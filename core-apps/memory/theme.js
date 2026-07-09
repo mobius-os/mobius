@@ -1,4 +1,30 @@
 export const CSS = `
+/* mobius-ui:Root v1 — keep in sync; library candidate. Memory still owns
+   most layout through S.* inline constants, so this block is the shared
+   platform floor rather than a full rewrite. */
+.mg-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+/* /mobius-ui:Root */
+
+/* mobius-ui:Focus v1 -- shared keyboard focus ring (WCAG 2.4.7); never bare outline:none */
+:where(button,a,input,textarea,select,summary,[role="button"],[tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* /mobius-ui:Focus */
+
 @keyframes mg-orbit-spin { to { transform: rotate(360deg); } }
 .mg-orbit {
   position: relative; width: 46px; height: 46px;
@@ -25,26 +51,34 @@ export const CSS = `
 .mg-graph { cursor: grab; }
 .mg-graph:active { cursor: grabbing; }
 
-.mg-row:hover { background: var(--surface2); }
-.mg-th:hover { color: var(--text); }
+@media (hover: hover) {
+  .mg-row:hover { background: var(--surface2); }
+  .mg-th:hover { color: var(--text); }
+  .mg-legend-row:hover { background: var(--surface2); }
+  .mg-tgl:hover { color: var(--text); }
+  .mg-tab:hover { color: var(--text); }
+  .mg-close:hover { background: var(--border); color: var(--text); }
+  .mg-discuss:hover { filter: brightness(1.06); }
+}
 /* Keyboard-focus ring for the now-focusable list rows + sort-header buttons,
    so the keyboard affordance these gained is actually visible. */
 .mg-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .mg-th:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.mg-legend-row:hover { background: var(--surface2); }
-.mg-tgl:hover { color: var(--text); }
-.mg-tab:hover { color: var(--text); }
-.mg-close:hover { background: var(--border); color: var(--text); }
-.mg-discuss:hover { filter: brightness(1.06); }
 .mg-discuss:active { transform: translateY(1px); }
 
-.mg-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
-.mg-scroll::-webkit-scrollbar-thumb {
-  background: var(--border); border-radius: 999px;
-  border: 2px solid var(--surface);
+/* mobius-ui:Scrollskin v2 — keep in sync; hidden by default, content stays scrollable. */
+.mg-scroll,
+.mg-md pre {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.mg-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-.mg-scroll::-webkit-scrollbar-track { background: transparent; }
+.mg-scroll::-webkit-scrollbar,
+.mg-md pre::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+/* /mobius-ui:Scrollskin */
 
 @keyframes mg-skel-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 @keyframes mg-pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
@@ -98,12 +132,23 @@ export const CSS = `
   .mg-md ul, .mg-md ol { margin: 8px 0 !important; }
   .mg-md code { font-size: 0.82em !important; }
   .mg-panel .mg-discuss { padding: 9px 12px !important; }
+  .mg-scroll table th:nth-child(n+3),
+  .mg-scroll table td:nth-child(n+3) {
+    display: none;
+  }
+  .mg-scroll table th,
+  .mg-scroll table td {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+  }
 }
+/* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Diverge below the marker only. */
 @media (prefers-reduced-motion: reduce) {
   .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
 }
+/* /mobius-ui:ReducedMotion */
 
-.mg-md h1, .mg-md h2, .mg-md h3 { margin: 16px 0 7px; line-height: 1.25; font-weight: 700; letter-spacing: -0.01em; }
+.mg-md h1, .mg-md h2, .mg-md h3 { margin: 16px 0 7px; line-height: 1.25; font-weight: 700; letter-spacing: 0; }
 .mg-md h1 { font-size: 19px; } .mg-md h2 { font-size: 16px; } .mg-md h3 { font-size: 14px; }
 .mg-md h1:first-child, .mg-md h2:first-child, .mg-md h3:first-child { margin-top: 0; }
 .mg-md p { margin: 9px 0; }
@@ -116,7 +161,13 @@ export const CSS = `
 .mg-md code { background: var(--surface2); border-radius: 5px; padding: 1px 5px; font-family: var(--mono); font-size: 0.85em; border: 1px solid var(--border-light, var(--border)); }
 .mg-md pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 13px; overflow-x: auto; margin: 11px 0; }
 .mg-md pre code { background: none; padding: 0; border: none; }
-.mg-md blockquote { border-left: 3px solid var(--accent); margin: 11px 0; padding: 3px 0 3px 13px; color: var(--muted); }
+.mg-md blockquote {
+  margin: 11px 0; padding: 10px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--muted);
+}
 .mg-md table { border-collapse: collapse; margin: 11px 0; font-size: 13px; width: 100%; }
 .mg-md th, .mg-md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 .mg-md th { background: var(--surface2); font-weight: 600; }

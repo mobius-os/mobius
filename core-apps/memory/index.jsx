@@ -427,7 +427,7 @@ export default function App({ appId, token }) {
 
   // ---------------------------------------------------------------- render ---
   return (
-    <div style={S.root}>
+    <div className="mg-root" style={S.root}>
       <style>{CSS}</style>
 
       <header style={S.header}>

@@ -75,11 +75,11 @@ export const CSS = `
 }
 .rf-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .rf-brand-icon {
-  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 6px;
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 8px;
   object-fit: cover; display: block;
 }
 .rf-brand-fallback {
-  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 6px;
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 8px;
   align-items: center; justify-content: center;
   background: ${ACCENT}; color: var(--bg, #0c0c0c);
   font-weight: 700; line-height: 1;
@@ -100,7 +100,7 @@ export const CSS = `
   border: 1px solid var(--border);
 }
 .rf-empty-mark-glyph { font-size: 34px; animation: rf-drift 6s ease-in-out infinite; }
-.rf-empty-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.2px; margin-bottom: 8px; }
+.rf-empty-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: 0; margin-bottom: 8px; }
 /* /mobius-ui:Empty */
 
 /* mobius-ui:Card v1 — keep in sync; library candidate. Diverge below the marker only. */
@@ -114,10 +114,13 @@ export const CSS = `
   touch-action: manipulation; user-select: none;
 }
 button.rf-card { cursor: pointer; }
-@media (hover:hover) { .rf-card:hover { border-color: ${ACCENT}; box-shadow: 0 6px 22px -12px ${ACCENT}; } }
+@media (hover:hover) { .rf-card:hover { border-color: ${ACCENT}; background: color-mix(in srgb, var(--surface) 92%, ${ACCENT} 8%); } }
 .rf-card:active { transform: scale(.992); background: var(--surface-active, var(--surface)); }
 .rf-card:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
-.rf-card.is-latest { border-left: 3px solid ${ACCENT}; }
+.rf-card.is-latest {
+  border-color: ${ACCENT};
+  background: color-mix(in srgb, var(--surface) 88%, ${ACCENT} 12%);
+}
 /* /mobius-ui:Card */
 
 /* mobius-ui:Button v1 — keep in sync; library candidate. Diverge below the marker only. */
@@ -146,7 +149,7 @@ button.rf-card { cursor: pointer; }
   touch-action: manipulation; user-select: none;
 }
 @media (hover:hover) { .rf-seg-btn:hover { color: var(--text); } }
-.rf-seg-btn.is-active { background: ${ACCENT}; color: #fff; }
+.rf-seg-btn.is-active { background: ${ACCENT}; color: var(--accent-fg); }
 /* /mobius-ui:Segmented */
 
 /* mobius-ui:ChatEmbed v1 — keep in sync; library candidate. Diverge below the marker only. */
@@ -170,10 +173,18 @@ button.rf-card { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) { .rf-spinner { animation: none; } }
 /* /mobius-ui:Spinner */
 
-/* mobius-ui:Scrollskin v1 — keep in sync; library candidate. Add the \`rf-scroll\` class to a scroller. */
-.rf-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
-.rf-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
-.rf-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+/* mobius-ui:Scrollskin v2 — keep in sync; hidden by default, content stays scrollable. */
+.rf-scroll,
+.rf-split-body {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.rf-scroll::-webkit-scrollbar,
+.rf-split-body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
 /* /mobius-ui:Scrollskin */
 
 /* ---- App-specific (reflection) — keep exact current values ---- */
@@ -216,7 +227,7 @@ button.rf-card { cursor: pointer; }
 .rf-streak-flame { animation: rf-drift 4s ease-in-out infinite; }
 .rf-streak-num { font-weight: 750; }
 .rf-streak-unit { font-weight: 550; }
-.rf-streak-dots { margin-left: 4px; letter-spacing: 1px; opacity: 0.55; font-size: 9px; }
+.rf-streak-dots { margin-left: 4px; letter-spacing: 0; opacity: 0.55; font-size: 9px; }
 
 /* Reports list + dated card */
 .rf-list { display: flex; flex-direction: column; gap: 11px; max-width: 660px; margin: 0 auto; }
@@ -228,13 +239,13 @@ button.rf-card { cursor: pointer; }
   padding: 8px 0; line-height: 1;
 }
 .rf-date-tile.is-latest {
-  background: linear-gradient(160deg, ${ACCENT} 0%, ${ACCENT_2} 100%); color: #fff;
+  background: linear-gradient(160deg, ${ACCENT} 0%, ${ACCENT_2} 100%); color: var(--accent-fg);
 }
-.rf-date-tile-day { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.92; }
-.rf-date-tile-num { font-size: 19px; font-weight: 750; letter-spacing: -0.5px; }
+.rf-date-tile-day { font-size: 10px; font-weight: 700; letter-spacing: 0; opacity: 0.92; }
+.rf-date-tile-num { font-size: 19px; font-weight: 750; letter-spacing: 0; }
 .rf-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; justify-content: center; }
 .rf-card-label-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.rf-card-label { font-size: 16px; font-weight: 700; letter-spacing: -0.2px; line-height: 1.2; }
+.rf-card-label { font-size: 16px; font-weight: 700; letter-spacing: 0; line-height: 1.2; }
 .rf-card-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
 .rf-card-tldr {
   font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: 5px;
@@ -242,8 +253,8 @@ button.rf-card { cursor: pointer; }
 }
 .rf-card-chevron { align-self: center; font-size: 20px; color: var(--muted); flex-shrink: 0; line-height: 1; opacity: 0.7; }
 .rf-latest-pill {
-  font-size: 11px; font-weight: 750; letter-spacing: 0.7px;
-  text-transform: uppercase; color: #fff;
+  font-size: 11px; font-weight: 750; letter-spacing: 0;
+  color: var(--accent-fg);
   background: ${ACCENT}; padding: 2px 8px; border-radius: 999px;
 }
 
@@ -300,16 +311,12 @@ button.rf-card { cursor: pointer; }
 }
 .rf-back-glyph { font-size: 16px; }
 .rf-detail-title { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; flex: 1; }
-.rf-detail-title-main { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rf-detail-title-main { font-size: 15px; font-weight: 700; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rf-detail-title-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
 .rf-split-body {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
   display: flex; flex-direction: column;
   overscroll-behavior: contain;
-  /* Reserve the classic-scrollbar gutter even while content fits, so the
-     height-bridge growing the brief iframe never changes the content width
-     (width change → text re-wrap → new height → feedback loop). */
-  scrollbar-gutter: stable;
 }
 .rf-brief-panel {
   flex-shrink: 0; display: flex; flex-direction: column;
@@ -445,7 +452,7 @@ button.rf-card { cursor: pointer; }
   display: flex; align-items: center; justify-content: center;
   background: ${ACCENT_DIM}; font-size: 15px;
 }
-.rf-section-label { font-size: 14.5px; font-weight: 700; letter-spacing: -0.1px; margin: 0; }
+.rf-section-label { font-size: 14.5px; font-weight: 700; letter-spacing: 0; margin: 0; }
 .rf-note { font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.55; }
 .rf-note-strong { color: var(--text); font-weight: 650; }
 .rf-time-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
@@ -470,6 +477,8 @@ button.rf-card { cursor: pointer; }
   touch-action: manipulation; user-select: none;
 }
 .rf-select:focus:not(:focus-visible) { outline: none; }
+.rf-agent-stack { display: grid; gap: 12px; }
+.rf-agent-field { display: grid; gap: 7px; }
 .rf-meta {
   font-size: 12px; color: var(--muted); line-height: 1.5;
   font-family: var(--mono, var(--font));
@@ -478,7 +487,7 @@ button.rf-card { cursor: pointer; }
 }
 .rf-model-label {
   font-size: 12px; color: var(--muted); font-weight: 750;
-  text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px;
+  letter-spacing: 0; margin-top: 4px;
 }
 .rf-textarea {
   width: 100%; min-height: 64px; padding: 9px 12px;
@@ -501,10 +510,10 @@ button.rf-card { cursor: pointer; }
 .rf-save-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
 .rf-save-btn {
   padding: 10px 22px; border-radius: 12px; border: none;
-  background: ${ACCENT}; color: #fff;
+  background: ${ACCENT}; color: var(--accent-fg);
   font-size: 13.5px; font-weight: 700; cursor: pointer;
   font-family: var(--font); transition: background 0.15s, opacity .15s;
-  box-shadow: 0 6px 18px -8px ${ACCENT};
+  box-shadow: 0 4px 8px -4px ${ACCENT};
   touch-action: manipulation; user-select: none;
 }
 .rf-save-btn:disabled {
@@ -548,14 +557,14 @@ button.rf-card { cursor: pointer; }
   border: 1px solid ${ACCENT};
   background: ${ACCENT_DIM};
 }
-.rf-rq__title { font-size: 15px; font-weight: 750; color: var(--text); margin: 0 0 4px; letter-spacing: -0.1px; }
+.rf-rq__title { font-size: 15px; font-weight: 750; color: var(--text); margin: 0 0 4px; letter-spacing: 0; }
 .rf-rq__note { font-size: 12px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
 .rf-rq__q + .rf-rq__q {
   margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);
 }
 .rf-rq__header {
-  font-size: 11px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: .5px; color: ${ACCENT}; margin-bottom: 4px;
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0; color: ${ACCENT}; margin-bottom: 4px;
 }
 .rf-rq__text { font-size: 14px; margin-bottom: 6px; color: var(--text); line-height: 1.45; }
 .rf-rq__hint { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
@@ -571,16 +580,16 @@ button.rf-card { cursor: pointer; }
 @media (hover: hover) {
   .rf-rq__opt:not(.rf-rq__opt--on):hover { border-color: ${ACCENT}; }
 }
-.rf-rq__opt--on { background: ${ACCENT}; color: #fff; border-color: ${ACCENT}; }
+.rf-rq__opt--on { background: ${ACCENT}; color: var(--accent-fg); border-color: ${ACCENT}; }
 .rf-rq__opt--dim { opacity: 0.4; border-color: transparent; }
 .rf-rq__opt:disabled { cursor: default; }
 .rf-rq__submit {
   display: block; width: 100%; margin-top: 14px; min-height: 44px;
   padding: 11px; border-radius: 11px; border: none;
-  background: ${ACCENT}; color: #fff;
+  background: ${ACCENT}; color: var(--accent-fg);
   font-size: 14px; font-weight: 700; cursor: pointer;
   font-family: var(--font); touch-action: manipulation; user-select: none;
-  box-shadow: 0 6px 18px -8px ${ACCENT};
+  box-shadow: 0 4px 8px -4px ${ACCENT};
 }
 .rf-rq__submit:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
 .rf-rq--answered .rf-rq__done {
