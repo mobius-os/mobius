@@ -3,7 +3,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, { shouldPinSend, anchorModeFromScroll, isNearScrollBottom } from './useScrollMode.js'
+import useScrollMode, {
+  shouldPinSend,
+  anchorModeFromScroll,
+  isNearScrollBottom,
+  modeForForegroundReturn,
+} from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
@@ -2036,7 +2041,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
   // backgrounded-then-resumed streaming chat doesn't snap away from where the
-  // user was reading. No-op when the turn isn't active or the tab is hidden.
+  // user was reading. If the user is already at the tail, preserve
+  // FOLLOW_BOTTOM so thinking/timer updates keep flowing at the bottom instead
+  // of converting the tail into a fixed anchor. No-op when the turn isn't
+  // active or the tab is hidden.
   // (The fast-forward affordance is computed separately at `canSteer` below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
@@ -2047,8 +2055,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         return
       }
       if (!turnActive) return
-      const anchor = anchorModeFromScroll(scrollRef.current)
-      if (anchor) modeRef.current = anchor
+      const nextMode = modeForForegroundReturn(scrollRef.current)
+      if (nextMode) modeRef.current = nextMode
     }
 
     document.addEventListener('visibilitychange', freezeStreamingReturn)

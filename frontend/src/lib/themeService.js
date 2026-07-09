@@ -64,7 +64,7 @@ function beginThemeTransition() {
   themeTransitionTimer = timerHost.setTimeout(() => {
     root.classList.remove('theme-transitioning')
     themeTransitionTimer = null
-  }, 220)
+  }, 180)
 }
 
 /**

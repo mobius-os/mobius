@@ -160,10 +160,20 @@ body,
   color-scheme: light;
 }
 
+/* Theme flips should recolor the shell, not animate every descendant. A
+   document-wide transition repaints shadow/blur-heavy chat surfaces and makes
+   light/dark switching feel sticky on mobile. Keep this narrow and cheap. */
 :root.theme-transitioning,
-:root.theme-transitioning * {
-  transition-property: background, background-color, border-color, box-shadow, color, fill, stroke;
-  transition-duration: 120ms;
+:root.theme-transitioning body,
+:root.theme-transitioning #root,
+:root.theme-transitioning .shell,
+:root.theme-transitioning .shell__bar,
+:root.theme-transitioning .drawer,
+:root.theme-transitioning .chat,
+:root.theme-transitioning .chat__pill,
+:root.theme-transitioning .chat__plus {
+  transition-property: background-color, border-color, color, fill, stroke;
+  transition-duration: 90ms;
   transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -297,20 +307,9 @@ textarea:focus-visible {
   --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* Message entry animation */
-@keyframes msg-enter {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.chat__msg { animation: msg-enter 240ms var(--ease-out-soft); }
-
-/* Tool block entry — opacity only so height stays stable for spacer
-   math (see CLAUDE.md "Chat UX — non-negotiable constraints"). */
-@keyframes tool-enter {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-.chat__tool { animation: tool-enter 200ms ease-out; }
+/* Restored chat history must not replay entrance motion. New rows already have
+   strong semantic changes (streaming cursor, tool status, queued tray), so the
+   transcript stays visually still while the scroll state machine works. */
 
 /* Tap feedback on shell-bar buttons. Component-specific transitions
    for .chat__send, .chat__mic, .chat__stop, .drawer__item live in
