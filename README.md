@@ -50,7 +50,7 @@ The unusual design decisions worth knowing upfront:
 Möbius ships with a curated app store. Tap to install; each app is yours to use, edit, or rebuild.
 
 <p align="center">
-  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: Skills, Tasks, Contribute, Notes, News, Memory, Reflection, and Editor, each with its own icon and install action." />
+  <img src="assets/screenshots/batteries-included.png" width="720" alt="The Möbius App Store Browse tab showing Skills, Tasks, Contribute, Notes, News, Memory, Reflection, and Editor in the starter catalog." />
 </p>
 
 <sub>The starter catalog opens with apps that help Möbius improve itself: <strong>Skills</strong> for agent playbooks, <strong>Tasks</strong> for scheduled check-ins, and <strong>Contribute</strong> for GitHub-backed changes. Everyday apps follow: <strong>Notes</strong>, <strong>News</strong>, <strong>Memory</strong>, <strong>Reflection</strong>, <strong>Editor</strong>, <strong>Web Studio</strong>, <strong>Workout</strong>, and more.</sub>
