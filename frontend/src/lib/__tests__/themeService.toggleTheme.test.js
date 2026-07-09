@@ -2,17 +2,17 @@
  * Unit tests for themeService.toggleTheme (Commit 3a).
  *
  * These are the SHIP-BLOCKER tests from the v2 design:
- *   - Fix 1: toggleTheme MUST invalidate BOTH themeQueries.invalidate
- *            AND themeQueries.mode.invalidate, otherwise AppCanvas's
- *            iframe theme propagation silently breaks.
+ *   - Fix 1: toggleTheme MUST seed BOTH theme query keys and mark
+ *            them stale, otherwise AppCanvas iframe propagation or
+ *            SettingsView's switch state silently drifts.
  *   - Fix 2: toggleTheme MUST extract `newBg` from the BUILT CSS,
  *            not from the parsed-input meta.
  *
- * Plus a unit assertion that the cache invalidation IS what triggers
+ * Plus a unit assertion that the cache seed IS what triggers
  * AppCanvas's useEffect path. AppCanvas reads
  * `useQuery({ queryKey: themeQueryKey })`; its useEffect on
  * [theme?.css, theme?.bg] postMessages the iframe. We simulate that
- * effect with a mock queryClient that captures invalidations + a
+ * effect with a mock queryClient that captures setQueryData + a
  * mock useEffect-like callback that fires the postMessage, and
  * assert the call lands.
  *
@@ -391,39 +391,56 @@ test('toggleTheme throws when persist fails (caller does rollback)', async () =>
     'cache must not be invalidated when persist throws')
 })
 
-test('iframe-propagation contract — invalidation triggers AppCanvas-style postMessage', async () => {
-  // Mandatory smoke from commit 3a: verify that the cache
-  // invalidation IS what AppCanvas's useEffect uses to trigger
-  // the moebius:frame-theme postMessage. We can't run the real
-  // AppCanvas under node:test (no React renderer), but we can
-  // mock its observable contract: subscribers to ['theme']
-  // invalidation get the new theme and call postMessage.
+test('iframe-propagation contract — cache seed triggers AppCanvas-style postMessage', async () => {
+  // Mandatory smoke: verify that the cache seed is what AppCanvas's
+  // useEffect uses to trigger the moebius:frame-theme postMessage.
+  // We can't run the real AppCanvas under node:test (no React
+  // renderer), but we can mock its observable contract: subscribers
+  // to ['theme'] receive the new theme and call postMessage.
   const qc = makeQueryClient()
   const api = makeApi(DARK_CSS)
   const postedMessages = []
+  let lastTheme
 
   // Simulate AppCanvas's useQuery subscriber + useEffect on
   // [theme?.css, theme?.bg].
-  const origInvalidate = qc.invalidateQueries
-  qc.invalidateQueries = async (opts) => {
-    const r = await origInvalidate(opts)
-    if (JSON.stringify(opts.queryKey) === '["theme"]') {
-      // Stand-in for AppCanvas's effect: after invalidation, the
-      // (mocked) theme query "refetches" and the effect posts to
-      // the iframe with the new css + bg.
-      postedMessages.push({
-        type: 'moebius:frame-theme',
-        themeCss: '<new-css>',
-        bg: '<new-bg>',
-      })
+  const origSetQueryData = qc.setQueryData
+  qc.setQueryData = (queryKey, value) => {
+    const result = origSetQueryData(queryKey, value)
+    if (JSON.stringify(queryKey) === '["theme"]') {
+      const changed = !lastTheme
+        || lastTheme.css !== value.css
+        || lastTheme.bg !== value.bg
+      lastTheme = value
+      if (changed) {
+        // Stand-in for AppCanvas's effect: after the theme query data
+        // changes, the effect posts to the iframe with the new css + bg.
+        postedMessages.push({
+          type: 'moebius:frame-theme',
+          themeCss: value.css,
+          bg: value.bg,
+        })
+      }
     }
-    return r
+    return result
   }
 
   await themeService.toggleTheme(qc, 'dark', api)
   assert.equal(postedMessages.length, 1,
-    'AppCanvas-style subscriber must observe the ["theme"] invalidation and postMessage exactly once')
+    'AppCanvas-style subscriber must observe the ["theme"] cache seed and postMessage exactly once')
   assert.equal(postedMessages[0].type, 'moebius:frame-theme')
+  assert.equal(postedMessages[0].bg, '#f0eeeb')
+})
+
+test('theme queries are marked stale without immediate refetch after persist', async () => {
+  const qc = makeQueryClient()
+  const api = makeApi(DARK_CSS)
+  await themeService.toggleTheme(qc, 'dark', api)
+  assert.deepEqual(
+    qc.invalidated.map(k => JSON.stringify(k)),
+    ['["theme"]', '["theme-mode"]'],
+    'both theme query keys should be marked stale after persist',
+  )
 })
 
 
@@ -524,12 +541,12 @@ test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted t
 
 
 // --- REVERT RACE: toggle must not be clobbered by a stale /api/theme re-apply ---
-// Reproduced in-browser: after a toggle, themeQueries.invalidate triggers a
-// refetch whose StaleWhileRevalidate response is the PRE-toggle theme;
-// useTheme's apply effect then repaints that stale theme OVER the toggle's
-// correct paint, snapping the UI back (the owner's "stuck/reverts" symptom).
-// The fix seeds the theme query cache with the NEW {css,bg} via setQueryData
-// (and refreshes the SW cache) so the re-apply is correct, not a regression.
+// Reproduced in-browser: after a toggle, an immediate /api/theme refetch could
+// receive the StaleWhileRevalidate PRE-toggle theme; useTheme's apply effect
+// then repainted that stale theme OVER the toggle's correct paint, snapping
+// the UI back (the owner's "stuck/reverts" symptom). The fix seeds the theme
+// query cache with the NEW {css,bg} via setQueryData, refreshes the SW cache,
+// and marks the queries stale without same-tick refetch churn.
 
 test('REVERT RACE — toggleTheme seeds the theme query cache with the NEW theme', async () => {
   const qc = makeQueryClient()
@@ -544,10 +561,10 @@ test('REVERT RACE — toggleTheme seeds the theme query cache with the NEW theme
     'seeded css must equal the freshly-built/applied css')
 })
 
-test('REVERT RACE — query cache is seeded BEFORE the invalidate refetch', async () => {
-  // setQueryData must land before invalidateQueries: invalidate kicks off the
-  // refetch whose result useTheme re-applies; the cache must already hold the
-  // new theme so that re-apply is a no-op rather than a stale revert.
+test('REVERT RACE — query cache is seeded BEFORE stale marking', async () => {
+  // setQueryData must land before invalidateQueries: invalidation marks the
+  // query stale for later refresh, but the cache must already hold the new
+  // theme so all subscribers see a coherent target immediately.
   const events = []
   const qc = {
     setData: [],

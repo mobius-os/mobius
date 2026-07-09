@@ -187,55 +187,57 @@ export default function ManageModelsModal({
           if you hide it here.
         </p>
 
-        {!ready && (
-          <div className="mmm__skeleton" aria-hidden="true">
-            <div className="mmm__skeleton-row" />
-            <div className="mmm__skeleton-row" />
-            <div className="mmm__skeleton-row" />
-          </div>
-        )}
+        <div className="mmm__body">
+          {!ready && (
+            <div className="mmm__skeleton" aria-hidden="true">
+              <div className="mmm__skeleton-row" />
+              <div className="mmm__skeleton-row" />
+              <div className="mmm__skeleton-row" />
+            </div>
+          )}
 
-        {ready && providerOrder.map(pid => {
-          const info = providerInfo[pid]
-          const entries = registry[pid] || []
-          if (entries.length === 0) return null
-          return (
-            <section key={pid} className="mmm__section">
-              <div className="mmm__section-head">
-                <span className="mmm__section-icon"><info.Logo /></span>
-                <span className="mmm__section-title">{info.label}</span>
-              </div>
-              <div className="mmm__rows">
-                {entries.map(m => {
-                  const visible = !draftHidden.has(m.id)
-                  return (
-                    <label
-                      key={m.id}
-                      className={`mmm-row${visible ? '' : ' mmm-row--hidden'}`}
-                    >
-                      <span className="mmm-row__main">
-                        <span className="mmm-row__title">{m.label}</span>
-                        <span className="mmm-row__sub">
-                          {m.id}
-                          {m.available === false && (
-                            <span className="mmm-row__pill">legacy</span>
-                          )}
+          {ready && providerOrder.map(pid => {
+            const info = providerInfo[pid]
+            const entries = registry[pid] || []
+            if (entries.length === 0) return null
+            return (
+              <section key={pid} className="mmm__section">
+                <div className="mmm__section-head">
+                  <span className="mmm__section-icon"><info.Logo /></span>
+                  <span className="mmm__section-title">{info.label}</span>
+                </div>
+                <div className="mmm__rows">
+                  {entries.map(m => {
+                    const visible = !draftHidden.has(m.id)
+                    return (
+                      <label
+                        key={m.id}
+                        className={`mmm-row${visible ? '' : ' mmm-row--hidden'}`}
+                      >
+                        <span className="mmm-row__main">
+                          <span className="mmm-row__title">{m.label}</span>
+                          <span className="mmm-row__sub">
+                            {m.id}
+                            {m.available === false && (
+                              <span className="mmm-row__pill">legacy</span>
+                            )}
+                          </span>
                         </span>
-                      </span>
-                      <input
-                        type="checkbox"
-                        className="mmm-row__toggle"
-                        checked={visible}
-                        onChange={() => toggle(m.id)}
-                        aria-label={`${visible ? 'Hide' : 'Show'} ${m.label} in picker`}
-                      />
-                    </label>
-                  )
-                })}
-              </div>
-            </section>
-          )
-        })}
+                        <input
+                          type="checkbox"
+                          className="mmm-row__toggle"
+                          checked={visible}
+                          onChange={() => toggle(m.id)}
+                          aria-label={`${visible ? 'Hide' : 'Show'} ${m.label} in picker`}
+                        />
+                      </label>
+                    )
+                  })}
+                </div>
+              </section>
+            )
+          })}
+        </div>
 
         {error && <p className="mmm__error">{error}</p>}
 

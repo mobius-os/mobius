@@ -702,7 +702,8 @@ export default function ChatSettingsPanel({
           onPointerDown={(ev) => ev.preventDefault()}
           onClick={() => setManageOpen(true)}
         >
-          Manage models
+          <span className="csp__manage-mark" aria-hidden="true">+</span>
+          <span className="csp__manage-label">Manage models</span>
         </button>
       )}
       {(codexSwitchWarning || compacting || error) && (

@@ -163,8 +163,8 @@ body,
 :root.theme-transitioning,
 :root.theme-transitioning * {
   transition-property: background, background-color, border-color, box-shadow, color, fill, stroke;
-  transition-duration: 180ms;
-  transition-timing-function: ease;
+  transition-duration: 120ms;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 html, body, #root {
