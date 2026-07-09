@@ -50,10 +50,10 @@ The unusual design decisions worth knowing upfront:
 Möbius ships with a curated app store. Tap to install; each app is yours to use, edit, or rebuild.
 
 <p align="center">
-  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Atlas, Memory, LaTeX, and Reflection, each with its own icon and a one-line description." />
+  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: Skills, Tasks, Contribute, Notes, News, Memory, Reflection, and Editor, each with its own icon and install action." />
 </p>
 
-<sub>A curated starter pack ships in the catalog. <strong>News</strong> writes a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Atlas</strong> is a 3D globe of where you have been. <strong>Memory</strong> is a browsable graph of everything the agent has learned. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Reflection</strong> reviews the day's work and leaves a one-page morning brief.</sub>
+<sub>The starter catalog opens with apps that help Möbius improve itself: <strong>Skills</strong> for agent playbooks, <strong>Tasks</strong> for scheduled check-ins, and <strong>Contribute</strong> for GitHub-backed changes. Everyday apps follow: <strong>Notes</strong>, <strong>News</strong>, <strong>Memory</strong>, <strong>Reflection</strong>, <strong>Editor</strong>, <strong>Web Studio</strong>, <strong>Workout</strong>, and more.</sub>
 
 Every app is a public repo with a `mobius.json` and an `index.jsx`, open under [github.com/mobius-os](https://github.com/mobius-os). Installing means pasting a URL. Updating means pasting the same URL again — it patches the code and keeps your data. There is no submission queue.
 
