@@ -35,6 +35,7 @@
   color: var(--text);
   text-align: left;
   transition: background 0.12s ease, border-color 0.12s ease;
+  touch-action: pan-y;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -46,7 +47,6 @@
 }
 
 .csp-row:focus-visible,
-.csp__manage:focus-visible,
 .csp__confirm-btn:focus-visible,
 .csp-effort__stop:focus-visible {
   outline: 2px solid var(--accent);
@@ -219,52 +219,14 @@
   text-align: right;
 }
 
-/* Manage-models affordance at the bottom of the picker. It is deliberately
-   more button-like than a provider row so it doesn't read as a section label. */
-.csp__manage {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid var(--border-light, var(--border));
-  background: var(--surface2);
+.csp__settings-note {
+  margin: 6px 10px 2px;
+  padding: 8px 10px;
   border-radius: 8px;
-  cursor: pointer;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  text-align: center;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-  margin-top: 6px;
-  box-sizing: border-box;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .csp__manage:hover {
-    background: color-mix(in srgb, var(--accent) 8%, var(--surface2));
-    border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
-    color: var(--text);
-  }
-}
-
-.csp__manage-mark {
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  display: inline-grid;
-  place-items: center;
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.csp__manage-label {
-  min-width: 0;
+  background: color-mix(in srgb, var(--surface2) 86%, transparent);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .csp__loading {

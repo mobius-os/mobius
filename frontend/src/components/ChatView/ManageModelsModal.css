@@ -131,12 +131,19 @@
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 10px;
+}
+
+.mmm__body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .mmm__section {

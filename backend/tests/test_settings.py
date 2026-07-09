@@ -282,10 +282,59 @@ def test_get_settings_returns_background_agent_defaults(client, auth):
   """Background agents inherit the owner provider until explicitly set."""
   client.post("/api/settings", json={"provider": "codex"}, headers=auth)
   body = client.get("/api/settings", headers=auth).json()
+  assert body["agent_settings"]["model"] == "gpt-5.5"
+  assert body["agent_settings"]["effort"] == "medium"
   assert body["background_agents"]["primary"]["provider"] == "codex"
   assert body["background_agents"]["primary"]["model"] == "gpt-5.5"
   assert body["background_agents"]["primary"]["effort"] == "medium"
   assert body["background_agents"]["fallback"] is None
+
+
+def test_set_chat_agent_defaults_persists_without_clobbering_background(client, auth):
+  """POST /api/settings can update global chat defaults separately."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  data_dir = _gs().data_dir
+  providers.write_agent_settings(
+    data_dir,
+    {
+      "background_agents": {
+        "primary": {
+          "provider": "claude",
+          "model": "claude-sonnet-4-6",
+          "effort": "high",
+        },
+        "fallback": {
+          "provider": "codex",
+          "model": "gpt-5.4",
+          "effort": "medium",
+        },
+      }
+    },
+  )
+  r = client.post(
+    "/api/settings",
+    json={
+      "provider": "codex",
+      "agent_settings": {
+        "model": "gpt-5.4",
+        "effort": "high",
+        "effort_by_provider": {"codex": "high"},
+      },
+    },
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  merged = providers._load_agent_settings(data_dir)
+  assert merged["model"] == "gpt-5.4"
+  assert merged["effort"] == "high"
+  assert merged["effort_by_provider"] == {"codex": "high"}
+  assert merged["background_agents"]["fallback"]["model"] == "gpt-5.4"
+  body = client.get("/api/settings", headers=auth).json()
+  assert body["provider"] == "codex"
+  assert body["agent_settings"]["model"] == "gpt-5.4"
+  assert body["agent_settings"]["effort"] == "high"
 
 
 def test_set_background_agents_persists_to_shared_settings(client, auth):

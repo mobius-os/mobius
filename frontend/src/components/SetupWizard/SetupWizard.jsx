@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
-import { authQueries, settingsQueries } from '../../hooks/queries.js'
+import { authQueries, modelQueries, settingsQueries } from '../../hooks/queries.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
+import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
+import { PROVIDER_INFO } from '../ChatView/ChatSettingsPanel.jsx'
 import './SetupWizard.css'
 
 const SETUP_STEPS = [
@@ -12,6 +15,19 @@ const SETUP_STEPS = [
   { id: 'provider', label: 'AI' },
   { id: 'gemini', label: 'Images' },
 ]
+const PROVIDERS = [
+  { id: 'codex', label: 'OpenAI Codex' },
+  { id: 'claude', label: 'Claude Code' },
+]
+const FALLBACK_MODELS = {
+  claude: CLAUDE_MODELS.map(m => ({ id: m.value, label: m.label })),
+  codex: CODEX_MODELS.map(m => ({ id: m.value, label: m.label })),
+}
+
+function defaultEffort(provider) {
+  const efforts = PROVIDER_INFO[provider]?.efforts || []
+  return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
+}
 
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
@@ -107,7 +123,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
     return (
       <ProviderStep
         onSkip={() => goToStep('gemini')}
-        onConnected={() => goToStep('gemini')}
+        onContinue={() => goToStep('gemini')}
         claudeAuthenticated={claudeAuthenticated}
       />
     )
@@ -233,14 +249,120 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
  * ChatGPT-account device-auth toggle lives inside CodexAuth. Either
  * provider connecting advances the wizard.
  */
-function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
+function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
+  const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState('codex')
   const settingsQuery = settingsQueries.owner.useQuery()
+  const modelRegistryQuery = modelQueries.registry.useQuery()
   const codexConnected = !!settingsQuery.data?.codex_authenticated
   const claudeConnected = !!claudeAuthenticated
+  const connectedAny = codexConnected || claudeConnected
+  const [chatChoice, setChatChoice] = useState({ provider: 'codex', model: '' })
+  const [primaryChoice, setPrimaryChoice] = useState({ provider: 'codex', model: '' })
+  const [secondaryChoice, setSecondaryChoice] = useState({ provider: '', model: '' })
+  const [agentSaving, setAgentSaving] = useState(false)
+  const [agentSaved, setAgentSaved] = useState(false)
+  const [agentError, setAgentError] = useState('')
+
+  useEffect(() => {
+    if (!settingsQuery.data) return
+    const provider = PROVIDERS.some(p => p.id === settingsQuery.data.provider)
+      ? settingsQuery.data.provider
+      : 'codex'
+    setChatChoice({
+      provider,
+      model: settingsQuery.data.agent_settings?.model || '',
+    })
+    setPrimaryChoice({
+      provider: settingsQuery.data.background_agents?.primary?.provider || provider,
+      model: settingsQuery.data.background_agents?.primary?.model || '',
+    })
+    setSecondaryChoice({
+      provider: settingsQuery.data.background_agents?.fallback?.provider || '',
+      model: settingsQuery.data.background_agents?.fallback?.model || '',
+    })
+  }, [settingsQuery.data])
 
   function toggle(id) {
     setExpanded(prev => prev === id ? null : id)
+  }
+
+  function modelsFor(provider) {
+    if (!provider) return []
+    const rows = modelRegistryQuery.data?.[provider]
+    if (Array.isArray(rows) && rows.length) {
+      return rows.map(m => ({ id: m.id, label: m.label || m.id }))
+    }
+    return FALLBACK_MODELS[provider] || []
+  }
+
+  const persistAgentChoices = useCallback(async (nextChat, nextPrimary, nextSecondary) => {
+    if (!nextChat?.provider || !nextPrimary?.provider) return
+    setAgentSaving(true)
+    setAgentSaved(false)
+    setAgentError('')
+    try {
+      const res = await api.settings.save({
+        provider: nextChat.provider,
+        agent_settings: {
+          model: nextChat.model || null,
+          effort: defaultEffort(nextChat.provider),
+          effort_by_provider: {
+            [nextChat.provider]: defaultEffort(nextChat.provider),
+          },
+        },
+        background_agents: {
+          primary: {
+            provider: nextPrimary.provider,
+            model: nextPrimary.model || null,
+            effort: defaultEffort(nextPrimary.provider),
+          },
+          fallback: nextSecondary?.provider
+            ? {
+                provider: nextSecondary.provider,
+                model: nextSecondary.model || null,
+                effort: defaultEffort(nextSecondary.provider),
+              }
+            : null,
+        },
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch {}
+        throw new Error(detail || 'Could not save agent defaults.')
+      }
+      settingsQueries.owner.invalidate(queryClient)
+      setAgentSaved(true)
+      setTimeout(() => setAgentSaved(false), 1600)
+    } catch (err) {
+      setAgentError(err.message || 'Could not save agent defaults.')
+    } finally {
+      setAgentSaving(false)
+    }
+  }, [queryClient])
+
+  function updateChoice(slot, patch) {
+    const currentChat = chatChoice
+    const currentPrimary = primaryChoice
+    const currentSecondary = secondaryChoice
+    const normalize = (choice, nextPatch) => {
+      const next = { ...choice, ...nextPatch }
+      if ('provider' in nextPatch) next.model = ''
+      return next
+    }
+    const nextChat = slot === 'chat' ? normalize(currentChat, patch) : currentChat
+    const nextPrimary = slot === 'primary' ? normalize(currentPrimary, patch) : currentPrimary
+    const nextSecondary = slot === 'secondary' ? normalize(currentSecondary, patch) : currentSecondary
+    setChatChoice(nextChat)
+    setPrimaryChoice(nextPrimary)
+    setSecondaryChoice(nextSecondary)
+    persistAgentChoices(nextChat, nextPrimary, nextSecondary)
+  }
+
+  function handleConnected() {
+    settingsQueries.owner.invalidate(queryClient)
+    authQueries.provider.claudeStatus.invalidate(queryClient)
+    setExpanded(null)
   }
 
   return (
@@ -264,7 +386,7 @@ function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
             expanded={expanded === 'codex'}
             onToggleExpand={() => toggle('codex')}
           >
-            <CodexAuth onConnected={onConnected} />
+            <CodexAuth onConnected={handleConnected} />
           </ProviderRow>
 
           <ProviderRow
@@ -278,17 +400,97 @@ function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
             <ProviderAuth
               authenticated={claudeAuthenticated}
               compact
-              onDone={onConnected}
+              onDone={handleConnected}
             />
           </ProviderRow>
         </div>
 
-        <p className="setup__skip-warn">
-          Without a provider, all chat messages will fail.
-        </p>
+        <div className="setup-agent">
+          <div className="setup-agent__head">
+            <h2>Agent defaults</h2>
+            <span>{agentSaving ? 'Saving...' : agentSaved ? 'Saved' : 'Auto-saves'}</span>
+          </div>
+          <SetupAgentChoice
+            label="Chats"
+            choice={chatChoice}
+            models={modelsFor(chatChoice.provider)}
+            onProviderChange={(provider) => updateChoice('chat', { provider })}
+            onModelChange={(model) => updateChoice('chat', { model })}
+          />
+          <SetupAgentChoice
+            label="Background primary"
+            choice={primaryChoice}
+            models={modelsFor(primaryChoice.provider)}
+            onProviderChange={(provider) => updateChoice('primary', { provider })}
+            onModelChange={(model) => updateChoice('primary', { model })}
+          />
+          <SetupAgentChoice
+            label="Background secondary"
+            allowNone
+            choice={secondaryChoice}
+            models={modelsFor(secondaryChoice.provider)}
+            onProviderChange={(provider) => updateChoice('secondary', { provider })}
+            onModelChange={(model) => updateChoice('secondary', { model })}
+          />
+          {agentError && <p className="setup__error">{agentError}</p>}
+        </div>
+
+        {!connectedAny && (
+          <p className="setup__skip-warn">
+            Without a provider, all chat messages will fail.
+          </p>
+        )}
+        <button
+          className="setup__btn setup__btn--full"
+          type="button"
+          onClick={onContinue}
+          disabled={!connectedAny}
+        >
+          Continue
+        </button>
         <button className="setup__skip" type="button" onClick={onSkip}>
           Skip for now
         </button>
+      </div>
+    </div>
+  )
+}
+
+function SetupAgentChoice({
+  label,
+  choice,
+  models,
+  allowNone = false,
+  onProviderChange,
+  onModelChange,
+}) {
+  return (
+    <div className="setup-agent-row">
+      <div className="setup-agent-row__label">{label}</div>
+      <div className="setup-agent-row__controls">
+        <select
+          className="setup__select"
+          value={choice.provider || ''}
+          onChange={(e) => onProviderChange(e.target.value)}
+          aria-label={`${label} provider`}
+        >
+          {allowNone && <option value="">No fallback</option>}
+          {PROVIDERS.map(provider => (
+            <option key={provider.id} value={provider.id}>{provider.label}</option>
+          ))}
+        </select>
+        <select
+          className="setup__select"
+          value={choice.model || ''}
+          onChange={(e) => onModelChange(e.target.value)}
+          aria-label={`${label} model`}
+          disabled={!choice.provider}
+        >
+          <option value="">Provider default</option>
+          {models.map(model => (
+            <option key={model.id} value={model.id}>{model.label || model.id}</option>
+          ))}
+        </select>
       </div>
     </div>
   )

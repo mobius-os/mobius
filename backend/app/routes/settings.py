@@ -109,6 +109,29 @@ def _background_choice_payload(choice) -> dict | None:
   return out
 
 
+def _agent_settings_payload(agent_settings) -> dict:
+  out: dict[str, object] = {}
+  if agent_settings is None:
+    return out
+  fields_set = getattr(agent_settings, "model_fields_set", set())
+  if "model" in fields_set:
+    model = agent_settings.model
+    out["model"] = model.strip() if isinstance(model, str) and model.strip() else None
+  if "effort" in fields_set:
+    effort = agent_settings.effort
+    out["effort"] = effort.strip() if isinstance(effort, str) and effort.strip() else None
+  if "effort_by_provider" in fields_set:
+    raw = agent_settings.effort_by_provider
+    if isinstance(raw, dict):
+      out["effort_by_provider"] = {
+        str(k): str(v) for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, str) and v.strip()
+      }
+    else:
+      out["effort_by_provider"] = None
+  return out
+
+
 # Outer composer — this is what routes/__init__.py picks up. The
 # real surfaces live on the three child surfaces below.
 router = APIRouter()
@@ -160,6 +183,9 @@ def get_settings_view(
     "gemini_configured": owner.gemini_api_key_enc is not None,
     "codex_authenticated": codex_creds.exists(),
     "provider": owner.provider or "claude",
+    "agent_settings": providers.effective_agent_settings(
+      data_dir, None, owner.provider or "claude"
+    ),
     "background_agents": providers.background_agent_settings(
       data_dir, owner.provider or "claude"
     ),
@@ -188,11 +214,17 @@ def update_settings(
   # Owner model is frozen / chmod 444), so it's persisted outside the
   # DB transaction. Merge into the existing file so we don't clobber
   # model/effort defaults the picker wrote there.
-  if body.skills_enabled is not None or body.background_agents is not None:
+  if (
+    body.skills_enabled is not None
+    or body.background_agents is not None
+    or body.agent_settings is not None
+  ):
     data_dir = get_app_settings().data_dir
     current = providers._load_agent_settings(data_dir)
     if body.skills_enabled is not None:
       current["skills_enabled"] = bool(body.skills_enabled)
+    if body.agent_settings is not None:
+      current.update(_agent_settings_payload(body.agent_settings))
     if body.background_agents is not None:
       existing = providers.background_agent_settings(
         data_dir, owner.provider or "claude"
