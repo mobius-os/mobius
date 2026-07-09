@@ -5,6 +5,7 @@ import {
   _computeSpacerH,
   isNearContentBottom,
   isNearScrollBottom,
+  modeForForegroundReturn,
   modeForViewportChange,
   shouldPinSend,
 } from '../useScrollMode.js'
@@ -128,6 +129,38 @@ test('viewport resize in reserved spacer anchors instead of snapping to bottom',
   assert.equal(
     modeForViewportChange(staleFollow, false, anchor),
     anchor,
+  )
+})
+
+test('foreground return preserves FOLLOW_BOTTOM at the physical tail', () => {
+  assert.deepEqual(
+    modeForForegroundReturn(makeScrollEl({
+      scrollHeight: 1600,
+      scrollTop: 1000,
+      clientHeight: 600,
+    })),
+    { kind: 'FOLLOW_BOTTOM' },
+  )
+})
+
+test('foreground return anchors the current reading position when scrolled up', () => {
+  const item = {
+    offsetTop: 720,
+    offsetHeight: 120,
+    dataset: { key: 'assistant-7' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 660,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+
+  assert.deepEqual(
+    modeForForegroundReturn(scrollEl),
+    { kind: 'ANCHOR_AT', key: 'assistant-7', offset: 60 },
   )
 })
 

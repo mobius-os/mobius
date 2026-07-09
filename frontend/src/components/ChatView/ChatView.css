@@ -1210,6 +1210,11 @@
     box-shadow 0.16s ease,
     transform 0.08s ease;
 }
+.chat__action:focus { outline: none; }
+.chat__action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .chat__action:active:not(:disabled) { transform: scale(0.94); }
 .chat__action svg {
   display: block;
@@ -1230,17 +1235,27 @@
   cursor: not-allowed;
 }
 
-/* Stop button — calm neutral shell with the destructive meaning carried by the
-   square glyph, avoiding the old red circular halo around the action slot. */
+/* Stop button — keep the 40px touch target, but remove the visible circular
+   shell. The square glyph is the affordance; the surrounding hit area should
+   not read as a separate button shape in the composer. */
 .chat__stop {
-  background: var(--surface2);
+  background: transparent;
   color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
-  border-color: var(--border-light);
+  border-color: transparent;
+  box-shadow: none;
 }
 .chat__stop:hover {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 10%, var(--surface2)); /* CONTRACT: faint destructive tint on opaque fill */
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
+  color: color-mix(in srgb, var(--danger) 86%, var(--text));
+  background: transparent;
+  border-color: transparent;
+}
+.chat__stop:focus-visible {
+  outline: none;
+}
+.chat__stop:focus-visible svg {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
 }
 
 /* Steer (fast-forward) button — replaces Stop while a turn is streaming

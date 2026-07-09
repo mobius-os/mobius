@@ -262,6 +262,17 @@ export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = nu
 }
 
 
+/** Foreground return (visibilitychange/pageshow/online) is not a reading
+ *  gesture, so preserve the physical position the browser is already showing.
+ *  If the user is at the real tail, keep FOLLOW_BOTTOM; otherwise freeze the
+ *  topmost visible message as an ANCHOR_AT. */
+export function modeForForegroundReturn(scrollEl) {
+  if (!scrollEl) return null
+  if (isNearScrollBottom(scrollEl)) return { kind: 'FOLLOW_BOTTOM' }
+  return anchorModeFromScroll(scrollEl)
+}
+
+
 /**
  * Hook that owns the chat scroll subsystem.
  *
