@@ -35,6 +35,12 @@ const _touchMql = typeof matchMedia === 'function'
 let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
+const EMPTY_PROMPTS = [
+  { label: 'Build an app', prompt: 'Build a simple app for tracking personal projects.' },
+  { label: 'Plan a task', prompt: 'Help me break down a task I need to finish this week.' },
+  { label: 'Analyze an idea', prompt: 'Help me think through an idea and find the sharpest next step.' },
+]
+
 /** Cheap structural equality for chat-message arrays. Returns true when
  *  the lists have the same length AND the last message has the same
  *  role/content/blocks. Avoids re-renders when the background fetch
@@ -763,7 +769,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     releaseFiles,
   } = useFileUpload({ chatId })
 
-  function restoreComposerText(text) {
+  function restoreComposerText(text, { focus = false } = {}) {
     setInput(text)
     requestAnimationFrame(() => {
       const el = inputRef.current
@@ -772,6 +778,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       const h = Math.min(el.scrollHeight, 280)
       el.style.height = `${h}px`
       el.closest('.chat__pill')?.classList.toggle('chat__pill--tall', h > 45)
+      if (focus) {
+        try { el.focus({ preventScroll: true }) }
+        catch { el.focus() }
+      }
     })
   }
 
@@ -2322,7 +2332,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             <div className="chat__empty">
               <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
               <p className="chat__empty-title">What's on your mind?</p>
-              <p className="chat__empty-sub">Ask questions, build and modify apps, schedule tasks.<br />Möbius improves the more you use it.</p>
+              <div className="chat__empty-prompts">
+                {EMPTY_PROMPTS.map(prompt => (
+                  <button
+                    key={prompt.label}
+                    type="button"
+                    className="chat__empty-prompt"
+                    onClick={() => restoreComposerText(prompt.prompt, { focus: true })}
+                  >
+                    {prompt.label}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -2334,6 +2355,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             <p className="chat__empty-sub">Check your connection and try again.</p>
             <button
               type="button"
+              className="chat__empty-action"
               onClick={() => {
                 setLoadError(false)
                 setLoading(true)

@@ -103,9 +103,11 @@
 }
 
 .md-blockquote {
-  border-left: 3px solid var(--accent);
-  padding: 4px 12px;
-  color: var(--muted);
+  padding: 8px 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+  border-radius: 10px;
 }
 
 /* Tailwind v4 Preflight zeroes `list-style` on every ul/ol — without
