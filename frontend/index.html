@@ -197,11 +197,27 @@
         // reload when the page was ALREADY controlled and a NEW worker takes over
         // (a genuine deploy/update).
         const hadControllerAtLoad = !!navigator.serviceWorker.controller
+        const rememberShellStateForAutoReload = () => {
+          try {
+            const activeView = localStorage.getItem('moebius_active_view') || 'chat'
+            const rawAppId = localStorage.getItem('moebius_active_app')
+            const activeAppId = rawAppId ? Number(rawAppId) : null
+            sessionStorage.setItem('shell-reload', JSON.stringify({
+              activeView,
+              activeAppId: Number.isFinite(activeAppId) ? activeAppId : null,
+              drawerOpen: false,
+              activeChatId: localStorage.getItem('moebius_active_chat') || null,
+            }))
+          } catch (_) {
+            // Best-effort: a failed storage read should not block an update.
+          }
+        }
         const reloadAfterControllerChange = () => {
           if (hadControllerAtLoad
               && navigator.serviceWorker.controller
               && !sessionStorage.getItem('sw-auto-reloaded')) {
             sessionStorage.setItem('sw-auto-reloaded', '1')
+            rememberShellStateForAutoReload()
             window.location.reload()
           }
         }

@@ -790,7 +790,10 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         </section>
 
         <section className="settings__section settings__section--compact">
-          <div className="settings__row">
+          <div
+            className="settings__row"
+            onPointerDownCapture={themeService.setThemeTransitionOriginFromEvent}
+          >
             <span className="settings__label">Dark mode</span>
             <Switch
               checked={!lightMode}

@@ -561,6 +561,23 @@ test('REVERT RACE — toggleTheme seeds the theme query cache with the NEW theme
     'seeded css must equal the freshly-built/applied css')
 })
 
+test('NAV REGRESSION — Settings toggleTheme avoids View Transition snapshot navigation', async () => {
+  const qc = makeQueryClient()
+  const api = makeApi(DARK_CSS)
+  let viewTransitionCalled = false
+  dom.document.startViewTransition = () => {
+    viewTransitionCalled = true
+    throw new Error('Settings theme toggle must use the CSS transition path')
+  }
+
+  const result = await themeService.toggleTheme(qc, 'dark', api)
+
+  assert.equal(viewTransitionCalled, false,
+    'theme toggles from Settings should not invoke document.startViewTransition')
+  assert.equal(result.newMode, 'light')
+  assert.equal(dom.document.body.style.background, '#f0eeeb')
+})
+
 test('REVERT RACE — query cache is seeded BEFORE stale marking', async () => {
   // setQueryData must land before invalidateQueries: invalidation marks the
   // query stale for later refresh, but the cache must already hold the new

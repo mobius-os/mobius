@@ -37,6 +37,9 @@ import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
 const STYLE_ID = 'mobius-theme'
 let themeAppliedOnce = false
 let themeTransitionTimer = null
+let themeViewTransitionTimer = null
+let themeTransitionToken = 0
+let nextThemeTransitionOrigin = null
 let lastThemeSignature = null
 
 function signatureForTheme(css, bg, mode) {
@@ -51,7 +54,6 @@ function signatureForTheme(css, bg, mode) {
 
 function beginThemeTransition() {
   if (typeof document === 'undefined') return
-  if (!themeAppliedOnce) return
   if (typeof window !== 'undefined'
       && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
     return
@@ -65,6 +67,120 @@ function beginThemeTransition() {
     root.classList.remove('theme-transitioning')
     themeTransitionTimer = null
   }, 180)
+}
+
+function shouldAnimateThemeChange() {
+  if (typeof document === 'undefined') return false
+  if (!themeAppliedOnce) return false
+  if (typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+    return false
+  }
+  if (document.visibilityState === 'hidden') return false
+  return true
+}
+
+function defaultThemeTransitionOrigin() {
+  if (typeof window === 'undefined') return null
+  const width = window.innerWidth || document.documentElement?.clientWidth || 0
+  const height = window.innerHeight || document.documentElement?.clientHeight || 0
+  if (!width || !height) return null
+  return { x: width / 2, y: height / 2 }
+}
+
+function applyThemeTransitionOrigin(root, origin) {
+  const next = origin || defaultThemeTransitionOrigin()
+  root.style.setProperty('--theme-transition-x', next ? `${Math.round(next.x)}px` : '50%')
+  root.style.setProperty('--theme-transition-y', next ? `${Math.round(next.y)}px` : '50%')
+}
+
+function consumeThemeTransitionOrigin() {
+  const origin = nextThemeTransitionOrigin
+  nextThemeTransitionOrigin = null
+  return origin
+}
+
+/**
+ * Remember where the user started the theme toggle so the view-transition
+ * reveal can bloom from the tap/click instead of cross-fading from nowhere.
+ * Keyboard/programmatic toggles fall back to the viewport center.
+ */
+export function setThemeTransitionOriginFromEvent(event) {
+  const native = event?.nativeEvent || event
+  const point = native?.touches?.[0]
+    || native?.changedTouches?.[0]
+    || native
+  const x = Number(point?.clientX)
+  const y = Number(point?.clientY)
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    nextThemeTransitionOrigin = { x, y }
+    return
+  }
+
+  const target = event?.currentTarget || event?.target
+  const rect = target?.getBoundingClientRect?.()
+  if (rect) {
+    nextThemeTransitionOrigin = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    }
+  }
+}
+
+function runThemeTransition(mutateDom, options = {}) {
+  const preferViewTransition = options.preferViewTransition !== false
+  if (!shouldAnimateThemeChange()) {
+    nextThemeTransitionOrigin = null
+    mutateDom()
+    return
+  }
+
+  const root = document.documentElement
+  const timerHost = typeof window !== 'undefined' ? window : globalThis
+
+  if (preferViewTransition
+      && typeof document.startViewTransition === 'function'
+      && root?.classList?.add
+      && root.classList.remove
+      && root.style?.setProperty) {
+    const token = ++themeTransitionToken
+    let didMutate = false
+    const cleanup = () => {
+      if (token !== themeTransitionToken) return
+      root.classList.remove('theme-view-transitioning')
+      if (themeViewTransitionTimer) timerHost.clearTimeout(themeViewTransitionTimer)
+      themeViewTransitionTimer = null
+    }
+    applyThemeTransitionOrigin(root, consumeThemeTransitionOrigin())
+    root.classList.add('theme-view-transitioning')
+    if (themeViewTransitionTimer) timerHost.clearTimeout(themeViewTransitionTimer)
+    themeViewTransitionTimer = timerHost.setTimeout(cleanup, 520)
+    try {
+      const transition = document.startViewTransition(() => {
+        didMutate = true
+        mutateDom()
+      })
+      const finished = transition?.finished || transition?.ready
+      if (finished?.then) {
+        finished.catch(() => {}).then(cleanup)
+      }
+      return
+    } catch (err) {
+      root.classList.remove('theme-view-transitioning')
+      if (themeViewTransitionTimer) {
+        timerHost.clearTimeout(themeViewTransitionTimer)
+        themeViewTransitionTimer = null
+      }
+      if (didMutate) throw err
+      beginThemeTransition()
+      mutateDom()
+      return
+    }
+  }
+
+  nextThemeTransitionOrigin = null
+  beginThemeTransition()
+  mutateDom()
 }
 
 /**
@@ -81,12 +197,15 @@ function beginThemeTransition() {
  * Kept as a named export so existing callers (useTheme's apply effect,
  * toggleTheme below, tests) don't have to change their call shape.
  */
-export function applyThemeToDom(css, bg, mode) {
+export function applyThemeToDom(css, bg, mode, options = {}) {
   const signature = signatureForTheme(css, bg, mode)
-  if (signature !== lastThemeSignature) beginThemeTransition()
-  applyTheme({ css, bg, mode })
-  lastThemeSignature = signature
-  themeAppliedOnce = true
+  const mutateDom = () => {
+    applyTheme({ css, bg, mode })
+    lastThemeSignature = signature
+    themeAppliedOnce = true
+  }
+  if (signature !== lastThemeSignature) runThemeTransition(mutateDom, options)
+  else mutateDom()
 }
 
 /**
@@ -293,7 +412,12 @@ export async function toggleTheme(queryClient, currentMode, api) {
   // the same tick as the visual change.
   await _cancelThemeQueries(queryClient)
   _seedThemeQueries(queryClient, newCss, newBg, newMode)
-  applyThemeToDom(newCss, newBg, newMode)
+  // The Settings toggle sits on the shell's back-stack sentinel. On mobile
+  // Chromium/PWA builds, combining a user tap, the View Transitions snapshot
+  // layer, and the Navigation API can occasionally consume that sentinel and
+  // restore the previous chat. Use the explicit CSS color transition for this
+  // user-tap path; it is still smooth, but avoids browser navigation machinery.
+  applyThemeToDom(newCss, newBg, newMode, { preferViewTransition: false })
 
   try {
     // Refresh SWR's local /api/theme body before notify.send can provoke a
@@ -311,7 +435,7 @@ export async function toggleTheme(queryClient, currentMode, api) {
   } catch (err) {
     _seedThemeQueries(queryClient, currentCss, oldBg, currentMode)
     await _refreshThemeSwCache(currentCss, oldBg, currentMode)
-    applyThemeToDom(currentCss, oldBg, currentMode)
+    applyThemeToDom(currentCss, oldBg, currentMode, { preferViewTransition: false })
     throw err
   }
 

@@ -27,6 +27,7 @@ function makeDomStub() {
   // (and the stub captures the assignment for the assertions below).
   const statusBar = { content: 'black', getAttribute: (k) => statusBar[k], setAttribute: (k, v) => { statusBar[k] = v } }
   const body = { style: {} }
+  const classes = new Set()
   // documentElement was added when light/dark mode support landed (set
   // data-theme attribute drives the CSS variable cascade). The stub
   // captures the assignment so tests can assert mode inference.
@@ -37,6 +38,11 @@ function makeDomStub() {
     _attrs: {},
     getAttribute: (k) => documentElement._attrs[k],
     setAttribute: (k, v) => { documentElement._attrs[k] = v },
+    classList: {
+      add: (c) => { classes.add(c) },
+      remove: (c) => { classes.delete(c) },
+      contains: (c) => classes.has(c),
+    },
     // colorScheme captured so the delegation tests can assert applyThemeToDom
     // now sets documentElement.style.colorScheme via the shared library.
     style: { _props: {}, colorScheme: '', setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
@@ -97,6 +103,7 @@ function makeDomStub() {
     meta,
     statusBar,
     documentElement,
+    classes,
     fontLinks,
     headChildren,
     styleNodes,
@@ -212,6 +219,49 @@ test('applyThemeToDom is idempotent — repeated calls produce identical DOM', (
   themeService.applyThemeToDom(css, '#aabbcc')
   assert.equal(dom.fontLinks.length, 1, 'no duplicate font links')
   assert.equal(dom.styleNodes.size, 1, 'one style node')
+})
+
+test('applyThemeToDom uses View Transitions for post-boot theme changes', async () => {
+  themeService.applyThemeToDom(':root { --bg: #111111; }', '#111111')
+  let callbackSawTransitionClass = false
+  dom.document.startViewTransition = (callback) => {
+    callbackSawTransitionClass = dom.documentElement.classList.contains('theme-view-transitioning')
+    callback()
+    return { finished: Promise.resolve() }
+  }
+
+  themeService.setThemeTransitionOriginFromEvent({ clientX: 23, clientY: 45 })
+  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
+
+  assert.equal(callbackSawTransitionClass, true,
+    'the view-transition CSS class should be present while the DOM mutates')
+  assert.equal(dom.documentElement.style.getPropertyValue('--theme-transition-x'), '23px')
+  assert.equal(dom.documentElement.style.getPropertyValue('--theme-transition-y'), '45px')
+  assert.equal(dom.document.body.style.background, '#f0eeeb')
+
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(dom.documentElement.classList.contains('theme-view-transitioning'), false,
+    'the view-transition class should be removed after the transition finishes')
+})
+
+test('applyThemeToDom can opt out of View Transitions for back-stack-sensitive toggles', () => {
+  themeService.applyThemeToDom(':root { --bg: #111111; }', '#111111')
+  let called = false
+  dom.document.startViewTransition = () => {
+    called = true
+    throw new Error('should not use View Transitions when opted out')
+  }
+
+  themeService.applyThemeToDom(
+    ':root { --bg: #f0eeeb; }',
+    '#f0eeeb',
+    'light',
+    { preferViewTransition: false },
+  )
+
+  assert.equal(called, false)
+  assert.equal(dom.document.body.style.background, '#f0eeeb')
 })
 
 test('persistTheme writes CSS + mode + sends notify in parallel', async () => {
