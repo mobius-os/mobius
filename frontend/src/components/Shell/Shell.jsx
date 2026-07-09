@@ -722,6 +722,8 @@ export default function Shell() {
   //     the building chat was deleted. Error is set as a draft (not auto-sent)
   //     so the user can review before sending.
   //   moebius:new-chat — open a new chat with optional pre-filled draft text.
+  //     Payload may include autoSend:true, which sends that exact draft after
+  //     ChatView mounts. Used only for explicit app approval flows.
   //   moebius:open-chat — open an existing chat, optionally pre-filling a draft.
   //   moebius:open-app — switch the shell to an installed app. Payload
   //     {appId} accepts either the numeric DB id or the slug; we match
@@ -744,7 +746,12 @@ export default function Shell() {
       const buildingChatId = appEntry?.chat_id || e.data.chatId || null
       const buildingChat = buildingChatId && chats.find(c => c.id === buildingChatId)
       if (buildingChat) {
-        try { sessionStorage.setItem('pending-draft', report) } catch {}
+        try {
+          sessionStorage.setItem('pending-draft', report)
+          sessionStorage.setItem(`draft:${buildingChatId}`, report)
+          sessionStorage.removeItem('pending-draft-autosend')
+          sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
+        } catch {}
         // Set view and chatId together to avoid flashing the previous chat.
         setActiveView('chat')
         setActiveChatId(buildingChatId)
@@ -770,11 +777,21 @@ export default function Shell() {
       if (e.data?.type === 'moebius:app-error') {
         handleAppError(e)
       } else if (e.data?.type === 'moebius:new-chat') {
-        newChat({ draft: e.data.draft, forceNew: true })
+        newChat({
+          draft: e.data.draft,
+          forceNew: true,
+          autoSend: e.data.autoSend === true,
+        })
       } else if (e.data?.type === 'moebius:open-chat') {
         if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
         if (e.data.draft) {
-          try { sessionStorage.setItem('pending-draft', String(e.data.draft)) } catch {}
+          const draftText = String(e.data.draft)
+          try {
+            sessionStorage.setItem('pending-draft', draftText)
+            sessionStorage.setItem(`draft:${e.data.chatId}`, draftText)
+            sessionStorage.removeItem('pending-draft-autosend')
+            sessionStorage.removeItem(`draft-autosend:${e.data.chatId}`)
+          } catch {}
         }
         navTo('chat', { chatId: e.data.chatId })
         refreshChats()
@@ -851,7 +868,7 @@ export default function Shell() {
     }
   }, [apps, chats, navTo, refreshApps, refreshChats])
 
-  async function newChat({ draft, forceNew, exclude } = {}) {
+  async function newChat({ draft, forceNew, exclude, autoSend } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only
     // POST a fresh row when no empty is available. Safe to reuse now
     // that create_chat leaves agent_settings_json NULL — an untouched
@@ -966,7 +983,18 @@ export default function Shell() {
     }
     closeDrawer()
     if (draft) {
-      try { sessionStorage.setItem('pending-draft', draft) } catch {}
+      const draftText = String(draft)
+      try {
+        sessionStorage.setItem('pending-draft', draftText)
+        sessionStorage.setItem(`draft:${chatId}`, draftText)
+        if (autoSend) {
+          sessionStorage.setItem('pending-draft-autosend', draftText)
+          sessionStorage.setItem(`draft-autosend:${chatId}`, draftText)
+        } else {
+          sessionStorage.removeItem('pending-draft-autosend')
+          sessionStorage.removeItem(`draft-autosend:${chatId}`)
+        }
+      } catch {}
     }
     setActiveView('chat')
     setActiveChatId(chatId)
