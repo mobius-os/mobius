@@ -41,8 +41,9 @@
   background: var(--surface, #14181f);
   color: var(--text, #d4d4d8);
   border: 1px solid var(--border, #252b36);
-  border-radius: 14px;
+  border-radius: 8px;
   padding: 26px 24px 22px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.32);
   animation: wt-scale-in 0.22s cubic-bezier(.2, .7, .2, 1) both;
 }
 
@@ -107,6 +108,7 @@
   background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
   font-size: 20px;
   color: var(--accent, #a78bfa);
+  animation: wt-arrow-cue 1.8s var(--ease-out-soft, ease-out) infinite;
 }
 
 /* Up-arrow placed at top-of-card (before the title) — wants negative
@@ -116,11 +118,31 @@
   margin: -8px auto 4px;
 }
 
+.wt__arrow--up {
+  animation-name: wt-arrow-cue-up;
+}
+.wt__arrow--down {
+  animation-name: wt-arrow-cue-down;
+}
+
+@keyframes wt-arrow-cue {
+  0%, 100% { opacity: 0.72; transform: translateY(0); }
+  50%      { opacity: 1; transform: translateY(-2px); }
+}
+@keyframes wt-arrow-cue-up {
+  0%, 100% { opacity: 0.72; transform: translateY(0); }
+  50%      { opacity: 1; transform: translateY(-2px); }
+}
+@keyframes wt-arrow-cue-down {
+  0%, 100% { opacity: 0.72; transform: translateY(0); }
+  50%      { opacity: 1; transform: translateY(2px); }
+}
+
 .wt__note {
   font-size: 13px;
   margin: 12px 0 0;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--border, #252b36);
 }
 
@@ -141,8 +163,10 @@
   text-underline-offset: 2px;
 }
 
-.wt__link:hover {
-  color: var(--accent-hover, #c4b5fd);
+@media (hover: hover) and (pointer: fine) {
+  .wt__link:hover {
+    color: var(--accent-hover, #c4b5fd);
+  }
 }
 
 .wt__actions {
@@ -154,7 +178,7 @@
 .wt__btn {
   flex: 1;
   padding: 12px 16px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: none;
   font-family: inherit;
   font-size: 14px;
@@ -177,11 +201,13 @@
 
 .wt__btn--primary {
   background: var(--accent, #a78bfa);
-  color: #0c0f14;
+  color: var(--accent-fg, #ffffff);
 }
 
-.wt__btn--primary:hover {
-  background: var(--accent-hover, #c4b5fd);
+@media (hover: hover) and (pointer: fine) {
+  .wt__btn--primary:hover {
+    background: var(--accent-hover, #c4b5fd);
+  }
 }
 
 .wt__btn--ghost {
@@ -214,6 +240,8 @@
   cursor: pointer;
 }
 
-.wt__skip-link:hover {
-  color: var(--text, #d4d4d8);
+@media (hover: hover) and (pointer: fine) {
+  .wt__skip-link:hover {
+    color: var(--text, #d4d4d8);
+  }
 }

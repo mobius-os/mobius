@@ -28,8 +28,8 @@
   padding: 24px;
   background: var(--surface, #171717);
   border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-  border-radius: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.32);
 }
 
 .errbound__title {
@@ -78,8 +78,10 @@
   transition: opacity 0.15s var(--ease-out-soft, ease);
 }
 
-.errbound__btn:hover {
-  opacity: 0.85;
+@media (hover: hover) and (pointer: fine) {
+  .errbound__btn:hover {
+    opacity: 0.85;
+  }
 }
 
 .errbound__btn--primary {

@@ -30,9 +30,9 @@
 .pa__input {
   background: var(--bg, #0d0d0d);
   border: 1px solid var(--border, #252b36);
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--text, #d4d4d8);
-  padding: 9px 12px;
+  padding: 11px 14px;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
   width: 100%;
@@ -42,22 +42,22 @@
 .pa__input:focus,
 .pa__input:focus-visible {
   border-color: var(--accent, #8b6cf7);
-  box-shadow: 0 0 0 3px var(--accent-dim, rgba(139, 108, 247, 0.14));
+  box-shadow: 0 0 0 3px var(--accent-dim, rgba(139, 108, 247, 0.18));
 }
 
 .pa__btn {
   align-self: inherit;
   background: var(--accent, #8b6cf7);
-  color: #fff;
+  color: var(--accent-fg, #ffffff);
   border: none;
-  /* Unified primary-CTA radius with .settings__btn (10px). Compact
+  /* Unified primary-CTA radius with .settings__btn (8px). Compact
      action chips like .provider-row__action stay pill-shaped
      (999px); .pa__btn is a form CTA, not a chip, so it joins the
      primary family. */
-  /* Match .settings__btn exactly (10px radius / 10px 18px / weight 500)
+  /* Match .settings__btn exactly (8px radius / 10px 18px / weight 500)
      so the provider CTA and the settings Save button read as one button
      family — they previously drifted to 20px padding + weight 600. */
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 10px 18px;
   font-size: 14px;
   font-weight: 500;
@@ -65,18 +65,20 @@
   transition: background 0.15s;
 }
 
-.pa__btn:hover:not(:disabled) {
-  background: var(--accent-hover, #c4b5fd);
+.pa__btn:focus-visible {
+  outline: 2px solid var(--accent, #8b6cf7);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pa__btn:hover:not(:disabled) {
+    background: var(--accent-hover, #c4b5fd);
+  }
 }
 
 .pa__btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.pa__btn:focus-visible {
-  outline: 2px solid var(--accent, #8b6cf7);
-  outline-offset: 2px;
 }
 
 .pa__btn--sm {
@@ -87,8 +89,10 @@
   border: 1px solid var(--border, #252b36);
 }
 
-.pa__btn--sm:hover:not(:disabled) {
-  background: var(--surface2, #1a1f28);
+@media (hover: hover) and (pointer: fine) {
+  .pa__btn--sm:hover:not(:disabled) {
+    background: var(--surface2, #1a1f28);
+  }
 }
 
 .pa__label {
@@ -161,7 +165,7 @@
   height: 22px;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg, #ffffff);
   font-size: 12px;
   font-weight: 700;
   flex-shrink: 0;
@@ -170,7 +174,8 @@
 .codex-auth__code {
   font-family: var(--mono);
   font-size: 15px;
-  letter-spacing: 0.05em;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
   color: var(--accent);
 }
 
@@ -203,7 +208,7 @@
   padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--border-light);
-  border-radius: 12px;
+  border-radius: 8px;
   /* Only animate the border — the background swap on default-change
      was the source of the flicker users noticed when re-selecting. */
   transition: border-color 0.15s;
