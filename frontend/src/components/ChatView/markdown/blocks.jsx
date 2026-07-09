@@ -161,6 +161,7 @@ export function BlockToken({ token }) {
     case 'blockquote': return <BlockQuote token={token} />
     case 'list': return <ListBlock token={token} />
     case 'hr': return <HorizontalRule />
+    case 'html': return null
     case 'space': return null
     default: return token.raw ? <p className="md-paragraph">{token.raw}</p> : null
   }

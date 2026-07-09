@@ -487,11 +487,36 @@
 }
 .chat__reasoning-summary::-webkit-details-marker { display: none; }
 .chat__reasoning-line {
-  display: block;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.chat__reasoning-ellipsis {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  margin-left: 2px;
+}
+.chat__reasoning-ellipsis span {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  transform: translateY(-1px);
+  animation: reasoningEllipsis 1.15s ease-in-out infinite;
+}
+.chat__reasoning-ellipsis span:nth-child(2) { animation-delay: 0.16s; }
+.chat__reasoning-ellipsis span:nth-child(3) { animation-delay: 0.32s; }
+
+@keyframes reasoningEllipsis {
+  0%, 70%, 100% { opacity: 0.3; transform: translateY(-1px) scale(0.78); }
+  35% { opacity: 0.85; transform: translateY(-1px) scale(1); }
 }
 .chat__reasoning-body {
   margin: 3px 0 0 10px;
