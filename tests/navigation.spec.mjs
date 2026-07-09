@@ -68,15 +68,25 @@ async function getNavState(page) {
 
 /** Navigate to a chat by clicking in the drawer. */
 async function navigateToChat(page, index = 0) {
-  await page.evaluate((idx) => {
+  const clicked = await page.evaluate((idx) => {
     const chats = document.querySelector('.drawer__group--chats')
     const items = chats?.querySelectorAll('.drawer__item') || []
     const chatItems = Array.from(items).filter(el =>
       el.querySelector('.drawer__item-text') && !el.classList.contains('drawer__item--new')
     )
-    if (chatItems[idx]) chatItems[idx].click()
+    const target = chatItems[idx] || document.querySelector('.drawer__item--new')
+    if (!target) return false
+    target.click()
+    return true
   }, index)
-  await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+  if (!clicked) throw new Error('No chat row or New chat button found in drawer')
+  await page.waitForFunction(
+    () => !document.querySelector('.settings')
+      && !!(document.querySelector('.chat__empty-wrap')
+        || document.querySelector('.chat__scroll')
+        || document.querySelector('.chat__form')),
+    { timeout: 8000 }
+  )
 }
 
 /** Navigate to an app by clicking in the drawer. */
