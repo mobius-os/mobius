@@ -11,11 +11,28 @@ Use /data/shared/agent-settings.json for per-instance settings that
 don't need code changes.
 """
 
+import json
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _read_build_info() -> dict:
+  """Reads optional Docker-baked build metadata.
+
+  deploy-prod.sh still passes BUILD_SHA/BUILD_DATE directly. Managed Docker
+  builders (Railway) may expose their own build args without our compose
+  wrapper, so the Dockerfile also writes a tiny fallback JSON file.
+  """
+  path = Path(os.environ.get("MOBIUS_BUILD_INFO_PATH", "/app/build-info.json"))
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except Exception:
+    return {}
+  return data if isinstance(data, dict) else {}
 
 
 class Settings(BaseSettings):
@@ -80,6 +97,19 @@ class Settings(BaseSettings):
   def _validate_and_derive(self) -> "Settings":
     """Validates secret_key strength and derives frontend_origin from
     DOMAIN on managed platforms (Railway) or when only DOMAIN is set."""
+    build_info = _read_build_info()
+    if (self.build_sha or "").strip() in ("", "unknown"):
+      railway_sha = (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "").strip()
+      baked_sha = str(build_info.get("sha") or "").strip()
+      if railway_sha:
+        self.build_sha = railway_sha
+      elif baked_sha and baked_sha != "unknown":
+        self.build_sha = baked_sha
+    if (self.build_date or "").strip() in ("", "unknown"):
+      baked_date = str(build_info.get("build_date") or "").strip()
+      if baked_date and baked_date != "unknown":
+        self.build_date = baked_date
+
     if len(self.secret_key) < 32:
       raise ValueError(
         "SECRET_KEY must be at least 32 characters long. "

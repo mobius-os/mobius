@@ -35,6 +35,15 @@ def test_build_sha_reads_env(monkeypatch):
   assert Settings(**_KW).build_sha == "abc123def"
 
 
+def test_build_sha_falls_back_to_railway_git_sha(monkeypatch):
+  monkeypatch.setenv("BUILD_SHA", "unknown")
+  monkeypatch.setenv(
+    "RAILWAY_GIT_COMMIT_SHA",
+    "d0beb8f5c55b36df7d674d55965a23b8d54ad69b",
+  )
+  assert Settings(**_KW).build_sha == "d0beb8f5c55b36df7d674d55965a23b8d54ad69b"
+
+
 def test_version_exposes_build_date(client, monkeypatch):
   # The commit date powering the Settings "version · date" line. Always a
   # string ("unknown" when unstamped); reads BUILD_DATE from the env.
@@ -44,6 +53,17 @@ def test_version_exposes_build_date(client, monkeypatch):
   assert Settings(**_KW).build_date == "2026-06-25"
   monkeypatch.delenv("BUILD_DATE", raising=False)
   assert Settings(**_KW).build_date == "unknown"
+
+
+def test_build_date_falls_back_to_baked_build_info(tmp_path, monkeypatch):
+  info = tmp_path / "build-info.json"
+  info.write_text(
+    '{"sha":"abc123","build_date":"2026-07-09"}\n',
+    encoding="utf-8",
+  )
+  monkeypatch.setenv("BUILD_DATE", "unknown")
+  monkeypatch.setenv("MOBIUS_BUILD_INFO_PATH", str(info))
+  assert Settings(**_KW).build_date == "2026-07-09"
 
 
 # ── served-platform identity ────────────────────────────────────────────
