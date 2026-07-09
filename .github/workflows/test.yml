@@ -25,7 +25,10 @@ concurrency:
 jobs:
   backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The full backend suite is now large enough that cold hosted runners can
+    # reach 5 minutes while tests are still passing. Keep the cap bounded, but
+    # leave headroom so the job fails on assertions instead of a hard cancel.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,7 +50,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run pytest
         working-directory: backend
-        run: pytest -q
+        run: pytest -q --durations=25
 
   frontend-unit:
     # Wires up the node:test unit suite that lives under

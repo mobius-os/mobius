@@ -294,6 +294,13 @@
   margin: 0;
 }
 
+/* Persisted custom themes can outlive component layout changes and are injected
+   after the app bundle. Keep the Server card's own rhythm authoritative so an
+   old theme rule can't double the Restart/Recovery gap. */
+.settings__section--server .settings__row--recovery {
+  margin-top: 0 !important;
+}
+
 .settings__section--server .settings__subtext--tight {
   margin: -10px 0 0;
 }
