@@ -11,6 +11,7 @@ impossible.
 """
 
 from datetime import date
+import json
 
 import pytest
 
@@ -217,6 +218,116 @@ def test_fallback_goal_points_at_artifacts_and_notes_cutoff(
   assert "morning chat" not in goal
   assert "do not create a chat" in goal.lower()
   assert "Do NOT restart" in goal
+
+
+# ---------------------------------------------------------------------------
+# Background-agent resolution
+# ---------------------------------------------------------------------------
+
+def _write_global_agents(tmp_path, payload):
+  shared = tmp_path / "shared"
+  shared.mkdir(parents=True, exist_ok=True)
+  (shared / "agent-settings.json").write_text(json.dumps(payload))
+
+
+def test_resolve_agents_inherits_system_background_defaults(tmp_path, monkeypatch):
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _write_global_agents(tmp_path, {
+    "background_agents": {
+      "primary": {
+        "provider": "codex",
+        "model": "gpt-5.4",
+        "effort": "high",
+      },
+      "fallback": {
+        "provider": "claude",
+        "model": "claude-sonnet-4-6",
+        "effort": "medium",
+      },
+    },
+  })
+  assert dr._resolve_agents({}) == {
+    "primary": {
+      "provider": "codex",
+      "model": "gpt-5.4",
+      "effort": "high",
+    },
+    "fallback": {
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
+    },
+  }
+
+
+def test_resolve_agents_app_primary_override_keeps_system_fallback(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _write_global_agents(tmp_path, {
+    "background_agents": {
+      "primary": {"provider": "codex", "model": "gpt-5.4"},
+      "fallback": {"provider": "codex", "model": "gpt-5.5"},
+    },
+  })
+  resolved = dr._resolve_agents({
+    "provider": "claude",
+    "model": "claude-opus-4-8",
+    "effort": "xhigh",
+  })
+  assert resolved["primary"] == {
+    "provider": "claude",
+    "model": "claude-opus-4-8",
+    "effort": "xhigh",
+  }
+  assert resolved["fallback"] == {
+    "provider": "codex",
+    "model": "gpt-5.5",
+    "effort": None,
+  }
+
+
+def test_resolve_agents_app_fallback_override_and_duplicate_skip(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _write_global_agents(tmp_path, {
+    "background_agents": {
+      "primary": {"provider": "claude", "model": "claude-sonnet-4-6"},
+      "fallback": {"provider": "codex", "model": "gpt-5.4"},
+    },
+  })
+  resolved = dr._resolve_agents({
+    "fallback_provider": "claude",
+    "fallback_model": "claude-sonnet-4-6",
+  })
+  assert resolved["primary"] == {
+    "provider": "claude",
+    "model": "claude-sonnet-4-6",
+    "effort": None,
+  }
+  assert resolved["fallback"] is None
+
+
+def test_resolve_agents_drops_cross_provider_model(tmp_path, monkeypatch):
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _write_global_agents(tmp_path, {
+    "background_agents": {
+      "primary": {"provider": "claude", "model": "gpt-5.5"},
+      "fallback": {"provider": "codex", "model": "claude-opus-4-8"},
+    },
+  })
+  resolved = dr._resolve_agents({})
+  assert resolved["primary"] == {
+    "provider": "claude",
+    "model": None,
+    "effort": None,
+  }
+  assert resolved["fallback"] == {
+    "provider": "codex",
+    "model": None,
+    "effort": None,
+  }
 
 
 # ---------------------------------------------------------------------------

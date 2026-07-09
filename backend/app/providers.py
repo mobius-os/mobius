@@ -214,6 +214,58 @@ def effective_agent_settings(
   return merged
 
 
+def _clean_background_choice(raw: Any, fallback_provider: str | None = None) -> dict | None:
+  if not isinstance(raw, dict):
+    return None
+  provider = raw.get("provider")
+  if provider not in PROVIDERS:
+    provider = fallback_provider if fallback_provider in PROVIDERS else None
+  if provider not in PROVIDERS:
+    return None
+  out: dict[str, Any] = {"provider": provider}
+  model = raw.get("model")
+  model = model.strip() if isinstance(model, str) and model.strip() else None
+  if model and _model_belongs_to_other_provider(model, provider):
+    model = None
+  out["model"] = model
+  effort = raw.get("effort")
+  out["effort"] = effort.strip() if isinstance(effort, str) and effort.strip() else None
+  return out
+
+
+def background_agent_settings(data_dir: str, default_provider: str | None = None) -> dict:
+  """Return the system-level background primary/fallback model choices.
+
+  Stored in /data/shared/agent-settings.json under:
+    {
+      "background_agents": {
+        "primary": {"provider": "claude", "model": "...", "effort": "..."},
+        "fallback": {"provider": "codex", "model": "...", "effort": "..."}
+      }
+    }
+
+  Absence stays backwards-compatible: primary inherits the owner's chat
+  provider plus global model/effort defaults, and fallback is disabled until
+  the owner explicitly chooses one. Apps that need background setup can then
+  inherit this without silently changing existing instances.
+  """
+  provider = default_provider if default_provider in PROVIDERS else DEFAULT_PROVIDER
+  file_layer = _load_agent_settings(data_dir)
+  raw = file_layer.get("background_agents")
+  bg = raw if isinstance(raw, dict) else {}
+
+  primary = _clean_background_choice(bg.get("primary"), provider)
+  if primary is None:
+    effective = effective_agent_settings(data_dir, None, provider=provider)
+    primary = {
+      "provider": provider,
+      "model": effective.get("model"),
+      "effort": effective.get("effort"),
+    }
+  fallback = _clean_background_choice(bg.get("fallback"))
+  return {"primary": primary, "fallback": fallback}
+
+
 def get_skill_path() -> Path | None:
   """Resolves the agent skill file location. Single source of truth.
 

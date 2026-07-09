@@ -4,8 +4,9 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
-import { authQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
+import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import * as themeService from '../../lib/themeService.js'
+import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -15,6 +16,84 @@ import './SettingsView.css'
 
 const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
+const PROVIDER_CHOICES = [
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'OpenAI Codex' },
+]
+const FALLBACK_MODEL_ROWS = {
+  claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label })),
+  codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label })),
+}
+
+function normalizeBackgroundAgents(backgroundAgents) {
+  const primaryProvider = PROVIDER_CHOICES.some(p => p.id === backgroundAgents?.primary?.provider)
+    ? backgroundAgents.primary.provider
+    : 'claude'
+  const fallbackProvider = PROVIDER_CHOICES.some(p => p.id === backgroundAgents?.fallback?.provider)
+    ? backgroundAgents.fallback.provider
+    : ''
+  return {
+    primary: {
+      provider: primaryProvider,
+      model: backgroundAgents?.primary?.model || '',
+      effort: backgroundAgents?.primary?.effort || '',
+    },
+    fallback: {
+      provider: fallbackProvider,
+      model: backgroundAgents?.fallback?.model || '',
+      effort: backgroundAgents?.fallback?.effort || '',
+    },
+  }
+}
+
+function BackgroundAgentPicker({
+  label,
+  hint,
+  choice,
+  allowNone = false,
+  models,
+  connected,
+  onProviderChange,
+  onModelChange,
+}) {
+  const provider = choice?.provider || ''
+  return (
+    <div className="settings__agent-row">
+      <div className="settings__agent-row-copy">
+        <div className="settings__label">{label}</div>
+        <p className="settings__subtext settings__subtext--tight">{hint}</p>
+      </div>
+      <div className="settings__agent-controls">
+        <select
+          className="settings__select"
+          value={provider}
+          onChange={(e) => onProviderChange(e.target.value)}
+          aria-label={`${label} provider`}
+        >
+          {allowNone && <option value="">No fallback</option>}
+          {PROVIDER_CHOICES.map((p) => (
+            <option key={p.id} value={p.id}>{p.label}</option>
+          ))}
+        </select>
+        <select
+          className="settings__select"
+          value={choice?.model || ''}
+          onChange={(e) => onModelChange(e.target.value)}
+          aria-label={`${label} model`}
+          disabled={!provider}
+        >
+          <option value="">Provider default</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.label || m.id}</option>
+          ))}
+        </select>
+        {provider && connected === false && (
+          <p className="settings__field-note">Not connected yet.</p>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function returnToSettingsAfterReload() {
   try { sessionStorage.setItem(RETURN_VIEW_KEY, 'settings') } catch {}
@@ -97,6 +176,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   //             render the section blank with no indication.
   //   LOADING — no data yet and no error: the initial in-flight fetch.
   const providerReady = settingsQuery.data !== undefined && claudeStatusQuery.data !== undefined
+  const modelRegistryQuery = modelQueries.registry.useQuery({ enabled: providerReady })
   const providerError =
     !providerReady && (settingsQuery.isError || claudeStatusQuery.isError)
   const providerErrorMsg =
@@ -106,6 +186,78 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     settingsQuery.refetch()
     claudeStatusQuery.refetch()
   }, [settingsQuery, claudeStatusQuery])
+  const [backgroundDraft, setBackgroundDraft] = useState(null)
+  const [backgroundSaving, setBackgroundSaving] = useState(false)
+  const [backgroundSaved, setBackgroundSaved] = useState(false)
+  const [backgroundError, setBackgroundError] = useState('')
+
+  useEffect(() => {
+    if (!settingsQuery.data?.background_agents) return
+    setBackgroundDraft(normalizeBackgroundAgents(settingsQuery.data.background_agents))
+  }, [settingsQuery.data?.background_agents])
+
+  const connectedByProvider = {
+    claude: claudeAuthenticated,
+    codex: codexAuthenticated,
+  }
+  const modelsForProvider = useCallback((provider) => {
+    if (!provider) return []
+    const rows = Array.isArray(modelRegistryQuery.data?.[provider])
+      ? modelRegistryQuery.data[provider]
+      : null
+    if (rows && rows.length) {
+      return rows.map((m) => ({ id: m.id, label: m.label || m.id }))
+    }
+    return FALLBACK_MODEL_ROWS[provider] || []
+  }, [modelRegistryQuery.data])
+
+  const setBackgroundChoice = useCallback((slot, patch) => {
+    setBackgroundDraft((prev) => {
+      const current = prev || normalizeBackgroundAgents(settingsQuery.data?.background_agents)
+      const nextChoice = { ...current[slot], ...patch }
+      if ('provider' in patch) nextChoice.model = ''
+      return { ...current, [slot]: nextChoice }
+    })
+    setBackgroundSaved(false)
+    setBackgroundError('')
+  }, [settingsQuery.data?.background_agents])
+
+  const saveBackgroundAgents = useCallback(async () => {
+    const draft = backgroundDraft || normalizeBackgroundAgents(settingsQuery.data?.background_agents)
+    if (!draft?.primary?.provider || backgroundSaving) return
+    setBackgroundSaving(true)
+    setBackgroundError('')
+    setBackgroundSaved(false)
+    try {
+      const payload = {
+        primary: {
+          provider: draft.primary.provider,
+          model: draft.primary.model || null,
+          effort: draft.primary.effort || null,
+        },
+        fallback: draft.fallback?.provider
+          ? {
+              provider: draft.fallback.provider,
+              model: draft.fallback.model || null,
+              effort: draft.fallback.effort || null,
+            }
+          : null,
+      }
+      const res = await api.settings.save({ background_agents: payload })
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch {}
+        throw new Error(detail || 'Could not save background agents.')
+      }
+      settingsQueries.owner.invalidate(queryClient)
+      setBackgroundSaved(true)
+      setTimeout(() => setBackgroundSaved(false), 2200)
+    } catch (err) {
+      setBackgroundError(err.message || 'Could not save background agents.')
+    } finally {
+      setBackgroundSaving(false)
+    }
+  }, [backgroundDraft, backgroundSaving, queryClient, settingsQuery.data?.background_agents])
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
@@ -472,6 +624,13 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
       : updatePhase === 'checked'
         ? 'No updates found'
         : 'Check for updates'
+  const effectiveBackgroundDraft = backgroundDraft ||
+    normalizeBackgroundAgents(settingsQuery.data?.background_agents)
+  const modelLoadNote = modelRegistryQuery.isError
+    ? 'Could not refresh the live model list. Saved defaults still work.'
+    : modelRegistryQuery.isLoading
+      ? 'Loading available models…'
+      : ''
 
   return (
     <div className="settings">
@@ -482,35 +641,86 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           <h2 className="settings__section-title">AI providers</h2>
 
           {providerReady ? (
-            <div className="settings__providers">
-              <ProviderRow
-                id="codex"
-                name="OpenAI Codex"
-                showRadio={false}
-                connected={codexAuthenticated}
-                version={codexVersion}
-                expanded={expandedAuth === 'codex'}
-                onToggleExpand={toggleCodexAuth}
-              >
-                <CodexAuth onConnected={onCodexAuthDone} />
-              </ProviderRow>
+            <>
+              <div className="settings__providers">
+                <ProviderRow
+                  id="codex"
+                  name="OpenAI Codex"
+                  showRadio={false}
+                  connected={codexAuthenticated}
+                  version={codexVersion}
+                  expanded={expandedAuth === 'codex'}
+                  onToggleExpand={toggleCodexAuth}
+                >
+                  <CodexAuth onConnected={onCodexAuthDone} />
+                </ProviderRow>
 
-              <ProviderRow
-                id="claude"
-                name="Claude Code"
-                showRadio={false}
-                connected={claudeAuthenticated}
-                version={claudeVersion}
-                expanded={expandedAuth === 'claude'}
-                onToggleExpand={toggleClaudeAuth}
-              >
-                <ProviderAuth
-                  authenticated={claudeAuthenticated}
-                  compact
-                  onDone={onClaudeAuthDone}
+                <ProviderRow
+                  id="claude"
+                  name="Claude Code"
+                  showRadio={false}
+                  connected={claudeAuthenticated}
+                  version={claudeVersion}
+                  expanded={expandedAuth === 'claude'}
+                  onToggleExpand={toggleClaudeAuth}
+                >
+                  <ProviderAuth
+                    authenticated={claudeAuthenticated}
+                    compact
+                    onDone={onClaudeAuthDone}
+                  />
+                </ProviderRow>
+              </div>
+
+              <div className="settings__agent-defaults">
+                <div className="settings__agent-head">
+                  <div>
+                    <h3 className="settings__agent-title">Background agents</h3>
+                    <p className="settings__subtext settings__subtext--tight">
+                      Used by scheduled/system apps when they have not chosen
+                      their own model.
+                    </p>
+                  </div>
+                  <button
+                    className="settings__btn settings__btn--outline settings__btn--sm"
+                    type="button"
+                    onClick={saveBackgroundAgents}
+                    disabled={backgroundSaving || !effectiveBackgroundDraft.primary.provider}
+                  >
+                    {backgroundSaving ? 'Saving…' : backgroundSaved ? 'Saved' : 'Save'}
+                  </button>
+                </div>
+                {modelLoadNote && (
+                  <div className="settings__notice">{modelLoadNote}</div>
+                )}
+                <BackgroundAgentPicker
+                  label="Primary"
+                  hint="First choice for nightly and scheduled agent work."
+                  choice={effectiveBackgroundDraft.primary}
+                  models={modelsForProvider(effectiveBackgroundDraft.primary.provider)}
+                  connected={connectedByProvider[effectiveBackgroundDraft.primary.provider]}
+                  onProviderChange={(provider) => setBackgroundChoice('primary', { provider })}
+                  onModelChange={(model) => setBackgroundChoice('primary', { model })}
                 />
-              </ProviderRow>
-            </div>
+                <BackgroundAgentPicker
+                  label="Fallback"
+                  hint="Used when the primary provider is out of usage or unauthenticated."
+                  allowNone
+                  choice={effectiveBackgroundDraft.fallback}
+                  models={modelsForProvider(effectiveBackgroundDraft.fallback.provider)}
+                  connected={connectedByProvider[effectiveBackgroundDraft.fallback.provider]}
+                  onProviderChange={(provider) => setBackgroundChoice('fallback', { provider })}
+                  onModelChange={(model) => setBackgroundChoice('fallback', { model })}
+                />
+                {backgroundError && (
+                  <Alert
+                    color="danger"
+                    variant="soft"
+                    description={backgroundError}
+                  />
+                )}
+              </div>
+            </>
           ) : providerError ? (
             // First-ever open with no persisted cache and the fetch
             // failed. Surface the error + a retry rather than rendering

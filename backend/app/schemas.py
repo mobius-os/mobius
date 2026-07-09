@@ -359,11 +359,34 @@ class NotificationSendRequest(BaseModel):
   source_id: str | None = None
 
 
+class BackgroundAgentChoice(BaseModel):
+  """One provider/model choice for unattended background work."""
+
+  provider: str | None = None
+  model: str | None = Field(default=None, max_length=256)
+  effort: str | None = Field(default=None, max_length=32)
+
+  @field_validator("provider")
+  @classmethod
+  def validate_provider(cls, value: str | None) -> str | None:
+    if value is not None and value not in PROVIDER_NAMES:
+      raise ValueError(f"unknown provider: {value}")
+    return value
+
+
+class BackgroundAgentsUpdate(BaseModel):
+  """System-level primary/fallback choices for scheduled app agents."""
+
+  primary: BackgroundAgentChoice | None = None
+  fallback: BackgroundAgentChoice | None = None
+
+
 class SettingsUpdate(BaseModel):
   """Owner-level settings updates."""
 
   gemini_api_key: str | None = None
   provider: str | None = None
+  background_agents: BackgroundAgentsUpdate | None = None
   # Opt-in to offering SDK skills to the Claude agent. Behavior-
   # shifting and default-off (see providers.skills_enabled); persisted
   # to the shared agent-settings.json rather than the frozen Owner

@@ -278,6 +278,104 @@ def test_set_skills_enabled_preserves_other_agent_settings(client, auth):
   assert merged["skills_enabled"] is True
 
 
+def test_get_settings_returns_background_agent_defaults(client, auth):
+  """Background agents inherit the owner provider until explicitly set."""
+  client.post("/api/settings", json={"provider": "codex"}, headers=auth)
+  body = client.get("/api/settings", headers=auth).json()
+  assert body["background_agents"]["primary"]["provider"] == "codex"
+  assert body["background_agents"]["primary"]["model"] == "gpt-5.5"
+  assert body["background_agents"]["primary"]["effort"] == "medium"
+  assert body["background_agents"]["fallback"] is None
+
+
+def test_set_background_agents_persists_to_shared_settings(client, auth):
+  """POST /api/settings stores primary/fallback without clobbering siblings."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  data_dir = _gs().data_dir
+  providers.write_agent_settings(data_dir, {"skills_enabled": True})
+  r = client.post(
+    "/api/settings",
+    json={
+      "background_agents": {
+        "primary": {
+          "provider": "claude",
+          "model": "claude-sonnet-4-6",
+          "effort": "high",
+        },
+        "fallback": {
+          "provider": "codex",
+          "model": "gpt-5.4",
+          "effort": "medium",
+        },
+      },
+    },
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  merged = providers._load_agent_settings(data_dir)
+  assert merged["skills_enabled"] is True
+  assert merged["background_agents"] == {
+    "primary": {
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+      "effort": "high",
+    },
+    "fallback": {
+      "provider": "codex",
+      "model": "gpt-5.4",
+      "effort": "medium",
+    },
+  }
+  body = client.get("/api/settings", headers=auth).json()
+  assert body["background_agents"] == merged["background_agents"]
+
+
+def test_background_agent_settings_drops_cross_provider_models(tmp_path):
+  """A stale model from the other provider is ignored at read time."""
+  from app import providers
+
+  providers.write_agent_settings(
+    str(tmp_path),
+    {
+      "background_agents": {
+        "primary": {
+          "provider": "claude",
+          "model": "gpt-5.5",
+          "effort": "high",
+        },
+        "fallback": {
+          "provider": "codex",
+          "model": "claude-opus-4-8",
+          "effort": "medium",
+        },
+      },
+    },
+  )
+  background = providers.background_agent_settings(str(tmp_path), "claude")
+  assert background["primary"] == {
+    "provider": "claude",
+    "model": None,
+    "effort": "high",
+  }
+  assert background["fallback"] == {
+    "provider": "codex",
+    "model": None,
+    "effort": "medium",
+  }
+
+
+def test_settings_rejects_unknown_background_agent_provider(client, auth):
+  """Background agent provider ids share the same strict provider enum."""
+  r = client.post(
+    "/api/settings",
+    json={"background_agents": {"primary": {"provider": "bogus"}}},
+    headers=auth,
+  )
+  assert r.status_code == 422
+
+
 def test_skills_enabled_gate_treats_absent_and_malformed_as_off(tmp_path):
   """providers.skills_enabled reads False for an absent file and a
   non-bool / non-true value — opt-in is explicit."""
