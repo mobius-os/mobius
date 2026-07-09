@@ -155,6 +155,144 @@ if [ -z "$SECRET_KEY" ]; then
   exit 1
 fi
 
+_public_port=${PORT:-8000}
+_app_port=${MOBIUS_APP_PORT:-18000}
+_recovery_port=${MOBIUS_RECOVERY_PORT:-18001}
+_railway_gateway=0
+if [ "${MOBIUS_RAILWAY_GATEWAY:-}" = "1" ] ||
+   [ -n "${RAILWAY_ENVIRONMENT:-}" ] ||
+   [ -n "${RAILWAY_ENVIRONMENT_ID:-}" ] ||
+   [ -n "${RAILWAY_PROJECT_ID:-}" ] ||
+   [ -n "${RAILWAY_SERVICE_ID:-}" ]; then
+  _railway_gateway=1
+fi
+
+_app_pid=""
+_gateway_pid=""
+_recovery_pid=""
+_restart_poller_started=0
+
+_shutdown_railway_gateway() {
+  _status="${1:-0}"
+  trap - TERM INT
+  cleanup
+  [ -n "$_app_pid" ] && kill "$_app_pid" 2>/dev/null || true
+  [ -n "$_recovery_pid" ] && kill "$_recovery_pid" 2>/dev/null || true
+  [ -n "$_gateway_pid" ] && kill "$_gateway_pid" 2>/dev/null || true
+  [ -n "$_app_pid" ] && wait "$_app_pid" 2>/dev/null || true
+  [ -n "$_recovery_pid" ] && wait "$_recovery_pid" 2>/dev/null || true
+  [ -n "$_gateway_pid" ] && wait "$_gateway_pid" 2>/dev/null || true
+  exit "$_status"
+}
+
+_start_platform_restart_poller() {
+  [ "$_restart_poller_started" -eq 1 ] && return 0
+  (
+    while true; do
+      if [ -f /data/.platform-restart-requested ]; then
+        rm -f /data/.platform-restart-requested 2>/dev/null || true
+        echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
+        kill -TERM 1 2>/dev/null || true
+        # pid1 is now draining + exiting; give it a moment, then stop polling.
+        sleep 5
+        exit 0
+      fi
+      sleep 2
+    done
+  ) &
+  _restart_poller_started=1
+}
+
+_reenforce_protected_files() {
+  [ -f /app/protected-files.txt ] || return 0
+  while IFS= read -r line; do
+    case "$line" in \#*|"") continue ;; esac
+    case "$line" in
+      /*) target="$line" ;;
+      *)  continue ;;
+    esac
+    if [ -f "$target" ]; then
+      chown root:root "$target" 2>/dev/null || true
+      case "$target" in
+        *.sh) chmod 555 "$target" 2>/dev/null || true ;;
+        *)    chmod 444 "$target" 2>/dev/null || true ;;
+      esac
+    fi
+  done < /app/protected-files.txt
+}
+
+_process_recover_pending() {
+  [ -f /data/.recover-pending ] || return 0
+  mode=$(cat /data/.recover-pending 2>/dev/null | tr -d '[:space:]')
+  rm -f /data/.recover-pending
+  restore_status=""
+  case "$mode" in
+    platform|platform-baked)
+      echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
+      if /app/scripts/recovery_restore.sh "$mode"; then
+        restore_status="ok"
+      else
+        restore_status="failed"
+        echo "WARNING: recovery_restore.sh $mode failed" >&2
+      fi
+      ;;
+    "") : ;;
+    *)
+      restore_status="unknown-mode"
+      echo "WARNING: unknown recovery flag mode: $mode" >&2
+      ;;
+  esac
+  if [ -n "$restore_status" ]; then
+    python3 -c "
+import json, sys, time
+entry = {
+  'role': 'system',
+  'content': f\"Recovery action '{sys.argv[1]}' completed: {sys.argv[2]}. Server restarted.\",
+  'ts': int(time.time()),
+}
+print(json.dumps(entry, separators=(',', ':')))
+" "$mode" "$restore_status" >> /data/recovery_chat.jsonl
+    chown mobius:mobius /data/recovery_chat.jsonl 2>/dev/null || true
+  fi
+  _reenforce_protected_files
+}
+
+_process_recover_pending
+
+if [ "$_railway_gateway" -eq 1 ]; then
+  # Railway templates expose one public service with the /data volume attached.
+  # Compose keeps recoveryd in its own container and Caddy routes /recover* to it;
+  # on Railway the closest equivalent is a separate recoveryd process sharing the
+  # same mounted /data, with this tiny gateway playing Caddy's routing role.
+  # recoveryd remains the only recovery implementation.
+  _recovery_allowed_hosts="${RECOVERY_ALLOWED_HOSTS:-}"
+  if [ -z "$_recovery_allowed_hosts" ]; then
+    _recovery_allowed_hosts="${RAILWAY_PUBLIC_DOMAIN:-${DOMAIN:-}}"
+  fi
+  echo "Railway gateway mode: public :$_public_port, app :$_app_port, recovery :$_recovery_port." >&2
+  (
+    while true; do
+      DATA_DIR="${DATA_DIR:-/data}" \
+      RECOVERY_PORT="$_recovery_port" \
+      RECOVERY_PLATFORM_HEALTH_URL="http://127.0.0.1:${_app_port}/api/health" \
+      RECOVERY_ALLOWED_HOSTS="$_recovery_allowed_hosts" \
+        python3 -P /app/recovery/recoveryd.py
+      _code=$?
+      echo "WARNING: recoveryd exited with status $_code; restarting in 1s." >&2
+      sleep 1
+    done
+  ) &
+  _recovery_pid=$!
+
+  python3 /app/scripts/railway_gateway.py \
+    --port "$_public_port" \
+    --app "http://127.0.0.1:${_app_port}" \
+    --recovery "http://127.0.0.1:${_recovery_port}" &
+  _gateway_pid=$!
+  trap '_shutdown_railway_gateway 143' TERM INT
+  _start_platform_restart_poller
+fi
+
 # -----------------------------------------------------------------------
 # Platform layer selection (Phase 1).
 # -----------------------------------------------------------------------
@@ -867,79 +1005,10 @@ fi
 ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 
 
-# Deferred restore: a previous boot's recovery chat may have written
-# /data/.recover-pending=<mode>. Process it AS ROOT (we're still root
-# at this point) so recovery_restore.sh can chown protected files
-# back to root:root. Then clear the flag and continue boot.
-#
-# Running the restore here (not from the route handler that wrote
-# the flag) is load-bearing: cp -a from /app/<X>-baked/ over the
-# live /app/<X>/ must preserve root ownership on protected files
-# for the frozen-island invariant to hold. The route handler runs
-# as mobius (uvicorn drops privilege) and cannot `chown root:root`.
-# Root can. The flag file is the handoff between the two contexts.
-if [ -f /data/.recover-pending ]; then
-  mode=$(cat /data/.recover-pending 2>/dev/null | tr -d '[:space:]')
-  rm -f /data/.recover-pending
-  restore_status=""
-  case "$mode" in
-    platform|platform-baked)
-      echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
-      if /app/scripts/recovery_restore.sh "$mode"; then
-        restore_status="ok"
-      else
-        restore_status="failed"
-        echo "WARNING: recovery_restore.sh $mode failed" >&2
-      fi
-      ;;
-    "") : ;;
-    *)
-      restore_status="unknown-mode"
-      echo "WARNING: unknown recovery flag mode: $mode" >&2
-      ;;
-  esac
-  # Tell the user what happened by appending to the recovery chat
-  # log. They'll see this when they reload /recover/chat after the
-  # container restart. Without this signal a silent failure leaves
-  # them refreshing nervously with no feedback.
-  if [ -n "$restore_status" ]; then
-    # Build the JSON via python's json.dumps so any future addition
-    # of free-form strings (error output, file paths, etc.) gets
-    # correctly escaped. Shell-interpolated JSON via echo was the
-    # original pattern but a single unescaped " or backslash in
-    # restore_status would corrupt the JSONL line and the runner
-    # would silently skip it (json.JSONDecodeError catch). The
-    # extra subprocess is cheap and runs at most once per boot.
-    python3 -c "
-import json, sys, time
-entry = {
-  'role': 'system',
-  'content': f\"Recovery action '{sys.argv[1]}' completed: {sys.argv[2]}. Server restarted.\",
-  'ts': int(time.time()),
-}
-print(json.dumps(entry, separators=(',', ':')))
-" "$mode" "$restore_status" >> /data/recovery_chat.jsonl
-    chown mobius:mobius /data/recovery_chat.jsonl 2>/dev/null || true
-  fi
-  # Re-enforce protected files now that the restore may have
-  # touched perms.
-  if [ -f /app/protected-files.txt ]; then
-    while IFS= read -r line; do
-      case "$line" in \#*|"") continue ;; esac
-      case "$line" in
-        /*) target="$line" ;;
-        *)  continue ;;
-      esac
-      if [ -f "$target" ]; then
-        chown root:root "$target" 2>/dev/null || true
-        case "$target" in
-          *.sh) chmod 555 "$target" 2>/dev/null || true ;;
-          *)    chmod 444 "$target" 2>/dev/null || true ;;
-        esac
-      fi
-    done < /app/protected-files.txt
-  fi
-fi
+# Recovery may have scheduled a restore during this boot before the app server
+# started. The early call near the top handles normal previous-boot restores;
+# this second call is a no-op unless a fresh flag appeared while setup ran.
+_process_recover_pending
 
 # Install the codex-plugin-cc into the agent's CLAUDE_CONFIG_DIR if
 # not yet present. Source is baked into the image at /opt/codex-plugin-cc
@@ -977,58 +1046,49 @@ su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude ba
 
 # O1: platform-restart sentinel poller (the recoveryd handshake).
 #
-# The frozen recovery container (recoveryd) cannot signal THIS container's
-# uvicorn — it's a different container with a different pid namespace. So a
-# Tier-1 restore in recoveryd writes /data/.recover-pending=<mode> and then
-# the restart sentinel /data/.platform-restart-requested; this poller is the
-# in-container half that acts on it. On sight it removes the sentinel and
-# `kill -TERM 1` — SIGTERM to docker-init (pid1, this container runs with
-# `init: true`). docker-init forwards SIGTERM to uvicorn (which drains within
-# --timeout-graceful-shutdown 10), then exits; Docker's `restart:
-# unless-stopped` recreates the container; the fresh entrypoint processes
-# /data/.recover-pending AS ROOT (the ~905 handler above ran earlier this
-# boot but the flag is set for the NEXT boot) and reverts /data/platform, so
-# the platform comes back on fixed code. NO Docker socket is involved.
+# The frozen recovery process cannot depend on app imports or app signal paths.
+# So a Tier-1 restore in recoveryd writes /data/.recover-pending=<mode> and
+# then the restart sentinel /data/.platform-restart-requested; this poller is
+# the in-container half that acts on it. On sight it removes the sentinel and
+# `kill -TERM 1` — SIGTERM to pid1. In compose, docker-init forwards SIGTERM to
+# uvicorn; on Railway, the entrypoint shell traps it, stops the gateway/app/
+# recoveryd children, and exits non-zero. Either way the service restarts; the
+# fresh entrypoint processes /data/.recover-pending AS ROOT and reverts
+# /data/platform, so the platform comes back on fixed code. NO Docker socket is
+# involved.
 #
-# This subshell is forked BEFORE the final `exec` below, so when the shell
-# exec's uvicorn the poller is reparented to docker-init and keeps running —
-# the same survival mechanism the health probe relies on. It is the SOLE
-# writer that consumes /data/.platform-restart-requested; recoveryd is the
-# sole writer that creates it. The 2s cadence bounds restore latency without
+# This subshell is forked before the server starts. In compose, the shell later
+# execs uvicorn and the poller is reparented to docker-init; on Railway, the
+# shell stays as a tiny supervisor for gateway/app/recoveryd. It is the SOLE
+# writer that consumes /data/.platform-restart-requested; recoveryd is the sole
+# writer that creates it. The 2s cadence bounds restore latency without
 # busy-looping.
-(
-  while true; do
-    if [ -f /data/.platform-restart-requested ]; then
-      rm -f /data/.platform-restart-requested 2>/dev/null || true
-      echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
-      kill -TERM 1 2>/dev/null || true
-      # pid1 is now draining + exiting; give it a moment, then stop polling.
-      sleep 5
-      exit 0
-    fi
-    sleep 2
-  done
-) &
+_start_platform_restart_poller
 
 # PHASE 3: Background health probe — writes /data/.last-successful-boot
 # and resets the boot-attempt counter once the server is confirmed
 # healthy. This is the "success" signal that prevents false-positive
 # crash-loop detection.
 #
-# The probe polls /api/health (127.0.0.1, never routed outside the
-# container) with a 60-second timeout (generous for slow first-boots
-# with DB migrations). On success it writes the sentinel and zeroes the
-# counter. It does NOT restart uvicorn or take any other action — it is
-# purely the signal that "this boot succeeded."
+# The probe polls the app's /api/health (127.0.0.1, never routed outside the
+# container) with a 90-second timeout (generous for slow first-boots with DB
+# migrations). In Railway gateway mode it probes the private app port, not
+# /recover/health, so recovery can be live while the boot-attempt counter still
+# correctly treats a broken app as a failed platform boot. On success it writes
+# the sentinel and zeroes the counter. It does NOT restart uvicorn or take any
+# other action — it is purely the signal that "this boot succeeded."
 #
 # pgrep self-match trap: we do NOT use `until ! pgrep -f uvicorn` or
 # similar — the probe waits on the outcome (/api/health 200), not on a
 # process name. See feedback_pgrep_self_match_in_monitor_loops.md.
-_port=${PORT:-8000}
+_health_url="http://127.0.0.1:${_public_port}/api/health"
+if [ "$_railway_gateway" -eq 1 ]; then
+  _health_url="http://127.0.0.1:${_app_port}/api/health"
+fi
 (
   # Wait up to 90 seconds for /api/health to return 200.
   for i in $(seq 1 90); do
-    if curl -sf "http://127.0.0.1:${_port}/api/health" > /dev/null 2>&1; then
+    if curl -sf "$_health_url" > /dev/null 2>&1; then
       # Health probe passed — record the success sentinel and reset counter.
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.last-successful-boot
       echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
@@ -1052,7 +1112,11 @@ _port=${PORT:-8000}
 # stops serving but never exits, tini never exits, and the container never
 # restarts ("pressed Restart, server never came back"). Bounding the drain makes
 # every SIGTERM-based restart reliably cycle the container.
-_uvicorn_flags="--host 0.0.0.0 --port ${PORT:-8000} --timeout-graceful-shutdown 10"
+if [ "$_railway_gateway" -eq 1 ]; then
+  _uvicorn_flags="--host 127.0.0.1 --port $_app_port --timeout-graceful-shutdown 10"
+else
+  _uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 10"
+fi
 # `$_env_scrub` is applied to the uvicorn exec so the served process runs with
 # the SAME scrubbed GIT_*/PYTHONPATH the import probe validated — a leaked
 # GIT_DIR must not redirect the app's git ops, and no stray PYTHONPATH may
@@ -1060,12 +1124,23 @@ _uvicorn_flags="--host 0.0.0.0 --port ${PORT:-8000} --timeout-graceful-shutdown 
 if [ "$_use_platform" -eq 1 ]; then
   _start_cmd="umask 022 && cd $_serve_workdir"
   _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
-  exec su -s /bin/sh mobius -c \
-    "$_start_cmd"
 else
   _start_cmd="umask 022 && export PYTHONDONTWRITEBYTECODE=1"
   _start_cmd="$_start_cmd && cd $_serve_workdir"
   _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
-  exec su -s /bin/sh mobius -c \
-    "$_start_cmd"
 fi
+
+if [ "$_railway_gateway" -eq 1 ]; then
+  su -s /bin/sh mobius -c "$_start_cmd" &
+  _app_pid=$!
+  if ! kill -0 "$_gateway_pid" 2>/dev/null; then
+    echo "FATAL: Railway gateway exited before app startup." >&2
+    _shutdown_railway_gateway 1
+  fi
+  wait "$_gateway_pid"
+  _gateway_status=$?
+  _shutdown_railway_gateway "$_gateway_status"
+fi
+
+exec su -s /bin/sh mobius -c \
+  "$_start_cmd"
