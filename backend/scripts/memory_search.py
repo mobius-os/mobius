@@ -5,8 +5,10 @@ The main chat agent does NOT traverse the graph on its own — the read-trace's
 `nodes_read` is mostly empty. It answers from the injected router + recent chat
 summaries and stops at the surface. This runner closes that gap: the main agent
 calls it via ONE Bash line early in a chat, and it spawns a SEPARATE, read-only
-`claude` subagent whose entire job is to walk the graph deeply for the parts
-this conversation actually touches, then hand back the relevant memories.
+search subagent whose entire job is to walk the graph deeply for the parts this
+conversation actually touches, then hand back the relevant memories. It uses the
+system background-agent primary/fallback settings, so Claude can fall through to
+Codex when it is out of usage or otherwise unavailable.
 
 It is the *recall* arm of the chat-centric memory model (see memory.md): the
 per-chat note is what the agent WRITES every turn; this is how it READS the
@@ -22,7 +24,7 @@ batching a hop into one `cat` collapses ~O(notes) serial turns into ~O(hops)
 turns — the ~3x win today, bounded at any graph size because only the relevant
 slice of each level is ever read. (A prior version read one note per turn: ~60s.)
 
-Two things make it more than "just ask claude in a subprocess":
+Two things make it more than "just ask a model in a subprocess":
 
   - Read tracking. Because reads are batched `cat`s (no per-file `Read` events),
     the chat's read-trace (`nodes_read`, via `app.memory_trace`) is taken from the
@@ -43,7 +45,9 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 # This script imports app.memory / app.memory_trace (server-only helpers) to map
 # Read paths to graph node ids and record the read-trace — but it is invoked from
@@ -58,16 +62,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Hard-coded paths rather than env-derived: like the reflection runner this can
-# be invoked from a near-empty environment, and the only var that matters to
-# the spawned CLI (CLAUDE_CONFIG_DIR) is set explicitly below.
+# be invoked from a near-empty environment. Provider auth homes are set
+# explicitly below so both automatic and agent-invoked memory searches use the
+# same credentials as normal Möbius turns.
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 MEMORY_DIR = DATA_DIR / "shared" / "memory"
 CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
-CLI_PATH = "/usr/local/bin/claude"
+CODEX_HOME = DATA_DIR / "cli-auth" / "codex"
+CLAUDE_CLI_PATH = "/usr/local/bin/claude"
+CODEX_CLI_PATH = "/usr/local/bin/codex"
 
 # A faster model is the right default for a helper that fires on most chats;
 # override with MEMORY_SEARCH_MODEL when traversal quality needs the big model.
-DEFAULT_MODEL = os.environ.get("MEMORY_SEARCH_MODEL", "claude-sonnet-4-6")
+DEFAULT_CLAUDE_MODEL = os.environ.get("MEMORY_SEARCH_MODEL", "claude-sonnet-4-6")
+DEFAULT_CODEX_MODEL = os.environ.get("MEMORY_SEARCH_CODEX_MODEL", "gpt-5.5")
+KNOWN_MODELS = {
+  "claude": (
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251001",
+    "claude-sonnet-4-7-20251215",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5-20251001",
+    "claude-haiku-4-5-20251001",
+  ),
+  "codex": ("gpt-5.5", "gpt-5.4"),
+}
 
 # How long to let the subagent traverse before giving up (seconds).
 TIMEOUT_SECS = int(os.environ.get("MEMORY_SEARCH_TIMEOUT", "180"))
@@ -132,6 +153,277 @@ section titles, no narration. Just a flat list:
 Report a fact ONLY from a note you opened — never from a scent line, never
 labelled "inferred". Invent nothing. Edit nothing — you are strictly read-only.
 """
+
+_AUTH_FAILURE_MARKERS = (
+  "401",
+  "invalid authentication credentials",
+  "failed to authenticate",
+  "authentication_error",
+  "oauth token has expired",
+  "not logged in",
+  "login required",
+)
+
+_USAGE_LIMIT_MARKERS = (
+  "usage limit",
+  "rate limit",
+  "quota",
+  "429",
+  "too many requests",
+  "temporarily unavailable",
+)
+
+
+class SearchRunResult(NamedTuple):
+  provider: str
+  text: str
+  stdout: str
+  stderr: str
+  returncode: int
+  read_ids: list[str]
+
+
+def _is_provider_failure(text: str, returncode: int = 1) -> bool:
+  """True when a failed CLI result looks like auth/usage/provider trouble.
+
+  The memory-search helper is best-effort, but provider exhaustion is exactly
+  when trying the configured fallback is valuable. Keep this conservative:
+  ordinary "No relevant memories" is a successful search, while nonzero CLI
+  exits or familiar auth/usage strings can move to the fallback.
+  """
+  if returncode != 0:
+    return True
+  low = (text or "").lower()
+  return any(marker in low for marker in (*_AUTH_FAILURE_MARKERS, *_USAGE_LIMIT_MARKERS))
+
+
+def _load_global_agent_settings() -> dict:
+  path = DATA_DIR / "shared" / "agent-settings.json"
+  if not path.is_file():
+    return {}
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
+  for known_provider, models in KNOWN_MODELS.items():
+    if known_provider != provider and model in models:
+      return True
+  return False
+
+
+def _clean_choice(raw: dict | None, fallback_provider: str | None = None) -> dict | None:
+  if not isinstance(raw, dict):
+    return None
+  provider = raw.get("provider")
+  if provider not in ("claude", "codex"):
+    provider = fallback_provider if fallback_provider in ("claude", "codex") else None
+  if provider not in ("claude", "codex"):
+    return None
+  model = raw.get("model")
+  model = model.strip() if isinstance(model, str) and model.strip() else None
+  if model and _model_belongs_to_other_provider(model, provider):
+    model = None
+  effort = raw.get("effort")
+  effort = effort.strip() if isinstance(effort, str) and effort.strip() else None
+  return {"provider": provider, "model": model, "effort": effort}
+
+
+def _same_choice(a: dict | None, b: dict | None) -> bool:
+  if not a or not b:
+    return False
+  return (
+    a.get("provider") == b.get("provider")
+    and (a.get("model") or None) == (b.get("model") or None)
+    and (a.get("effort") or None) == (b.get("effort") or None)
+  )
+
+
+def _resolve_search_agents() -> list[dict]:
+  """Returns provider choices for memory search, primary first.
+
+  Memory search is a live-chat helper, but it behaves like a tiny background
+  subagent. It therefore inherits the system background primary/fallback so a
+  Claude usage/auth outage can fall through to Codex without changing the main
+  chat. Env vars remain as an escape hatch for direct CLI testing.
+  """
+  forced_provider = os.environ.get("MEMORY_SEARCH_PROVIDER")
+  if forced_provider in ("claude", "codex"):
+    model_env = (
+      "MEMORY_SEARCH_CODEX_MODEL" if forced_provider == "codex"
+      else "MEMORY_SEARCH_MODEL"
+    )
+    return [{
+      "provider": forced_provider,
+      "model": os.environ.get(model_env) or None,
+      "effort": os.environ.get("MEMORY_SEARCH_EFFORT") or None,
+    }]
+
+  settings = _load_global_agent_settings()
+  raw_background = settings.get("background_agents")
+  background = raw_background if isinstance(raw_background, dict) else {}
+  primary = _clean_choice(background.get("primary"), fallback_provider="claude")
+  if primary is None:
+    primary = _clean_choice(
+      {
+        "provider": "claude",
+        "model": settings.get("model") or DEFAULT_CLAUDE_MODEL,
+        "effort": settings.get("effort"),
+      },
+      fallback_provider="claude",
+    )
+  fallback = _clean_choice(background.get("fallback"))
+  choices = [primary] if primary else []
+  if fallback and not _same_choice(primary, fallback):
+    choices.append(fallback)
+  return choices or [{"provider": "claude", "model": DEFAULT_CLAUDE_MODEL, "effort": None}]
+
+
+def _extract_read_ids_from_claude_stdout(stdout: str) -> tuple[str, list[str]]:
+  read_ids: list[str] = []
+  final_text = ""
+  for line in stdout.splitlines():
+    line = line.strip()
+    if not line:
+      continue
+    try:
+      obj = json.loads(line)
+    except ValueError:
+      continue
+    typ = obj.get("type")
+    if typ == "assistant":
+      for block in obj.get("message", {}).get("content", []) or []:
+        if (
+          isinstance(block, dict)
+          and block.get("type") == "tool_use"
+          and block.get("name") == "Read"
+        ):
+          fp = (block.get("input") or {}).get("file_path")
+          if fp:
+            nid = _path_to_node_id(fp)
+            if nid and nid not in read_ids:
+              read_ids.append(nid)
+    elif typ == "result":
+      final_text = obj.get("result") or final_text
+
+  for nid in _sources_to_node_ids(final_text):
+    if nid not in read_ids:
+      read_ids.append(nid)
+  return final_text, read_ids
+
+
+def _run_claude_search(choice: dict, prompt: str) -> SearchRunResult:
+  env = dict(os.environ)
+  env["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG_DIR)
+  # Scoped read-only Bash lets a hop be one batched `cat a.md b.md c.md` while
+  # keeping the subagent write-incapable. This is load-bearing: the query is raw
+  # chat text and note bodies are agent-written, so a prompt injection could try
+  # to mutate the graph. Pin Bash to cat/rg/ls and deny write-shaped tools.
+  cmd = [
+    CLAUDE_CLI_PATH,
+    "-p",
+    prompt,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowedTools",
+    "Bash(cat:*)",
+    "Bash(rg:*)",
+    "Bash(ls:*)",
+    "Read",
+    "Grep",
+    "Glob",
+    "--disallowedTools",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "--add-dir",
+    str(MEMORY_DIR),
+    "--append-system-prompt",
+    SEARCH_SYSTEM_PROMPT,
+  ]
+  model = choice.get("model") or DEFAULT_CLAUDE_MODEL
+  if model:
+    cmd += ["--model", model]
+  proc = subprocess.run(
+    cmd,
+    cwd=str(MEMORY_DIR),
+    env=env,
+    capture_output=True,
+    text=True,
+    timeout=TIMEOUT_SECS,
+  )
+  final_text, read_ids = _extract_read_ids_from_claude_stdout(proc.stdout)
+  return SearchRunResult(
+    "claude", final_text, proc.stdout, proc.stderr, proc.returncode, read_ids,
+  )
+
+
+def _run_codex_search(choice: dict, prompt: str) -> SearchRunResult:
+  env = dict(os.environ)
+  env["CODEX_HOME"] = str(CODEX_HOME)
+  with tempfile.NamedTemporaryFile("r+", encoding="utf-8", delete=True) as out:
+    cmd = [
+      CODEX_CLI_PATH,
+      "exec",
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--json",
+      "-s",
+      "read-only",
+      "-a",
+      "never",
+      "-C",
+      str(MEMORY_DIR),
+      "-o",
+      out.name,
+    ]
+    model = choice.get("model") or DEFAULT_CODEX_MODEL
+    if model:
+      cmd += ["--model", model]
+    effort = choice.get("effort")
+    if effort:
+      cmd += ["-c", f"model_reasoning_effort={json.dumps(effort)}"]
+    codex_prompt = (
+      SEARCH_SYSTEM_PROMPT
+      + "\n\n"
+      + "You are running inside a read-only sandbox. Use only read-only "
+        "inspection commands such as cat, rg, and ls. Do not attempt writes, "
+        "network access, package installs, or external tool setup.\n\n"
+      + prompt
+    )
+    cmd.append(codex_prompt)
+    proc = subprocess.run(
+      cmd,
+      cwd=str(MEMORY_DIR),
+      env=env,
+      capture_output=True,
+      text=True,
+      timeout=TIMEOUT_SECS,
+    )
+    out.seek(0)
+    final_text = out.read().strip()
+  read_ids = _sources_to_node_ids(final_text)
+  return SearchRunResult(
+    "codex", final_text, proc.stdout, proc.stderr, proc.returncode, read_ids,
+  )
+
+
+def _run_search_choice(choice: dict, prompt: str) -> SearchRunResult:
+  if choice.get("provider") == "codex":
+    return _run_codex_search(choice, prompt)
+  return _run_claude_search(choice, prompt)
+
+
+def _failure_snippet(result: SearchRunResult) -> str:
+  detail = result.stderr.strip() or result.text.strip() or result.stdout.strip()
+  detail = " ".join(detail.split())
+  return detail[:240] if detail else f"exit {result.returncode}"
 
 
 def _hints_clause(max_depth: int | None, max_breadth: int | None) -> str:
@@ -262,101 +554,54 @@ def run() -> int:
     return 2
   query = positional[0]
   chat_id = positional[1] if len(positional) > 1 else ""
+  prompt = build_prompt(query, _hints_clause(max_depth, max_breadth))
+  choices = _resolve_search_agents()
 
-  env = dict(os.environ)
-  env["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG_DIR)
-
-  cmd = [
-    CLI_PATH,
-    "-p",
-    build_prompt(query, _hints_clause(max_depth, max_breadth)),
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--allowedTools",
-    # Scoped read-only Bash so a hop is one batched `cat a.md b.md c.md` (the CLI
-    # serializes N Read calls into N turns; batching a hop into one call is the
-    # speedup) while the subagent stays write-incapable. This scoping is
-    # load-bearing: the query is the partner's raw chat text and note bodies are
-    # agent-written, so a prompt injection could try to make this "read-only"
-    # search mutate the graph. Pinning Bash to cat/rg/ls keeps the walk fully
-    # agentic (the model still picks the route and follows the edges) and leaves
-    # Read/Grep/Glob for single-file use.
-    #
-    # Verified live against the pinned CLI (2.1.x, headless -p): batched `cat`
-    # and `rg` execute; a `touch` or `>`-redirect bash write is refused by the
-    # CLI's own headless write-sandbox ("may only modify files in the allowed
-    # working directories", and even those need an interactive grant no `-p` run
-    # can give); the Write/Edit tools are denied. Residual risk: the CLI's
-    # permission matching does NOT decompose compound commands, so a read-only
-    # rider after an allowed prefix (e.g. `cat x.md && echo …`) still runs — but a
-    # rider cannot mutate (writes hit the sandbox) and no network/exfil tool is
-    # granted, so the read-only guarantee holds. --disallowedTools names the
-    # write-shaped tools explicitly (deny beats allow) so the denial does not
-    # rely on their mere absence from the allow-list.
-    "Bash(cat:*)",
-    "Bash(rg:*)",
-    "Bash(ls:*)",
-    "Read",
-    "Grep",
-    "Glob",
-    "--disallowedTools",
-    "Write",
-    "Edit",
-    "NotebookEdit",
-    "--add-dir",
-    str(MEMORY_DIR),
-    "--append-system-prompt",
-    SEARCH_SYSTEM_PROMPT,
-  ]
-  if DEFAULT_MODEL:
-    cmd += ["--model", DEFAULT_MODEL]
-
-  read_ids: list[str] = []
-  final_text = ""
+  final: SearchRunResult | None = None
+  failures: list[str] = []
   try:
-    proc = subprocess.run(
-      cmd,
-      cwd=str(MEMORY_DIR),
-      env=env,
-      capture_output=True,
-      text=True,
-      timeout=TIMEOUT_SECS,
+    for index, choice in enumerate(choices):
+      provider = choice.get("provider") or "claude"
+      try:
+        result = _run_search_choice(choice, prompt)
+      except subprocess.TimeoutExpired:
+        failures.append(f"{provider}: timed out after {TIMEOUT_SECS}s")
+        if index + 1 < len(choices):
+          sys.stderr.write(
+            f"memory_search: {provider} timed out after {TIMEOUT_SECS}s; "
+            "trying fallback\n"
+          )
+        continue
+
+      failure_output = result.stderr if result.returncode == 0 else "\n".join([
+        result.stdout,
+        result.stderr,
+      ])
+      if _is_provider_failure(failure_output, result.returncode):
+        failures.append(f"{provider}: {_failure_snippet(result)}")
+        if index + 1 < len(choices):
+          sys.stderr.write(
+            f"memory_search: {provider} failed; trying fallback "
+            f"({_failure_snippet(result)})\n"
+          )
+        continue
+
+      final = result
+      break
+  except OSError as exc:
+    failures.append(f"provider launch failed: {exc}")
+
+  if final is None:
+    sys.stdout.write("No relevant memories.\n")
+    sys.stderr.write(
+      "memory_search: all search providers failed: "
+      + (" | ".join(failures) if failures else "none configured")
+      + "\n"
     )
-  except subprocess.TimeoutExpired:
-    sys.stderr.write(f"memory_search: timed out after {TIMEOUT_SECS}s\n")
     return 1
 
-  for line in proc.stdout.splitlines():
-    line = line.strip()
-    if not line:
-      continue
-    try:
-      obj = json.loads(line)
-    except ValueError:
-      continue
-    typ = obj.get("type")
-    if typ == "assistant":
-      for block in obj.get("message", {}).get("content", []) or []:
-        if (
-          isinstance(block, dict)
-          and block.get("type") == "tool_use"
-          and block.get("name") == "Read"
-        ):
-          fp = (block.get("input") or {}).get("file_path")
-          if fp:
-            nid = _path_to_node_id(fp)
-            if nid and nid not in read_ids:
-              read_ids.append(nid)
-    elif typ == "result":
-      final_text = obj.get("result") or final_text
-
-  # Batched `cat` reads leave no per-file Read events, so the cited SOURCES line
-  # is the authoritative read-trace; union in any actual Read-tool ids too, in
-  # case the model reached for single-file Read on a hop.
-  for nid in _sources_to_node_ids(final_text):
-    if nid not in read_ids:
-      read_ids.append(nid)
+  read_ids = list(final.read_ids)
+  final_text = final.text
 
   if chat_id and read_ids:
     from app.memory_trace import record_note_read
@@ -369,7 +614,7 @@ def run() -> int:
   # without polluting the integrated text.
   sys.stdout.write((final_text or "No relevant memories.").rstrip() + "\n")
   sys.stderr.write(
-    f"memory_search: read {len(read_ids)} node(s): "
+    f"memory_search: provider={final.provider} read {len(read_ids)} node(s): "
     f"{', '.join(read_ids) or '(none)'}\n"
   )
   return 0

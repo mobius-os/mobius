@@ -144,6 +144,104 @@ def test_sources_to_node_ids_mixed_separators_and_dedupe(monkeypatch):
   assert ids == ["note:coffee", "moc:food", "chat:xy"]
 
 
+# --- provider selection / fallback --------------------------------------
+
+
+def test_resolve_search_agents_uses_background_primary_and_fallback(
+  monkeypatch, tmp_path
+):
+  ms = _load()
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(
+    """
+    {
+      "background_agents": {
+        "primary": {"provider": "codex", "model": "gpt-5.5", "effort": "medium"},
+        "fallback": {"provider": "claude", "model": "claude-sonnet-4-6"}
+      }
+    }
+    """,
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(ms, "DATA_DIR", tmp_path)
+
+  assert ms._resolve_search_agents() == [
+    {"provider": "codex", "model": "gpt-5.5", "effort": "medium"},
+    {"provider": "claude", "model": "claude-sonnet-4-6", "effort": None},
+  ]
+
+
+def test_clean_choice_drops_known_cross_provider_model():
+  ms = _load()
+  assert ms._clean_choice(
+    {"provider": "codex", "model": "claude-sonnet-4-6", "effort": "medium"}
+  ) == {"provider": "codex", "model": None, "effort": "medium"}
+
+
+def test_run_falls_back_to_codex_when_claude_is_usage_limited(
+  monkeypatch, capsys
+):
+  ms = _load()
+  monkeypatch.setattr(ms, "_path_to_node_id", _identity_path_to_id(ms))
+  monkeypatch.setattr(
+    ms,
+    "_resolve_search_agents",
+    lambda: [
+      {"provider": "claude", "model": "claude-sonnet-4-6", "effort": None},
+      {"provider": "codex", "model": "gpt-5.5", "effort": "high"},
+    ],
+  )
+  monkeypatch.setattr(ms.sys, "argv", ["memory_search.py", "the request"])
+  captured = {"providers": [], "codex_cmd": None, "codex_env": None}
+
+  class _Proc:
+    def __init__(self, stdout="", stderr="", returncode=0):
+      self.stdout = stdout
+      self.stderr = stderr
+      self.returncode = returncode
+
+  def _fake_run(cmd, **kwargs):
+    if cmd[0] == ms.CLAUDE_CLI_PATH:
+      captured["providers"].append("claude")
+      return _Proc(stderr="Usage limit reached", returncode=1)
+    if cmd[0] == ms.CODEX_CLI_PATH:
+      captured["providers"].append("codex")
+      captured["codex_cmd"] = cmd
+      captured["codex_env"] = kwargs.get("env", {})
+      output_path = Path(cmd[cmd.index("-o") + 1])
+      output_path.write_text(
+        "- Relevant thing (notes/foo).\nSOURCES: notes/foo\n",
+        encoding="utf-8",
+      )
+      return _Proc(stdout='{"type":"result"}\n', returncode=0)
+    raise AssertionError(f"unexpected command: {cmd}")
+
+  monkeypatch.setattr(ms.subprocess, "run", _fake_run)
+
+  assert ms.run() == 0
+  out = capsys.readouterr()
+  assert "Relevant thing" in out.out
+  assert "provider=codex" in out.err
+  assert "trying fallback" in out.err
+  assert captured["providers"] == ["claude", "codex"]
+
+  cmd = captured["codex_cmd"]
+  assert cmd[:2] == [ms.CODEX_CLI_PATH, "exec"]
+  for arg in (
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--json",
+  ):
+    assert arg in cmd
+  assert cmd[cmd.index("-s") + 1] == "read-only"
+  assert cmd[cmd.index("-a") + 1] == "never"
+  assert "model_reasoning_effort=\"high\"" in cmd
+  assert captured["codex_env"]["CODEX_HOME"] == str(ms.CODEX_HOME)
+
+
 # --- the constructed CLI command scopes Bash (the HIGH finding) ----------
 
 
