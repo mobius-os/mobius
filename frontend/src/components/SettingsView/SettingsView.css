@@ -366,29 +366,6 @@
 
 .settings__btn--nowrap { white-space: nowrap; }
 
-.settings__pill-action {
-  flex-shrink: 0;
-  background: var(--surface2);
-  border: 1px solid var(--border-light);
-  color: var(--text);
-  padding: 7px 14px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.3;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
-  -webkit-tap-highlight-color: transparent;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .settings__pill-action:hover {
-    background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
-    border-color: color-mix(in srgb, var(--accent) 60%, var(--border-light));
-  }
-}
-
-.settings__pill-action:focus-visible,
 .settings-model-select__control:focus-visible,
 .settings-effort__stop:focus-visible {
   outline: 2px solid var(--accent);
