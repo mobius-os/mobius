@@ -106,6 +106,7 @@ _GITIGNORE = "\n".join([
   "inputs/",
   "runs/",
   "settings.json",
+  "last-run.json",
   "reflection-brief-template.html",
   "fork-chat.sh",
   "fork-session.sh",
@@ -114,6 +115,22 @@ _GITIGNORE = "\n".join([
   "[0-9]*/",
   "",
 ])
+
+_MANAGED_RUNTIME_PATHS = (
+  "init-cron.sh",
+  "init-cron.sh.tombstoned",
+  ".cron-pending.json",
+  "inputs",
+  "runs",
+  "settings.json",
+  "last-run.json",
+  "reflection-brief-template.html",
+  "fork-chat.sh",
+  "fork-session.sh",
+)
+
+_EXCLUDE_BEGIN = "# BEGIN MOBIUS MANAGED IGNORE RULES"
+_EXCLUDE_END = "# END MOBIUS MANAGED IGNORE RULES"
 
 # A fixed identity so commits don't depend on the container's global git
 # config (which the mobius user may not have set). The installer commits
@@ -206,6 +223,58 @@ def _tracked_source(source_dir: Path) -> list[str]:
   ]
 
 
+def _managed_exclude_block() -> str:
+  return f"{_EXCLUDE_BEGIN}\n{_GITIGNORE}{_EXCLUDE_END}\n"
+
+
+def _write_managed_exclude(exclude: Path) -> None:
+  """Write Mobius rules into .git/info/exclude without owning the file."""
+  block = _managed_exclude_block()
+  current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+  start = current.find(_EXCLUDE_BEGIN)
+  end = current.find(_EXCLUDE_END, start + len(_EXCLUDE_BEGIN)) if start >= 0 else -1
+  if start >= 0 and end >= 0:
+    end += len(_EXCLUDE_END)
+    if current[end:end + 1] == "\n":
+      end += 1
+    updated = current[:start] + block + current[end:]
+  elif current in (_GITIGNORE, _GITIGNORE + "\n"):
+    updated = block
+  else:
+    prefix = current
+    if prefix and not prefix.endswith("\n"):
+      prefix += "\n"
+    if prefix and not prefix.endswith("\n\n"):
+      prefix += "\n"
+    updated = prefix + block
+  if updated != current:
+    exclude.write_text(updated, encoding="utf-8")
+
+
+def _refresh_ignore_rules(source_dir: str | Path) -> None:
+  """Refresh Mobius-managed ignore rules for a per-app repo.
+
+  Synthetic installer repos own their committed `.gitignore`, so old repos are
+  upgraded in place before staging. Real-origin cloned repos own their committed
+  `.gitignore`; Mobius rules live in `.git/info/exclude` there. Both repo kinds
+  can have old commits that already tracked runtime files, so this also removes
+  those paths from the index while keeping the files on disk.
+  """
+  repo = Path(source_dir)
+  if has_origin(repo):
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    _write_managed_exclude(exclude)
+  else:
+    gitignore = repo / ".gitignore"
+    if not gitignore.exists() or gitignore.read_text(encoding="utf-8") != _GITIGNORE:
+      gitignore.write_text(_GITIGNORE, encoding="utf-8")
+  _run(
+    repo, "rm", "-r", "--cached", "--ignore-unmatch", "--",
+    *_MANAGED_RUNTIME_PATHS, check=False,
+  )
+
+
 def is_repo(source_dir: str | Path) -> bool:
   """Whether `source_dir` already holds a git repo."""
   return (Path(source_dir) / ".git").exists()
@@ -294,9 +363,7 @@ def clone_upstream(
     # A committed catalog .gitignore rarely lists these; without this, the
     # first commit pollutes `main` and — since record_upstream preserves the
     # on-disk .gitignore — never self-heals (the card-099 orphan-cron class).
-    exclude = clone_dir / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    exclude.write_text(_GITIGNORE + "\n", encoding="utf-8")
+    _refresh_ignore_rules(clone_dir)
     sha = _run(clone_dir, "rev-parse", "HEAD").stdout.strip()
     repo.mkdir(parents=True, exist_ok=True)
     existing = list(repo.iterdir())
@@ -380,7 +447,9 @@ def align_local_to_upstream(source_dir: str | Path) -> None:
   repo = Path(source_dir)
   up = head_sha(repo, UPSTREAM_BRANCH)
   _run(repo, "checkout", "-q", LOCAL_BRANCH)
+  _refresh_ignore_rules(repo)
   _run(repo, "reset", "-q", "--hard", up)
+  _refresh_ignore_rules(repo)
 
 
 def record_upstream(
@@ -417,14 +486,16 @@ def record_upstream(
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _refresh_ignore_rules(repo)
   parent = _run(repo, "rev-parse", UPSTREAM_BRANCH).stdout.strip()
-  # Preserve the existing managed .gitignore exactly (avoids churning it when the
-  # module constant drifts); fall back to the constant if upstream lacks one.
-  gi = subprocess.run(
-    ["git", "-C", str(repo), "cat-file", "-p", f"{UPSTREAM_BRANCH}:.gitignore"],
-    capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
-  )
-  gitignore_bytes = gi.stdout if gi.returncode == 0 else _GITIGNORE.encode()
+  if has_origin(repo):
+    gi = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "-p", f"{UPSTREAM_BRANCH}:.gitignore"],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
+    )
+    gitignore_bytes = gi.stdout if gi.returncode == 0 else _GITIGNORE.encode()
+  else:
+    gitignore_bytes = (repo / ".gitignore").read_bytes()
   # The full pristine source set: the managed .gitignore plus every file in the
   # shipped tree. Files in `exec_paths` are 100755 so `upstream` and `main` agree
   # on the mode (a 644/755 skew alone makes merge report a phantom add/add).
@@ -557,6 +628,7 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
     )
     if in_progress:
       return None
+  _refresh_ignore_rules(repo)
   # Stage BEFORE the gate so `has_unresolved_conflicts` reads git's resolved
   # state: staging marks unmerged paths resolved in the index (clearing
   # `ls-files -u`) whether or not their content is clean, so the gate then
@@ -618,6 +690,7 @@ def commit_replay(
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _refresh_ignore_rules(repo)
   _run(repo, "add", *_tracked_source(repo))
   tree = _run(repo, "write-tree").stdout.strip()
   main_tree = _run(repo, "rev-parse", f"{LOCAL_BRANCH}^{{tree}}").stdout.strip()
