@@ -2244,6 +2244,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // rows this request is steering; restore the snapshot below if the
         // backend says the turn was not steered.
         pendingQueue.promoteManyByTs(consumePendingTs)
+        const queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
+        const restoreOptimisticSteerQueue = () => {
+          // If another path touched the queue while the POST was in flight
+          // (notably the natural turn-end drain), every pendingQueue mutation
+          // assigns a fresh array. In that case the other path won the race,
+          // so restoring our stale snapshot would resurrect duplicate chips.
+          if (pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote) {
+            pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+          }
+        }
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingTs,
@@ -2267,7 +2277,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         if (result?.status !== 'steered') {
           steerPinIntentRef.current = null
-          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+          restoreOptimisticSteerQueue()
         }
         // not_steered (the turn closed between the gate and the POST) or any
         // other status: restore the queue and let it drain at turn-end. The
@@ -2275,7 +2285,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // it never gets lost.
       } catch {
         steerPinIntentRef.current = null
-        pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+        restoreOptimisticSteerQueue()
         // Network/POST error — restore the queue for the turn-end drain.
       }
     } finally {
