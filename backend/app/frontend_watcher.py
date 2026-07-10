@@ -32,12 +32,18 @@ _FRONTEND_DIR = Path("/data/platform/frontend")
 _DIST_DIR = _FRONTEND_DIR / "dist"
 _NEXT_DIST_DIR = _FRONTEND_DIR / ".dist-next"
 _OLD_DIST_DIR = _FRONTEND_DIR / ".dist-old"
+_ATTIC_DIR = _FRONTEND_DIR / ".assets-attic"
+_ATTIC_KEEP = 3
 _CACHE_DIR = _FRONTEND_DIR / ".vite-cache"
 _TMP_DIR = _FRONTEND_DIR / ".vite-tmp"
 _ROOT_FILES = {"index.html", "vite.config.js"}
 _WATCH_DIRS = ("src", "public")
 _BUILD_LOCK = threading.Lock()
+# Attic + swap scratch dirs must never re-trigger a build. `.`-prefixed dirs
+# are already ignored by _is_frontend_source_path, but listing them here is
+# the explicit, greppable contract.
 _IGNORED_PARTS = {
+  ".assets-attic",
   ".dist-next",
   ".dist-old",
   ".git",
@@ -84,7 +90,13 @@ def _publish_system_event(event: dict) -> None:
 
 
 def _complete_build(d: Path) -> bool:
-  return d.is_dir() and (d / "assets").is_dir() and (d / "index.html").is_file()
+  return (
+    d.is_dir()
+    and (d / "assets").is_dir()
+    and (d / "index.html").is_file()
+    and (d / "sw.js").is_file()
+    and (d / "manifest.webmanifest").is_file()
+  )
 
 
 def _tail(text: str, limit: int = 4000) -> str:
@@ -92,6 +104,80 @@ def _tail(text: str, limit: int = 4000) -> str:
   if len(text) <= limit:
     return text
   return "..." + text[-limit:]
+
+
+def _attic_gen_num(p: Path) -> int:
+  """Generation number encoded in an attic subdir name (``gen-<n>``)."""
+  try:
+    return int(p.name.split("-", 1)[1])
+  except (IndexError, ValueError):
+    return -1
+
+
+def _hardlink(src: Path, dest: Path) -> None:
+  """Hardlink ``src`` -> ``dest``, falling back to a copy across filesystems.
+
+  Same-fs hardlinks are the near-free default (the attic is a sibling of
+  ``dist``); the copy fallback keeps the attic correct on the rare cross-device
+  layout rather than leaving a gap an unreloaded tab would 404 on.
+  """
+  try:
+    os.link(src, dest)
+  except FileExistsError:
+    pass
+  except OSError:
+    shutil.copy2(src, dest)
+
+
+def _prune_attic() -> None:
+  """Keep only the newest ``_ATTIC_KEEP`` attic generations, drop older ones.
+
+  Per-generation subdirs make membership explicit, so pruning is a numeric
+  sort + rmtree. Dropping a generation only unlinks ITS hardlinks — the
+  underlying inodes survive as long as a newer generation (or the live
+  ``dist``) still links the same content-hashed bytes.
+  """
+  gens = sorted(
+    (p for p in _ATTIC_DIR.glob("gen-*") if p.is_dir()),
+    key=_attic_gen_num,
+  )
+  stale = gens[:-_ATTIC_KEEP] if _ATTIC_KEEP > 0 else gens
+  for old in stale:
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def _attic_generation(gen_dir: Path) -> None:
+  """Hardlink an outgoing generation's assets + index into the attic.
+
+  Invariant: after a swap ``dist`` holds only the NEW generation's content-
+  hashed chunks, but a tab that has not reloaded still requests the OLD
+  generation's chunks. Retaining the outgoing generation here lets request-time
+  ``/assets`` resolution (see main.py) answer those on a ``dist`` miss, so a
+  mid-build tab never 404s its module graph — that is why we attic on every
+  swap. Per-generation subdirs keep membership explicit for pruning; the index
+  is retained too because the generation boundary covers every entry file.
+  Content-hashed names never collide, so the flat serve union stays safe.
+  Best-effort: the published ``dist`` is already live, so the caller must not
+  let an attic failure fail the swap.
+  """
+  assets_src = gen_dir / "assets"
+  if not assets_src.is_dir():
+    return
+  _ATTIC_DIR.mkdir(parents=True, exist_ok=True)
+  existing = [p for p in _ATTIC_DIR.glob("gen-*") if p.is_dir()]
+  next_n = 1 + max((_attic_gen_num(p) for p in existing), default=0)
+  dest = _ATTIC_DIR / f"gen-{next_n}"
+  dest_assets = dest / "assets"
+  dest_assets.mkdir(parents=True, exist_ok=True)
+  for src in assets_src.rglob("*"):
+    if src.is_file():
+      link = dest_assets / src.relative_to(assets_src)
+      link.parent.mkdir(parents=True, exist_ok=True)
+      _hardlink(src, link)
+  index_src = gen_dir / "index.html"
+  if index_src.is_file():
+    _hardlink(index_src, dest / "index.html")
+  _prune_attic()
 
 
 def _replace_dist() -> None:
@@ -121,6 +207,16 @@ def _replace_dist() -> None:
     if old_moved and not _DIST_DIR.exists() and _OLD_DIST_DIR.exists():
       _OLD_DIST_DIR.rename(_DIST_DIR)
     raise
+  if old_moved and _OLD_DIST_DIR.is_dir():
+    # Attic the OUTGOING generation before deleting it so an unreloaded tab can
+    # still fetch its content-hashed chunks after the swap (request-time
+    # /assets resolution serves the attic on a dist miss). Best-effort: the new
+    # dist is already published and live, so an attic failure must not fail the
+    # swap — the only cost is that a mid-build tab may 404 a lazy chunk.
+    try:
+      _attic_generation(_OLD_DIST_DIR)
+    except Exception:
+      log.exception("attic hardlink of outgoing generation failed")
   if _OLD_DIST_DIR.exists():
     shutil.rmtree(_OLD_DIST_DIR)
 
@@ -171,7 +267,10 @@ def _run_vite_build() -> str:
   if not _complete_build(_NEXT_DIST_DIR):
     if _NEXT_DIST_DIR.exists():
       shutil.rmtree(_NEXT_DIST_DIR)
-    raise RuntimeError("vite build did not produce index.html and assets/")
+    raise RuntimeError(
+      "vite build did not produce index.html, assets/, sw.js, and "
+      "manifest.webmanifest"
+    )
 
   _replace_dist()
   return result.stdout

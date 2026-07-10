@@ -17,6 +17,7 @@ dist/
 .vite-tmp/
 .dist-next/
 .dist-old/
+.assets-attic/
 
 # OS
 .DS_Store
