@@ -153,4 +153,6 @@ def test_main_boots_when_app_watcher_start_raises(monkeypatch):
     # client.
     resp = client.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["boot_id"]
