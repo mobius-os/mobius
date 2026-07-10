@@ -6,6 +6,7 @@ import {
   _pinReapplyNeeded,
   isNearContentBottom,
   isNearScrollBottom,
+  modeForChatExit,
   modeForForegroundReturn,
   modeForViewportChange,
   shouldPinSend,
@@ -202,6 +203,38 @@ test('foreground return anchors the current reading position when scrolled up', 
     modeForForegroundReturn(scrollEl),
     { kind: 'ANCHOR_AT', key: 'assistant-7', offset: 60 },
   )
+})
+
+test('chat exit freezes the visible anchor even at the physical tail', () => {
+  const item = {
+    offsetTop: 1200,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 1000,
+    clientHeight: 800,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+
+  assert.deepEqual(
+    modeForChatExit(scrollEl),
+    { kind: 'ANCHOR_AT', key: 'assistant-tail', offset: 200 },
+  )
+})
+
+test('chat exit falls back to follow mode only when no message anchor exists', () => {
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 1000,
+    clientHeight: 800,
+    querySelectorAll() { return [] },
+  }
+
+  assert.deepEqual(modeForChatExit(scrollEl), { kind: 'FOLLOW_BOTTOM' })
 })
 
 function makeSpacerScrollEl({ clientHeight, queuedTray = null }) {

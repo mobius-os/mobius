@@ -282,10 +282,10 @@ def test_get_settings_returns_background_agent_defaults(client, auth):
   """Background agents enable the resolved provider until explicitly set."""
   client.post("/api/settings", json={"provider": "codex"}, headers=auth)
   body = client.get("/api/settings", headers=auth).json()
-  assert body["agent_settings"]["model"] == "gpt-5.5"
+  assert body["agent_settings"]["model"] is None
   assert body["agent_settings"]["effort"] == "medium"
   assert body["background_agents"]["primary"]["provider"] == "codex"
-  assert body["background_agents"]["primary"]["model"] == "gpt-5.5"
+  assert body["background_agents"]["primary"]["model"] is None
   assert body["background_agents"]["primary"]["effort"] == "medium"
   assert body["background_agents"]["fallback"] is None
 

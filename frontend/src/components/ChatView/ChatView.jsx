@@ -23,12 +23,18 @@ import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
+import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
+  openAppCtaViewModel,
+  previewReadyAnnouncement,
+  resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
+  shouldShowOpenAppCta,
   startedMessagesFromResponse,
+  systemEventForChat,
 } from './chatRuntimeState.js'
 import './ChatView.css'
 
@@ -211,7 +217,7 @@ function readInitialComposer(chatId) {
 }
 
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, onChatMissing, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null }) {
+export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, onChatMissing, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null, composerFocusRequest = null, onComposerFocusHandled = null }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -304,6 +310,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // only by the IntersectionObserver effect below (near hasPendingQuestion).
   const [pendingCardOffscreen, setPendingCardOffscreen] = useState(false)
   const [showInspector, setShowInspector] = useState(false)
+  const [previewReadyStatus, setPreviewReadyStatus] = useState('')
+  const lastAnnouncedPreviewRef = useRef(null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -412,6 +420,38 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     if (!chatEl || !footEl) return
     chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
   }, [])
+
+  // A drawer "New chat" tap should leave desktop-web users ready to type.
+  // Keep this as an explicit one-shot request from Shell instead of a blanket
+  // autofocus-on-mount: selecting existing chats should not steal focus, and
+  // touch-primary devices should not pop the soft keyboard unexpectedly.
+  useEffect(() => {
+    const token = composerFocusRequest?.token
+    if (token == null) return
+    const requestChatId = composerFocusRequest?.chatId
+    if (requestChatId == null || String(requestChatId) !== String(chatId)) return
+
+    if (!shouldApplyComposerFocusRequest({
+      focusRequest: composerFocusRequest,
+      chatId,
+      embedded,
+      isTouchPrimary: _isTouchPrimary,
+    })) {
+      onComposerFocusHandled?.(token)
+      return
+    }
+
+    let cancelled = false
+    const raf = requestAnimationFrame(() => {
+      if (cancelled) return
+      focusComposerElement(inputRef.current)
+      onComposerFocusHandled?.(token)
+    })
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+    }
+  }, [chatId, composerFocusRequest, embedded, onComposerFocusHandled])
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.
@@ -796,7 +836,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       onStreamEnd?.({ continues })
     },
-    onSystemEvent,
+    onSystemEvent: event => onSystemEvent?.(systemEventForChat(event, chatId)),
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
       const consumedTs = message?._consumed_ts
@@ -832,8 +872,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // could work while the message stayed low in the viewport with no
       // reserved room below it.
       //
-      const pinIntent = steerPinIntentRef.current || inlineSteerPinIntentRef.current
-      inlineSteerPinIntentRef.current = null
       const steeredMessages = Array.isArray(steeredBatch) && steeredBatch.length > 0
         ? steeredBatch.map((m, i) => ({
             role: 'user',
@@ -843,6 +881,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           }))
         : [{ role: 'user', content, ts: ts ?? Date.now() }]
       const pinTargetTs = steeredMessages[0]?.ts
+      const steeredTsList = steeredMessages
+        .map(m => m?.ts)
+        .filter(v => v != null)
+      const pinIntent = steerPinIntentRef.current
+        || inlineSteerPinIntentRef.current
+        || takeQueuedPinIntent({ tsList: steeredTsList, ts })
+      inlineSteerPinIntentRef.current = null
       promoteStreamToMessages({ keepTurnOpen: true })
       const steeredIsFirstUser = !messagesRef.current.some(
         m => m.role === 'user' && !m.hidden,
@@ -853,15 +898,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         isFirstUserMsg: steeredIsFirstUser,
         respectFollowMode: false,
       })
-      const pinStillValid = pinIntent ? pinIntentStillCurrent(pinIntent) : false
-      const shouldPinSteered = pinTargetTs != null && pinStillValid && (
-        pinIntent ? pinIntent.willPin : fallbackWillPin()
-      )
+      const {
+        intentStillCurrent: pinStillValid,
+        shouldPin: shouldPinSteered,
+      } = resolveSteeredPinDecision({
+        pinTargetTs,
+        pinIntent,
+        pinIntentStillCurrent,
+        fallbackWillPin,
+      })
       // Dedup by ts so a reconnect's catch-up replay of the same event
       // can't double-insert the steered user message. Insert by transcript ts
       // instead of blindly appending: if a fetch/replay already committed the
       // post-steer assistant row, the steered user still belongs before it.
-      commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
+      // Arm the scroll mode BEFORE rendering the steered row. EventSource
+      // callbacks are outside React's synthetic event layer, and query-cache
+      // listeners can observe the transcript update immediately; setting the
+      // mode first prevents a one-frame "row appears low, then snaps up" steer.
       setSpacerActive(true)
       if (shouldPinSteered) {
         if (spacerRef.current) spacerRef.current.style.height = '0px'
@@ -869,6 +922,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       } else if (pinStillValid) {
         settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
       }
+      commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       steerPinIntentRef.current = null
     },
   })
@@ -1093,6 +1147,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const raf = requestAnimationFrame(measureComposerHeight)
     return () => cancelAnimationFrame(raf)
   }, [builtApp, sending, measureComposerHeight])
+
+  useEffect(() => {
+    if (!shouldShowOpenAppCta(builtApp)) {
+      lastAnnouncedPreviewRef.current = null
+      setPreviewReadyStatus('')
+      return
+    }
+    const key = `${builtApp.id}:${builtApp.name || ''}`
+    if (lastAnnouncedPreviewRef.current === key) return
+    lastAnnouncedPreviewRef.current = key
+    setPreviewReadyStatus(previewReadyAnnouncement(builtApp))
+  }, [builtApp])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -2171,6 +2237,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           wasNearScrollBottom: wasNearContentBottomAtSteer,
         })
         steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+        // The queued tray is part of the footer height. If it stays visible
+        // until after the steered row is inserted, the scroll system pins with
+        // one layout and then immediately reflows when the tray disappears — the
+        // visible "down, then up" fast-forward jump. Hide only the confirmed
+        // rows this request is steering; restore the snapshot below if the
+        // backend says the turn was not steered.
+        pendingQueue.promoteManyByTs(consumePendingTs)
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingTs,
@@ -2194,14 +2267,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         if (result?.status !== 'steered') {
           steerPinIntentRef.current = null
+          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
         }
         // not_steered (the turn closed between the gate and the POST) or any
-        // other status: leave the queue intact. The backend kept the
-        // messages queued and they drain at turn-end — surface nothing
-        // scary, the tray simply stays until the natural drain.
+        // other status: restore the queue and let it drain at turn-end. The
+        // tray may disappear briefly during the optimistic steer attempt, but
+        // it never gets lost.
       } catch {
         steerPinIntentRef.current = null
-        // Network/POST error — leave the queue intact for the turn-end drain.
+        pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+        // Network/POST error — restore the queue for the turn-end drain.
       }
     } finally {
       handlingSteerRef.current = false
@@ -2458,6 +2533,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     : (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
         ? 'Response ready.'
         : '')
+  const openAppCta = openAppCtaViewModel(builtApp, turnActive)
 
   return (
     <div
@@ -2473,6 +2549,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         aria-relevant="text"
       >
         {ariaStatus}
+      </div>
+      <div
+        className="chat__sr-status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-relevant="text"
+      >
+        {previewReadyStatus}
       </div>
       {showInspector && (
         <AgentContextInspector
@@ -2668,18 +2752,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       </div>
       )}
 
-      {builtApp && !turnActive && (
-        <div className="chat__open-app">
-          <button
-            className="chat__open-app-btn"
-            onClick={() => onOpenApp?.(builtApp.id)}
-          >
-            Open {builtApp.name || 'app'} →
-          </button>
-        </div>
-      )}
-
       <div ref={footRef} className="chat__foot">
+        {openAppCta && (
+          <div className="chat__open-app">
+            <button
+              className="chat__open-app-btn"
+              aria-label={openAppCta.ariaLabel}
+              onClick={() => onOpenApp?.(builtApp.id)}
+            >
+              {openAppCta.label} →
+            </button>
+          </div>
+        )}
         {hasPendingQuestion && pendingCardOffscreen && (
           <button
             type="button"

@@ -32,6 +32,23 @@ So don't over-build, and don't artificially under-build either:
 
 ---
 
+## Build in visible layers
+
+For new mini-apps, get to an openable first layer quickly, then keep improving
+it while the partner can watch and try it:
+
+1. Create a coherent first layer: themed shell, primary layout, empty/loading/error states, storage paths, and one real functional slice. Do not register a blank "coming soon" stub unless the partner explicitly asked for a placeholder.
+2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration can show an open-preview affordance while the turn is still running, so the partner does not have to wait for the final handoff to try the app.
+3. Immediately smoke-check the shell preview before continuing: it renders coherently, has no missing imports/assets, and any storage-backed path used by the slice works.
+4. Continue in visible increments. Each save should leave the app in a coherent state; the file watcher recompiles source edits and an app open in the shell preview/canvas refreshes to the latest compiled bundle. Standalone `/apps/<slug>/` PWAs may need a manual refresh/reopen.
+5. Narrate milestones, not internals: "first layer is openable", "storage is wired", "mobile layout is fixed", "review pass is running." The partner should feel progress without reading raw tool logs.
+6. If the first visible layer will take more than a few minutes because of packaging, auth, data migration, or a risky dependency, say that early and explain the gating reason.
+
+Layered does **not** mean under-building. It means the first useful slice becomes
+interactive early, then the richer pieces land while the app is alive.
+
+---
+
 ## Before building: check existing apps
 
 Default to checking what already exists before creating a new one:
@@ -150,15 +167,17 @@ Example:
     sample.png
 ```
 
-On first create only, register + compile (mints the id + DB row):
+On first create only, register + compile as soon as the first usable layer has
+one real feature and should compile (mints the id + DB row and, in a live
+building chat, gives the partner an openable shell preview):
 
 ```bash
 python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>/index.jsx
 ```
 
-`register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat.
+`register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat. When run from a live building chat, it also emits the app-update signal that lets that chat surface the open-preview affordance.
 
-**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or a source-like sibling module changes under `/data/apps/<slug>/` (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). Re-running the script creates a DUPLICATE every time the name differs by a character (slug-vs-title is the common slip). If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
+**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or source-like modules under `/data/apps/<slug>/` change (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). If the partner already has the app open in the shell preview/canvas, each successful recompile refreshes them onto the newest compiled bundle; standalone PWAs may need refresh/reopen. The helper patches the existing row when the `source_dir` is the same, but registering from a different folder or bypassing the helper can still create duplicates. If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
 
