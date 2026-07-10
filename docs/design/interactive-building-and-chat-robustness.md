@@ -136,15 +136,22 @@ apply so the owner sees them together.* No auto-detection anywhere.
 
 ## Part 2 — Turn lifecycle (chat that stops breaking)
 
-### 2.1 Explicit run-states ⚑
+### 2.1 Run-states: derived in v1, formalized only if needed ⚑
 
-The substrate names what a live turn is doing — one owner per running turn:
-
-`streaming | tool_running | waiting_for_user (AskUserQuestion) |
-provider_parked | draining | parked_for_restart` — plus terminal states.
-The watchdog, drain, and health surface all read these states instead of
-guessing. (Server invariant: every running turn has exactly one of: a live
+The substrate must know what a live turn is doing — one owner per running
+turn. (Server invariant: every running turn has exactly one of: a live
 handle, a parked record, or a terminal status.)
+
+**V1 trim (owner call, 2026-07-10): do NOT introduce a new persisted state
+enum.** Every state the watchdog/drain/health surface need is already
+derivable from signals that exist: live handle in the registry (streaming /
+tool-running), the pending-question registry (waiting for the owner), the
+`parked_until` record (provider-parked, §2.4), and the process-wide
+`draining` flag (§2.2). V1 implements these as derived checks at the two
+read points (watchdog exemption, health surface). Formalize into an explicit
+enum only if the derived checks prove messy in practice — a state-machine
+zoo added up front is exactly the over-engineering this design is meant to
+avoid.
 
 ### 2.2 Graceful restart: drain, park, notify — never replay unrequested ⚑
 
@@ -160,8 +167,12 @@ One drain-gated `restart_this_worker` that ALL restart paths route through
    update" note. Distinct `TerminalDisposition` for restart-drain. The
    restart utility's SIGKILL timer is extended to `DRAIN_TIMEOUT + grace`
    for drain-aware restarts (the 5s hard-kill stays as the crash floor). ⚑
-3. Turns that can't drain in time park as `parked_for_restart` (durable
-   marker; partials persisted).
+3. Turns that can't drain in time — **v1 trim (owner call, 2026-07-10):**
+   no parking mechanism yet. They keep today's contract (durable run marker
+   → boot reconcile finalizes with the interrupted note), upgraded with the
+   same one-tap **Resume** affordance as step 4. Most turns drain in
+   seconds; build the full `parked_for_restart` machinery only if long
+   fleet turns demonstrably bite in practice.
 4. **Boot**: reconcile finalizes anything left, then **push-notifies**:
    "Your turn was paused for an update — tap to resume." Resume is ONE tap
    (re-sends the preserved context as a continue turn). No automatic replay:
@@ -178,12 +189,13 @@ continues with partials intact."
 
 - `ChatBroadcast.publish()` stamps `last_event_at` (single choke point all
   runner/tool/task events pass through).
-- One lifespan sweep (mirrors the wedged-marker sweeper): a turn in
-  `streaming`/`tool_running` with `now - last_event_at > ~10 min` →
-  interrupt via the normal clean path → finalize partials + a clear error
-  with one-tap Resume. `waiting_for_user`, `provider_parked`, and `draining`
-  are exempt (legitimately silent); the watchdog is suppressed during drain
-  so it can't race the drain's own interrupt. ⚑
+- One lifespan sweep (mirrors the wedged-marker sweeper): a live turn with
+  `now - last_event_at > ~10 min` → interrupt via the normal clean path →
+  finalize partials + a clear error with one-tap Resume. Exemptions are the
+  DERIVED checks from §2.1: a registered pending question (waiting for the
+  owner), a `parked_until` record (provider-parked), or the `draining` flag
+  — all legitimately silent; the drain check also stops the watchdog racing
+  the drain's own interrupt. ⚑
 - Long quiet tool calls are safe: tool/task/thinking events reset the clock;
   the observed wedge was silent >1h and would be caught in 10 minutes.
 
@@ -191,9 +203,9 @@ continues with partials intact."
 
 - Parse the reset time (structured rate-limit events where available; text
   "resets 1:40am" otherwise; fallback 30-min re-check).
-- Park as `provider_parked` on the run record (`parked_until`,
-  `park_reason`). The persisted block becomes a live card: "Rate limit —
-  resets at 1:40am · **Resume now**".
+- Park on the run record (`parked_until`, `park_reason` — this record IS
+  the provider-parked signal; no separate state enum). The persisted block
+  becomes a live card: "Rate limit — resets at 1:40am · **Resume now**".
 - At `parked_until`, **push-notify**: "Your limit has reset — tap to resume."
   Default is notify + one-tap resume (the deliberate no-limit-storm boundary
   stays); **auto-resume is an owner setting, off by default**, and even then
@@ -229,10 +241,11 @@ audit, never the load-bearing net.
    safe. (Pairs naturally with the card-189 shell-legacy removal.)
 2. **Client apply-on-idle + SW waiting-lifecycle migration** — L. Kills
    disruptive reloads; the SW half is load-bearing, not optional. ⚑
-3. **Run-states + `last_event_at` + liveness watchdog** — M. Kills the
-   wedge class; the states also serve items 4–6. ⚑
-4. **Drain-gated restart (`DrainForRestart`, kill-timer, park, boot
-   notify + one-tap resume)** — L. Kills the 16-block class.
+3. **`last_event_at` + liveness watchdog (derived-exemption checks, no
+   state enum)** — S/M. Kills the wedge class. ⚑
+4. **Drain-gated restart (`DrainForRestart`, kill-timer, boot notify +
+   one-tap resume; no parking mechanism in v1)** — M/L. Kills the
+   16-block class.
 5. **Warm-build/publish split (`vite build --watch` + settle/apply-now
    publication)** — M/L. The speed win, and closes the SW install race. ⚑
 6. **Provider-limit parking + reset-notify + opt-in auto-resume** — M.
@@ -245,6 +258,10 @@ audit, never the load-bearing net.
 - Watch-mode ≈1–3s + publish-on-settle, not HMR-instant; serving stays
   unified. HMR is the named future tier, adopted deliberately or not at all.
 - Drain adds ≤20–30s to restarts (owner-initiated, infrequent).
+- Two deliberate v1 trims (owner call, 2026-07-10): run-states stay DERIVED
+  from existing signals (no persisted enum), and undrainable turns keep the
+  interrupted-note + Resume contract instead of a parking mechanism. Both
+  get built only if practice demonstrates the need — evidence first.
 - Attic keeps K=3 generations of assets + index (hardlinked, pruned,
   gitignored).
 - Resumption is one tap, not automatic — a deliberate explicit boundary;
