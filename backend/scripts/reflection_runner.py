@@ -87,6 +87,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The Codex background path does `from app.codex_sdk_runner import ...`; the
+# Claude path uses the pip-installed SDK directly, so only Codex needs the
+# `app` package importable. Reflection runs from cron with a near-empty
+# environment and no PYTHONPATH, so sys.path[0] is this scripts/ dir — which
+# holds no `app` package — and that import would raise ModuleNotFoundError,
+# killing the whole Codex primary/fallback night with no brief. Put the package
+# root (the backend dir holding `app`) on sys.path so the import resolves
+# regardless of cwd, exactly as memory_search.py does for its own app.memory
+# imports.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # --- Fixed locations (the container's data layout) -------------------
 # These are intentionally hard-coded rather than env-derived: Reflection
 # runs from cron with a near-empty environment, and the wrapper exports

@@ -12,10 +12,16 @@ impossible.
 
 from datetime import date
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 import scripts.reflection_runner as dr
+
+RUNNER = Path(dr.__file__).resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +414,42 @@ def test_resolve_agents_drops_cross_provider_model(tmp_path, monkeypatch):
     "model": None,
     "effort": None,
   }
+
+
+# ---------------------------------------------------------------------------
+# Codex import seam — the runner is invoked from cron with a near-empty env
+# ---------------------------------------------------------------------------
+
+def test_codex_import_resolves_from_a_foreign_cwd(tmp_path):
+  # The Codex background path does `from app.codex_sdk_runner import ...`, but
+  # cron invokes this runner from cwd /data with no PYTHONPATH and no
+  # SECRET_KEY. Without the module's sys.path fix that import raises
+  # ModuleNotFoundError, _run_codex_session catches it as rc=1 (outside the
+  # 64/65/66 band), the provider fallback never fires, and the guaranteed-brief
+  # rescue re-runs the same dead path — a Codex night silently produces
+  # nothing. Exec the module body (which runs its sys.path.insert) from a cwd
+  # that lacks backend/ on the path, with PYTHONPATH and SECRET_KEY cleared,
+  # then do the real import. Mirrors memory_search's foreign-cwd smoke test.
+  prog = (
+    "import importlib.util\n"
+    f"spec = importlib.util.spec_from_file_location('rr', r'{RUNNER}')\n"
+    "m = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(m)\n"
+    "from app.codex_sdk_runner import run_codex_sdk_turn\n"
+    "print('IMPORT_OK')\n"
+  )
+  env = {
+    k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "SECRET_KEY")
+  }
+  r = subprocess.run(
+    [sys.executable, "-c", prog],
+    cwd=str(tmp_path),
+    env=env,
+    capture_output=True,
+    text=True,
+  )
+  assert "ModuleNotFoundError" not in r.stderr, r.stderr
+  assert "IMPORT_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
 
 
 # ---------------------------------------------------------------------------
