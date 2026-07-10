@@ -46,6 +46,7 @@
 
 .toast__message {
   flex: 1;
+  overflow-wrap: anywhere;
 }
 
 /* Inline action button (e.g. "Undo"). Inherits the toast's color so it

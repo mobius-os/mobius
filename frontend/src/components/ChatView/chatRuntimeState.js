@@ -51,3 +51,51 @@ export function canFastForwardQueue(pendingMessages, turnActive) {
     && pendingMessages.length > 0
     && pendingMessages.every(m => typeof m?.ts === 'number' && m.serverTs === true)
 }
+
+export function shouldShowOpenAppCta(builtApp) {
+  return Boolean(builtApp?.id)
+}
+
+export function openAppCtaViewModel(builtApp, turnActive) {
+  if (!shouldShowOpenAppCta(builtApp)) return null
+  const name = builtApp.name || 'app'
+  if (turnActive) {
+    return {
+      label: `Open ${name} preview`,
+      ariaLabel: `Open live preview of ${name}`,
+    }
+  }
+  return {
+    label: `Open ${name}`,
+    ariaLabel: `Open ${name}`,
+  }
+}
+
+export function previewReadyAnnouncement(builtApp) {
+  if (!shouldShowOpenAppCta(builtApp)) return ''
+  return `Live preview ready for ${builtApp.name || 'app'}.`
+}
+
+export function systemEventForChat(event, chatId) {
+  if (!event || chatId === null || chatId === undefined || chatId === '') {
+    return event
+  }
+  return { ...event, chatId }
+}
+
+export function resolveSteeredPinDecision({
+  pinTargetTs,
+  pinIntent,
+  pinIntentStillCurrent,
+  fallbackWillPin,
+}) {
+  const intentStillCurrent = pinIntent
+    ? !!pinIntentStillCurrent?.(pinIntent)
+    : true
+  return {
+    intentStillCurrent,
+    shouldPin: pinTargetTs != null
+      && intentStillCurrent
+      && (pinIntent ? !!pinIntent.willPin : !!fallbackWillPin?.()),
+  }
+}

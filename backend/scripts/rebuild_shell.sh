@@ -10,6 +10,14 @@ notify() {
   curl -s -X POST "$NOTIFY_URL" -H "$AUTH" -H "$CT" -d "$1" >/dev/null 2>&1 || true
 }
 
+notify_failed() {
+  payload=$(
+    printf '%s' "$1" | python3 -c 'import json, sys; print(json.dumps({"type":"shell_rebuild_failed","error":sys.stdin.read().strip()}))' 2>/dev/null \
+      || printf '{"type":"shell_rebuild_failed","error":"shell rebuild failed"}'
+  )
+  notify "$payload"
+}
+
 notify '{"type":"shell_rebuilding"}'
 
 FRONTEND_DIR=/data/platform/frontend
@@ -17,6 +25,7 @@ NEXT_DIST=.dist-next
 OLD_DIST=.dist-old
 CACHE_DIR=.vite-cache
 TMP_DIR=.vite-tmp
+BUILD_LOG="$TMP_DIR/vite-build.log"
 
 cd "$FRONTEND_DIR"
 
@@ -29,7 +38,8 @@ rm -rf "$NEXT_DIST" "$OLD_DIST" "$CACHE_DIR" "$TMP_DIR" node_modules/.vite 2>/de
 mkdir -p "$CACHE_DIR" "$TMP_DIR"
 
 if MOBIUS_VITE_CACHE="$FRONTEND_DIR/$CACHE_DIR" TMPDIR="$FRONTEND_DIR/$TMP_DIR" \
-  npx vite build --outDir "$NEXT_DIST" --emptyOutDir 2>&1; then
+  npx vite build --configLoader runner --outDir "$NEXT_DIST" --emptyOutDir >"$BUILD_LOG" 2>&1; then
+  cat "$BUILD_LOG"
   # Vite builds the app bundle but does NOT copy the self-hosted
   # vendor libs (three.js etc.) — those live only at /app/static/vendor
   # from the Dockerfile's npm-install step. Without this copy, mini-
@@ -45,7 +55,7 @@ if MOBIUS_VITE_CACHE="$FRONTEND_DIR/$CACHE_DIR" TMPDIR="$FRONTEND_DIR/$TMP_DIR" 
     rm -rf "$NEXT_DIST" 2>/dev/null || true
     err="vite build did not produce a complete dist"
     echo "$err" >&2
-    notify "{\"type\":\"shell_rebuild_failed\",\"error\":\"$err\"}"
+    notify_failed "$err"
     exit 1
   fi
   old_moved=0
@@ -59,15 +69,16 @@ if MOBIUS_VITE_CACHE="$FRONTEND_DIR/$CACHE_DIR" TMPDIR="$FRONTEND_DIR/$TMP_DIR" 
     fi
     err="could not promote rebuilt frontend dist"
     echo "$err" >&2
-    notify "{\"type\":\"shell_rebuild_failed\",\"error\":\"$err\"}"
+    notify_failed "$err"
     exit 1
   fi
   rm -rf "$OLD_DIST" 2>/dev/null || true
   echo "Frontend rebuilt successfully."
   notify '{"type":"shell_rebuilt"}'
 else
-  err="vite build failed"
-  echo "$err" >&2
-  notify "{\"type\":\"shell_rebuild_failed\",\"error\":\"$err\"}"
+  cat "$BUILD_LOG" >&2 || true
+  err="$(tail -c 4000 "$BUILD_LOG" 2>/dev/null || printf 'vite build failed')"
+  [ -n "$err" ] || err="vite build failed"
+  notify_failed "$err"
   exit 1
 fi

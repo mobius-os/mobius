@@ -2958,11 +2958,18 @@ async def _run_chat_impl(
   # points; if one is added here, a concurrent PATCH could clobber the
   # user's pick.
   if chat_row is not None and chat_overrides is None:
-    snapshot = {
-      k: agent_settings[k]
-      for k in ("model", "effort", "effort_by_provider")
-      if agent_settings.get(k) is not None
-    }
+    snapshot = {}
+    for k in ("model", "effort", "effort_by_provider"):
+      if k not in agent_settings:
+        continue
+      value = agent_settings.get(k)
+      # ``model: None`` is meaningful: this chat started before the
+      # owner manually pinned a default model, so keep it on the
+      # provider SDK's own default instead of letting a later global
+      # model choice drift into this already-started chat.
+      if value is None and k != "model":
+        continue
+      snapshot[k] = value
     if snapshot:
       chat_row.agent_settings_json = snapshot
       try:

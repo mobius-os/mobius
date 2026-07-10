@@ -20,8 +20,18 @@ import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import {
+  shellRebuildFailureDetails,
+  shellRebuildFailureMessage,
+} from '../../lib/shellRebuildFailure.js'
+import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
+import {
+  builtAppForChat,
+  withBuiltAppForChat,
+  withoutBuiltAppForChat,
+} from './builtAppState.js'
+import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import './Shell.css'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -38,6 +48,11 @@ function _warmTargetSw() {
     .then(reg => reg.active)
     .catch(() => null)
 }
+
+const SHELL_BUILDING_NOTICE_DELAY_MS = 1200
+const SHELL_FAILURE_NOTICE_DELAY_MS = 1200
+const SHELL_FAILURE_AUTO_DISMISS_MS = 6000
+const SHELL_RELOAD_RECHECK_MS = 6000
 
 export default function Shell() {
   const {
@@ -102,6 +117,15 @@ export default function Shell() {
     setToast({ message, variant, duration, action })
   }
   function dismissToast() { setToast(null) }
+  function copyShellRebuildFailure(details) {
+    if (!details || typeof navigator === 'undefined' || !navigator.clipboard) {
+      showToast('Build details are in the server logs.', { duration: 5000 })
+      return
+    }
+    navigator.clipboard.writeText(details)
+      .then(() => showToast('Build details copied.'))
+      .catch(() => showToast('Could not copy build details.', { variant: 'error' }))
+  }
   const handleAppIntentDelivered = useCallback((appId, delivered) => {
     setAppIntents((prev) => {
       const key = String(appId)
@@ -111,6 +135,181 @@ export default function Shell() {
       return next
     })
   }, [])
+
+  // Shell update lifecycle shown in the top bar. This is deliberately separate
+  // from transient toasts: owner-initiated shell work should be visible while it
+  // is happening, and a ready update should not steal focus just to prove it
+  // landed.
+  const [shellUpdate, setShellUpdate] = useState({ state: 'idle' })
+  const shellUpdateRef = useRef(shellUpdate)
+  useEffect(() => { shellUpdateRef.current = shellUpdate }, [shellUpdate])
+
+
+  const pendingShellReloadRef = useRef(false)
+  const shellReloadTimerRef = useRef(null)
+  const shellBuildingNoticeTimerRef = useRef(null)
+  const shellFailureNoticeTimerRef = useRef(null)
+  const shellFailureDismissTimerRef = useRef(null)
+  const lastShellInteractionAtRef = useRef(0)
+  const [composerFocusRequest, setComposerFocusRequest] = useState(null)
+  const composerFocusTokenRef = useRef(0)
+
+  function requestComposerFocus(chatId) {
+    if (chatId == null) return
+    composerFocusTokenRef.current += 1
+    setComposerFocusRequest({
+      chatId,
+      token: composerFocusTokenRef.current,
+    })
+  }
+
+  const handleComposerFocusHandled = useCallback((token) => {
+    setComposerFocusRequest(prev => (
+      prev?.token === token ? null : prev
+    ))
+  }, [])
+
+  function shellReloadState() {
+    return {
+      activeView: activeViewRef.current,
+      activeAppId: activeAppIdRef.current,
+      drawerOpen: drawerOpenRef.current,
+      activeChatId: activeChatIdRef.current,
+    }
+  }
+
+  function setShellUpdateState(next) {
+    setShellUpdate(prev => (prev.state === next.state ? prev : next))
+  }
+
+  function clearShellUpdateTimers() {
+    if (shellBuildingNoticeTimerRef.current) {
+      clearTimeout(shellBuildingNoticeTimerRef.current)
+      shellBuildingNoticeTimerRef.current = null
+    }
+    if (shellFailureNoticeTimerRef.current) {
+      clearTimeout(shellFailureNoticeTimerRef.current)
+      shellFailureNoticeTimerRef.current = null
+    }
+    if (shellFailureDismissTimerRef.current) {
+      clearTimeout(shellFailureDismissTimerRef.current)
+      shellFailureDismissTimerRef.current = null
+    }
+  }
+
+  function performShellReload() {
+    pendingShellReloadRef.current = false
+    if (shellReloadTimerRef.current) {
+      clearTimeout(shellReloadTimerRef.current)
+      shellReloadTimerRef.current = null
+    }
+    clearShellUpdateTimers()
+    setShellUpdateState({ state: 'refreshing' })
+    sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
+    // Match the manifest scope so the post-reload page lands inside
+    // the installed PWA's declared scope — writing `/` here would
+    // briefly put the page out of scope and Chromium can refuse the
+    // next manifest update in-place.
+    replaceNavEntry('base', '/shell/')
+    setTimeout(() => window.location.reload(), 180)
+  }
+
+  function shellReloadWouldDisruptUser() {
+    return shouldDeferShellReload({
+      activeElement: document.activeElement,
+      activeView: activeViewRef.current,
+      activeChatId: activeChatIdRef.current,
+      streamingChatIds: streamingChatIdsRef.current,
+      lastUserInteractionAt: lastShellInteractionAtRef.current,
+      visibilityState: document.visibilityState,
+    })
+  }
+
+  function scheduleShellReloadCheck() {
+    if (shellReloadTimerRef.current) clearTimeout(shellReloadTimerRef.current)
+    shellReloadTimerRef.current = setTimeout(() => {
+      shellReloadTimerRef.current = null
+      if (!pendingShellReloadRef.current) return
+      if (shellReloadWouldDisruptUser()) {
+        scheduleShellReloadCheck()
+      } else {
+        performShellReload()
+      }
+    }, SHELL_RELOAD_RECHECK_MS)
+  }
+
+  function deferShellReload() {
+    pendingShellReloadRef.current = true
+    clearShellUpdateTimers()
+    // Keep an existing ready badge steady instead of re-announcing every
+    // watcher rebuild. A sibling agent may save several shell files in one
+    // task; the owner only needs one persistent "refresh when ready" affordance.
+    setShellUpdateState({ state: 'ready' })
+    scheduleShellReloadCheck()
+  }
+
+  function requestShellReload() {
+    if (shellReloadWouldDisruptUser()) {
+      deferShellReload()
+    } else {
+      performShellReload()
+    }
+  }
+
+  function noteShellRebuilding() {
+    // If a refresh is already pending, do not flip the badge back to
+    // "Updating…" on every subsequent source save. The ready affordance is the
+    // useful state now: it tells the owner a refresh will pick up the latest
+    // completed build when they are ready.
+    if (pendingShellReloadRef.current || shellUpdateRef.current.state === 'ready') return
+    clearShellUpdateTimers()
+    shellBuildingNoticeTimerRef.current = setTimeout(() => {
+      shellBuildingNoticeTimerRef.current = null
+      if (pendingShellReloadRef.current || shellUpdateRef.current.state === 'ready') return
+      setShellUpdateState({ state: 'building' })
+    }, SHELL_BUILDING_NOTICE_DELAY_MS)
+  }
+
+  function noteShellRebuildFailed(event) {
+    if (pendingShellReloadRef.current || shellUpdateRef.current.state === 'ready') return
+    const details = shellRebuildFailureDetails(event)
+    const message = shellRebuildFailureMessage(event)
+    clearShellUpdateTimers()
+    // The watcher can observe an in-progress file write and publish a failure
+    // that is immediately followed by a successful rebuild. Give success a
+    // chance to arrive before showing an error, and auto-clear the error if it
+    // really does remain visible.
+    shellFailureNoticeTimerRef.current = setTimeout(() => {
+      shellFailureNoticeTimerRef.current = null
+      setShellUpdateState({ state: 'failed', message, details })
+      shellFailureDismissTimerRef.current = setTimeout(() => {
+        shellFailureDismissTimerRef.current = null
+        if (shellUpdateRef.current.state === 'failed') {
+          setShellUpdateState({ state: 'idle' })
+        }
+      }, SHELL_FAILURE_AUTO_DISMISS_MS)
+    }, SHELL_FAILURE_NOTICE_DELAY_MS)
+  }
+
+  useEffect(() => {
+    const record = () => { lastShellInteractionAtRef.current = Date.now() }
+    const opts = { capture: true, passive: true }
+    window.addEventListener('pointerdown', record, opts)
+    window.addEventListener('touchstart', record, opts)
+    window.addEventListener('keydown', record, opts)
+    window.addEventListener('input', record, opts)
+    window.addEventListener('focusin', record, opts)
+    return () => {
+      window.removeEventListener('pointerdown', record, opts)
+      window.removeEventListener('touchstart', record, opts)
+      window.removeEventListener('keydown', record, opts)
+      window.removeEventListener('input', record, opts)
+      window.removeEventListener('focusin', record, opts)
+      if (shellReloadTimerRef.current) clearTimeout(shellReloadTimerRef.current)
+      clearShellUpdateTimers()
+    }
+  }, [])
+
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
@@ -139,7 +338,8 @@ export default function Shell() {
   // guarantees the has_messages flag is now true and the reuse guard
   // (which reads has_messages from the chats query) is reliable again.
   const recoveredChatIdsRef = useRef(new Set())
-  const [builtApp, setBuiltApp] = useState(null)
+  const [builtAppsByChatId, setBuiltAppsByChatId] = useState({})
+  const builtApp = builtAppForChat(builtAppsByChatId, activeChatId)
   // First-sign-in walkthrough. The query result is the source of
   // truth — backend persists completion via
   // POST /api/owner/walkthrough/complete. We render the overlay iff
@@ -166,6 +366,8 @@ export default function Shell() {
     }
     return next
   }, [localStreamingChatIds, chats])
+  const streamingChatIdsRef = useRef(streamingChatIds)
+  useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -651,10 +853,15 @@ export default function Shell() {
       // row (app_built and app_updated arrive close together but order
       // isn't guaranteed).
       if (ev.appId) {
+        const sourceChatId = ev.chatId || activeChatIdRef.current
         refreshApps().then(updatedApps => {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           const name = app?.name || null
-          setBuiltApp({ id: Number(ev.appId), name })
+          setBuiltAppsByChatId(prev => withBuiltAppForChat(
+            prev,
+            sourceChatId,
+            { id: Number(ev.appId), name },
+          ))
           // Warm the SW cache immediately after a build lands so the
           // "Open app" CTA tap is served from cache.
           if (app) warmAppCode(app)
@@ -680,7 +887,10 @@ export default function Shell() {
         }
       }
       refreshChats()
+    } else if (ev.type === 'shell_rebuilding') {
+      noteShellRebuilding()
     } else if (ev.type === 'shell_rebuilt') {
+      clearShellUpdateTimers()
       // Deduplicate against the SSE catch-up burst to avoid reload loops.
       const now = Date.now()
       const lastRebuilt = Number(sessionStorage.getItem('shell-rebuilt-at') || 0)
@@ -692,23 +902,13 @@ export default function Shell() {
       // correctness checking, but by the time shell_rebuilt fires those
       // closure values may be one render behind concurrent state updates.
       // Sibling branches (chat_run_started, chat_run_finished) already
-      // use refs for exactly this reason.
-      sessionStorage.setItem('shell-reload', JSON.stringify({
-        activeView: activeViewRef.current,
-        activeAppId: activeAppIdRef.current,
-        drawerOpen: drawerOpenRef.current,
-        activeChatId: activeChatIdRef.current,
-      }))
-      // Match the manifest scope so the post-reload page lands inside
-      // the installed PWA's declared scope — writing `/` here would
-      // briefly put the page out of scope and Chromium can refuse the
-      // next manifest update in-place.
-      replaceNavEntry('base', '/shell/')
-      document.body.style.transition = 'opacity 0.2s ease'
-      document.body.style.opacity = '0'
-      setTimeout(() => window.location.reload(), 220)
+      // use refs for exactly this reason. If the owner is typing, steering,
+      // or reading the currently-running chat, hold the refresh behind a
+      // steady top-bar badge instead of fading the whole shell black and
+      // stealing focus.
+      requestShellReload()
     } else if (ev.type === 'shell_rebuild_failed') {
-      showToast('Shell rebuild failed.', { variant: 'error', duration: 8000 })
+      noteShellRebuildFailed(ev)
     }
   }, [
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
@@ -902,7 +1102,7 @@ export default function Shell() {
     }
   }, [apps, chats, navTo, refreshApps, refreshChats])
 
-  async function newChat({ draft, forceNew, exclude, autoSend } = {}) {
+  async function newChat({ draft, forceNew, exclude, autoSend, focusComposer } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only
     // POST a fresh row when no empty is available. Safe to reuse now
     // that create_chat leaves agent_settings_json NULL — an untouched
@@ -1032,12 +1232,12 @@ export default function Shell() {
     }
     setActiveView('chat')
     setActiveChatId(chatId)
+    if (focusComposer) requestComposerFocus(chatId)
   }
 
   function selectChat(id) {
     clearChatAttention(id)
     navTo('chat', { chatId: id })
-    setBuiltApp(null)
     refreshChats()
   }
 
@@ -1249,6 +1449,50 @@ export default function Shell() {
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
         </div>
+        {shellUpdate.state !== 'idle' && (
+          <div
+            className={`shell__update shell__update--${shellUpdate.state}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="shell__update-dot" aria-hidden="true" />
+            <span className="shell__update-label">
+              {shellUpdate.state === 'building' && 'Updating shell…'}
+              {shellUpdate.state === 'ready' && 'Update ready'}
+              {shellUpdate.state === 'refreshing' && 'Refreshing…'}
+              {shellUpdate.state === 'failed' && (shellUpdate.message || 'Update failed')}
+            </span>
+            {shellUpdate.state === 'ready' && (
+              <button
+                type="button"
+                className="shell__update-action"
+                onClick={performShellReload}
+              >
+                Refresh
+              </button>
+            )}
+            {shellUpdate.state === 'failed' && (
+              <>
+                {shellUpdate.details && (
+                  <button
+                    type="button"
+                    className="shell__update-action"
+                    onClick={() => copyShellRebuildFailure(shellUpdate.details)}
+                  >
+                    Copy
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="shell__update-action"
+                  onClick={() => setShellUpdate({ state: 'idle' })}
+                >
+                  Dismiss
+                </button>
+              </>
+            )}
+          </div>
+        )}
         {!online && (
           <span className="shell__offline" role="status" aria-live="polite">
             Offline
@@ -1266,7 +1510,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onNewChat={newChat}
+        onNewChat={() => newChat({ focusComposer: true })}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
@@ -1344,15 +1588,20 @@ export default function Shell() {
               }
             }}
             builtApp={builtApp}
-            onOpenApp={(appId) => { navTo('canvas', { appId }); setBuiltApp(null) }}
+            onOpenApp={(appId) => {
+              navTo('canvas', { appId })
+              setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
+            }}
             onMessageStart={() => {
               // User just sent a message — the agent is about to
               // stream a response. Mark this chat as streaming so the
               // drawer's pulse dot picks it up immediately (no
               // round-trip wait for the first SSE event).
               markStreamingStart(activeChatId)
-              setBuiltApp(null)
+              setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}
+            composerFocusRequest={composerFocusRequest}
+            onComposerFocusHandled={handleComposerFocusHandled}
           />
           </ErrorBoundary>
         )}

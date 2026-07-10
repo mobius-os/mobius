@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getToken, BASE } from '../../api/client.js'
+import {
+  isChatStreamSystemEvent,
+  shouldForwardChatStreamSystemEvent,
+} from './chatSystemEvents.js'
 import { questionKey } from './questionKey.js'
 import {
   upsertQuestionItem,
@@ -65,28 +69,6 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
 // scheduler hop are well under that on local + remote prod traffic.
 const BROADCAST_REGISTRATION_WINDOW_MS = 1500
 
-// Events that come through the chat SSE stream but are not chat content.
-// These are published by agent scripts (notify_theme.sh, register_app.py,
-// rebuild_shell.sh) via POST /api/notify, which pushes them into the
-// active ChatBroadcast.  The SSE stream delivers them alongside normal
-// chat events.  We forward them to the onSystemEvent callback rather
-// than processing them as text/tool events.
-const SYSTEM_EVENTS = new Set([
-  'theme_updated',
-  'app_updated',
-  // app_built is the chat-SCOPED CTA signal: the backend publishes it
-  // onto ONLY the building chat's broadcast (see routes/notify.py), so
-  // it arrives exclusively on the stream of the chat that built the app.
-  // Forwarded to onSystemEvent like the other system events; the handler
-  // sets the "Open app" CTA. (app_updated stays list-refresh-only.)
-  'app_built',
-  'shell_rebuilding',
-  'shell_rebuilt',
-  'shell_rebuild_failed',
-  'chat_run_started',
-  'chat_run_finished',
-])
-
 /**
  * Hook that manages an SSE connection to /api/chats/{chatId}/stream.
  *
@@ -133,10 +115,11 @@ const SYSTEM_EVENTS = new Set([
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
  *
- * System events (theme_updated, app_updated, shell_rebuilding,
- * shell_rebuilt, shell_rebuild_failed) listed in the `SYSTEM_EVENTS`
- * set above are forwarded to `onSystemEvent` instead of touching
- * `streamItems` — they aren't chat content.
+ * System events such as theme_updated and app_updated are forwarded to
+ * `onSystemEvent` instead of touching `streamItems` — they aren't chat
+ * content. Shell rebuild events are forwarded only when they are live, not
+ * during chat catch-up replay, because an old replayed `shell_rebuilt` would
+ * otherwise re-arm the shell refresh badge every time the user switches chats.
  *
  * @param {string} chatId
  * @param {object} callbacks
@@ -722,8 +705,10 @@ export default function useStreamConnection(chatId, {
             catchUpStartedRef.current = true
           }
 
-          if (SYSTEM_EVENTS.has(event.type)) {
-            onSystemEventRef.current?.(event)
+          if (isChatStreamSystemEvent(event.type)) {
+            if (shouldForwardChatStreamSystemEvent(event, { isCatchUp })) {
+              onSystemEventRef.current?.(event)
+            }
             continue
           }
 

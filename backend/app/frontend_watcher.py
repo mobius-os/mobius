@@ -141,6 +141,8 @@ def _run_vite_build() -> str:
     "npx",
     "vite",
     "build",
+    "--configLoader",
+    "runner",
     "--outDir",
     ".dist-next",
     "--emptyOutDir",
@@ -292,13 +294,8 @@ class _FrontendHandler(FileSystemEventHandler):
       log.warning(
         "frontend rebuild failed after %s: %s", changed_path, exc,
       )
-      _publish_system_event({
-        "type": "shell_rebuild_failed",
-        "error": str(exc),
-      })
       return
     log.info("frontend rebuilt from %s", _FRONTEND_DIR)
-    _publish_system_event({"type": "shell_rebuilt"})
 
 
 def start_watcher(
