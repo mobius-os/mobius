@@ -182,6 +182,7 @@ function BackgroundProviderRow({
   index,
   models,
   dragging,
+  settling,
   dropTarget,
   dropPosition,
   dragStyle,
@@ -203,6 +204,7 @@ function BackgroundProviderRow({
         'settings-bg-row'
         + (enabled ? '' : ' settings-bg-row--off')
         + (dragging ? ' settings-bg-row--dragging' : '')
+        + (settling ? ' settings-bg-row--settling' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
         + (dropTarget && dropPosition ? ` settings-bg-row--drop-${dropPosition}` : '')
       }
@@ -357,6 +359,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
   const backgroundDragRef = useRef(null)
+  const backgroundSettleTimerRef = useRef(null)
   const backgroundRowRefs = useRef([])
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
@@ -512,6 +515,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
   const startBackgroundReorder = useCallback((event, index) => {
     if (event.button !== undefined && event.button !== 0) return
+    if (backgroundSettleTimerRef.current) {
+      window.clearTimeout(backgroundSettleTimerRef.current)
+      backgroundSettleTimerRef.current = null
+    }
     const node = backgroundRowRefs.current[index]
     if (!node) return
     const rowRect = node.getBoundingClientRect()
@@ -555,7 +562,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     const onPointerMove = (event) => {
       event.preventDefault()
       setBackgroundDrag((current) => {
-        if (!current) return current
+        if (!current || current.dropping) return current
         const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
         const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
         if (current.toIndex === toIndex && current.currentY === event.clientY) return current
@@ -566,14 +573,39 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     const finish = (event) => {
       event.preventDefault()
       const current = backgroundDragRef.current
-      setBackgroundDrag(null)
       if (!current) return
       const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
       const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
-      if (toIndex !== fromIndex) moveBackgroundProvider(fromIndex, toIndex)
+      if (toIndex === fromIndex) {
+        setBackgroundDrag(null)
+        return
+      }
+      const originSlot = current.slots?.[fromIndex]
+      const targetSlot = current.slots?.[toIndex]
+      if (!originSlot || !targetSlot) {
+        setBackgroundDrag(null)
+        moveBackgroundProvider(fromIndex, toIndex)
+        return
+      }
+      const settleY = targetSlot.top - originSlot.top
+      setBackgroundDrag({
+        ...current,
+        currentY: current.startY + settleY,
+        toIndex,
+        dropping: true,
+      })
+      backgroundSettleTimerRef.current = window.setTimeout(() => {
+        backgroundSettleTimerRef.current = null
+        moveBackgroundProvider(fromIndex, toIndex)
+        setBackgroundDrag(null)
+      }, 150)
     }
 
     const cancel = () => {
+      if (backgroundSettleTimerRef.current) {
+        window.clearTimeout(backgroundSettleTimerRef.current)
+        backgroundSettleTimerRef.current = null
+      }
       setBackgroundDrag(null)
     }
 
@@ -586,6 +618,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       window.removeEventListener('pointercancel', cancel)
     }
   }, [activeBackgroundDragFromIndex, backgroundIndexFromY, moveBackgroundProvider])
+
+  useEffect(() => () => {
+    if (backgroundSettleTimerRef.current) {
+      window.clearTimeout(backgroundSettleTimerRef.current)
+      backgroundSettleTimerRef.current = null
+    }
+  }, [])
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
@@ -1078,8 +1117,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       index={index}
                       models={modelsForProvider(row.provider)}
                       dragging={backgroundDrag?.fromIndex === index}
+                      settling={
+                        backgroundDrag?.dropping
+                        && backgroundDrag?.fromIndex === index
+                      }
                       dropTarget={
-                        backgroundDrag?.toIndex === index
+                        !backgroundDrag?.dropping
+                        && backgroundDrag?.toIndex === index
                         && backgroundDrag?.fromIndex !== index
                       }
                       dropPosition={backgroundDropPosition}
