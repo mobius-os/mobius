@@ -19,6 +19,38 @@ logger = logging.getLogger(__name__)
 
 _vapid: Vapid | None = None
 
+_QUIET_PUSH_SOURCE_TYPES = frozenset({
+  "platform_conflict",
+  "platform_update",
+  "shell",
+  "shell_rebuild",
+  "shell_rebuilding",
+  "shell_rebuilt",
+  "shell_rebuild_failed",
+})
+
+
+def _is_quiet_maintenance_push(
+  *, source_type: str | None, title: str, body: str | None
+) -> bool:
+  """Return True for shell/platform maintenance notices.
+
+  These remain in notification history but should not become OS/browser
+  popups. User-facing agent/app notifications still use the normal push path.
+  """
+  source = (source_type or "").strip().lower()
+  if source in _QUIET_PUSH_SOURCE_TYPES:
+    return True
+  if source not in {"", "agent", "system"}:
+    return False
+  text = f"{title or ''}\n{body or ''}".lower()
+  return (
+    ("shell" in text and any(
+      word in text for word in ("build", "rebuild", "building", "rebuilt")
+    ))
+    or ("platform update" in text)
+  )
+
 
 def _key_dir() -> Path:
   settings = get_settings()
@@ -101,7 +133,7 @@ def notify_owner(
   owner_id: int,
   *,
   title: str,
-  body: str,
+  body: str | None,
   source_type: str = "system",
   source_id: str | None = None,
   icon: str | None = None,
@@ -161,6 +193,11 @@ def notify_owner(
   # owns this contract so we don't have to reach across modules
   # into broadcast internals.
   if source_id and presence.has_watchers(source_id):
+    return notification_id
+
+  if _is_quiet_maintenance_push(
+    source_type=source_type, title=title, body=body,
+  ):
     return notification_id
 
   payload = {
