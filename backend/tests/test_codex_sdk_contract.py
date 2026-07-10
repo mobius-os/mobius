@@ -107,3 +107,19 @@ def test_request_user_input_method_string_unchanged():
     "wire string. Verify codex/_client docs and update the constant "
     "if the SDK genuinely renamed the method."
   )
+
+
+def test_request_user_input_bridge_has_no_user_answer_timeout():
+  """The Codex bridge must honor the AskUserQuestion no-timeout contract.
+
+  A bounded ``Future.result(timeout=...)`` turns a slow human answer into a
+  stale grey card and makes the agent end the turn before the user can approve.
+  Stop/cancel remains the explicit escape hatch.
+  """
+  import inspect
+  from app import codex_sdk_runner
+
+  source = inspect.getsource(codex_sdk_runner._install_request_user_input_handler)
+  assert "fut.result()" in source
+  assert "fut.result(timeout=" not in source
+  assert "_BRIDGE_USER_ANSWER_TIMEOUT" not in source

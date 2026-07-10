@@ -589,6 +589,21 @@ def _cp(stdout="", stderr="", returncode=0):
   return subprocess.CompletedProcess(["mock"], returncode, stdout, stderr)
 
 
+_UPSTREAM_SHA = "d" * 40
+
+
+def _submit_preflight_response(args, *, merge_conflict: bool = False):
+  if (
+    len(args) >= 3 and
+    args[:2] == ("rev-parse", "--verify") and
+    args[2].startswith("refs/mobius-submit/upstream-")
+  ):
+    return _cp(_UPSTREAM_SHA + "\n")
+  if args[:1] == ("merge-tree",):
+    return _cp(returncode=1 if merge_conflict else 0)
+  return None
+
+
 def _commit_metadata(
   sha,
   *,
@@ -643,6 +658,8 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
   def fake_git(repo_path, *args, check=True):
     nonlocal fork_ready
     git_calls.append(args)
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("develop\n")
     if args == ("status", "--porcelain"):
@@ -761,6 +778,8 @@ def test_submit_contribution_normalizes_fallback_author_before_push(
   def fake_git(repo_path, *args, check=True):
     nonlocal normalized
     git_calls.append(args)
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("main\n")
     if args == ("status", "--porcelain"):
@@ -886,6 +905,8 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   def fake_git(repo_path, *args, check=True):
     nonlocal fork_fixed
     git_calls.append(args)
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("main\n")
     if args == ("status", "--porcelain"):
@@ -990,6 +1011,8 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
 
   def fake_git(repo_path, *args, check=True):
     git_calls.append(args)
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("main\n")
     if args == ("status", "--porcelain"):
@@ -1033,6 +1056,92 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
   assert not any(call[:1] == ("push",) for call in git_calls)
 
 
+def test_submit_contribution_rejects_unmergeable_branch_before_push(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-merge-conflict"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
+  base = "b" * 40
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  git_calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if (preflight := _submit_preflight_response(args, merge_conflict=True)) is not None:
+      return preflight
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("main\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", "fix/demo-polish"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{head}",
+    ):
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", "fix/demo-polish"):
+      return _cp(
+        "Polish demo\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
+      return _commit_metadata(head)
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", lambda *args, **kwargs: _cp(""))
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert r.status_code == 409
+  detail = r.json()["detail"]
+  assert "no longer merges cleanly" in detail["message"]
+  assert detail["record"]["status"] == "prepared"
+  assert detail["record"]["last_submit_upstream_branch"] == "main"
+  assert detail["record"]["last_submit_upstream_sha"] == _UPSTREAM_SHA
+  assert not any(call[:1] == ("push",) for call in git_calls)
+
+
 def test_submit_contribution_records_public_branch_after_pr_create_failure(
   client, owner_token, monkeypatch,
 ):
@@ -1067,6 +1176,8 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
   monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
 
   def fake_git(repo_path, *args, check=True):
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("main\n")
     if args == ("status", "--porcelain"):

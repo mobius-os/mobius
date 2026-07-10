@@ -64,6 +64,11 @@ PLATFORM_BACKEND = PLATFORM_REPO / "backend"
 # gitignored out of the outer ``/data`` repo in entrypoint.sh).
 UPGRADE_FLAG = Path("/data/.platform-upgrade-available")
 RESTART_NEEDED_FLAG = Path("/data/.platform-restart-needed")
+# Written by entrypoint.sh before uvicorn starts. These identify the backend
+# tree the current Python process actually imported, which can differ from the
+# on-disk clone after an agent edits /data/platform.
+SERVING_SOURCE_FILE = Path("/tmp/serving-source")
+SERVING_SHA_FILE = Path("/tmp/serving-sha")
 # Persist a conflict so Settings keeps showing it across reloads (the rebase is
 # aborted, so no git state alone can signal it). Records the target sha + paths.
 CONFLICT_FLAG = Path("/data/.platform-conflict")
@@ -479,6 +484,34 @@ def mark_restart_needed(target_sha: str) -> None:
   os.replace(tmp, RESTART_NEEDED_FLAG)
 
 
+def _served_platform_sha() -> str | None:
+  """Commit the running uvicorn imported from /data/platform, or None.
+
+  ``/api/version`` already reports these sentinels. The updater reads the same
+  files so Settings can notice the common agent-edit case: the platform checkout
+  advanced after boot, but the live Python process is still running old modules.
+  """
+  try:
+    if SERVING_SOURCE_FILE.read_text().strip() != "platform":
+      return None
+    sha = SERVING_SHA_FILE.read_text().strip()
+  except Exception:
+    return None
+  return sha or None
+
+
+def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
+  served = _served_platform_sha()
+  if not served:
+    return False
+  try:
+    local = _local_branch(repo)
+    head = _rev(repo, local)
+  except Exception:
+    return False
+  return bool(head and head != served)
+
+
 def _changed_paths(repo: Path, before: str | None, after: str | None) -> list[str]:
   """Repo-relative paths changed between two commits, best-effort."""
   if not before or not after or before == after:
@@ -692,7 +725,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _rebase_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
-  restart_needed = RESTART_NEEDED_FLAG.exists()
+  restart_needed = RESTART_NEEDED_FLAG.exists() or _platform_tree_needs_restart(repo)
   local = _local_branch(repo)
 
   if conflict:
@@ -740,7 +773,11 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   """
   if (repo / ".git").exists() and _has_origin(repo):
     with _reconcile_flock():
-      _fetch(repo)
+      if _fetch(repo):
+        target = _rev(repo, DEFAULT_TARGET_REF)
+        local = _local_branch(repo)
+        if target and _is_ancestor(repo, target, local):
+          _set_upstream(repo, target)
   return platform_status(repo)
 
 
@@ -777,7 +814,11 @@ async def apply_platform_update(
     elif res.status == "rolled_back":
       state = PlatformUpdateState.ROLLED_BACK
     elif res.status == "up_to_date":
-      state = PlatformUpdateState.UP_TO_DATE
+      if _platform_tree_needs_restart(repo):
+        mark_restart_needed(_rev(repo, _local_branch(repo)) or res.pre_sha or "")
+        state = PlatformUpdateState.RESTART_NEEDED
+      else:
+        state = PlatformUpdateState.UP_TO_DATE
     else:  # offline / skipped — nothing changed; tell the UI plainly.
       raise PlatformUpdateError(res.error or res.status)
 

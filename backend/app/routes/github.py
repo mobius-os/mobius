@@ -371,6 +371,14 @@ def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> Contributio
   )
 
 
+def _record_patch_with(base: dict, extra: dict) -> dict:
+  if not extra:
+    return base
+  if not base:
+    return extra
+  return {**base, **extra}
+
+
 def _normalize_head_attribution(
   repo: Path,
   branch: str,
@@ -424,6 +432,73 @@ def _normalize_head_attribution(
       "agent to prepare this PR again."
     )
   return _head_sha_patch(record, before["sha"], after["sha"])
+
+
+def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
+  proc = _gh(
+    repo,
+    "repo", "view", upstream_repo,
+    "--json", "defaultBranchRef",
+    "--jq", ".defaultBranchRef.name",
+    check=False,
+  )
+  branch = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+  if not branch:
+    branch = "main"
+  return _validate_branch(branch)
+
+
+def _assert_merges_with_upstream(
+  repo: Path, upstream_repo: str, branch: str,
+) -> dict:
+  upstream_branch = _upstream_default_branch(repo, upstream_repo)
+  remote_url = f"https://github.com/{upstream_repo}.git"
+  ref_key = hashlib.sha256(
+    f"{upstream_repo}\0{branch}\0{time.time_ns()}".encode("utf-8")
+  ).hexdigest()[:24]
+  upstream_ref = f"refs/mobius-submit/upstream-{ref_key}"
+  preflight_patch = {"last_submit_upstream_branch": upstream_branch}
+  try:
+    fetched = _git(
+      repo,
+      "fetch", "--no-tags", "--force",
+      remote_url,
+      f"+refs/heads/{upstream_branch}:{upstream_ref}",
+      check=False,
+    )
+    if fetched.returncode != 0:
+      raise ContributionSubmitError(
+        (
+          "Could not verify that this PR merges with the upstream branch. "
+          "Leave feedback so your agent can refresh it."
+        ),
+        record_patch=preflight_patch,
+      ) from None
+    upstream_sha = _git(
+      repo, "rev-parse", "--verify", f"{upstream_ref}^{{commit}}",
+    ).stdout.strip()
+    if not _GIT_SHA.match(upstream_sha):
+      raise ContributionSubmitError(
+        "Could not resolve the upstream branch for this PR. Leave feedback "
+        "so your agent can refresh it.",
+        record_patch=preflight_patch,
+      )
+    preflight_patch["last_submit_upstream_sha"] = upstream_sha
+    merged = _git(
+      repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
+    )
+    if merged.returncode != 0:
+      raise ContributionSubmitError(
+        (
+          f"This PR no longer merges cleanly with upstream {upstream_branch}. "
+          "Leave feedback so your agent can refresh the branch before it is "
+          "pushed."
+        ),
+        record_patch=preflight_patch,
+      )
+    return preflight_patch
+  finally:
+    _git(repo, "update-ref", "-d", upstream_ref, check=False)
 
 
 def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
@@ -711,6 +786,12 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
       record=record,
     )
     _assert_clean_worktree(repo)
+
+    try:
+      merge_patch = _assert_merges_with_upstream(repo, upstream_repo, branch)
+      record_patch = _record_patch_with(record_patch, merge_patch)
+    except ContributionSubmitError as exc:
+      raise _merge_error_patch(exc, record_patch) from exc
 
     try:
       _ensure_owner_fork_remote(repo, upstream_repo, login)

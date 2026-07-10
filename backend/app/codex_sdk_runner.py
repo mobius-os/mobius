@@ -103,14 +103,6 @@ class _OverlapError(_BridgeError):
   """
 
 
-# How long the sync bridge waits for the user to answer an AskUserQuestion.
-# 420 s is long enough for a deliberate slow answer while staying under
-# common reverse-proxy idle-timeout windows (~600 s for most setups) —
-# a 600 s fut.result sits at the proxy deadline and races a TCP reset,
-# leaving the Codex worker thread hung with no cleanup path.
-_BRIDGE_USER_ANSWER_TIMEOUT_SECS = 420.0
-
-
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
   """Best-effort early persistence for provider resume continuity."""
   if db is None or not chat_id or not session_id:
@@ -689,10 +681,11 @@ def _install_request_user_input_handler(
         log.error("Codex bridge: %s chat_id=%s", err, chat_id)
         return {"error": {"message": err}}
 
-    # Bridge from sync (this thread) to async (runner loop). On any
-    # failure (timeout, overlap, asyncio loop closed), translate to a
-    # JSON-RPC-shaped error so Codex actually fails the tool call
-    # instead of continuing with empty answers (B2, B5).
+    # Bridge from sync (this thread) to async (runner loop). It deliberately
+    # has no user-answer timeout: an AskUserQuestion is a human pause point, and
+    # only an answer, Stop/cancel, or a real bridge failure should resolve it.
+    # On failures, translate to a JSON-RPC-shaped error so Codex actually fails
+    # the tool call instead of continuing with empty answers (B2, B5).
     try:
       fut = asyncio.run_coroutine_threadsafe(
         park_question(questions), loop,
@@ -706,24 +699,12 @@ def _install_request_user_input_handler(
       return {"error": {"message": "Möbius bridge unavailable."}}
 
     try:
-      text_keyed = fut.result(timeout=_BRIDGE_USER_ANSWER_TIMEOUT_SECS)
+      text_keyed = fut.result()
     except _OverlapError as exc:
       log.warning(
         "Codex bridge: overlap rejected chat_id=%s: %s", chat_id, exc,
       )
       return {"error": {"message": str(exc)}}
-    except TimeoutError:
-      # The user didn't answer within the timeout window. Cancel the parked
-      # future so the runner-side coroutine can clean up, and return an error
-      # so Codex aborts the tool call instead of continuing with fabricated
-      # empty answers (B5). The timeout is set below common proxy idle windows
-      # so this path fires before the proxy tears down the connection.
-      fut.cancel()
-      log.warning(
-        "Codex bridge: user did not answer within %.0fs chat_id=%s",
-        _BRIDGE_USER_ANSWER_TIMEOUT_SECS, chat_id,
-      )
-      return {"error": {"message": "User did not answer in time."}}
     except (asyncio.CancelledError, _cf.CancelledError):
       log.info("Codex bridge: cancelled chat_id=%s", chat_id)
       return {"error": {"message": "Interrupted by Stop."}}

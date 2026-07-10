@@ -40,6 +40,7 @@ fi
 DATA_DIR="${DATA_DIR:-/data}"
 DB="$DATA_DIR/db/ultimate.db"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$DATA_DIR/cli-auth/claude}"
+export CODEX_HOME="${CODEX_HOME:-$DATA_DIR/cli-auth/codex}"
 
 # The chat runner records Claude sessions under the project dir for cwd=/data,
 # which the CLI encodes by stripping the leading slash and turning every '/'
@@ -147,6 +148,33 @@ reseed_prompt() {
   fi
 }
 
+run_codex_reseed() {
+  local prompt="$1" out log_tmp rc
+  out="$(mktemp "${TMPDIR:-/tmp}/fork-chat-codex-out.XXXXXX")" || return 5
+  log_tmp="$(mktemp "${TMPDIR:-/tmp}/fork-chat-codex-log.XXXXXX")" || {
+    rm -f "$out"
+    return 5
+  }
+  (
+    cd "$DATA_DIR" && codex exec \
+      --skip-git-repo-check \
+      --ephemeral \
+      --sandbox read-only \
+      --color never \
+      --output-last-message "$out" \
+      "$prompt"
+  ) >"$log_tmp" 2>&1
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    cat "$log_tmp" >&2
+    echo "fork-chat: codex interview failed for $CHAT_ID (rc=$rc)" >&2
+    rm -f "$out" "$log_tmp"
+    return "$rc"
+  fi
+  cat "$out"
+  rm -f "$out" "$log_tmp"
+}
+
 # Provider + CLI session id for the chat (reads the DB directly — no auth).
 # A DB error exits non-zero (no `2>/dev/null` swallow) and a missing chat row
 # exits 3, so we can tell "read failed / no such chat" from "chat exists but
@@ -190,10 +218,13 @@ case "$PROVIDER" in
     ;;
   codex)
     # Codex thread-resume isn't exposed as a clean CLI fork; reseed from the
-    # chat's recent messages (same provider, not a byte-exact fork).
+    # chat's recent messages (same provider, not a byte-exact fork). Pin
+    # CODEX_HOME to the same auth dir real chat turns use and allow /data,
+    # which is intentionally not a git repo; otherwise Reflection's Codex
+    # interviews fail the CLI trust check and print nothing useful.
     MSGS="$(require_recent_messages)"; msgs_rc=$?
     [[ $msgs_rc -eq 0 ]] || exit "$msgs_rc"
-    codex exec "$(reseed_prompt "$MSGS")" 2>/dev/null
+    run_codex_reseed "$(reseed_prompt "$MSGS")"
     ;;
   *)
     echo "fork-chat: unknown provider '$PROVIDER'" >&2; exit 4 ;;
