@@ -854,19 +854,32 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       if msgs and msgs[-1].get("role") == "assistant":
         blocks = list(msgs[-1].get("blocks") or [])
         finalize_blocks(blocks)
-        # Drop any UNANSWERED question block. The in-memory pending-question
-        # future died with the process, so the card can never be answered —
-        # the answer route returns 410 (no registered pending). Leaving it
-        # renders an interactive card (questionAnswerable = hasQuestion &&
-        # isLastMsg && !sending, none of which reconcile changes) that
-        # dead-ends on submit. An ALREADY-answered question (has "answers")
-        # is real transcript and is kept; the interruption note below is the
-        # turn's outcome.
-        blocks = [
-          b for b in blocks
-          if not (b.get("type") == "question" and not b.get("answers"))
-        ]
-        blocks.append(err_block)
+        # Preserve a tail unanswered question. It is a durable human handoff,
+        # not a disposable in-memory callback: the route can record the later
+        # answer and restart a hidden continuation even though the original SDK
+        # future died with the process. Put the interruption note BEFORE the
+        # trailing question block(s) so the card remains the tail prompt and
+        # therefore remains answerable after reload. If there is no trailing
+        # open question, append the note as the turn's terminal outcome.
+        trailing_open_start = len(blocks)
+        while trailing_open_start > 0:
+          block = blocks[trailing_open_start - 1]
+          if block.get("type") != "question" or block.get("answers"):
+            break
+          trailing_open_start -= 1
+        if trailing_open_start < len(blocks):
+          wait_note = dict(err_block)
+          wait_note["message"] = (
+            note
+            + " Your answer is still needed; I will continue once you submit it."
+          )
+          blocks = (
+            blocks[:trailing_open_start]
+            + [wait_note]
+            + blocks[trailing_open_start:]
+          )
+        else:
+          blocks.append(err_block)
         # build_assistant_message omits ts; carry the turn's existing
         # stable ts (the frontend bridge + React keys rely on it — a
         # ts-less message is dropped by useBridgePartial). Mirrors the

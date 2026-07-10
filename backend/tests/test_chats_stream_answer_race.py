@@ -9,13 +9,15 @@ between "event published" and "registry populated" used to hit a
 410. The route now polls with a short grace period before deciding
 the question is stale.
 
-These tests pin three behaviours of that grace period:
+These tests pin four behaviours of that grace period:
 
   1. Happy path — pending registered before POST → 202 immediately.
   2. Race path — pending registered AFTER POST starts but inside
      the grace window → 202 after the registration lands.
-  3. Stale path — no pending, none arrives → 410 after the grace
-     window elapses, in roughly the budget the loop allows.
+  3. Recovery path — no live pending, but a durable open question remains
+     after restart → answer is recorded and a hidden continuation starts.
+  4. Stale path — no pending, none arrives, and no durable open question
+     exists → 410 after the grace window elapses.
 """
 
 import asyncio
@@ -24,9 +26,11 @@ from uuid import uuid4
 
 import pytest
 
+from app import chat as chat_mod
 from app import models, questions
 from app.database import SessionLocal
 from app.pending_questions import PendingQuestion
+from app.routes import chats_stream
 
 
 def _make_pending(future: asyncio.Future) -> PendingQuestion:
@@ -118,6 +122,16 @@ def _question_blocks(chat_id: str) -> list[dict]:
     db.close()
 
 
+def _set_pending_messages(chat_id: str, pending: list[dict]) -> None:
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.pending_messages = pending
+    db.commit()
+  finally:
+    db.close()
+
+
 def test_answer_delivers_immediately_when_pending_registered(
   client, auth, chat,
 ):
@@ -157,6 +171,76 @@ def test_answer_delivers_immediately_when_pending_registered(
     assert elapsed < 0.25, (
       f"happy path waited unexpectedly long: {elapsed:.3f}s"
     )
+
+  asyncio.run(go())
+
+
+def test_answer_recovers_durable_question_without_live_pending(
+  client, auth, chat, monkeypatch,
+):
+  """A restart kills the in-memory future but keeps the question block.
+
+  Submitting the answer should not gray out or 410 the card. It records the
+  answer, places the hidden continuation before unrelated queued work, and
+  starts that recovered continuation.
+  """
+  scheduled: list[dict] = []
+
+  def fake_schedule_continuation(**kwargs):
+    scheduled.append(kwargs)
+    # The test does not spawn a runner, so release the starting reservation the
+    # real scheduler would hand to run_chat.
+    chat_mod.discard_starting(kwargs["chat_id"])
+
+  monkeypatch.setattr(
+    chats_stream, "_schedule_continuation", fake_schedule_continuation,
+  )
+
+  async def go():
+    qid = "q-recovered"
+    _seed_question_block(chat.id, qid)
+    _set_pending_messages(
+      chat.id,
+      [{"role": "user", "content": "queued-visible", "ts": 3}],
+    )
+    assert questions.get(chat.id) is None
+
+    res = await asyncio.get_event_loop().run_in_executor(
+      None,
+      lambda: client.post(
+        f"/api/chats/{chat.id}/messages",
+        json={
+          "content": "- Pick one: b",
+          "hidden": True,
+          "answers": {"Pick one": "b"},
+          "question_id": qid,
+        },
+        headers=auth,
+      ),
+    )
+
+    assert res.status_code == 202, res.text
+    assert res.json()["status"] == "started"
+    assert scheduled, "recovered answer should start a hidden continuation"
+    assert scheduled[0]["next_user"]["hidden"] is True
+    assert scheduled[0]["next_user"]["content"] == "- Pick one: b"
+
+    db = SessionLocal()
+    try:
+      row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+      question = [
+        b for b in row.messages[1]["blocks"]
+        if b.get("type") == "question"
+      ][0]
+      assert question["answers"] == {"Pick one": "b"}
+      assert row.messages[-1]["hidden"] is True
+      assert row.messages[-1]["content"] == "- Pick one: b"
+      assert [m["content"] for m in row.pending_messages] == [
+        "queued-visible"
+      ]
+      assert row.run_status == "running"
+    finally:
+      db.close()
 
   asyncio.run(go())
 

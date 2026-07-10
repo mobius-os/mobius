@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, app_git, fs_locks, icon_cache, models, schemas,
+  activity, app_git, fs_locks, icon_cache, models, providers, schemas,
   source_dirs, theme,
 )
 from app.storage_io import delete_content_type_tree, read_capped_body
@@ -1091,7 +1091,9 @@ async def create_conflict_resolver_chat(
         )
 
     title = f"Resolve {app.name} update conflict"
-    provider = (owner.provider if owner else None) or "claude"
+    provider = providers.resolve_default_provider(
+      get_settings().data_dir, owner.provider if owner else None,
+    )
     chat = models.Chat(
       id=str(uuid.uuid4()),
       title=title,

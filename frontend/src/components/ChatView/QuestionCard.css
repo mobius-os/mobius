@@ -8,9 +8,6 @@
 .qcard--answered {
   pointer-events: none;
 }
-.qcard--stale {
-  background: color-mix(in srgb, var(--surface) 86%, var(--warning, #f59e0b));
-}
 
 .qcard__q + .qcard__q {
   margin-top: 14px;
@@ -208,14 +205,4 @@
 .qcard__submit:disabled {
   opacity: .4;
   cursor: default;
-}
-
-.qcard__status {
-  margin-top: 12px;
-  padding: 9px 10px;
-  border-radius: 8px;
-  background: var(--surface2, rgba(128,128,128,.1));
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.4;
 }

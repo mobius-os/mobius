@@ -6,21 +6,21 @@ pending future by peeking with `get`, identity-reclaiming with
 `claim_if`, then setting the result. Stop flows cancel the pending
 future via `cancel`.
 
-Timeout SLA — Claude has none; Codex has a 420-second bridge timeout
-that cancels the shared future and returns a JSON-RPC timeout error
-instead of fabricated empty answers. A pending question's future is
-resolved or cancelled by one of:
+Timeout SLA — none. A question is a human pause point, so every provider
+waits until the user answers or the owner explicitly stops the turn. A
+pending question's future is resolved or cancelled by one of:
   (a) the user-answer POST → resolves with the answers dict, or
-  (b) `stop_chat` / `stop_chat_for` → cancels the future, or
-  (c) the Codex bridge timeout → cancels the future.
+  (b) `stop_chat` / `stop_chat_for` → cancels the future.
 
-On the no-timeout Claude path, if neither user answer nor stop fires
-(container crash, lost client, stuck SDK), the future stays alive until
-the process restarts. This is intentional: the question card blocks the
-user's chat UI, so a silent timeout would silently drop their turn.
-Resolving with no answer would be worse than blocking — the agent would
-interpret the empty payload as a real choice and proceed with garbage
-state.
+If neither user answer nor stop fires, the future may remain pending
+forever. This is intentional: the question card blocks the user's chat UI,
+so a silent timeout would silently drop their turn. Resolving with no
+answer would be worse than blocking — the agent would interpret the empty
+payload as a real choice and proceed with garbage state. If the process
+restarts while a question is open, the in-memory future is gone, but the
+durable transcript keeps the question block; the answer route records the
+later answer and starts a hidden continuation so the collaboration can
+resume.
 
 `pending_questions.py` keeps the `PendingQuestion` dataclass alone so
 the type can be shared without dragging this module's globals into
@@ -38,6 +38,7 @@ from app.pending_questions import PendingQuestion
 # write the PendingQuestion in directly under the chat_id key. Routes
 # import `app.questions` and call `get` / `claim_if` / `cancel` / etc.
 _pending: dict[str, PendingQuestion] = {}
+_cancelled: dict[str, str | None] = {}
 
 
 def register(chat_id: str, pending: PendingQuestion) -> None:
@@ -49,6 +50,7 @@ def register(chat_id: str, pending: PendingQuestion) -> None:
   """
   if not chat_id:
     return
+  _cancelled.pop(chat_id, None)
   _pending[chat_id] = pending
 
 
@@ -104,8 +106,22 @@ def claim_if(chat_id: str, expected: "PendingQuestion") -> bool:
   current = _pending.get(chat_id)
   if current is expected:
     _pending.pop(chat_id, None)
+    _cancelled.pop(chat_id, None)
     return True
   return False
+
+
+def was_cancelled(chat_id: str, question_id: str | None = None) -> bool:
+  """Whether Stop explicitly cancelled this chat's pending question.
+
+  This is an in-memory tombstone, intentionally lost on process restart.
+  A lost process should be recoverable from the durable transcript; an
+  explicit Stop should not be rehydrated by a racing answer POST.
+  """
+  if chat_id not in _cancelled:
+    return False
+  cancelled_id = _cancelled[chat_id]
+  return question_id is None or cancelled_id is None or cancelled_id == question_id
 
 
 def cancel(chat_id: str) -> None:
@@ -117,5 +133,8 @@ def cancel(chat_id: str) -> None:
   cleaner and removes the temptation to re-fetch by chat_id.
   """
   pending = _pending.pop(chat_id, None)
-  if pending is not None and not pending.future.done():
+  if pending is None:
+    return
+  _cancelled[chat_id] = pending.question_id
+  if not pending.future.done():
     pending.future.cancel()

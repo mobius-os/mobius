@@ -91,6 +91,7 @@ function AgentChoiceCard({
   saving = false,
   saved = false,
   error = '',
+  connectedByProvider,
   onProviderChange,
   onModelChange,
   onEffortChange,
@@ -99,6 +100,11 @@ function AgentChoiceCard({
   const info = PROVIDER_INFO[provider]
   const Logo = info?.Logo
   const efforts = info?.efforts || []
+  const hasConnectedProvider = connectedByProvider &&
+    Object.values(connectedByProvider).some(Boolean)
+  const providerChoices = PROVIDER_CHOICES.filter((p) => (
+    !hasConnectedProvider || connectedByProvider[p.id] || p.id === provider
+  ))
   return (
     <div className={`settings-agent-card${provider ? '' : ' settings-agent-card--empty'}`}>
       <div className="settings-agent-card__head">
@@ -121,7 +127,7 @@ function AgentChoiceCard({
             aria-label={`${title} provider`}
           >
             {allowNone && <option value="">No secondary agent</option>}
-            {PROVIDER_CHOICES.map((p) => (
+            {providerChoices.map((p) => (
               <option key={p.id} value={p.id}>{p.label}</option>
             ))}
           </select>
@@ -840,6 +846,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                   choice={effectiveChatDraft}
                   models={modelsForProvider(effectiveChatDraft.provider)}
                   connected={connectedByProvider[effectiveChatDraft.provider]}
+                  connectedByProvider={connectedByProvider}
                   saving={chatSaving}
                   saved={chatSaved}
                   error={chatError}
@@ -871,6 +878,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                   choice={effectiveBackgroundDraft.primary}
                   models={modelsForProvider(effectiveBackgroundDraft.primary.provider)}
                   connected={connectedByProvider[effectiveBackgroundDraft.primary.provider]}
+                  connectedByProvider={connectedByProvider}
                   saving={backgroundSaving}
                   saved={backgroundSaved}
                   error={backgroundError}
@@ -885,6 +893,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                   choice={effectiveBackgroundDraft.fallback}
                   models={modelsForProvider(effectiveBackgroundDraft.fallback.provider)}
                   connected={connectedByProvider[effectiveBackgroundDraft.fallback.provider]}
+                  connectedByProvider={connectedByProvider}
                   saving={backgroundSaving}
                   saved={backgroundSaved}
                   error={backgroundError}

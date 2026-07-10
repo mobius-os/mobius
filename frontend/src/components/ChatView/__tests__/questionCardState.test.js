@@ -5,22 +5,22 @@ import assert from 'node:assert/strict'
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
-test('stale unanswered question cards explain that they are no longer active', () => {
-  assert.match(component, /const stale = disabled && !answered/,
-    'QuestionCard should distinguish stale unanswered cards from answered cards')
-  assert.match(component, /className=\{`qcard[^`]*qcard--stale/,
-    'stale cards should receive a visible state class')
-  assert.match(component, /This question is no longer active/,
-    'stale cards should explain why the controls are disabled')
+test('unanswered question cards do not have a stale gray state', () => {
+  assert.doesNotMatch(component, /const stale = disabled && !answered/,
+    'QuestionCard should not model unanswered questions as stale')
+  assert.doesNotMatch(component, /qcard--stale/,
+    'unanswered cards should not receive a stale visual class')
+  assert.doesNotMatch(component, /This question is no longer active/,
+    'unanswered cards should not tell the user the question expired')
   assert.match(component, /\{!answered && !disabled && \(\s*<button[\s\S]*className="qcard__submit"/,
     'submit button should render only while the card can still be answered')
   assert.match(component, /\{!answered && !disabled && \(\s*<div className="qcard__hint"/,
-    'selection hints should not invite interaction on stale cards')
+    'selection hints should render only when the card is answerable')
 })
 
-test('stale question cards have dedicated styling', () => {
-  assert.match(css, /\.qcard--stale\s*\{[\s\S]*?\}/,
-    'stale question cards should have a visible style hook')
-  assert.match(css, /\.qcard__status\s*\{[\s\S]*?\}/,
-    'stale question cards should style their explanatory status')
+test('question card css has no stale styling hook', () => {
+  assert.doesNotMatch(css, /\.qcard--stale\s*\{[\s\S]*?\}/,
+    'stale question styling should not come back')
+  assert.doesNotMatch(css, /\.qcard__status\s*\{[\s\S]*?\}/,
+    'expiration status styling should not come back')
 })

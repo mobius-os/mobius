@@ -841,12 +841,13 @@ async def spawn_platform_conflict_chat(
   import time
   import uuid
 
-  from app import models
+  from app import models, providers
   from app.broadcast import create_broadcast, get_system_broadcast
   from app.chat import (
     current_run_generation, discard_starting, mark_starting, run_chat,
   )
   from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.config import get_settings
   from app.push import notify_owner
 
   title = "Resolve platform update conflict"
@@ -863,7 +864,9 @@ async def spawn_platform_conflict_chat(
   owner = db.query(models.Owner).first()
   if owner is None:
     return None
-  provider = owner.provider or "claude"
+  provider = providers.resolve_default_provider(
+    get_settings().data_dir, owner.provider,
+  )
 
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
   content = (

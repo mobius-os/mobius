@@ -132,8 +132,9 @@ function useAppTokenQuery(appId) {
 }
 
 async function fetchClaudeProviderStatus() {
-  const res = await api.auth.provider.claude.status()
-  return jsonOrThrow(res, 'provider status fetch failed:')
+  const res = await api.auth.provider.statuses()
+  const data = await jsonOrThrow(res, 'provider status fetch failed:')
+  return data?.claude || { authenticated: false }
 }
 
 function useClaudeProviderStatusQuery({ enabled = true } = {}) {

@@ -464,6 +464,47 @@ PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 # The default provider when none is configured.
 DEFAULT_PROVIDER = "claude"
 
+# When the stored provider is still the historical default but is not
+# authenticated, prefer a connected provider over showing a dead default.
+# Codex is first because the setup wizard leads with it for new installs.
+CONNECTED_DEFAULT_ORDER = ("codex", "claude")
+
+
+def authenticated_provider_ids(data_dir: str) -> list[str]:
+  """Return provider ids whose credential preflight currently passes."""
+  ids: list[str] = []
+  for provider_id in CONNECTED_DEFAULT_ORDER:
+    provider = PROVIDERS.get(provider_id)
+    if provider and provider.check_auth(data_dir) is None:
+      ids.append(provider_id)
+  return ids
+
+
+def resolve_default_provider(
+  data_dir: str,
+  configured_provider: str | None = None,
+) -> str:
+  """Resolve the provider new chats/settings should present.
+
+  Existing installs have `Owner.provider="claude"` from the original DB
+  default even when the user only connected Codex during setup. In that
+  case, surfacing Claude as the default creates a dead-end picker. Treat the
+  configured provider as authoritative when it is connected, but if it is the
+  historical default and is not connected, fall forward to the first connected
+  provider.
+  """
+  provider_id = (
+    configured_provider if configured_provider in PROVIDERS else DEFAULT_PROVIDER
+  )
+  if (
+    provider_id == DEFAULT_PROVIDER
+    and PROVIDERS[provider_id].check_auth(data_dir) is not None
+  ):
+    connected = authenticated_provider_ids(data_dir)
+    if connected:
+      return connected[0]
+  return provider_id
+
 
 def get_provider(provider_id: str | None = None) -> BaseProvider:
   """Returns a provider by ID, falling back to the default."""

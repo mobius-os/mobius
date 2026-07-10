@@ -290,6 +290,48 @@ def test_get_settings_returns_background_agent_defaults(client, auth):
   assert body["background_agents"]["fallback"] is None
 
 
+def test_get_settings_prefers_connected_codex_over_unconnected_default(client, auth):
+  """A fresh owner row defaults to Claude, but Codex-only setup should
+  surface Codex as the active default instead of a disconnected Claude."""
+  from pathlib import Path
+  from app.config import get_settings as _gs
+
+  codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
+  codex_auth.parent.mkdir(parents=True, exist_ok=True)
+  codex_auth.write_text("{}", encoding="utf-8")
+
+  try:
+    body = client.get("/api/settings", headers=auth).json()
+    assert body["codex_authenticated"] is True
+    assert body["provider"] == "codex"
+    assert body["agent_settings"]["model"] == "gpt-5.5"
+    assert body["background_agents"]["primary"]["provider"] == "codex"
+  finally:
+    codex_auth.unlink(missing_ok=True)
+
+
+def test_new_chat_prefers_connected_codex_over_unconnected_default(
+  client, auth, db,
+):
+  """New chats should inherit the usable provider, not the historical
+  Owner.provider default, after a Codex-only setup."""
+  from pathlib import Path
+  from app import models
+  from app.config import get_settings as _gs
+
+  codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
+  codex_auth.parent.mkdir(parents=True, exist_ok=True)
+  codex_auth.write_text("{}", encoding="utf-8")
+
+  try:
+    r = client.post("/api/chats", json={"title": "Codex first"}, headers=auth)
+    assert r.status_code == 200, r.text
+    chat = db.query(models.Chat).filter(models.Chat.id == r.json()["id"]).first()
+    assert chat.provider == "codex"
+  finally:
+    codex_auth.unlink(missing_ok=True)
+
+
 def test_set_chat_agent_defaults_persists_without_clobbering_background(client, auth):
   """POST /api/settings can update global chat defaults separately."""
   from app.config import get_settings as _gs

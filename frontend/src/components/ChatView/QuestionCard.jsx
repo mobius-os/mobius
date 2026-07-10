@@ -19,7 +19,6 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
-  const stale = disabled && !answered
 
   const allAnswered = questions.every(q => {
     const a = answers[q.question]
@@ -84,8 +83,8 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
 
   return (
     <div
-      className={`qcard${answered ? ' qcard--answered' : ''}${stale ? ' qcard--stale' : ''}`}
-      aria-disabled={stale || undefined}
+      className={`qcard${answered ? ' qcard--answered' : ''}`}
+      aria-disabled={disabled && !answered ? true : undefined}
     >
       {questions.map((q, qi) => {
         const selected = answers[q.question]
@@ -223,11 +222,6 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
           </div>
         )
       })}
-      {stale && (
-        <div className="qcard__status" role="status">
-          This question is no longer active. Reply in chat if you still want to answer.
-        </div>
-      )}
       {!answered && !disabled && (
         <button
           type="button"

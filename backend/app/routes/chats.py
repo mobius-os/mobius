@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app import activity, auth, models, questions
+from app import activity, auth, models, providers, questions
 from app.config import get_settings
 from app.chat import (
   _clear_run_status,
@@ -302,7 +302,10 @@ def create_chat(
   import uuid
 
   owner = db.query(models.Owner).first()
-  provider = (owner.provider if owner else None) or "claude"
+  data_dir = get_settings().data_dir
+  provider = providers.resolve_default_provider(
+    data_dir, owner.provider if owner else None,
+  )
 
   chat = models.Chat(
     id=str(uuid.uuid4()),
@@ -1042,7 +1045,10 @@ def create_app_chat(
   import uuid
 
   owner = db.query(models.Owner).first()
-  provider = body.provider or (owner.provider if owner else None) or "claude"
+  data_dir = get_settings().data_dir
+  provider = body.provider or providers.resolve_default_provider(
+    data_dir, owner.provider if owner else None,
+  )
   if provider not in ("claude", "codex"):
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
 

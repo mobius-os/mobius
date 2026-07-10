@@ -112,9 +112,9 @@ def test_request_user_input_method_string_unchanged():
 def test_request_user_input_bridge_has_no_user_answer_timeout():
   """The Codex bridge must honor the AskUserQuestion no-timeout contract.
 
-  A bounded ``Future.result(timeout=...)`` turns a slow human answer into a
-  stale grey card and makes the agent end the turn before the user can approve.
-  Stop/cancel remains the explicit escape hatch.
+  A bounded ``Future.result(timeout=...)`` turns a slow human answer into an
+  artificial expiry and makes the agent end the turn before the user can
+  approve. Stop/cancel remains the explicit escape hatch.
   """
   import inspect
   from app import codex_sdk_runner

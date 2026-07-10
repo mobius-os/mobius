@@ -242,9 +242,10 @@ class AppendPending(_Command):
 
   Replicates `_append_to_pending`: optionally applies `answers` to the
   last question block, bumps the new message's `ts` so it is unique
-  within the queue + transcript, appends it to `pending_messages`, stamps
-  `updated_at`, and commits.  Returns `{"stored", "pending"}` — the stored
-  message (with its final ts) and the resulting queue.
+  within the queue + transcript, appends (or prepends) it to
+  `pending_messages`, stamps `updated_at`, and commits. Returns
+  `{"stored", "pending"}` — the stored message (with its final ts) and the
+  resulting queue.
   """
 
   chat_id: str = ""
@@ -253,6 +254,8 @@ class AppendPending(_Command):
   answers: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
+  front: bool = False
+  require_answer_match: bool = False
 
 
 @dataclass
@@ -1330,21 +1333,26 @@ class ChatWriterActor:
 
     Replicates `_append_to_pending`: applies `answers` to the last question
     block (when present), bumps the message `ts` so it is unique within the
-    queue + transcript, appends to `pending_messages`, commits.  Returns the
-    stored message (with its final ts) and the resulting queue.
+    queue + transcript, appends or prepends to `pending_messages`, commits.
+    Returns the stored message (with its final ts) and the resulting queue.
     """
     from datetime import UTC, datetime
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("AppendPending: chat not found or deleted")
-    apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+    applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+    if cmd.require_answer_match and not applied:
+      raise _PersistFailed("AppendPending: no matching question block")
     pending = list(chat.pending_messages or [])
     new_msg = dict(cmd.user_msg)
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
     _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
-    pending.append(new_msg)
+    if cmd.front:
+      pending.insert(0, new_msg)
+    else:
+      pending.append(new_msg)
     chat.pending_messages = pending
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)

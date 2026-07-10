@@ -154,7 +154,8 @@
 
 .codex-auth__step a {
   color: var(--accent);
-  word-break: break-all;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .codex-auth__step-num {
@@ -172,23 +173,66 @@
 }
 
 .codex-auth__code {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 75%, var(--bg));
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: 17px;
   letter-spacing: 0;
   font-variant-numeric: tabular-nums;
-  color: var(--accent);
+  color: var(--text);
+  padding: 7px 10px;
+  user-select: all;
+  cursor: copy;
+}
+
+.codex-auth__code-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label label"
+    "code action";
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.codex-auth__code-label {
+  grid-area: label;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.codex-auth__code-copy .codex-auth__code {
+  grid-area: code;
+}
+
+.codex-auth__copy-btn {
+  grid-area: action;
+  white-space: nowrap;
+}
+
+.codex-auth__copy-error {
+  margin: 2px 0 0 32px;
 }
 
 .codex-auth__pending-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 8px;
   margin-top: 4px;
+  flex-wrap: wrap;
 }
 
 .codex-auth__waiting {
   margin: 0;
+  margin-right: auto;
 }
 
 /* ── Unified provider rows (shared by Settings + Setup) ──── */
