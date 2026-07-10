@@ -1,7 +1,7 @@
 """File watcher that auto-recompiles mini-app source on edit.
 
-Watches source-like files under user app source dirs (`/data/apps/<slug>/`)
-and platform-owned core app source dirs (`/data/platform/core-apps/<slug>/`).
+Watches source-like files under installable app source dirs
+(`/data/apps/<slug>/`).
 When `index.jsx` or one of its sibling modules changes, looks up the app by
 its exact `source_dir` in the DB, re-reads `index.jsx`, recompiles from that
 real entry path so relative imports resolve, and persists the current entry
@@ -52,11 +52,7 @@ _IGNORED_SOURCE_PARTS = {
 
 def _source_roots() -> list[Path]:
   data_dir = Path(get_settings().data_dir)
-  roots = [source_dirs.apps_root(data_dir)]
-  platform_core = source_dirs.platform_core_root(data_dir)
-  if platform_core.is_dir():
-    roots.append(platform_core)
-  return roots
+  return [source_dirs.apps_root(data_dir)]
 
 
 def _source_dir_for_changed_path(path: str | Path) -> Path | None:
@@ -75,9 +71,6 @@ def _source_dir_for_changed_path(path: str | Path) -> Path | None:
       continue
     if len(rel.parts) < 2:
       return None
-    if root == source_dirs.platform_core_root(get_settings().data_dir):
-      if not source_dirs.is_core_app_slug(rel.parts[0]):
-        return None
     ignored_parts = rel.parts[1:-1]
     if any(
       part in _IGNORED_SOURCE_PARTS or part.startswith(".")

@@ -18,5 +18,6 @@ belongs. Add a note here only when the fact is specific to *this* deployment.
 
 ## Notes
 
-- [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
-  graph, fixes apps, and writes a morning brief; overnight changes are normal.
+- [[a-nightly-reflection-pass-exists]] — the overnight pass writes a morning
+  brief, reviews Memory's maintenance log, and fixes safe app issues; overnight
+  changes are normal.

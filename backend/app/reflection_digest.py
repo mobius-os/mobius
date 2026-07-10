@@ -1,10 +1,9 @@
 """Pure helpers for the nightly Reflection per-app digest.
 
 Kept side-effect-free and importable so the error-classification logic is
-unit-testable, while `core-apps/reflection/fetch.sh` stays the HTTP/IO layer
-that fetches the inputs and writes `per-app-digest.json`. The fetch.sh
-heredoc runs with `PYTHONPATH=/app`, so it imports this as
-`from app import reflection_digest`.
+unit-testable, while Reflection's scheduled app job stays the HTTP/IO layer that
+fetches the inputs and writes `per-app-digest.json`. The job's heredoc runs with
+`PYTHONPATH=/app`, so it imports this as `from app import reflection_digest`.
 
 This summarizes the `app_error` events the platform records in
 `/data/logs/activity.jsonl` (uncaught JS errors POSTed to

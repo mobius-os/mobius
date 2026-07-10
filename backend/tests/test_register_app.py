@@ -1,6 +1,6 @@
 """register_app.py decides create-vs-update by a stable key.
 
-Feature 097: a core app renamed in place (Memory Graph -> Memory, same
+Feature 097: an app renamed in place (Memory Graph -> Memory, same
 /data/apps/<slug>/ source dir) must UPDATE its existing row, not create a
 duplicate. Matching on the display name regressed here because the name is
 exactly the field a rename changes; matching on source_dir (stable across a
@@ -65,9 +65,9 @@ def test_source_dir_match_beats_name_collision():
   assert existing is not None and existing["id"] == 4
 
 
-def test_core_migration_matches_explicit_legacy_source_dir():
-  """The core installer can move a row from the old copied source tree to
-  /data/platform/core-apps without creating a duplicate."""
+def test_migration_matches_explicit_legacy_source_dir():
+  """A migration hint can match a row at an older source tree without creating
+  a duplicate."""
   mod = _load_module()
   apps = [
     {"id": 10, "name": "Beat Machine", "source_dir": "/data/apps/beatmachine"},
@@ -81,7 +81,7 @@ def test_core_migration_matches_explicit_legacy_source_dir():
   assert existing is not None and existing["id"] == 10
 
 
-def test_core_migration_ignores_unrelated_legacy_source_dir():
+def test_migration_ignores_unrelated_legacy_source_dir():
   """A legacy source-dir hint is not enough to adopt an unrelated row."""
   mod = _load_module()
   apps = [
@@ -102,7 +102,7 @@ def test_core_migration_ignores_unrelated_legacy_source_dir():
 
 
 def test_update_patch_includes_name(monkeypatch, tmp_path):
-  """Registering an existing source dir should carry core display renames."""
+  """Registering an existing source dir should carry display renames."""
   mod = _load_module()
   entry = tmp_path / "index.jsx"
   entry.write_text("export default function App() { return null }")

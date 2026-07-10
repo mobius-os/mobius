@@ -17,7 +17,8 @@ how-to (that's a **skill** now, under `/data/shared/skills/`). See
 for the rules.
 
 This graph starts almost empty by design — a scaffold of maps with no facts yet.
-It **grows through use**, and the nightly **Reflection** pass curates it.
+It **grows through use**. The **Memory** app owns scheduled consolidation; the
+**Reflection** app may review Memory's update log for system-improvement signals.
 
 ## Maps
 
@@ -36,8 +37,9 @@ It **grows through use**, and the nightly **Reflection** pass curates it.
   weight observation extra in early chats.
 - [[memory-is-visible-to-the-partner]] — the Memory app shows every note to the
   partner; write as if you'd stand behind it when quoted back.
-- [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
-  chat notes into the graph and fixes apps; defer heavy reorganizing to it.
+- [[a-nightly-reflection-pass-exists]] — the overnight system-improvement pass
+  writes a brief and reviews Memory's maintenance log; Memory owns graph
+  consolidation.
 
 ## Recent chats
 

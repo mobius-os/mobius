@@ -1,16 +1,15 @@
-"""Shared source-directory rules for mini-apps and platform core apps."""
+"""Shared source-directory rules for installable mini-apps."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
 
-SourceDirKind = Literal["app", "platform_core"]
+SourceDirKind = Literal["app"]
 
-# Built-in apps whose editable source is owned by the platform repo when
-# /data/platform is active. Ordinary user/store app source remains under
-# /data/apps/<slug>.
-CORE_APP_SLUGS = frozenset({"memory", "reflection", "beat-machine"})
+# Installable apps own their editable source under /data/apps/<slug>. The App
+# Store itself is bootstrapped separately; no catalog app is platform-owned.
+CORE_APP_SLUGS = frozenset()
 
 
 def apps_root(data_dir: str | Path) -> Path:
@@ -18,21 +17,24 @@ def apps_root(data_dir: str | Path) -> Path:
 
 
 def platform_core_root(data_dir: str | Path) -> Path:
+  """Legacy location used only to recognize old rows during migration."""
   return (Path(data_dir) / "platform" / "core-apps").resolve()
 
 
 def is_core_app_slug(slug: str | None) -> bool:
+  """Compatibility helper: catalog apps are no longer platform-core apps."""
   return bool(slug) and slug in CORE_APP_SLUGS
 
 
 def core_source_dir(data_dir: str | Path, slug: str) -> Path:
+  """Legacy platform-core source path for old-row migration checks."""
   return platform_core_root(data_dir) / slug
 
 
 def source_dir_kind(
   source_dir: str | Path | None, data_dir: str | Path,
 ) -> SourceDirKind | None:
-  """Classify an absolute source dir under the two approved source roots."""
+  """Classify an absolute source dir under the approved app source root."""
   if not source_dir:
     return None
   try:
@@ -44,17 +46,13 @@ def source_dir_kind(
   if resolved.parent == root and not resolved.name.isdigit():
     return "app"
 
-  core_root = platform_core_root(data_dir)
-  if resolved.parent == core_root and is_core_app_slug(resolved.name):
-    return "platform_core"
-
   return None
 
 
 def is_platform_core_source_dir(
   source_dir: str | Path | None, data_dir: str | Path,
 ) -> bool:
-  return source_dir_kind(source_dir, data_dir) == "platform_core"
+  return False
 
 
 def source_dir_for_changed_path(
@@ -62,9 +60,8 @@ def source_dir_for_changed_path(
 ) -> Path | None:
   """Return the owning source dir for a source-like file change.
 
-  The owner is the immediate child of either /data/apps or
-  /data/platform/core-apps. The caller is responsible for extension and
-  ignored-subdir filtering before calling this helper.
+  The owner is the immediate child of /data/apps. The caller is responsible for
+  extension and ignored-subdir filtering before calling this helper.
   """
   p = Path(path)
   try:
@@ -72,20 +69,14 @@ def source_dir_for_changed_path(
   except (OSError, RuntimeError):
     return None
 
-  for root, require_core_slug in (
-    (apps_root(data_dir), False),
-    (platform_core_root(data_dir), True),
-  ):
-    try:
-      rel = resolved.relative_to(root)
-    except ValueError:
-      continue
-    if len(rel.parts) < 2:
-      return None
-    slug = rel.parts[0]
-    if slug.isdigit():
-      return None
-    if require_core_slug and not is_core_app_slug(slug):
-      return None
-    return root / slug
-  return None
+  root = apps_root(data_dir)
+  try:
+    rel = resolved.relative_to(root)
+  except ValueError:
+    return None
+  if len(rel.parts) < 2:
+    return None
+  slug = rel.parts[0]
+  if slug.isdigit():
+    return None
+  return root / slug

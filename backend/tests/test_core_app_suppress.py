@@ -1,4 +1,4 @@
-"""Unit tests for the durable core-app suppression marker."""
+"""Compatibility tests for the retired core-app suppression marker."""
 
 from pathlib import Path
 
@@ -9,25 +9,15 @@ def _marker(data_dir, slug):
   return Path(data_dir) / "shared" / "suppressed-core-apps" / slug
 
 
-def test_memory_and_reflection_suppressible_store_and_ordinary_not():
-  assert core_app_suppress.is_suppressible_core_slug("memory")
-  # Reflection is suppressible (owner call): uninstalling it also stops its
-  # nightly run — an accepted trade-off (see the module docstring).
-  assert core_app_suppress.is_suppressible_core_slug("reflection")
-  assert core_app_suppress.is_suppressible_core_slug("beat-machine")
-  # The App Store is the app-manager — never durably suppressible.
-  assert not core_app_suppress.is_suppressible_core_slug("store")
-  assert not core_app_suppress.is_suppressible_core_slug("notes")
-  assert not core_app_suppress.is_suppressible_core_slug("")
-  assert not core_app_suppress.is_suppressible_core_slug(None)
+def test_no_catalog_app_is_suppressible():
+  for slug in ("memory", "reflection", "beat-machine", "store", "notes", "", None):
+    assert not core_app_suppress.is_suppressible_core_slug(slug)
 
 
-def test_mark_creates_marker_for_core_slug(tmp_path):
+def test_mark_is_noop_for_historical_platform_app(tmp_path):
   core_app_suppress.mark_suppressed(tmp_path, "memory", app_id=42)
-  assert _marker(tmp_path, "memory").exists()
-  assert core_app_suppress.is_suppressed(tmp_path, "memory")
-  body = _marker(tmp_path, "memory").read_text()
-  assert "app_id: 42" in body  # observability
+  assert not _marker(tmp_path, "memory").exists()
+  assert not core_app_suppress.is_suppressed(tmp_path, "memory")
 
 
 def test_mark_is_noop_for_ordinary_app(tmp_path):
@@ -43,7 +33,8 @@ def test_mark_is_noop_for_store(tmp_path):
 
 
 def test_clear_removes_marker(tmp_path):
-  core_app_suppress.mark_suppressed(tmp_path, "memory")
+  _marker(tmp_path, "memory").parent.mkdir(parents=True)
+  _marker(tmp_path, "memory").write_text("old marker", encoding="utf-8")
   assert core_app_suppress.is_suppressed(tmp_path, "memory")
   core_app_suppress.clear_suppressed(tmp_path, "memory")
   assert not core_app_suppress.is_suppressed(tmp_path, "memory")
@@ -58,16 +49,13 @@ def test_clear_is_noop_when_absent(tmp_path):
 
 def test_list_suppressed(tmp_path):
   assert core_app_suppress.list_suppressed(tmp_path) == set()
-  core_app_suppress.mark_suppressed(tmp_path, "memory")
-  core_app_suppress.mark_suppressed(tmp_path, "reflection")
-  core_app_suppress.mark_suppressed(tmp_path, "beat-machine")
-  # a non-suppressible slug is a no-op and never appears
-  core_app_suppress.mark_suppressed(tmp_path, "store")
-  assert core_app_suppress.list_suppressed(tmp_path) == {"memory", "reflection", "beat-machine"}
+  marker_dir = tmp_path / "shared" / "suppressed-core-apps"
+  marker_dir.mkdir(parents=True)
+  (marker_dir / "memory").write_text("old", encoding="utf-8")
+  (marker_dir / "reflection").write_text("old", encoding="utf-8")
+  assert core_app_suppress.list_suppressed(tmp_path) == {"memory", "reflection"}
 
 
-def test_marker_path_matches_shell_check(tmp_path):
-  # install-core-apps.sh checks `$DATA_DIR/shared/suppressed-core-apps/$slug`.
-  # Keep the Python marker path in lockstep with that literal.
+def test_mark_no_longer_creates_shell_marker(tmp_path):
   core_app_suppress.mark_suppressed(tmp_path, "memory")
-  assert (tmp_path / "shared" / "suppressed-core-apps" / "memory").is_file()
+  assert not (tmp_path / "shared" / "suppressed-core-apps" / "memory").exists()

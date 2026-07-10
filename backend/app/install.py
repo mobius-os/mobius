@@ -45,7 +45,7 @@ from PIL import Image as _PILImage
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, models, source_dirs
+from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
 from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
 # Keep the underscore alias: install._http_get calls _validate_url_safe, and
@@ -664,12 +664,49 @@ def _should_force_core_store_update(
 # migration window closes.
 PRE_RENAME_PLATFORM_SLUGS = ("mind", "dreaming")
 
-# Platform/core apps that must never be silently ADOPTED (and thereby replaced
+# Historical platform-owned app slugs. They are no longer core apps, but old
+# instances can still have rows pointing at /data/platform/core-apps/<slug>.
+# Keep them reserved from untrusted previous_id adoption and migrate them only
+# from the trusted mobius-os catalog.
+HISTORICAL_PLATFORM_APP_SLUGS = legacy_platform_apps.SLUGS
+
+# Platform/store slugs that must never be silently ADOPTED (and thereby replaced
 # in place, inheriting the row's id + storage) by a `previous_id` declaration in
 # an untrusted manifest. See the guard in the predecessor-adoption block.
 _RESERVED_PLATFORM_SLUGS = frozenset({
-  *source_dirs.CORE_APP_SLUGS, "store", *PRE_RENAME_PLATFORM_SLUGS,
+  *HISTORICAL_PLATFORM_APP_SLUGS, "store", *PRE_RENAME_PLATFORM_SLUGS,
 })
+
+
+def _is_legacy_platform_source_dir(
+  source_dir: str | None,
+  data_dir: str | Path,
+  slug: str | None,
+) -> bool:
+  return legacy_platform_apps.is_legacy_source_dir(source_dir, data_dir, slug)
+
+
+def _is_trusted_legacy_platform_catalog_install(
+  app: models.App | None,
+  manifest_id: str,
+  canonical_manifest_url: str,
+  data_dir: str | Path,
+) -> bool:
+  """True when a trusted same-id catalog install should move a baked app out
+  of platform-owned source.
+
+  Old rows can be found through several identity shapes before the no-URL
+  legacy-platform fallback runs: canonical manifest_url, raw `mobius.json`, or
+  a bare base URL. Treat all of those as the same forward migration, while still
+  rejecting previous_id renames or untrusted manifests.
+  """
+  return (
+    app is not None
+    and manifest_id == app.slug
+    and manifest_id in HISTORICAL_PLATFORM_APP_SLUGS
+    and _is_trusted_catalog_source(canonical_manifest_url)
+    and _is_legacy_platform_source_dir(app.source_dir, data_dir, app.slug)
+  )
 
 
 def _is_trusted_catalog_source(canonical_manifest_url: str) -> bool:
@@ -1749,31 +1786,43 @@ async def install_from_manifest(
         if existing:
           adopt_kind = "legacy"
   settings_data_dir = get_settings().data_dir
-  if existing is None and manifest_id in source_dirs.CORE_APP_SLUGS:
+  if _is_trusted_legacy_platform_catalog_install(
+    existing, manifest_id, canonical_manifest_url, settings_data_dir,
+  ):
+    adopt_kind = "legacy-platform"
+  if (
+    existing is None
+    and manifest_id in HISTORICAL_PLATFORM_APP_SLUGS
+    and _is_trusted_catalog_source(canonical_manifest_url)
+  ):
     platform_row = (
       db.query(models.App)
-      .filter(models.App.slug == manifest_id)
+      .filter(
+        models.App.slug == manifest_id,
+        models.App.deleted_at.is_(None),
+        (models.App.manifest_url.is_(None))
+        | (models.App.manifest_url == ""),
+      )
       .first()
     )
-    if platform_row and source_dirs.is_platform_core_source_dir(
-      platform_row.source_dir, settings_data_dir,
+    if platform_row and _is_legacy_platform_source_dir(
+      platform_row.source_dir, settings_data_dir, manifest_id,
     ):
-      raise HTTPException(
-        409,
-        (
-          "Built-in platform apps are restored and updated by platform "
-          "updates, not by the manifest installer."
-        ),
-      )
+      existing = platform_row
+      adopt_kind = "legacy-platform"
   mode = "update" if existing else "install"
-  if existing and source_dirs.is_platform_core_source_dir(
-    existing.source_dir, settings_data_dir,
+  if (
+    existing
+    and _is_legacy_platform_source_dir(
+      existing.source_dir, settings_data_dir, existing.slug,
+    )
+    and adopt_kind != "legacy-platform"
   ):
     raise HTTPException(
       409,
       (
-        "Built-in platform apps are updated by platform updates, not by the "
-        "manifest installer."
+        "This legacy platform-owned app must be migrated by installing its "
+        "trusted mobius-os catalog entry."
       ),
     )
 
@@ -1875,6 +1924,27 @@ async def install_from_manifest(
       # unreviewed old code, or flip offline_capable away from what the
       # running code's service-worker logic expects.
       db.flush()
+      if adopt_kind == "legacy-platform":
+        old_source_dir = app.source_dir
+        target_slug = manifest_id
+        target_source_dir = str(data_dir / "apps" / target_slug)
+        try:
+          _reject_if_source_dir_taken(
+            db, target_source_dir, exclude_id=app.id,
+          )
+        except HTTPException:
+          target_slug = allocate_unique_slug(db, manifest["name"])
+          target_source_dir = str(data_dir / "apps" / target_slug)
+        if not Path(target_source_dir).exists():
+          created_paths.append(Path(target_source_dir))
+        if old_source_dir:
+          async with fs_locks.source_dir_lock(old_source_dir):
+            await asyncio.to_thread(_unregister_cron, Path(old_source_dir))
+        app.slug = target_slug
+        app.source_dir = target_source_dir
+        app.manifest_url = canonical_manifest_url
+        db.flush()
+
       # Identity migration after an ADOPTION (rename or legacy). The adopted row
       # still carries the predecessor's slug + on-disk source tree, but its new
       # identity is `manifest_id` — move the tree to the new id's path and
@@ -1885,7 +1955,7 @@ async def install_from_manifest(
       # is never touched. Done BEFORE the git block + source-write + cron phases
       # so the rest of the install writes to and registers cron at the NEW path.
       # A plain re-install (adopt_kind == "") never enters here.
-      if adopt_kind and manifest_id != app.slug:
+      if adopt_kind and adopt_kind != "legacy-platform" and manifest_id != app.slug:
         old_source_dir = app.source_dir
         target_slug = manifest_id
         target_source_dir = str(data_dir / "apps" / target_slug)

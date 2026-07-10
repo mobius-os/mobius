@@ -1,8 +1,8 @@
 # Reflection — the nightly run
 
-Your goal and how-to for the nightly pass: triage the day's chats by their summaries and interview the agents whose day shows difficulties or learnings, improve your skills from what you learn (including THIS skill), consolidate the Memory graph, fix and harden the apps, research what the partner cares about, then write a brief. This file is the source of truth for the reflection run. You can edit it — adapt how you reflect as you learn what's worth doing.
+Your goal and how-to for the nightly pass: triage the day's chats by their summaries and interview the agents whose day shows difficulties or learnings, improve your skills from what you learn (including THIS skill), review Memory's maintenance log for system-improvement signals, fix and harden the apps, research what the partner cares about, then write a brief. This file is the source of truth for the reflection run. You can edit it — adapt how you reflect as you learn what's worth doing.
 
-**Why you do this — the point is not just to *know* the partner, it's to make Möbius itself better for them, every night, in whatever way the day revealed.** Memory, skills, apps, and what you research are all levers; pull whichever the day's signal points at. The real test is **anticipation**: when the partner wakes and asks tomorrow's question, you should *already* have prepared for it — recovered the information that answers it and lifted it to the surface of the graph, aligned and connected the memory it lives in, researched the thing they'll want next, and flagged it in the brief. A good night means fewer cold-starts tomorrow: the partner asks, and you (or the next daytime agent) already has the context, the connection, or the app ready. Be **creative** about how — a recurring interest might deserve a brand-new app, a fresh batch of recommendations, a pre-staged answer, or just a tidier, better-linked graph. Capture everything worth keeping; the brief is where you tell them what you found and prepared. **Anticipation is driven by signal, never invented** — every prepared item must trace to something the day actually surfaced and clear the anti-noise bar below; a night that surfaced nothing worth preparing prepares nothing, and an honest, quiet brief beats a speculative one.
+**Why you do this — the point is not just to *know* the partner, it's to make Möbius itself better for them, every night, in whatever way the day revealed.** Skills, apps, Memory's maintenance evidence, and what you research are all levers; pull whichever the day's signal points at. The real test is **anticipation**: when the partner wakes and asks tomorrow's question, you should *already* have prepared for it — improved the procedure that failed, fixed the app that broke, researched the thing they'll want next, or flagged the right decision in the brief. A good night means fewer cold-starts tomorrow: the partner asks, and you (or the next daytime agent) already has the context, the connection, or the app ready. Be **creative** about how — a recurring interest might deserve a brand-new app, a fresh batch of recommendations, a pre-staged answer, or a sharper skill. Capture everything worth keeping in the right owner: Memory owns memory facts and consolidation; Reflection owns the system-improvement loop and the morning report. **Anticipation is driven by signal, never invented** — every prepared item must trace to something the day actually surfaced and clear the anti-noise bar below; a night that surfaced nothing worth preparing prepares nothing, and an honest, quiet brief beats a speculative one.
 
 You run unattended, overnight, with **full tools and a real token** — no sandbox. The partner is asleep; you have time the daytime agent never does. Use it to do the heavy, deferred work and to leave the platform a little better than you found it. Then hand the partner a short, honest brief over morning coffee — with question cards only when something genuinely wants their input.
 
@@ -13,11 +13,11 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`) — 
 ## The contract for the whole run
 
 - **Be conservative and reversible.** You are operating on the partner's live platform while they sleep. Everything you change is in `/data`'s git history — but prefer changes you'd be comfortable explaining in the morning. **Never auto-apply anything risky** (security fixes with behavior change, destructive data ops, dependency major-bumps, anything that hits paid external APIs or notifies other people). Surface those in the brief as a proposal with a one-tap question, don't do them.
-- **Commit as you go.** After each discrete chunk — a skill edit, a graph consolidation, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
+- **Commit as you go.** After each discrete chunk — a skill edit, a system-improvement note, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
 - **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. A short brief the partner reads fully beats a long one they skim.
-- **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/memory.md` for the Memory heavy-lift. This skill orchestrates; those skills hold the per-task contracts.
+- **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/memory.md` only when interpreting Memory's update log or proposing memory-system improvements. This skill orchestrates; those skills hold the per-task contracts.
 - **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
-- **Two deliverables are non-negotiable, in this order: consolidate the day's chat notes (phase 3, step 2), then write the brief.** This is the floor for every night — see the run-order preamble below for why and where it sits.
+- **The deliverable is non-negotiable: write the brief.** Reflection may improve skills, apps, and system routines before that, but a partial night with a truthful brief beats a perfect investigation that never ships.
 
 ---
 
@@ -25,7 +25,7 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`) — 
 
 Work through these as one multi-turn goal. Earlier phases feed later ones — the interviews surface what to fix, the fixes inform the brief. Don't skip the interviews to get to the fun parts — real testimony from the agent that did the work beats reconstructing its day from artifacts; the summary-first triage below decides WHICH agents are worth that spend.
 
-**Run the chat-note consolidation (phase 3, step 2) BEFORE app triage (phase 4).** App triage is the open-ended turn sink — chasing one app's bug can eat the whole budget — so it must come after the load-bearing graph work, never before it. The order that protects the graph is: review-your-own-runs (0) → interviews (1) → skill edits (2) → **consolidate the chat notes + the rest of the cheap Memory upkeep you can finish now** (3) → app triage (4) → research (5) → brief (6). Do NOT dive into an interesting app bug at turn 5 and leave the chat notes for "later" — later never comes, which is how the graph froze for days while the notes piled up unconsolidated. If a digest error tempts you into an app early, note it and come back to it in phase 4.
+The order is: review-your-own-runs (0) → interviews (1) → skill edits (2) → **Memory-system review from update logs** (3) → app triage (4) → research (5) → brief (6). Do not consolidate Memory's graph here; the Memory app's scheduled job owns that. Your job is to notice whether Memory's own process is serving future agents well and to improve the surrounding system when it is not.
 
 ### 0. REVIEW YOUR OWN RECENT RUNS — one read, first
 
@@ -35,7 +35,7 @@ Also read `inputs/prev-question-answers.json` here (present when the partner tap
 
 ### 1. INTROSPECTION — interview the agents worth interviewing (summary-first triage)
 
-**Adaptive rule.** Before starting interviews, check whether today had any user chat activity. Read `activity.jsonl` (already staged in `inputs/`) and count `ev == "chat_sent"` events — one per user turn, the real "did the partner chat today" signal (`app_open` tracks app usage, not chatting; a chat row with a human turn still counts too). If **tonight is a cron-only night** (no user chat activity, only background jobs ran), do a **light pass** on phase 1 — scan the cron session jsonls for any unexpected errors, but spend the saved turns where the value compounds: Memory consolidation (phase 3), the apps the partner uses most (phase 4), a platform improvement you've been deferring, and **brainstorming what would be genuinely useful to the partner next** — new-app ideas, features on their most-touched apps, preparations for what they'll ask tomorrow. Ideas ship as ranked proposals in the brief (same anti-noise bar), not unattended builds. A calm night is not a skipped night; it's the night for the improvement work no busy day leaves room for. Write one sentence in the brief noting it was a cron-only night.
+**Adaptive rule.** Before starting interviews, check whether today had any user chat activity. Read `activity.jsonl` (already staged in `inputs/`) and count `ev == "chat_sent"` events — one per user turn, the real "did the partner chat today" signal (`app_open` tracks app usage, not chatting; a chat row with a human turn still counts too). If **tonight is a cron-only night** (no user chat activity, only background jobs ran), do a **light pass** on phase 1 — scan the cron session jsonls for any unexpected errors, but spend the saved turns where the value compounds: Memory-system review from the update log (phase 3), the apps the partner uses most (phase 4), a platform improvement you've been deferring, and **brainstorming what would be genuinely useful to the partner next** — new-app ideas, features on their most-touched apps, preparations for what they'll ask tomorrow. Ideas ship as ranked proposals in the brief (same anti-noise bar), not unattended builds. A calm night is not a skipped night; it's the night for the improvement work no busy day leaves room for. Write one sentence in the brief noting it was a cron-only night.
 
 On nights with user activity, this is the first phase and the one you may not skip. The agents that did today's work hold context you don't: what surprised them, what they'd warn future-you about, where a skill let them down. You recover it by **forking their session and asking them.**
 
@@ -86,7 +86,7 @@ The directory name is the cwd with `/` → `-` (e.g. `-data-apps-news-2` == `/da
 2. **What to prepare for the partner** — what should the morning brief flag? Open loops, decisions awaiting them, anything that'll surprise them when they open the app.
 3. **What was hard** — where did you get stuck, retry, or work around something? What cost you turns?
 4. **Skills** — which skill did you lean on, did it hold up, and what one edit would have saved you time? (This feeds phase 2.)
-5. **Memory** — what did you wish you'd remembered, or what would have been worth recording? Any note that misled you? (This feeds phase 3, where you cross-check the answer against the chat's read-trace.)
+5. **Memory** — what did you wish you'd remembered, or what would have been worth recording? Any note that misled you? (This feeds phase 3, where you compare the complaint with Memory's own update log and decide whether the memory system needs a skill/process change.)
 
 **Don't repeat yourself across nights.** The five above are the default *frame*, not a fixed script. Before forking a recurring chat, skim what prior runs already asked it (`/data/apps/reflection/runs/*/interviews.md` — the same files you write in this phase) — **drop the questions you already have a solid answer to**, and spend the fork going *deeper* or on what's genuinely *new* since you last covered it. A chat with nothing moved since your last coverage needs no interview at all (the phase-1 triage already drops the un-moved ones). Re-asking the same five every night burns budget and buries the one new signal under four answers you already had.
 
@@ -111,46 +111,44 @@ The interviews just told you where the skills failed today's agents. Act on it.
 - **Keep a skill edit general and de-dated.** When a failure earns a skill edit, write the durable *rule plus the check that proves it* ("verify a claimed shell edit landed: `grep` the diff token, `stat` the mtime"), never a fixed-date anecdote ("on 2026-06-11, agent X claimed a fix that…") — generic run-relative phrasing ("tonight," "today's agents") is fine; it's *dated incidents* that rot. The incident itself, if worth keeping, is a Memory note you `[[link]]` (phase 3 owns that note) — the skill stays a clean ruleset a future run reads cold. A skill that accretes dated anecdotes gets longer and slower to read every night, which is exactly the noise this phase exists to remove.
 - Don't rewrite a skill wholesale on one night's evidence. Surgical edits, each tied to an observed failure.
 
-### 3. CONSOLIDATE + CLEAN the Memory graph — the heavy work the daytime defers
+### 3. REVIEW Memory health — improve the system, not the graph
 
-The daytime agent maintains a growing note per chat (`chats/<id>/index.md`: summary + facts & intent) but does only light, obvious graph upkeep. The consolidation + reorg are explicitly yours. `Read /data/shared/skills/memory.md` first — it owns the inclusion bar, atomicity, anti-orphan, and the structure rules (split/inline/promote/redirect, with the thresholds the linter warns on); this section is just the reflection-specific *order of operations*.
+The **Memory** app owns reading, writing, and consolidating the graph. Your job
+here is to inspect whether that system is working and decide whether Reflection
+should improve the surrounding process, ask the partner for a decision, or leave
+Memory alone.
 
-**Step 2 (consolidation) is the floor — do it first and commit it** (`pm-commit 'memory: consolidated chat notes'`), before the read-trace diff (step 1) or the broader reorg (steps 3–6). Those are the *deep* work: valuable on a quiet night, the first to cut on a busy one. If you do only one Memory thing tonight, it's this.
+Read, in this order:
 
-1. **Diff the read-traces — find what WOULD have helped.** *(Deferrable — the deep work; do it AFTER step 2's consolidation, and cut it first on a busy night.)* Each chat leaves `/data/shared/memory/read-trace/<chat_id>.json`: `nodes_injected` (what the platform showed the agent for free) and `nodes_read` (what it went and dug for). For each substantive chat from the interviews, do a **deeper memory search than the day agent did** — start at the index and descend the maps that chat's topic touches, past where the trace shows the agent stopped. Then diff: what existed in the graph that would have helped, but was never injected or read? Reorganize so it would have been: add a `[[link]]` with a reason from where the agent *did* look, lift the missed note's summary into its parent map (or the index), reduce the depth to it. The interviews' "what did you wish you'd remembered" answers are the same gap seen from the agent's side — cross-check them against the trace. This diff is the engine that makes the graph serve tomorrow's agents better than today's; don't skip it on user-active nights.
-2. **Consolidate the chat notes AND mine the transcripts — the night is the system of record.** *(REQUIRED — the floor; do this FIRST, before step 1, and commit it. If you do only one Memory thing tonight, it's this.)* The daytime per-chat note (`chats/<id>/index.md`: its growing summary + `## Facts & intent`) is a best-effort, same-day capture; it can still MISS durable facts on quick "just answer" turns. So your capture source is **both** the day's chat notes **and**, for each substantive chat, its TRANSCRIPT: re-read the chat (the read-trace diff above already surfaces them) for durable first-person facts the note didn't capture — a preference, constraint, identity, environment, relationship, or a fact stated *inside a question*. For each fact, from either source, pick **exactly one** operation:
-   - **drop** — already known, or not a durable fact.
-   - **append** — same fact, new evidence → add a dated bullet + `source:` to the existing note.
-   - **new note** — genuinely new. **Hard rule: never create a note without either matching an existing concept OR giving it ≥1 typed `[[link]]`** (no slip without a neighbour → orphans are structurally impossible).
-   - **link** — the concept exists; only a typed relation is missing.
-   - **merge → hub** — the same shared fact is referenced by ≥3 topics → make it ONE hub note (`type: hub`) that the topics point AT (anti-flood: one hub, not N×N copies); don't duplicate a shared preference into each topic.
-   - **supersede** — a fact changed → the new note is current, give it `supersedes:` + leave a redirect/banner on the old; **never silently delete** (git is history; the partner is authoritative — mark which is current, don't hedge). **But when WHICH is current is genuinely ambiguous** — two contradictory facts (`likes ice cream` vs `doesn't`) with no clear recency or context to pick a winner — do NOT guess: keep both with their `source:` + dates, mark the note `uncertain`, and **surface it in the brief as a one-tap question** ("you told me X on <date> and not-X on <date> — which should I keep?"). The partner's tap resolves it on your next run (read in phase 0, acted on in phase 2). A clear recency/context winner you supersede silently; a real contradiction you ASK. (Carry it forward: if the note is already `uncertain` with a pending unanswered question from an earlier brief, re-include that SAME one-tap question in tonight's brief — don't fork a new variant; one open question per contradiction, carried until they resolve it.)
-   The chat notes themselves STAY (they're graph nodes — you consolidate durable facts OUT of them into `notes/`, you don't delete them). Four rules govern the notes you write:
-   - **Provenance is mandatory.** Every consolidated note carries `source: [chat:<id>]` — the chat(s) where the fact was first observed (list all when you merge several). It's the audit trail: a later-doubted fact (suspected hallucination, stale claim) gets verified by re-reading that origin chat's raw transcript, not by trusting the distilled note. A note with no `source:` is a repair target — backfill it (find the origin chat, or mark `source: legacy` for a pre-existing/seed note with no chat to cite), NEVER a reason to drop or distrust the note.
-   - **Narrow the pointers you just made promotable.** ONLY a chat's `## Related` / `see also [[chats/A]]` *pointer* links — never an inline factual `[[link]]` in `## Summary` or `## Facts & intent` (those are the note's informative content — don't remove one merely because its fact got promoted; dedupe/supersede under the chat-note rules only). When a chat points at another *for one named fact* (`B → [[chats/A]] — for their coffee ratio`) only because that fact wasn't its own note yet, rewrite the pointer once it is one: `B → [[coffee-ratio]]` (bare slug). A keeps the `source:` so the route isn't lost; B now pulls just the fact, not A's whole summary. Two guards: (a) only when the reason names a SINGLE fact that's now a note — a continuation pointer (`continued from A`, `the earlier espresso session`) is not a fact-fetch, leave it; when in doubt, leave it. (b) if the reason covers several facts, B needs all of them — one pointer per promoted fact, or keep the chat pointer until they're ALL notes; never drop B's route to an un-promoted one. The win: `A → X,Y,Z` + `B → X` beats `B → A → X,Y,Z` (the MDL test — fewer, more-specific pointers).
-   - **Before a new note, grep existing titles** (`grep -ril '<topic>' /data/shared/memory/notes/`) so you extend/merge rather than fork a near-duplicate (`title:` is the dedup key).
-   - **Place it per memory.md's structure rules** (split a >~30-line note keeping a parent summary; inline a thin parent; promote a ~5-link note to a map; redirect stub on any move/rename), with a sharp `description:` scent line so the router can route to it.
-3. **Merge + supersede.** Collapse near-duplicates the daytime agent left for you (the *judgment* merges it wasn't allowed to make). When two notes disagree and there's a **clear winner** — a later statement that explicitly corrects the earlier, or a newer same-scope claim — newer wins: supersede, don't silently delete (`as-of:` dates on time-sensitive claims, `supersedes:` on the replacement, a redirect/banner on the replaced, memory.md's structure rules). A genuine contradiction with NO clear winner is the **ask-don't-guess** case from the supersede operation above — never collapse it here under "newer wins." (A later *hypothetical* or a *different-scope* remark is not a correction — don't supersede on it.)
-4. **Prune.** Remove notes whose fact is no longer true or no longer future-relevant — judge by the fact itself, not by any score (recall is router→traverse, not ranking — `importance` is vestigial and `access_count`/`usage.json` survives only as the Memory app's "Used" display column, never as a recall signal). Git is the undo. Each night, list notes with `updated` older than ~60 days and re-verify each is still true and future-relevant, or prune it; flag notes whose `as-of:` is older than ~90 days for re-verification. When unsure about several, surface them in the brief as ONE line ("I found N notes that look stale — prune them?"), not one question per note. Also sweep the read-traces:
-   ```bash
-   find /data/shared/memory/read-trace -name '*.json' -mtime +14 -delete
-   ```
+1. `/data/shared/memory/update-log/*.jsonl` — Memory's recent scheduled
+   consolidation records. Prefer the latest few files.
+2. `/data/cron-logs/memory.log` and recent `cron_outcome` activity for the
+   Memory job — only enough to see whether Memory ran, failed, timed out, or
+   repeatedly reported the same followup.
+3. The interviews' Memory answers from phase 1 — complaints about missing,
+   stale, misleading, or over-broad recall.
 
-5. **Guarantee + enrich each chat note (the backstop).** The platform injects the full summaries of the ~10 most-recently-touched chat notes at session start, so the chat notes ARE what tomorrow's agent "remembers happening recently" — there is no separate recent-chats queue. The daytime agent maintains each `chats/<id>/index.md` (`type: chat`: growing summary + facts & intent, name synced via `PATCH /api/chats/<id>` `by_agent: true`) every turn; you GUARANTEE it for every substantive chat the daytime agent under-served, and enrich it with `[[chats/<other-id>]]` cross-links to the chats it drew on. Write the summaries partner-facing and concrete.
-6. **Reorganize + rebalance.** The linter's **warnings are your worklist**: bare map entries missing their one-line description, oversized notes (split candidates), overfull maps (>15 children — split into sub-maps), MOC-promotion candidates, redirect chains to collapse, orphaned stubs to purge. Work through them per memory.md's structure rules. The MDL test still gates every move: does the reorg make the graph *cheaper to describe and search* — fewer, better-placed links, summaries higher, depth lower — or just busier? If busier, don't.
+Then act on the **system** signal:
 
-   **v2 upkeep — two cheap, high-value passes:**
-   - **Retire the bootstrap note.** Once `about-the-user` holds **at least 3 real non-bootstrap user-model notes** (preferences, interests, active projects, or working-style facts — meta/platform/bootstrap notes do NOT count), archive the seed `this-instance-is-fresh` note (`type: bootstrap`) and drop its router line. This is the general rule for any `type: bootstrap` note whose body states its own retirement condition: leaving a superseded one in place is worse than useless — it contradicts the real profile and squats one of the injected chat-summary/router slots with "you know nothing about this partner."
-   - **Refresh stale scent lines (git-based, no hashing).** A note whose body changed but whose router `description:` didn't will silently mis-route a reader. Cheap check: if a note's last commit is newer than its `index.md`'s (`git -C /data log -1 --format=%ct -- <path>`), re-read it and update the router's scent line for it before you commit.
-7. **Assert the invariant + rebuild.** From `index.md` every map is reachable, from every map every note is reachable; zero orphans, zero dangling links. Then `python3 /app/scripts/build_memory_graph.py` (it lints and exits non-zero on **errors** — fix those; warnings you've judged not worth a reorg tonight may stay) and `pm-commit 'memory: <what changed>'`.
+- If Memory did not run, timed out, or repeatedly failed its graph rebuild,
+  diagnose the wrapper/runner/app-install issue if it is small and reversible;
+  otherwise put a clear proposal in the brief.
+- If Memory's update log says it created/merged/pruned useful notes, mention the
+  outcome in the brief only when it matters to the partner. Do not recap routine
+  maintenance.
+- If Memory reports ambiguous contradictions or stale facts that need the
+  partner, carry at most one or two high-value questions into the brief. The
+  partner's answer becomes next-run input; Memory can then resolve the graph.
+- If several agents wished they had remembered the same thing but Memory's log
+  did not catch it, improve `/data/shared/skills/memory.md` surgically or note a
+  Memory-runner/platform improvement. Do not edit the graph itself unless the
+  fix is a trivial repair required to unblock the viewer.
+- If Memory is healthy and no interview raised a memory-system issue, write one
+  sentence in your run notes and move on. Empty phase 3 is fine.
 
-Don't over-record. Most of what clears the bar is a fact about the partner → default it into `about-the-user`. When unsure, prune rather than keep.
-
-**Honor owner steering.** If `/data/apps/reflection/settings.json` contains a
-`focus` list or an `avoid` list, prioritize memory topics in `focus` and skip
-topics in `avoid` when deciding what to consolidate, promote, or surface in the
-brief. (This anticipates an in-app setting — act on it if present, ignore if
-absent.)
+Use `/data/shared/skills/memory.md` as the contract for what Memory should have
+done, not as permission for Reflection to do that work. When you make a
+system-facing change, commit it with `pm-commit 'memory-system: <what and why>'`.
 
 ### 4. IMPROVE APPS — triage with the digest, then fix and propose
 
@@ -176,21 +174,20 @@ Commit each fix on its own: `pm-commit 'app(<slug>): <what and why>'`.
 
 ### Turn-budget guide
 
-The whole run — interviews, skill edits, Memory consolidation, app triage, research, brief — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights front-load the Memory work and skip or shorten 1):
+The whole run — interviews, skill edits, Memory-system review, app triage, research, brief — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights shorten 1 and spend a little more on system review):
 
 | Phase | Turns | Notes |
 |---|---|---|
 | 1. Interviews | ≤12 | Light pass on cron-only nights (≤5) |
 | 2. Skill edits | ≤5 | Only confirmed gaps from interviews |
-| 3a. **Chat-note consolidation (reserved)** | ≤5 | **Non-negotiable — do this BEFORE phase 4, commit it.** Fold the day's substantive chat notes' durable facts into the graph. This slice is reserved: never spend it on app triage. |
-| 3b. Deeper Memory reorg | ≤7 | Read-trace diff + merges + prune + chat-note enrichment; deferrable — cut first when tight |
+| 3. Memory-system review | ≤7 | Read Memory update logs/outcomes and improve the process only when there is real signal |
 | 4. App triage + fixes | ≤13 | Digest-first; skip apps with 0 opens |
 | 5. Research | ≤5 | Only if a clear topic cleared the bar; otherwise skip |
 | 6. Brief | ≤10 | Hard stop at 10 — never let this exceed budget |
 
-The slices sum to ≤57 of the 60-turn budget, leaving a small margin; they are a guide, not a hard meter — you can't see your own turn count, the runner speaks it to you when you near the budget.
+The slices leave a small margin; they are a guide, not a hard meter — you can't see your own turn count, the runner speaks it to you when you near the budget.
 
-**At turn 40, stop any phase still in progress, commit what's done, and jump to phase 6 — UNLESS the chat notes aren't yet consolidated, in which case do the minimal consolidation first (fold each substantive chat note's durable facts into the graph, commit), then the brief.** A partial night that consolidated the notes and shipped a brief beats a "complete" night that did neither. Note in the brief what you skipped. (If you ordered the night correctly, phase 3a finished long before turn 40 and this clause is moot — it's the backstop for a night that ran long.)
+**At turn 40, stop any phase still in progress, commit what's done, and jump to phase 6.** A partial night that shipped a clear brief beats a "complete" night that produced no report. Note in the brief what you skipped.
 
 ### 5. RESEARCH tailored to the partner's known interests
 
@@ -205,7 +202,7 @@ The bar is the anti-noise bar either way: trigger (the known interest), why (wha
 
 One artifact: the static **brief** (an HTML page). Your job tonight ends when the brief (with its optional question-cards carrier) is written and committed.
 
-**Fill the brief template.** Read `/data/apps/reflection/reflection-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach platform/baked script paths), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; everything else lives inside collapsed `<details>` items (the shape contract below). The **what-I-did** section always ends with one memory-hygiene line: "Memory: N notes created, N merged, N pruned." (Use 0 for unchanged categories — the count matters less than the habit of including it.) **Do not summarize the partner's own Mobius interactions back to them.** Use chat/interview facts only as evidence for what *you* did, what *you* learned, what changed in the platform, and what needs a decision. If a sentence reads like a recap of the partner's day ("you discussed X, then Y"), delete it or turn it into an outcome ("I fixed/propose/learned X because today's agents hit Y"). **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/reflection/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Reflection app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `reflection` slug runtime workspace (which holds nightly inputs/wrappers, not app storage) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
+**Fill the brief template.** Read `/data/apps/reflection/reflection-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach platform/baked script paths), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; everything else lives inside collapsed `<details>` items (the shape contract below). Include Memory maintenance only when the Memory update log exposed a partner-visible outcome, a system fix, or a decision; routine graph upkeep is not a brief item. **Do not summarize the partner's own Mobius interactions back to them.** Use chat/interview facts only as evidence for what *you* did, what *you* learned, what changed in the platform, and what needs a decision. If a sentence reads like a recap of the partner's day ("you discussed X, then Y"), delete it or turn it into an outcome ("I fixed/propose/learned X because today's agents hit Y"). **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/reflection/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Reflection app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `reflection` slug runtime workspace (which holds nightly inputs/wrappers, not app storage) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
 
 **The brief's fixed shape — TL;DR, headline cards, then everything collapsed.** The standing complaint is briefs that are too long and too detailed up front. The shape is a contract, top to bottom:
 
@@ -219,9 +216,9 @@ Copy this skeleton — the template (and the base style the app injects into eve
 <section id="summary">                      <!-- §1 — never collapsed -->
   <div class="lede">
     <!-- TL;DR: 3–6 sentences MAX — what happened + what needs the owner. -->
-    <p class="headline">Quiet night: I fixed the Gym sync cron, consolidated
-    four Memory notes, and found one decision for you — archiving the stale
-    News digests. Nothing else needs your attention.</p>
+    <p class="headline">Quiet night: I fixed the Gym sync cron, checked
+    Memory's maintenance log, and found one decision for you — archiving the
+    stale News digests. Nothing else needs your attention.</p>
     <ul class="keypoints">                  <!-- 3–5 one-line headline cards -->
       <li>Fixed: Gym cron had silently stopped — root-caused and repaired</li>
       <li>Decide: archive 12 stale News digests? (card in the chat below)</li>

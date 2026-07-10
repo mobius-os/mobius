@@ -21,14 +21,15 @@ Why this is its own runner (not `run_claude_sdk_turn`):
     deliberately kept off the production chat path so a broken chat
     stack can't take down recovery. Reflection follows the same instinct
     for the opposite reason: a long autonomous run that forks chats,
-    rewrites the Memory graph, and edits skills should not share mutable
-    state (registries, the writer actor, active-client maps) with the
-    daytime chat path it may be operating on while the partner sleeps.
+    edits skills, reviews app health, and writes a brief should not
+    share mutable state (registries, the writer actor, active-client
+    maps) with the daytime chat path it may be operating on while the
+    partner sleeps.
   - **No tool gating, no sandbox.** The v1 Reflection agent ran
     token-less and Bash-less against a staging copy. This runner is the
     opposite: full capability, instructed (not policed) by the skill,
     per Möbius's "code empowers the agent; it does not police it." The
-    wrapper (`core-apps/reflection/fetch.sh`) owns no-overlap + timeout +
+    wrapper (`app-reflection/fetch.sh` in the catalog app) owns no-overlap + timeout +
     the activity emit; the SKILL owns what the agent does.
 
 The SDK call mirrors `app.claude_sdk_runner._run_once`: same
@@ -41,7 +42,7 @@ deliberate and all in service of "autonomous":
     callback, no keepalive hook. Every tool auto-runs; there is no
     user to approve anything.
   - `max_turns` is high (default 60) so the multi-phase run
-    (interviews → skill edits → Memory consolidation → app fixes →
+    (interviews → skill edits → Memory-system review → app fixes →
     research → brief) fits in one goal loop. The brief is the night's
     one deliverable; the conversation about it is opened by the partner
     on tap in the Reflection app, not by this run.
@@ -111,8 +112,8 @@ BAKED_BRIEF_TEMPLATE = Path("/app/scripts/reflection-brief-template.html")
 BRIEF_TEMPLATE_DEST = DATA_DIR / "apps" / "reflection" / "reflection-brief-template.html"
 
 # Multi-turn budget for the whole nightly goal loop. High because one
-# Reflection run spans many phases (interviews, skill edits, graph
-# consolidation, app fixes, research, brief), each costing several tool
+# Reflection run spans many phases (interviews, skill edits, Memory-system
+# review, app fixes, research, brief), each costing several tool
 # turns. The wrapper's `timeout` is the real wall-clock bound; this is the
 # SDK-side ceiling so a wedged loop can't spin forever even if the timeout
 # were removed.
@@ -143,7 +144,7 @@ KNOWN_MODELS_BY_PROVIDER = {
 FALLBACK_MAX_TURNS = 12
 
 # The runner shares the process exit-code space with its wrapper
-# (`core-apps/reflection/fetch.sh`), whose OWN config errors take the low
+# (`app-reflection/fetch.sh` in the catalog app), whose OWN config errors take the low
 # codes: 2 = no app id, 3 = no service token, 5 = lock skip, 124 = timeout.
 # Historically the runner ALSO returned 2/3 for model/usage/auth failures, so
 # a usage-limit night surfaced to the owner as "config error (exit 2)" and a
@@ -243,38 +244,28 @@ def steering_message(
 
   Pure crossing detector: fires when the (prev_turn, turn] step
   crosses a threshold from `steering_thresholds`. The skill tells the
-  agent to bail by turn 40 to the night's TWO floor deliverables — a
-  drained memory inbox and a shipped brief, in that order — but the
-  agent cannot observe its own turn count, so the runner counts
-  assistant turns and speaks the number into the session at the right
-  moments. Both messages protect the inbox drain (phase 3a): the
-  graph froze for days when the old steering said "phases 1-5 are
-  over" and the agent skipped consolidation entirely. The drain is
-  cheap and should already be done by these thresholds if the night
-  was ordered right; the steering is the backstop for a night that
-  ran long before reaching it. When a single step crosses both
-  thresholds, only the sterner message is returned (two back-to-back
-  budget warnings would dilute each other).
+  agent to bail by turn 40 to the night's floor deliverable — a shipped
+  brief — but the agent cannot observe its own turn count, so the runner
+  counts assistant turns and speaks the number into the session at the
+  right moments. When a single step crosses both thresholds, only the
+  sterner message is returned (two back-to-back budget warnings would
+  dilute each other).
   """
   soft, hard = steering_thresholds(max_turns)
   if prev_turn < hard <= turn:
     return (
       f"TURN BUDGET: you are at turn {turn} of {max_turns} and almost "
-      "out. Two floor deliverables, in order: if the memory inbox "
-      "isn't drained yet, fold each remaining inbox.md line into the "
-      "graph, empty the inbox, and commit (be quick) — THEN write a "
-      "MINIMAL brief (a heading and a few honest lines on what was "
-      "done and what was cut off), save it to the reports dir, and "
-      "stop. Skip everything else."
+      "out. Stop open-ended investigation now and write a MINIMAL "
+      "brief (a heading and a few honest lines on what was done, what "
+      "was skipped, and what needs the partner), save it to the reports "
+      "dir, commit it, and stop. Skip everything else."
     )
   if prev_turn < soft <= turn:
     return (
       f"TURN BUDGET: you are at turn {turn} of {max_turns}. STOP "
-      "open-ended investigation now. If you haven't drained the "
-      "memory inbox yet (phase 3a), do that minimal drain FIRST and "
-      "commit it — it is the night's other non-negotiable deliverable "
-      "and must not be skipped. Then write the brief. The deeper "
-      "Memory reorg, remaining app triage, and research are over."
+      "open-ended investigation now. Commit whatever safe work is done, "
+      "then write the brief. Remaining app triage, Memory-system review, "
+      "and research are over unless needed for one brief sentence."
     )
   return None
 
@@ -424,11 +415,10 @@ def write_static_usage_limit_brief(brief_path: Path) -> bool:
 def _safety_snapshot(label: str) -> None:
   """Best-effort git snapshot of /data BEFORE Reflection mutates anything.
 
-  The nightly run consolidates the memory graph, rewrites skills, and fixes
-  apps — destructive overwrites of agent-owned files under /data/shared that
-  the "git is the undo" contract (memory.md) promises are recoverable. Until now
-  that promise rested entirely on the agent's own `pm-commit` discipline
-  MID-run, so a consolidation that overwrote a note before the first commit had
+  The nightly run rewrites skills, fixes apps, and writes reports — edits to
+  agent-owned files under /data that the "git is the undo" contract promises are
+  recoverable. Until now that promise rested entirely on the agent's own
+  `pm-commit` discipline MID-run, so an early edit before the first commit had
   no pre-state restore point beyond LAST night's. Committing the current tree as
   the very first thing the run does guarantees one.
 
@@ -766,11 +756,11 @@ def build_goal(settings: dict) -> str:
     "                          Absent on first runs / when nothing was asked.",
     "",
     "Follow your skill (your system prompt) for the full procedure. "
-    "Two floor deliverables: drain the memory inbox (phase 3a) EARLY "
-    "— before app triage — then ship the brief (phase 6). At turn 40 "
-    "cut any unfinished deep work; if the inbox still has lines, do "
-    "the minimal drain first, then the brief, so the partner wakes to "
-    "something and the graph never freezes.",
+    "Memory owns graph consolidation; Reflection reviews Memory's update "
+    "log for system-improvement signals but does not drain or rewrite the "
+    "graph. The floor deliverable is the brief (phase 6). At turn 40 cut "
+    "unfinished deep work and ship a truthful brief so the partner wakes "
+    "to something useful.",
     "",
     f"Your working directory is {DATA_DIR}. You have a real token "
     "($AGENT_TOKEN / $SERVICE_TOKEN) and full tools — no sandbox. "
@@ -1268,9 +1258,9 @@ async def run() -> int:
     f"effort={effort or '(default)'} max_turns={max_turns} cwd={DATA_DIR}"
   )
 
-  # Guaranteed pre-run restore point: commit /data BEFORE the agent consolidates
-  # memory / rewrites skills, so "git is the undo" holds even if tonight's run
-  # overwrites a note before its own first pm-commit. Best-effort; never blocks.
+  # Guaranteed pre-run restore point: commit /data BEFORE the agent rewrites
+  # skills or apps, so "git is the undo" holds even if tonight's run edits a
+  # file before its own first pm-commit. Best-effort; never blocks.
   from datetime import date
   _safety_snapshot(f"reflection: pre-run safety snapshot {date.today().isoformat()}")
 

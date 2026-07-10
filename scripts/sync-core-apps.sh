@@ -1,10 +1,9 @@
 #!/bin/bash
-# sync-core-apps.sh — regenerate core-apps/<slug>/ from its catalog repo.
+# sync-core-apps.sh — regenerate platform-owned app snapshots, when any.
 #
-# The catalog repos (mobius-os/app-<slug>) are the single source of truth for
-# the platform's built-in apps; core-apps/<slug>/ is a committed snapshot of
-# one, pinned by commit in core-apps/SOURCES. To update a built-in app: bump
-# its commit in core-apps/SOURCES, run this, and commit the resulting diff.
+# Catalog apps normally install into /data/apps through the App Store. This
+# script is now a compatibility helper for an intentionally-empty registry; it
+# still supports future platform-owned snapshots if core-apps/SOURCES grows.
 #
 # Usage: sync-core-apps.sh [DEST_ROOT]
 #   DEST_ROOT defaults to the repo's core-apps/. check-core-apps-sync.sh passes
