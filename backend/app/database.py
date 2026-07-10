@@ -27,7 +27,19 @@ def _make_engine():
     db_path = Path(settings.database_url.replace("sqlite:////", "/"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
   connect_args = {"check_same_thread": False} if is_sqlite else {}
-  eng = create_engine(settings.database_url, connect_args=connect_args)
+  # Pool hardening for Postgres (Railway et al.). Defaults (QueuePool
+  # 5 + 10 overflow) stay, but pre_ping validates a connection before
+  # handing it out — Railway silently drops idle Postgres connections,
+  # and without this the first query on a stale one raises instead of
+  # transparently reconnecting. pool_recycle caps connection age below
+  # any server-side idle timeout. Omitted for SQLite, whose pool is
+  # process-local and never sees these failure modes.
+  pool_kwargs = (
+    {} if is_sqlite else {"pool_pre_ping": True, "pool_recycle": 1800}
+  )
+  eng = create_engine(
+    settings.database_url, connect_args=connect_args, **pool_kwargs
+  )
   if is_sqlite:
     # SQLite under concurrent writes:
     # - WAL lets readers run while a single writer writes (no

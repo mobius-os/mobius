@@ -136,6 +136,7 @@ def notify(
 async def stream_system_events(
   request: Request,
   _owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
 ):
   """Shell-level SSE: streams system events for the lifetime of the
   Shell, regardless of which view (chat / canvas / settings) is
@@ -145,6 +146,18 @@ async def stream_system_events(
   Keepalive cadence matches the chat stream so reverse proxies see
   consistent traffic patterns.
   """
+  # Release the DB connection BEFORE entering the (potentially hours-long)
+  # stream loop. FastAPI defers yield-dependency teardown for a
+  # StreamingResponse until the body finishes streaming, so get_db's
+  # `db.close()` would otherwise not run until the client disconnects —
+  # pinning one pooled connection per open Shell tab. With a Postgres
+  # QueuePool of 5+10, a handful of lingering EventSource connections
+  # exhausted the pool and every DB-touching request began timing out
+  # (QueuePool limit reached). `db` here is the SAME session get_current_owner
+  # used (FastAPI caches the get_db sub-dependency within a request), so
+  # auth has already completed against it; closing now returns the
+  # connection immediately and get_db's own finally close is a no-op.
+  db.close()
   queue = get_system_broadcast().subscribe()
 
   async def generate():
