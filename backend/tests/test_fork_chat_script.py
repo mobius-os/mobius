@@ -37,6 +37,10 @@ def _write_fake_codex(bin_dir: Path, *, exit_code=0) -> None:
 set -euo pipefail
 out=""
 args=()
+stdin_payload=""
+if [[ ! -t 0 ]]; then
+  stdin_payload="$(cat)"
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output-last-message)
@@ -53,7 +57,7 @@ fi
   printf 'pwd=%s\\n' "$PWD"
   printf 'CODEX_HOME=%s\\n' "${{CODEX_HOME:-}}"
   printf 'args=%s\\n' "${{args[*]}}"
-  printf 'prompt=%s\\n' "${{args[-1]}}"
+  printf 'stdin=%s\\n' "$stdin_payload"
 }} > "$out"
 """,
     encoding="utf-8",
@@ -83,7 +87,7 @@ def test_codex_fork_uses_prod_auth_home_and_non_git_data_dir(tmp_path):
 
   assert f"pwd={tmp_path}" in proc.stdout
   assert f"CODEX_HOME={tmp_path / 'cli-auth' / 'codex'}" in proc.stdout
-  assert "exec --skip-git-repo-check --ephemeral --sandbox read-only" in proc.stdout
+  assert "args=exec --skip-git-repo-check --ephemeral --sandbox read-only --color never -" in proc.stdout
   assert "You previously worked on this" in proc.stdout
   assert "what should Reflection learn?" in proc.stdout
 

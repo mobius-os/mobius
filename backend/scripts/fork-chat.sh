@@ -162,7 +162,7 @@ run_codex_reseed() {
       --sandbox read-only \
       --color never \
       --output-last-message "$out" \
-      "$prompt"
+      - <<<"$prompt"
   ) >"$log_tmp" 2>&1
   rc=$?
   if [[ $rc -ne 0 ]]; then
