@@ -83,6 +83,9 @@ import {
 } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import './ChatSettingsPanel.css'
 
+function isUpdatedModel(model) {
+  return model === 'gpt-5.5'
+}
 
 /** Claude product mark — four-petal flower / starburst silhouette,
  *  the recognizable Claude.ai icon (distinct from the Anthropic
@@ -642,7 +645,10 @@ export default function ChatSettingsPanel({
             <div key={`${pid}-${m.id}`}>
               <button
                 type="button"
-                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
+                className={
+                  `csp-row${isSelected ? ' csp-row--selected' : ''}`
+                  + (isUpdatedModel(m.id) ? ' csp-row--updated' : '')
+                }
                 onPointerDown={preserveFocusUnlessTouch}
                 onClick={() => handlePickModel(m.id, pid)}
                 disabled={saving || compacting}
@@ -650,7 +656,12 @@ export default function ChatSettingsPanel({
               >
                 <span className="csp-row__icon"><info.Logo /></span>
                 <span className="csp-row__main">
-                  <span className="csp-row__title">{m.label}</span>
+                  <span className="csp-row__title">
+                    <span>{m.label}</span>
+                    {isUpdatedModel(m.id) && (
+                      <span className="csp-row__badge">Updated</span>
+                    )}
+                  </span>
                   <span className="csp-row__sub">{info.label}</span>
                 </span>
                 <span className="csp-row__dot" />
@@ -693,11 +704,6 @@ export default function ChatSettingsPanel({
           )
         })
       })}
-      {dataReady && (
-        <div className="csp__settings-note">
-          Configure available models in Settings.
-        </div>
-      )}
       {(codexSwitchWarning || compacting || error) && (
         <div className="csp__foot">
           {compacting && (

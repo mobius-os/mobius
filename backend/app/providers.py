@@ -267,7 +267,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   `primary`/`fallback` are kept for older runners and app settings. The richer
   `providers` list is the owner-facing source of truth: one default per
   provider, plus enabled/order for quota fallback. Absence stays backwards-
-  compatible: only the owner's chat provider is enabled until the owner opts
+  compatible: only the resolved provider is enabled until the owner opts
   additional providers in.
   """
   provider = default_provider if default_provider in PROVIDERS else DEFAULT_PROVIDER
@@ -285,6 +285,8 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
     if provider_id in seen:
       return
     row = dict(choice)
+    row["model"] = row.get("model") or DEFAULT_MODELS.get(provider_id)
+    row["effort"] = row.get("effort") or DEFAULT_EFFORT
     row["enabled"] = (
       bool(row.get("enabled"))
       if "enabled" in row
@@ -303,22 +305,12 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   else:
     primary = _clean_background_choice(bg.get("primary"), provider)
     if primary is None:
-      effective = effective_agent_settings(data_dir, None, provider=provider)
-      primary = {
-        "provider": provider,
-        "model": effective.get("model"),
-        "effort": effective.get("effort"),
-      }
+      primary = _background_default_choice(provider, enabled=True)
     add_row(primary, enabled_default=True)
     add_row(_clean_background_choice(bg.get("fallback")), enabled_default=True)
 
   if not rows:
-    effective = effective_agent_settings(data_dir, None, provider=provider)
-    add_row({
-      "provider": provider,
-      "model": effective.get("model"),
-      "effort": effective.get("effort"),
-    }, enabled_default=True)
+    add_row(_background_default_choice(provider, enabled=True), enabled_default=True)
 
   for provider_id in PROVIDERS:
     if provider_id not in seen:
