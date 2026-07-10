@@ -11,11 +11,11 @@ get_owner_or_app_with_github_access docstring. The read surface
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
 document containing a mutation or subscription operation. GitHub writes
-are limited to the owner-token-only Contribute approval endpoint, which
-consumes a single prepared ledger record after the owner presses Approve:
-it claims that record, rechecks the reviewed branch/diff, pushes to the
-owner's fork, and creates the draft PR. App-scoped github_access tokens
-cannot submit that write path.
+are limited to the Contribute approval endpoint, which consumes a single
+prepared ledger record after the owner presses Approve: it claims that
+record, rechecks the reviewed branch/diff, pushes to the owner's fork,
+and creates the draft PR. An app-scoped github_access token may submit
+only its own prepared record; it cannot act as a general GitHub write proxy.
 
 The token itself never appears in any response or log line (INV1).
 """
@@ -46,7 +46,8 @@ from app import fs_locks, github_auth, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  get_current_owner,
+  Principal,
+  get_principal,
   get_owner_or_app_with_github_access,
   reject_cross_site,
 )
@@ -145,8 +146,39 @@ def _write_record(path: Path, record: dict) -> None:
   atomic_write(path, json.dumps(record, ensure_ascii=False, indent=2) + "\n")
 
 
-def _validate_submit_app(app_id: int, db: Session) -> str | None:
-  """Validate the contribution owner selected and return the app token nonce."""
+def _require_github_access_principal(
+  principal: Principal, db: Session
+) -> models.Owner:
+  if principal.app_id is None:
+    return principal.owner
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == principal.app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.github_access):
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.github_access=true in its manifest "
+      "to manage and read the GitHub connection on your behalf."
+    ),
+  )
+
+
+def _validate_submit_app(
+  app_id: int, principal: Principal, db: Session
+) -> str | None:
+  """Authorize a direct contribution submit and return the app token nonce."""
+  _require_github_access_principal(principal, db)
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="An app can only submit contributions from its own storage.",
+    )
   app = (
     db.query(models.App)
     .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
@@ -817,7 +849,7 @@ async def submit_contribution(
   app_id: int,
   record_id: str,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
 ):
   """Submit one prepared Contribute record as a draft pull request.
 
@@ -825,10 +857,10 @@ async def submit_contribution(
   record + reviewed diff; this endpoint claims that record, rechecks freshness,
   pushes the already-prepared branch to the owner's fork, creates the draft PR,
   then writes the GitHub URL back to the ledger. It does not expose the GitHub
-  token to the app, and it rejects app-scoped tokens so github_access cannot
-  directly trigger a GitHub write.
+  token to the app, and an app-scoped token can only submit a record from that
+  app's own storage after the same server-side freshness checks pass.
   """
-  expected_nonce = _validate_submit_app(app_id, db)
+  expected_nonce = _validate_submit_app(app_id, principal, db)
   async with fs_locks.app_storage_lock(app_id):
     claimed, record_path, diff_path = _claim_record(
       app_id=app_id,

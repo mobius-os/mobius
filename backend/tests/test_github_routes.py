@@ -593,7 +593,7 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat")
-  app_id, _ = _app_token(client, owner_token, github_access=True)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-1"
   repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
@@ -674,7 +674,7 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
 
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
-    headers={"Authorization": f"Bearer {owner_token}"},
+    headers={"Authorization": f"Bearer {app_token}"},
   )
   assert r.status_code == 200, r.text
   body = r.json()
@@ -871,11 +871,52 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
   )
 
 
-def test_submit_contribution_rejects_app_scoped_token(
+def test_submit_contribution_rejects_other_app_scoped_token(
   client, owner_token,
 ):
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, other_app_token = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-app-token"
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(
+        Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+      ),
+      "head_sha": "abc123",
+    },
+  }
+  _write_contribution(app_id, record_id, record)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {other_app_token}"},
+  )
+  assert r.status_code == 403
+  assert "own storage" in r.json()["detail"]
+
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )
+  assert stored["status"] == "prepared"
+  assert "last_submit_error" not in stored
+
+
+def test_submit_contribution_rejects_app_without_github_access(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(client, owner_token, github_access=False)
+  record_id = "rec-pr-no-github-access"
   record = {
     "id": record_id,
     "type": "pr",
@@ -901,14 +942,7 @@ def test_submit_contribution_rejects_app_scoped_token(
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert r.status_code == 403
-  assert "App tokens cannot access this endpoint" in r.json()["detail"]
-
-  stored = json.loads(
-    (Path(get_settings().data_dir) / "apps" / str(app_id) /
-     "contributions" / f"{record_id}.json").read_text()
-  )
-  assert stored["status"] == "prepared"
-  assert "last_submit_error" not in stored
+  assert "github_access" in r.json()["detail"]
 
 
 def test_submit_contribution_rolls_back_unready_record(
