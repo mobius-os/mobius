@@ -20,7 +20,8 @@ import os
 
 from sqlalchemy.orm import Session
 
-from app import models
+from app import legacy_platform_apps, models
+from app.config import get_settings
 from app.install import install_from_manifest
 
 log = logging.getLogger("mobius.bootstrap")
@@ -32,10 +33,57 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-store/main/mobius.json"
 )
 
+LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
+
 # Tests set MOEBIUS_SKIP_BOOTSTRAP=1 so the pytest suite doesn't hit
 # the live GitHub URL. Set in docker-compose.test.yml's `pytest`
 # service environment block.
 _SKIP_ENV = "MOEBIUS_SKIP_BOOTSTRAP"
+
+
+def _is_legacy_platform_row(app: models.App) -> bool:
+  """True for active old rows whose source is /data/platform/core-apps/<slug>."""
+  return legacy_platform_apps.is_legacy_source_dir(
+    app.source_dir, get_settings().data_dir, app.slug,
+  )
+
+
+async def _migrate_legacy_platform_apps(db: Session) -> None:
+  """Move old built-in rows forward by installing their trusted catalog entry.
+
+  New instances do not auto-install these apps. This only runs when an active
+  row from an older image is already present and still points at the retired
+  platform-core source tree.
+  """
+  rows = (
+    db.query(models.App)
+    .filter(
+      models.App.deleted_at.is_(None),
+      models.App.slug.in_(tuple(LEGACY_PLATFORM_APP_MANIFEST_URLS)),
+    )
+    .all()
+  )
+  for row in rows:
+    if not _is_legacy_platform_row(row):
+      continue
+    manifest_url = LEGACY_PLATFORM_APP_MANIFEST_URLS[row.slug]
+    log.info(
+      "bootstrap: migrating legacy platform app %s from %s",
+      row.slug, row.source_dir,
+    )
+    try:
+      await install_from_manifest(
+        db,
+        manifest_url=manifest_url,
+        manifest=None,
+        raw_base=None,
+        source="bootstrap",
+      )
+    except Exception as exc:
+      log.exception(
+        "bootstrap: legacy platform app migration failed for %s — %s",
+        row.slug, exc,
+      )
 
 
 async def ensure_store_installed(db: Session) -> None:
@@ -60,6 +108,9 @@ async def ensure_store_installed(db: Session) -> None:
   if os.environ.get(_SKIP_ENV) == "1":
     log.info("bootstrap: %s=1, skipping store install", _SKIP_ENV)
     return
+
+  await _migrate_legacy_platform_apps(db)
+
   # Installs store the CANONICAL identity key (`<base>#manifest-id=<id>`, with a
   # trailing `/mobius.json` stripped from the base), NOT the bare URL — so match
   # on that canonical prefix, else this lookup misses every restart and

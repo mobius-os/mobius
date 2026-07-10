@@ -32,7 +32,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "8"  # bump when the baked seed skills change (v2: added reflection.md; v3: const-CSS styling standard in building-apps.md + new app-component-shapes.md; v4: added embedded-app-agent.md; v5: SyncPill v2 silent-when-healthy; v6: recovery.md matches the actual /recover dashboard — four real actions, restore via recovery_restore.sh not a button; v7: rename dreaming.md->reflection.md + mind.md->memory.md + chat-centric memory model — existing instances get the rename via migrate-app-rename.sh, NOT a reseed; v8: contributing.md retired from the seed — the Contribute app ships it via the manifest `skills` field, and live copies on existing instances are untouched)
+SEED_VERSION = "9"  # bump when the baked seed skills change (v2: added reflection.md; v3: const-CSS styling standard in building-apps.md + new app-component-shapes.md; v4: added embedded-app-agent.md; v5: SyncPill v2 silent-when-healthy; v6: recovery.md matches the actual /recover dashboard — four real actions, restore via recovery_restore.sh not a button; v7: rename dreaming.md->reflection.md + mind.md->memory.md + chat-centric memory model — existing instances get the rename via migrate-app-rename.sh, NOT a reseed; v8: contributing.md retired from the seed — the Contribute app ships it via the manifest `skills` field, and live copies on existing instances are untouched; v9: Memory owns scheduled consolidation, Reflection reviews Memory's update log for system-improvement signals)
 
 _SEED_CANDIDATES = [
   Path("/app/scripts/seed-skills"),

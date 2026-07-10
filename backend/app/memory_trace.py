@@ -1,8 +1,8 @@
-"""Persists per-chat read traces of the memory graph for the nightly pass.
+"""Persists per-chat read traces of the memory graph for Memory maintenance.
 
-The Reflection consolidation diff — "what did today's agents actually see
-vs. what WOULD have helped them" — needs the read side of that diff
-recorded somewhere durable. Two signals feed it:
+The scheduled Memory consolidation pass can compare "what did today's agents
+actually see vs. what WOULD have helped them" only if the read side of that diff
+is recorded somewhere durable. Two signals feed it:
 
   - the injected block: `chat.py` records which nodes `build_memory_block`
     loaded into the session's first user message;
@@ -15,8 +15,8 @@ Both merge into `<data_dir>/shared/memory/read-trace/<chat_id>.json`:
    "nodes_injected": ["<node id>", ...], "nodes_read": ["<node id>", ...],
    "updated": "<ISO8601>"}
 
-Node ids match `graph.json` ids (a file's slug), so Reflection can diff a
-trace directly against the graph without re-deriving the mapping. The
+Node ids match `graph.json` ids (a file's slug), so Memory can diff a trace
+directly against the graph without re-deriving the mapping. The
 two lists stay separate on purpose: `nodes_injected` is what the platform
 pushed at the agent for free; `nodes_read` is what the agent went and dug
 for — the second is the stronger relevance signal.
@@ -24,7 +24,7 @@ for — the second is the stronger relevance signal.
 Every write here is FIRE-AND-FORGET: a trace failure must never block,
 slow, or fail the turn that produced it, so all public functions swallow
 their own errors. The directory is bounded by `prune_traces` (14 days),
-called from the boot init and by the Reflection skill.
+called from the boot init and by the scheduled Memory pass.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from app.memory import _loaded_path_to_id, memory_dir
 log = logging.getLogger("mobius.memory")
 
 # Traces older than this are deleted — by the boot-time sweep and by the
-# nightly pass. Two weeks comfortably covers "the day's chats" plus a few
+# scheduled pass. Two weeks comfortably covers "the day's chats" plus a few
 # skipped nights, without the dir growing one file per chat forever.
 TRACE_RETENTION_DAYS = 14
 

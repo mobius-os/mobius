@@ -62,9 +62,9 @@ def _find_existing(
 ):
   """Find the app this (re-)registration refers to, by STABLE identity.
 
-  Identity is source_dir, not the display name. A core app renamed in place
-  (Memory Graph -> Memory, feature 097) keeps the same /data/apps/<slug>/ source
-  dir, so matching on name would miss the existing row and CREATE a duplicate.
+  Identity is source_dir, not the display name. An app renamed in place keeps the
+  same /data/apps/<slug>/ source dir, so matching on name would miss the existing
+  row and CREATE a duplicate.
   The file watcher already keys edits on the exact source_dir, so it is the
   canonical per-app key. Fall back to the name only for legacy rows that
   predate source_dir being populated (NULL/absent in the API response), where

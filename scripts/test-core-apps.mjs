@@ -12,10 +12,12 @@ if (!existsSync(join(frontendNodeModules, '.bin', 'esbuild'))) {
   process.exit(1)
 }
 
-const apps = readdirSync(coreAppsDir, { withFileTypes: true })
-  .filter((entry) => entry.isDirectory())
-  .map((entry) => entry.name)
-  .sort()
+const apps = existsSync(coreAppsDir)
+  ? readdirSync(coreAppsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+  : []
 
 let failed = false
 

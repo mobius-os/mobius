@@ -488,18 +488,18 @@ def test_create_app_rejects_unsafe_source_dir(client, owner_token):
     "name": "fine", "description": "x", "jsx_source": jsx,
     "source_dir": os.path.join(data_dir, "apps", "fine"),
   }, headers=auth).status_code == 201
-  # Platform core dirs are service-only, only for known built-in slugs, and the
-  # app slug must match the core source directory.
+  # Platform core dirs are legacy-only now; even the service token cannot
+  # register new apps there. All editable app source lives under /data/apps.
   core_dir = os.path.join(data_dir, "platform", "core-apps", "memory")
   os.makedirs(core_dir, exist_ok=True)
   assert client.post("/api/apps/", json={
     "name": "Memory", "description": "x", "jsx_source": jsx,
     "source_dir": core_dir,
-  }, headers=auth).status_code == 403
+  }, headers=auth).status_code == 400
   assert client.post("/api/apps/", json={
     "name": "Memory", "description": "x", "jsx_source": jsx,
     "source_dir": core_dir,
-  }, headers=service_auth).status_code == 201
+  }, headers=service_auth).status_code == 400
   non_core_dir = os.path.join(data_dir, "platform", "core-apps", "notes")
   os.makedirs(non_core_dir, exist_ok=True)
   assert client.post("/api/apps/", json={
@@ -897,47 +897,19 @@ async def test_watcher_recompiles_when_imported_module_changes(
 
 
 @pytest.mark.asyncio
-async def test_watcher_recompiles_platform_core_source(
-  client, owner_token,
-):
-  """A platform core source edit recompiles the app registered to that dir."""
-  import asyncio
+async def test_watcher_ignores_platform_core_source():
+  """Only /data/apps source edits are watched; platform core paths are legacy."""
   import os
-  import app.models as models
-  from app.app_watcher import _JsxHandler
-  from app.database import SessionLocal
+  from app.app_watcher import _source_dir_for_changed_path
+
   data_dir = os.environ["DATA_DIR"]
-  with open(os.path.join(data_dir, "service-token.txt"), encoding="utf-8") as f:
-    service_auth = {"Authorization": f"Bearer {f.read()}"}
   src = os.path.join(data_dir, "platform", "core-apps", "beat-machine")
   os.makedirs(src, exist_ok=True)
   component = os.path.join(src, "Widget.jsx")
   with open(component, "w", encoding="utf-8") as f:
-    f.write("export function Widget(){ return <span>CORE_V0</span> }")
-  jsx = (
-    "import { Widget } from './Widget.jsx';\n"
-    "export default function App(){ return <Widget /> }"
-  )
-  app_id = client.post("/api/apps/", json={
-    "name": "Beat Machine", "description": "x",
-    "jsx_source": jsx, "source_dir": src,
-  }, headers=service_auth).json()["id"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  assert "CORE_V0" in open(live, encoding="utf-8").read()
+    f.write("export function Widget(){ return <span>LEGACY</span> }")
 
-  with open(component, "w", encoding="utf-8") as f:
-    f.write("export function Widget(){ return <span>CORE_V1</span> }")
-  await _JsxHandler(asyncio.get_running_loop())._recompile(component)
-
-  s = SessionLocal()
-  try:
-    row = s.query(models.App).filter(models.App.id == app_id).first()
-    assert row.source_dir == src
-  finally:
-    s.close()
-  compiled = open(live, encoding="utf-8").read()
-  assert "CORE_V1" in compiled
-  assert "CORE_V0" not in compiled
+  assert _source_dir_for_changed_path(component) is None
 
 
 @pytest.mark.asyncio

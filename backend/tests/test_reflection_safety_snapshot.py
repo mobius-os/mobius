@@ -1,9 +1,8 @@
 """Feature 112: Reflection takes a guaranteed pre-run git snapshot of /data.
 
-The nightly run consolidates the memory graph, rewrites skills, and fixes apps
-— destructive overwrites of agent-owned files under /data/shared. The
-"git is the undo" promise (memory.md) previously rested only on the agent's own
-mid-run pm-commit discipline, so a consolidation that overwrote a note before
+The nightly run rewrites skills, fixes apps, and writes reports — edits to
+agent-owned files under /data. The "git is the undo" promise previously rested
+only on the agent's own mid-run pm-commit discipline, so an early edit before
 the first commit had no pre-state restore point beyond last night's. The runner
 now commits the current tree as the very first thing the run does.
 """

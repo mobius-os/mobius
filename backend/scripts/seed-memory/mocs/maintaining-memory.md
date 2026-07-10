@@ -16,8 +16,8 @@ before you record, link, or tidy notes.
   daytime vs. nightly split in one note. (Also the canonical note-shape example.)
 - [[memory-is-visible-to-the-partner]] — the Memory app shows every note to the
   partner; write as if you'd stand behind it when quoted back.
-- [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
-  graph and fixes apps; defer heavy reorganizing to it.
+- [[a-nightly-reflection-pass-exists]] — the overnight Reflection pass writes a
+  brief and reviews Memory's maintenance log; Memory owns graph consolidation.
 
 ## The short version
 
@@ -26,11 +26,11 @@ before you record, link, or tidy notes.
   everything, and not generic app/platform how-to (that's a skill now). Default
   to recording nothing.
 - **Day-to-day**, keep this chat's note current (`chats/<id>/index.md`); the
-  nightly reflection pass consolidates the day's notes into proper notes. When
-  you already know a clean fact, you may write the note directly under `notes/`
-  and link it into a map.
+  scheduled Memory pass consolidates the day's notes into proper notes. When you
+  already know a clean fact, you may write the note directly under `notes/` and
+  link it into a map.
 - **One idea per note.** Title it as the specific claim. Link every note into
   at least one map ([[index]] → maps → notes). No orphans.
 - **Tidy lightly by day** (drop stale, collapse obvious dupes, newer wins);
   **defer the reorg** (merges that need judgment, promote-to-MOC, restructuring)
-  to the nightly reflection pass.
+  to the scheduled Memory pass.

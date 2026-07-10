@@ -19,7 +19,11 @@ import pytest
 from fastapi import HTTPException
 
 from app import models
-from app.bootstrap import BOOTSTRAP_STORE_MANIFEST_URL, ensure_store_installed
+from app.bootstrap import (
+  BOOTSTRAP_STORE_MANIFEST_URL,
+  LEGACY_PLATFORM_APP_MANIFEST_URLS,
+  ensure_store_installed,
+)
 
 
 @pytest.mark.asyncio
@@ -78,6 +82,56 @@ async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_store_installed(db)
   install_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manifest_url_shape", ["empty", "raw", "canonical"])
+async def test_bootstrap_migrates_active_legacy_platform_rows(
+  manifest_url_shape, db, monkeypatch,
+):
+  """Old baked app rows are moved forward through the trusted catalog entry."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.config import get_settings
+  from app.install import _canonical_identity_key
+
+  data_dir = get_settings().data_dir
+  legacy_source = f"{data_dir}/platform/core-apps/memory"
+  raw_memory_manifest = LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
+  stored_manifest_url = {
+    "empty": None,
+    "raw": raw_memory_manifest,
+    "canonical": _canonical_identity_key(raw_memory_manifest, "memory"),
+  }[manifest_url_shape]
+  db.add_all([
+    models.App(
+      name="Memory",
+      description="legacy platform app",
+      jsx_source="export default function App() {}",
+      slug="memory",
+      source_dir=legacy_source,
+      manifest_url=stored_manifest_url,
+    ),
+    models.App(
+      name="Store",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="store",
+      manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
+    ),
+  ])
+  db.commit()
+
+  mock_app = models.App(id=3, name="Memory", slug="memory")
+  install_mock = AsyncMock(return_value=(mock_app, "update", [], {}, [], "none"))
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_store_installed(db)
+
+  assert install_mock.await_count == 1
+  assert (
+    install_mock.await_args.kwargs["manifest_url"]
+    == LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
+  )
+  assert install_mock.await_args.kwargs["source"] == "bootstrap"
 
 
 @pytest.mark.asyncio

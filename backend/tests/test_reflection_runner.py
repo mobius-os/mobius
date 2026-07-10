@@ -51,18 +51,17 @@ def test_steering_message_fires_exactly_at_each_threshold():
   assert "MINIMAL brief" in hard_msg
 
 
-def test_steering_messages_both_protect_the_inbox_drain():
-  # The graph froze for days when the old soft message said "phases
-  # 1-5 are over" and the agent skipped consolidation. Both steering
-  # messages must now name the inbox drain as a floor deliverable so
-  # the runner never authorizes skipping it.
+def test_steering_messages_protect_the_brief_only():
+  # Memory consolidation is now owned by the Memory app. Reflection's
+  # countdown should force a shipped brief, not reintroduce the old inbox drain.
   soft = dr.steering_message(34, 35, 60)
   hard = dr.steering_message(44, 45, 60)
   assert soft is not None and hard is not None
   for msg in (soft, hard):
-    assert "inbox" in msg
+    assert "brief" in msg
+    assert "inbox" not in msg
   # The soft message must not regress to "phases 1-5 are over" — that
-  # exact phrasing is what told the agent consolidation was done.
+  # exact phrasing made the agent skip the deliverable.
   assert "phases 1-5 are over" not in soft
 
 

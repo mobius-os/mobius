@@ -1,19 +1,9 @@
 #!/bin/bash
-# check-core-apps-sync.sh — CI guard: fail if a CATALOG-SYNCED core app drifts
-# from its pinned catalog commit. Re-runs the sync into a temp dir and diffs
-# each pinned slug against the committed core-apps/ tree. Needs network (clones
-# the catalog repos), so it runs as its own CI step, not inside the hermetic
-# backend pytest.
+# check-core-apps-sync.sh — compatibility CI guard for platform-owned app
+# snapshots. SOURCES is intentionally empty today; if a future platform snapshot
+# is added, this re-runs the sync into a temp dir and diffs each pinned slug.
 #
-# Core apps come in two kinds:
-#   - catalog-synced: listed in core-apps/SOURCES as `<slug> <repo> <commit>`;
-#     a committed snapshot of that repo. Drift from the pinned commit fails here.
-#   - native: authored directly in-repo, with no upstream catalog repo (e.g.
-#     skills, tasks). There is nothing to diff them against, so they are exempt
-#     from this check. Their manifest is still enforced —
-#     tests/test_core_apps_manifests.py requires EVERY core app under
-#     core-apps/ to ship a valid mobius.json — so a broken/manifest-less dir is
-#     still caught, just by pytest rather than here.
+# Catalog apps install through the App Store into /data/apps, not from this tree.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,7 +36,7 @@ while read -r slug repo commit _rest; do
 done < "$ROOT/core-apps/SOURCES"
 
 if [ "$fail" -eq 0 ]; then
-  echo "catalog-synced core-apps match the pinned catalog ✓"
+  echo "platform app snapshots are in sync"
 else
   echo "Run scripts/sync-core-apps.sh and commit the result (or fix core-apps/SOURCES)." >&2
   exit 1

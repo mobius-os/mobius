@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-reshape.sh — post-deploy gate for the three-layer agent context
 # (core.md constitution + /data/shared/skills/ + /data/shared/memory/ graph)
-# and the Memory + Reflection core apps. Confirms the reshape actually took effect
+# and any installed Memory + Reflection catalog apps. Confirms the reshape took effect
 # INSIDE a running container — not just that the image deployed. Read-only.
 #
 # Run it after scripts/deploy-prod.sh (or against mobius-test after a test
@@ -45,16 +45,33 @@ nsk="$(dex 'ls /data/shared/skills/*.md 2>/dev/null | wc -l' | tr -d ' ')"
 mode="$(dex 'cd /app && python3 -c "from app import memory; print(memory.build_memory_block(\"/data\").mode)"')"
 [ "$mode" = "graph" ] && ok "memory injection mode = graph" || bad "memory injection mode = ${mode:-<none>} (expected graph)"
 
-# 4. Memory + Reflection registered.
+# 4. Memory + Reflection are optional catalog apps, not required platform core apps.
 TOK="$(docker exec "$C" cat /data/service-token.txt 2>/dev/null)"
 dex "curl -s -H 'Authorization: Bearer $TOK' $BASE/api/apps/ > /tmp/vr_apps.json"
-have() { dex "python3 -c \"import json,sys; print('yes' if any(a.get('slug')==sys.argv[1] for a in json.load(open('/tmp/vr_apps.json'))) else 'no')\" $1"; }
-[ "$(have memory)" = "yes" ]     && ok "Memory app registered"     || bad "Memory app NOT registered"
-[ "$(have reflection)" = "yes" ] && ok "Reflection app registered" || bad "Reflection app NOT registered"
+source_for() {
+  dex "python3 -c \"import json,sys; slug=sys.argv[1]; apps=json.load(open('/tmp/vr_apps.json')); print(next((a.get('source_dir') or '' for a in apps if a.get('slug')==slug), ''))\" $1"
+}
+check_optional_catalog_app() {
+  local slug="$1" src
+  src="$(source_for "$slug")"
+  if [ -z "$src" ]; then
+    ok "$slug app not installed (optional)"
+  elif [ "${src#/data/apps/}" != "$src" ]; then
+    ok "$slug app installed from /data/apps"
+  else
+    bad "$slug app installed from unexpected source_dir: $src"
+  fi
+}
+check_optional_catalog_app memory
+check_optional_catalog_app reflection
 
-# 5. reflection cron installed for the mobius user.
-cron="$(dex 'crontab -u mobius -l 2>/dev/null | grep -c "reflection/fetch.sh"' | tr -d ' ')"
-[ "${cron:-0}" -ge 1 ] && ok "reflection cron installed" || bad "reflection cron NOT installed"
+# 5. app crons exist only when their apps are installed.
+for slug in memory reflection; do
+  src="$(source_for "$slug")"
+  [ -n "$src" ] || continue
+  cron="$(dex "crontab -u mobius -l 2>/dev/null | grep -c '$slug/fetch.sh'" | tr -d ' ')"
+  [ "${cron:-0}" -ge 1 ] && ok "$slug cron installed" || bad "$slug cron NOT installed"
+done
 
 # 6. deployed reflection skill has the brief-path FIX (writes reports/<date>.html,
 #    not briefs/). We check the fix, not byte-identity with the seed — the

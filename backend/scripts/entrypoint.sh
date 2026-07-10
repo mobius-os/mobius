@@ -1050,10 +1050,9 @@ fi
 # failures that look like generic CLI crashes.
 umask 022
 
-# Install the core apps + the nightly reflection cron once the server is
-# healthy. Prefer the platform script when the platform clone is active; the
-# baked script is only the recovery-floor fallback. Backgrounded so it doesn't
-# block boot; polls /api/health itself; idempotent; non-fatal.
+# Retired app seeding compatibility hook. Kept as a non-fatal background no-op
+# so older images/platform clones still boot through the same path while app
+# installs live in the App Store and /data/apps.
 _core_installer=/app/scripts/install-core-apps.sh
 if [ "$_use_platform" -eq 1 ] && [ -f /data/platform/backend/scripts/install-core-apps.sh ]; then
   _core_installer=/data/platform/backend/scripts/install-core-apps.sh

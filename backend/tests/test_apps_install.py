@@ -3082,11 +3082,15 @@ def test_legacy_slug_adoption_of_no_manifest_url_row(
   assert len(listed) == 1                  # no duplicate
 
 
-def test_previous_id_cannot_adopt_platform_core_source_row(
+def test_previous_id_cannot_adopt_legacy_platform_source_row(
   client, auth, db, bypass_url_validation,
 ):
-  """Manifest installs must not adopt a built-in row whose source is owned by
-  /data/platform/core-apps; built-ins update through platform deploys."""
+  """A trusted rename must not adopt a legacy platform-source row.
+
+  Historical platform rows migrate only when the catalog id is the SAME slug
+  (memory -> memory, reflection -> reflection, beat-machine -> beat-machine).
+  A previous_id rename shape still fails closed.
+  """
   from app import models
   data_dir = Path(get_settings().data_dir)
   src_dir = data_dir / "platform" / "core-apps" / "memory"
@@ -3118,11 +3122,11 @@ def test_previous_id_cannot_adopt_platform_core_source_row(
   assert (src_dir / "index.jsx").exists()
 
 
-def test_manifest_install_cannot_duplicate_platform_core_slug(
+def test_trusted_catalog_install_migrates_legacy_platform_row(
   client, auth, db, bypass_url_validation,
 ):
-  """A platform-managed core row has no manifest_url, but a store install of
-  the same manifest id must not create memory-2."""
+  """A trusted catalog install adopts the old platform row instead of creating
+  memory-2, and moves editable source to /data/apps/memory."""
   from app import models
   data_dir = Path(get_settings().data_dir)
   src_dir = data_dir / "platform" / "core-apps" / "memory"
@@ -3145,8 +3149,70 @@ def test_manifest_install_cannot_duplicate_platform_core_slug(
   base = "https://raw.githubusercontent.com/mobius-os/app-memory/main/"
   r = _install_simple(client, auth, base, _simple_manifest("memory"))
 
-  assert r.status_code == 409, r.text
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == app.id
+  assert payload["slug"] == "memory"
+  assert payload["source_dir"] == str(data_dir / "apps" / "memory")
+  assert payload["manifest_url"] == base.rstrip("/") + "#manifest-id=memory"
+
+  db.refresh(app)
   assert len(db.query(models.App).all()) == 1
+  assert app.source_dir == str(data_dir / "apps" / "memory")
+  assert app.manifest_url == base.rstrip("/") + "#manifest-id=memory"
+  assert (data_dir / "apps" / "memory" / "index.jsx").exists()
+  assert (src_dir / "index.jsx").exists()
+
+
+@pytest.mark.parametrize("stored_manifest_url_shape", ["raw_mobius_json", "canonical"])
+def test_trusted_catalog_update_migrates_legacy_platform_row_found_by_url(
+  stored_manifest_url_shape, client, auth, db, bypass_url_validation,
+):
+  """Prod-era baked rows can carry an old catalog URL while still pointing at
+  /data/platform/core-apps. Updating from the Store should repair that state in
+  place instead of tripping the platform-owned-app guard."""
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  src_dir = data_dir / "platform" / "core-apps" / "reflection"
+  src_dir.mkdir(parents=True, exist_ok=True)
+  (src_dir / "index.jsx").write_text(JSX)
+  base = "https://raw.githubusercontent.com/mobius-os/app-reflection/main/"
+  canonical = base.rstrip("/") + "#manifest-id=reflection"
+  stored_manifest_url = {
+    "raw_mobius_json": base + "mobius.json",
+    "canonical": canonical,
+  }[stored_manifest_url_shape]
+  app = models.App(
+    name="Reflection",
+    description="platform core",
+    jsx_source=JSX,
+    source_dir=str(src_dir),
+    slug="reflection",
+    manifest_url=stored_manifest_url,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+
+  r = _install_simple(client, auth, base, _simple_manifest("reflection"))
+
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == app.id
+  assert payload["slug"] == "reflection"
+  assert payload["source_dir"] == str(data_dir / "apps" / "reflection")
+  assert payload["manifest_url"] == canonical
+
+  db.refresh(app)
+  assert len(db.query(models.App).all()) == 1
+  assert app.source_dir == str(data_dir / "apps" / "reflection")
+  assert app.manifest_url == canonical
+  assert (data_dir / "apps" / "reflection" / "index.jsx").exists()
+  assert (src_dir / "index.jsx").exists()
 
 
 def test_previous_id_matching_nothing_is_a_fresh_install(

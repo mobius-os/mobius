@@ -1,8 +1,4 @@
-"""Integration: DELETE / recover / install wiring for durable core-app
-suppression (the marker the boot seeder honors). Complements the pure-helper
-unit tests in test_core_app_suppress.py — the wiring is where the reversible
-soft-delete pattern historically hides bugs.
-"""
+"""Integration coverage for the retired core-app suppression marker."""
 
 from pathlib import Path
 
@@ -30,18 +26,15 @@ def _create(client, auth, name):
   return r.json()
 
 
-def test_delete_core_app_writes_marker_recover_clears_it(client, auth):
+def test_delete_memory_app_writes_no_marker_recover_keeps_none(client, auth):
   core_app_suppress.clear_suppressed(get_settings().data_dir, "memory")
   app = _create(client, auth, "Memory")
-  # The core slug must land on its canonical value or the marker key is wrong.
   assert app["slug"] == "memory", app
   assert not _marker("memory").exists()
 
-  # Delete → the boot seeder must never resurrect it → marker written.
   assert client.delete(f"/api/apps/{app['id']}", headers=auth).status_code == 204
-  assert _marker("memory").exists()
+  assert not _marker("memory").exists()
 
-  # Recover (within TTL) → owner brought it back → marker cleared.
   r = client.post(f"/api/apps/{app['id']}/recover", headers=auth)
   assert r.status_code == 200, r.text
   assert not _marker("memory").exists()

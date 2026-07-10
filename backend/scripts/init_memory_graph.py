@@ -11,9 +11,9 @@ every learned note (Codex review R1). So:
     `.seed-version` + `.ready` LAST. A failed lint leaves no `.ready`, so the
     injector keeps the legacy flat-file fallback (review R2).
   - subsequent boots (graph present): leave the agent's notes untouched; only
-    ensure inbox.md exists and re-publish `.ready` if a prior boot crashed
-    mid-publish. Seed-version migrations for existing instances are a reflection
-    task, not a boot-time overwrite.
+    ensure legacy compatibility files exist and re-publish `.ready` if a prior
+    boot crashed mid-publish. Seed-version migrations for existing instances are
+    a merge-aware agent task, not a boot-time overwrite.
 
 This is pure file I/O (no agent process). Run from entrypoint after
 init_agent_context.py.
@@ -40,14 +40,15 @@ _SEED_CANDIDATES = [
   Path("/app/scripts/seed-memory"),
   Path(__file__).resolve().parent / "seed-memory",
 ]
-SEED_VERSION = "3"  # bump when the seed graph's authored content changes
+SEED_VERSION = "4"  # bump when the seed graph's authored content changes
 
 INBOX_HEADER = (
   "# Inbox\n\n"
-  "Raw, unconsolidated observations land here during the day (your skill's\n"
-  "append recipe writes to this file). The nightly reflection pass folds these\n"
-  "into atomic notes under `notes/` and then truncates this file. Anything\n"
-  "here is recalled next session, so nothing is lost before consolidation.\n\n"
+  "Legacy compatibility file. Current memory practice keeps durable facts in\n"
+  "`chats/<id>/index.md` during the day, then lets the scheduled Memory pass\n"
+  "promote, merge, prune, and rebuild the graph. If old instructions left lines\n"
+  "here, Memory's scheduled pass may drain them; new facts should go to the\n"
+  "current chat note or a proper linked note.\n\n"
 )
 
 # Mirrors seed-memory/recent-chats.md, for the self-heal path: instances
@@ -55,15 +56,15 @@ INBOX_HEADER = (
 # inbox.md, the queue is instance state — never overwritten once present).
 RECENT_CHATS_HEADER = (
   "# Recent chats\n\n"
-  "A fixed-size queue of the last chats — at most 10 entries, oldest first,\n"
-  "one line each:\n\n"
+  "Legacy compatibility file. Current memory practice injects the summaries of\n"
+  "the most-recently-touched chat notes directly from `chats/<id>/index.md`, so\n"
+  "there is no separate recent-chats queue to maintain by hand.\n\n"
+  "Old entries, when present, used this shape:\n\n"
   "`- [chat:<id>] <YYYY-MM-DD> — <1-2 sentence summary>`\n\n"
-  "The nightly Reflection pass maintains it: appends the day's chats from its\n"
-  "interviews and evicts the oldest beyond 10. Don't grow it by hand during\n"
-  "the day. The summaries are usually enough to recall what recently\n"
-  "happened; when a specific exchange matters, fetch the full transcript\n"
-  "with `GET /api/chats/<id>`.\n\n"
-  "*(no chats recorded yet — the first nightly pass fills this in)*\n"
+  "The summaries in chat notes are usually enough to recall what recently\n"
+  "happened; when a specific exchange matters, fetch the full transcript with\n"
+  "`GET /api/chats/<id>`.\n\n"
+  "*(no legacy chat queue entries)*\n"
 )
 
 
@@ -124,8 +125,8 @@ def _publish_from_staging() -> bool:
 
 def init() -> None:
   MEMORY.parent.mkdir(parents=True, exist_ok=True)
-  # Cheap boot-time sweep of stale per-chat read-traces. The nightly
-  # Reflection pass prunes too, but a long-idle or reflection-less instance
+  # Cheap boot-time sweep of stale per-chat read-traces. The scheduled Memory
+  # pass prunes too, but a long-idle or memory-less instance
   # shouldn't accumulate one file per chat forever. Best-effort by
   # construction (prune_traces never raises).
   pruned = prune_traces(DATA_DIR)

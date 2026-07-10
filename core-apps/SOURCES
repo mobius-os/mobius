@@ -1,23 +1,9 @@
-# Core apps are SNAPSHOTS of their catalog repos. The catalog repo is the
-# single source of truth; core-apps/<slug>/ is a committed copy of it. At
-# runtime the active source is /data/platform/core-apps/<slug> (the platform
-# clone), not a copied /data/apps/<slug> tree.
+# No catalog app is pinned as a platform core app.
 #
-# To update a built-in app: edit it in its catalog repo (mobius-os/app-<slug>),
-# bump the commit below, run `scripts/sync-core-apps.sh`, and commit the diff.
-# CI (`scripts/check-core-apps-sync.sh`) fails the build if core-apps/<slug>
-# drifts from <repo>@<commit> — so the two trees can never silently diverge
-# again (which is how core-apps/reflection once shipped without its manifest).
-# Do not use core-apps/SYNC_LOCAL for app UI/source drift; it is only for
-# platform wrapper files that must live beside a core app at runtime.
+# The App Store is bootstrapped separately by backend/app/bootstrap.py. Memory,
+# Reflection, Beat Machine, and every other app install from their catalog repos
+# into /data/apps/<slug>, where users and agents can edit/update them normally.
 #
-# NATIVE apps: a core app may instead be authored directly in this repo with no
-# catalog repo (none at present). Such apps are simply NOT listed below —
-# they have no upstream to diff against, so the sync check skips them. Their
-# manifest is still required: tests/test_core_apps_manifests.py enforces that
-# EVERY core-apps/<slug>/ ships a valid mobius.json, native or not.
-#
-# Format (catalog-synced apps only): <slug>  <owner/repo>  <commit-sha>
-memory      mobius-os/app-memory      f74ea4da3b02ef46d40f1de6ce43ca31d89d6832
-reflection  mobius-os/app-reflection  cf51c2805cd31cf01b7fb56d8f22adc654dcbf9b
-beat-machine  mobius-os/app-beat-machine  511ca1ae3609b83a478f8b6cd307ed4e3039b8cf
+# Kept as an empty registry so older tooling can run without a missing-file
+# branch. Format, when intentionally reintroduced for a platform-owned app:
+# <slug>  <owner/repo>  <commit-sha>
