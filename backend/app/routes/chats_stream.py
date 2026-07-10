@@ -660,10 +660,12 @@ async def send_message(
   # after the restart (the stale-pending drain), so nothing the owner sent is
   # lost. This must intercept BEFORE the queue-or-start branches below, which
   # would otherwise spawn a turn (fresh StartTurn, or a stale-pending drain).
-  # force_steer (Stop's queue-collapse resend) is exempt: with the turn already
-  # interrupted it has nothing steerable and degrades to a queue append on its
-  # own path below.
-  if is_draining() and not body.force_steer:
+  # force_steer is deliberately NOT exempt: a steer accepted while the drain is
+  # interrupting a handle can buffer into the dying runner's continuation and
+  # start fresh provider work mid-shutdown (or, with no running turn at all,
+  # fall through to a fresh StartTurn). During the restart window every send —
+  # steer included — queues.
+  if is_draining():
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
