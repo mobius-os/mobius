@@ -409,6 +409,77 @@ broadcast_shell_rebuilt() {
   ' 2>/dev/null
 }
 
+run_deploy_canary() {
+  [ "${DEPLOY_CANARY:-0}" = "1" ] || return 0
+  info "DEPLOY_CANARY=1: sending throwaway chat turn and waiting for a reply"
+  if docker exec "$CONTAINER" sh -c '
+    set -eu
+    base="'"${INTERNAL_BASE}"'"
+    tok=$(cat /data/service-token.txt 2>/dev/null) || exit 2
+    [ -n "$tok" ] || exit 2
+    chat_id=""
+    cleanup() {
+      [ -n "${chat_id:-}" ] || return 0
+      curl -fsS -o /dev/null \
+        -X DELETE "$base/api/chats/$chat_id" \
+        -H "Authorization: Bearer $tok" || true
+    }
+    trap cleanup EXIT
+    chat_json=$(curl -fsS \
+      -X POST "$base/api/chats" \
+      -H "Authorization: Bearer $tok" \
+      -H "Content-Type: application/json" \
+      -d "{\"title\":\"Deploy canary\",\"messages\":[]}")
+    chat_id=$(printf "%s" "$chat_json" | python3 -c "
+import json, sys
+print(json.load(sys.stdin)[\"id\"])
+")
+    curl -fsS -o /dev/null \
+      -X POST "$base/api/chats/$chat_id/messages" \
+      -H "Authorization: Bearer $tok" \
+      -H "Content-Type: application/json" \
+      -d "{\"content\":\"reply ok\"}"
+    for _i in $(seq 1 90); do
+      status_json=$(curl -fsS \
+        -H "Authorization: Bearer $tok" \
+        "$base/api/chats/$chat_id?limit=10")
+      if printf "%s" "$status_json" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if d.get(\"running\"):
+  sys.exit(1)
+for m in d.get(\"messages\") or []:
+  if m.get(\"role\") != \"assistant\":
+    continue
+  if (m.get(\"content\") or \"\").strip() or m.get(\"blocks\"):
+    sys.exit(0)
+sys.exit(1)
+"; then
+        exit 0
+      fi
+      sleep 1
+    done
+    exit 1
+  '; then
+    ok "deploy canary passed — throwaway SDK turn completed"
+  else
+    docker exec "$CONTAINER" sh -c '
+      set -eu
+      base="'"${INTERNAL_BASE}"'"
+      tok=$(cat /data/service-token.txt 2>/dev/null) || exit 0
+      [ -n "$tok" ] || exit 0
+      curl -fsS -o /dev/null \
+        -X POST "$base/api/notifications/send" \
+        -H "Authorization: Bearer $tok" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\":\"Deploy canary failed\",\"body\":\"Check provider auth, rate/usage limits, /api/debug/status, and container logs.\"}" \
+        || true
+    ' 2>/dev/null || true
+    warn "deploy canary FAILED — deploy remains live, but chat turns may be unhealthy."
+    warn "Check provider auth, rate/usage limits, /api/debug/status, and container logs."
+  fi
+}
+
 # Docker's restart counter for the live container, as an integer. This is the
 # real "is the new image actually crash-looping?" signal: the preflight already
 # proved the image BOOTS in a scratch box, so during cutover a climbing
@@ -921,6 +992,8 @@ wait_for_cutover \
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready"
 wait_for_cutover "ready_code" "writer ready" \
   "readiness check never returned 200 — the chat-persistence writer is not serving"
+
+run_deploy_canary
 
 # ── step 3: rebuild the served platform frontend ───────────────────────
 # The authoritative frontend source and dist now live in /data/platform. After

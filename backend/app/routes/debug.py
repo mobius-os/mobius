@@ -7,13 +7,18 @@ ad-hoc debug endpoints.
 """
 
 import os
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.orm import Session
 
 from app import models
-from app.broadcast import get_broadcast, get_all_active_broadcasts
+from app.broadcast import get_all_active_broadcasts
+from app.chat import live_run_health_fields
 from app.config import get_settings
+from app.database import get_db
 from app.deps import get_current_owner
 from app.runner_registry import RunnerKind, registry
 
@@ -33,6 +38,7 @@ _SECRET_KEY_CHANGED_FLAG = Path(
 def debug_status(
   request: Request,
   _owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
 ):
   """Returns active agent runtimes, broadcasts, and starting state.
 
@@ -47,12 +53,26 @@ def debug_status(
   operator should investigate and restart. The field is absent (or
   False) when reconciliation succeeded.
   """
+  now_monotonic = time.monotonic()
+  now_wall = datetime.now(UTC).replace(tzinfo=None)
+
+  def _client_entry(handle):
+    return {
+      "chat_id": handle.chat_id,
+      **live_run_health_fields(
+        handle.chat_id,
+        db,
+        now_monotonic=now_monotonic,
+        now_wall=now_wall,
+      ),
+    }
+
   sdk_clients = [
-    {"chat_id": handle.chat_id}
+    _client_entry(handle)
     for handle in registry.handles_by_kind(RunnerKind.CLAUDE_SDK)
   ]
   sdk_sessions = [
-    {"chat_id": handle.chat_id}
+    _client_entry(handle)
     for handle in registry.handles_by_kind(RunnerKind.CODEX_SDK)
   ]
 
@@ -62,7 +82,12 @@ def debug_status(
       "chat_id": bc.chat_id,
       "running": bc.running,
       "event_count": len(bc.event_log),
-      "subscriber_count": len(bc.subscribers),
+      **live_run_health_fields(
+        bc.chat_id,
+        db,
+        now_monotonic=now_monotonic,
+        now_wall=now_wall,
+      ),
     })
 
   # app.state.reconciliation_failed is set by lifespan() when the

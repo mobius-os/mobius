@@ -561,6 +561,16 @@ _SKILL_TEXT_CACHE: str | None = None
 # the marker survives until persistence is complete.
 _clear_after_terminal_generation: dict[str, int] = {}
 
+# Liveness watchdog. Derived-only in v1: no persisted run-state enum.
+PROGRESS_TIMEOUT = 600.0
+STALLED_TURN_MESSAGE = (
+  "The turn stalled (no activity for 10 minutes) and was stopped — your "
+  "message is preserved; send again to resume."
+)
+# Placeholder for the future drain-gated restart path. The watchdog checks this
+# process-wide flag so it will not race a restart drain once that work flips it.
+draining = False
+
 
 def _read_skill_text() -> str:
   """Returns the agent skill (system-prompt) text, cached after first
@@ -616,6 +626,138 @@ def bump_run_generation(chat_id: str) -> int:
   skips writing.
   """
   return registry.bump_generation(chat_id)
+
+
+def last_event_age_secs(
+  bc: ChatBroadcast | None,
+  now: float | None = None,
+) -> float | None:
+  """Age in seconds of the broadcast's last event, from monotonic time."""
+  if bc is None or bc.last_event_at is None:
+    return None
+  if now is None:
+    now = time.monotonic()
+  return max(0.0, now - bc.last_event_at)
+
+
+def is_broadcast_stale(
+  bc: ChatBroadcast | None,
+  now: float | None = None,
+) -> bool:
+  """The one staleness predicate used by watchdog and debug status."""
+  age = last_event_age_secs(bc, now)
+  return age is not None and age > PROGRESS_TIMEOUT
+
+
+def _run_age_secs(
+  chat: models.Chat | None,
+  now: datetime | None = None,
+) -> float | None:
+  """Age in seconds of the current durable run marker, when derivable."""
+  if chat is None or chat.run_started_at is None:
+    return None
+  if now is None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+  started = chat.run_started_at
+  if started.tzinfo is not None:
+    started = started.astimezone(UTC).replace(tzinfo=None)
+  return max(0.0, (now - started).total_seconds())
+
+
+def _parked_until_for_chat(
+  db: Session,
+  chat_id: str,
+) -> datetime | None:
+  """Return a provider-park timestamp if a future schema has one.
+
+  V1 has no parking column yet. This defensive probe keeps the liveness checks
+  forward-compatible without requiring the provider-limit work to land first.
+  """
+  if not hasattr(models.ChatRun, "parked_until"):
+    return None
+  try:
+    run = (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.chat_id == chat_id)
+      .filter(models.ChatRun.status == "running")
+      .order_by(models.ChatRun.started_at.desc())
+      .first()
+    )
+  except Exception:
+    return None
+  if run is None:
+    return None
+  parked_until = getattr(run, "parked_until", None)
+  if isinstance(parked_until, datetime):
+    return parked_until
+  return None
+
+
+def _is_future_park(
+  parked_until: datetime | None,
+  now: datetime | None = None,
+) -> bool:
+  if parked_until is None:
+    return False
+  if now is None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+  if parked_until.tzinfo is not None:
+    parked_until = parked_until.astimezone(UTC).replace(tzinfo=None)
+  return parked_until > now
+
+
+def _stall_exemption(
+  db: Session,
+  chat_id: str,
+  now: datetime | None = None,
+) -> str | None:
+  """Derived exemptions from design 2.1: question, park, or draining."""
+  if draining:
+    return "draining"
+  if questions.get(chat_id) is not None:
+    return "pending_question"
+  if _is_future_park(_parked_until_for_chat(db, chat_id), now):
+    return "parked"
+  return None
+
+
+def live_run_health_fields(
+  chat_id: str,
+  db: Session,
+  *,
+  now_monotonic: float | None = None,
+  now_wall: datetime | None = None,
+) -> dict:
+  """Derived liveness surface for one chat, shared by debug status."""
+  if now_monotonic is None:
+    now_monotonic = time.monotonic()
+  if now_wall is None:
+    now_wall = datetime.now(UTC).replace(tzinfo=None)
+  bc = get_broadcast(chat_id)
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  parked_until = _parked_until_for_chat(db, chat_id)
+  stale = is_broadcast_stale(bc, now_monotonic)
+  exemption = _stall_exemption(db, chat_id, now_wall)
+  if exemption == "pending_question":
+    state = "pending_question"
+  elif exemption == "parked":
+    state = "parked"
+  elif exemption == "draining":
+    state = "draining"
+  elif stale:
+    state = "stale"
+  else:
+    state = "live"
+  return {
+    "state": state,
+    "last_event_age_secs": last_event_age_secs(bc, now_monotonic),
+    "run_age_secs": _run_age_secs(chat, now_wall),
+    "subscriber_count": len(bc.subscribers) if bc is not None else 0,
+    "stale": stale,
+    "parked_until": (
+      parked_until.isoformat() if parked_until is not None else None
+    ),
+  }
 
 
 def forget_chat(chat_id: str) -> None:
@@ -1107,6 +1249,92 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
       "swept %d wedged run marker(s): %s", len(swept), ", ".join(swept),
     )
   return swept
+
+
+async def sweep_stalled_live_runs(db: Session) -> list[str]:
+  """Interrupt live SDK turns whose broadcast has been silent too long.
+
+  This is the runtime liveness watchdog from design 2.3. It uses only derived
+  state: the registry says which turns are live, `ChatBroadcast.last_event_at`
+  says whether progress is stale, and `_stall_exemption` checks the v1
+  exemptions without introducing a persisted run-state enum.
+
+  The interrupt path deliberately mirrors Stop's generation handoff but skips
+  Stop's user-facing queue collapse: pending_messages are not cleared and
+  pending questions are not cancelled. The runner is allowed to unwind through
+  its normal `_complete_turn` path, so the single-writer actor still owns the
+  terminal transcript write and run-marker cleanup.
+  """
+  log = _get_logger()
+  interrupted: list[str] = []
+  now_monotonic = time.monotonic()
+  now_wall = datetime.now(UTC).replace(tzinfo=None)
+  for chat_id in sorted(registry.all_alive_chat_ids()):
+    handles = registry.get_handles(chat_id)
+    if not handles:
+      # Broadcast creation starts the stale clock, but the watchdog only acts
+      # once a live SDK handle exists. Pre-handle stalls remain visible in
+      # /api/debug/status and are not interrupted from this sweep.
+      continue
+    bc = get_broadcast(chat_id)
+    if not is_broadcast_stale(bc, now_monotonic):
+      continue
+    exemption = _stall_exemption(db, chat_id, now_wall)
+    if exemption is not None:
+      log.info(
+        "stalled-live watchdog skipped chat_id=%s exemption=%s",
+        chat_id, exemption,
+      )
+      continue
+    sink = get_active_sink(chat_id)
+    if sink is not None:
+      sink.publish({"type": "error", "message": STALLED_TURN_MESSAGE})
+    elif bc is not None:
+      # Transport-only fallback for the rare inconsistent state where a handle
+      # is live but chat.py no longer has its sink. Do not persist directly.
+      bc.publish({"type": "error", "message": STALLED_TURN_MESSAGE})
+      log.warning(
+        "stalled-live watchdog has no active sink for chat_id=%s; "
+        "published transport error only",
+        chat_id,
+      )
+
+    stopped_gen = current_run_generation(chat_id)
+    if not isinstance(stopped_gen, int):
+      log.warning(
+        "stalled-live watchdog skipped chat_id=%s with non-finite generation",
+        chat_id,
+      )
+      continue
+    bump_run_generation(chat_id)
+    _clear_after_terminal_generation[chat_id] = stopped_gen
+
+    all_interrupted = True
+    for handle in handles:
+      try:
+        stopped = await handle.stop(timeout=2.0)
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        log.warning(
+          "stalled-live watchdog interrupt failed chat_id=%s kind=%s",
+          chat_id, getattr(handle, "kind", "?"), exc_info=True,
+        )
+        stopped = False
+      if not stopped:
+        all_interrupted = False
+        log.warning(
+          "stalled-live watchdog interrupt timed out chat_id=%s kind=%s",
+          chat_id, getattr(handle, "kind", "?"),
+        )
+    if all_interrupted:
+      interrupted.append(chat_id)
+  if interrupted:
+    log.warning(
+      "stalled-live watchdog interrupted %d chat(s): %s",
+      len(interrupted), ", ".join(interrupted),
+    )
+  return interrupted
 
 
 async def _clear_pending(chat_id: str) -> list[int]:
