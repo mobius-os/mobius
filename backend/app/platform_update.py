@@ -156,6 +156,14 @@ class PlatformRestartResponse(TypedDict):
   status: Literal["restarting"]
 
 
+class PlatformConflictResolverChatOut(TypedDict):
+  """Response shape for ``POST /api/platform/conflict-resolver-chat``."""
+
+  chat_id: str
+  created: bool
+  started: bool
+
+
 @dataclass(frozen=True)
 class ReconcileResult:
   """Outcome of a single :func:`reconcile_clone` pass.
@@ -786,10 +794,11 @@ async def apply_platform_update(
 ) -> PlatformApplyResult:
   """Owner-triggered reconcile. Clean/updated -> ``restart_needed`` (the running
   uvicorn must restart to load the new code). Conflict -> the conflict is
-  recorded and an agent resolver chat is opened. Rolled back -> the tree stayed
-  on the old code and the state says so. Offline/skipped -> a ``409`` via
-  :class:`PlatformUpdateError`. Never restarts on its own."""
+  recorded and Settings offers an owner-clicked resolver chat. Rolled back ->
+  the tree stayed on the old code and the state says so. Offline/skipped -> a
+  ``409`` via :class:`PlatformUpdateError`. Never restarts on its own."""
   async with _APPLY_LOCK:
+    existing_conflict = await asyncio.to_thread(_read_conflict_flag) or {}
     res = await asyncio.to_thread(_reconcile_under_lock, repo, False)
     chat_id: str | None = None
 
@@ -798,17 +807,20 @@ async def apply_platform_update(
       await _rebuild_frontend_after_update_if_needed(repo, res)
       state = PlatformUpdateState.RESTART_NEEDED
     elif res.status == "conflict":
-      chat_id = await spawn_platform_conflict_chat(db, res.conflict_paths)
-      # Stamp the resolver chat into the persisted flag so a Settings reload can
-      # still link to it. When a re-apply hit a pre-existing conflict the fresh
-      # values can be empty (no new target, no fresh paths, spawn deduped to
-      # None), so fall back to the recorded flag for all three fields rather than
-      # clobbering the good values already on disk.
-      existing = _read_conflict_flag() or {}
+      # Keep the resolver gated behind the owner's next click. A conflict pass
+      # rewrites the flag with target + paths, so preserve a previously opened
+      # chat only when it belongs to this same target.
+      target = res.target_sha or existing_conflict.get("upstream")
+      existing_chat_id = (
+        existing_conflict.get("chat_id")
+        if target and existing_conflict.get("upstream") == target
+        else None
+      )
+      chat_id = existing_chat_id
       _write_conflict_flag(
-        res.target_sha or existing.get("upstream"),
-        res.conflict_paths or existing.get("paths") or [],
-        chat_id or existing.get("chat_id"),
+        target,
+        res.conflict_paths or existing_conflict.get("paths") or [],
+        existing_chat_id,
       )
       state = PlatformUpdateState.CONFLICT
     elif res.status == "rolled_back":
@@ -832,9 +844,46 @@ async def apply_platform_update(
     )
 
 
+async def create_platform_conflict_resolver_chat(
+  db: Session, repo: Path = PLATFORM_REPO,
+) -> PlatformConflictResolverChatOut:
+  """Create or return the owner-clicked resolver chat for a platform conflict."""
+  from app import models
+
+  flag = _read_conflict_flag() or {}
+  if not (CONFLICT_FLAG.exists() or _rebase_in_progress(repo)):
+    raise PlatformUpdateError("No unresolved platform update conflict.")
+
+  existing_chat_id = flag.get("chat_id")
+  if existing_chat_id:
+    existing = (
+      db.query(models.Chat)
+      .filter(models.Chat.id == existing_chat_id)
+      .filter(models.Chat.deleted_at.is_(None))
+      .filter(models.Chat.created_by_app_id.is_(None))
+      .first()
+    )
+    if existing is not None:
+      return PlatformConflictResolverChatOut(
+        chat_id=existing.id, created=False, started=False,
+      )
+
+  conflict_paths = flag.get("paths") or _unmerged_paths(repo)
+  result = await spawn_platform_conflict_chat(db, conflict_paths)
+  if result is None:
+    raise PlatformUpdateError("Could not open resolver chat.")
+
+  _write_conflict_flag(
+    flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF),
+    conflict_paths,
+    result["chat_id"],
+  )
+  return result
+
+
 async def spawn_platform_conflict_chat(
   db: Session, conflict_paths: list[str],
-) -> str | None:
+) -> PlatformConflictResolverChatOut | None:
   """Open a visible agent chat to reconcile the new platform version into
   ``main`` — the platform analogue of a per-app update-conflict resolver chat.
   Dedupes on a running resolver."""
@@ -859,7 +908,9 @@ async def spawn_platform_conflict_chat(
     .first()
   )
   if running is not None:
-    return None
+    return PlatformConflictResolverChatOut(
+      chat_id=running.id, created=False, started=False,
+    )
 
   owner = db.query(models.Owner).first()
   if owner is None:
@@ -897,8 +948,11 @@ async def spawn_platform_conflict_chat(
   db.commit()
 
   if not mark_starting(chat_id):
-    return chat_id
+    return PlatformConflictResolverChatOut(
+      chat_id=chat_id, created=True, started=False,
+    )
 
+  started = False
   try:
     start_gen = current_run_generation(chat_id)
     run_token = alloc_run_token()
@@ -917,6 +971,7 @@ async def spawn_platform_conflict_chat(
         result["history"], chat_id=chat_id, session_id=result["session_id"],
         provider_id=result["provider"], run_gen=start_gen, run_token=run_token,
       ))
+      started = True
     else:
       discard_starting(chat_id)
   except Exception:
@@ -933,4 +988,6 @@ async def spawn_platform_conflict_chat(
     except Exception:
       pass
 
-  return chat_id
+  return PlatformConflictResolverChatOut(
+    chat_id=chat_id, created=True, started=started,
+  )

@@ -319,7 +319,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
   // Platform self-update (backend/frontend/libraries/recovery as one release).
-  // 'idle' | 'applying' | 'restarting'.
+  // 'idle' | 'applying' | 'resolving' | 'restarting'.
   const [platform, setPlatform] = useState(null)
   const [platformPhase, setPlatformPhase] = useState('idle')
   const [platformError, setPlatformError] = useState('')
@@ -830,7 +830,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   useEffect(() => { refreshPlatform() }, [refreshPlatform])
 
   // Press Update -> merge the baked platform release into the live backend.
-  // Clean -> the row flips to "restart needed"; conflict -> an agent chat opens.
+  // Clean -> the row flips to "restart needed"; conflict -> show a resolver
+  // action, but wait for the owner's click before opening an agent chat.
   async function applyPlatformUpdate() {
     if (platformPhase !== 'idle') return
     setPlatformError('')
@@ -846,6 +847,35 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       await refreshPlatform()
     } catch {
       setPlatformError('Update failed — the instance is unchanged.')
+    } finally {
+      setPlatformPhase('idle')
+    }
+  }
+
+  async function resolvePlatformConflict() {
+    if (platformPhase !== 'idle' || !onOpenChat) return
+    setPlatformError('')
+
+    if (platform?.conflict_chat_id) {
+      onOpenChat(platform.conflict_chat_id)
+      return
+    }
+
+    setPlatformPhase('resolving')
+    try {
+      const res = await api.platform.conflictResolverChat()
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json())?.detail || '' } catch {}
+        setPlatformError(detail ? `Could not open chat: ${detail}` : 'Could not open the resolver chat.')
+        await refreshPlatform()
+        return
+      }
+      const body = await res.json()
+      await refreshPlatform()
+      if (body?.chat_id) onOpenChat(body.chat_id)
+    } catch {
+      setPlatformError('Could not open the resolver chat.')
     } finally {
       setPlatformPhase('idle')
     }
@@ -1227,13 +1257,18 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           <div className="settings__row">
             <span className="settings__label">Updates</span>
             {platformConflict ? (
-              platform?.conflict_chat_id && onOpenChat ? (
+              onOpenChat ? (
                 <button
                   className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                   type="button"
-                  onClick={() => onOpenChat(platform.conflict_chat_id)}
+                  onClick={resolvePlatformConflict}
+                  disabled={platformPhase === 'resolving'}
                 >
-                  Resolve
+                  {platformPhase === 'resolving'
+                    ? 'Opening…'
+                    : platform?.conflict_chat_id
+                      ? 'Open chat'
+                      : 'Resolve in chat'}
                 </button>
               ) : null
             ) : platformRestart ? (

@@ -407,6 +407,71 @@ async def test_apply_rebuilds_frontend_when_update_touched_frontend(monkeypatch,
   assert calls == [(platform, new)]
 
 
+@pytest.mark.asyncio
+async def test_apply_conflict_waits_for_owner_before_opening_chat(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+
+  async def fail_spawn(*args, **kwargs):  # pragma: no cover - should not run
+    raise AssertionError("apply must not start a resolver chat")
+
+  monkeypatch.setattr(pu, "spawn_platform_conflict_chat", fail_spawn)
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+    pu.ReconcileResult(
+      "conflict", _served_sha(platform), _served_sha(platform), target,
+      ["backend/app/main.py"],
+    )
+  ))
+
+  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+
+  assert res["state"] == pu.PlatformUpdateState.CONFLICT.value
+  assert res["needs_restart"] is False
+  assert res["chat_id"] is None
+  flag = pu._read_conflict_flag()
+  assert flag["upstream"] == target
+  assert flag["paths"] == ["backend/app/main.py"]
+  assert flag["chat_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_platform_conflict_resolver_chat_is_click_gated(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+  pu._write_conflict_flag(target, ["backend/app/main.py"])
+  calls = []
+
+  async def fake_spawn(db, paths):
+    calls.append((db, paths))
+    return {
+      "chat_id": "resolver-chat",
+      "created": True,
+      "started": True,
+    }
+
+  monkeypatch.setattr(pu, "spawn_platform_conflict_chat", fake_spawn)
+
+  db = SimpleNamespace()
+  res = await pu.create_platform_conflict_resolver_chat(db, platform)
+
+  assert res == {
+    "chat_id": "resolver-chat",
+    "created": True,
+    "started": True,
+  }
+  assert calls == [(db, ["backend/app/main.py"])]
+  flag = pu._read_conflict_flag()
+  assert flag["upstream"] == target
+  assert flag["paths"] == ["backend/app/main.py"]
+  assert flag["chat_id"] == "resolver-chat"
+
+
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
   origin, platform = clone_env
   served = _served_sha(platform)

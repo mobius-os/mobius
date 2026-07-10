@@ -2,8 +2,10 @@
 
 When the partner updates an installed app and the new version touches the same
 lines as local edits, the update can't apply cleanly — exactly like a `git pull`
-that conflicts. Möbius doesn't paper over it: it leaves a **real merge conflict**
-in the app's source and opens a chat (this one) so you resolve it the normal way.
+that conflicts. The update attempt itself leaves the app's live source alone.
+When the partner clicks **Resolve in chat**, Möbius materializes a **real merge
+conflict** in the app's source and opens this chat so you resolve it the normal
+way.
 `Read` this before resolving one.
 
 ## How app updates work (so the conflict makes sense)
@@ -16,12 +18,13 @@ branches:
 - **`main`** — the working branch with the local edits you and the partner have
   made. This is what's checked out.
 
-An update records the new version on `upstream` and merges it into `main`. A
-clean merge just applies. A conflict leaves `main`'s working tree mid-merge:
-conflict markers in the files + a `MERGE_HEAD`. **The app keeps serving its
-previous (working) version the whole time** — the marker-bearing source won't
-compile, so the file watcher holds the last good bundle. Nothing is broken for
-the partner while you work; you're just finishing the merge.
+An update records the new version on `upstream`. A clean merge applies. A
+conflict first surfaces to the partner without touching live source; once they
+click Resolve, `main`'s working tree is left mid-merge: conflict markers in the
+files + a `MERGE_HEAD`. **The app keeps serving its previous (working) version
+the whole time** — the marker-bearing source won't compile, so the file watcher
+holds the last good bundle. Nothing is broken for the partner while you work;
+you're just finishing the merge.
 
 ## Look at the conflict
 
