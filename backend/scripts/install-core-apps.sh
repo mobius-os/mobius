@@ -404,7 +404,7 @@ fi
 # Canonical app slug is `beat-machine`; older prod rows used
 # `/data/apps/beatmachine`. Pass that legacy path to register_app.py so the row
 # migrates in place to the platform source without creating a duplicate.
-beat_machine_app_id="$(sync_core_app beat-machine "Beat Machine" "A native step sequencer with synthesized drums, custom recordings, and simple effects." beat-machine beatmachine)"
+beat_machine_app_id="$(sync_core_app beat-machine "Beat Machine" "A native 32-step sequencer with drum-kit voices, custom recordings, BPM control, and simple effects." beat-machine beatmachine)"
 if [[ -n "$beat_machine_app_id" ]]; then
   if [[ -f "$CORE_SRC/beat-machine/icon.png" ]]; then
     curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/beat-machine/icon.png" \
