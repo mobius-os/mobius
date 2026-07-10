@@ -62,7 +62,7 @@ export function Sequencer({
           })}
         </div>
 
-        <div style={S.seqScrollArea} ref={seqScrollRef}>
+        <div className="bm-scroll-skin" style={S.seqScrollArea} ref={seqScrollRef}>
           <div style={S.seqGridInner}>
             <div style={S.beatNumbers} aria-hidden="true">
               {Array.from({ length: TOTAL_BEATS }, (_, beatIdx) => (

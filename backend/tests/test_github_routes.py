@@ -625,8 +625,10 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
 
   monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
   git_calls = []
+  fork_ready = False
 
   def fake_git(repo_path, *args, check=True):
+    nonlocal fork_ready
     git_calls.append(args)
     if args == ("rev-parse", "--abbrev-ref", "HEAD"):
       return _cp("develop\n")
@@ -656,13 +658,19 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
         "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
       )
     if args == ("remote", "get-url", "fork"):
+      if fork_ready:
+        return _cp("https://github.com/octocat/app-demo.git\n")
       return _cp(returncode=1)
     return _cp("")
 
   gh_calls = []
 
   def fake_gh(repo_path, *args, check=True):
+    nonlocal fork_ready
     gh_calls.append(args)
+    if args[:2] == ("repo", "fork"):
+      fork_ready = True
+      return _cp("")
     if args[:2] == ("pr", "list"):
       return _cp("[]")
     if args[:2] == ("pr", "create"):
@@ -696,6 +704,110 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
   )
   assert stored["status"] == "draft"
   assert stored["number"] == 42
+
+
+def test_submit_contribution_replaces_stale_fork_remote_before_push(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-stale-fork"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
+  base = "b" * 40
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+
+  git_calls = []
+  fork_fixed = False
+
+  def fake_git(repo_path, *args, check=True):
+    nonlocal fork_fixed
+    git_calls.append(args)
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("main\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", "fix/demo-polish"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{head}",
+    ):
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", "fix/demo-polish"):
+      return _cp(
+        "Polish demo\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args == ("remote", "get-url", "fork"):
+      if fork_fixed:
+        return _cp("git@github.com:octocat/app-demo.git\n")
+      return _cp("https://github.com/someone-else/app-demo.git\n")
+    if args == ("remote", "remove", "fork"):
+      return _cp("")
+    return _cp("")
+
+  gh_calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    nonlocal fork_fixed
+    gh_calls.append(args)
+    if args[:2] == ("repo", "fork"):
+      fork_fixed = True
+      return _cp("")
+    if args[:2] == ("pr", "list"):
+      return _cp("[]")
+    if args[:2] == ("pr", "create"):
+      return _cp("https://github.com/mobius-os/app-demo/pull/43\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 200, r.text
+  assert ("remote", "remove", "fork") in git_calls
+  assert (
+    "repo", "fork", "mobius-os/app-demo",
+    "--remote", "--remote-name", "fork",
+  ) in gh_calls
+  assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
 
 
 def test_submit_contribution_rejects_branch_diff_mismatch(
@@ -840,7 +952,7 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
         "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
       )
     if args == ("remote", "get-url", "fork"):
-      return _cp("")
+      return _cp("https://github.com/octocat/app-demo.git\n")
     if args[:1] == ("push",):
       return _cp("")
     return _cp("")

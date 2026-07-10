@@ -381,6 +381,100 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
   assert body["background_agents"] == merged["background_agents"]
 
 
+def test_set_background_agents_primary_only_preserves_existing_fallback(client, auth):
+  """Partial background-agent updates should not silently remove fallback."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  data_dir = _gs().data_dir
+  providers.write_agent_settings(
+    data_dir,
+    {
+      "background_agents": {
+        "primary": {
+          "provider": "claude",
+          "model": "claude-sonnet-4-6",
+          "effort": "medium",
+        },
+        "fallback": {
+          "provider": "codex",
+          "model": "gpt-5.4",
+          "effort": "high",
+        },
+      }
+    },
+  )
+  r = client.post(
+    "/api/settings",
+    json={
+      "background_agents": {
+        "primary": {
+          "provider": "codex",
+          "model": "gpt-5.5",
+          "effort": "medium",
+        },
+      },
+    },
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  merged = providers._load_agent_settings(data_dir)
+  assert merged["background_agents"]["primary"] == {
+    "provider": "codex",
+    "model": "gpt-5.5",
+    "effort": "medium",
+  }
+  assert merged["background_agents"]["fallback"] == {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "effort": "high",
+  }
+
+
+def test_set_background_agents_explicit_null_clears_fallback(client, auth):
+  """Explicit fallback null remains the deliberate way to remove fallback."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  data_dir = _gs().data_dir
+  providers.write_agent_settings(
+    data_dir,
+    {
+      "background_agents": {
+        "primary": {"provider": "claude", "model": None, "effort": "medium"},
+        "fallback": {"provider": "codex", "model": "gpt-5.4", "effort": "medium"},
+      }
+    },
+  )
+  r = client.post(
+    "/api/settings",
+    json={"background_agents": {"fallback": None}},
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  merged = providers._load_agent_settings(data_dir)
+  assert merged["background_agents"]["fallback"] is None
+
+
+def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkeypatch):
+  """The UI must not show Saved when the shared settings file did not persist."""
+  from app.routes import settings as settings_route
+
+  monkeypatch.setattr(
+    settings_route.providers,
+    "write_agent_settings",
+    lambda _data_dir, _settings: False,
+  )
+  r = client.post(
+    "/api/settings",
+    json={"provider": "codex", "skills_enabled": True},
+    headers=auth,
+  )
+  assert r.status_code == 500
+  assert "Could not save agent settings" in r.json()["detail"]
+  assert client.get("/api/settings", headers=auth).json()["provider"] == "claude"
+
+
 def test_background_agent_settings_drops_cross_provider_models(tmp_path):
   """A stale model from the other provider is ignored at read time."""
   from app import providers

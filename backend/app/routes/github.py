@@ -492,6 +492,50 @@ def _find_existing_pr(repo: Path, upstream_repo: str, login: str, branch: str) -
   return None
 
 
+def _github_remote_slug(remote_url: str) -> str | None:
+  """Return owner/repo for GitHub remotes we can verify."""
+  raw = str(remote_url or "").strip()
+  if raw.startswith("git@github.com:"):
+    path = raw.removeprefix("git@github.com:")
+  else:
+    parsed = urlparse(raw)
+    if (parsed.hostname or "").lower() != "github.com":
+      return None
+    path = parsed.path.lstrip("/")
+  path = path.removesuffix(".git").strip("/")
+  parts = path.split("/")
+  if len(parts) != 2 or not parts[0] or not parts[1]:
+    return None
+  return f"{parts[0]}/{parts[1]}"
+
+
+def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> None:
+  """Make local remote `fork` point at the approving owner's fork."""
+  repo_name = upstream_repo.split("/", 1)[1]
+  expected_slug = f"{login}/{repo_name}"
+  existing = _git(repo, "remote", "get-url", "fork", check=False)
+  if existing.returncode == 0:
+    actual_slug = _github_remote_slug(existing.stdout)
+    if actual_slug and actual_slug.lower() == expected_slug.lower():
+      return
+    # The staged contribution checkout is disposable. Replacing a stale
+    # remote is safer than pushing reviewed code to an ambient `fork` URL.
+    _git(repo, "remote", "remove", "fork", check=False)
+
+  _gh(
+    repo,
+    "repo", "fork", upstream_repo,
+    "--remote", "--remote-name", "fork",
+  )
+  final = _git(repo, "remote", "get-url", "fork", check=False)
+  final_slug = _github_remote_slug(final.stdout) if final.returncode == 0 else None
+  if not final_slug or final_slug.lower() != expected_slug.lower():
+    raise ContributionSubmitError(
+      "Could not verify the fork remote for this GitHub account. "
+      "Reconnect GitHub or ask the agent to prepare the contribution again."
+    )
+
+
 def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -533,12 +577,7 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]
     _assert_fresh(record, diff_path, repo, branch)
     _assert_coauthor_trailer(repo, branch)
 
-    if _git(repo, "remote", "get-url", "fork", check=False).returncode != 0:
-      _gh(
-        repo,
-        "repo", "fork", upstream_repo,
-        "--remote", "--remote-name", "fork",
-      )
+    _ensure_owner_fork_remote(repo, upstream_repo, login)
 
     last_push_error = None
     for _ in range(_PUSH_RETRIES):
