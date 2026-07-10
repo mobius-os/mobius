@@ -19,6 +19,7 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
+  const stale = disabled && !answered
 
   const allAnswered = questions.every(q => {
     const a = answers[q.question]
@@ -82,7 +83,10 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
   }
 
   return (
-    <div className={`qcard${answered ? ' qcard--answered' : ''}`}>
+    <div
+      className={`qcard${answered ? ' qcard--answered' : ''}${stale ? ' qcard--stale' : ''}`}
+      aria-disabled={stale || undefined}
+    >
       {questions.map((q, qi) => {
         const selected = answers[q.question]
         const isMulti = q.multiSelect
@@ -107,7 +111,7 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
                 (□ checkbox for multi, ○ radio for single). */}
-            {!answered && (
+            {!answered && !disabled && (
               <div className="qcard__hint">
                 {isMulti
                   ? `Select all that apply${selectedArr.length ? ` · ${selectedArr.length} selected` : ''}`
@@ -219,7 +223,12 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
           </div>
         )
       })}
-      {!answered && (
+      {stale && (
+        <div className="qcard__status" role="status">
+          This question is no longer active. Reply in chat if you still want to answer.
+        </div>
+      )}
+      {!answered && !disabled && (
         <button
           type="button"
           className="qcard__submit"

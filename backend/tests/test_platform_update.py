@@ -114,6 +114,8 @@ def clone_env(tmp_path, monkeypatch):
   retargeted into tmp_path."""
   monkeypatch.setattr(pu, "UPGRADE_FLAG", tmp_path / ".upgrade")
   monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", tmp_path / ".restart")
+  monkeypatch.setattr(pu, "SERVING_SOURCE_FILE", tmp_path / ".serving-source")
+  monkeypatch.setattr(pu, "SERVING_SHA_FILE", tmp_path / ".serving-sha")
   monkeypatch.setattr(pu, "CONFLICT_FLAG", tmp_path / ".conflict")
   monkeypatch.setattr(pu, "ROLLED_BACK_FLAG", tmp_path / ".rolled-back")
   monkeypatch.setattr(pu, "OFFLINE_FLAG", tmp_path / ".offline")
@@ -354,6 +356,24 @@ def test_check_for_updates_offline_is_safe_noop(clone_env):
   assert _served_sha(platform) == before
 
 
+def test_check_for_updates_syncs_marker_when_local_already_contains_origin(clone_env):
+  origin, platform = clone_env
+  stale_marker = pu.recorded_upstream_sha(platform)
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 88")})
+  _git(platform, "fetch", "-q", "origin")
+  _git(platform, "merge", "--ff-only", "-q", "origin/main")
+  _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_B = 2", "LINE_B = 'LOCAL'")})
+  _git(platform, "branch", "-f", "upstream", stale_marker)
+  assert pu.recorded_upstream_sha(platform) == stale_marker
+
+  status = pu.check_for_updates(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  assert pu.recorded_upstream_sha(platform) == new
+
+
 # --- owner Apply rebuilds stale frontend dist after frontend updates ----------
 
 def test_touched_frontend_detects_frontend_only_changes(clone_env):
@@ -385,6 +405,43 @@ async def test_apply_rebuilds_frontend_when_update_touched_frontend(monkeypatch,
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
   assert calls == [(platform, new)]
+
+
+def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  head = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'AFTER_BOOT'")})
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert status["needs_restart"] is True
+  assert _served_sha(platform) == head
+
+
+@pytest.mark.asyncio
+async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  head = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'AFTER_BOOT'")})
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+    pu.ReconcileResult("up_to_date", head, head, pu.recorded_upstream_sha(platform))
+  ))
+
+  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+
+  assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert res["needs_restart"] is True
+  assert pu.RESTART_NEEDED_FLAG.read_text() == head
 
 
 # --- restart flag lifecycle -------------------------------------------------
