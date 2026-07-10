@@ -90,7 +90,19 @@ async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
 async def test_bootstrap_migrates_active_legacy_platform_rows(
   source_shape, manifest_url_shape, db, monkeypatch,
 ):
-  """Old baked app rows are moved forward through the trusted catalog entry."""
+  """The migration is ONE-SHOT: it moves un-migrated baked rows forward through
+  the trusted catalog entry, but never re-fires on a row that already carries a
+  manifest_url.
+
+  Two un-migrated shapes exist. A `platform_core` row still points at
+  /data/platform/core-apps and is migrated regardless of its manifest_url (the
+  catalog install moves it out of that tree, so it stops matching next boot). A
+  `data_apps` row already sits at the steady-state /data/apps/<slug> path, so it
+  only counts as un-migrated while its manifest_url is empty — once the identity
+  is stamped (raw or canonical), re-migrating would re-fetch GitHub every restart
+  and could fast-forward the app past owner review. Matching data_apps + a set
+  manifest_url as legacy was the bug this pins closed.
+  """
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.config import get_settings
   from app.install import _canonical_identity_key
@@ -125,17 +137,24 @@ async def test_bootstrap_migrates_active_legacy_platform_rows(
   ])
   db.commit()
 
+  # A platform-core row is always un-migrated (source still in that tree); a
+  # data_apps row is un-migrated only while its manifest_url is empty.
+  should_migrate = source_shape == "platform_core" or manifest_url_shape == "empty"
+
   mock_app = models.App(id=3, name="Memory", slug="memory")
   install_mock = AsyncMock(return_value=(mock_app, "update", [], {}, [], "none"))
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_store_installed(db)
 
-  assert install_mock.await_count == 1
-  assert (
-    install_mock.await_args.kwargs["manifest_url"]
-    == LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
-  )
-  assert install_mock.await_args.kwargs["source"] == "bootstrap"
+  if should_migrate:
+    assert install_mock.await_count == 1
+    assert (
+      install_mock.await_args.kwargs["manifest_url"]
+      == LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
+    )
+    assert install_mock.await_args.kwargs["source"] == "bootstrap"
+  else:
+    assert install_mock.await_count == 0
 
 
 @pytest.mark.asyncio
