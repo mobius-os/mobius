@@ -196,6 +196,9 @@ def test_origin_repo_refresh_preserves_custom_info_exclude(tmp_path):
   (source_dir / "last-run.json").write_text("{}\n", encoding="utf-8")
   app_git._run(source_dir, "add", "-f", "last-run.json")
   app_git._run(source_dir, "commit", "-q", "-m", "old tracked runtime")
+  (source_dir / "README.md.mobius-drop-bak").write_text("old\n", encoding="utf-8")
+  app_git._run(source_dir, "add", "-f", "README.md.mobius-drop-bak")
+  app_git._run(source_dir, "commit", "-q", "-m", "old tracked backup")
   (source_dir / "api.js").write_text("export const api = true\n", encoding="utf-8")
 
   app_git.commit_local(source_dir, "local edit")
@@ -206,9 +209,11 @@ def test_origin_repo_refresh_preserves_custom_info_exclude(tmp_path):
   assert "last-run.json" in exclude_text
   assert (source_dir / ".gitignore").read_text(encoding="utf-8") == "node_modules/\n"
   assert (source_dir / "last-run.json").read_text(encoding="utf-8") == "{}\n"
+  assert (source_dir / "README.md.mobius-drop-bak").read_text(encoding="utf-8") == "old\n"
   tracked = set(app_git._run(source_dir, "ls-files").stdout.split())
   assert "api.js" in tracked
   assert "last-run.json" not in tracked
+  assert "README.md.mobius-drop-bak" not in tracked
 
 
 def test_has_origin_distinguishes_clone_from_synthetic_repo(tmp_path):
@@ -1274,7 +1279,12 @@ def test_commit_local_upgrades_managed_gitignore_and_untracks_runtime_files(tmp_
   (repo / "inputs" / "activity.jsonl").write_text("runtime\n", encoding="utf-8")
   (repo / "last-run.json").write_text("{}\n", encoding="utf-8")
   (repo / "init-cron.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-  app_git._run(repo, "add", "inputs/activity.jsonl", "last-run.json", "init-cron.sh")
+  (repo / "README.md.mobius-drop-bak").write_text("old\n", encoding="utf-8")
+  app_git._run(
+    repo, "add",
+    "inputs/activity.jsonl", "last-run.json", "init-cron.sh",
+    "README.md.mobius-drop-bak",
+  )
 
   app_git.commit_local(repo, "agent edit")
 
@@ -1283,9 +1293,11 @@ def test_commit_local_upgrades_managed_gitignore_and_untracks_runtime_files(tmp_
   assert "inputs/activity.jsonl" not in tracked
   assert "last-run.json" not in tracked
   assert "init-cron.sh" not in tracked
+  assert "README.md.mobius-drop-bak" not in tracked
   assert (repo / "inputs" / "activity.jsonl").exists()
   assert (repo / "last-run.json").exists()
   assert (repo / "init-cron.sh").exists()
+  assert (repo / "README.md.mobius-drop-bak").exists()
   gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
   assert "*.js" not in gitignore
   assert "inputs/" in gitignore
