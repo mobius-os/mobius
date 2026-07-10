@@ -135,8 +135,8 @@ sync_core_app() {
   # the store; both clear the marker). Skipping here also avoids the stale
   # cp-over-preserved-source a blind re-seed does during the TTL window.
   # Path is kept in lockstep with core_app_suppress._SUPPRESS_SUBDIR. Only slugs
-  # in core_app_suppress.SUPPRESSIBLE_CORE_SLUGS ever get a marker (memory +
-  # reflection). For reflection, returning early here ALSO skips the reflection
+  # in core_app_suppress.SUPPRESSIBLE_CORE_SLUGS ever get a marker (memory,
+  # reflection, beat-machine). For reflection, returning early here ALSO skips the reflection
   # cron block below (gated on a non-empty id), so its nightly run — brief +
   # memory-graph consolidation — stops. That's the intended "uninstall the
   # feature" semantic (owner call 2026-07-06); the built graph is untouched.
@@ -262,7 +262,7 @@ fi
 # `/data/apps/beatmachine`, so keep that runtime path to let register_app.py
 # match and upgrade the existing row by source_dir instead of creating a
 # duplicate app on first native sync.
-beat_machine_app_id="$(sync_core_app beat-machine "Beat Machine" "A native sampler pad for synthesized drums, custom recordings, and simple effects." beat-machine beatmachine)"
+beat_machine_app_id="$(sync_core_app beat-machine "Beat Machine" "A native step sequencer with synthesized drums, custom recordings, and simple effects." beat-machine beatmachine)"
 if [[ -n "$beat_machine_app_id" ]]; then
   if [[ -f "$CORE_SRC/beat-machine/icon.png" ]]; then
     curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/beat-machine/icon.png" \

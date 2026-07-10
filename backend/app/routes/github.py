@@ -1,4 +1,4 @@
-"""GitHub connection routes: device flow, PAT fallback, read surface.
+"""GitHub connection routes: device flow, PAT fallback, read surface, submit.
 
 Connect endpoints persist a token via app.github_auth (owner OR a
 github_access app — so the Contribute app can drive connect from its
@@ -10,18 +10,29 @@ paste their own token, but the grant itself is powerful — see the
 get_owner_or_app_with_github_access docstring. The read surface
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
-document containing a mutation or subscription operation. This surface
-has no GitHub write endpoint at all; GitHub writes happen through the
-agent's gh CLI, where the contributing.md skill (not this code) is what
-holds the per-action owner-approval gate.
+document containing a mutation or subscription operation. GitHub writes
+are limited to the owner-token-only Contribute approval endpoint, which
+consumes a single prepared ledger record after the owner presses Approve:
+it claims that record, rechecks the reviewed branch/diff, pushes to the
+owner's fork, and creates the draft PR. App-scoped github_access tokens
+cannot submit that write path.
 
 The token itself never appears in any response or log line (INV1).
 """
 
+import asyncio
+import hashlib
+import json
 import logging
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
-from urllib.parse import urljoin, urlparse
+from datetime import UTC, datetime
+from pathlib import Path
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -29,13 +40,17 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
 
-from app import github_auth, models
+from app import fs_locks, github_auth, models
 from app.config import get_settings
+from app.database import get_db
 from app.deps import (
+  get_current_owner,
   get_owner_or_app_with_github_access,
   reject_cross_site,
 )
+from app.storage_io import atomic_write
 
 router = APIRouter(prefix="/api/github", tags=["github"])
 _limiter = Limiter(key_func=get_remote_address)
@@ -62,6 +77,17 @@ _GQL_NOISE = re.compile(
   r"|#[^\n]*"                 # comments
 )
 _GQL_WRITE_OP = re.compile(r"\b(?:mutation|subscription)\b", re.IGNORECASE)
+_CONTRIBUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_GITHUB_REPO = re.compile(
+  r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+)
+_BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
+_GIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_COAUTHOR_TRAILER = (
+  "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>"
+)
+_SUBMIT_TIMEOUT = 90
+_PUSH_RETRIES = 3
 
 
 class GithubTokenRequest(BaseModel):
@@ -71,6 +97,481 @@ class GithubTokenRequest(BaseModel):
 class GraphqlRequest(BaseModel):
   query: str
   variables: dict | None = None
+
+
+class ContributionSubmitError(Exception):
+  """A partner-actionable failure while submitting a prepared contribution."""
+
+  def __init__(
+    self,
+    message: str,
+    status_code: int = 409,
+    *,
+    record_patch: dict | None = None,
+  ):
+    super().__init__(message)
+    self.message = message
+    self.status_code = status_code
+    self.record_patch = record_patch or {}
+
+
+def _now_iso() -> str:
+  return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _record_paths(app_id: int, record_id: str) -> tuple[Path, Path]:
+  if not _CONTRIBUTION_ID.match(record_id):
+    raise HTTPException(status_code=400, detail="Invalid contribution id.")
+  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  return (
+    base / "contributions" / f"{record_id}.json",
+    base / "contributions" / f"{record_id}.diff",
+  )
+
+
+def _read_record(path: Path) -> dict:
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except FileNotFoundError:
+    raise HTTPException(status_code=404, detail="Contribution not found.")
+  except (OSError, ValueError):
+    raise HTTPException(status_code=400, detail="Contribution record is invalid.")
+  if not isinstance(data, dict):
+    raise HTTPException(status_code=400, detail="Contribution record is invalid.")
+  return data
+
+
+def _write_record(path: Path, record: dict) -> None:
+  atomic_write(path, json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+def _validate_submit_app(app_id: int, db: Session) -> str | None:
+  """Validate the contribution owner selected and return the app token nonce."""
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  return app.token_nonce
+
+
+def _recheck_submit_app(db: Session, app_id: int, expected_nonce: str | None) -> None:
+  row = (
+    db.query(models.App)
+    .populate_existing()
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if row is None or row.token_nonce != expected_nonce:
+    raise HTTPException(status_code=404, detail="App not found.")
+
+
+def _safe_repo_path(raw: object) -> Path:
+  if not isinstance(raw, str) or not raw:
+    raise ContributionSubmitError(
+      "This record needs to be prepared again: it has no durable repo_path."
+    )
+  try:
+    repo = Path(raw).resolve()
+  except (OSError, RuntimeError):
+    raise ContributionSubmitError("The staged repo path is invalid.")
+  data_dir = Path(get_settings().data_dir).resolve()
+  allowed_roots = (
+    data_dir / "apps",
+    data_dir / "platform",
+    data_dir / "contributions",
+  )
+  if repo == allowed_roots[1]:
+    return repo
+  for root in (allowed_roots[0], allowed_roots[2]):
+    try:
+      repo.relative_to(root)
+      return repo
+    except ValueError:
+      continue
+  raise ContributionSubmitError(
+    "This staged repo is outside the contribution source allowlist."
+  )
+
+
+def _validate_repo_slug(value: object) -> str:
+  repo = str(value or "")
+  if not _GITHUB_REPO.match(repo):
+    raise ContributionSubmitError("The staged GitHub repo is invalid.")
+  return repo
+
+
+def _validate_branch(value: object) -> str:
+  branch = str(value or "")
+  if (
+    not _BRANCH_NAME.match(branch)
+    or branch.startswith("-")
+    or ".." in branch
+    or "//" in branch
+    or branch.endswith(("/", ".", ".lock"))
+  ):
+    raise ContributionSubmitError("The staged branch name is invalid.")
+  return branch
+
+
+def _git_env(repo: Path) -> dict:
+  env = dict(os.environ)
+  for var in (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  ):
+    env.pop(var, None)
+  env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
+  env["GIT_TERMINAL_PROMPT"] = "0"
+  env["GH_PROMPT_DISABLED"] = "1"
+  if github_auth.GH_AUTH_DIR.exists():
+    env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
+  return env
+
+
+def _run_cmd(
+  argv: list[str], *, cwd: Path, check: bool = True, timeout: int = _SUBMIT_TIMEOUT
+) -> subprocess.CompletedProcess:
+  proc = subprocess.run(
+    argv,
+    cwd=str(cwd),
+    capture_output=True,
+    text=True,
+    timeout=timeout,
+    check=False,
+    env=_git_env(cwd),
+  )
+  if check and proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or "command failed").strip()
+    raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
+  return proc
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+  return _run_cmd(["git", "-C", str(repo), *args], cwd=repo, check=check)
+
+
+def _gh(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+  return _run_cmd(["gh", *args], cwd=repo, check=check)
+
+
+def _assert_clean_worktree(repo: Path) -> None:
+  status = _git(repo, "status", "--porcelain").stdout.strip()
+  if status:
+    raise ContributionSubmitError(
+      "This staged branch has uncommitted source changes. Ask your agent "
+      "to prepare the PR again before submitting."
+    )
+
+
+def _assert_coauthor_trailer(repo: Path, branch: str) -> None:
+  body = _git(repo, "log", "-1", "--format=%B", branch).stdout
+  if _COAUTHOR_TRAILER not in body:
+    raise ContributionSubmitError(
+      "This staged commit is missing the Möbius Agent co-author trailer. "
+      "Leave feedback so your agent can prepare it again."
+    )
+
+
+def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
+  raw = str(value or "").strip()
+  if not raw:
+    raise ContributionSubmitError(
+      f"This record needs to be prepared again: it has no reviewed {label}."
+    )
+  if not _GIT_SHA.match(raw):
+    raise ContributionSubmitError(f"The reviewed {label} is invalid.")
+  try:
+    resolved = _git(
+      repo, "rev-parse", "--verify", f"{raw}^{{commit}}"
+    ).stdout.strip()
+  except ContributionSubmitError:
+    raise ContributionSubmitError(
+      f"The reviewed {label} is not present in the staged repo."
+    )
+  if not _GIT_SHA.match(resolved):
+    raise ContributionSubmitError(f"The reviewed {label} resolved incorrectly.")
+  return resolved
+
+
+def _reviewed_branch_diff(repo: Path, base_sha: str, head_sha: str) -> bytes:
+  proc = _git(
+    repo,
+    "-c", "core.quotePath=false",
+    "diff",
+    "--no-ext-diff",
+    "--no-color",
+    "--binary",
+    "--full-index",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    f"{base_sha}..{head_sha}",
+  )
+  return proc.stdout.encode("utf-8")
+
+
+def _assert_fresh(record: dict, diff_path: Path, repo: Path, branch: str) -> None:
+  plan = record.get("plan") or {}
+  expected_base = _resolve_reviewed_commit(repo, plan.get("base_sha"), "base sha")
+  expected_head = _resolve_reviewed_commit(
+    repo, plan.get("head_sha") or record.get("head_sha"), "head sha"
+  )
+  actual_head = _git(repo, "rev-parse", branch).stdout.strip()
+  if actual_head != expected_head:
+    raise ContributionSubmitError(
+      "This branch changed after review. Ask your agent to refresh the "
+      "Contribute card before submitting."
+    )
+  expected_diff = str(plan.get("diff_sha256") or "").strip()
+  if not expected_diff:
+    raise ContributionSubmitError(
+      "This record needs to be prepared again: it has no reviewed diff hash."
+    )
+  try:
+    diff_bytes = diff_path.read_bytes()
+  except OSError:
+    raise ContributionSubmitError(
+      "The reviewed diff is missing. Ask your agent to prepare this again."
+    )
+  stored_hash = hashlib.sha256(diff_bytes).hexdigest()
+  if stored_hash != expected_diff:
+    raise ContributionSubmitError(
+      "The reviewed diff changed. Ask your agent to refresh the "
+      "Contribute card before submitting."
+    )
+  branch_hash = hashlib.sha256(
+    _reviewed_branch_diff(repo, expected_base, expected_head)
+  ).hexdigest()
+  if branch_hash != expected_diff:
+    raise ContributionSubmitError(
+      "The reviewed diff does not match the branch that would be pushed. "
+      "Ask your agent to prepare this PR again."
+    )
+
+
+def _claim_record(
+  *, app_id: int, record_id: str, db: Session, expected_nonce: str | None
+) -> tuple[dict, Path, Path]:
+  record_path, diff_path = _record_paths(app_id, record_id)
+  _recheck_submit_app(db, app_id, expected_nonce)
+  record = _read_record(record_path)
+  if record.get("status") != "prepared":
+    raise HTTPException(
+      status_code=409,
+      detail="This contribution is no longer waiting for approval.",
+    )
+  plan = record.get("plan")
+  if not isinstance(plan, dict):
+    raise HTTPException(
+      status_code=409,
+      detail="This older contribution needs agent review before it can submit.",
+    )
+  if plan.get("action") != "pr" or record.get("type") != "pr":
+    raise HTTPException(
+      status_code=400,
+      detail="Direct approval currently supports pull requests.",
+    )
+  now = _now_iso()
+  claimed = {
+    **record,
+    "status": "submitting",
+    "submitter": "contribute-button",
+    "submit_started_at": now,
+    "updated_at": now,
+  }
+  _write_record(record_path, claimed)
+  return claimed, record_path, diff_path
+
+
+def _mark_submit_failure(
+  *,
+  app_id: int,
+  record_path: Path,
+  message: str,
+  record_patch: dict | None = None,
+) -> dict | None:
+  try:
+    record = _read_record(record_path)
+  except HTTPException:
+    return None
+  if record.get("status") != "submitting":
+    return record
+  next_record = {
+    **record,
+    **(record_patch or {}),
+    "status": "prepared",
+    "last_submit_error": message,
+    "updated_at": _now_iso(),
+  }
+  _write_record(record_path, next_record)
+  return next_record
+
+
+def _mark_submit_success(
+  *,
+  record_path: Path,
+  record: dict,
+  pr_url: str,
+  number: int | None,
+) -> dict:
+  now = _now_iso()
+  next_record = {
+    **record,
+    "status": "draft",
+    "url": pr_url,
+    "updated_at": now,
+    "submitted_at": now,
+  }
+  if number is not None:
+    next_record["number"] = number
+  next_record.pop("last_submit_error", None)
+  _write_record(record_path, next_record)
+  return next_record
+
+
+def _parse_pr_number(url: str) -> int | None:
+  m = re.search(r"/pull/(\d+)(?:$|[/?#])", url)
+  return int(m.group(1)) if m else None
+
+
+def _find_existing_pr(repo: Path, upstream_repo: str, login: str, branch: str) -> str | None:
+  proc = _gh(
+    repo,
+    "pr", "list",
+    "-R", upstream_repo,
+    "--head", f"{login}:{branch}",
+    "--state", "open",
+    "--json", "url",
+    "--limit", "1",
+    check=False,
+  )
+  if proc.returncode != 0:
+    return None
+  try:
+    rows = json.loads(proc.stdout or "[]")
+  except ValueError:
+    return None
+  if isinstance(rows, list) and rows:
+    url = rows[0].get("url") if isinstance(rows[0], dict) else None
+    if isinstance(url, str) and url.startswith("https://github.com/"):
+      return url
+  return None
+
+
+def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]:
+  if not shutil.which("git") or not shutil.which("gh"):
+    raise ContributionSubmitError(
+      "This platform needs git and gh installed before it can submit PRs.",
+      status_code=409,
+    )
+  token = github_auth.get_token()
+  state = github_auth.read_state() or {}
+  login = str(state.get("login") or "")
+  if not token or not login:
+    raise ContributionSubmitError("Connect GitHub before approving this PR.", 401)
+
+  plan = record.get("plan") or {}
+  upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+  branch = _validate_branch(plan.get("branch") or record.get("branch"))
+  repo = _safe_repo_path(plan.get("repo_path"))
+  if not (repo / ".git").exists():
+    raise ContributionSubmitError("The staged repo is not a git checkout.")
+
+  title = str(plan.get("title") or record.get("title") or "").strip()
+  body = str(plan.get("body_draft") or "").strip()
+  if not title:
+    raise ContributionSubmitError("This prepared PR is missing a title.")
+  if not body:
+    raise ContributionSubmitError("This prepared PR is missing its reviewed body.")
+
+  checkout_back = None
+  try:
+    current_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    checkout_back = (
+      _git(repo, "rev-parse", "HEAD").stdout.strip()
+      if current_branch == "HEAD"
+      else current_branch
+    )
+    _git(repo, "check-ref-format", "--branch", branch)
+    _assert_clean_worktree(repo)
+    _git(repo, "checkout", "-q", branch)
+    _assert_clean_worktree(repo)
+    _assert_fresh(record, diff_path, repo, branch)
+    _assert_coauthor_trailer(repo, branch)
+
+    if _git(repo, "remote", "get-url", "fork", check=False).returncode != 0:
+      _gh(
+        repo,
+        "repo", "fork", upstream_repo,
+        "--remote", "--remote-name", "fork",
+      )
+
+    last_push_error = None
+    for _ in range(_PUSH_RETRIES):
+      proc = _git(
+        repo,
+        "push", "fork", f"HEAD:refs/heads/{branch}",
+        check=False,
+      )
+      if proc.returncode == 0:
+        last_push_error = None
+        break
+      last_push_error = (proc.stderr or proc.stdout or "").strip()
+      time.sleep(2)
+    if last_push_error:
+      raise ContributionSubmitError(last_push_error[:600] or "Git push failed.")
+    pushed_branch_url = (
+      f"https://github.com/{login}/{upstream_repo.split('/', 1)[1]}"
+      f"/tree/{quote(branch, safe='/')}"
+    )
+    pushed_patch = {
+      "last_submit_stage": "pushed",
+      "last_pushed_branch": f"{login}:{branch}",
+      "last_pushed_branch_url": pushed_branch_url,
+    }
+
+    existing = _find_existing_pr(repo, upstream_repo, login, branch)
+    if existing:
+      return existing, _parse_pr_number(existing)
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+      f.write(body)
+      body_file = f.name
+    try:
+      try:
+        pr = _gh(
+          repo,
+          "pr", "create",
+          "-R", upstream_repo,
+          "-H", f"{login}:{branch}",
+          "--draft",
+          "--title", title,
+          "--body-file", body_file,
+        )
+      except ContributionSubmitError as exc:
+        raise ContributionSubmitError(
+          f"{exc.message} The branch was pushed to {pushed_branch_url}.",
+          exc.status_code,
+          record_patch=pushed_patch,
+        )
+    finally:
+      try:
+        os.unlink(body_file)
+      except OSError:
+        pass
+    url = (pr.stdout or "").strip().splitlines()[-1].strip()
+    if not url.startswith("https://github.com/"):
+      raise ContributionSubmitError(
+        f"GitHub did not return a pull request URL. The branch was pushed "
+        f"to {pushed_branch_url}.",
+        record_patch=pushed_patch,
+      )
+    return url, _parse_pr_number(url)
+  finally:
+    if checkout_back:
+      _git(repo, "checkout", "-q", checkout_back, check=False)
 
 
 async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
@@ -304,6 +805,86 @@ def github_disconnect(
   """Disconnects GitHub — removes the stored credentials."""
   github_auth.clear_credentials()
   return {"ok": True}
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/submit",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("10/minute")
+async def submit_contribution(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Submit one prepared Contribute record as a draft pull request.
+
+  This is the owner-approval button path. The Contribute app stores a prepared
+  record + reviewed diff; this endpoint claims that record, rechecks freshness,
+  pushes the already-prepared branch to the owner's fork, creates the draft PR,
+  then writes the GitHub URL back to the ledger. It does not expose the GitHub
+  token to the app, and it rejects app-scoped tokens so github_access cannot
+  directly trigger a GitHub write.
+  """
+  expected_nonce = _validate_submit_app(app_id, db)
+  async with fs_locks.app_storage_lock(app_id):
+    claimed, record_path, diff_path = _claim_record(
+      app_id=app_id,
+      record_id=record_id,
+      db=db,
+      expected_nonce=expected_nonce,
+    )
+
+  try:
+    plan = claimed.get("plan") or {}
+    repo_path = _safe_repo_path(plan.get("repo_path"))
+    async with fs_locks.source_dir_lock(str(repo_path)):
+      pr_url, number = await asyncio.to_thread(
+        _submit_prepared_pr, claimed, diff_path,
+      )
+  except ContributionSubmitError as exc:
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      record = _mark_submit_failure(
+        app_id=app_id,
+        record_path=record_path,
+        message=exc.message,
+        record_patch=exc.record_patch,
+      )
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"message": exc.message, "record": record},
+    )
+  except Exception as exc:
+    log.exception("Contribution submit failed for %s/%s", app_id, record_id)
+    message = "Could not submit this PR. Leave feedback so your agent can retry."
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      record = _mark_submit_failure(
+        app_id=app_id, record_path=record_path, message=message,
+      )
+    raise HTTPException(
+      status_code=500,
+      detail={"message": message, "record": record},
+    ) from exc
+
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    current = _read_record(record_path)
+    if current.get("status") != "submitting":
+      raise HTTPException(
+        status_code=409,
+        detail="This contribution changed while the PR was being created.",
+      )
+    submitted = _mark_submit_success(
+      record_path=record_path,
+      record=current,
+      pr_url=pr_url,
+      number=number,
+    )
+  return {"record": submitted, "url": pr_url, "number": number}
 
 
 async def _forward_capped(

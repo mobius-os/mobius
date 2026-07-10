@@ -12,16 +12,19 @@ the network. Two harness notes:
   identity test re-points GIT_CONFIG_GLOBAL at a tmp file and reads it back.
 """
 
+import hashlib
 import json
 import os
 import stat
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
 
 from app import github_auth
 from app.config import get_settings
+from app.storage_io import atomic_write
 
 # The github router's Limiter is a separate instance from app.state.limiter,
 # so conftest's disable doesn't reach it (see module docstring).
@@ -569,3 +572,382 @@ def test_graphql_mutation_as_string_literal_allowed(client, auth, monkeypatch):
   })
   assert r.status_code == 200
   assert seen["body"]["query"].count("mutation") == 1
+
+
+# --- contribution submit (approval button path) -----------------------
+
+
+def _write_contribution(app_id, record_id, record, diff_text=""):
+  base = Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
+  base.mkdir(parents=True, exist_ok=True)
+  atomic_write(base / f"{record_id}.json", json.dumps(record))
+  if diff_text:
+    atomic_write(base / f"{record_id}.diff", diff_text)
+
+
+def _cp(stdout="", stderr="", returncode=0):
+  return subprocess.CompletedProcess(["mock"], returncode, stdout, stderr)
+
+
+def test_submit_contribution_creates_draft_pr_from_prepared_record(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-1"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
+  base = "b" * 40
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "created_at": "2026-07-09T00:00:00Z",
+    "updated_at": "2026-07-09T00:00:00Z",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "## What\n\nPolishes the demo.",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  git_calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("develop\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", "fix/demo-polish"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{head}",
+    ):
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", "fix/demo-polish"):
+      return _cp(
+        "Polish demo\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args == ("remote", "get-url", "fork"):
+      return _cp(returncode=1)
+    return _cp("")
+
+  gh_calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    gh_calls.append(args)
+    if args[:2] == ("pr", "list"):
+      return _cp("[]")
+    if args[:2] == ("pr", "create"):
+      return _cp("https://github.com/mobius-os/app-demo/pull/42\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert body["url"] == "https://github.com/mobius-os/app-demo/pull/42"
+  assert body["number"] == 42
+  assert body["record"]["status"] == "draft"
+  assert body["record"]["url"] == body["url"]
+  assert (
+    "repo", "fork", "mobius-os/app-demo",
+    "--remote", "--remote-name", "fork",
+  ) in gh_calls
+  assert any(call[:2] == ("pr", "create") for call in gh_calls)
+  assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
+  assert ("checkout", "-q", "develop") in git_calls
+
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )
+  assert stored["status"] == "draft"
+  assert stored["number"] == 42
+
+
+def test_submit_contribution_rejects_branch_diff_mismatch(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-diff-mismatch"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  reviewed_diff = "diff --git a/index.jsx b/index.jsx\n+reviewed\n"
+  branch_diff = "diff --git a/index.jsx b/index.jsx\n+not-reviewed\n"
+  base = "b" * 40
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(reviewed_diff.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, reviewed_diff)
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  git_calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("main\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", "fix/demo-polish"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{head}",
+    ):
+      return _cp(branch_diff)
+    if args == ("log", "-1", "--format=%B", "fix/demo-polish"):
+      return _cp(
+        "Polish demo\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", lambda *args, **kwargs: _cp(""))
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 409
+  detail = r.json()["detail"]
+  assert "does not match the branch" in detail["message"]
+  assert detail["record"]["status"] == "prepared"
+  assert not any(call[:1] == ("push",) for call in git_calls)
+
+
+def test_submit_contribution_records_public_branch_after_pr_create_failure(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-push-then-fail"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
+  base = "b" * 40
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+
+  def fake_git(repo_path, *args, check=True):
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("main\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", "fix/demo-polish"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{head}",
+    ):
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", "fix/demo-polish"):
+      return _cp(
+        "Polish demo\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args == ("remote", "get-url", "fork"):
+      return _cp("")
+    if args[:1] == ("push",):
+      return _cp("")
+    return _cp("")
+
+  def fake_gh(repo_path, *args, check=True):
+    if args[:2] == ("pr", "list"):
+      return _cp("[]")
+    if args[:2] == ("pr", "create"):
+      from app.routes.github import ContributionSubmitError
+      raise ContributionSubmitError("create failed")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 409
+  detail = r.json()["detail"]
+  assert "branch was pushed" in detail["message"]
+  assert detail["record"]["status"] == "prepared"
+  assert detail["record"]["last_submit_stage"] == "pushed"
+  assert (
+    detail["record"]["last_pushed_branch_url"] ==
+    "https://github.com/octocat/app-demo/tree/fix/demo-polish"
+  )
+
+
+def test_submit_contribution_rejects_app_scoped_token(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-app-token"
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(
+        Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+      ),
+      "head_sha": "abc123",
+    },
+  }
+  _write_contribution(app_id, record_id, record)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 403
+  assert "App tokens cannot access this endpoint" in r.json()["detail"]
+
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )
+  assert stored["status"] == "prepared"
+  assert "last_submit_error" not in stored
+
+
+def test_submit_contribution_rolls_back_unready_record(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-unready"
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "head_sha": "abc123",
+    },
+  }
+  _write_contribution(app_id, record_id, record)
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 409
+  detail = r.json()["detail"]
+  assert "repo_path" in detail["message"]
+  assert detail["record"]["status"] == "prepared"
+  assert "last_submit_error" in detail["record"]
+
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )
+  assert stored["status"] == "prepared"
+  assert "last_submit_error" in stored

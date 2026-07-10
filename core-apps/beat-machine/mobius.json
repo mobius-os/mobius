@@ -2,7 +2,7 @@
   "id": "beat-machine",
   "name": "Beat Machine",
   "version": "1.0.0",
-  "description": "A native Möbius sampler pad for synthesized drums, custom recordings, and simple effects.",
+  "description": "A native Möbius step sequencer with synthesized drums, custom recordings, and simple effects.",
   "author": "mobius-os",
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-beat-machine",
@@ -13,7 +13,7 @@
     "reads": true,
     "writes": "queued",
     "execution": "none",
-    "reads_detail": "Beat Machine stores pad state through window.mobius.storage. Recorded pads, volumes, and effects are read-through cached and writes queue while offline; the app code is cached by the offline_capable flag."
+    "reads_detail": "Beat Machine stores sequencer state through window.mobius.storage. The grid, BPM, recorded pads, volumes, and effects are read-through cached and writes queue while offline; the app code is cached by the offline_capable flag."
   },
   "permissions": {
     "cross_app_access": "none",
@@ -29,9 +29,10 @@
   "source_files": [
     "audio.js",
     "storage.js",
-    "theme.js",
-    "ui/DetailPanel.jsx",
+    "styles.js",
+    "ui/ControlPanel.jsx",
     "ui/Header.jsx",
-    "ui/PadButton.jsx"
+    "ui/PadBanks.jsx",
+    "ui/Sequencer.jsx"
   ]
 }
