@@ -258,6 +258,44 @@ def _write_managed_exclude(exclude: Path) -> None:
     exclude.write_text(updated, encoding="utf-8")
 
 
+def _ref_has_path(repo: Path, ref: str, rel: str) -> bool:
+  proc = _run(repo, "cat-file", "-e", f"{ref}:{rel}", check=False)
+  return proc.returncode == 0
+
+
+def _looks_like_managed_gitignore(text: str) -> bool:
+  if text in (_GITIGNORE, _GITIGNORE + "\n"):
+    return True
+  return (
+    "Generated build output and vendored deps are not hand-written source" in text
+    and "Manifest static_assets are install-managed" in text
+    and "init-cron.sh" in text
+    and "[0-9]*/" in text
+  )
+
+
+def _drop_stale_managed_gitignore_from_origin_repo(repo: Path) -> None:
+  """Remove old synthetic Mobius .gitignore files from real-origin repos.
+
+  Real-origin apps own their committed `.gitignore`; Mobius rules belong in
+  `.git/info/exclude`. During migration from the older synthetic repo model, a
+  generated `.gitignore` can be left in the worktree. If the catalog upstream
+  does not track `.gitignore`, that stale file would otherwise be committed as
+  a local app edit on the next install/update.
+  """
+  gitignore = repo / ".gitignore"
+  if not gitignore.exists() or _ref_has_path(repo, UPSTREAM_BRANCH, ".gitignore"):
+    return
+  try:
+    text = gitignore.read_text(encoding="utf-8")
+  except UnicodeDecodeError:
+    return
+  if not _looks_like_managed_gitignore(text):
+    return
+  _run(repo, "rm", "--cached", "--ignore-unmatch", "--", ".gitignore", check=False)
+  gitignore.unlink(missing_ok=True)
+
+
 def _refresh_ignore_rules(source_dir: str | Path) -> None:
   """Refresh Mobius-managed ignore rules for a per-app repo.
 
@@ -272,6 +310,7 @@ def _refresh_ignore_rules(source_dir: str | Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     _write_managed_exclude(exclude)
+    _drop_stale_managed_gitignore_from_origin_repo(repo)
   else:
     gitignore = repo / ".gitignore"
     if not gitignore.exists() or gitignore.read_text(encoding="utf-8") != _GITIGNORE:
