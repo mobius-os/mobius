@@ -688,17 +688,26 @@ def _is_legacy_platform_source_dir(
 
 def _is_historical_platform_app_source_dir(
   source_dir: str | None,
+  manifest_url: str | None,
   data_dir: str | Path,
   slug: str | None,
 ) -> bool:
-  """True for retired core-app rows sourced directly from /data/apps/<slug>.
+  """True for a retired core-app row at /data/apps/<slug> not yet migrated.
 
   One prod-era installer shape registered Memory/Reflection/Beat Machine as
   editable app rows under /data/apps/<slug> with no manifest_url. They are not
   platform-owned source dirs, but they are still the predecessor rows the
-  trusted mobius-os catalog entry must update in place. Keep this narrow:
-  only historical platform slugs from legacy_platform_apps may match.
+  trusted mobius-os catalog entry must update in place. A catalog install lands
+  at exactly that same /data/apps/<slug> path but stamps a canonical
+  manifest_url, so path + slug alone cannot tell the un-migrated row from the
+  migrated steady state — matching on those alone re-fired the migration (an
+  extra GitHub fetch, and a no-owner-review fast-forward) on every boot. Gate on
+  the empty manifest_url the migration fills in, so this stays a ONE-SHOT
+  predicate that mirrors the install-side platform_row query's NULL/'' filter.
+  Keep it narrow: only historical platform slugs from legacy_platform_apps match.
   """
+  if manifest_url:
+    return False
   if not source_dir or not slug or slug not in HISTORICAL_PLATFORM_APP_SLUGS:
     return False
   try:
@@ -1835,7 +1844,8 @@ async def install_from_manifest(
         existing = platform_row
         adopt_kind = "legacy-platform"
       elif _is_historical_platform_app_source_dir(
-        platform_row.source_dir, settings_data_dir, manifest_id,
+        platform_row.source_dir, platform_row.manifest_url,
+        settings_data_dir, manifest_id,
       ):
         existing = platform_row
         adopt_kind = "legacy-catalog"
@@ -1972,6 +1982,19 @@ async def install_from_manifest(
             await asyncio.to_thread(_unregister_cron, Path(old_source_dir))
         app.slug = target_slug
         app.source_dir = target_source_dir
+        app.manifest_url = canonical_manifest_url
+        db.flush()
+      elif adopt_kind == "legacy-catalog":
+        # A pre-git-model catalog app: editable source already sits at
+        # /data/apps/<slug> (manifest_id == app.slug on this path, so no
+        # slug/source_dir move), only the canonical identity is missing. Stamp it
+        # NOW, before the git merge below can short-circuit on a conflict. The
+        # post-merge re-stamp is skipped on conflict, so deferring to it would
+        # leave a conflicting migration with a NULL manifest_url — the boot
+        # migration would then keep re-firing (and re-fetching) every restart
+        # instead of running once. The identity move is orthogonal to the source:
+        # the owner still resolves the surfaced conflict through the click-gated
+        # resolver, and the served source/bundle stay theirs until they do.
         app.manifest_url = canonical_manifest_url
         db.flush()
 
@@ -2131,8 +2154,23 @@ async def install_from_manifest(
       if git_source_dir:
         version = str(manifest.get("version", "unknown"))
         had_repo = app_git.is_repo(git_source_dir)
-        merge_existing_source = (
-          existing and had_repo and not legacy_platform_migration
+        # A pre-git-model app being adopted from the catalog — or any existing app
+        # that somehow lost its repo — has editable owner source on disk and in DB
+        # jsx_source but no per-app git history and no recorded upstream. Init the
+        # repo now so the merge path below captures those on-disk edits onto `main`
+        # BEFORE the catalog upstream is recorded. Without this the fresh-install
+        # branch's align_local_to_upstream would reset --hard the tree to catalog
+        # bytes and the owner's edits would land in ZERO git blobs — unrecoverable.
+        # Excludes legacy-platform rows: their real source lived under
+        # /data/platform/core-apps and the /data/apps/<slug> dir is only the
+        # retired cron sidecar, not owner source to preserve.
+        adopt_repoless_source = bool(
+          existing and not had_repo and not legacy_platform_migration
+        )
+        if adopt_repoless_source:
+          await asyncio.to_thread(app_git.ensure_repo, git_source_dir)
+        merge_existing_source = existing and not legacy_platform_migration and (
+          had_repo or adopt_repoless_source
         )
         if merge_existing_source:
           prev_upstream_commit = app.upstream_commit
@@ -2167,9 +2205,17 @@ async def install_from_manifest(
           # stranding the merge base at the install point and resolving the
           # NEXT update to stale local content. commit_replay still runs
           # (merge_applied gate) so the single-parent replay advances the base.
-          diverged = bool(prev_upstream_commit) and await asyncio.to_thread(
-            app_git.local_diverged_from,
-            git_source_dir, prev_upstream_commit,
+          # An adopted repo-less row has no recorded upstream to diverge from, so
+          # `prev_upstream_commit` is empty and the check below would read "no
+          # divergence" and take the catalog bytes verbatim — silently replacing
+          # the owner source we just committed to `main`. Force the three-way
+          # merge instead, so those edits are folded in cleanly or surfaced as an
+          # owner-gated conflict (identical on-disk == catalog resolves clean).
+          diverged = adopt_repoless_source or (
+            bool(prev_upstream_commit) and await asyncio.to_thread(
+              app_git.local_diverged_from,
+              git_source_dir, prev_upstream_commit,
+            )
           )
           if repo_ref is not None and await asyncio.to_thread(
             app_git.has_origin, git_source_dir,
