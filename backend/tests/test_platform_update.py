@@ -573,3 +573,95 @@ def test_rolled_back_flag_roundtrips(clone_env):
   got = pu._read_rolled_back_flag()
   assert got["target"] == "tgt-sha"
   assert "ModuleNotFoundError" in got["error"]
+
+
+# --- update preview: the read-only "review before Apply" surface ------------
+# platform_update_preview is fetch-free (it reads the origin/main left by the
+# last fetch), so each test fetches first to mirror the real order: Check
+# fetches, then Update opens the preview.
+
+
+def test_update_preview_up_to_date_is_empty(clone_env):
+  origin, platform = clone_env
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["available"] is False
+  assert preview["commits"] == []
+  assert preview["files"] == []
+  assert preview["diff"] is None
+  assert preview["diff_truncated"] is False
+
+
+def test_update_preview_clean_fast_forward(clone_env):
+  origin, platform = clone_env
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300")}, msg="bump line c")
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["available"] is True
+  assert preview["target_sha"] == new
+  assert [c["subject"] for c in preview["commits"]] == ["bump line c"]
+  changed = {f["path"] for f in preview["files"]}
+  assert "backend/app/main.py" in changed
+  assert "LINE_C = 300" in preview["diff"]
+  assert preview["diff_truncated"] is False
+
+
+def test_update_preview_excludes_local_edits(clone_env):
+  # A committed local edit must NOT appear in the preview — the owner reviews
+  # only the upstream-side changes a clean Apply pulls in.
+  origin, platform = clone_env
+  _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 111")})
+  _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 333")})
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["available"] is True
+  assert "LINE_C = 333" in preview["diff"]  # upstream change is shown
+  assert "LINE_A = 111" not in preview["diff"]  # local edit is excluded
+
+
+def test_update_preview_reports_file_status(clone_env):
+  origin, platform = clone_env
+  _advance_origin(
+    origin,
+    edits={"backend/app/added.py": "NEW = 1\n"},
+    deletes=["backend/app/foo.py"],
+    msg="add + delete",
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  status_by_path = {f["path"]: f["status"] for f in preview["files"]}
+  assert status_by_path.get("backend/app/added.py") == "A"
+  assert status_by_path.get("backend/app/foo.py") == "D"
+
+
+def test_update_preview_caps_large_diff(clone_env):
+  origin, platform = clone_env
+  huge = "x" * (pu.MAX_PREVIEW_DIFF_CHARS + 50_000) + "\n"
+  _advance_origin(origin, edits={"backend/app/big.py": huge}, msg="big file")
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["diff_truncated"] is True
+  assert len(preview["diff"]) == pu.MAX_PREVIEW_DIFF_CHARS
+
+
+def test_update_preview_degrades_when_not_a_clone(tmp_path):
+  # A non-git directory must degrade to an empty preview, never raise, so the
+  # route + Settings can't break on a missing/odd platform tree.
+  preview = pu.platform_update_preview(tmp_path)
+
+  assert preview["available"] is False
+  assert preview["diff"] is None
+  assert preview["commits"] == []

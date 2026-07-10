@@ -27,7 +27,7 @@ from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.platform_update import (
   PlatformApplyResult, PlatformConflictResolverChatOut, PlatformStatus,
-  PlatformUpdateError,
+  PlatformUpdateError, PlatformUpdatePreview,
 )
 from app.restart_util import restart_this_worker
 
@@ -77,6 +77,21 @@ async def check_platform_updates(
       recorded_upstream_sha=None, seed_required=False, conflict_paths=[],
       conflict_chat_id=None,
     )
+
+
+@router.get("/update-preview")
+async def get_platform_update_preview(
+  _: models.Owner = Depends(get_current_owner),
+) -> PlatformUpdatePreview:
+  """Read-only preview of the incoming platform update, for the Settings review
+  step the owner sees before Apply. Fetch-free and non-mutating like ``/status``.
+  Never raises — a git hiccup degrades to an empty preview so the review sheet
+  shows "nothing to review" rather than breaking the page."""
+  try:
+    return await asyncio.to_thread(platform_update.platform_update_preview)
+  except Exception as exc:
+    log.warning("platform update-preview failed: %r", exc)
+    return platform_update.empty_platform_update_preview()
 
 
 @router.post("/apply", dependencies=[Depends(reject_cross_site)])
