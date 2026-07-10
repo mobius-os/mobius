@@ -48,7 +48,7 @@ def static_index():
   # conftest.py creates backend/static/index.html (with the empty slot)
   # before app.main is imported, so the SPA fallback route GET / hits is
   # registered. Assert it's present, then serve it.
-  idx = main._static_dir / "index.html"
+  idx = main._resolve_static_dir() / "index.html"
   assert idx.is_file(), (
     "static/index.html missing — conftest should have stubbed it before "
     "app import; the SPA fallback route won't be registered without it"

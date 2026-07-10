@@ -55,14 +55,14 @@ def test_root_shell_manifest_is_theme_colored_and_no_cache(client):
   must revalidate on every fetch. On standalone Android the OS reads the
   manifest theme_color for the system/gesture-nav bar tint, so a stale-cached
   manifest pins that bar to the old theme after a theme change (card 164)."""
-  from app.main import _static_dir
+  from app.main import _resolve_static_dir
   if not _spa_active(client):
     pytest.skip("SPA fallback not registered (no static dir in this env)")
   # A real frontend build copies frontend/public/manifest.webmanifest into the
   # served static dir; the venv test env has the static dir but not that file,
   # so provision a minimal one for the duration of the test (the route only
   # overwrites theme_color/background_color, it doesn't author the manifest).
-  manifest_path = _static_dir / "manifest.webmanifest"
+  manifest_path = _resolve_static_dir() / "manifest.webmanifest"
   created = False
   if not manifest_path.is_file():
     manifest_path.write_text(

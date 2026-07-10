@@ -19,7 +19,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
@@ -266,8 +265,9 @@ async def lifespan(app):
   # sweep clears such orphaned markers between boots. Wrapped so a sweep failure
   # can't kill the loop; the loop is cancelled on shutdown.
   _wedged_sweep_task = None
+  _stalled_live_task = None
   try:
-    from app.chat import sweep_wedged_run_markers
+    from app.chat import sweep_stalled_live_runs, sweep_wedged_run_markers
     from app.database import SessionLocal as _SweepSession
 
     async def _wedged_marker_loop():
@@ -285,14 +285,32 @@ async def lifespan(app):
           _log.error("wedged-marker sweep failed: %s", _exc, exc_info=True)
 
     _wedged_sweep_task = _asyncio.create_task(_wedged_marker_loop())
+
+    async def _stalled_live_loop():
+      while True:
+        await _asyncio.sleep(60)
+        try:
+          _sl_db = _SweepSession()
+          try:
+            await sweep_stalled_live_runs(_sl_db)
+          finally:
+            _sl_db.close()
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error("stalled-live sweep failed: %s", _exc, exc_info=True)
+
+    _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
   except Exception as exc:
-    _log.error("wedged-marker sweep wiring failed: %s", exc, exc_info=True)
+    _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
   try:
     yield
   finally:
     # Stop the liveness watchdog before the writer drains.
     if _wedged_sweep_task is not None:
       _wedged_sweep_task.cancel()
+    if _stalled_live_task is not None:
+      _stalled_live_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
@@ -647,19 +665,22 @@ def _served_platform_identity(data_dir: str) -> dict:
 def _served_frontend_identity() -> dict:
   """Identity of the frontend bundle ACTUALLY being served.
 
-  The whole-repo platform serves ``_static_dir`` — ``/data/platform/frontend/
-  dist`` when it is a complete build, else the baked ``/app/static`` floor. Vite
-  injects a content-hashed asset name into ``index.html``, so hashing the served
-  ``index.html`` yields an identity that changes on every rebuild the watcher
-  swaps in: the frontend analogue of ``served_sha``. ``frontend_source`` says
-  which tree is live. Never raises.
+  The whole-repo platform serves the per-request-resolved static dir —
+  ``/data/platform/frontend/dist`` when it is a complete build, else the baked
+  ``/app/static`` floor. Vite injects a content-hashed asset name into
+  ``index.html``, so hashing the served ``index.html`` yields an identity that
+  changes on every rebuild the watcher swaps in: the frontend analogue of
+  ``served_sha``. Resolving per request (not a boot-time snapshot) means a dist
+  that appears after boot is reflected here without a restart. ``frontend_source``
+  says which tree is live. Never raises.
   """
   import hashlib
 
+  static_dir = _resolve_static_dir()
   out = {"served_frontend": None,
-         "frontend_source": "baked" if _static_dir == _baked_dir else "platform"}
+         "frontend_source": "baked" if static_dir == _baked_dir else "platform"}
   try:
-    html = (_static_dir / "index.html").read_bytes()
+    html = (static_dir / "index.html").read_bytes()
     out["served_frontend"] = hashlib.sha256(html).hexdigest()[:16]
   except Exception:  # missing/unreadable dist — degrade, never raise
     pass
@@ -726,7 +747,7 @@ def root_redirect():
 
 # -- Frontend static files (single-container mode) ---------------------
 # Prefer the agent-editable whole-repo build at /data/platform/frontend/dist/
-# if it exists and is complete (both assets/ and index.html must be present).
+# if it exists and is complete (Vite root files + assets/ must be present).
 # Fall back to the baked-in build at /app/static/ on any error.
 _live_dir = Path(settings.data_dir) / "platform" / "frontend" / "dist"
 # The baked SPA is at the IMAGE path /app/static, NOT relative to __file__.
@@ -740,7 +761,76 @@ _baked_dir = Path(os.environ.get("MOBIUS_BAKED_STATIC_DIR", "/app/static"))
 
 def _is_complete_build(d: Path) -> bool:
   """Returns True only if the directory looks like a complete Vite build."""
-  return d.is_dir() and (d / "assets").is_dir() and (d / "index.html").is_file()
+  return (
+    d.is_dir()
+    and (d / "assets").is_dir()
+    and (d / "index.html").is_file()
+    and (d / "sw.js").is_file()
+    and (d / "manifest.webmanifest").is_file()
+  )
+
+
+# The served frontend is resolved PER REQUEST, never frozen at module load: the
+# live build when it is complete, else the baked image floor. A dist that
+# appears or rebuilds after boot is then served with no restart, and a dist
+# gone incomplete mid-swap transparently falls back to the floor. A ~1s memo
+# keeps the stat cost off the hot asset path without pinning a stale choice
+# across a rebuild (a swap settles well inside one TTL).
+_STATIC_DIR_TTL_SECS = 1.0
+_static_dir_memo: dict = {"dir": None, "at": 0.0}
+
+
+def _resolve_static_dir() -> Path:
+  """Return the frontend dir serving this request: live dist if complete, else
+  the baked floor. Memoized for ``_STATIC_DIR_TTL_SECS``."""
+  now = time.monotonic()
+  memo = _static_dir_memo
+  if memo["dir"] is not None and now - memo["at"] < _STATIC_DIR_TTL_SECS:
+    return memo["dir"]
+  resolved = _live_dir if _is_complete_build(_live_dir) else _baked_dir
+  memo["dir"] = resolved
+  memo["at"] = now
+  return resolved
+
+
+# The asset attic — frontend_watcher hardlinks each OUTGOING generation's
+# content-hashed assets here on a dist swap. A sibling of ``dist`` so the
+# hardlinks stay on one filesystem. Request-time /assets resolution serves a
+# dist miss from these retained old generations so an unreloaded tab never 404s
+# its chunk graph after a swap.
+_ATTIC_DIR = _live_dir.parent / ".assets-attic"
+
+
+def _resolve_asset_file(asset_path: str) -> Path | None:
+  """Resolve ``/assets/<asset_path>`` to a file on disk, or None on a miss.
+
+  Searches, in order, the served build's ``assets``, the attic's retained old
+  generations, then the baked floor. Vite content-hashes every asset name, so
+  those names never collide across generations — the union always yields the
+  right bytes for whichever generation the client loaded, and the search order
+  only affects which byte-identical copy answers first. A miss returns None so
+  the caller emits a plain 404, never the SPA HTML: a JS module served as
+  ``text/html`` is MIME-rejected by the browser and poisons the cache-first
+  service worker (exactly the missing-``three.core.js`` failure). Each
+  candidate is containment-checked against its root so ``..`` cannot escape.
+  """
+  roots = [_resolve_static_dir() / "assets"]
+  try:
+    roots.extend(p for p in _ATTIC_DIR.glob("gen-*/assets") if p.is_dir())
+  except OSError:
+    pass
+  roots.append(_baked_dir / "assets")  # per-request corruption/boot floor
+  for root in roots:
+    try:
+      root_r = root.resolve()
+      target = (root_r / asset_path).resolve()
+    except OSError:
+      continue
+    if target == root_r or root_r not in target.parents:
+      continue  # the dir itself, or a `..` traversal escaping the root
+    if target.is_file():
+      return target
+  return None
 
 
 def _is_static_asset_path(path: str) -> bool:
@@ -985,29 +1075,50 @@ async def app_owned_asset(slug: str, asset_path: str, request: Request):
   )
 
 
-_static_dir = _live_dir if _is_complete_build(_live_dir) else _baked_dir
-if _static_dir.is_dir():
-  try:
-    # Serve static assets (JS, CSS, images) at their exact paths.
-    app.mount(
-      "/assets",
-      StaticFiles(directory=str(_static_dir / "assets")),
-      name="assets",
-    )
-  except Exception:
-    # Live build is corrupt — fall back to the baked-in build silently.
-    _static_dir = _baked_dir
-    app.mount(
-      "/assets",
-      StaticFiles(directory=str(_static_dir / "assets")),
-      name="assets",
-    )
-
+# Register the frontend serving routes whenever any static tree exists as a
+# floor: the baked build is the guaranteed one inside the image, so this is
+# effectively always-on in production; a bare local checkout has neither and
+# skips the SPA fallback. WHICH tree serves each request — and where each
+# /assets file comes from — is resolved per request (_resolve_static_dir /
+# _resolve_asset_file), never frozen here at module load.
+if _baked_dir.is_dir() or _live_dir.is_dir():
   from app.theme import get_bg_color, theme_data
+
+  # /assets is a request-time handler, NOT a StaticFiles mount: it serves the
+  # live build, then the attic's retained old generations, then a plain 404 —
+  # never the SPA HTML. A missing chunk MUST be a 404, not a mystery text/html
+  # payload (the browser MIME-rejects a module served as HTML and it poisons
+  # the cache-first service worker). The mount had to bind one directory at
+  # module load; this resolves per request, so a post-boot dist and a mid-swap
+  # old generation both serve without a restart.
+  @app.api_route(
+    "/assets/{asset_path:path}", methods=["GET", "HEAD"], include_in_schema=False
+  )
+  async def serve_asset(request: Request, asset_path: str):
+    target = await asyncio.to_thread(_resolve_asset_file, asset_path)
+    if target is None:
+      raise HTTPException(status_code=404, detail="Not found.")
+    media_type = (
+      mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    )
+    # Vite content-hashes every /assets filename, so the URL itself is the
+    # validator — a changed asset ships a new name. That makes the bytes
+    # safely immutable: cache hard, skip the revalidation round-trip.
+    return FileResponse(
+      str(target),
+      media_type=media_type,
+      headers={
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
+      },
+    )
 
   @app.get("/{path:path}")
   async def spa_fallback(request: Request, path: str):
     """Serves the SPA index.html for any non-API, non-asset path."""
+    # Resolve which build serves THIS request (live dist if complete, else the
+    # baked floor) once, up front — per request, never a module-load snapshot.
+    static_dir = _resolve_static_dir()
     app_slug = await asyncio.to_thread(_top_level_app_slug_alias, path)
     if app_slug:
       from fastapi.responses import RedirectResponse
@@ -1022,7 +1133,7 @@ if _static_dir.is_dir():
       import json
       from fastapi.responses import JSONResponse
       manifest = json.loads(
-        (_static_dir / "manifest.webmanifest").read_text()
+        (static_dir / "manifest.webmanifest").read_text()
       )
       bg = get_bg_color(settings.data_dir)
       manifest["background_color"] = bg
@@ -1046,7 +1157,7 @@ if _static_dir.is_dir():
         headers={"Cache-Control": "no-cache, must-revalidate"},
       )
 
-    file = _static_dir / path
+    file = static_dir / path
     if file.is_file() and path != "index.html":
       # The service worker MUST be served with `Cache-Control:
       # no-cache` so the browser revalidates it on every page load.
@@ -1073,16 +1184,14 @@ if _static_dir.is_dir():
         # (same class as the /app-assets + /module fix; see http_caching).
         strip_range(request)
       return FileResponse(str(file), headers=headers)
-    # _static_dir resolution is all-or-nothing at startup — when the
-    # agent's live build (/data/platform/frontend/dist) is selected, any file
-    # that lives ONLY in the baked build (/app/static) would
-    # otherwise fall through to the HTML response. /vendor/three/*
-    # is the canonical example: the npm-install vendor copy lands in
-    # /app/static at image build time, but Vite doesn't include
-    # vendor in /data/platform/frontend/dist. Falling back to the baked dir for
-    # files-not-in-live keeps mini-app imports working without
-    # forcing the rebuild script to mirror the entire vendor tree.
-    if _static_dir != _baked_dir and path != "index.html":
+    # When the live build is being served, a file that lives ONLY in the baked
+    # build (/app/static) would otherwise fall through to the HTML response.
+    # /vendor/three/* is the canonical example: the npm-install vendor copy
+    # lands in /app/static at image build time, but Vite doesn't emit vendor
+    # into /data/platform/frontend/dist. Falling back to the baked dir for
+    # files-not-in-live keeps mini-app imports working without forcing the
+    # rebuild to mirror the entire vendor tree.
+    if static_dir != _baked_dir and path != "index.html":
       baked = _baked_dir / path
       if baked.is_file():
         return FileResponse(str(baked))
@@ -1109,7 +1218,7 @@ if _static_dir.is_dir():
     import json
     from fastapi.responses import HTMLResponse
     try:
-      html = (_static_dir / "index.html").read_text(encoding="utf-8")
+      html = (static_dir / "index.html").read_text(encoding="utf-8")
     except FileNotFoundError:
       # The served dist is absent only during the frontend watcher's dist swap
       # (a two-rename window of a few microseconds — see
