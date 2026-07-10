@@ -53,6 +53,37 @@ ok()   { printf '%s[pre-push]%s %s\n' "$c_ok"  "$c_off" "$*"; }
 warn() { printf '%s[pre-push]%s %s\n' "$c_warn" "$c_off" "$*"; }
 err()  { printf '%s[pre-push]%s %s\n' "$c_err" "$c_off" "$*" >&2; }
 
+# Fast local feedback for the sibling-clobber class. This hook is bypassable;
+# the real guarantee is GitHub branch protection on main (owner-only).
+ZERO=0000000000000000000000000000000000000000
+PUSH_REFS="$PP_TMP/push-refs"
+if [ -t 0 ]; then
+  : >"$PUSH_REFS"
+else
+  cat >"$PUSH_REFS"
+fi
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  [ -n "${remote_ref:-}" ] || continue
+  case "$remote_ref" in
+    refs/heads/main)
+      if [ "$local_sha" = "$ZERO" ]; then
+        err "refusing to delete main"
+        err "recover: git fetch origin && git rebase origin/main && scripts/land.sh"
+        FAIL=1
+      elif [ "$remote_sha" != "$ZERO" ] &&
+           ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+        err "refusing non-fast-forward update to main"
+        err "recover: git fetch origin && git rebase origin/main && scripts/land.sh"
+        FAIL=1
+      fi
+      ;;
+  esac
+done <"$PUSH_REFS"
+if [ "$FAIL" -ne 0 ]; then
+  err "push blocked before running slow checks."
+  exit 1
+fi
+
 # Commits being pushed = everything on HEAD not yet on origin/main.
 BASE="$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1)"
 CHANGED="$(git diff --name-only --diff-filter=d "$BASE"..HEAD 2>/dev/null || true)"
