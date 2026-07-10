@@ -880,6 +880,14 @@ async def stream_chat(
   # 403 (app token, foreign chat) — matching send_message's surface.
   get_active_chat_for_principal(db, chat_id, principal)
 
+  # Release the DB connection before the stream loop. Like the shell SSE
+  # in notify.py, this StreamingResponse would otherwise pin a pooled
+  # connection for the whole life of the stream (FastAPI defers get_db's
+  # teardown until the body finishes), and enough concurrent chat streams
+  # would exhaust the Postgres QueuePool. The gate above is the only DB
+  # use here; the generator never touches `db`.
+  db.close()
+
   bc = get_broadcast(chat_id)
   if bc is None:
     # No broadcast either because none was ever created or because the
