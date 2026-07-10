@@ -2955,6 +2955,31 @@ def _install_simple(client, auth, base, manifest, jsx=JSX):
     })
 
 
+def test_install_response_includes_capability_flags(
+  client, auth, bypass_url_validation,
+):
+  """The immediate install response must match the persisted app capabilities."""
+  base = "https://caps.test/repo/"
+  manifest = _simple_manifest("capability-app")
+  manifest["embeds_agent"] = True
+  manifest["permissions"]["manage_apps"] = True
+  manifest["permissions"]["github_access"] = True
+
+  r = _install_simple(client, auth, base, manifest)
+
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["embeds_agent"] is True
+  assert payload["manage_apps"] is True
+  assert payload["github_access"] is True
+
+  listed = client.get("/api/apps/", headers=auth).json()
+  row = next(app for app in listed if app["id"] == payload["id"])
+  assert row["embeds_agent"] is True
+  assert row["manage_apps"] is True
+  assert row["github_access"] is True
+
+
 def test_install_validates_previous_id_field(client, auth, bypass_url_validation):
   """`previous_id` is held to the same slug rules as `id`, and may not equal
   `id` (a self-pointer would be a no-op that only confuses the migration)."""
@@ -3213,6 +3238,74 @@ def test_trusted_catalog_update_migrates_legacy_platform_row_found_by_url(
   assert app.manifest_url == canonical
   assert (data_dir / "apps" / "reflection" / "index.jsx").exists()
   assert (src_dir / "index.jsx").exists()
+
+
+def test_legacy_platform_migration_ignores_runtime_sidecar_repo(
+  client, auth, db, bypass_url_validation,
+):
+  """The old runtime sidecar under /data/apps/<slug> is not editable source.
+
+  Prod had Reflection source in /data/platform/core-apps/reflection, plus a
+  stale repo at /data/apps/reflection used by scheduled runtime files. Migration
+  must install the catalog source into /data/apps/reflection instead of merging
+  that stale repo's deleted source files as local user edits.
+  """
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  platform_source = data_dir / "platform" / "core-apps" / "reflection"
+  platform_source.mkdir(parents=True, exist_ok=True)
+  old_jsx = "export default function App() { return <div>old</div> }"
+  (platform_source / "index.jsx").write_text(old_jsx)
+
+  runtime_dir = data_dir / "apps" / "reflection"
+  base = "https://raw.githubusercontent.com/mobius-os/app-reflection/main/"
+  old_upstream = app_git.record_upstream(
+    runtime_dir,
+    {"index.jsx": old_jsx.encode()},
+    base.rstrip("/") + "#manifest-id=reflection",
+    "0.9.0",
+  )
+  app_git.align_local_to_upstream(runtime_dir)
+  (runtime_dir / "index.jsx").unlink()
+  (runtime_dir / "inputs").mkdir()
+  (runtime_dir / "inputs" / "activity.jsonl").write_text("keep\n")
+  app_git.commit_local(runtime_dir, "runtime sidecar state")
+
+  app = models.App(
+    name="Reflection",
+    description="platform core",
+    jsx_source=old_jsx,
+    source_dir=str(platform_source),
+    slug="reflection",
+    manifest_url=None,
+    version="0.9.0",
+    upstream_commit=old_upstream,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+
+  new_jsx = "export default function App() { return <div>catalog</div> }"
+  r = _install_simple(
+    client, auth, base, _simple_manifest("reflection", version="2.0.0"),
+    jsx=new_jsx,
+  )
+
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "update"
+  assert payload["conflict_paths"] == []
+  assert payload["source_dir"] == str(runtime_dir)
+  assert (runtime_dir / "index.jsx").read_text() == new_jsx
+  assert (runtime_dir / "inputs" / "activity.jsonl").read_text() == "keep\n"
+
+  db.refresh(app)
+  assert app.version == "2.0.0"
+  assert app.source_dir == str(runtime_dir)
+  assert app.manifest_url == base.rstrip("/") + "#manifest-id=reflection"
+  assert app_git.local_diverged_from(runtime_dir, app.upstream_commit) is False
 
 
 def test_previous_id_matching_nothing_is_a_fresh_install(

@@ -1811,12 +1811,13 @@ async def install_from_manifest(
       existing = platform_row
       adopt_kind = "legacy-platform"
   mode = "update" if existing else "install"
+  legacy_platform_migration = adopt_kind == "legacy-platform"
   if (
     existing
     and _is_legacy_platform_source_dir(
       existing.source_dir, settings_data_dir, existing.slug,
     )
-    and adopt_kind != "legacy-platform"
+    and not legacy_platform_migration
   ):
     raise HTTPException(
       409,
@@ -2101,7 +2102,10 @@ async def install_from_manifest(
       if git_source_dir:
         version = str(manifest.get("version", "unknown"))
         had_repo = app_git.is_repo(git_source_dir)
-        if existing and had_repo:
+        merge_existing_source = (
+          existing and had_repo and not legacy_platform_migration
+        )
+        if merge_existing_source:
           prev_upstream_commit = app.upstream_commit
           previous_upstream_paths = await asyncio.to_thread(
             _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
@@ -2256,6 +2260,11 @@ async def install_from_manifest(
                   git_source_dir, merge.merged_tree_oid,
                 )
         else:
+          # Fresh installs and legacy-platform migrations both build local
+          # `main` from the catalog tree. For legacy platform rows, an existing
+          # /data/apps/<slug> repo is only the old runtime sidecar; source lived
+          # under /data/platform/core-apps/<slug>, so do not merge its stale
+          # source state as user edits.
           # Fresh install (or an existing app that somehow lost its repo):
           # for a new raw-GitHub catalog install, prefer a REAL clone so the
           # source tree carries origin/<ref> and the app's own .gitignore. If
