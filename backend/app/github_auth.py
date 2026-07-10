@@ -73,6 +73,29 @@ def get_token() -> str | None:
   return token if isinstance(token, str) and token else None
 
 
+def noreply_email(login: str, user_id: int | str | None) -> str:
+  user_id_text = str(user_id or "").strip()
+  local_part = f"{user_id_text}+{login}" if user_id_text else login
+  return f"{local_part}@users.noreply.github.com"
+
+
+def _set_git_identity(name: str, email: str) -> None:
+  targets: list[tuple[str, list[str]]] = [
+    ("global", ["git", "config", "--global"]),
+  ]
+  data_dir = Path(get_settings().data_dir)
+  for repo in (data_dir, data_dir / "platform"):
+    if (repo / ".git").exists():
+      targets.append((str(repo), ["git", "-C", str(repo), "config"]))
+
+  for _, base_cmd in targets:
+    for key, value in (("user.name", name), ("user.email", email)):
+      subprocess.run(
+        [*base_cmd, key, value],
+        check=False, capture_output=True, timeout=10,
+      )
+
+
 def _write_0600(path: Path, content: str) -> None:
   """Writes `content` to `path` created with mode 0600 (same idiom as
   routes/auth.py's _write_credentials — credentials never pass through
@@ -123,12 +146,7 @@ def write_credentials(
 
   # Explicit argv list — never shell interpolation — so a hostile login
   # string could at worst become a weird config value, not a command.
-  email = f"{user_id}+{login}@users.noreply.github.com"
-  for key, value in (("user.name", login), ("user.email", email)):
-    subprocess.run(
-      ["git", "config", "--global", key, value],
-      check=False, capture_output=True, timeout=10,
-    )
+  _set_git_identity(login, noreply_email(login, user_id))
 
 
 def clear_credentials() -> None:
