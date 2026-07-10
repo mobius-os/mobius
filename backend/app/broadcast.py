@@ -83,6 +83,7 @@ class ChatBroadcast:
     self.subscribers: list[asyncio.Queue] = []
     self.running = True
     self.completed_at: Optional[float] = None
+    self.last_event_at: Optional[float] = time.monotonic()
 
   def publish(self, event: dict):
     """Appends event to log and pushes to all subscriber queues.
@@ -97,6 +98,7 @@ class ChatBroadcast:
     When the log reaches _EVENT_LOG_MAX the oldest entry is dropped to keep
     the cap. The tail (most recent state) is always preserved.
     """
+    self.last_event_at = time.monotonic()
     # Coalesce: if the last log entry is also a streaming-text chunk, merge
     # the content rather than appending a new entry. This keeps the log size
     # proportional to contiguous-text-run count rather than character count.

@@ -1,12 +1,24 @@
 {
   "active_sdk_clients": [
     {
-      "chat_id": "chat-sdk-claude"
+      "chat_id": "chat-sdk-claude",
+      "state": "live",
+      "last_event_age_secs": null,
+      "run_age_secs": null,
+      "subscriber_count": 0,
+      "stale": false,
+      "parked_until": null
     }
   ],
   "active_sdk_sessions": [
     {
-      "chat_id": "chat-sdk-codex"
+      "chat_id": "chat-sdk-codex",
+      "state": "live",
+      "last_event_age_secs": null,
+      "run_age_secs": null,
+      "subscriber_count": 0,
+      "stale": false,
+      "parked_until": null
     }
   ],
   "starting": [
