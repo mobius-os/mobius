@@ -189,6 +189,15 @@
         if (sessionStorage.getItem('sw-auto-reloaded') === '1') {
           sessionStorage.removeItem('sw-auto-reloaded')
         }
+        // `sw-skip-initiated` is a one-shot marker Shell.performShellReload sets
+        // right before it posts SKIP_WAITING at an idle apply-boundary. It tells
+        // the controllerchange handler below that a resulting controllerchange
+        // is OURS (an expected apply), not a spontaneous background SW flip to
+        // suppress. Clear it on the next load so a later spontaneous
+        // controllerchange can't be mistaken for a page-initiated apply.
+        if (sessionStorage.getItem('sw-skip-initiated') === '1') {
+          sessionStorage.removeItem('sw-skip-initiated')
+        }
         // A page that loaded WITHOUT a controller is a first-ever SW install:
         // the worker claiming this page is NOT an update (it just re-fetches the
         // same bundle), so reloading is a wasted splash-flash for real first-time
@@ -213,6 +222,15 @@
           }
         }
         const reloadAfterControllerChange = () => {
+          // Reload on a controllerchange ONLY when the page itself asked the
+          // waiting worker to take over — Shell.performShellReload set
+          // `sw-skip-initiated` before posting SKIP_WAITING at an idle
+          // boundary. The SW no longer skipWaiting()s on its own, so the only
+          // legitimate controllerchange here is one we initiated; a spontaneous
+          // one (a background generation flip) must NEVER reload a live turn.
+          // This is the belt-and-suspenders fast path — Shell also reloads
+          // directly — and the shared `sw-auto-reloaded` guard keeps it to one.
+          if (!sessionStorage.getItem('sw-skip-initiated')) return
           if (hadControllerAtLoad
               && navigator.serviceWorker.controller
               && !sessionStorage.getItem('sw-auto-reloaded')) {
@@ -256,9 +274,13 @@
         // the service worker and is registered with updateViaCache:'none', so
         // fetch('/sw.js', {cache:'reload'}) is the reliable network identity.
         // If the current document loaded bundle A but network /sw.js precaches
-        // bundle B, delete only Workbox's precache and reload once. The old
-        // worker then falls through to network for /index.html and the new
-        // hashed asset, while app/runtime caches remain untouched.
+        // bundle B, DEFER the recovery to Shell's apply-on-idle machine (set a
+        // flag; do NOT delete caches or reload here). This runs from an async
+        // register()/ready callback that can resolve AFTER Shell has mounted and
+        // reconnected to a running background turn — a boot-time force-reload
+        // there would blank a live stream. Shell reads the flag on mount, routes
+        // it through the same hold-until-idle path (idle → apply, else wait for
+        // the turn to end), and only then deletes Workbox's precache + reloads.
         const stalePrecacheRecoveryKey = 'sw-stale-precache-recovering'
         const wasRecoveringStalePrecache =
           sessionStorage.getItem(stalePrecacheRecoveryKey) === '1'
@@ -286,16 +308,12 @@
             if (!res.ok) return
             const expected = expectedShellBundleFromSw(await res.text())
             if (!expected || current.includes(expected)) return
+            // Re-fetch sw.js so the update watchdog can install the new worker;
+            // harmless (conditional GET). Then flag the mismatch for Shell to
+            // resolve at an idle boundary — the cache delete + reload happen
+            // there, never here.
             try { await reg?.update?.() } catch (_) {}
-            const keys = await caches.keys()
-            await Promise.all(
-              keys
-                .filter(k => k.startsWith('workbox-precache-'))
-                .map(k => caches.delete(k))
-            )
-            sessionStorage.setItem(stalePrecacheRecoveryKey, '1')
-            rememberShellStateForAutoReload()
-            window.location.reload()
+            try { sessionStorage.setItem('sw-stale-precache-pending', '1') } catch (_) {}
           } catch (_) {
             // Best-effort self-heal only; never block shell boot.
           }

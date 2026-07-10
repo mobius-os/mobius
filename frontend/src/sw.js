@@ -50,7 +50,6 @@ import {
 import {
   CacheFirst, StaleWhileRevalidate, NetworkFirst,
 } from 'workbox-strategies'
-import { clientsClaim } from 'workbox-core'
 import {
   VENDOR_CACHE,
   ESM_CACHE,
@@ -71,23 +70,39 @@ import {
   entriesToTrim,
 } from './sw-cache-policy.js'
 
-// LOAD-BEARING: these two calls are NOT injected by vite-plugin-pwa
-// when using the `injectManifest` strategy + `injectRegister: null`
-// (see vite.config.js). They are the only thing that makes the new
-// SW take over without a user-initiated reload. Removing them
-// breaks auto-update — installed PWAs would keep running the
-// previous SW until every tab was closed.
+// SW UPDATE LEASH (design §1.3 — "the streaming view is sacred").
 //
-// Interaction with the SSE `shell_rebuilt` event (Shell.jsx): when
-// the agent rebuilds the shell, the backend emits `shell_rebuilt`
-// and Shell.jsx does `window.location.reload()`. That reload is the
-// authoritative refresh path. clientsClaim's silent SW swap is a
-// fallback for the offline / SSE-missed case — the brief window
-// where the new SW takes over an open tab running old JS is
-// acceptable for a single-owner app that's almost always online
-// when in use.
-self.skipWaiting()
-clientsClaim()
+// We deliberately do NOT skipWaiting()/clientsClaim() at the top level. Under
+// the `injectManifest` strategy + `injectRegister: null` (see vite.config.js)
+// those are the only auto-takeover calls, and an eager takeover is exactly the
+// disruption this design removes: a new SW that activates + claims while a tab
+// is mid-turn flips the generation underneath a LIVE stream — its lazy chunks
+// 404, and `controllerchange` can force-reload the page mid-turn. So the new SW
+// now INSTALLS AND WAITS. The page hands it control — postMessage
+// {type:'SKIP_WAITING'} from Shell's performShellReload — only at an idle apply
+// boundary (Shell holds the reload while the owner is typing/steering/reading a
+// running chat), so the SW generation flips exactly when the page generation
+// does.
+//
+// FIRST-EVER INSTALL is the one case that still claims immediately: there is no
+// old generation whose live turn could be disrupted, and claiming lets offline
+// caching + app-code cache-first work from the very first load (an uncontrolled
+// page's fetches bypass the SW entirely). We detect it at install time —
+// `self.registration.active` is the OUTGOING worker during our install and is
+// null on a first-ever install — and claim on activate only in that case. The
+// module-level flag carries that verdict from install to activate (both fire on
+// this same worker's global scope). On an UPDATE we never reach activate until
+// the page posted SKIP_WAITING at its idle boundary; the reload Shell then
+// drives adopts the freshly-active worker without any spontaneous claim.
+let isFirstInstall = false
+self.addEventListener('install', () => {
+  isFirstInstall = !self.registration.active
+})
+self.addEventListener('message', (event) => {
+  // The page reached its idle apply-boundary and asked us to take over.
+  // This is the ONLY place the SW leaves the waiting phase on an update.
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting()
+})
 
 // Self-hosted React for the mini-app import map. These live in
 // /app/static/vendor (copied by the Dockerfile AFTER the Vite build, so
@@ -204,6 +219,12 @@ self.addEventListener('activate', (event) => {
     await Promise.all(
       keys.filter(isStaleRuntimeCache).map(k => caches.delete(k)),
     )
+    // First-ever install only: claim the (uncontrolled) page now so offline +
+    // app-code cache-first work from the very first load. An UPDATE reaches
+    // activate only after a page-initiated SKIP_WAITING; the reload the page
+    // then drives adopts the new worker, so we never claim an already-controlled
+    // page out from under a live turn. See the SW UPDATE LEASH note above.
+    if (isFirstInstall) await self.clients.claim()
   })())
 })
 
