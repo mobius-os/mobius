@@ -131,6 +131,16 @@ def notify(
   if body.type == "app_updated" and body.appId is not None:
     publish_app_built_to_owning_chat(db, body.appId)
 
+  # Agent affordance from design §1.5: the event still reaches clients through
+  # the normal broadcast path above, and the watcher also publishes any dirty
+  # warm staging immediately instead of waiting for the settle timer.
+  if body.type == "shell_apply_now":
+    try:
+      from app.frontend_watcher import publish_now
+      publish_now("shell_apply_now")
+    except Exception:
+      log.exception("shell_apply_now publish hook failed")
+
 
 @router.get("/api/events/system")
 async def stream_system_events(
