@@ -216,16 +216,16 @@ def _safe_repo_path(raw: object) -> Path:
     data_dir / "platform",
     data_dir / "contributions",
   )
-  if repo == allowed_roots[1]:
-    return repo
-  for root in (allowed_roots[0], allowed_roots[2]):
+  for root in allowed_roots:
     try:
       repo.relative_to(root)
       return repo
     except ValueError:
       continue
   raise ContributionSubmitError(
-    "This staged repo is outside the contribution source allowlist."
+    "This prepared PR was staged outside Mobius' durable contribution folders. "
+    "Ask the agent to prepare it again from /data/apps, /data/platform, or "
+    "/data/contributions; nothing was sent to GitHub."
   )
 
 
