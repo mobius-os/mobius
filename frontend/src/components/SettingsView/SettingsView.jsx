@@ -11,6 +11,7 @@ import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
+import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
 import './SettingsView.css'
@@ -298,6 +299,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDragIndex, setBackgroundDragIndex] = useState(null)
+  const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
 
@@ -319,6 +321,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     const requested = focusTarget?.section
     if (!requested) return undefined
     const section = requested === 'models' ? 'ai-providers' : requested
+    if (requested === 'models') setManageModelsOpen(true)
     let clearTimer = null
     const raf = requestAnimationFrame(() => {
       const node = setupFocusRefs.current[section]
@@ -847,6 +850,24 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 </ProviderRow>
               </div>
 
+              <div className="settings-agent-group">
+                <div className="settings-agent-group__head">
+                  <div>
+                    <h3 className="settings__agent-title">Chat model</h3>
+                    <p className="settings__subtext settings__subtext--tight">
+                      Manage which models appear in chat pickers.
+                    </p>
+                  </div>
+                  <button
+                    className="provider-row__action"
+                    type="button"
+                    onClick={() => setManageModelsOpen(true)}
+                  >
+                    Configure
+                  </button>
+                </div>
+              </div>
+
               <div
                 className={`settings-agent-group${attentionSection === 'background-agents' ? ' settings-setup-target' : ''}`}
                 id="settings-background-agents"
@@ -903,6 +924,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   />
                 )}
               </div>
+              {manageModelsOpen && (
+                <ManageModelsModal
+                  onClose={() => setManageModelsOpen(false)}
+                  providerOrder={PROVIDER_ORDER}
+                  providerInfo={PROVIDER_INFO}
+                />
+              )}
             </>
           ) : providerError ? (
             // First-ever open with no persisted cache and the fetch
@@ -954,7 +982,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
             </div>
             {configured && (
               <button
-                className="settings__pill-action"
+                className="provider-row__action"
                 type="button"
                 onClick={() => setGeminiExpanded(prev => !prev)}
                 aria-expanded={geminiExpanded}
