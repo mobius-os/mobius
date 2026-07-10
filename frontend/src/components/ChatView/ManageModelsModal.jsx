@@ -28,14 +28,6 @@ import { api } from '../../api/client.js'
 import { modelQueries } from '../../hooks/queries.js'
 import './ManageModelsModal.css'
 
-function isUpdatedModel(model) {
-  return model === 'gpt-5.5'
-}
-
-function isLegacyModel(model) {
-  return model?.available === false && !isUpdatedModel(model.id)
-}
-
 export default function ManageModelsModal({
   onClose,
   providerOrder,
@@ -222,15 +214,7 @@ export default function ManageModelsModal({
                         >
                           <span className="mmm-row__main">
                             <span className="mmm-row__title">{m.label}</span>
-                            <span className="mmm-row__sub">
-                              {m.id}
-                              {isUpdatedModel(m.id) && (
-                                <span className="mmm-row__pill mmm-row__pill--updated">Updated</span>
-                              )}
-                              {isLegacyModel(m) && (
-                                <span className="mmm-row__pill">Legacy</span>
-                              )}
-                            </span>
+                            <span className="mmm-row__sub">{m.id}</span>
                           </span>
                           <input
                             type="checkbox"

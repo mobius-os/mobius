@@ -83,10 +83,6 @@ import {
 } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import './ChatSettingsPanel.css'
 
-function isUpdatedModel(model) {
-  return model === 'gpt-5.5'
-}
-
 /** Claude product mark — four-petal flower / starburst silhouette,
  *  the recognizable Claude.ai icon (distinct from the Anthropic
  *  angular-A corporate mark). */
@@ -195,9 +191,8 @@ function preserveFocusUnlessTouch(ev) {
  *  registry + owner prefs.
  *
  *  Rules (matches the codex-review spec):
- *    - Sort by registry order. The backend already returns entries
- *      in KNOWN_MODELS order followed by live-only IDs, so we just
- *      keep that order.
+ *    - Keep registry order. The backend returns the provider SDK/CLI
+ *      order when live fetch succeeds, and fallback order otherwise.
  *    - Hide entries whose ID appears in `hiddenIds`, UNLESS that ID
  *      is the chat's currently-selected model (`selectedId`). The
  *      currently-selected model is always visible so the user can
@@ -645,10 +640,7 @@ export default function ChatSettingsPanel({
             <div key={`${pid}-${m.id}`}>
               <button
                 type="button"
-                className={
-                  `csp-row${isSelected ? ' csp-row--selected' : ''}`
-                  + (isUpdatedModel(m.id) ? ' csp-row--updated' : '')
-                }
+                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
                 onPointerDown={preserveFocusUnlessTouch}
                 onClick={() => handlePickModel(m.id, pid)}
                 disabled={saving || compacting}
@@ -658,9 +650,6 @@ export default function ChatSettingsPanel({
                 <span className="csp-row__main">
                   <span className="csp-row__title">
                     <span>{m.label}</span>
-                    {isUpdatedModel(m.id) && (
-                      <span className="csp-row__badge">Updated</span>
-                    )}
                   </span>
                   <span className="csp-row__sub">{info.label}</span>
                 </span>

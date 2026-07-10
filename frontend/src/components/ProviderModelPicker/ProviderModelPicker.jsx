@@ -1,13 +1,14 @@
 /**
- * Model constants shared between ChatSettingsPanel (the live per-chat picker)
- * and any future surface that needs the canonical model list.
+ * Static fallback model constants shared by picker surfaces before
+ * `/api/models` resolves or when the live registry is unavailable.
+ * The provider SDK/CLI registry is the source of truth once loaded.
  *
  * The ProviderModelPicker radio-list component that used to live here was
  * superseded by ChatSettingsPanel's stepper layout and is no longer rendered.
- * The data exports below are the live contract; the component code is gone.
+ * The component code is gone; only fallback rows remain.
  */
 
-/** Known models per provider. Add here when a new model lands; the value
+/** Fallback models per provider. Add here when a new default fallback lands; the value
  *  is what gets passed to ClaudeAgentOptions(model=...) / Codex thread.start.
  *
  *  Anthropic switched to dateless pinned IDs starting with the 4.6 generation —

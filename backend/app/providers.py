@@ -38,13 +38,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# Known models per provider, with the top entry treated as the
-# default. Mirrors the order in the frontend's CLAUDE_MODELS /
-# CODEX_MODELS lists — keep in sync when a model lands at the top
-# of either list. Listing all known values lets the snapshot logic
-# detect cross-provider model mismatches (e.g. the global file
-# remembers a Codex model but a new chat starts on Claude) and
-# fall back cleanly to the provider's own top entry.
+# Fallback models per provider, with the top entry treated as the
+# default when live registry fetches are unavailable. Listing known
+# values also lets the snapshot logic detect cross-provider model
+# mismatches (e.g. the global file remembers a Codex model but a new
+# chat starts on Claude) and fall back cleanly to the provider's own
+# top entry. On successful registry fetches, the SDK/CLI list is the
+# source of truth.
 KNOWN_MODELS = {
   "claude": [
     # Anthropic switched to dateless pinned IDs starting with 4.6;
@@ -67,13 +67,11 @@ KNOWN_MODELS = {
 }
 
 
-# Human-readable label for each known model ID. Live registry calls
-# return raw IDs without UI metadata (Anthropic's /v1/models returns
-# only `id` + a generic `display_name`; Codex's models() returns
-# slugs only), so the canonical label always comes from this map.
-# Models the live API returns that are NOT in this map fall back to
-# their raw ID as the label — the picker still renders, just with a
-# less polished name. Add a row here when you add to KNOWN_MODELS.
+# Human-readable label for model IDs we know how to polish. Live
+# registry calls return raw IDs without consistent UI metadata
+# (Anthropic's /v1/models returns `id` + a generic `display_name`;
+# Codex's models() returns slugs only), so labels come from this map
+# when present and fall back to the raw ID for newly released models.
 MODEL_LABELS: dict[str, str] = {
   "claude-opus-4-8": "Opus 4.8",
   "claude-opus-4-7": "Opus 4.7",
@@ -613,7 +611,7 @@ _MODEL_CACHE_TTL_SECONDS = 5 * 60
 # In-process cache. Single-process FastAPI means a dict is enough; if
 # we ever scale out we'll need a shared cache, but that's not the
 # constraint today.
-_model_registry_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
+_model_registry_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 # Per-provider lock so a concurrent caller waiting on a Claude refetch
 # isn't blocked by an in-flight Codex refetch (and vice versa). The
 # cache itself is read without a lock — Python dict reads are atomic
@@ -633,11 +631,10 @@ def _label_for(model_id: str) -> str:
 
 def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   """Returns the KNOWN_MODELS list for `provider_id` as registry
-  entries. Used when the upstream fetch fails AND as the seed for
-  cross-referencing live IDs against the canonical order. `available`
-  is set explicitly here so non-route callers (tests, internal
-  helpers) get the same dict shape the route layer's Pydantic
-  serialization would produce."""
+  entries. Used when the upstream fetch fails. `available` is set
+  explicitly here so non-route callers (tests, internal helpers) get
+  the same dict shape the route layer's Pydantic serialization would
+  produce."""
   return [
     {
       "id": mid,
@@ -649,39 +646,24 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   ]
 
 
-def _merge_live_with_known(
+def _live_model_entries(
   provider_id: str, live_ids: list[str]
-) -> list[dict[str, str]]:
-  """Merges a live ID list with KNOWN_MODELS ordering + labels.
+) -> list[dict[str, Any]]:
+  """Wraps live SDK/CLI model IDs as registry entries.
 
-  Known IDs appear first in KNOWN_MODELS order (so the picker stays
-  visually stable across an Anthropic-side reordering). Live-only
-  IDs (released since the last KNOWN_MODELS bump) follow, in the
-  order the upstream returned them. Stale-known IDs (in
-  KNOWN_MODELS but not in live) are kept — they may still resolve
-  as aliases server-side, and dropping them would silently break
-  existing chats that persisted them.
+  Static KNOWN_MODELS is only the failure fallback. When a live fetch
+  succeeds, the provider SDK/CLI is the source of truth; labels are a
+  cosmetic map with raw-ID fallback.
   """
-  known = KNOWN_MODELS.get(provider_id, [])
-  live_set = set(live_ids)
-  entries: list[dict[str, str]] = []
-  for mid in known:
-    entries.append({
-      "id": mid,
-      "label": _label_for(mid),
-      "provider": provider_id,
-      "available": mid in live_set,
-    })
-  for mid in live_ids:
-    if mid in known:
-      continue
-    entries.append({
+  return [
+    {
       "id": mid,
       "label": _label_for(mid),
       "provider": provider_id,
       "available": True,
-    })
-  return entries
+    }
+    for mid in live_ids
+  ]
 
 
 # Claude CLI OAuth constants — the registry path refreshes an expired
@@ -935,7 +917,7 @@ async def _fetch_provider_models(
 async def list_models(
   data_dir: str,
   force_refresh: bool = False,
-) -> dict[str, list[dict[str, str]]]:
+) -> dict[str, list[dict[str, Any]]]:
   """Returns `{provider_id: [{id, label, provider, available}, ...]}`.
 
   Cache TTL is 5 minutes per provider. On upstream failure for a
@@ -948,7 +930,7 @@ async def list_models(
   KNOWN_MODELS fallback for both.
   """
 
-  def cache_fresh(provider_id: str) -> list[dict[str, str]] | None:
+  def cache_fresh(provider_id: str) -> list[dict[str, Any]] | None:
     """Returns cached entries if a non-forced read can use them."""
     if force_refresh:
       return None
@@ -959,7 +941,7 @@ async def list_models(
       return None
     return cached[1]
 
-  async def fetch_one(provider_id: str) -> tuple[str, list[dict[str, str]]]:
+  async def fetch_one(provider_id: str) -> tuple[str, list[dict[str, Any]]]:
     """Refetches under the provider's lock, with a double-checked
     cache read inside the lock so we don't redo a refetch another
     caller just completed for us."""
@@ -969,7 +951,7 @@ async def list_models(
         return provider_id, hit
       try:
         live_ids = await _fetch_provider_models(provider_id, data_dir)
-        entries = _merge_live_with_known(provider_id, live_ids)
+        entries = _live_model_entries(provider_id, live_ids)
       except Exception as exc:  # noqa: BLE001 — fallback is the contract
         log.warning(
           "model registry fetch failed for %s: %s; using KNOWN_MODELS",
@@ -982,7 +964,7 @@ async def list_models(
   # Serve hot reads (cache hit + not forced) without ever taking a
   # lock — concurrent callers in the steady-state hit the cache
   # directly. Only cache misses go through fetch_one.
-  result: dict[str, list[dict[str, str]]] = {}
+  result: dict[str, list[dict[str, Any]]] = {}
   cold: list[str] = []
   for provider_id in PROVIDERS:
     hit = cache_fresh(provider_id)
