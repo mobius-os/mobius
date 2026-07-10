@@ -43,6 +43,8 @@ from app.routes import (
   published_router,
 )
 
+_BOOT_ID = f"{os.getpid()}-{time.time_ns()}"
+
 
 def _init_db():
   """Run migrations and create tables, retrying on transient failures."""
@@ -552,9 +554,11 @@ def health(response: Response):
   already sends `cache: 'no-store'`, but the response carrying the directive
   too is belt-and-suspenders against an intermediary or a stale-200 path
   (a suspected contributor to the Android offline-probe-returns-true anomaly).
+  `boot_id` is a per-worker marker the Settings restart flow uses to avoid
+  reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
-  return {"status": "ok"}
+  return {"status": "ok", "boot_id": _BOOT_ID}
 
 
 @app.get("/api/ready")

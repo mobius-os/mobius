@@ -5,6 +5,7 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
+import { restartCanReload } from '../../lib/restartReadiness.js'
 import * as themeService from '../../lib/themeService.js'
 import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
@@ -19,6 +20,9 @@ import './SettingsView.css'
 const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
 const SYSTEM_SETUP_READY_KEY = 'mobius:system-setup-ready:v1'
+const RESTART_POLL_INTERVAL_MS = 1500
+const RESTART_POLL_MAX = 40
+const RESTART_SHELL_READY_PATH = '/shell/'
 const PROVIDER_CHOICES = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
@@ -182,7 +186,6 @@ function BackgroundProviderRow({
   index,
   models,
   dragging,
-  settling,
   dropTarget,
   dropPosition,
   dragStyle,
@@ -204,7 +207,6 @@ function BackgroundProviderRow({
         'settings-bg-row'
         + (enabled ? '' : ' settings-bg-row--off')
         + (dragging ? ' settings-bg-row--dragging' : '')
-        + (settling ? ' settings-bg-row--settling' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
         + (dropTarget && dropPosition ? ` settings-bg-row--drop-${dropPosition}` : '')
       }
@@ -231,7 +233,7 @@ function BackgroundProviderRow({
         {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
       </span>
       <div className="settings-bg-row__agent">
-        <span className={`settings-model-select${isUpdatedModel(selectedModel) ? ' settings-model-select--updated' : ''}`}>
+        <span className="settings-model-select">
           <select
             className="settings-model-select__control"
             value={selectedModel}
@@ -264,6 +266,44 @@ function BackgroundProviderRow({
 
 function returnToSettingsAfterReload() {
   try { sessionStorage.setItem(RETURN_VIEW_KEY, 'settings') } catch {}
+}
+
+async function readRestartHealth() {
+  const response = await fetch('/api/health', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  })
+  if (!response.ok) return { ok: false, bootId: '' }
+  let body = null
+  try { body = await response.json() } catch {}
+  return {
+    ok: true,
+    bootId: typeof body?.boot_id === 'string' ? body.boot_id : '',
+  }
+}
+
+async function readRestartBootId() {
+  try {
+    const health = await readRestartHealth()
+    return health.ok ? health.bootId : ''
+  } catch {
+    return ''
+  }
+}
+
+async function shellDocumentReady() {
+  if (typeof window === 'undefined') return false
+  try {
+    const response = await fetch(new URL(RESTART_SHELL_READY_PATH, window.location.origin), {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { Accept: 'text/html' },
+    })
+    if (!response.ok) return false
+    return (response.headers.get('content-type') || '').toLowerCase().includes('text/html')
+  } catch {
+    return false
+  }
 }
 
 export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = null }) {
@@ -358,8 +398,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
+  const [backgroundCommitting, setBackgroundCommitting] = useState(false)
   const backgroundDragRef = useRef(null)
-  const backgroundSettleTimerRef = useRef(null)
+  const backgroundCommitRafRef = useRef(null)
   const backgroundRowRefs = useRef([])
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
@@ -494,6 +535,20 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     backgroundDragRef.current = backgroundDrag
   }, [backgroundDrag])
 
+  const beginBackgroundCommit = useCallback(() => {
+    if (backgroundCommitRafRef.current) {
+      window.cancelAnimationFrame(backgroundCommitRafRef.current)
+      backgroundCommitRafRef.current = null
+    }
+    setBackgroundCommitting(true)
+    backgroundCommitRafRef.current = window.requestAnimationFrame(() => {
+      backgroundCommitRafRef.current = window.requestAnimationFrame(() => {
+        backgroundCommitRafRef.current = null
+        setBackgroundCommitting(false)
+      })
+    })
+  }, [])
+
   const backgroundIndexFromY = useCallback((clientY, slots) => {
     const rows = slots || backgroundRowRefs.current
       .map((node) => {
@@ -515,10 +570,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
   const startBackgroundReorder = useCallback((event, index) => {
     if (event.button !== undefined && event.button !== 0) return
-    if (backgroundSettleTimerRef.current) {
-      window.clearTimeout(backgroundSettleTimerRef.current)
-      backgroundSettleTimerRef.current = null
-    }
     const node = backgroundRowRefs.current[index]
     if (!node) return
     const rowRect = node.getBoundingClientRect()
@@ -532,23 +583,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         center: rect.top + rect.height / 2,
       }
     }).filter(Boolean)
-    const nextSlot = rows[index + 1]?.getBoundingClientRect()
-    const prevSlot = rows[index - 1]?.getBoundingClientRect()
-    const step = nextSlot
-      ? nextSlot.top - rowRect.top
-      : prevSlot
-        ? rowRect.top - prevSlot.top
-        : rowRect.height + 6
     event.preventDefault()
     event.stopPropagation()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
     const next = {
       fromIndex: index,
       toIndex: index,
-      startY: event.clientY,
-      currentY: event.clientY,
       grabOffsetY: event.clientY - rowRect.top,
       rowHeight: rowRect.height,
-      step,
       slots,
     }
     setBackgroundDrag(next)
@@ -562,11 +604,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     const onPointerMove = (event) => {
       event.preventDefault()
       setBackgroundDrag((current) => {
-        if (!current || current.dropping) return current
+        if (!current) return current
         const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
         const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
-        if (current.toIndex === toIndex && current.currentY === event.clientY) return current
-        return { ...current, currentY: event.clientY, toIndex }
+        if (current.toIndex === toIndex) return current
+        return { ...current, toIndex }
       })
     }
 
@@ -580,32 +622,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         setBackgroundDrag(null)
         return
       }
-      const originSlot = current.slots?.[fromIndex]
-      const targetSlot = current.slots?.[toIndex]
-      if (!originSlot || !targetSlot) {
-        setBackgroundDrag(null)
-        moveBackgroundProvider(fromIndex, toIndex)
-        return
-      }
-      const settleY = targetSlot.top - originSlot.top
-      setBackgroundDrag({
-        ...current,
-        currentY: current.startY + settleY,
-        toIndex,
-        dropping: true,
-      })
-      backgroundSettleTimerRef.current = window.setTimeout(() => {
-        backgroundSettleTimerRef.current = null
-        moveBackgroundProvider(fromIndex, toIndex)
-        setBackgroundDrag(null)
-      }, 150)
+      beginBackgroundCommit()
+      setBackgroundDrag(null)
+      moveBackgroundProvider(fromIndex, toIndex)
     }
 
     const cancel = () => {
-      if (backgroundSettleTimerRef.current) {
-        window.clearTimeout(backgroundSettleTimerRef.current)
-        backgroundSettleTimerRef.current = null
-      }
       setBackgroundDrag(null)
     }
 
@@ -617,12 +639,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [activeBackgroundDragFromIndex, backgroundIndexFromY, moveBackgroundProvider])
+  }, [activeBackgroundDragFromIndex, backgroundIndexFromY, beginBackgroundCommit, moveBackgroundProvider])
 
   useEffect(() => () => {
-    if (backgroundSettleTimerRef.current) {
-      window.clearTimeout(backgroundSettleTimerRef.current)
-      backgroundSettleTimerRef.current = null
+    if (backgroundCommitRafRef.current) {
+      window.cancelAnimationFrame(backgroundCommitRafRef.current)
+      backgroundCommitRafRef.current = null
     }
   }, [])
 
@@ -731,17 +753,21 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // component unmount or on a second restart attempt (shouldn't happen —
   // the button is disabled while restarting, but belt-and-braces).
   const restartPollRef = useRef(null)
-  useEffect(() => {
-    return () => {
-      if (restartPollRef.current) clearInterval(restartPollRef.current)
-    }
+  const clearRestartPoll = useCallback(() => {
+    if (!restartPollRef.current) return
+    window.clearTimeout(restartPollRef.current)
+    restartPollRef.current = null
   }, [])
+  useEffect(() => {
+    return () => clearRestartPoll()
+  }, [clearRestartPoll])
 
   async function restartServer() {
     if (restartPhase === 'restarting') return
     setRestartPhase('restarting')
     setRestartError('')
     try {
+      const previousBootId = await readRestartBootId()
       const res = await api.admin.restart()
       if (!res.ok) {
         let detail = ''
@@ -749,32 +775,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         throw new Error(detail || `Restart failed (${res.status})`)
       }
       returnToSettingsAfterReload()
-      // Poll /api/health every ~1.5s instead of a fixed 10s blind reload.
-      // Reload as soon as the server is back; surface a notice if it hasn't
-      // returned within ~45s (30 polls × 1500ms) so the user knows to check
-      // the container rather than waiting indefinitely.
-      const POLL_INTERVAL_MS = 1500
-      const POLL_MAX = 30
-      let polls = 0
-      restartPollRef.current = setInterval(async () => {
-        polls++
-        try {
-          const probe = await fetch('/api/health', { cache: 'no-store' })
-          if (probe.ok) {
-            clearInterval(restartPollRef.current)
-            restartPollRef.current = null
-            window.location.reload()
-            return
-          }
-        } catch (_) { /* server still down — keep polling */ }
-        if (polls >= POLL_MAX) {
-          clearInterval(restartPollRef.current)
-          restartPollRef.current = null
+      pollRestartThenReload({
+        previousBootId,
+        onTimeout: () => {
           setRestartError("Server hasn't come back yet — check the container.")
           setRestartPhase('idle')
           setRestartConfirm(false)
-        }
-      }, POLL_INTERVAL_MS)
+        },
+      })
     } catch (err) {
       setRestartPhase('idle')
       setRestartConfirm(false)
@@ -834,7 +842,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         }
       } catch { /* fall through to a plain reload */ }
     }
+    if (!(await shellDocumentReady())) return false
     window.location.reload()
+    return true
   }
 
   // Platform self-update: read availability once on mount so Settings can show
@@ -905,31 +915,44 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
   }
 
-  // Poll /api/health until the worker is back, then reload. Shared by the
-  // platform restart-to-finish flow (reuses restartPollRef + its unmount clear).
-  function pollHealthThenReload(onTimeout) {
-    const POLL_INTERVAL_MS = 1500
-    const POLL_MAX = 30
+  // Poll until the restart is actually safe to navigate. A plain successful
+  // /api/health response can still be the OLD worker answering before its
+  // BackgroundTask sends SIGTERM, so prefer a changed boot id. When updating
+  // from an older server that does not expose boot ids, require either a
+  // down/up cycle or a conservative wait before trying to reload.
+  function pollRestartThenReload({ previousBootId = '', onTimeout }) {
+    clearRestartPoll()
+    const startedAt = Date.now()
     let attempts = 0
-    restartPollRef.current = setInterval(async () => {
+    let sawUnavailable = false
+
+    const poll = async () => {
+      restartPollRef.current = null
       attempts += 1
       try {
-        const probe = await fetch('/api/health', { cache: 'no-store' })
-        if (probe.ok) {
-          clearInterval(restartPollRef.current)
-          restartPollRef.current = null
-          reloadOntoFreshSW()
-          return
+        const health = await readRestartHealth()
+        if (!health.ok) {
+          sawUnavailable = true
+        } else if (restartCanReload({
+          previousBootId,
+          currentBootId: health.bootId,
+          sawUnavailable,
+          elapsedMs: Date.now() - startedAt,
+        })) {
+          const reloaded = await reloadOntoFreshSW()
+          if (reloaded) return
         }
       } catch {
-        // still down — keep polling
+        sawUnavailable = true
       }
-      if (attempts >= POLL_MAX) {
-        clearInterval(restartPollRef.current)
-        restartPollRef.current = null
+      if (attempts >= RESTART_POLL_MAX) {
         onTimeout()
+        return
       }
-    }, POLL_INTERVAL_MS)
+      restartPollRef.current = window.setTimeout(poll, RESTART_POLL_INTERVAL_MS)
+    }
+
+    restartPollRef.current = window.setTimeout(poll, RESTART_POLL_INTERVAL_MS)
   }
 
   // The owner's explicit confirmation that finishes a platform update: clicking
@@ -939,6 +962,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     setPlatformError('')
     setPlatformPhase('restarting')
     try {
+      const previousBootId = await readRestartBootId()
       // apiFetch resolves for any non-401, so a 5xx is NOT a thrown error —
       // check res.ok or we'd poll + reload onto the same (unchanged) code and
       // report a non-restart as success. Mirrors applyPlatformUpdate's guard.
@@ -951,8 +975,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         return
       }
       returnToSettingsAfterReload()
-      pollHealthThenReload(() =>
-        setPlatformError("Server hasn't come back yet — check the container."))
+      pollRestartThenReload({
+        previousBootId,
+        onTimeout: () => {
+          setPlatformError("Server hasn't come back yet — check the container.")
+          setPlatformPhase('idle')
+        },
+      })
     } catch {
       setPlatformError('Restart signal failed.')
       setPlatformPhase('idle')
@@ -1002,11 +1031,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   }, [effectiveBackgroundDraft.length])
   const backgroundDragStyleForIndex = (index) => {
     if (!backgroundDrag) return undefined
-    const deltaY = backgroundDrag.currentY - backgroundDrag.startY
-    const step = backgroundDrag.step || 0
+    const slots = backgroundDrag.slots || []
     if (index === backgroundDrag.fromIndex) {
+      const originSlot = slots[backgroundDrag.fromIndex]
+      const targetSlot = slots[backgroundDrag.toIndex]
+      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
       return {
-        transform: `translateY(${deltaY}px) scale(1.01)`,
+        transform: `translateY(${offset}px) scale(1.01)`,
         zIndex: 2,
       }
     }
@@ -1015,14 +1046,20 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       && index > backgroundDrag.fromIndex
       && index <= backgroundDrag.toIndex
     ) {
-      return { transform: `translateY(-${step}px)` }
+      const originSlot = slots[index]
+      const targetSlot = slots[index - 1]
+      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
+      return { transform: `translateY(${offset}px)` }
     }
     if (
       backgroundDrag.toIndex < backgroundDrag.fromIndex
       && index >= backgroundDrag.toIndex
       && index < backgroundDrag.fromIndex
     ) {
-      return { transform: `translateY(${step}px)` }
+      const originSlot = slots[index]
+      const targetSlot = slots[index + 1]
+      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
+      return { transform: `translateY(${offset}px)` }
     }
     return undefined
   }
@@ -1109,7 +1146,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                     </p>
                   </div>
                 </div>
-                <div className="settings-bg-list">
+                <div
+                  className={`settings-bg-list${backgroundCommitting ? ' settings-bg-list--committing' : ''}`}
+                >
                   {effectiveBackgroundDraft.map((row, index) => (
                     <BackgroundProviderRow
                       key={row.provider}
@@ -1117,13 +1156,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       index={index}
                       models={modelsForProvider(row.provider)}
                       dragging={backgroundDrag?.fromIndex === index}
-                      settling={
-                        backgroundDrag?.dropping
-                        && backgroundDrag?.fromIndex === index
-                      }
                       dropTarget={
-                        !backgroundDrag?.dropping
-                        && backgroundDrag?.toIndex === index
+                        backgroundDrag?.toIndex === index
                         && backgroundDrag?.fromIndex !== index
                       }
                       dropPosition={backgroundDropPosition}

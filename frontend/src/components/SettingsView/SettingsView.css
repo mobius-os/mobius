@@ -372,16 +372,15 @@
   will-change: transform;
 }
 
+.settings-bg-list--committing .settings-bg-row {
+  transition: none;
+}
+
 .settings-bg-row--dragging {
   border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
   box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
   opacity: 0.96;
-  transition: none;
-}
-
-.settings-bg-row--settling {
-  transition: transform 0.15s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .settings-bg-row--drop-target {
@@ -480,11 +479,6 @@
   line-height: 1.25;
   padding: 6px 28px 6px 10px;
   outline: none;
-}
-
-.settings-model-select--updated .settings-model-select__control {
-  border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
 .settings-effort-stepper {
