@@ -24,8 +24,8 @@ const PROVIDER_CHOICES = [
   { id: 'codex', label: 'OpenAI Codex' },
 ]
 const FALLBACK_MODEL_ROWS = {
-  claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label })),
-  codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label })),
+  claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
+  codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
 }
 
 function markSystemSetupReady() {
@@ -57,6 +57,17 @@ function providerFromSettings(settings) {
 
 function isUpdatedModel(model) {
   return model === 'gpt-5.5'
+}
+
+function isLegacyModel(model) {
+  return model?.available === false && !isUpdatedModel(model.id)
+}
+
+function modelDisplayLabel(model) {
+  const label = model?.label || model?.id || ''
+  if (isUpdatedModel(model?.id)) return `${label} · Updated`
+  if (isLegacyModel(model)) return `${label} · Legacy`
+  return label
 }
 
 function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude') {
@@ -98,13 +109,6 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
 
 function providerLabel(provider) {
   return PROVIDER_CHOICES.find(p => p.id === provider)?.label || 'No provider'
-}
-
-function SaveState({ saving, saved, error }) {
-  if (error) return <span className="settings-agent-state settings-agent-state--error">Not saved</span>
-  if (saving) return <span className="settings-agent-state">Saving…</span>
-  if (saved) return <span className="settings-agent-state settings-agent-state--saved">Saved</span>
-  return null
 }
 
 function SettingsEffortStepper({ provider, value, disabled, onChange }) {
@@ -238,7 +242,7 @@ function BackgroundProviderRow({
             )}
             {models.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.label || model.id}{isUpdatedModel(model.id) ? ' · updated' : ''}
+                {modelDisplayLabel(model)}
               </option>
             ))}
           </select>
@@ -349,8 +353,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     claudeStatusQuery.refetch()
   }, [settingsQuery, claudeStatusQuery])
   const [backgroundDraft, setBackgroundDraft] = useState(null)
-  const [backgroundSaving, setBackgroundSaving] = useState(false)
-  const [backgroundSaved, setBackgroundSaved] = useState(false)
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
@@ -402,7 +404,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       ? modelRegistryQuery.data[provider]
       : null
     if (rows && rows.length) {
-      return rows.map((m) => ({ id: m.id, label: m.label || m.id }))
+      return rows.map((m) => ({
+        id: m.id,
+        label: m.label || m.id,
+        available: m.available,
+      }))
     }
     return FALLBACK_MODEL_ROWS[provider] || []
   }, [modelRegistryQuery.data])
@@ -415,9 +421,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       return
     }
     const reqId = ++backgroundSaveReqRef.current
-    setBackgroundSaving(true)
     setBackgroundError('')
-    setBackgroundSaved(false)
     try {
       const toChoice = (row, includeEnabled = false) => {
         const isEnabled = row.enabled !== false
@@ -443,16 +447,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       }
       markSystemSetupReady()
       settingsQueries.owner.invalidate(queryClient)
-      setBackgroundSaved(true)
-      setTimeout(() => {
-        if (reqId === backgroundSaveReqRef.current) setBackgroundSaved(false)
-      }, 1800)
     } catch (err) {
       if (reqId === backgroundSaveReqRef.current) {
         setBackgroundError(err.message || 'Could not save background agents.')
       }
-    } finally {
-      if (reqId === backgroundSaveReqRef.current) setBackgroundSaving(false)
     }
   }, [queryClient])
 
@@ -1071,11 +1069,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       Möbius tries the next enabled agent.
                     </p>
                   </div>
-                  <SaveState
-                    saving={backgroundSaving}
-                    saved={backgroundSaved}
-                    error={backgroundError}
-                  />
                 </div>
                 <div className="settings-bg-list">
                   {effectiveBackgroundDraft.map((row, index) => (

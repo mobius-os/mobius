@@ -353,7 +353,15 @@
 
 .csp__confirm-btn--ghost {
   color: var(--text);
-  background: var(--surface);
+  border-color: color-mix(in srgb, var(--text) 18%, var(--border));
+  background: var(--surface2);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .csp__confirm-btn--ghost:not(:disabled):hover {
+    border-color: color-mix(in srgb, var(--text) 26%, var(--border));
+    background: var(--surface);
+  }
 }
 
 .csp__error {

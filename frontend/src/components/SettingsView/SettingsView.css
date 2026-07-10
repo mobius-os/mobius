@@ -299,21 +299,6 @@
   color: var(--text);
 }
 
-.settings-agent-state {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.settings-agent-state--saved {
-  color: var(--accent);
-}
-
-.settings-agent-state--error {
-  color: var(--danger);
-}
-
 @media (max-width: 620px) {
   .settings-agent-group__head {
     flex-direction: column;

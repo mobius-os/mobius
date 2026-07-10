@@ -234,9 +234,8 @@
   gap: 6px;
 }
 
-/* Legacy pill — marks IDs that were in KNOWN_MODELS but the live
-   API didn't return. Kept visible so chats that persisted them
-   resolve, but the owner can recognize them at a glance. */
+/* Status pills keep Configure's model vocabulary aligned with the compact
+   pickers: Updated is a positive cue, Legacy is only for stale aliases. */
 .mmm-row__pill {
   font-size: 11px;
   font-weight: 600;
@@ -249,6 +248,12 @@
   border-radius: 4px;
   padding: 1px 6px;
   line-height: 1.4;
+}
+
+.mmm-row__pill--updated {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
 }
 
 .mmm-row__toggle {
@@ -391,15 +396,15 @@
 }
 
 .mmm__btn--ghost {
-  background: transparent;
-  color: var(--muted);
-  border-color: transparent;
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .mmm__btn--ghost:not(:disabled):hover {
     background: var(--surface2);
-    color: var(--text);
+    border-color: color-mix(in srgb, var(--text) 20%, var(--border));
   }
 }
 
