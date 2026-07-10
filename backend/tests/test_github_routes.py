@@ -604,6 +604,35 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
   return None
 
 
+def test_safe_repo_path_accepts_durable_contribution_roots():
+  from app.routes.github import _safe_repo_path
+
+  data_dir = Path(get_settings().data_dir)
+
+  assert _safe_repo_path(str(data_dir / "apps" / "notes")) == (
+    data_dir / "apps" / "notes"
+  ).resolve()
+  assert _safe_repo_path(str(data_dir / "platform")) == (
+    data_dir / "platform"
+  ).resolve()
+  assert _safe_repo_path(str(data_dir / "platform" / ".worktrees" / "fix")) == (
+    data_dir / "platform" / ".worktrees" / "fix"
+  ).resolve()
+  assert _safe_repo_path(str(data_dir / "contributions" / "rec" / "repo")) == (
+    data_dir / "contributions" / "rec" / "repo"
+  ).resolve()
+
+
+def test_safe_repo_path_rejects_non_durable_locations(tmp_path):
+  from app.routes.github import ContributionSubmitError, _safe_repo_path
+
+  with pytest.raises(ContributionSubmitError) as exc:
+    _safe_repo_path(str(tmp_path / "repo"))
+
+  assert "durable contribution folders" in exc.value.message
+  assert "nothing was sent to GitHub" in exc.value.message
+
+
 def _commit_metadata(
   sha,
   *,
