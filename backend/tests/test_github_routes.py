@@ -633,6 +633,54 @@ def test_safe_repo_path_rejects_non_durable_locations(tmp_path):
   assert "nothing was sent to GitHub" in exc.value.message
 
 
+def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _ensure_owner_fork_remote
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  git_calls = []
+  gh_calls = []
+  fork_ready = False
+
+  def fake_git(repo_path, *args, check=True):
+    nonlocal fork_ready
+    git_calls.append(args)
+    if args == ("remote", "get-url", "fork"):
+      if fork_ready:
+        return _cp("https://github.com/octocat/app-demo-1.git\n")
+      return _cp(returncode=1)
+    if args == ("remote", "get-url", "origin"):
+      return _cp("https://github.com/someone-else/app-demo.git\n")
+    if args == (
+      "remote", "set-url", "origin",
+      "https://github.com/mobius-os/app-demo.git",
+    ):
+      return _cp("")
+    return _cp("")
+
+  def fake_gh(repo_path, *args, check=True):
+    nonlocal fork_ready
+    gh_calls.append(args)
+    if args == ("repo", "fork", "--remote", "--remote-name", "fork"):
+      fork_ready = True
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  fork_slug = _ensure_owner_fork_remote(repo, "mobius-os/app-demo", "octocat")
+
+  assert fork_slug == "octocat/app-demo-1"
+  assert (
+    "remote", "set-url", "origin",
+    "https://github.com/mobius-os/app-demo.git",
+  ) in git_calls
+  assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
+  assert all("mobius-os/app-demo" not in call for call in gh_calls)
+
+
 def _commit_metadata(
   sha,
   *,
@@ -718,9 +766,11 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
       )
     if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
       return _commit_metadata(head)
+    if args == ("remote", "get-url", "origin"):
+      return _cp("https://github.com/mobius-os/app-demo.git\n")
     if args == ("remote", "get-url", "fork"):
       if fork_ready:
-        return _cp("https://github.com/octocat/app-demo.git\n")
+        return _cp("https://github.com/octocat/app-demo-1.git\n")
       return _cp(returncode=1)
     return _cp("")
 
@@ -751,12 +801,11 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   assert body["number"] == 42
   assert body["record"]["status"] == "open"
   assert body["record"]["url"] == body["url"]
-  assert (
-    "repo", "fork", "mobius-os/app-demo",
-    "--remote", "--remote-name", "fork",
-  ) in gh_calls
+  assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
+  assert not any(call[:2] == ("remote", "set-url") for call in git_calls)
   create_call = next(call for call in gh_calls if call[:2] == ("pr", "create"))
   assert "--draft" not in create_call
+  assert "octocat:fix/demo-polish" in create_call
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
   assert ("checkout", "-q", "develop") in git_calls
 
@@ -766,6 +815,7 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   )
   assert stored["status"] == "open"
   assert stored["number"] == 42
+  assert stored["head_repository"] == "octocat/app-demo-1"
 
 
 def test_submit_contribution_normalizes_fallback_author_before_push(
@@ -966,9 +1016,11 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
       )
     if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
       return _commit_metadata(head)
+    if args == ("remote", "get-url", "origin"):
+      return _cp("https://github.com/mobius-os/app-demo.git\n")
     if args == ("remote", "get-url", "fork"):
       if fork_fixed:
-        return _cp("git@github.com:octocat/app-demo.git\n")
+        return _cp("git@github.com:octocat/app-demo-1.git\n")
       return _cp("https://github.com/someone-else/app-demo.git\n")
     if args == ("remote", "remove", "fork"):
       return _cp("")
@@ -997,10 +1049,8 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   )
   assert r.status_code == 200, r.text
   assert ("remote", "remove", "fork") in git_calls
-  assert (
-    "repo", "fork", "mobius-os/app-demo",
-    "--remote", "--remote-name", "fork",
-  ) in gh_calls
+  assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
+  assert not any(call[:2] == ("remote", "set-url") for call in git_calls)
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
 
 
