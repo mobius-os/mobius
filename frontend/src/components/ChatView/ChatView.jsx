@@ -2126,6 +2126,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // visible in the tray but do not expose an inert fast-forward button.
   const composerBusy = turnActive || pendingQueue.pendingMessages.length > 0
   const canSteer = canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+  const canRequestSteer = turnActive && pendingQueue.pendingMessages.length > 0
 
   useEffect(() => {
     try {
@@ -2592,6 +2593,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           onStop={handleStop}
           onSteer={handleSteer}
           canSteer={canSteer}
+          canRequestSteer={canRequestSteer}
           offline={!online}
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
