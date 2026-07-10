@@ -617,7 +617,7 @@ def _commit_metadata(
   )
 
 
-def test_submit_contribution_creates_draft_pr_from_prepared_record(
+def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat")
@@ -720,13 +720,14 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
   body = r.json()
   assert body["url"] == "https://github.com/mobius-os/app-demo/pull/42"
   assert body["number"] == 42
-  assert body["record"]["status"] == "draft"
+  assert body["record"]["status"] == "open"
   assert body["record"]["url"] == body["url"]
   assert (
     "repo", "fork", "mobius-os/app-demo",
     "--remote", "--remote-name", "fork",
   ) in gh_calls
-  assert any(call[:2] == ("pr", "create") for call in gh_calls)
+  create_call = next(call for call in gh_calls if call[:2] == ("pr", "create"))
+  assert "--draft" not in create_call
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
   assert ("checkout", "-q", "develop") in git_calls
 
@@ -734,7 +735,7 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
     (Path(get_settings().data_dir) / "apps" / str(app_id) /
      "contributions" / f"{record_id}.json").read_text()
   )
-  assert stored["status"] == "draft"
+  assert stored["status"] == "open"
   assert stored["number"] == 42
 
 
