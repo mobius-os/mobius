@@ -107,27 +107,20 @@ function SaveState({ saving, saved, error }) {
   return null
 }
 
-function effortShortLabel(effort) {
-  const value = effort?.value || ''
-  if (value === 'none') return 'N'
-  if (value === 'minimal') return 'Min'
-  if (value === 'low') return 'L'
-  if (value === 'medium') return 'M'
-  if (value === 'high') return 'H'
-  if (value === 'xhigh') return 'X'
-  if (value === 'max') return 'Max'
-  if (value === 'ultracode') return 'U'
-  return (effort?.label || value || '-').slice(0, 3)
-}
-
 function SettingsEffortStepper({ provider, value, disabled, onChange }) {
   const efforts = PROVIDER_INFO[provider]?.efforts || []
   if (!efforts.length) return null
   const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
+  const selected = efforts[selectedIndex] || efforts[0]
+  const selectedPosition = efforts.length > 1
+    ? `${(selectedIndex / (efforts.length - 1)) * 100}%`
+    : '50%'
+  const labelEdge =
+    selectedIndex === 0 ? 'start' : selectedIndex === efforts.length - 1 ? 'end' : 'middle'
   return (
     <div
       className={`settings-effort-stepper${disabled ? ' settings-effort-stepper--disabled' : ''}`}
-      style={{ '--effort-count': efforts.length }}
+      style={{ '--effort-label-left': selectedPosition }}
     >
       <div
         className="settings-effort-stepper__track"
@@ -169,15 +162,12 @@ function SettingsEffortStepper({ provider, value, disabled, onChange }) {
           />
         ))}
       </div>
-      <div className="settings-effort-stepper__labels" aria-hidden="true">
-        {efforts.map((effort, index) => (
-          <span
-            key={effort.value}
-            className={index === selectedIndex ? 'settings-effort-stepper__label--on' : ''}
-          >
-            {effortShortLabel(effort)}
-          </span>
-        ))}
+      <div className="settings-effort-stepper__label-row" aria-hidden="true">
+        <span
+          className={`settings-effort-stepper__label settings-effort-stepper__label--${labelEdge}`}
+        >
+          {selected.label}
+        </span>
       </div>
     </div>
   )
@@ -189,6 +179,8 @@ function BackgroundProviderRow({
   models,
   dragging,
   dropTarget,
+  dropPosition,
+  dragStyle,
   rowRef,
   onModelChange,
   onEffortChange,
@@ -208,7 +200,9 @@ function BackgroundProviderRow({
         + (enabled ? '' : ' settings-bg-row--off')
         + (dragging ? ' settings-bg-row--dragging' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
+        + (dropTarget && dropPosition ? ` settings-bg-row--drop-${dropPosition}` : '')
       }
+      style={dragStyle}
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
     >
       <span
@@ -360,6 +354,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
+  const backgroundDragRef = useRef(null)
   const backgroundRowRefs = useRef([])
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
@@ -494,24 +489,63 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     })
   }, [backgroundDraft, settingsQuery.data, updateBackgroundDraft])
 
-  const backgroundIndexFromY = useCallback((clientY) => {
-    const rows = backgroundRowRefs.current
-    let fallback = Math.max(0, rows.length - 1)
+  useEffect(() => {
+    backgroundDragRef.current = backgroundDrag
+  }, [backgroundDrag])
+
+  const backgroundIndexFromY = useCallback((clientY, slots) => {
+    const rows = slots || backgroundRowRefs.current
+      .map((node) => {
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return {
+          top: rect.top,
+          height: rect.height,
+          center: rect.top + rect.height / 2,
+        }
+      })
+      .filter(Boolean)
+    if (!rows.length) return 0
     for (let index = 0; index < rows.length; index++) {
-      const node = rows[index]
-      if (!node) continue
-      const rect = node.getBoundingClientRect()
-      fallback = index
-      if (clientY < rect.top + rect.height / 2) return index
+      if (clientY < rows[index].center) return index
     }
-    return fallback
+    return rows.length - 1
   }, [])
 
   const startBackgroundReorder = useCallback((event, index) => {
     if (event.button !== undefined && event.button !== 0) return
+    const node = backgroundRowRefs.current[index]
+    if (!node) return
+    const rowRect = node.getBoundingClientRect()
+    const rows = backgroundRowRefs.current
+    const slots = rows.map((rowNode) => {
+      if (!rowNode) return null
+      const rect = rowNode.getBoundingClientRect()
+      return {
+        top: rect.top,
+        height: rect.height,
+        center: rect.top + rect.height / 2,
+      }
+    }).filter(Boolean)
+    const nextSlot = rows[index + 1]?.getBoundingClientRect()
+    const prevSlot = rows[index - 1]?.getBoundingClientRect()
+    const step = nextSlot
+      ? nextSlot.top - rowRect.top
+      : prevSlot
+        ? rowRect.top - prevSlot.top
+        : rowRect.height + 6
     event.preventDefault()
     event.stopPropagation()
-    const next = { fromIndex: index, toIndex: index }
+    const next = {
+      fromIndex: index,
+      toIndex: index,
+      startY: event.clientY,
+      currentY: event.clientY,
+      grabOffsetY: event.clientY - rowRect.top,
+      rowHeight: rowRect.height,
+      step,
+      slots,
+    }
     setBackgroundDrag(next)
   }, [])
 
@@ -522,17 +556,22 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
     const onPointerMove = (event) => {
       event.preventDefault()
-      const toIndex = backgroundIndexFromY(event.clientY)
       setBackgroundDrag((current) => {
-        if (!current || current.toIndex === toIndex) return current
-        return { ...current, toIndex }
+        if (!current) return current
+        const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
+        const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
+        if (current.toIndex === toIndex && current.currentY === event.clientY) return current
+        return { ...current, currentY: event.clientY, toIndex }
       })
     }
 
     const finish = (event) => {
       event.preventDefault()
-      const toIndex = backgroundIndexFromY(event.clientY)
+      const current = backgroundDragRef.current
       setBackgroundDrag(null)
+      if (!current) return
+      const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
+      const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
       if (toIndex !== fromIndex) moveBackgroundProvider(fromIndex, toIndex)
     }
 
@@ -924,6 +963,35 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   useEffect(() => {
     backgroundRowRefs.current.length = effectiveBackgroundDraft.length
   }, [effectiveBackgroundDraft.length])
+  const backgroundDragStyleForIndex = (index) => {
+    if (!backgroundDrag) return undefined
+    const deltaY = backgroundDrag.currentY - backgroundDrag.startY
+    const step = backgroundDrag.step || 0
+    if (index === backgroundDrag.fromIndex) {
+      return {
+        transform: `translateY(${deltaY}px) scale(1.01)`,
+        zIndex: 2,
+      }
+    }
+    if (
+      backgroundDrag.toIndex > backgroundDrag.fromIndex
+      && index > backgroundDrag.fromIndex
+      && index <= backgroundDrag.toIndex
+    ) {
+      return { transform: `translateY(-${step}px)` }
+    }
+    if (
+      backgroundDrag.toIndex < backgroundDrag.fromIndex
+      && index >= backgroundDrag.toIndex
+      && index < backgroundDrag.fromIndex
+    ) {
+      return { transform: `translateY(${step}px)` }
+    }
+    return undefined
+  }
+  const backgroundDropPosition = backgroundDrag?.toIndex < backgroundDrag?.fromIndex
+    ? 'before'
+    : 'after'
   const showGeminiForm = !configured || geminiExpanded
 
   return (
@@ -1021,6 +1089,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                         backgroundDrag?.toIndex === index
                         && backgroundDrag?.fromIndex !== index
                       }
+                      dropPosition={backgroundDropPosition}
+                      dragStyle={backgroundDragStyleForIndex(index)}
                       rowRef={(node) => {
                         backgroundRowRefs.current[index] = node
                       }}
