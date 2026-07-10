@@ -365,6 +365,7 @@ class BackgroundAgentChoice(BaseModel):
   provider: str | None = None
   model: str | None = Field(default=None, max_length=256)
   effort: str | None = Field(default=None, max_length=32)
+  enabled: bool | None = True
 
   @field_validator("provider")
   @classmethod
@@ -375,8 +376,9 @@ class BackgroundAgentChoice(BaseModel):
 
 
 class BackgroundAgentsUpdate(BaseModel):
-  """System-level primary/fallback choices for scheduled app agents."""
+  """System-level provider choices for scheduled app agents."""
 
+  providers: list[BackgroundAgentChoice] | None = None
   primary: BackgroundAgentChoice | None = None
   fallback: BackgroundAgentChoice | None = None
 

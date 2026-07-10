@@ -30,6 +30,7 @@
   border-radius: 8px;
   padding: 20px;
   margin-bottom: 14px;
+  scroll-margin-top: 24px;
 }
 
 .settings__section--compact {
@@ -269,6 +270,18 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  scroll-margin-top: 24px;
+}
+
+.settings__section:focus,
+.settings-agent-group:focus {
+  outline: none;
+}
+
+.settings-setup-target {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 4px;
+  transition: outline-color 0.18s ease, outline-offset 0.18s ease;
 }
 
 .settings-agent-group__head {
@@ -441,6 +454,291 @@
 }
 
 .settings__btn--nowrap { white-space: nowrap; }
+
+.settings__pill-action {
+  flex-shrink: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border-light);
+  color: var(--text);
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings__pill-action:hover {
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--border-light));
+  }
+}
+
+.settings__pill-action:focus-visible,
+.settings-icon-btn:focus-visible,
+.settings-effort__stop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-integration-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-integration-row__copy {
+  min-width: 0;
+}
+
+.settings-bg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-bg-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 68%, var(--bg));
+}
+
+.settings-bg-row--off {
+  background: color-mix(in srgb, var(--surface) 50%, var(--bg));
+}
+
+.settings-bg-row__drag {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  min-height: 32px;
+  color: var(--muted);
+  cursor: grab;
+}
+
+.settings-bg-row:active .settings-bg-row__drag {
+  cursor: grabbing;
+}
+
+.settings-bg-row__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+  user-select: none;
+}
+
+.settings-bg-row__toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.settings-bg-row__toggle input:disabled {
+  cursor: not-allowed;
+}
+
+.settings-bg-row__main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-bg-row__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-bg-row__icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--surface2) 72%, var(--surface));
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.settings-bg-row__copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-bg-row__title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.settings-bg-row__controls {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.9fr) minmax(190px, 1.1fr);
+  gap: 10px;
+}
+
+.settings-agent-field--effort {
+  justify-content: start;
+}
+
+.settings-effort {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 0 2px;
+}
+
+.settings-effort--disabled {
+  opacity: 0.55;
+}
+
+.settings-effort__track {
+  flex: 1;
+  min-width: 96px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+}
+
+.settings-effort__track::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  top: 50%;
+  height: 2px;
+  background: var(--border);
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+
+.settings-effort__stop {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings-effort__stop:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+}
+
+.settings-effort__stop--filled,
+.settings-effort__stop--on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-effort__stop--on {
+  transform: scale(1.35);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.settings-effort__stop:disabled {
+  cursor: not-allowed;
+}
+
+.settings-effort__label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  min-width: 70px;
+  text-align: right;
+}
+
+.settings-bg-row__order {
+  display: inline-flex;
+  gap: 4px;
+  min-height: 32px;
+}
+
+.settings-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  border: 1px solid var(--border-light);
+  background: var(--surface2);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings-icon-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--border-light));
+  }
+}
+
+.settings-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 620px) {
+  .settings-bg-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .settings-bg-row__drag {
+    display: none;
+  }
+
+  .settings-bg-row__toggle {
+    grid-column: 1;
+  }
+
+  .settings-bg-row__main {
+    grid-column: 2;
+  }
+
+  .settings-bg-row__order {
+    grid-column: 3;
+    flex-direction: column;
+  }
+
+  .settings-bg-row__controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-integration-row {
+    flex-direction: column;
+  }
+}
 
 /* Cancel + confirm pair for a deliberate two-step action (e.g. the manual
    server restart, which interrupts any live chat). */

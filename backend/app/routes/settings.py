@@ -98,7 +98,7 @@ def _format_cli_version(raw: str | None) -> str | None:
   return f"{version} ({date})" if date else version
 
 
-def _background_choice_payload(choice) -> dict | None:
+def _background_choice_payload(choice, *, include_enabled: bool = False) -> dict | None:
   if choice is None or choice.provider is None:
     return None
   out = {"provider": choice.provider, "model": None, "effort": None}
@@ -106,7 +106,84 @@ def _background_choice_payload(choice) -> dict | None:
     out["model"] = choice.model.strip()
   if isinstance(choice.effort, str) and choice.effort.strip():
     out["effort"] = choice.effort.strip()
+  if include_enabled:
+    out["enabled"] = choice.enabled is not False
   return out
+
+
+def _background_agents_payload(update, existing: dict) -> dict:
+  fields_set = getattr(update, "model_fields_set", set())
+  if "providers" in fields_set:
+    rows = []
+    seen = set()
+    for choice in update.providers or []:
+      row = _background_choice_payload(choice, include_enabled=True)
+      if row is None or row["provider"] in seen:
+        continue
+      rows.append(row)
+      seen.add(row["provider"])
+    enabled = [row for row in rows if row.get("enabled") is not False]
+    if not enabled:
+      raise HTTPException(
+        status_code=422,
+        detail="At least one background provider must be selected.",
+      )
+    return {
+      "providers": rows,
+      "primary": {
+        k: v for k, v in enabled[0].items() if k != "enabled"
+      },
+      "fallback": (
+        {k: v for k, v in enabled[1].items() if k != "enabled"}
+        if len(enabled) > 1 else None
+      ),
+    }
+
+  primary = existing.get("primary")
+  if "primary" in fields_set:
+    primary = (
+      _background_choice_payload(update.primary)
+      or existing.get("primary")
+    )
+  fallback = existing.get("fallback")
+  if "fallback" in fields_set:
+    fallback = _background_choice_payload(update.fallback)
+
+  rows_by_provider = {
+    row.get("provider"): dict(row)
+    for row in existing.get("providers") or []
+    if isinstance(row, dict) and row.get("provider")
+  }
+  enabled_provider_ids = []
+  for row in (primary, fallback):
+    if not isinstance(row, dict):
+      continue
+    provider = row.get("provider")
+    if provider in enabled_provider_ids:
+      continue
+    rows_by_provider[provider] = {**row, "enabled": True}
+    enabled_provider_ids.append(provider)
+
+  rows = []
+  seen = set()
+  for provider in enabled_provider_ids:
+    row = rows_by_provider.get(provider)
+    if row is not None:
+      rows.append(row)
+      seen.add(provider)
+  for row in existing.get("providers") or []:
+    if not isinstance(row, dict):
+      continue
+    provider = row.get("provider")
+    if provider in seen:
+      continue
+    rows.append({**row, "enabled": False})
+    seen.add(provider)
+  return {
+    "providers": rows,
+    "primary": primary,
+    "fallback": fallback,
+  }
 
 
 def _agent_settings_payload(agent_settings) -> dict:
@@ -230,20 +307,10 @@ def update_settings(
       existing = providers.background_agent_settings(
         data_dir, provider
       )
-      fields_set = getattr(body.background_agents, "model_fields_set", set())
-      primary = existing.get("primary")
-      if "primary" in fields_set:
-        primary = (
-          _background_choice_payload(body.background_agents.primary)
-          or existing.get("primary")
-        )
-      fallback = existing.get("fallback")
-      if "fallback" in fields_set:
-        fallback = _background_choice_payload(body.background_agents.fallback)
-      current["background_agents"] = {
-        "primary": primary,
-        "fallback": fallback,
-      }
+      current["background_agents"] = _background_agents_payload(
+        body.background_agents,
+        existing,
+      )
     if not providers.write_agent_settings(data_dir, current):
       db.rollback()
       raise HTTPException(

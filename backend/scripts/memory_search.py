@@ -218,6 +218,8 @@ def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
 def _clean_choice(raw: dict | None, fallback_provider: str | None = None) -> dict | None:
   if not isinstance(raw, dict):
     return None
+  if raw.get("enabled") is False:
+    return None
   provider = raw.get("provider")
   if provider not in ("claude", "codex"):
     provider = fallback_provider if fallback_provider in ("claude", "codex") else None
@@ -265,6 +267,16 @@ def _resolve_search_agents() -> list[dict]:
   settings = _load_global_agent_settings()
   raw_background = settings.get("background_agents")
   background = raw_background if isinstance(raw_background, dict) else {}
+  raw_choices = background.get("providers")
+  if isinstance(raw_choices, list):
+    choices: list[dict] = []
+    for raw_choice in raw_choices:
+      choice = _clean_choice(raw_choice)
+      if choice and not any(_same_choice(choice, existing) for existing in choices):
+        choices.append(choice)
+    if choices:
+      return choices
+
   primary = _clean_choice(background.get("primary"), fallback_provider="claude")
   if primary is None:
     primary = _clean_choice(

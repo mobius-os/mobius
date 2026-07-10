@@ -96,6 +96,7 @@ export default function Shell() {
   // toast state: null | { message, variant, duration, action }
   // variant: 'info' | 'error'  (see components/ui/Toast.jsx)
   const [toast, setToast] = useState(null)
+  const [settingsFocusTarget, setSettingsFocusTarget] = useState(null)
   function showToast(message, { variant = 'info', duration = 4000, action } = {}) {
     setToast({ message, variant, duration, action })
   }
@@ -731,7 +732,16 @@ export default function Shell() {
   //     (don't crash the shell on a stale or malicious payload). Mirrors
   //     the drawer's onApp wiring (navTo('canvas', { appId })) so the
   //     existing iframe LRU + back-stack behavior applies.
+  //   moebius:open-settings — switch to Settings and focus a known section.
+  //     Used by setup prompts inside catalog apps; unknown section names
+  //     degrade to the provider area.
   useEffect(() => {
+    const settingsSections = new Set([
+      'ai-providers',
+      'background-agents',
+      'image-generation',
+      'models',
+    ])
     const findAppForOpenTarget = (list, target) => {
       if (target == null) return null
       return (list || []).find(a =>
@@ -817,6 +827,13 @@ export default function Shell() {
           return
         }
         navTo('canvas', { appId: app.id })
+      } else if (e.data?.type === 'moebius:open-settings') {
+        const rawSection = typeof e.data.section === 'string' ? e.data.section : ''
+        const section = settingsSections.has(rawSection) ? rawSection : 'ai-providers'
+        setSettingsFocusTarget({ section, nonce: Date.now() })
+        if (activeViewRef.current !== 'settings') {
+          navTo('settings')
+        }
       }
     }
 
@@ -1236,7 +1253,10 @@ export default function Shell() {
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
-        onSettings={() => navTo('settings')}
+        onSettings={() => {
+          setSettingsFocusTarget(null)
+          navTo('settings')
+        }}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
         settingsWarning={providerAuth.anyDisconnected}
@@ -1355,7 +1375,11 @@ export default function Shell() {
           </div>
         ))}
         {activeView === 'settings' && (
-          <SettingsView onThemeChange={loadTheme} onOpenChat={selectChat} />
+          <SettingsView
+            onThemeChange={loadTheme}
+            onOpenChat={selectChat}
+            focusTarget={settingsFocusTarget}
+          />
         )}
       </main>
       {/* SHELL-provided immersive exit. With the top bar gone the drawer
