@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import Response
 
+from app.database import engine
 from app.net_utils import validate_url_safe
 from app.routes.proxy import _capped_response
 
@@ -149,6 +151,35 @@ def test_proxy_get_allows_same_origin_request(client, owner_token):
   )
   # 400 = URL rejected by SSRF validator, not 403 CSRF → guard passed.
   assert r.status_code == 400
+
+
+def test_proxy_releases_db_connection_before_external_fetch(
+  client, owner_token, monkeypatch
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  baseline_checked_out = engine.pool.checkedout()
+  checked_out = []
+
+  def fake_validate_url_safe(url):
+    assert url == "https://example.com/data"
+    return "https://93.184.216.34/data", "example.com", "example.com"
+
+  async def fake_capped_response(_client, _req):
+    checked_out.append(engine.pool.checkedout())
+    return Response(content=b"ok", media_type="text/plain")
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+
+  r = client.get(
+    "/api/proxy",
+    params={"url": "https://example.com/data"},
+    headers=auth,
+  )
+
+  assert r.status_code == 200
+  assert r.text == "ok"
+  assert checked_out == [baseline_checked_out]
 
 
 def test_proxy_forwards_rate_limit_headers():

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import auth, models
 from app.config import get_settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
@@ -267,6 +267,22 @@ def get_current_owner_or_app(
   both the owner and the app_id.
   """
   return resolve_owner_or_app(token, db)
+
+
+def authorize_current_owner_or_app_detached(
+  token: str = Depends(_oauth2),
+) -> None:
+  """Authenticates owner/app tokens without holding a DB session afterward.
+
+  Use this on long-running routes that only need an auth gate. The ordinary
+  yield-based DB dependency closes after the response, so a slow external fetch
+  can keep a pooled DB connection checked out for the whole network wait.
+  """
+  db = SessionLocal()
+  try:
+    resolve_owner_or_app(token, db)
+  finally:
+    db.close()
 
 
 def get_principal(

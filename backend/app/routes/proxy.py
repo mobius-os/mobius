@@ -12,8 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from app import models
-from app.deps import get_current_owner_or_app, reject_cross_site
+from app.deps import authorize_current_owner_or_app_detached, reject_cross_site
 from app.net_utils import validate_url_safe
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
@@ -76,7 +75,7 @@ async def _capped_response(
 @router.get("", dependencies=[Depends(reject_cross_site)])
 async def proxy_get(
   url: str,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: None = Depends(authorize_current_owner_or_app_detached),
 ):
   """Fetches a URL via GET and returns the raw response body."""
   pinned_url, host_header, sni_host = validate_url_safe(url)
@@ -90,7 +89,7 @@ async def proxy_get(
 @router.post("", dependencies=[Depends(reject_cross_site)])
 async def proxy_post(
   body: ProxyPostRequest,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: None = Depends(authorize_current_owner_or_app_detached),
 ):
   """Posts to a URL and returns the raw response body."""
   if body.body and len(body.body.encode()) > _MAX_BODY:
