@@ -144,10 +144,12 @@ class AppInstallOut(AppOut):
   # conflicting files are named in `conflict_paths` for an agent to
   # resolve. 'conflict' never occurs while the flag is explicitly off.
   mode: Literal["install", "update", "conflict"]
-  # The manifest's declared version that ended up applied. Lets the
-  # store mini-app refresh its installed-versions map without round-
-  # tripping the manifest itself.
+  # The version currently installed after the call. On `conflict`, the served
+  # app is unchanged, so this remains the pre-conflict version.
   version: str
+  # The manifest version that was fetched but could not be applied yet. Only
+  # present on `mode == "conflict"`.
+  upstream_version: str | None = None
   # Steps that were skipped because mini-app permissions could only
   # take them so far — e.g. "icon: 404 in source repo", "schedule:
   # no shell access (manual agent step)". Empty list = full success.

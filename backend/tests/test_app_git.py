@@ -174,6 +174,43 @@ def test_clone_upstream_neutralizes_symlinks_and_layers_managed_ignore(tmp_path)
     assert (r.returncode == 0) is want, name
 
 
+def test_origin_repo_refresh_preserves_custom_info_exclude(tmp_path):
+  """Mobius owns only its marked block in origin-backed repos."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => null\n")
+  (fixture / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+  _commit_all(fixture, "fixture")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+  exclude = source_dir / ".git" / "info" / "exclude"
+  exclude.write_text("# user scratch\nscratch/\n", encoding="utf-8")
+  (source_dir / "last-run.json").write_text("{}\n", encoding="utf-8")
+  app_git._run(source_dir, "add", "-f", "last-run.json")
+  app_git._run(source_dir, "commit", "-q", "-m", "old tracked runtime")
+  (source_dir / "api.js").write_text("export const api = true\n", encoding="utf-8")
+
+  app_git.commit_local(source_dir, "local edit")
+
+  exclude_text = exclude.read_text(encoding="utf-8")
+  assert "# user scratch\nscratch/\n" in exclude_text
+  assert app_git._EXCLUDE_BEGIN in exclude_text
+  assert "last-run.json" in exclude_text
+  assert (source_dir / ".gitignore").read_text(encoding="utf-8") == "node_modules/\n"
+  assert (source_dir / "last-run.json").read_text(encoding="utf-8") == "{}\n"
+  tracked = set(app_git._run(source_dir, "ls-files").stdout.split())
+  assert "api.js" in tracked
+  assert "last-run.json" not in tracked
+
+
 def test_has_origin_distinguishes_clone_from_synthetic_repo(tmp_path):
   """Cloned apps have origin; record_upstream synthetic apps do not."""
   fixture = tmp_path / "fixture"
@@ -1213,6 +1250,120 @@ def test_gitignore_tracks_sibling_source_modules_not_build_output(tmp_path):
   assert "node_modules/dep.js" not in tracked
   assert "index.jsx.bak" not in tracked
   assert not any(t.startswith("12/") for t in tracked)
+
+
+def test_commit_local_upgrades_managed_gitignore_and_untracks_runtime_files(tmp_path):
+  """Old synthetic app repos had stale managed .gitignore files.
+
+  The next commit must repair those rules before staging: sibling source files
+  like api.js should become tracked again, while runtime workspaces already
+  captured by old repos are removed from the index without deleting them.
+  """
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  (repo / ".gitignore").write_text(
+    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
+    encoding="utf-8",
+  )
+  _write(repo, "export default function App() { return null }\n")
+  app_git._run(repo, "add", ".gitignore", "index.jsx")
+  app_git._run(repo, "commit", "-q", "-m", "old synthetic app")
+
+  (repo / "api.js").write_text("export const api = true\n", encoding="utf-8")
+  (repo / "inputs").mkdir()
+  (repo / "inputs" / "activity.jsonl").write_text("runtime\n", encoding="utf-8")
+  (repo / "last-run.json").write_text("{}\n", encoding="utf-8")
+  (repo / "init-cron.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  app_git._run(repo, "add", "inputs/activity.jsonl", "last-run.json", "init-cron.sh")
+
+  app_git.commit_local(repo, "agent edit")
+
+  tracked = set(app_git._run(repo, "ls-files").stdout.split())
+  assert "api.js" in tracked
+  assert "inputs/activity.jsonl" not in tracked
+  assert "last-run.json" not in tracked
+  assert "init-cron.sh" not in tracked
+  assert (repo / "inputs" / "activity.jsonl").exists()
+  assert (repo / "last-run.json").exists()
+  assert (repo / "init-cron.sh").exists()
+  gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
+  assert "*.js" not in gitignore
+  assert "inputs/" in gitignore
+  assert "last-run.json" in gitignore
+
+
+def test_record_upstream_upgrades_stale_managed_gitignore(tmp_path):
+  """The pristine upstream branch must also stop carrying old ignore rules."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  (repo / ".gitignore").write_text(
+    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
+    encoding="utf-8",
+  )
+  _write(repo, "export default function App() { return null }\n")
+  app_git._run(repo, "add", ".gitignore", "index.jsx")
+  app_git._run(repo, "commit", "-q", "-m", "old synthetic app")
+  app_git._run(repo, "branch", "-f", app_git.UPSTREAM_BRANCH, app_git.LOCAL_BRANCH)
+
+  app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"export default function App() { return null }\n",
+      "api.js": b"export const api = true\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+
+  upstream_gitignore = app_git._run(
+    repo, "cat-file", "-p", f"{app_git.UPSTREAM_BRANCH}:.gitignore",
+  ).stdout
+  assert "*.js" not in upstream_gitignore
+  assert "inputs/" in upstream_gitignore
+  assert "last-run.json" in upstream_gitignore
+  tracked = set(app_git._run(
+    repo, "ls-tree", "-r", "--name-only", app_git.UPSTREAM_BRANCH,
+  ).stdout.split())
+  assert "api.js" in tracked
+
+
+def test_align_local_to_upstream_preserves_tracked_runtime_files(tmp_path):
+  """Legacy repos may reach install with runtime files already tracked."""
+  repo = tmp_path / "app"
+  app_git.record_upstream(
+    repo,
+    {"index.jsx": b"export default function App() { return <div>v1</div> }\n"},
+    "https://x/mobius.json",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  (repo / ".gitignore").write_text(
+    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
+    encoding="utf-8",
+  )
+  (repo / "inputs").mkdir()
+  (repo / "inputs" / "activity.jsonl").write_text("keep\n", encoding="utf-8")
+  (repo / "last-run.json").write_text("{}\n", encoding="utf-8")
+  app_git._run(repo, "add", ".gitignore", "inputs/activity.jsonl", "last-run.json")
+  app_git._run(repo, "commit", "-q", "-m", "old tracked runtime")
+
+  app_git.record_upstream(
+    repo,
+    {"index.jsx": b"export default function App() { return <div>v2</div> }\n"},
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+
+  assert (repo / "index.jsx").read_text(encoding="utf-8").endswith("v2</div> }\n")
+  assert (repo / "inputs" / "activity.jsonl").read_text(encoding="utf-8") == "keep\n"
+  assert (repo / "last-run.json").read_text(encoding="utf-8") == "{}\n"
+  tracked = set(app_git._run(repo, "ls-files").stdout.split())
+  assert "inputs/activity.jsonl" not in tracked
+  assert "last-run.json" not in tracked
+  gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
+  assert "*.js" not in gitignore
+  assert "inputs/" in gitignore
 
 
 def test_init_cron_is_never_tracked_so_a_reset_cannot_resurrect_it(tmp_path):

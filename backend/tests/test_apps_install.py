@@ -2520,6 +2520,8 @@ def test_flag_on_conflicting_update_materializes_real_merge_conflict(
   assert r2.status_code == 201, r2.text
   payload = r2.json()
   assert payload["mode"] == "conflict"
+  assert payload["version"] == "1.0.0"
+  assert payload["upstream_version"] == "2.0.0"
   assert "index.jsx" in payload["conflict_paths"]
 
   # A REAL merge conflict is materialized in the working tree for the agent.
@@ -3266,10 +3268,19 @@ def test_legacy_platform_migration_ignores_runtime_sidecar_repo(
     "0.9.0",
   )
   app_git.align_local_to_upstream(runtime_dir)
+  (runtime_dir / ".gitignore").write_text(
+    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
+    encoding="utf-8",
+  )
   (runtime_dir / "index.jsx").unlink()
   (runtime_dir / "inputs").mkdir()
   (runtime_dir / "inputs" / "activity.jsonl").write_text("keep\n")
-  app_git.commit_local(runtime_dir, "runtime sidecar state")
+  (runtime_dir / "last-run.json").write_text("{}\n")
+  app_git._run(runtime_dir, "add", "-A", ".")
+  app_git._run(runtime_dir, "commit", "-q", "-m", "runtime sidecar state")
+  assert "inputs/activity.jsonl" in app_git._run(
+    runtime_dir, "ls-files",
+  ).stdout.split()
 
   app = models.App(
     name="Reflection",
@@ -3300,6 +3311,14 @@ def test_legacy_platform_migration_ignores_runtime_sidecar_repo(
   assert payload["source_dir"] == str(runtime_dir)
   assert (runtime_dir / "index.jsx").read_text() == new_jsx
   assert (runtime_dir / "inputs" / "activity.jsonl").read_text() == "keep\n"
+  assert (runtime_dir / "last-run.json").read_text() == "{}\n"
+  tracked = set(app_git._run(runtime_dir, "ls-files").stdout.split())
+  assert "inputs/activity.jsonl" not in tracked
+  assert "last-run.json" not in tracked
+  assert "init-cron.sh" not in tracked
+  gitignore = (runtime_dir / ".gitignore").read_text(encoding="utf-8")
+  assert "*.js" not in gitignore
+  assert "inputs/" in gitignore
 
   db.refresh(app)
   assert app.version == "2.0.0"

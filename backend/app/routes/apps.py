@@ -621,6 +621,7 @@ async def install_app(
   # resolver chat itself. We deliberately do NOT auto-spawn a resolver here —
   # doing so preempted the owner's choice and raced a duplicate chat against the
   # store's own.
+  upstream_version = str(manifest.get("version", "")).strip() or None
   return schemas.AppInstallOut(
     id=app.id,
     name=app.name,
@@ -644,7 +645,8 @@ async def install_app(
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,
-    version=manifest.get("version", "unknown"),
+    version=app.version or "unknown",
+    upstream_version=upstream_version if mode == "conflict" else None,
     warnings=warnings,
     conflict_paths=conflict_paths,
     divergence=divergence,
