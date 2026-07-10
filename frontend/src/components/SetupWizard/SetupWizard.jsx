@@ -15,7 +15,6 @@ const SETUP_STEPS = [
   { id: 'provider', label: 'AI' },
   { id: 'gemini', label: 'Images' },
 ]
-const SYSTEM_SETUP_READY_KEY = 'mobius:system-setup-ready:v1'
 const PROVIDERS = [
   { id: 'codex', label: 'OpenAI Codex' },
   { id: 'claude', label: 'Claude Code' },
@@ -28,16 +27,6 @@ const FALLBACK_MODELS = {
 function defaultEffort(provider) {
   const efforts = PROVIDER_INFO[provider]?.efforts || []
   return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
-}
-
-function markSystemSetupReady() {
-  if (typeof window === 'undefined' || !window.localStorage) return
-  try {
-    window.localStorage.setItem(
-      SYSTEM_SETUP_READY_KEY,
-      JSON.stringify({ completedAt: new Date().toISOString() }),
-    )
-  } catch {}
 }
 
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
@@ -372,7 +361,6 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
         try { detail = (await res.json()).detail || '' } catch {}
         throw new Error(detail || 'Could not save agent defaults.')
       }
-      markSystemSetupReady()
       settingsQueries.owner.invalidate(queryClient)
       setAgentSaved(true)
       setTimeout(() => setAgentSaved(false), 1600)
