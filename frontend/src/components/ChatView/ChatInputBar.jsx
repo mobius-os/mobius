@@ -59,12 +59,9 @@
  * ║      synthesis. Don't remove either handler.                     ║
  * ║                                                                  ║
  * ║   7. ENTER / SHORTCUT SEND                                       ║
- * ║      `_isTouchPrimary` is detected once via                      ║
- * ║      `matchMedia('(hover: none) and (pointer: coarse)')` and     ║
- * ║      gates plain Enter. Touch devices: Enter inserts a           ║
- * ║      newline. Desktop: Enter sends or steers. Cmd/Ctrl+Enter     ║
- * ║      is an explicit hardware-keyboard shortcut for the same      ║
- * ║      send/steer action. Shift+Enter always inserts a newline.    ║
+ * ║      Enter sends or steers in the web composer. Shift+Enter      ║
+ * ║      inserts a newline. Cmd/Ctrl+Enter remains accepted for      ║
+ * ║      users who already rely on that send/steer shortcut.         ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -72,15 +69,6 @@
 import { useRef, useLayoutEffect } from 'react'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
-
-
-// Detect touch-primary once (same heuristic ChatView uses).
-const _touchMql = typeof matchMedia === 'function'
-  ? matchMedia('(hover: none) and (pointer: coarse)')
-  : null
-let _isTouchPrimary = _touchMql?.matches ?? false
-_touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
-
 
 /** The primary action button — FastForward / Send / Stop / Mic —
  *  auto-resolved from the bar's input/sending/listening/uploading state.
@@ -387,7 +375,6 @@ export default function ChatInputBar({
       hasInput,
       canSteer,
       canRequestSteer,
-      isTouchPrimary: _isTouchPrimary,
     })
     if (!action) return
     e.preventDefault()

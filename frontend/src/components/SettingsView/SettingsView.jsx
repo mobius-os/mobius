@@ -907,7 +907,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
   }
 
-  async function resolvePlatformConflict() {
+  async function startPlatformConflictResolver() {
     if (platformPhase !== 'idle' || !onOpenChat) return
     setPlatformError('')
 
@@ -916,7 +916,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       return
     }
 
-    setPlatformPhase('resolving')
+    setPlatformPhase('starting-resolver')
     try {
       const res = await api.platform.conflictResolverChat()
       if (!res.ok) {
@@ -1045,7 +1045,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
     platformPhase === 'applying' ||
-    platformPhase === 'resolving' ||
+    platformPhase === 'starting-resolver' ||
     updatePhase === 'checking'
   const checkUpdatesLabel =
     updatePhase === 'checking'
@@ -1353,7 +1353,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
               >
                 {platformConflict
-                  ? 'Update conflict'
+                  ? 'Update paused on conflict'
                   : platformRolledBack
                     ? 'Update needs repair'
                     : platformRestart
@@ -1376,14 +1376,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 <button
                   className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                   type="button"
-                  onClick={resolvePlatformConflict}
-                  disabled={platformPhase === 'resolving'}
+                  onClick={startPlatformConflictResolver}
+                  disabled={platformPhase === 'starting-resolver'}
                 >
-                  {platformPhase === 'resolving'
-                    ? 'Opening…'
+                  {platformPhase === 'starting-resolver'
+                    ? 'Starting…'
                     : platform?.conflict_chat_id
-                      ? 'Open chat'
-                      : 'Resolve in chat'}
+                      ? 'Open resolver chat'
+                      : 'Start resolver chat'}
                 </button>
               ) : null
             ) : platformRestart ? (

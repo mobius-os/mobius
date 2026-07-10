@@ -90,14 +90,14 @@ test('plain Enter steers queued text on desktop when the composer is empty', () 
   )
 })
 
-test('plain Enter remains a newline on touch-primary devices', () => {
+test('plain Enter submits composer text on web touch-primary devices', () => {
   assert.equal(
     resolveComposerEnterAction(enter(), {
       hasInput: true,
       canRequestSteer: true,
       isTouchPrimary: true,
     }),
-    null,
+    'submit',
   )
 })
 
@@ -106,7 +106,7 @@ test('Shift+Enter always stays a newline chord', () => {
     resolveComposerEnterAction(enter({ shiftKey: true, metaKey: true }), {
       hasInput: true,
       canSteer: true,
-      isTouchPrimary: false,
+      isTouchPrimary: true,
     }),
     null,
   )
