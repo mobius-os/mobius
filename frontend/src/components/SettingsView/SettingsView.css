@@ -380,6 +380,10 @@
   transition: none;
 }
 
+.settings-bg-row--settling {
+  transition: transform 0.15s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .settings-bg-row--drop-target {
   border-color: color-mix(in srgb, var(--accent) 66%, var(--border));
   background: color-mix(in srgb, var(--accent) 8%, var(--surface));
