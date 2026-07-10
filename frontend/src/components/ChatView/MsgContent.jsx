@@ -44,6 +44,11 @@ function MsgContentInner({
   msg,
   chatId,
   onQuestionAnswer,
+  // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
+  // a stable send callback that re-sends a short "continue". Only the tail
+  // interrupt note (a resumable error block on the last message) shows the
+  // button. Compared in the memo below, so pass a stable reference.
+  onResume,
   // isLastMsg + liveQuestionId replace the old inline isQuestionAnswerable
   // arrow so memo can do a stable shallow comparison instead of seeing a
   // fresh function reference every render.
@@ -168,12 +173,28 @@ function MsgContentInner({
         // typically include "Upgrade to Pro (https://...)" and
         // "purchase more credits at https://..." that the user
         // wants to tap straight from the chat.
+        // A turn paused by a drain-gated restart (or interrupted by a crash)
+        // persists a `resumable` note (backend reconcile marks it). Only the
+        // TAIL note on the last message is resumable — mirrors how a question
+        // card is only answerable at the tail — so scrolled-back history and
+        // live provider errors never show a Resume button. One tap re-sends a
+        // short "continue" as a normal visible send.
+        const resumable = !!(block.resumable && isLastMsg && onResume)
         return (
           <div key={i} className="chat__text--error" role="alert">
             <span className="chat__error-label">Error</span>
             <StandardMarkdown
               text={block.message || 'The agent ran into an issue.'}
             />
+            {resumable && (
+              <button
+                type="button"
+                className="chat__resume"
+                onClick={() => onResume('continue')}
+              >
+                Resume
+              </button>
+            )}
           </div>
         )
       }
@@ -250,6 +271,7 @@ export default memo(MsgContentInner, (prev, next) => {
     prev.msg === next.msg
     && prev.chatId === next.chatId
     && prev.onQuestionAnswer === next.onQuestionAnswer
+    && prev.onResume === next.onResume
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
     // suppressedQuestionKeys is a Set (new reference each render) or null.

@@ -41,6 +41,7 @@ from app.broadcast import (
 )
 from app.chat_writer import (
   AppendSteeredUserMessage,
+  Barrier,
   ClearPending,
   ClearRunStatus,
   Finalize,
@@ -567,9 +568,42 @@ STALLED_TURN_MESSAGE = (
   "The turn stalled (no activity for 10 minutes) and was stopped — your "
   "message is preserved; send again to resume."
 )
-# Placeholder for the future drain-gated restart path. The watchdog checks this
-# process-wide flag so it will not race a restart drain once that work flips it.
+# Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
+# set, new POST /messages sends append to the durable queue instead of starting
+# turns, and both liveness sweeps stand down so they can't race the drain's own
+# interrupt (the stalled-live watchdog exempts it via `_stall_exemption`; the
+# wedged-marker sweep returns early). `_restart_draining_chats` records the chats
+# whose live turn the drain interrupted, so each turn's terminal transition
+# (run_chat's finally) LEAVES its run marker set (DRAINED_FOR_RESTART) instead of
+# clearing it — preserving it for boot reconcile + one-tap Resume.
 draining = False
+_restart_draining_chats: set[str] = set()
+
+# Budget for the drain to interrupt live turns + flush their notes. The restart
+# utility arms its SIGKILL backstop at DRAIN_TIMEOUT + grace; the existing short
+# hard-kill stays as the crash floor once SIGTERM is sent.
+DRAIN_TIMEOUT = 25.0
+
+# The terminal note a drained turn persists (design §2.2). Boot reconcile keys
+# on this exact text to mark the block resumable rather than stacking a second
+# interrupted note on top of it.
+PAUSED_FOR_RESTART_MESSAGE = "Paused for a platform update."
+
+
+def begin_drain() -> None:
+  """Set the process-wide drain gate. Idempotent."""
+  global draining
+  draining = True
+
+
+def is_draining() -> bool:
+  """Whether the worker is draining for a restart (read live, not imported).
+
+  Callers in other modules must read the flag through this function rather than
+  `from app.chat import draining` — the latter binds the value at import time
+  (False) and never sees `begin_drain()` flip the module global.
+  """
+  return draining
 
 
 def _read_skill_text() -> str:
@@ -991,37 +1025,64 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       # transcript renderer reads — see MsgContent.jsx's error branch
       # and events.process_event's "error" handler, which both key on
       # block["message"]. Matching that shape makes the synthetic note
-      # render identically to a live provider error.
-      err_block = {"type": "error", "message": note}
+      # render identically to a live provider error. `resumable` marks the
+      # note for the one-tap Resume affordance (MsgContent renders a Resume
+      # button on a resumable interrupt note); every interrupted turn — crash
+      # or drain-gated restart — is resumable via a fresh "continue" send.
+      err_block = {"type": "error", "message": note, "resumable": True}
       if msgs and msgs[-1].get("role") == "assistant":
         blocks = list(msgs[-1].get("blocks") or [])
         finalize_blocks(blocks)
-        # Preserve a tail unanswered question. It is a durable human handoff,
-        # not a disposable in-memory callback: the route can record the later
-        # answer and restart a hidden continuation even though the original SDK
-        # future died with the process. Put the interruption note BEFORE the
-        # trailing question block(s) so the card remains the tail prompt and
-        # therefore remains answerable after reload. If there is no trailing
-        # open question, append the note as the turn's terminal outcome.
-        trailing_open_start = len(blocks)
-        while trailing_open_start > 0:
-          block = blocks[trailing_open_start - 1]
-          if block.get("type") != "question" or block.get("answers"):
-            break
-          trailing_open_start -= 1
-        if trailing_open_start < len(blocks):
-          wait_note = dict(err_block)
-          wait_note["message"] = (
-            note
-            + " Your answer is still needed; I will continue once you submit it."
-          )
-          blocks = (
-            blocks[:trailing_open_start]
-            + [wait_note]
-            + blocks[trailing_open_start:]
-          )
+        # A drain-gated restart (design §2.2) already wrote its own terminal
+        # "paused for a platform update" note through the sink before the
+        # process went down. Don't stack a second interrupted note on top of
+        # it — just mark THAT note resumable so the Resume affordance renders,
+        # and persist the finalized tool-block state. Only the drain's exact
+        # note text qualifies, so a live provider error never gets a spurious
+        # Resume button here.
+        paused_idx = next(
+          (len(blocks) - 1 - i
+           for i, b in enumerate(reversed(blocks))
+           if b.get("type") == "error"
+           and b.get("message") == PAUSED_FOR_RESTART_MESSAGE),
+          None,
+        )
+        if paused_idx is not None:
+          # The drain wrote the terminal note; just make it resumable and fall
+          # through to the shared write-back below (no second note appended).
+          # Replace with a FRESH dict rather than mutating the ORM-loaded block
+          # in place: `Chat.messages` is a plain JSON column with no mutation
+          # tracking, so an in-place edit to a loaded block is not flushed —
+          # only a genuinely new value in the reassigned list persists (every
+          # other reconcile branch appends a fresh block for the same reason).
+          blocks[paused_idx] = {**blocks[paused_idx], "resumable": True}
         else:
-          blocks.append(err_block)
+          # Preserve a tail unanswered question. It is a durable human handoff,
+          # not a disposable in-memory callback: the route can record the later
+          # answer and restart a hidden continuation even though the original SDK
+          # future died with the process. Put the interruption note BEFORE the
+          # trailing question block(s) so the card remains the tail prompt and
+          # therefore remains answerable after reload. If there is no trailing
+          # open question, append the note as the turn's terminal outcome.
+          trailing_open_start = len(blocks)
+          while trailing_open_start > 0:
+            block = blocks[trailing_open_start - 1]
+            if block.get("type") != "question" or block.get("answers"):
+              break
+            trailing_open_start -= 1
+          if trailing_open_start < len(blocks):
+            wait_note = dict(err_block)
+            wait_note["message"] = (
+              note
+              + " Your answer is still needed; I will continue once you submit it."
+            )
+            blocks = (
+              blocks[:trailing_open_start]
+              + [wait_note]
+              + blocks[trailing_open_start:]
+            )
+          else:
+            blocks.append(err_block)
         # build_assistant_message omits ts; carry the turn's existing
         # stable ts (the frontend bridge + React keys rely on it — a
         # ts-less message is dropped by useBridgePartial). Mirrors the
@@ -1151,6 +1212,38 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   return reconciled
 
 
+def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
+  """Push-notify once that paused turn(s) can be resumed (design §2.2 step 4).
+
+  Called from the lifespan right after `reconcile_interrupted_chats`, so a
+  drain-gated restart (or any crash that left turns mid-flight) surfaces a
+  single "tap to resume" prompt on the next boot. Fires ONE notification, not
+  one per chat — a multi-turn restart must not storm the owner; a single
+  reconciled chat deep-links straight to it.
+
+  Best-effort: a missing owner or a push-delivery failure never blocks boot
+  (the resumable note is already durable in the transcript regardless). Returns
+  the notification id, or None when there was nothing to notify.
+  """
+  if not reconciled:
+    return None
+  owner = db.query(models.Owner).first()
+  if owner is None:
+    return None
+  from app import push
+
+  single = reconciled[0] if len(reconciled) == 1 else None
+  return push.notify_owner(
+    db,
+    owner.id,
+    title="Turn paused for an update",
+    body="Your turn was paused for an update — tap to resume.",
+    source_type="system",
+    source_id=single,
+    target=(f"/shell/?chat={single}" if single else None),
+  )
+
+
 # Runtime liveness floor: a turn must be at least this old before the periodic
 # sweep treats a still-"running" marker as a candidate. Reaping is gated on the
 # broadcast + registry state below; the floor is only belt-and-suspenders
@@ -1196,6 +1289,11 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
   """
   log = _get_logger()
   swept: list[str] = []
+  if draining:
+    # A drain-gated restart deliberately LEAVES run markers set for boot
+    # reconcile (DRAINED_FOR_RESTART). Standing down here keeps this sweep from
+    # clearing them, and from racing the drain's own interrupt.
+    return swept
   try:
     cutoff = datetime.now(UTC).replace(tzinfo=None) - _WEDGED_RUN_MIN_AGE
     stale = (
@@ -1335,6 +1433,94 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
       len(interrupted), ", ".join(interrupted),
     )
   return interrupted
+
+
+async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
+  """Interrupt every live turn for a graceful restart, preserving queues.
+
+  This is the DrainForRestart path from design §2.2 — distinct from
+  `stop_chat_for`, which intentionally COLLAPSES the pending queue. A restart
+  must NEVER touch `pending_messages`: every queued send is preserved and
+  self-heals on the owner's next action after the reboot.
+
+  Sets the `draining` gate first (idempotent) so a send arriving mid-drain
+  queues rather than starting, and both liveness sweeps stand down. Then, for
+  each live turn:
+
+    - publishes a one-line "paused for a platform update" note through the
+      turn's sink, so the note + the accumulated partial blocks are persisted
+      (the sink's immediate PersistError makes the transcript durable even if
+      the runner is SIGKILLed before its own finalize runs);
+    - mirrors the stalled-live watchdog's clean-interrupt handoff — bump the
+      generation so the turn-end drain sees a stale generation and does NOT
+      promote the queue — BUT records the chat in `_restart_draining_chats` so
+      the turn's finally LEAVES the durable run marker set (DRAINED_FOR_RESTART)
+      instead of clearing it. The preserved marker is what boot reconcile
+      finalizes and what the one-tap Resume affordance keys on.
+
+  Best-effort and bounded: a handle that won't interrupt in time keeps today's
+  contract — the restart utility's SIGKILL backstop kills the worker and boot
+  reconcile finalizes the marker (still with the resume affordance). Returns the
+  chat ids it interrupted cleanly.
+  """
+  begin_drain()
+  log = _get_logger()
+  drained: list[str] = []
+  note = {"type": "error", "message": PAUSED_FOR_RESTART_MESSAGE}
+  for chat_id in sorted(registry.all_alive_chat_ids()):
+    handles = registry.get_handles(chat_id)
+    if not handles:
+      # A chat reserved 'starting' but with no live handle yet — nothing to
+      # interrupt. Its send is durable and reconciles on the next boot.
+      continue
+    sink = get_active_sink(chat_id)
+    if sink is not None:
+      sink.publish(dict(note))
+    else:
+      bc = get_broadcast(chat_id)
+      if bc is not None:
+        # Transport-only fallback (handle live but no sink). The note isn't
+        # persisted here; boot reconcile still adds the resumable interrupted
+        # note for this marker.
+        bc.publish(dict(note))
+    stopped_gen = current_run_generation(chat_id)
+    if not isinstance(stopped_gen, int):
+      # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
+      continue
+    # Mark BEFORE bumping so the turn's finally (which may run the instant the
+    # interrupt lands) observes the drain and leaves the marker set.
+    _restart_draining_chats.add(chat_id)
+    bump_run_generation(chat_id)
+    _clear_after_terminal_generation[chat_id] = stopped_gen
+    all_interrupted = True
+    for handle in handles:
+      try:
+        stopped = await handle.stop(timeout=2.0)
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        log.warning(
+          "drain-for-restart interrupt failed chat_id=%s kind=%s",
+          chat_id, getattr(handle, "kind", "?"), exc_info=True,
+        )
+        stopped = False
+      if not stopped:
+        all_interrupted = False
+    if all_interrupted:
+      drained.append(chat_id)
+  # Flush the writer so every paused note (the sink's fire-and-forget
+  # PersistError above) is durably committed before the worker restarts.
+  try:
+    ack = get_writer().submit(Barrier())
+    await _await_ack(ack, timeout=min(timeout, 10.0))
+  except Exception:
+    log.warning("drain-for-restart writer flush failed", exc_info=True)
+  if drained:
+    log.info(
+      "drain-for-restart interrupted %d turn(s): %s",
+      len(drained), ", ".join(drained),
+    )
+  return drained
 
 
 async def _clear_pending(chat_id: str) -> list[int]:
@@ -2633,31 +2819,44 @@ async def run_chat(
     # claim leaves it alive, and then we leave the marker for that new owner
     # (STALE_NO_ACTION-equivalent — no clear).
     if chat_id and clear_stopped_run and run_gen is not None:
-      try:
-        async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
-          async with chat_queue.get_lock(chat_id):
-            still_immediate_successor = (
-              current_run_generation(chat_id) == run_gen + 1
-            )
-            newer_owner_claimed = registry.is_alive(chat_id)
-            if still_immediate_successor and not newer_owner_claimed:
-              # Identity-keyed on this dying run's token: if a fresh turn
-              # raced in and set a new marker (the is_alive window above),
-              # the actor no-ops this clear instead of wiping it.
-              await _clear_run_status_strict(chat_id, run_token or "")
-              disposition = (
-                chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
+      if chat_id in _restart_draining_chats:
+        # Drain-for-restart handoff: this turn was interrupted for a graceful
+        # restart. LEAVE the durable run marker set (and the pending queue
+        # intact) so boot reconcile finalizes it and the one-tap Resume works —
+        # the deliberate difference from a Stop handoff, which CLEARS the marker
+        # in the else-branch below. `_complete_turn` already finalized the
+        # partials + the paused note above (stop-handoff-successor path); no
+        # queue was promoted (the bumped generation made the turn-end drain read
+        # STALE_NO_ACTION). Discard the per-chat flag so a hypothetical surviving
+        # process can't mis-tag a later turn.
+        _restart_draining_chats.discard(chat_id)
+        disposition = chat_queue.TerminalDisposition.DRAINED_FOR_RESTART
+      else:
+        try:
+          async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+            async with chat_queue.get_lock(chat_id):
+              still_immediate_successor = (
+                current_run_generation(chat_id) == run_gen + 1
               )
-            else:
-              # A newer generation / a fresh StartTurn now owns the chat —
-              # leave its marker untouched.
-              disposition = chat_queue.TerminalDisposition.STALE_NO_ACTION
-      except (Exception, asyncio.TimeoutError):
-        _get_logger().warning(
-          "Stop-handoff ClearRunStatus did not persist chat_id=%s "
-          "(reconciliation will repair)", chat_id, exc_info=True,
-        )
-        disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+              newer_owner_claimed = registry.is_alive(chat_id)
+              if still_immediate_successor and not newer_owner_claimed:
+                # Identity-keyed on this dying run's token: if a fresh turn
+                # raced in and set a new marker (the is_alive window above),
+                # the actor no-ops this clear instead of wiping it.
+                await _clear_run_status_strict(chat_id, run_token or "")
+                disposition = (
+                  chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
+                )
+              else:
+                # A newer generation / a fresh StartTurn now owns the chat —
+                # leave its marker untouched.
+                disposition = chat_queue.TerminalDisposition.STALE_NO_ACTION
+        except (Exception, asyncio.TimeoutError):
+          _get_logger().warning(
+            "Stop-handoff ClearRunStatus did not persist chat_id=%s "
+            "(reconciliation will repair)", chat_id, exc_info=True,
+          )
+          disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
     # One observable record of how this turn's terminal transition resolved
     # — DEBUG so chat.log stays one-line-per-turn at INFO, but available when
     # MOEBIUS_CHAT_DEBUG is on to trace a marker-left/cleared decision.

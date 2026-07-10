@@ -100,12 +100,16 @@ async def lifespan(app):
   # other lifespan steps: a failure here must not brick the recovery
   # surface. Runs single-threaded pre-serving, so no queue-lock
   # contention — see reconcile_interrupted_chats for the argument.
+  # Chats reconciled at boot (incl. any turn paused by a drain-gated restart),
+  # carried to the post-`init_vapid` notify below — VAPID must be initialized
+  # before a push can be delivered.
+  _reconciled_chats: list[str] = []
   try:
     from app.chat import reconcile_interrupted_chats
     from app.database import SessionLocal as _ReconcileSession
     _rc_db = _ReconcileSession()
     try:
-      reconcile_interrupted_chats(_rc_db)
+      _reconciled_chats = reconcile_interrupted_chats(_rc_db) or []
     finally:
       _rc_db.close()
   except Exception as exc:
@@ -160,6 +164,22 @@ async def lifespan(app):
     init_vapid()
   except Exception as exc:
     _log.error("init_vapid failed: %s", exc, exc_info=True)
+  # Boot resume notify (design §2.2 step 4). Runs AFTER init_vapid so the push
+  # can actually deliver: one "tap to resume" notification for any turn left
+  # paused by a drain-gated restart (or crash) that boot reconcile finalized.
+  # Best-effort — the resumable note is already durable in the transcript, so a
+  # notify failure never blocks boot.
+  try:
+    if _reconciled_chats:
+      from app.chat import notify_after_reconcile
+      from app.database import SessionLocal as _NotifySession
+      _nt_db = _NotifySession()
+      try:
+        notify_after_reconcile(_nt_db, _reconciled_chats)
+      finally:
+        _nt_db.close()
+  except Exception as exc:
+    _log.error("paused-turn resume notify failed: %s", exc, exc_info=True)
   # First-boot auto-install of the curated app-store mini-app so a
   # fresh container shows the store in the drawer immediately. The
   # bootstrap module is idempotent (no-op if slug='store' already

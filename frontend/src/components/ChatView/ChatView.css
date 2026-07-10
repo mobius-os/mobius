@@ -430,6 +430,24 @@
   text-transform: uppercase;
   color: var(--danger);
 }
+/* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
+   Rendered only on the tail resumable interrupt note; re-sends "continue". */
+.chat__resume {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chat__resume:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-light));
+}
 
 /* ── Typing indicator ─────────────────────────────── */
 
