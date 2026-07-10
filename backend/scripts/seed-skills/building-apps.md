@@ -6,14 +6,15 @@ Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and `token`
 
 ---
 
-## Which path: a local app or a shareable catalog app
+## Which path: local-first or installable
 
-Two shapes of app ship through different entry points — pick before you start:
+Two shapes of app ship through different entry points, but both should be
+repo-ready from day one:
 
-- **A local app for this instance** (the common case, and what you build when the partner asks for "an app"): write `index.jsx` under `/data/apps/<slug>/` and run `register_app.py` once (see *Lifecycle* below). There is **no `mobius.json`** on this path — the manifest is only for catalog apps, and `register_app.py` never reads one.
-- **A shareable catalog app** (packaged so other instances can install it from a store or repo): author a `mobius.json` manifest plus `index.jsx`, then install with `POST /api/apps/install` and the manifest URL (see *Packaging / wrapping* above).
+- **A local-first app for this instance** (the common case, and what you build when the partner asks for "an app"): write source under `/data/apps/<slug>/` and run `register_app.py` once (see *Lifecycle* below). `register_app.py` reads `index.jsx`, not `mobius.json`, so local registration stays fast. Still keep a valid `mobius.json`, README, icon, and source `.gitignore` beside the source unless the app is truly throwaway; that makes "turn this into a repo/share it" a packaging step instead of archaeology.
+- **An installable app from a repo** (when the partner already wants to share/install it elsewhere): author `mobius.json` plus `index.jsx` in a root-level repo package, push it, then install with `POST /api/apps/install` and the raw manifest URL (see *Packaging / wrapping* above). The installer creates the `/data/apps/<slug>` repo and tracks upstream/local history.
 
-When unsure, you want the local path.
+When unsure, build local-first, but leave the app repo-ready.
 
 ---
 
@@ -131,12 +132,17 @@ export default function MyApp({ appId, token }) {
 1. Create a source folder at `/data/apps/<name>/`.
 2. Put the app entrypoint at `/data/apps/<name>/index.jsx`.
 3. Split larger apps into sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules inside that same folder and import them relatively from `index.jsx`.
-4. Keep durable static build assets under `static/`; keep runtime data in storage, not in the source folder.
+4. Add repo-ready package files when the app might live beyond this instance: `mobius.json`, `README.md`, `icon.png`, and `.gitignore`.
+5. Keep durable static build assets under `static/`; keep runtime data in storage, not in the source folder.
 
 Example:
 
 ```text
 /data/apps/mood-board/
+  mobius.json
+  README.md
+  icon.png
+  .gitignore
   index.jsx
   Board.jsx
   cards.js
@@ -155,6 +161,15 @@ python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>
 **For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or a source-like sibling module changes under `/data/apps/<slug>/` (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). Re-running the script creates a DUPLICATE every time the name differs by a character (slug-vs-title is the common slip). If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
+
+### Share Later Checklist
+
+When the partner asks to share a local-first app as a repo, make the existing source tree installable instead of rebuilding it elsewhere:
+
+1. Keep `mobius.json` at the repo root with stable `id`, `name`, `version`, `description`, `entry`, `icon`, complete `source_files`, any `static_assets`, permissions, and offline flags.
+2. Keep runtime data, tokens, logs, generated reports, and local caches out of the repo; source plus declared static assets only.
+3. Initialize git in the app source if needed: `git init -b main`, commit, push to GitHub, and keep the package at repo root on `main` or a tag. Root packages give the installer a real `origin` clone and clean PR-friendly diffs; repo subdirs and branch names with slashes fall back to synthetic upstream tracking.
+4. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
 
 **Don't hand-bump a version constant in app source.** If an app carries its released version inline (e.g. `const APP_VERSION = '1.2.0'`), leave that line alone — the catalog/installer sets it per release, not your edits. Bumping it locally guarantees a merge conflict on the *next* update: your bump and the new release's bump land on the same line, so every update stops to ask the owner to reconcile a version number. Git already tracks your edits — you never need a version bump to record them. (This is the single most common avoidable update conflict.)
 

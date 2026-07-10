@@ -1050,11 +1050,15 @@ fi
 # failures that look like generic CLI crashes.
 umask 022
 
-# Install the core apps (memory-graph + reflection) + the nightly reflection
-# cron once the server is healthy. Backgrounded so it doesn't block boot;
-# polls /api/health itself; idempotent; non-fatal. Runs as mobius so the
-# registered app files are mobius-owned.
-su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash /app/scripts/install-core-apps.sh" &
+# Install the core apps + the nightly reflection cron once the server is
+# healthy. Prefer the platform script when the platform clone is active; the
+# baked script is only the recovery-floor fallback. Backgrounded so it doesn't
+# block boot; polls /api/health itself; idempotent; non-fatal.
+_core_installer=/app/scripts/install-core-apps.sh
+if [ "$_use_platform" -eq 1 ] && [ -f /data/platform/backend/scripts/install-core-apps.sh ]; then
+  _core_installer=/data/platform/backend/scripts/install-core-apps.sh
+fi
+su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash '$_core_installer'" &
 
 # O1: platform-restart sentinel poller (the recoveryd handshake).
 #

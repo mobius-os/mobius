@@ -5,6 +5,11 @@ from pathlib import Path
 from app.config import get_settings
 
 
+def _service_auth():
+  token = (Path(get_settings().data_dir) / "service-token.txt").read_text()
+  return {"Authorization": f"Bearer {token}"}
+
+
 def test_create_app_rejects_cross_site_request(client, auth):
   cross = client.post(
     "/api/apps/",
@@ -34,7 +39,7 @@ def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
   from datetime import datetime, timedelta, UTC
   from app import models
   source_dir = Path(get_settings().data_dir) / "apps" / "My App (draft)"
-  source_dir.mkdir(parents=True)
+  source_dir.mkdir(parents=True, exist_ok=True)
   (source_dir / "index.jsx").write_text(
     "export default function App() { return <div/> }",
     encoding="utf-8",
@@ -63,6 +68,72 @@ def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
   assert not source_dir.exists()
 
 
+def test_delete_then_purge_preserves_platform_core_source(client, auth, db):
+  """A core app row may point at /data/platform/core-apps; TTL purge must not
+  remove platform-owned source."""
+  from datetime import datetime, timedelta, UTC
+  from app import core_app_suppress, models
+  data_dir = Path(get_settings().data_dir)
+  core_app_suppress.clear_suppressed(data_dir, "memory")
+  source_dir = data_dir / "platform" / "core-apps" / "memory"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "index.jsx").write_text(
+    "export default function App() { return <div/> }",
+    encoding="utf-8",
+  )
+
+  r = client.post("/api/apps/", json={
+    "name": "Memory",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=_service_auth())
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+  client.get("/api/apps/", headers=auth)
+
+  assert source_dir.exists()
+  assert (source_dir / "index.jsx").exists()
+
+
+def test_delete_platform_core_app_disables_runtime_cron_replay(
+  client, auth,
+):
+  """Reflection's source lives in platform, but its boot replay shim is runtime
+  state under /data/apps/reflection and must still tombstone on delete."""
+  data_dir = Path(get_settings().data_dir)
+  source_dir = data_dir / "platform" / "core-apps" / "reflection"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "index.jsx").write_text(
+    "export default function App() { return <div/> }",
+    encoding="utf-8",
+  )
+  runtime_dir = data_dir / "apps" / "reflection"
+  runtime_dir.mkdir(parents=True)
+  replay = runtime_dir / "init-cron.sh"
+  replay.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+  r = client.post("/api/apps/", json={
+    "name": "Reflection",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=_service_auth())
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+
+  assert not replay.exists()
+  assert (runtime_dir / "init-cron.sh.tombstoned").exists()
+  assert source_dir.exists()
+
+
 def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
   calls = []
 
@@ -71,7 +142,7 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
 
   monkeypatch.setattr("app.install._register_cron", fake_register)
   source_dir = Path(get_settings().data_dir) / "apps" / "news"
-  source_dir.mkdir(parents=True)
+  source_dir.mkdir(parents=True, exist_ok=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
 
   r = client.post("/api/apps/", json={
@@ -102,6 +173,90 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
     headers=app_auth,
   )
   assert r.status_code == 403
+
+
+def test_platform_core_schedule_update_uses_runtime_replay_dir(
+  client, auth, monkeypatch,
+):
+  calls = []
+
+  def fake_register(slug, schedule_expr, job_path, app_id, replay_dir):
+    calls.append((slug, schedule_expr, job_path, app_id, replay_dir))
+
+  def fail_scaffold(*_args, **_kwargs):
+    raise AssertionError("platform core schedules must not use scaffold")
+
+  monkeypatch.setattr(
+    "app.routes.apps._register_absolute_cron_replay", fake_register,
+  )
+  monkeypatch.setattr("app.install._register_cron", fail_scaffold)
+
+  data_dir = Path(get_settings().data_dir)
+  source_dir = data_dir / "platform" / "core-apps" / "reflection"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+  r = client.post("/api/apps/", json={
+    "name": "Reflection",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=_service_auth())
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  r = client.post(
+    f"/api/apps/{app_id}/schedule",
+    json={"cron": "15 7 * * *", "job": "fetch.sh"},
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  assert calls == [(
+    "reflection",
+    "15 7 * * *",
+    source_dir / "fetch.sh",
+    app_id,
+    data_dir / "apps" / "reflection",
+  )]
+
+
+def test_service_core_source_patch_clears_store_identity(client, auth, db):
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  old_source = data_dir / "apps" / "memory"
+  old_source.mkdir(parents=True, exist_ok=True)
+  source_dir = data_dir / "platform" / "core-apps" / "memory"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "index.jsx").write_text(
+    "export default function App() { return <div/> }",
+    encoding="utf-8",
+  )
+  app = models.App(
+    name="Memory",
+    description="store-managed core",
+    jsx_source="export default function App() { return <div/> }",
+    source_dir=str(old_source),
+    slug="memory",
+    manifest_url="https://raw.githubusercontent.com/mobius-os/app-memory/main/mobius.json",
+    version="1.2.3",
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+  app_id = app.id
+
+  r = client.patch(
+    f"/api/apps/{app_id}",
+    json={"source_dir": str(source_dir)},
+    headers=_service_auth(),
+  )
+  assert r.status_code == 200, r.text
+  db.refresh(app)
+  assert app.source_dir == str(source_dir)
+  assert app.manifest_url is None
+  assert app.version is None
 
 
 def test_app_schedules_are_readable_by_app_tokens(client, auth):
@@ -163,7 +318,41 @@ def test_app_schedules_prefer_init_cron_over_manifest(client, auth):
     "description": "test",
     "jsx_source": "export default function App() { return <div/> }",
     "source_dir": str(source_dir),
-  }, headers=auth)
+  }, headers=_service_auth())
+  assert r.status_code == 201, r.text
+
+  r = client.get("/api/apps/schedules", headers=auth)
+  assert r.status_code == 200, r.text
+  assert [(job["cron"], job["job"]) for job in r.json()] == [
+    ("0 6 * * *", "fetch.sh")
+  ]
+
+
+def test_platform_core_schedules_prefer_runtime_replay_over_manifest(
+  client, auth, monkeypatch,
+):
+  monkeypatch.setattr("app.routes.apps._read_live_crontab", lambda: "")
+  data_dir = Path(get_settings().data_dir)
+  source_dir = data_dir / "platform" / "core-apps" / "reflection"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "mobius.json").write_text(
+    '{"schedule":{"default":"0 10 * * *","job":"fetch.sh"}}',
+    encoding="utf-8",
+  )
+  runtime_dir = data_dir / "apps" / "reflection"
+  runtime_dir.mkdir(parents=True, exist_ok=True)
+  (runtime_dir / "init-cron.sh").write_text(
+    f'ENTRY="0 6 * * * {source_dir}/fetch.sh 56"\n',
+    encoding="utf-8",
+  )
+
+  r = client.post("/api/apps/", json={
+    "name": "Reflection",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=_service_auth())
   assert r.status_code == 201, r.text
 
   r = client.get("/api/apps/schedules", headers=auth)

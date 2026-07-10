@@ -31,6 +31,11 @@ def test_core_apps_present():
     assert _slugs(), "no built-in apps found under core-apps/"
 
 
+def test_core_slug_registry_matches_core_app_dirs():
+    from app.source_dirs import CORE_APP_SLUGS
+    assert {p.name for p in _slugs()} == set(CORE_APP_SLUGS)
+
+
 @pytest.mark.parametrize("app", _slugs(), ids=lambda p: p.name)
 def test_core_app_manifest_is_installable(app: Path):
     manifest = app / "mobius.json"

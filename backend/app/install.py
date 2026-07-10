@@ -45,7 +45,7 @@ from PIL import Image as _PILImage
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, models
+from app import activity, app_git, fs_locks, models, source_dirs
 from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
 # Keep the underscore alias: install._http_get calls _validate_url_safe, and
@@ -668,7 +668,7 @@ PRE_RENAME_PLATFORM_SLUGS = ("mind", "dreaming")
 # in place, inheriting the row's id + storage) by a `previous_id` declaration in
 # an untrusted manifest. See the guard in the predecessor-adoption block.
 _RESERVED_PLATFORM_SLUGS = frozenset({
-  "memory", "reflection", "store", *PRE_RENAME_PLATFORM_SLUGS,
+  *source_dirs.CORE_APP_SLUGS, "store", *PRE_RENAME_PLATFORM_SLUGS,
 })
 
 
@@ -1748,7 +1748,34 @@ async def install_from_manifest(
         )
         if existing:
           adopt_kind = "legacy"
+  settings_data_dir = get_settings().data_dir
+  if existing is None and manifest_id in source_dirs.CORE_APP_SLUGS:
+    platform_row = (
+      db.query(models.App)
+      .filter(models.App.slug == manifest_id)
+      .first()
+    )
+    if platform_row and source_dirs.is_platform_core_source_dir(
+      platform_row.source_dir, settings_data_dir,
+    ):
+      raise HTTPException(
+        409,
+        (
+          "Built-in platform apps are restored and updated by platform "
+          "updates, not by the manifest installer."
+        ),
+      )
   mode = "update" if existing else "install"
+  if existing and source_dirs.is_platform_core_source_dir(
+    existing.source_dir, settings_data_dir,
+  ):
+    raise HTTPException(
+      409,
+      (
+        "Built-in platform apps are updated by platform updates, not by the "
+        "manifest installer."
+      ),
+    )
 
   warnings: list[str] = []
   conflict_paths: list[str] = []

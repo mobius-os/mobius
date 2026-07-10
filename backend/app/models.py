@@ -269,11 +269,11 @@ class App(Base):
   # are small (~10-50KB at 512x512) and per-app — avoids needing a
   # separate file store + cleanup path.
   icon_png = Column(LargeBinary, nullable=True, default=None)
-  # Absolute directory under /data/apps/ holding this app's source
-  # files (typically `/data/apps/<dirname>`).  Stored explicitly so
-  # the file watcher can map a modified `index.jsx` back to its DB
-  # row without slugify-guessing the name.  Null for apps created
-  # before this column existed.
+  # Absolute directory holding this app's source files. Ordinary user/store apps
+  # use `/data/apps/<dirname>`; built-in core apps may use
+  # `/data/platform/core-apps/<slug>`. Stored explicitly so the file watcher can
+  # map a modified `index.jsx` back to its DB row without slugify-guessing the
+  # name. Null for apps created before this column existed.
   source_dir = Column(String(512), nullable=True, default=None)
   # Chat that last created or modified this app.  Null for apps created
   # before this column was added.  Used to route app errors back to the

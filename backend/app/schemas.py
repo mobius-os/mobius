@@ -39,9 +39,10 @@ class AppCreate(BaseModel):
   # needed for copying apps between instances.
   jsx_source: str
   chat_id: str | None = None
-  # Absolute directory under /data/apps/ where this app's index.jsx
-  # lives. Passed by register_app.py so the file watcher can resolve
-  # file events to apps without slugify-guessing the name.
+  # Absolute directory where this app's index.jsx lives. Ordinary user/store
+  # apps use /data/apps/<slug>; built-in core apps may use
+  # /data/platform/core-apps/<slug>. Passed by register_app.py so the file
+  # watcher can resolve file events to apps without slugify-guessing the name.
   source_dir: str | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"

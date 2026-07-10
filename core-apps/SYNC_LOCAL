@@ -7,6 +7,7 @@
 # mobius-owned copy). This is the escape hatch for the fetch.sh recurrence: it is
 # the nightly-cron WRAPPER, not app UI, so editing it must not require an upstream
 # app-reflection round-trip + re-pin (it drifted three times that way). The
-# runtime copy is installed from THIS repo by install-core-apps.sh, so mobius is
-# authoritative for it; the catalog repo's copy is legacy.
+# runtime wrapper is served from THIS platform repo by install-core-apps.sh, so
+# mobius is authoritative for it; the catalog repo's copy is legacy. Do not add
+# app UI/source files here to bypass the catalog pin.
 reflection fetch.sh

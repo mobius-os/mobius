@@ -1,12 +1,15 @@
 # Core apps are SNAPSHOTS of their catalog repos. The catalog repo is the
-# single source of truth; core-apps/<slug>/ is a committed copy of it, baked
-# into the image and installed at boot by install-core-apps.sh.
+# single source of truth; core-apps/<slug>/ is a committed copy of it. At
+# runtime the active source is /data/platform/core-apps/<slug> (the platform
+# clone), not a copied /data/apps/<slug> tree.
 #
 # To update a built-in app: edit it in its catalog repo (mobius-os/app-<slug>),
 # bump the commit below, run `scripts/sync-core-apps.sh`, and commit the diff.
 # CI (`scripts/check-core-apps-sync.sh`) fails the build if core-apps/<slug>
 # drifts from <repo>@<commit> — so the two trees can never silently diverge
 # again (which is how core-apps/reflection once shipped without its manifest).
+# Do not use core-apps/SYNC_LOCAL for app UI/source drift; it is only for
+# platform wrapper files that must live beside a core app at runtime.
 #
 # NATIVE apps: a core app may instead be authored directly in this repo with no
 # catalog repo (none at present). Such apps are simply NOT listed below —

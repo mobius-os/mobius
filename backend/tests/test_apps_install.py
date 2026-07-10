@@ -774,6 +774,36 @@ def test_previous_id_cannot_adopt_reserved_slug_from_untrusted_source(
   assert core.deleted_at is None
 
 
+def test_previous_id_cannot_adopt_beat_machine_from_untrusted_source(
+    client, db, auth, bypass_url_validation):
+  """New native core apps must be reserved too, including Beat Machine."""
+  from app import models
+  core_id = _seed_null_manifest_core(db, "beat-machine")
+
+  base = "https://x.test/evil-beat/"
+  manifest = {**MANIFEST_NEWS, "id": "evil-beat", "name": "Evil Beat",
+              "previous_id": "beat-machine"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"p"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch("app.install.httpx.AsyncClient",
+             side_effect=_fake_async_client(responses)):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert r.status_code == 201, r.text
+  assert r.json()["mode"] == "install"
+  assert r.json()["id"] != core_id
+  core = db.query(models.App).filter(models.App.id == core_id).first()
+  assert core.slug == "beat-machine"
+  assert core.manifest_url is None
+
+
 def test_previous_id_may_adopt_reserved_slug_from_trusted_catalog(
     client, db, auth, bypass_url_validation):
   """The trusted mobius-os catalog CAN still supersede a baked core app via
@@ -3050,6 +3080,73 @@ def test_legacy_slug_adoption_of_no_manifest_url_row(
 
   listed = client.get("/api/apps/", headers=auth).json()
   assert len(listed) == 1                  # no duplicate
+
+
+def test_previous_id_cannot_adopt_platform_core_source_row(
+  client, auth, db, bypass_url_validation,
+):
+  """Manifest installs must not adopt a built-in row whose source is owned by
+  /data/platform/core-apps; built-ins update through platform deploys."""
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  src_dir = data_dir / "platform" / "core-apps" / "memory"
+  src_dir.mkdir(parents=True, exist_ok=True)
+  (src_dir / "index.jsx").write_text(JSX)
+  app = models.App(
+    name="Memory",
+    description="platform core",
+    jsx_source=JSX,
+    source_dir=str(src_dir),
+    slug="memory",
+    manifest_url=None,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+
+  base = "https://raw.githubusercontent.com/mobius-os/app-memory/main/"
+  r = _install_simple(
+    client, auth, base,
+    _simple_manifest("memory-next", previous_id="memory"),
+  )
+
+  assert r.status_code == 409, r.text
+  db.refresh(app)
+  assert app.source_dir == str(src_dir)
+  assert (src_dir / "index.jsx").exists()
+
+
+def test_manifest_install_cannot_duplicate_platform_core_slug(
+  client, auth, db, bypass_url_validation,
+):
+  """A platform-managed core row has no manifest_url, but a store install of
+  the same manifest id must not create memory-2."""
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  src_dir = data_dir / "platform" / "core-apps" / "memory"
+  src_dir.mkdir(parents=True, exist_ok=True)
+  (src_dir / "index.jsx").write_text(JSX)
+  app = models.App(
+    name="Memory",
+    description="platform core",
+    jsx_source=JSX,
+    source_dir=str(src_dir),
+    slug="memory",
+    manifest_url=None,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+
+  base = "https://raw.githubusercontent.com/mobius-os/app-memory/main/"
+  r = _install_simple(client, auth, base, _simple_manifest("memory"))
+
+  assert r.status_code == 409, r.text
+  assert len(db.query(models.App).all()) == 1
 
 
 def test_previous_id_matching_nothing_is_a_fresh_install(

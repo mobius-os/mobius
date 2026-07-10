@@ -40,13 +40,14 @@ assumes the core app holds its canonical slug; if a user app already occupies
 
 from pathlib import Path
 
+from .source_dirs import CORE_APP_SLUGS
 from .timeutil import now_naive_utc
 
 # The core apps an owner may durably remove. ``store`` is excluded (the
 # app-manager). ``reflection`` is included with the accepted trade-off that
 # uninstalling it stops its nightly run (brief + graph consolidation) — see the
 # module docstring.
-SUPPRESSIBLE_CORE_SLUGS = frozenset({"memory", "reflection", "beat-machine"})
+SUPPRESSIBLE_CORE_SLUGS = CORE_APP_SLUGS
 
 # Relative to data_dir. Mirrored by the `[ -f ]` check at the top of
 # sync_core_app in install-core-apps.sh — keep the two paths in lockstep.

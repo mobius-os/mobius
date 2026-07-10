@@ -2,11 +2,13 @@
 
 import asyncio
 import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -20,7 +22,10 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, icon_cache, models, schemas, theme
+from app import (
+  activity, app_git, fs_locks, icon_cache, models, schemas,
+  source_dirs, theme,
+)
 from app.storage_io import delete_content_type_tree, read_capped_body
 from app.broadcast import get_system_broadcast
 from app.routes.notify import publish_app_built_to_owning_chat
@@ -75,36 +80,31 @@ def _derive_source_dir(data_dir: str, name: str) -> str:
 def _validate_source_dir(source_dir: str, data_dir: str) -> str:
   """Validates a caller-supplied source_dir, returning its resolved path.
 
-  A source dir must be an IMMEDIATE child of /data/apps with a non-numeric
-  basename — the exact shape every production source dir already has (built
-  apps and installs both land at /data/apps/<slug>; register_app passes the
-  dirname of a jsx file the agent wrote under /data/apps/<slug>). Enforcing it
-  here is free defense-in-depth on the create/patch/register_app inputs, which
-  arrive verbatim:
-    - `resolved.parent != apps_root` rejects traversal and arbitrary
-      locations (`/data/apps/../etc` resolves to /etc, whose parent isn't
-      apps_root) so source_dir can't point the run-job script runner or the
-      uninstall rmtree at a path outside the app source tree, and
-    - a purely-numeric basename would collide with the per-app STORAGE tree
-      /data/apps/<id> (storage is keyed by the integer app id): a write to
-      that app's storage could clobber this app's source, and uninstall's
-      rmtree could delete the other app's storage tree.
+  Ordinary app source must be an IMMEDIATE non-numeric child of /data/apps.
+  Platform-owned core app source may be the matching immediate child of
+  /data/platform/core-apps for one of the built-in core slugs. Everything else
+  is rejected so source_dir cannot point job runners, compilers, or uninstall
+  cleanup at arbitrary paths.
+
   Raises 400 on either violation. `.resolve()` collapses symlinks and `..`
   before the containment check.
   """
-  apps_root = (Path(data_dir) / "apps").resolve()
   # resolve() can raise on a pathological path (e.g. a symlink loop). Surface
   # that as a clean 400, not a 500 (Codex review round-7 #3 robustness caveat).
   try:
     resolved = Path(source_dir).resolve()
   except (OSError, RuntimeError):
     raise HTTPException(status_code=400, detail="Invalid source_dir.")
-  if resolved.parent != apps_root:
-    raise HTTPException(
-      status_code=400,
-      detail="source_dir must be an immediate child of /data/apps.",
-    )
-  if resolved.name.isdigit():
+
+  kind = source_dirs.source_dir_kind(resolved, data_dir)
+  if kind == "app":
+    return str(resolved)
+  if kind == "platform_core":
+    return str(resolved)
+
+  apps_root = source_dirs.apps_root(data_dir)
+  core_root = source_dirs.platform_core_root(data_dir)
+  if resolved.parent == apps_root and resolved.name.isdigit():
     raise HTTPException(
       status_code=400,
       detail=(
@@ -112,7 +112,63 @@ def _validate_source_dir(source_dir: str, data_dir: str) -> str:
         "are reserved for the per-app storage path /data/apps/<id>."
       ),
     )
-  return str(resolved)
+  if resolved.parent == core_root:
+    raise HTTPException(
+      status_code=400,
+      detail="platform core source_dir must name an approved core app.",
+    )
+  raise HTTPException(
+    status_code=400,
+    detail=(
+      "source_dir must be an immediate child of /data/apps, or an approved "
+      "core app under /data/platform/core-apps."
+    ),
+  )
+
+
+def _reject_platform_core_slug_mismatch(
+  source_dir: str, data_dir: str, app_slug: str | None,
+) -> None:
+  if not source_dirs.is_platform_core_source_dir(source_dir, data_dir):
+    return
+  if not app_slug or Path(source_dir).resolve().name != app_slug:
+    raise HTTPException(
+      status_code=400,
+      detail="platform core source_dir must match the app slug.",
+    )
+
+
+def _request_bearer_token(request: Request) -> str:
+  auth = request.headers.get("authorization", "")
+  scheme, _, token = auth.partition(" ")
+  if scheme.lower() != "bearer":
+    return ""
+  return token.strip()
+
+
+def _is_service_token_request(request: Request, data_dir: str) -> bool:
+  try:
+    service_token = (Path(data_dir) / "service-token.txt").read_text().strip()
+  except OSError:
+    return False
+  request_token = _request_bearer_token(request)
+  return bool(service_token and request_token) and hmac.compare_digest(
+    service_token, request_token,
+  )
+
+
+def _reject_platform_core_unless_service_token(
+  source_dir: str,
+  data_dir: str,
+  request: Request,
+) -> None:
+  if not source_dirs.is_platform_core_source_dir(source_dir, data_dir):
+    return
+  if not _is_service_token_request(request, data_dir):
+    raise HTTPException(
+      status_code=403,
+      detail="platform core source_dir is reserved for platform registration.",
+    )
 
 
 def _reject_if_source_dir_taken(
@@ -159,10 +215,11 @@ def _safe_to_rmtree_source(
     - a /data/apps/<integer> per-app storage tree, and
     - a directory a SIBLING app row shares — removing it when one app is
       uninstalled would break the other.
-  Production source dirs are always a unique /data/apps/<slug>, so this only
-  ever stops cleanup for pathological legacy rows.
+  Ordinary app source dirs are a unique /data/apps/<slug>. Platform core app
+  source dirs are never removed by app uninstall/purge; they belong to the
+  platform repo.
   """
-  if resolved.parent != apps_root or resolved.name.isdigit():
+  if source_dirs.source_dir_kind(resolved, apps_root.parent) != "app":
     return False
   others = (
     db.query(models.App)
@@ -256,6 +313,99 @@ def _drop_cron_only(resolved: Path) -> None:
   except OSError:
     pass
   _disable_init_cron_replay(resolved)
+
+
+def _core_runtime_dir(app_slug: str | None, settings) -> Path | None:
+  """Runtime sidecar dir for core app boot replay files, when any."""
+  if not source_dirs.is_core_app_slug(app_slug):
+    return None
+  return Path(settings.data_dir) / "apps" / app_slug
+
+
+def _platform_core_runtime_dir_for_app(app: models.App) -> Path | None:
+  settings = get_settings()
+  if not source_dirs.is_platform_core_source_dir(
+    app.source_dir, settings.data_dir,
+  ):
+    return None
+  return _core_runtime_dir(app.slug, settings)
+
+
+def _cron_replay_dirs_for_app(app: models.App, source_dir: Path) -> list[Path]:
+  dirs = [source_dir]
+  runtime_dir = _platform_core_runtime_dir_for_app(app)
+  if runtime_dir is None:
+    return dirs
+  try:
+    if runtime_dir.resolve() == source_dir.resolve():
+      return dirs
+  except (OSError, RuntimeError):
+    pass
+  return [*dirs, runtime_dir]
+
+
+def _read_init_cron_text(replay_dir: Path) -> str:
+  init_path = replay_dir / "init-cron.sh"
+  try:
+    return init_path.read_text() if init_path.is_file() else ""
+  except OSError:
+    return ""
+
+
+def _register_absolute_cron_replay(
+  slug: str,
+  schedule_expr: str,
+  job_path: Path,
+  app_id: int | None,
+  replay_dir: Path,
+) -> None:
+  """Write a durable cron replay script whose command may live elsewhere.
+
+  Ordinary app schedules use init-cron-scaffold.sh, which assumes both the
+  replay file and job script live under /data/apps/<slug>. Platform core apps
+  deliberately split those: source/job scripts live in /data/platform/core-apps
+  while boot replay state lives under /data/apps/<slug>.
+  """
+  entry = f"{schedule_expr} {job_path}"
+  if app_id is not None:
+    entry = f"{entry} {app_id}"
+  replay_dir.mkdir(parents=True, exist_ok=True)
+  init_path = replay_dir / "init-cron.sh"
+  init_path.write_text(
+    f"""#!/bin/sh
+# Restores the cron entry for "{slug}" on container restart.
+ENTRY={shlex.quote(entry)}
+JOB_PATH={shlex.quote(str(job_path))}
+ERRFILE=$(mktemp)
+EXISTING=$(crontab -u mobius -l 2>"$ERRFILE"); RC=$?
+if [ "$RC" -eq 0 ]; then
+  (printf '%s\\n' "$EXISTING" | grep -vF "$JOB_PATH"; echo "$ENTRY") | crontab -u mobius -
+elif grep -qi 'no crontab for' "$ERRFILE"; then
+  echo "$ENTRY" | crontab -u mobius -
+else
+  echo "init-cron({slug}): crontab read error (rc=$RC); leaving crontab unchanged" >&2
+  cat "$ERRFILE" >&2
+fi
+rm -f "$ERRFILE"
+""",
+    encoding="utf-8",
+  )
+  init_path.chmod(0o755)
+  try:
+    result = subprocess.run(
+      ["bash", str(init_path)],
+      capture_output=True,
+      text=True,
+      timeout=30,
+      check=False,
+    )
+  except OSError as exc:
+    raise HTTPException(500, f"Cron registration failed: {exc}") from exc
+  if result.returncode != 0:
+    raise HTTPException(
+      500,
+      f"Cron registration failed: {result.stderr.strip()[:400]}",
+    )
 
 
 def _resolve_app_source_dir(app_source_dir, app_name, settings) -> Path | None:
@@ -439,17 +589,16 @@ def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
   if not app.source_dir:
     return None
   source_dir = Path(app.source_dir)
-  return (
-    _schedule_from_crontab_text(source_dir, live_crontab)
-    or _schedule_from_crontab_text(
-      source_dir,
-      (
-        (source_dir / "init-cron.sh").read_text()
-        if (source_dir / "init-cron.sh").is_file() else ""
-      ),
+  live = _schedule_from_crontab_text(source_dir, live_crontab)
+  if live is not None:
+    return live
+  for replay_dir in _cron_replay_dirs_for_app(app, source_dir):
+    schedule = _schedule_from_crontab_text(
+      source_dir, _read_init_cron_text(replay_dir),
     )
-    or _manifest_schedule(source_dir)
-  )
+    if schedule is not None:
+      return schedule
+  return _manifest_schedule(source_dir)
 
 
 @router.get("/", response_model=list[schemas.AppOut])
@@ -978,6 +1127,7 @@ async def create_conflict_resolver_chat(
 )
 async def create_app(
   body: schemas.AppCreate,
+  request: Request,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
@@ -996,6 +1146,8 @@ async def create_app(
     if body.source_dir
     else str(Path(data_dir) / "apps" / slug)
   )
+  _reject_platform_core_slug_mismatch(source_dir, data_dir, slug)
+  _reject_platform_core_unless_service_token(source_dir, data_dir, request)
   # Hold the per-source-dir lock across the row commit so this app's source_dir
   # becomes visible to a concurrent uninstall's shared-dir dedup check before
   # that uninstall could rmtree the directory, and so
@@ -1050,8 +1202,9 @@ async def create_app(
   # route is never reached by the boot seeder for a suppressed slug (the seeder
   # skips it first), so the only caller here would be an owner/agent building a
   # NEW same-named app post-TTL — and clearing the marker then would let the next
-  # boot cp baked core source over that custom app. Bring-back is recover_app
-  # (within TTL) or install_app (store reinstall); those clear the marker.
+  # boot re-register the platform core app over that custom app. Bring-back is
+  # recover_app (within TTL) or install_app (store reinstall); those clear the
+  # marker.
   return app
 
 
@@ -1074,6 +1227,7 @@ def get_app(
 async def update_app(
   app_id: int,
   body: schemas.AppUpdate,
+  request: Request,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
@@ -1121,7 +1275,17 @@ async def update_app(
     if body.chat_id is not None:
       app.chat_id = body.chat_id
     if new_source_dir is not None:
+      target_slug = app.slug or _slugify_for_source_dir(app.name)
+      _reject_platform_core_slug_mismatch(
+        new_source_dir, data_dir, target_slug,
+      )
+      _reject_platform_core_unless_service_token(
+        new_source_dir, data_dir, request,
+      )
       app.source_dir = new_source_dir
+      if source_dirs.is_platform_core_source_dir(new_source_dir, data_dir):
+        app.manifest_url = None
+        app.version = None
     if body.pinned is not None:
       app.pinned_at = now_naive_utc() if body.pinned else None
     if body.share_with_apps is not None:
@@ -1393,6 +1557,12 @@ async def delete_app(
     if resolved_source is not None:
       async with fs_locks.source_dir_lock(str(resolved_source)):
         await asyncio.to_thread(_drop_cron_only, resolved_source)
+    runtime_dir = _core_runtime_dir(app_slug, settings)
+    if runtime_dir is not None and (
+      resolved_source is None or runtime_dir.resolve() != resolved_source
+    ):
+      async with fs_locks.source_dir_lock(str(runtime_dir)):
+        await asyncio.to_thread(_drop_cron_only, runtime_dir)
 
 
 @router.delete(
@@ -1516,6 +1686,12 @@ async def recover_app(
     if resolved_source is not None:
       async with fs_locks.source_dir_lock(str(resolved_source)):
         await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
+    runtime_dir = _core_runtime_dir(app_slug, settings)
+    if runtime_dir is not None and (
+      resolved_source is None or runtime_dir.resolve() != resolved_source
+    ):
+      async with fs_locks.source_dir_lock(str(runtime_dir)):
+        await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
   # Refetch the drawer (app reappears) and bust any cached iframe for it.
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app_id)}
@@ -1676,7 +1852,13 @@ def update_app_schedule(
   if not job_path.is_file():
     raise HTTPException(status_code=400, detail="Job script not found.")
   slug = app.slug or _slugify_for_source_dir(app.name)
-  _register_cron(slug, body.cron, job_path, app_id)
+  runtime_dir = _platform_core_runtime_dir_for_app(app)
+  if runtime_dir is not None:
+    _register_absolute_cron_replay(
+      slug, body.cron, job_path, app_id, runtime_dir,
+    )
+  else:
+    _register_cron(slug, body.cron, job_path, app_id)
   return {"cron": body.cron, "job": job_name}
 
 

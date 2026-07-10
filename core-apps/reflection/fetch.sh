@@ -16,8 +16,9 @@
 # exports the few env vars its shell needs, runs the runner under a lock
 # + timeout, and records how the night finished.
 #
-# Invoked by cron as: /data/apps/reflection/fetch.sh <app_id>
-# (the app id arrives as $1, per the cron-scaffold convention).
+# Invoked by cron as: <platform-core-source>/reflection/fetch.sh <app_id>
+# (the app id arrives as $1). Runtime inputs still land under
+# /data/apps/reflection/inputs.
 #
 # REFLECTION_DRY=1 skips the real agent run (records a dry outcome) so the
 # plumbing — lock, inputs, env, heartbeat, cron_outcome — can be smoke-
