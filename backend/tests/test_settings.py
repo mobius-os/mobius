@@ -847,27 +847,24 @@ def test_model_prefs_clear(client, auth, db):
   assert owner.model_prefs_json == {"hidden_ids": []}
 
 
-def test_merge_live_with_known_handles_known_plus_new():
-  """Merging a known model + a brand-new live ID preserves
-  KNOWN_MODELS order then appends the live-only entry."""
-  from app.providers import _merge_live_with_known
-  merged = _merge_live_with_known(
-    "claude", ["claude-opus-4-8", "claude-future-model"],
+def test_live_model_entries_use_live_sdk_order_only():
+  """A successful live fetch uses provider SDK/CLI order and does not
+  mix in stale fallback rows."""
+  from app.providers import _live_model_entries
+  merged = _live_model_entries(
+    "claude", ["claude-future-model", "claude-opus-4-8"],
   )
-  # First: the known opus comes first (and reports available).
-  assert merged[0] == {
-    "id": "claude-opus-4-8", "label": "Opus 4.8",
-    "provider": "claude", "available": True,
-  }
-  # The live-only entry lands at the end.
-  assert merged[-1] == {
-    "id": "claude-future-model", "label": "claude-future-model",
-    "provider": "claude", "available": True,
-  }
-  # Stale-known IDs (in KNOWN_MODELS but missing from the live list)
-  # stay listed with available=False.
-  haiku = next(m for m in merged if m["id"] == "claude-haiku-4-5-20251001")
-  assert haiku["available"] is False
+  assert merged == [
+    {
+      "id": "claude-future-model", "label": "claude-future-model",
+      "provider": "claude", "available": True,
+    },
+    {
+      "id": "claude-opus-4-8", "label": "Opus 4.8",
+      "provider": "claude", "available": True,
+    },
+  ]
+  assert "claude-haiku-4-5-20251001" not in [m["id"] for m in merged]
 
 
 def test_resolve_displayed_models_keeps_selected_even_when_hidden():

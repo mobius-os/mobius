@@ -251,6 +251,6 @@ async def test_fetch_claude_models_raises_when_refresh_fails(
   with pytest.raises(httpx.HTTPStatusError):
     await providers._fetch_claude_models(str(tmp_path))
 
-  # The merge/fallback path still yields the current KNOWN_MODELS list.
+  # The fallback path still yields the current KNOWN_MODELS list.
   fallback = providers._fallback_models("claude")
   assert any(e["id"] == "claude-opus-4-8" for e in fallback)

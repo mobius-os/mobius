@@ -414,11 +414,9 @@ class ModelEntry(BaseModel):
   id: str
   label: str
   provider: str
-  # True when the live API confirms the model is currently available.
-  # KNOWN_MODELS entries the live API didn't return get `False`
-  # here (kept for chats that persisted them as aliases). On full
-  # fallback every entry is True since we have no live signal to
-  # contradict it.
+  # True for rows returned by a successful live fetch or by the
+  # fallback registry. Kept in the response shape for compatibility
+  # with older clients that already read this field.
   available: bool = True
 
 

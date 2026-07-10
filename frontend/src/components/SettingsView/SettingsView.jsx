@@ -59,21 +59,6 @@ function providerFromSettings(settings) {
   return isKnownProvider(settings?.provider) ? settings.provider : 'claude'
 }
 
-function isUpdatedModel(model) {
-  return model === 'gpt-5.5'
-}
-
-function isLegacyModel(model) {
-  return model?.available === false && !isUpdatedModel(model.id)
-}
-
-function modelDisplayLabel(model) {
-  const label = model?.label || model?.id || ''
-  if (isUpdatedModel(model?.id)) return `${label} · Updated`
-  if (isLegacyModel(model)) return `${label} · Legacy`
-  return label
-}
-
 function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude') {
   const rows = []
   const seen = new Set()
@@ -246,7 +231,7 @@ function BackgroundProviderRow({
             )}
             {models.map((model) => (
               <option key={model.id} value={model.id}>
-                {modelDisplayLabel(model)}
+                {model.label || model.id}
               </option>
             ))}
           </select>
