@@ -220,7 +220,7 @@
 
 /* Top-align a row whose label spans two lines (label + subtext), so the
    trailing button sits level with the first line rather than centered
-   against the taller text block (e.g. the Shell version row). */
+   against the taller text block. */
 .settings__row--top {
   align-items: flex-start;
 }
@@ -303,27 +303,6 @@
   .settings-agent-group__head {
     flex-direction: column;
   }
-}
-
-/* Möbius update cluster: the status line stacks ABOVE the build identity, so a
-   short status ("Up to date") never shares a flex row with the build string and
-   wraps mid-phrase. A vertical stack reads as one calm unit; the trailing action
-   button (top-aligned via .settings__row--top) sits level with the status line. */
-.settings__update {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-/* The build sha as a quiet, monospaced identity line — tabular glyphs make a
-   hex sha read AS a build id rather than stray text. */
-.settings__build {
-  margin: 0;
-  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
-  font-size: 12px;
-  letter-spacing: 0;
-  color: var(--muted);
 }
 
 .settings__btn--nowrap { white-space: nowrap; }
