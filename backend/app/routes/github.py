@@ -11,10 +11,10 @@ get_owner_or_app_with_github_access docstring. The read surface
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
 document containing a mutation or subscription operation. GitHub writes
-are limited to the Contribute approval endpoint, which consumes a single
-prepared ledger record after the owner presses Approve: it claims that
+are limited to the Contribute submit endpoint, which consumes a single
+prepared ledger record after the owner presses Send: it claims that
 record, rechecks the reviewed branch/diff, pushes to the owner's fork,
-and creates the draft PR. An app-scoped github_access token may submit
+and creates the pull request. An app-scoped github_access token may submit
 only its own prepared record; it cannot act as a general GitHub write proxy.
 
 The token itself never appears in any response or log line (INV1).
@@ -650,7 +650,7 @@ def _mark_submit_success(
   next_record = {
     **record,
     **(record_patch or {}),
-    "status": "draft",
+    "status": "open",
     "url": pr_url,
     "updated_at": now,
     "submitted_at": now,
@@ -835,14 +835,16 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
       body_file = f.name
     try:
       try:
-        pr = _gh(
-          repo,
+        create_args = [
           "pr", "create",
           "-R", upstream_repo,
           "-H", f"{login}:{branch}",
-          "--draft",
           "--title", title,
           "--body-file", body_file,
+        ]
+        pr = _gh(
+          repo,
+          *create_args,
         )
       except ContributionSubmitError as exc:
         raise ContributionSubmitError(
@@ -1113,14 +1115,14 @@ async def submit_contribution(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Submit one prepared Contribute record as a draft pull request.
+  """Submit one prepared Contribute record as a pull request.
 
-  This is the owner-approval button path. The Contribute app stores a prepared
+  This is the owner-confirmed button path. The Contribute app stores a prepared
   record + reviewed diff; this endpoint claims that record, rechecks freshness,
-  pushes the already-prepared branch to the owner's fork, creates the draft PR,
-  then writes the GitHub URL back to the ledger. It does not expose the GitHub
-  token to the app, and an app-scoped token can only submit a record from that
-  app's own storage after the same server-side freshness checks pass.
+  pushes the already-prepared branch to the owner's fork, creates the PR, then
+  writes the GitHub URL back to the ledger. It does not expose the GitHub token
+  to the app, and an app-scoped token can only submit a record from that app's
+  own storage after the same server-side freshness checks pass.
   """
   expected_nonce = _validate_submit_app(app_id, principal, db)
   async with fs_locks.app_storage_lock(app_id):
