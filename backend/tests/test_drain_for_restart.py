@@ -139,7 +139,11 @@ def test_drain_preserves_pending_while_stop_clears_it():
   assert drained_state["pending"] == queued
   assert drained_state["run_status"] == "running"  # marker LEFT for reconcile
 
-  # Stop: queue collapsed (frontend resends; backend clears).
+  # Stop: queue collapsed (frontend resends; backend clears). The drain above
+  # left the process-wide gate set (in production only the restart ends it), so
+  # reset it here — Stop-during-drain deliberately preserves the queue, and
+  # this half of the contrast is about a NORMAL worker's Stop.
+  chat_mod.draining = False
   db = SessionLocal()
   try:
     asyncio.run(chat_mod.stop_chat_for("stop-clear", db=db))
@@ -280,6 +284,59 @@ def test_send_while_draining_queues_instead_of_starting(client, auth):
   # No turn was started; the send sits in the durable queue for post-restart.
   assert not chat_mod.is_chat_running(cid)
   assert len(_chat(cid)["pending"]) == 1
+
+
+def test_force_steer_while_draining_queues_too(client, auth):
+  """force_steer must not pierce the drain gate: a steer accepted while the
+  drain is interrupting a handle can buffer into the dying runner's
+  continuation (or, with no running turn, fall through to a fresh StartTurn).
+  During the restart window every send queues — steer included."""
+  cid = str(uuid.uuid4())
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(id=cid, title="t", messages=[]))
+    db.commit()
+  finally:
+    db.close()
+
+  chat_mod.draining = True
+  try:
+    r = client.post(
+      f"/api/chats/{cid}/messages",
+      headers=auth,
+      json={"content": "steer while draining", "force_steer": True},
+    )
+  finally:
+    chat_mod.draining = False
+
+  assert r.status_code == 202
+  assert r.json()["status"] == "queued"
+  assert not chat_mod.is_chat_running(cid)
+  assert len(_chat(cid)["pending"]) == 1
+
+
+def test_stop_during_drain_preserves_pending():
+  """A Stop landing inside the drain window must not clear the queue: the
+  worker is about to die, so handing the cleared messages to the frontend to
+  re-send races the SIGTERM and can lose them. With the drain gate up, Stop
+  still interrupts but reports an empty cleared list (the PM-115 contract:
+  the frontend re-sends only what the backend confirms it cleared)."""
+  queued = [{"role": "user", "content": "queued", "ts": 2}]
+  _live_turn("stop-in-drain", pending=list(queued))
+
+  chat_mod.draining = True
+  try:
+    db = SessionLocal()
+    try:
+      _, cleared = asyncio.run(chat_mod.stop_chat_for("stop-in-drain", db=db))
+    finally:
+      db.close()
+  finally:
+    chat_mod.draining = False
+  _drain_writer()
+
+  assert cleared == []
+  assert _chat("stop-in-drain")["pending"] == queued
 
 
 def test_wedged_sweep_stands_down_while_draining():

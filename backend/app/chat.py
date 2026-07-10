@@ -1449,8 +1449,10 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
 
     - publishes a one-line "paused for a platform update" note through the
       turn's sink, so the note + the accumulated partial blocks are persisted
-      (the sink's immediate PersistError makes the transcript durable even if
-      the runner is SIGKILLed before its own finalize runs);
+      (the sink's immediate PersistError, flushed by the Barrier below —
+      best-effort: a commit that loses the race with SIGKILL is repaired by
+      boot reconcile, which finalizes the marker with a generic interrupted
+      note that is equally resumable);
     - mirrors the stalled-live watchdog's clean-interrupt handoff — bump the
       generation so the turn-end drain sees a stale generation and does NOT
       promote the queue — BUT records the chat in `_restart_draining_chats` so
@@ -1460,8 +1462,11 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
 
   Best-effort and bounded: a handle that won't interrupt in time keeps today's
   contract — the restart utility's SIGKILL backstop kills the worker and boot
-  reconcile finalizes the marker (still with the resume affordance). Returns the
-  chat ids it interrupted cleanly.
+  reconcile finalizes the marker (still with the resume affordance). Handle
+  stops run serially at up to 2s each, so with many concurrent live turns the
+  tail may not drain before the backstop — accepted for the single-owner
+  reality (a handful of turns at most); parallelize the stops before this
+  assumption breaks. Returns the chat ids it interrupted cleanly.
   """
   begin_drain()
   log = _get_logger()
@@ -1686,15 +1691,24 @@ async def stop_chat_for(
   # self-heals on the next interaction).
   log = _get_logger()
   cleared_pending_ts: list[int] = []
-  try:
-    async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
-      async with chat_queue.get_lock(chat_id):
-        cleared_pending_ts = await _clear_pending(chat_id)
-  except (Exception, asyncio.TimeoutError):
-    log.warning(
-      "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
-      "queue for reconciliation", chat_id, exc_info=True,
-    )
+  # Restart-drain invariant (design §2.2): the pending queue must survive the
+  # restart untouched. A Stop landing inside the drain window would durably
+  # delete queued messages here and hand them to the frontend to re-send — but
+  # the worker is about to die, so the re-send POST can race the SIGTERM and
+  # the queued text would then exist nowhere durable. Skip the clear and return
+  # an empty cleared list: handleStop re-sends only what the backend confirms
+  # it cleared (the PM-115 contract), so an empty list means the frontend
+  # re-sends nothing and the queue rides through the restart intact.
+  if not draining:
+    try:
+      async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+        async with chat_queue.get_lock(chat_id):
+          cleared_pending_ts = await _clear_pending(chat_id)
+    except (Exception, asyncio.TimeoutError):
+      log.warning(
+        "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
+        "queue for reconciliation", chat_id, exc_info=True,
+      )
   questions.cancel(chat_id)
   all_stopped = True
   for handle in handles:
