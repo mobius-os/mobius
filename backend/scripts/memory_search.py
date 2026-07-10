@@ -181,17 +181,29 @@ class SearchRunResult(NamedTuple):
   stderr: str
   returncode: int
   read_ids: list[str]
+  # The result event's own error flag. The Claude CLI mislabels a 401
+  # ResultMessage as subtype="success" while setting is_error=True and can exit
+  # 0, so the exit code alone reads that failed run as a success — is_error is
+  # the reliable structured signal (recovery_chat_runner reads the same field).
+  # Codex has no equivalent in its output file, so it stays False and relies on
+  # the exit code, which is trustworthy for that CLI.
+  is_error: bool = False
 
 
-def _is_provider_failure(text: str, returncode: int = 1) -> bool:
-  """True when a failed CLI result looks like auth/usage/provider trouble.
+def _is_provider_failure(
+  text: str, returncode: int = 1, is_error: bool = False
+) -> bool:
+  """True when a CLI result looks like auth/usage/provider trouble.
 
   The memory-search helper is best-effort, but provider exhaustion is exactly
-  when trying the configured fallback is valuable. Keep this conservative:
-  ordinary "No relevant memories" is a successful search, while nonzero CLI
-  exits or familiar auth/usage strings can move to the fallback.
+  when trying the configured fallback is valuable. A run failed if the process
+  exited nonzero OR the result event carried is_error (the exit-0-with-error
+  case the Claude CLI produces on a 401). A clean run (exit 0, not is_error) is
+  scanned only for familiar auth/usage strings in its stderr — never its
+  synthesis text, so a legitimate memory that mentions "rate limit" can't be
+  misread as a failure.
   """
-  if returncode != 0:
+  if returncode != 0 or is_error:
     return True
   low = (text or "").lower()
   return any(marker in low for marker in (*_AUTH_FAILURE_MARKERS, *_USAGE_LIMIT_MARKERS))
@@ -294,9 +306,12 @@ def _resolve_search_agents() -> list[dict]:
   return choices or [{"provider": "claude", "model": DEFAULT_CLAUDE_MODEL, "effort": None}]
 
 
-def _extract_read_ids_from_claude_stdout(stdout: str) -> tuple[str, list[str]]:
+def _extract_read_ids_from_claude_stdout(
+  stdout: str,
+) -> tuple[str, list[str], bool]:
   read_ids: list[str] = []
   final_text = ""
+  is_error = False
   for line in stdout.splitlines():
     line = line.strip()
     if not line:
@@ -320,11 +335,13 @@ def _extract_read_ids_from_claude_stdout(stdout: str) -> tuple[str, list[str]]:
               read_ids.append(nid)
     elif typ == "result":
       final_text = obj.get("result") or final_text
+      # is_error is the one honest signal on a 401 the CLI exits 0 for.
+      is_error = bool(obj.get("is_error"))
 
   for nid in _sources_to_node_ids(final_text):
     if nid not in read_ids:
       read_ids.append(nid)
-  return final_text, read_ids
+  return final_text, read_ids, is_error
 
 
 def _run_claude_search(choice: dict, prompt: str) -> SearchRunResult:
@@ -368,9 +385,12 @@ def _run_claude_search(choice: dict, prompt: str) -> SearchRunResult:
     text=True,
     timeout=TIMEOUT_SECS,
   )
-  final_text, read_ids = _extract_read_ids_from_claude_stdout(proc.stdout)
+  final_text, read_ids, is_error = _extract_read_ids_from_claude_stdout(
+    proc.stdout
+  )
   return SearchRunResult(
     "claude", final_text, proc.stdout, proc.stderr, proc.returncode, read_ids,
+    is_error,
   )
 
 
@@ -589,7 +609,9 @@ def run() -> int:
         result.stdout,
         result.stderr,
       ])
-      if _is_provider_failure(failure_output, result.returncode):
+      if _is_provider_failure(
+        failure_output, result.returncode, result.is_error
+      ):
         failures.append(f"{provider}: {_failure_snippet(result)}")
         if index + 1 < len(choices):
           sys.stderr.write(

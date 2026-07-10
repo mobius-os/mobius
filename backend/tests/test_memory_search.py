@@ -10,6 +10,7 @@ hint parsing (a flag with no value used to silently become the query text).
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -265,6 +266,119 @@ def test_run_falls_back_to_codex_when_claude_is_usage_limited(
   assert cmd[cmd.index("-a") + 1] == "never"
   assert "model_reasoning_effort=\"high\"" in cmd
   assert captured["codex_env"]["CODEX_HOME"] == str(ms.CODEX_HOME)
+
+
+def test_run_falls_back_when_claude_exits_zero_with_an_error_result(
+  monkeypatch, capsys
+):
+  # The Claude CLI mislabels a 401 as subtype="success" and can exit 0 while
+  # setting is_error=True on the result event, with the auth-error string as
+  # the "result" text. Without honoring is_error, run() would accept that blob
+  # as the synthesis and inject the error text into the agent's context as
+  # "memories". The fallback must fire on this class and the error text must
+  # never reach stdout.
+  ms = _load()
+  monkeypatch.setattr(ms, "_path_to_node_id", _identity_path_to_id(ms))
+  monkeypatch.setattr(
+    ms,
+    "_resolve_search_agents",
+    lambda: [
+      {"provider": "claude", "model": "claude-sonnet-4-6", "effort": None},
+      {"provider": "codex", "model": "gpt-5.5", "effort": None},
+    ],
+  )
+  monkeypatch.setattr(ms.sys, "argv", ["memory_search.py", "the request"])
+  providers = []
+
+  error_blob = "Invalid authentication credentials. Please run /login (401)."
+
+  class _Proc:
+    def __init__(self, stdout="", stderr="", returncode=0):
+      self.stdout = stdout
+      self.stderr = stderr
+      self.returncode = returncode
+
+  def _fake_run(cmd, **kwargs):
+    if cmd[0] == ms.CLAUDE_CLI_PATH:
+      providers.append("claude")
+      # exit 0, but the result event flags the error and carries the 401 text.
+      return _Proc(
+        stdout=json.dumps(
+          {"type": "result", "is_error": True, "result": error_blob}
+        )
+        + "\n",
+        returncode=0,
+      )
+    if cmd[0] == ms.CODEX_CLI_PATH:
+      providers.append("codex")
+      Path(cmd[cmd.index("-o") + 1]).write_text(
+        "- Relevant thing (notes/foo).\nSOURCES: notes/foo\n",
+        encoding="utf-8",
+      )
+      return _Proc(stdout='{"type":"result"}\n', returncode=0)
+    raise AssertionError(f"unexpected command: {cmd}")
+
+  monkeypatch.setattr(ms.subprocess, "run", _fake_run)
+
+  assert ms.run() == 0
+  out = capsys.readouterr()
+  assert providers == ["claude", "codex"]
+  # the fallback synthesis is served; the 401 blob is never injected as memory.
+  assert "Relevant thing" in out.out
+  assert error_blob not in out.out
+  assert "provider=codex" in out.err
+
+
+def test_is_provider_failure_honors_is_error_and_markers():
+  ms = _load()
+  # exit 0 + is_error is a failure (the mislabeled-401 case).
+  assert ms._is_provider_failure("clean synthesis", 0, True) is True
+  # a clean run with no auth/usage marker in the scanned text is a success.
+  assert ms._is_provider_failure("clean synthesis", 0, False) is False
+  # an auth marker in the scanned text (stderr) still routes to the fallback.
+  assert ms._is_provider_failure("401 not logged in", 0, False) is True
+
+
+def test_run_accepts_clean_synthesis_that_mentions_a_limit(monkeypatch, capsys):
+  # The false-positive guard for the is_error fix: a clean run (exit 0,
+  # is_error False) whose SYNTHESIS happens to mention "rate limit" must be
+  # served as-is, not misread as a provider failure — run() scans only stderr
+  # on a clean zero exit, never the synthesis text.
+  ms = _load()
+  monkeypatch.setattr(ms, "_path_to_node_id", _identity_path_to_id(ms))
+  monkeypatch.setattr(
+    ms,
+    "_resolve_search_agents",
+    lambda: [
+      {"provider": "claude", "model": "claude-sonnet-4-6", "effort": None},
+      {"provider": "codex", "model": "gpt-5.5", "effort": None},
+    ],
+  )
+  monkeypatch.setattr(ms.sys, "argv", ["memory_search.py", "the request"])
+  providers = []
+  synthesis = "- We once hit a rate limit on provider X (notes/foo)."
+
+  class _Proc:
+    stderr = ""
+    returncode = 0
+
+    def __init__(self, stdout):
+      self.stdout = stdout
+
+  def _fake_run(cmd, **kwargs):
+    if cmd[0] == ms.CLAUDE_CLI_PATH:
+      providers.append("claude")
+      return _Proc(
+        json.dumps({"type": "result", "is_error": False, "result": synthesis})
+        + "\n"
+      )
+    raise AssertionError("fallback must not run for a clean synthesis")
+
+  monkeypatch.setattr(ms.subprocess, "run", _fake_run)
+  assert ms.run() == 0
+  out = capsys.readouterr()
+  assert providers == ["claude"]
+  assert "rate limit" in out.out
 
 
 # --- the constructed CLI command scopes Bash (the HIGH finding) ----------
