@@ -2464,8 +2464,11 @@ async def install_from_manifest(
         staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
         app.compiled_path = str(live_bundle)
 
-        source_dir_path = Path(app.source_dir or "")
-        if source_dir_path:
+        # Guard on the raw string, not the Path: Path("") is PosixPath('.'),
+        # which is truthy — a legacy sourceless app (source_dir NULL/"") would
+        # slip into this branch and write index.jsx into the process cwd.
+        source_dir_path = Path(app.source_dir) if app.source_dir else None
+        if source_dir_path is not None:
           # The per-source-dir lock is ALREADY held (acquired above for the merge
           # decision and kept across this write), so a watcher commit can't
           # interleave and the merge result we computed is exactly what lands.

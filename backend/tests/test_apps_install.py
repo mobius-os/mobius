@@ -1073,6 +1073,13 @@ def test_update_of_legacy_no_source_dir_app_makes_no_stray_dir(
   assert r2.json()["id"] == v1_id
   # No stray empty /data/apps/<slug>/ materialized for the sourceless update.
   assert not source_dir.exists(), "update materialized a stray source dir"
+  # And no cwd-relative write either: Path("") is PosixPath('.') (truthy), so
+  # an empty source_dir once slipped into the materialize branch and wrote
+  # index.jsx into the process cwd — backend/ under pytest, the uvicorn cwd
+  # in production.
+  assert not Path("index.jsx").exists(), (
+    "sourceless update wrote index.jsx into the process cwd"
+  )
 
 
 def test_update_keeping_schedule_still_registers_cron(
