@@ -18,6 +18,7 @@ from app.chat import (
   discard_starting,
   get_active_sink,
   is_chat_running,
+  is_draining,
   mark_starting,
   run_chat,
 )
@@ -652,6 +653,22 @@ async def send_message(
       except (ValueError, TypeError):
         return {}
     return {}
+
+  # Drain gate (design §2.2): while the worker is draining for a restart, never
+  # start a new turn or promote the queue — append to pending and return
+  # "queued". The send is preserved and self-heals on the owner's next action
+  # after the restart (the stale-pending drain), so nothing the owner sent is
+  # lost. This must intercept BEFORE the queue-or-start branches below, which
+  # would otherwise spawn a turn (fresh StartTurn, or a stale-pending drain).
+  # force_steer (Stop's queue-collapse resend) is exempt: with the turn already
+  # interrupted it has nothing steerable and degrades to a queue append on its
+  # own path below.
+  if is_draining() and not body.force_steer:
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
+    db.expire(chat)
+    return _queued_response(new_msg, len(chat.pending_messages or []))
 
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending

@@ -2723,6 +2723,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 msg={msg}
                 chatId={chatId}
                 onQuestionAnswer={doSendSilent}
+                onResume={doSend}
                 isLastMsg={isLastMsg}
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}

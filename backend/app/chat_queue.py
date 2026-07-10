@@ -113,6 +113,15 @@ class TerminalDisposition(enum.Enum):
   # (the "limit storm"). The queue is preserved and self-heals on the user's
   # next send via the stale-pending drain. No auto-resume: the user resends
   # (or waits for the limit to reset) themselves.
+  DRAINED_FOR_RESTART = "drained_for_restart"
+  # The turn was interrupted by a drain-gated restart (design §2.2), NOT by
+  # Stop. Its partial blocks + a "paused for a platform update" note were
+  # finalized, but the durable run marker AND the pending queue are
+  # DELIBERATELY LEFT INTACT — unlike a Stop handoff (which clears the marker)
+  # or an empty-terminal (which clears + forgets). Boot reconcile finalizes the
+  # preserved marker and marks the note resumable so the owner's one-tap Resume
+  # works; the queue self-heals on the next send. Never promoted at drain time —
+  # promoting would start a turn while the worker is shutting down.
 
 
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
