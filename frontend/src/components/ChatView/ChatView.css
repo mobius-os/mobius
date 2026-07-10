@@ -5,8 +5,8 @@
    ║   Every rule below has a real-bug history. If a future     ║
    ║   pass quietly violates one, regression-hunt these first.  ║
    ║                                                            ║
-   ║   1. `.chat__foot` is `position: absolute`, offset above   ║
-   ║      env(safe-area-inset-bottom),                          ║
+   ║   1. `.chat__foot` is `position: absolute`, tucked above    ║
+   ║      max(0px, env(safe-area-inset-bottom) - 14px),          ║
    ║      with `pointer-events: none` — chat content scrolls    ║
    ║      *behind* the composer. Only the pill + + + queue +    ║
    ║      attach-tray re-enable pointer-events. The gutter is   ║
@@ -14,9 +14,9 @@
    ║                                                            ║
    ║   2. `--composer-h` is published by a ResizeObserver in    ║
    ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
-   ║      reserves `padding-bottom: calc(var(--composer-h) +    ║
-   ║      env(safe-area-inset-bottom) + 16px)` so the last      ║
-   ║      message clears the pill and gesture area as it grows  ║
+   ║      reserves --composer-h + the same tucked safe-area     ║
+   ║      expression + 16px so the last message clears the      ║
+   ║      pill and gesture area as it grows                     ║
    ║      (chips, queue tray, multi-line input).                ║
    ║                                                            ║
    ║   3. Empty-state wrap centers in the chat area with a      ║
@@ -159,12 +159,13 @@
   margin: 0 auto;
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
-     var (written by ChatView's ResizeObserver), the device bottom
-     safe-area gap below the foot, plus a small breathing-room
+     var (written by ChatView's ResizeObserver), the tucked safe-area
+     gap below the foot (the SAME max() expression as `.chat__foot`'s
+     `bottom` — keep them in sync), plus a small breathing-room
      margin so chips/queue tray growing the foot keeps the last
      message clear of the pill. Fallback 80px is for the first
      paint before the RO fires. */
-  padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
+  padding: 8px 6px calc(var(--composer-h, 80px) + max(0px, env(safe-area-inset-bottom, 0px) - 14px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -1025,7 +1026,15 @@
    children, so taps on the gutter pass through to the chat. */
 .chat__foot {
   position: absolute;
-  bottom: env(safe-area-inset-bottom, 0px);
+  /* iMessage-style tuck: lift the foot by the device bottom inset MINUS 14px,
+     floored at 0. iPhones report a constant 34px home-indicator inset, which
+     left the pill floating visibly higher than on Android (where Chrome's
+     edge-to-edge reports ~0) — the 14px tuck dips the pill into the top of
+     that reserved zone, still clear of the indicator line, so both platforms
+     read consistently. Android/zero-inset devices: max() floors at 0 and
+     nothing moves. Keep the same expression in `.chat__list`'s bottom
+     padding — the two must move together. */
+  bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - 14px));
   left: 0;
   right: 0;
   padding: 8px 12px;
@@ -1085,10 +1094,12 @@
 .chat__foot .composer-plus { pointer-events: auto; }
 
 /* Embedded composer: the app sheet (not the chat) owns the device
-   safe area, so the `env(safe-area-inset-bottom)` reservation here
-   would double-gap the bottom inside the sheet. Pin the bottom
-   padding to a flat 8px so the pill sits flush in the embed. */
+   safe area, so any `env(safe-area-inset-bottom)` reservation here
+   would double-gap the bottom inside the sheet. Pin BOTH the anchor
+   and the bottom padding flat so the pill sits flush in the embed
+   (and the iOS tuck in the base rule can't shift it). */
 .chat-embed .chat__foot {
+  bottom: 0;
   padding-bottom: 8px;
 }
 
