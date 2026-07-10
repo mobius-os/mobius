@@ -463,14 +463,14 @@ async def provider_status(
 
 @router.get("/providers/status")
 async def providers_status(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns connection status for ALL registered providers.
 
   The `/provider/status` route above only reports the currently-
-  active provider — sufficient for SettingsView's "is the current one
-  connected" check, but the `/` slash picker needs to know which
-  providers' models are usable so it can hide disconnected ones.
+  active provider. Mini-app setup screens also need the full provider
+  map, using app tokens, so their model pickers can disable disconnected
+  providers instead of guessing.
   """
   from app.providers import PROVIDERS
   data_dir = get_settings().data_dir

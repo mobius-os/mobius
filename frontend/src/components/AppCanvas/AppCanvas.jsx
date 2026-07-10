@@ -74,6 +74,11 @@ import './AppCanvas.css'
 //      windowed app whose chrome already owns the inset padding can't
 //      double-pad. See lib/safeAreaInsets.js for the read contract.
 //
+//   6. {type: 'moebius:app-intent', intent}                parent → frame
+//      One-shot shell intent delivered after the app has mounted. Used by
+//      catalog surfaces that open an app directly into a setup/settings path
+//      without inventing app-specific deep links.
+//
 // Shell-level messages (handled by Shell.jsx, NOT this file):
 //   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
 //   - {type: 'moebius:new-chat', draft?, autoSend?}          frame → shell
@@ -133,7 +138,8 @@ function readDeviceInsets() {
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
   immersive = false,
-  onNavPush, onNavPop, onNavReset, onImmersive,
+  pendingIntent = null,
+  onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered,
 }) {
   const queryClient = useQueryClient()
   // The app-scoped token is fetched from the server and isn't available
@@ -404,6 +410,19 @@ export default function AppCanvas({
       window.location.origin,
     )
   }, [theme?.css, theme?.bg])
+
+  useEffect(() => {
+    if (!pendingIntent || !loaded || !iframeRef.current?.contentWindow) return
+    iframeRef.current.contentWindow.postMessage(
+      {
+        type: 'moebius:app-intent',
+        intent: pendingIntent.intent,
+        nonce: pendingIntent.nonce,
+      },
+      window.location.origin,
+    )
+    onIntentDelivered?.(appId, pendingIntent)
+  }, [appId, loaded, pendingIntent, onIntentDelivered])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
