@@ -982,12 +982,24 @@ su -s /bin/sh mobius -c '
     gh_uid=$(python3 -c "import json;v=json.load(open(\"$_gh_state\")).get(\"user_id\");print(\"\" if v is None else v)" 2>/dev/null)
   fi
   if [ -n "$gh_login" ]; then
-    git config --global user.name "$gh_login"
-    git config --global user.email "${gh_uid}+${gh_login}@users.noreply.github.com"
+    gh_email="${gh_login}@users.noreply.github.com"
+    if [ -n "$gh_uid" ]; then
+      gh_email="${gh_uid}+${gh_login}@users.noreply.github.com"
+    fi
+    git_name="$gh_login"
+    git_email="$gh_email"
   else
-    git config --global user.name "Mobius Agent"
-    git config --global user.email "agent@mobius"
+    git_name="Mobius Agent"
+    git_email="agent@mobius"
   fi
+  git config --global user.name "$git_name"
+  git config --global user.email "$git_email"
+  for repo in /data /data/platform; do
+    if [ -d "$repo/.git" ]; then
+      git -C "$repo" config user.name "$git_name" || true
+      git -C "$repo" config user.email "$git_email" || true
+    fi
+  done
   git config --global credential.helper "!gh auth git-credential"
 ' 2>/dev/null || true
 

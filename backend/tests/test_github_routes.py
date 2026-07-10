@@ -589,6 +589,19 @@ def _cp(stdout="", stderr="", returncode=0):
   return subprocess.CompletedProcess(["mock"], returncode, stdout, stderr)
 
 
+def _commit_metadata(
+  sha,
+  *,
+  name="octocat",
+  email="42+octocat@users.noreply.github.com",
+  tree="reviewed-tree",
+):
+  return _cp(
+    f"{sha}\x00{tree}\x00{name}\x00{email}\x00{name}\x00{email}"
+    "\x002026-07-10T03:12:02+00:00\n"
+  )
+
+
 def test_submit_contribution_creates_draft_pr_from_prepared_record(
   client, owner_token, monkeypatch,
 ):
@@ -657,6 +670,8 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
         "Polish demo\n\n"
         "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
       )
+    if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
+      return _commit_metadata(head)
     if args == ("remote", "get-url", "fork"):
       if fork_ready:
         return _cp("https://github.com/octocat/app-demo.git\n")
@@ -704,6 +719,132 @@ def test_submit_contribution_creates_draft_pr_from_prepared_record(
   )
   assert stored["status"] == "draft"
   assert stored["number"] == 42
+
+
+def test_submit_contribution_normalizes_fallback_author_before_push(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "rec-pr-fallback-author"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
+  base = "b" * 40
+  old_head = "a" * 40
+  new_head = "c" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "Body",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": old_head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+
+  git_calls = []
+  normalized = False
+
+  def fake_git(repo_path, *args, check=True):
+    nonlocal normalized
+    git_calls.append(args)
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("main\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", "fix/demo-polish"):
+      return _cp((new_head if normalized else old_head) + "\n")
+    if args == ("rev-parse", "HEAD"):
+      return _cp((new_head if normalized else old_head) + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{old_head}^{{commit}}"):
+      return _cp(old_head + "\n")
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{old_head}",
+    ):
+      return _cp(diff_text)
+    if args == (
+      "-c", "core.quotePath=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--binary",
+      "--full-index",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      f"{base}..{new_head}",
+    ):
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", "fix/demo-polish"):
+      return _cp(
+        "Polish demo\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
+      if normalized:
+        return _commit_metadata(new_head)
+      return _commit_metadata(
+        old_head,
+        name="Mobius Agent",
+        email="agent@mobius",
+      )
+    if args[:9] == (
+      "-c", "user.name=octocat",
+      "-c", "user.email=42+octocat@users.noreply.github.com",
+      "commit", "--amend", "--no-edit", "--no-gpg-sign", "--author",
+    ):
+      assert args[9] == "octocat <42+octocat@users.noreply.github.com>"
+      normalized = True
+      return _cp("")
+    if args == ("remote", "get-url", "fork"):
+      return _cp("https://github.com/octocat/app-demo.git\n")
+    if args[:1] == ("push",):
+      assert normalized
+      return _cp("")
+    return _cp("")
+
+  def fake_gh(repo_path, *args, check=True):
+    if args[:2] == ("pr", "list"):
+      return _cp("[]")
+    if args[:2] == ("pr", "create"):
+      return _cp("https://github.com/mobius-os/app-demo/pull/44\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert body["record"]["head_sha"] == new_head
+  assert body["record"]["plan"]["head_sha"] == new_head
+  assert body["record"]["plan"]["attribution_normalized_from"] == old_head
+  assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
 
 
 def test_submit_contribution_replaces_stale_fork_remote_before_push(
@@ -772,6 +913,8 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
         "Polish demo\n\n"
         "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
       )
+    if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
+      return _commit_metadata(head)
     if args == ("remote", "get-url", "fork"):
       if fork_fixed:
         return _cp("git@github.com:octocat/app-demo.git\n")
@@ -951,6 +1094,8 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
         "Polish demo\n\n"
         "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
       )
+    if args[:3] == ("show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI"):
+      return _commit_metadata(head)
     if args == ("remote", "get-url", "fork"):
       return _cp("https://github.com/octocat/app-demo.git\n")
     if args[:1] == ("push",):

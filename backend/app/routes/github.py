@@ -84,6 +84,7 @@ _GITHUB_REPO = re.compile(
 )
 _BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _GIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
 _COAUTHOR_TRAILER = (
   "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>"
 )
@@ -253,6 +254,8 @@ def _git_env(repo: Path) -> dict:
   for var in (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
   ):
     env.pop(var, None)
   env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
@@ -264,7 +267,11 @@ def _git_env(repo: Path) -> dict:
 
 
 def _run_cmd(
-  argv: list[str], *, cwd: Path, check: bool = True, timeout: int = _SUBMIT_TIMEOUT
+  argv: list[str], *,
+  cwd: Path,
+  check: bool = True,
+  timeout: int = _SUBMIT_TIMEOUT,
+  env: dict | None = None,
 ) -> subprocess.CompletedProcess:
   proc = subprocess.run(
     argv,
@@ -273,7 +280,7 @@ def _run_cmd(
     text=True,
     timeout=timeout,
     check=False,
-    env=_git_env(cwd),
+    env=env or _git_env(cwd),
   )
   if check and proc.returncode != 0:
     detail = (proc.stderr or proc.stdout or "command failed").strip()
@@ -305,6 +312,118 @@ def _assert_coauthor_trailer(repo: Path, branch: str) -> None:
       "This staged commit is missing the Möbius Agent co-author trailer. "
       "Leave feedback so your agent can prepare it again."
     )
+
+
+def _connected_git_identity(state: dict, login: str) -> tuple[str, str]:
+  if not _GITHUB_LOGIN.match(login):
+    raise ContributionSubmitError("Reconnect GitHub before approving this PR.", 401)
+  user_id = str(state.get("user_id") or "").strip()
+  if user_id and not user_id.isdigit():
+    raise ContributionSubmitError("Reconnect GitHub before approving this PR.", 401)
+  return login, github_auth.noreply_email(login, user_id)
+
+
+def _head_commit_metadata(repo: Path, branch: str) -> dict:
+  out = _git(
+    repo,
+    "show", "-s",
+    "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI",
+    branch,
+  ).stdout.rstrip("\n")
+  parts = out.split("\x00")
+  if len(parts) != 7:
+    raise ContributionSubmitError(
+      "Could not inspect the staged commit attribution. Ask your agent "
+      "to prepare this PR again."
+    )
+  return {
+    "sha": parts[0],
+    "tree": parts[1],
+    "author_name": parts[2],
+    "author_email": parts[3],
+    "committer_name": parts[4],
+    "committer_email": parts[5],
+    "author_date": parts[6],
+  }
+
+
+def _head_sha_patch(record: dict, old_head: str, new_head: str) -> dict:
+  if old_head == new_head:
+    return {}
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  return {
+    "head_sha": new_head,
+    "plan": {
+      **plan,
+      "head_sha": new_head,
+      "attribution_normalized_from": old_head,
+    },
+  }
+
+
+def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> ContributionSubmitError:
+  if not patch:
+    return exc
+  return ContributionSubmitError(
+    exc.message,
+    exc.status_code,
+    record_patch={**patch, **exc.record_patch},
+  )
+
+
+def _normalize_head_attribution(
+  repo: Path,
+  branch: str,
+  *,
+  author_name: str,
+  author_email: str,
+  base_sha: str,
+  expected_diff: str,
+  record: dict,
+) -> dict:
+  before = _head_commit_metadata(repo, branch)
+  if (
+    before["author_name"] == author_name
+    and before["author_email"] == author_email
+    and before["committer_name"] == author_name
+    and before["committer_email"] == author_email
+  ):
+    return {}
+
+  _git(
+    repo,
+    "-c", f"user.name={author_name}",
+    "-c", f"user.email={author_email}",
+    "commit", "--amend", "--no-edit", "--no-gpg-sign",
+    "--author", f"{author_name} <{author_email}>",
+    "--date", before["author_date"],
+  )
+
+  after = _head_commit_metadata(repo, branch)
+  if after["tree"] != before["tree"]:
+    raise ContributionSubmitError(
+      "Normalizing commit attribution changed the staged source tree. "
+      "Ask your agent to prepare this PR again."
+    )
+  if (
+    after["author_name"] != author_name
+    or after["author_email"] != author_email
+    or after["committer_name"] != author_name
+    or after["committer_email"] != author_email
+  ):
+    raise ContributionSubmitError(
+      "Could not normalize the staged commit attribution. Ask your agent "
+      "to prepare this PR again."
+    )
+  branch_hash = hashlib.sha256(
+    _reviewed_branch_diff(repo, base_sha, after["sha"])
+  ).hexdigest()
+  if branch_hash != expected_diff:
+    raise ContributionSubmitError(
+      "Normalizing commit attribution changed the reviewed diff. Ask your "
+      "agent to prepare this PR again."
+    )
+  return _head_sha_patch(record, before["sha"], after["sha"])
 
 
 def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
@@ -344,7 +463,9 @@ def _reviewed_branch_diff(repo: Path, base_sha: str, head_sha: str) -> bytes:
   return proc.stdout.encode("utf-8")
 
 
-def _assert_fresh(record: dict, diff_path: Path, repo: Path, branch: str) -> None:
+def _assert_fresh(
+  record: dict, diff_path: Path, repo: Path, branch: str,
+) -> tuple[str, str, str]:
   plan = record.get("plan") or {}
   expected_base = _resolve_reviewed_commit(repo, plan.get("base_sha"), "base sha")
   expected_head = _resolve_reviewed_commit(
@@ -381,6 +502,7 @@ def _assert_fresh(record: dict, diff_path: Path, repo: Path, branch: str) -> Non
       "The reviewed diff does not match the branch that would be pushed. "
       "Ask your agent to prepare this PR again."
     )
+  return expected_base, expected_head, expected_diff
 
 
 def _claim_record(
@@ -447,10 +569,12 @@ def _mark_submit_success(
   record: dict,
   pr_url: str,
   number: int | None,
+  record_patch: dict | None = None,
 ) -> dict:
   now = _now_iso()
   next_record = {
     **record,
+    **(record_patch or {}),
     "status": "draft",
     "url": pr_url,
     "updated_at": now,
@@ -536,7 +660,7 @@ def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> Non
     )
 
 
-def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]:
+def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
       "This platform needs git and gh installed before it can submit PRs.",
@@ -547,6 +671,7 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]
   login = str(state.get("login") or "")
   if not token or not login:
     raise ContributionSubmitError("Connect GitHub before approving this PR.", 401)
+  author_name, author_email = _connected_git_identity(state, login)
 
   plan = record.get("plan") or {}
   upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
@@ -574,10 +699,23 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]
     _assert_clean_worktree(repo)
     _git(repo, "checkout", "-q", branch)
     _assert_clean_worktree(repo)
-    _assert_fresh(record, diff_path, repo, branch)
+    expected_base, _, expected_diff = _assert_fresh(record, diff_path, repo, branch)
     _assert_coauthor_trailer(repo, branch)
+    record_patch = _normalize_head_attribution(
+      repo,
+      branch,
+      author_name=author_name,
+      author_email=author_email,
+      base_sha=expected_base,
+      expected_diff=expected_diff,
+      record=record,
+    )
+    _assert_clean_worktree(repo)
 
-    _ensure_owner_fork_remote(repo, upstream_repo, login)
+    try:
+      _ensure_owner_fork_remote(repo, upstream_repo, login)
+    except ContributionSubmitError as exc:
+      raise _merge_error_patch(exc, record_patch) from exc
 
     last_push_error = None
     for _ in range(_PUSH_RETRIES):
@@ -592,12 +730,16 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]
       last_push_error = (proc.stderr or proc.stdout or "").strip()
       time.sleep(2)
     if last_push_error:
-      raise ContributionSubmitError(last_push_error[:600] or "Git push failed.")
+      raise ContributionSubmitError(
+        last_push_error[:600] or "Git push failed.",
+        record_patch=record_patch,
+      )
     pushed_branch_url = (
       f"https://github.com/{login}/{upstream_repo.split('/', 1)[1]}"
       f"/tree/{quote(branch, safe='/')}"
     )
     pushed_patch = {
+      **record_patch,
       "last_submit_stage": "pushed",
       "last_pushed_branch": f"{login}:{branch}",
       "last_pushed_branch_url": pushed_branch_url,
@@ -605,7 +747,7 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]
 
     existing = _find_existing_pr(repo, upstream_repo, login, branch)
     if existing:
-      return existing, _parse_pr_number(existing)
+      return existing, _parse_pr_number(existing), record_patch
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -639,7 +781,7 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None]
         f"to {pushed_branch_url}.",
         record_patch=pushed_patch,
       )
-    return url, _parse_pr_number(url)
+    return url, _parse_pr_number(url), record_patch
   finally:
     if checkout_back:
       _git(repo, "checkout", "-q", checkout_back, check=False)
@@ -912,7 +1054,7 @@ async def submit_contribution(
     plan = claimed.get("plan") or {}
     repo_path = _safe_repo_path(plan.get("repo_path"))
     async with fs_locks.source_dir_lock(str(repo_path)):
-      pr_url, number = await asyncio.to_thread(
+      pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr, claimed, diff_path,
       )
   except ContributionSubmitError as exc:
@@ -954,6 +1096,7 @@ async def submit_contribution(
       record=current,
       pr_url=pr_url,
       number=number,
+      record_patch=record_patch,
     )
   return {"record": submitted, "url": pr_url, "number": number}
 
