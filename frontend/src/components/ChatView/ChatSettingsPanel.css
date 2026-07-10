@@ -46,6 +46,10 @@
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
 }
 
+.csp-row--updated:not(.csp-row--selected) {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
 .csp-row:focus-visible,
 .csp__confirm-btn:focus-visible,
 .csp-effort__stop:focus-visible {
@@ -92,10 +96,31 @@
 }
 
 .csp-row__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: 14px;     /* --font-text-sm */
   font-weight: 500;    /* OpenAI Apps SDK menu rows are 400; bump to 500 to read as the primary line above the 12px subtitle */
   line-height: 1.4;
   color: var(--text);
+}
+
+.csp-row__title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.csp-row__badge {
+  flex-shrink: 0;
+  padding: 1px 6px 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.35;
 }
 
 .csp-row__sub {
@@ -217,16 +242,6 @@
   white-space: nowrap;
   min-width: 70px;
   text-align: right;
-}
-
-.csp__settings-note {
-  margin: 6px 10px 2px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface2) 86%, transparent);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .csp__loading {

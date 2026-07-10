@@ -3,10 +3,9 @@ import '../ui/StatusDot.css'
 import './ProviderAuth.css'
 
 /**
- * Single unified row per provider. Shared by SettingsView (with a
- * default-radio, used to pick which provider new chats use) and
- * SetupWizard (no radio, used as a tap-to-connect list during
- * first-time setup).
+ * Single unified row per provider. Shared by SettingsView and
+ * SetupWizard as a compact auth/status row; the optional radio
+ * variant is kept for legacy provider-pick surfaces.
  *
  * Props:
  *   id              — provider id ('claude' / 'codex'); used for onSelect
@@ -16,13 +15,12 @@ import './ProviderAuth.css'
  *   onToggleExpand  — fires when the user wants to open/close auth panel
  *   children        — auth flow component (ProviderAuth / CodexAuth)
  *
- *   showRadio       — bool, default true. False in setup wizard.
+ *   showRadio       — bool, default true. False in setup/settings.
  *   isDefault       — bool, only meaningful when showRadio. Drives the
  *                     radio-dot + accent border.
  *   onSelect        — only used when showRadio. Click on the row main
- *                     area calls onSelect(id) — settings uses this to
- *                     switch the default. When showRadio is false, the
- *                     main area toggles expand instead.
+ *                     area calls onSelect(id). When showRadio is false,
+ *                     the main area is static.
  *   disabled        — disable the main area (used by settings during
  *                     /settings POST in-flight).
  *   badge           — optional small label rendered next to the name
@@ -35,10 +33,10 @@ export default function ProviderRow({
   showRadio = true, isDefault = false, onSelect, disabled = false,
   badge, version,
 }) {
-  // Settings page (showRadio=false): the main row is INFORMATIONAL
+  // Settings page (showRadio=false): the main row is informational
   // only — clicking it does nothing. The user must explicitly tap
   // Connect/Reconnect to open the auth panel. The radio variant
-  // (setup wizard, showRadio=true) keeps row-tap = set-default.
+  // keeps row-tap = select provider for legacy surfaces.
   const rowIsClickable = showRadio
   const handleMainClick = rowIsClickable
     ? () => onSelect?.(id)
@@ -46,7 +44,7 @@ export default function ProviderRow({
 
   const mainTitle = showRadio
     ? (connected
-        ? (isDefault ? 'Default for new chats' : 'Set as default')
+        ? (isDefault ? 'Selected provider' : 'Select provider')
         : 'Tap to set up authentication')
     : undefined
 

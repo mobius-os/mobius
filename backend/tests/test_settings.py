@@ -279,7 +279,7 @@ def test_set_skills_enabled_preserves_other_agent_settings(client, auth):
 
 
 def test_get_settings_returns_background_agent_defaults(client, auth):
-  """Background agents inherit the owner provider until explicitly set."""
+  """Background agents enable the resolved provider until explicitly set."""
   client.post("/api/settings", json={"provider": "codex"}, headers=auth)
   body = client.get("/api/settings", headers=auth).json()
   assert body["agent_settings"]["model"] == "gpt-5.5"
@@ -288,6 +288,23 @@ def test_get_settings_returns_background_agent_defaults(client, auth):
   assert body["background_agents"]["primary"]["model"] == "gpt-5.5"
   assert body["background_agents"]["primary"]["effort"] == "medium"
   assert body["background_agents"]["fallback"] is None
+
+
+def test_background_agent_defaults_do_not_inherit_chat_model_defaults(tmp_path):
+  """Background work has provider-native defaults, not global chat defaults."""
+  from app import providers
+
+  providers.write_agent_settings(
+    str(tmp_path),
+    {"model": "gpt-5.4", "effort": "high"},
+  )
+  background = providers.background_agent_settings(str(tmp_path), "codex")
+  assert background["primary"] == {
+    "provider": "codex",
+    "model": "gpt-5.5",
+    "effort": "medium",
+  }
+  assert background["fallback"] is None
 
 
 def test_get_settings_prefers_connected_codex_over_unconnected_default(client, auth):
@@ -611,12 +628,12 @@ def test_background_agent_settings_drops_cross_provider_models(tmp_path):
   background = providers.background_agent_settings(str(tmp_path), "claude")
   assert background["primary"] == {
     "provider": "claude",
-    "model": None,
+    "model": "claude-opus-4-8",
     "effort": "high",
   }
   assert background["fallback"] == {
     "provider": "codex",
-    "model": None,
+    "model": "gpt-5.5",
     "effort": "medium",
   }
 
