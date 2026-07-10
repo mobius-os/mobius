@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # sync-test-backend.sh — Push host backend source into a mobius-TEST container's
-# served platform layer, restart, and report. The backend counterpart to
-# sync-test-shell.sh.
+# served platform layer, restart, and report.
 #
 # Why this exists: the mobius-test `app` service serves BAKED image code — only
 # the `pytest` service bind-mounts backend/app. And a bind-mount onto /app/app
@@ -12,7 +11,7 @@
 # so uvicorn re-imports it. This is the exact manual loop (docker cp + restart)
 # that costs a cycle every time it is rediscovered.
 #
-# REFUSES to touch prod (mobius / :8000) — same guardrail as sync-test-shell.sh.
+# REFUSES to touch prod (mobius / :8000), matching the live-test guardrail.
 # This must NEVER overwrite the live owner's served backend.
 #
 # Usage:

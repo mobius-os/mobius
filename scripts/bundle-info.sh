@@ -97,5 +97,6 @@ printf '  host:      %s\n' "${host_sha:0:12}${host_sha:+...}"
 printf '  container: %s\n' "${container_sha:0:12}${container_sha:+...}"
 printf '  status:    %s\n' "$drift"
 if [ "$drift" = "DRIFT" ]; then
-  printf '\nRun: scripts/sync-test-shell.sh\n'
+  printf '\nThe test container source differs from this checkout.\n'
+  printf 'Edit /data/platform/frontend/src in the container, or refresh the test container from this worktree.\n'
 fi

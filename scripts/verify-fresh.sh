@@ -45,7 +45,8 @@ dist=$(docker exec "$CONTAINER" bash -c \
 if [ -z "$dist" ]; then
   echo "verify-fresh: no dist bundle at /data/platform/frontend/dist/assets/ — container is serving the baked /app/static/ fallback" >&2
   echo "  served: $served (from baked image)"
-  echo "  Run: docker exec -u mobius $CONTAINER bash /app/scripts/rebuild_shell.sh"
+  echo "  The watcher builds /data/platform/frontend/src into dist after source saves."
+  echo "  For platform updates, use the platform apply flow; it rebuilds via rebuild_frontend_now."
   exit 3
 fi
 
@@ -61,11 +62,8 @@ verify-fresh: MISMATCH — $CONTAINER is serving stale code
   on disk: $dist
 
 The container is serving a different bundle than the platform frontend dist.
-Rebuild the served frontend, then check again:
-
-  docker exec -u mobius $CONTAINER bash /app/scripts/rebuild_shell.sh
-
-(or sync + rebuild in one shot via scripts/sync-test-shell.sh for the
-test container).
+Wait for any in-flight watcher build to finish, then check again. If this
+followed a platform update rather than a file save, use the platform apply flow;
+it rebuilds /data/platform/frontend via rebuild_frontend_now.
 EOF
 exit 1
