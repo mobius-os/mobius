@@ -1,6 +1,8 @@
 import { S } from '../styles.js'
 
 export function Header({ appId, activePads, online }) {
+  const soundCount = `${activePads} ${activePads === 1 ? 'sound' : 'sounds'}`
+
   return (
     <header style={S.header}>
       <div style={S.titleRow}>
@@ -24,7 +26,9 @@ export function Header({ appId, activePads, online }) {
           <span style={S.logoFallback} aria-hidden="true">♬</span>
         )}
         <h1 style={S.title}>Beat Machine</h1>
-        <span style={S.badge}>{activePads}/16</span>
+        <span style={S.badge} title={`${soundCount} loaded`} aria-label={`${soundCount} loaded`}>
+          {soundCount}
+        </span>
       </div>
       {!online && <span style={S.offlinePill} role="status">Offline</span>}
     </header>

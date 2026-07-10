@@ -76,8 +76,24 @@ export function ControlPanel({
             {selected.isPreset && <span style={S.presetTag}>KIT</span>}
             {selectedPad >= CUSTOM_START && (
               <>
-                <button type="button" style={S.tinyBtn} onClick={() => onStartRename(selectedPad)}>Ren</button>
-                <button type="button" style={{ ...S.tinyBtn, color: '#f87171' }} onClick={() => onClearPad(selectedPad)}>Del</button>
+                <button
+                  type="button"
+                  style={S.tinyBtn}
+                  onClick={() => onStartRename(selectedPad)}
+                  title="Rename sample"
+                  aria-label="Rename sample"
+                >
+                  Ren
+                </button>
+                <button
+                  type="button"
+                  style={{ ...S.tinyBtn, color: '#f87171' }}
+                  onClick={() => onClearPad(selectedPad)}
+                  title="Delete sample"
+                  aria-label="Delete sample"
+                >
+                  Del
+                </button>
               </>
             )}
           </div>
@@ -90,7 +106,7 @@ export function ControlPanel({
           />
         </div>
       ) : (
-        <div style={S.emptyHint}>Tap kit pad to play{'\n'}Hold custom to record</div>
+        <div style={S.emptyHint}>Tap a sound to preview{'\n'}Hold an empty custom pad to record</div>
       )}
 
       <div style={S.fxArea}>

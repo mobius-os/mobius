@@ -51,7 +51,7 @@ export function PadBanks({
 
   return (
     <section style={S.padArea} aria-label="Beat pads">
-      <div style={S.sectionLabel}>Drum kit</div>
+      <div style={S.sectionLabel}>Kit sounds</div>
       <div style={S.padGrid}>
         {pads.slice(0, CUSTOM_START).map((pad, idx) => (
           <button
@@ -59,6 +59,7 @@ export function PadBanks({
             type="button"
             aria-label={`${pad.name} pad ${idx + 1}`}
             aria-pressed={selectedPad === idx}
+            title={pad.name}
             onPointerDown={(event) => {
               event.preventDefault()
               onPadDown(idx)
@@ -79,7 +80,7 @@ export function PadBanks({
         ))}
       </div>
 
-      <div style={{ ...S.sectionLabel, marginTop: 4 }}>Custom - hold rec</div>
+      <div style={{ ...S.sectionLabel, marginTop: 4 }}>Custom sounds</div>
       <div style={S.padGrid}>
         {pads.slice(CUSTOM_START).map((pad, offset) => {
           const idx = offset + CUSTOM_START
@@ -91,6 +92,7 @@ export function PadBanks({
               type="button"
               aria-label={`${pad.name || `Custom pad ${offset + 1}`} pad ${idx + 1}`}
               aria-pressed={selectedPad === idx}
+              title={pad.buffer ? pad.name || `Rec ${offset + 1}` : 'Hold to record'}
               onPointerDown={(event) => {
                 event.preventDefault()
                 onPadDown(idx)

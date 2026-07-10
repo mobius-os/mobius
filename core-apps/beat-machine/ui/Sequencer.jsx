@@ -1,4 +1,4 @@
-import { TOTAL_BEATS } from '../audio.js'
+import { CUSTOM_START, TOTAL_BEATS } from '../audio.js'
 import { S } from '../styles.js'
 
 export function Sequencer({
@@ -13,6 +13,10 @@ export function Sequencer({
   onClear,
   onToggleCell,
 }) {
+  const visibleRows = pads
+    .map((pad, padIdx) => ({ pad, padIdx }))
+    .filter(({ pad }) => pad.buffer || pad.isPreset)
+
   return (
     <section style={S.seqSection} aria-label="Step sequencer">
       <div style={S.transport}>
@@ -37,26 +41,33 @@ export function Sequencer({
           />
           <span style={S.bpmValue}>{bpm}</span>
         </div>
-        <button type="button" style={S.clearBtn} onClick={onClear}>Clear</button>
+        <button
+          type="button"
+          style={S.clearBtn}
+          onClick={onClear}
+          title="Clear pattern"
+          aria-label="Clear pattern"
+        >
+          Clear
+        </button>
       </div>
 
       <div style={S.seqScrollWrapper}>
         <div style={S.seqLabelsCol} aria-hidden="true">
           <div style={{ height: 16, flexShrink: 0 }} />
-          {pads.map((pad, idx) => {
-            const has = pad.buffer || pad.isPreset
+          {visibleRows.map(({ pad, padIdx }) => {
             return (
               <div
-                key={idx}
+                key={padIdx}
                 style={{
                   ...S.seqRowLabel,
-                  color: has ? pad.color : 'var(--muted)',
-                  opacity: has ? 1 : 0.25,
-                  borderTop: idx === 8 ? '1px solid var(--border)' : 'none',
-                  marginTop: idx === 8 ? 2 : 0,
+                  color: pad.color,
+                  borderTop: padIdx === CUSTOM_START ? '1px solid var(--border)' : 'none',
+                  marginTop: padIdx === CUSTOM_START ? 3 : 0,
                 }}
+                title={pad.name || `Pad ${padIdx + 1}`}
               >
-                {pad.name || `${idx + 1}`}
+                {pad.name || `Rec ${padIdx - CUSTOM_START + 1}`}
               </div>
             )
           })}
@@ -78,15 +89,14 @@ export function Sequencer({
                 </div>
               ))}
             </div>
-            {pads.map((pad, padIdx) => {
-              const has = pad.buffer || pad.isPreset
+            {visibleRows.map(({ pad, padIdx }) => {
               return (
                 <div
                   key={padIdx}
                   style={{
                     ...S.seqCells,
-                    borderTop: padIdx === 8 ? '1px solid var(--border)' : 'none',
-                    marginTop: padIdx === 8 ? 2 : 0,
+                    borderTop: padIdx === CUSTOM_START ? '1px solid var(--border)' : 'none',
+                    marginTop: padIdx === CUSTOM_START ? 3 : 0,
                   }}
                   role="row"
                   aria-label={pad.name || `Pad ${padIdx + 1}`}
@@ -98,7 +108,6 @@ export function Sequencer({
                       <button
                         key={beatIdx}
                         type="button"
-                        disabled={!has}
                         onClick={() => onToggleCell(padIdx, beatIdx)}
                         aria-label={`${pad.name || `Pad ${padIdx + 1}`} beat ${beatIdx + 1}`}
                         aria-pressed={on}
@@ -112,8 +121,7 @@ export function Sequencer({
                                 ? 'var(--surface)'
                                 : 'rgba(255,255,255,0.015)',
                           borderColor: cur ? 'var(--accent)' : on ? `${pad.color}66` : 'var(--border)',
-                          opacity: has ? 1 : 0.12,
-                          cursor: has ? 'pointer' : 'default',
+                          cursor: 'pointer',
                           boxShadow: on && cur ? `0 0 6px ${pad.color}55` : 'none',
                         }}
                       />
