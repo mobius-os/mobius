@@ -17,6 +17,7 @@ import './SettingsView.css'
 
 const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
+const SYSTEM_SETUP_READY_KEY = 'mobius:system-setup-ready:v1'
 const PROVIDER_CHOICES = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
@@ -24,6 +25,16 @@ const PROVIDER_CHOICES = [
 const FALLBACK_MODEL_ROWS = {
   claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label })),
   codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label })),
+}
+
+function markSystemSetupReady() {
+  if (typeof window === 'undefined' || !window.localStorage) return
+  try {
+    window.localStorage.setItem(
+      SYSTEM_SETUP_READY_KEY,
+      JSON.stringify({ completedAt: new Date().toISOString() }),
+    )
+  } catch {}
 }
 
 function defaultEffort(provider) {
@@ -370,6 +381,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         try { detail = (await res.json()).detail || '' } catch {}
         throw new Error(detail || 'Could not save background agents.')
       }
+      markSystemSetupReady()
       settingsQueries.owner.invalidate(queryClient)
       setBackgroundSaved(true)
       setTimeout(() => {

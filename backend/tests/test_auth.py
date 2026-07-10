@@ -123,6 +123,32 @@ def test_providers_models_accepts_app_token(client, auth):
   assert [m["id"] for m in body["codex"]] == KNOWN_MODELS["codex"]
 
 
+def test_providers_status_accepts_app_token(client, auth):
+  """Mini-app setup screens need provider connection status with the same
+  app-scoped token they use for the model registry."""
+  r0 = client.post("/api/apps/", headers=auth, json={
+    "name": "Status host",
+    "description": "x",
+    "jsx_source": "export default function App() { return null }",
+  })
+  assert r0.status_code == 201, r0.text
+  app_id = r0.json()["id"]
+
+  from app.auth import create_access_token
+  app_token = create_access_token({
+    "sub": "test", "scope": "app", "app_id": app_id,
+  })
+  r = client.get(
+    "/api/auth/providers/status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert "claude" in body
+  assert "codex" in body
+  assert "authenticated" in body["claude"]
+
+
 def test_providers_models_returns_known_models_on_missing_creds(
   client, auth,
 ):

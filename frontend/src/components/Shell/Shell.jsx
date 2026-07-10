@@ -80,6 +80,7 @@ export default function Shell() {
   const [appCache, setAppCache] = useState(
     () => (coldRestoredCanvasAppId != null ? [coldRestoredCanvasAppId] : [])
   )
+  const [appIntents, setAppIntents] = useState({})
   // Ids ever observed PRESENT in a fetched /api/apps list. The eviction
   // effect below treats an app as uninstalled only on a genuine
   // present→absent transition (it was here, now it's gone), never on a
@@ -101,6 +102,15 @@ export default function Shell() {
     setToast({ message, variant, duration, action })
   }
   function dismissToast() { setToast(null) }
+  const handleAppIntentDelivered = useCallback((appId, delivered) => {
+    setAppIntents((prev) => {
+      const key = String(appId)
+      if (!prev[key] || prev[key].nonce !== delivered?.nonce) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }, [])
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
@@ -826,6 +836,13 @@ export default function Shell() {
           showToast('App is not installed yet.', { duration: 6000 })
           return
         }
+        const intent = typeof e.data.intent === 'string' ? e.data.intent.trim() : ''
+        if (intent) {
+          setAppIntents((prev) => ({
+            ...prev,
+            [String(app.id)]: { intent, nonce: Date.now() },
+          }))
+        }
         navTo('canvas', { appId: app.id })
       } else if (e.data?.type === 'moebius:open-settings') {
         const rawSection = typeof e.data.section === 'string' ? e.data.section : ''
@@ -1361,6 +1378,7 @@ export default function Shell() {
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
+              pendingIntent={appIntents[String(id)] || null}
               // Immersive is APPLIED only while this app is the active holder
               // (immersiveActive already requires the canvas view + active
               // app). Only then does the iframe receive the real safe-area
@@ -1371,6 +1389,7 @@ export default function Shell() {
               onNavPop={appNavPop}
               onNavReset={appNavReset}
               onImmersive={handleImmersive}
+              onIntentDelivered={handleAppIntentDelivered}
             />
           </div>
         ))}
