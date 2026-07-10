@@ -613,12 +613,12 @@ async def install_app(
   # Clean up any retired suppression marker left by older builds. Catalog apps
   # are ordinary installs now, so this is compatibility cleanup only.
   core_app_suppress.clear_suppressed(get_settings().data_dir, app.slug)
-  # A conflicting update leaves the app on its current version with a real
-  # working-tree merge (markers + MERGE_HEAD) on disk; the merge is NOT
-  # auto-resolved. Whether to involve the agent is the owner's call, not ours:
+  # A conflicting update leaves the app on its current version with its source
+  # files untouched. Whether to involve the agent is the owner's call, not ours:
   # the store surfaces the conflict (mode + conflict_paths, below) and the owner
   # opts in via its click-gated "Resolve in chat" affordance, which opens the
-  # resolver chat itself. We deliberately do NOT auto-spawn a resolver here —
+  # resolver chat itself. Only that resolver endpoint materializes conflict
+  # markers for the agent. We deliberately do NOT auto-spawn a resolver here —
   # doing so preempted the owner's choice and raced a duplicate chat against the
   # store's own.
   upstream_version = str(manifest.get("version", "")).strip() or None
@@ -943,17 +943,33 @@ async def create_conflict_resolver_chat(
     raise HTTPException(status_code=400, detail="App is not a git repo.")
 
   async with fs_locks.source_dir_lock(str(repo)):
-    if not await asyncio.to_thread(_git_path_exists, repo, "MERGE_HEAD"):
-      raise HTTPException(
-        status_code=409,
-        detail="No unresolved update conflict for this app.",
-      )
-    conflict_paths = await asyncio.to_thread(_unmerged_status_paths, repo)
-    if not conflict_paths:
-      raise HTTPException(
-        status_code=409,
-        detail="No unresolved update conflict for this app.",
-      )
+    materialize_on_new_chat = False
+    if await asyncio.to_thread(_git_path_exists, repo, "MERGE_HEAD"):
+      conflict_paths = await asyncio.to_thread(_unmerged_status_paths, repo)
+      if not conflict_paths:
+        raise HTTPException(
+          status_code=409,
+          detail="No unresolved update conflict for this app.",
+        )
+    else:
+      merge = await asyncio.to_thread(app_git.merge_upstream, repo)
+      if merge.status != "conflict" or not merge.conflict_paths:
+        raise HTTPException(
+          status_code=409,
+          detail="No unresolved update conflict for this app.",
+        )
+      conflict_paths = merge.conflict_paths
+      materialize_on_new_chat = True
+
+    if materialize_on_new_chat:
+      conflict_paths = await asyncio.to_thread(
+        app_git.start_conflict_merge, repo,
+      ) or conflict_paths
+      if not conflict_paths:
+        raise HTTPException(
+          status_code=409,
+          detail="No unresolved update conflict for this app.",
+        )
     upstream_version = await asyncio.to_thread(
       _upstream_version, repo, app.upstream_commit,
     )
