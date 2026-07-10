@@ -391,12 +391,12 @@ def get_owner_or_app_with_github_access(
   needs the owner to authorize on github.com or paste their own PAT),
   can disconnect, and can read PR/issue state under the stored token.
   What it CANNOT do is exfiltrate the token (it never leaves the server,
-  INV1) or write to GitHub over HTTP (the read surface is GET-only /
-  mutation-rejecting; all writes go through the agent's gh CLI with
-  per-action owner approval). The Contribute mini-app is the canonical
-  and, today, only holder — it ships `permissions.github_access: true`
-  so its own UI can connect + read without holding the owner JWT. A
-  boolean gate like manage_apps above, not a ladder.
+  INV1) or write to GitHub over HTTP with an app-scoped token (the read
+  surface is GET-only / mutation-rejecting, and the PR submit endpoint
+  is owner-token-only). The Contribute mini-app is the canonical and,
+  today, only holder — it ships `permissions.github_access: true` so its
+  own UI can connect + read without holding the owner JWT. A boolean gate
+  like manage_apps above, not a ladder.
 
   Because the grant covers connect + disconnect, treat it as a
   connection-management capability, not a read scope, when deciding

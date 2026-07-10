@@ -1,38 +1,32 @@
-function PadMark(props) {
-  return (
-    <span {...props}>
-      <span /><span /><span /><span />
-    </span>
-  )
-}
+import { S } from '../styles.js'
 
-export function BeatHeader({ appId, readyCount, online }) {
+export function Header({ appId, activePads, online }) {
   return (
-    <header className="bm-header">
-      <div className="bm-brand">
-        {appId && (
-          <img
-            src={`/api/apps/${appId}/icon?size=64`}
-            alt=""
-            width={36}
-            height={36}
-            className="bm-brand-icon"
-            onError={(event) => {
-              event.currentTarget.style.display = 'none'
-              const fallback = event.currentTarget.nextElementSibling
-              if (fallback) fallback.style.display = 'grid'
-            }}
-          />
+    <header style={S.header}>
+      <div style={S.titleRow}>
+        {appId ? (
+          <>
+            <img
+              src={`/api/apps/${appId}/icon?size=64`}
+              alt=""
+              width={30}
+              height={30}
+              style={S.appIcon}
+              onError={(event) => {
+                event.currentTarget.style.display = 'none'
+                const fallback = event.currentTarget.nextElementSibling
+                if (fallback) fallback.style.display = 'flex'
+              }}
+            />
+            <span style={{ ...S.logoFallback, display: 'none' }} aria-hidden="true">♬</span>
+          </>
+        ) : (
+          <span style={S.logoFallback} aria-hidden="true">♬</span>
         )}
-        <PadMark className="bm-mark" style={{ display: appId ? 'none' : 'grid' }} aria-hidden="true" />
-        <div className="bm-brand-text">
-          <h1 className="bm-title">Beat Machine</h1>
-          <span className="bm-subtitle">{readyCount} pads ready</span>
-        </div>
+        <h1 style={S.title}>Beat Machine</h1>
+        <span style={S.badge}>{activePads}/16</span>
       </div>
-      <div className="bm-header-right">
-        {!online && <span className="bm-sync-pill" role="status">Offline</span>}
-      </div>
+      {!online && <span style={S.offlinePill} role="status">Offline</span>}
     </header>
   )
 }

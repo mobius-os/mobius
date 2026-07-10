@@ -1,4 +1,4 @@
-import { PADS, PAD_COLORS } from './audio.js'
+import { CUSTOM_START, PADS, PAD_COLORS, TOTAL_BEATS } from './audio.js'
 import { useEffect, useState } from 'react'
 
 export const SAVE_PATH = 'state.json'
@@ -45,13 +45,45 @@ export async function saveBeatState(appId, token, data) {
 }
 
 export function sanitizeState(raw) {
-  const state = raw && typeof raw === 'object' ? raw : {}
+  const state = unwrapStorageEnvelope(raw)
   return {
+    grid: sanitizeGrid(state.grid),
+    bpm: sanitizeBpm(state.bpm),
     volumes: sanitizeVolumes(state.volumes),
     echo: clamp01(state.echo),
     reverb: clamp01(state.reverb),
     customPads: sanitizeCustomPads(state.customPads),
   }
+}
+
+export function createEmptyGrid() {
+  return Array.from({ length: PADS }, () => new Array(TOTAL_BEATS).fill(false))
+}
+
+function unwrapStorageEnvelope(raw) {
+  if (raw && typeof raw === 'object' && typeof raw.content === 'string') {
+    try {
+      const parsed = JSON.parse(raw.content)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {}
+}
+
+function sanitizeGrid(value) {
+  const rows = Array.isArray(value) ? value : []
+  return Array.from({ length: PADS }, (_, padIdx) => {
+    const row = Array.isArray(rows[padIdx]) ? rows[padIdx] : []
+    return Array.from({ length: TOTAL_BEATS }, (_, beatIdx) => row[beatIdx] === true)
+  })
+}
+
+function sanitizeBpm(value) {
+  const bpm = Number(value)
+  if (!Number.isFinite(bpm)) return 120
+  return Math.max(60, Math.min(200, Math.round(bpm)))
 }
 
 function sanitizeVolumes(value) {
@@ -67,12 +99,12 @@ function sanitizeCustomPads(value) {
   return value
     .map((item) => {
       const idx = Number(item?.idx)
-      if (!Number.isInteger(idx) || idx < 8 || idx >= PADS) return null
+      if (!Number.isInteger(idx) || idx < CUSTOM_START || idx >= PADS) return null
       const audio = item.audio && typeof item.audio === 'object' ? item.audio : null
       if (!audio || !Array.isArray(audio.channels) || audio.channels.length === 0) return null
       return {
         idx,
-        name: String(item.name || `Sample ${idx - 7}`).slice(0, 18),
+        name: String(item.name || `Rec ${idx - CUSTOM_START + 1}`).slice(0, 18),
         color: typeof item.color === 'string' ? item.color : PAD_COLORS[idx],
         audio,
       }

@@ -4,6 +4,7 @@ import {
   CUSTOM_START,
   MAX_RECORD_SECONDS,
   PADS,
+  TOTAL_BEATS,
   createInitialPads,
   createRecordingBuffer,
   drawLiveWaveform,
@@ -12,13 +13,16 @@ import {
   restoreSavedAudio,
   serializeCustomPads,
 } from './audio.js'
-import { CSS } from './theme.js'
-import { loadBeatState, saveBeatState, useOnline } from './storage.js'
-import { EffectsMixer, PadDetail } from './ui/DetailPanel.jsx'
-import { BeatHeader } from './ui/Header.jsx'
-import { PadButton, hasPadAudio, sampleName } from './ui/PadButton.jsx'
+import { createEmptyGrid, loadBeatState, saveBeatState, useOnline } from './storage.js'
+import { CSS, S } from './styles.js'
+import { ControlPanel } from './ui/ControlPanel.jsx'
+import { Header } from './ui/Header.jsx'
+import { PadBanks } from './ui/PadBanks.jsx'
+import { Sequencer } from './ui/Sequencer.jsx'
 
-const SAVE_DEBOUNCE_MS = 700
+const SAVE_DEBOUNCE_MS = 800
+const LOOKAHEAD_MS = 25
+const SCHEDULE_AHEAD_SECONDS = 0.1
 
 function signal(name, payload) {
   try { window.mobius?.signal?.(name, payload) } catch {}
@@ -26,56 +30,80 @@ function signal(name, payload) {
 
 export default function BeatMachine({ appId, token }) {
   const online = useOnline()
-  const engineRef = useRef(null)
-  const kitLoadedRef = useRef(false)
-  const volumesRef = useRef(new Array(PADS).fill(0.8))
-  const echoRef = useRef(0)
-  const reverbRef = useRef(0)
 
-  const [padsState, setPadsState] = useState(createInitialPads)
-  const padsRef = useRef(padsState)
+  const engineRef = useRef(null)
+  const presetsLoadedRef = useRef(false)
+  const schedulerRef = useRef(null)
+  const nextBeatTimeRef = useRef(0)
+  const currentBeatRef = useRef(0)
+  const playRef = useRef(false)
+  const activeSrcRef = useRef(null)
+
+  const [pads, setPadsState] = useState(createInitialPads)
+  const padsRef = useRef(pads)
   const setPads = useCallback((updater) => {
     const next = typeof updater === 'function' ? updater(padsRef.current) : updater
     padsRef.current = next
     setPadsState(next)
   }, [])
 
+  const [grid, setGridState] = useState(createEmptyGrid)
+  const gridRef = useRef(grid)
+  const setGrid = useCallback((updater) => {
+    const next = typeof updater === 'function' ? updater(gridRef.current) : updater
+    gridRef.current = next
+    setGridState(next)
+  }, [])
+
   const [volumes, setVolumes] = useState(() => new Array(PADS).fill(0.8))
+  const volumesRef = useRef(volumes)
   const [echo, setEcho] = useState(0)
+  const echoRef = useRef(echo)
   const [reverb, setReverb] = useState(0)
+  const reverbRef = useRef(reverb)
+  const [bpm, setBpm] = useState(120)
+  const bpmRef = useRef(bpm)
+
+  const [playing, setPlaying] = useState(false)
+  const [currentBeat, setCurrentBeat] = useState(-1)
   const [selectedPad, setSelectedPad] = useState(null)
-  const [activePad, setActivePad] = useState(null)
+  const [activePadIdx, setActivePadIdx] = useState(null)
   const [isRecording, setIsRecording] = useState(false)
   const isRecordingRef = useRef(false)
+  const [recordTarget, setRecordTarget] = useState(null)
   const recordTargetRef = useRef(null)
-  const [renaming, setRenaming] = useState(false)
-  const [renameValue, setRenameValue] = useState('')
+  const recordIntentRef = useRef(null)
+  const [renamingPad, setRenamingPad] = useState(null)
+  const [renameVal, setRenameVal] = useState('')
   const [stateLoaded, setStateLoaded] = useState(false)
   const [toast, setToast] = useState('')
 
+  const saveTimerRef = useRef(null)
+  const readySignalRef = useRef(false)
+  const recordingTimerRef = useRef(null)
   const recProcessorRef = useRef(null)
-  const recSourceRef = useRef(null)
   const recSilentRef = useRef(null)
-  const recStreamRef = useRef(null)
   const recChunksRef = useRef([])
   const analyserRef = useRef(null)
   const animFrameRef = useRef(null)
-  const stopTimerRef = useRef(null)
-  const stopRecordingRef = useRef(null)
+  const streamRef = useRef(null)
+  const recSourceRef = useRef(null)
   const liveCanvasRef = useRef(null)
   const waveCanvasRef = useRef(null)
-  const saveTimerRef = useRef(null)
-  const readySignalRef = useRef(false)
+  const seqScrollRef = useRef(null)
 
-  useEffect(() => { padsRef.current = padsState }, [padsState])
+  useEffect(() => { padsRef.current = pads }, [pads])
+  useEffect(() => { gridRef.current = grid }, [grid])
   useEffect(() => { volumesRef.current = volumes }, [volumes])
+  useEffect(() => { bpmRef.current = bpm }, [bpm])
   useEffect(() => { echoRef.current = echo }, [echo])
   useEffect(() => { reverbRef.current = reverb }, [reverb])
+  useEffect(() => { recordTargetRef.current = recordTarget }, [recordTarget])
 
   const showToast = useCallback((message) => {
     setToast(message)
     window.clearTimeout(showToast.timer)
-    showToast.timer = window.setTimeout(() => setToast(''), 3200)
+    showToast.timer = window.setTimeout(() => setToast(''), 2600)
   }, [])
 
   const getEngine = useCallback(() => {
@@ -84,30 +112,15 @@ export default function BeatMachine({ appId, token }) {
     return engineRef.current
   }, [])
 
-  const ensureEngineReady = useCallback(() => {
+  const initPresets = useCallback(() => {
     const engine = getEngine()
-    let next = padsRef.current
-    let changed = false
-
-    if (!kitLoadedRef.current) {
-      next = installKitBuffers(next, engine.ctx)
-      kitLoadedRef.current = true
-      changed = true
+    if (!presetsLoadedRef.current) {
+      presetsLoadedRef.current = true
+      setPads((prev) => installKitBuffers(prev, engine.ctx))
     }
-
-    next = next.map((pad) => {
-      if (!pad.savedAudio || pad.buffer) return pad
-      const buffer = restoreSavedAudio(engine.ctx, pad.savedAudio)
-      if (!buffer) return pad
-      changed = true
-      return { ...pad, buffer }
-    })
-
     volumesRef.current.forEach((value, idx) => engine.setVolume(idx, value))
     engine.setEcho(echoRef.current)
     engine.setReverb(reverbRef.current)
-
-    if (changed) setPads(next)
     return engine
   }, [getEngine, setPads])
 
@@ -116,19 +129,24 @@ export default function BeatMachine({ appId, token }) {
     ;(async () => {
       const saved = await loadBeatState(appId, token)
       if (!alive) return
+      setGrid(saved.grid)
+      setBpm(saved.bpm)
       setVolumes(saved.volumes)
       setEcho(saved.echo)
       setReverb(saved.reverb)
       if (saved.customPads.length) {
+        const engine = getEngine()
         setPads((prev) => {
           const next = [...prev]
           for (const item of saved.customPads) {
+            const buffer = restoreSavedAudio(engine.ctx, item.audio)
+            if (!buffer) continue
             next[item.idx] = {
               ...next[item.idx],
-              name: item.name,
+              name: item.name || `Rec ${item.idx - CUSTOM_START + 1}`,
               color: item.color || next[item.idx].color,
+              buffer,
               savedAudio: item.audio,
-              buffer: null,
               isPreset: false,
             }
           }
@@ -138,11 +156,12 @@ export default function BeatMachine({ appId, token }) {
       setStateLoaded(true)
     })()
     return () => { alive = false }
-  }, [appId, token, setPads])
+  }, [appId, token, getEngine, setGrid, setPads])
 
   useEffect(() => {
-    if (!engineRef.current) return
-    volumes.forEach((value, idx) => engineRef.current.setVolume(idx, value))
+    if (engineRef.current) {
+      volumes.forEach((value, idx) => engineRef.current.setVolume(idx, value))
+    }
   }, [volumes])
 
   useEffect(() => {
@@ -159,6 +178,8 @@ export default function BeatMachine({ appId, token }) {
     saveTimerRef.current = window.setTimeout(async () => {
       try {
         await saveBeatState(appId, token, {
+          grid,
+          bpm,
           volumes,
           echo,
           reverb,
@@ -170,49 +191,63 @@ export default function BeatMachine({ appId, token }) {
       }
     }, SAVE_DEBOUNCE_MS)
     return () => window.clearTimeout(saveTimerRef.current)
-  }, [appId, token, volumes, echo, reverb, padsState, stateLoaded, showToast])
+  }, [appId, token, grid, bpm, volumes, echo, reverb, pads, stateLoaded, showToast])
 
-  const customCount = useMemo(
-    () => padsState.slice(CUSTOM_START).filter((pad) => pad.buffer || pad.savedAudio).length,
-    [padsState],
+  const activePads = useMemo(
+    () => pads.filter((pad) => pad.buffer || pad.isPreset).length,
+    [pads],
   )
-  const readyCount = CUSTOM_START + customCount
 
   useEffect(() => {
     if (!stateLoaded || readySignalRef.current) return
     readySignalRef.current = true
-    signal('app_ready', { custom_pads: customCount, ready_pads: readyCount })
-  }, [customCount, readyCount, stateLoaded])
+    signal('app_ready', { ready_pads: activePads })
+  }, [activePads, stateLoaded])
 
-  const playPad = useCallback((idx) => {
-    try {
-      const engine = ensureEngineReady()
-      const pad = padsRef.current[idx]
-      const buffer = pad?.buffer || null
-      if (!buffer) return
-      engine.play(idx, buffer)
-      signal('pad_played', { kind: idx < CUSTOM_START ? 'kit' : 'sample' })
-    } catch (err) {
-      showToast(String(err?.message || 'Audio is unavailable'))
-      signal('error', { operation: 'play_pad', message: String(err?.message || err) })
+  const scheduler = useCallback(() => {
+    const engine = engineRef.current
+    if (!engine?.ctx) return
+    while (nextBeatTimeRef.current < engine.currentTime + SCHEDULE_AHEAD_SECONDS) {
+      const beat = currentBeatRef.current
+      const rows = gridRef.current
+      const currentPads = padsRef.current
+      for (let idx = 0; idx < PADS; idx += 1) {
+        if (rows[idx]?.[beat] && currentPads[idx]?.buffer) {
+          engine.play(idx, currentPads[idx].buffer, nextBeatTimeRef.current)
+        }
+      }
+      setCurrentBeat(beat)
+      nextBeatTimeRef.current += 60 / bpmRef.current / 4
+      currentBeatRef.current = (currentBeatRef.current + 1) % TOTAL_BEATS
     }
-  }, [ensureEngineReady, showToast])
+  }, [])
 
-  const triggerPad = useCallback((idx) => {
-    if (isRecordingRef.current) return
-    setSelectedPad(idx)
-    setRenaming(false)
-    setActivePad(idx)
-    window.setTimeout(() => {
-      setActivePad((current) => (current === idx ? null : current))
-    }, 150)
+  const stopPlayback = useCallback(() => {
+    playRef.current = false
+    setPlaying(false)
+    setCurrentBeat(-1)
+    window.clearTimeout(schedulerRef.current)
+  }, [])
 
-    const pad = padsRef.current[idx]
-    if (hasPadAudio(pad)) playPad(idx)
-  }, [playPad])
+  const startPlayback = useCallback(() => {
+    const engine = initPresets()
+    playRef.current = true
+    setPlaying(true)
+    currentBeatRef.current = 0
+    nextBeatTimeRef.current = engine.currentTime + 0.05
+    const loop = () => {
+      if (!playRef.current) return
+      scheduler()
+      schedulerRef.current = window.setTimeout(loop, LOOKAHEAD_MS)
+    }
+    loop()
+    signal('playback_started')
+  }, [initPresets, scheduler])
 
-  const cleanupRecordingNodes = useCallback(() => {
-    window.clearTimeout(stopTimerRef.current)
+  const cleanupRecording = useCallback(() => {
+    recordIntentRef.current = null
+    window.clearTimeout(recordingTimerRef.current)
+    recordingTimerRef.current = null
     window.cancelAnimationFrame(animFrameRef.current)
     if (recProcessorRef.current) {
       recProcessorRef.current.onaudioprocess = null
@@ -227,51 +262,51 @@ export default function BeatMachine({ appId, token }) {
       try { recSourceRef.current.disconnect() } catch {}
       recSourceRef.current = null
     }
-    if (recStreamRef.current) {
-      recStreamRef.current.getTracks().forEach((track) => track.stop())
-      recStreamRef.current = null
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
     }
     analyserRef.current = null
   }, [])
 
   const stopRecording = useCallback(() => {
-    const engine = engineRef.current
     const target = recordTargetRef.current
+    const engine = engineRef.current
     const chunks = recChunksRef.current
-    cleanupRecordingNodes()
+    cleanupRecording()
     recChunksRef.current = []
-    recordTargetRef.current = null
-    isRecordingRef.current = false
     setIsRecording(false)
-    setActivePad(null)
+    isRecordingRef.current = false
+    setRecordTarget(null)
+    recordTargetRef.current = null
 
-    if (!engine || target == null || chunks.length === 0) return
+    if (!engine || target === null || chunks.length === 0) return
     const buffer = createRecordingBuffer(engine.ctx, chunks, MAX_RECORD_SECONDS)
     if (!buffer) return
-
     setPads((prev) => {
       const next = [...prev]
       next[target] = {
         ...next[target],
-        name: next[target].name || sampleName(target),
         buffer,
         savedAudio: null,
+        name: next[target].name || `Rec ${target - CUSTOM_START + 1}`,
         isPreset: false,
       }
       return next
     })
     setSelectedPad(target)
     signal('item_created', { type: 'sample' })
-  }, [cleanupRecordingNodes, setPads])
+  }, [cleanupRecording, setPads])
 
-  useEffect(() => {
-    stopRecordingRef.current = stopRecording
-  }, [stopRecording])
-
-  const startRecording = useCallback(async (idx) => {
-    if (idx < CUSTOM_START || isRecordingRef.current) return
+  const startRecording = useCallback(async (padIdx) => {
+    if (
+      padIdx < CUSTOM_START ||
+      isRecordingRef.current ||
+      recordIntentRef.current !== null
+    ) return
+    recordIntentRef.current = padIdx
     try {
-      const engine = ensureEngineReady()
+      const engine = initPresets()
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Microphone recording is unavailable in this browser.')
       }
@@ -282,7 +317,11 @@ export default function BeatMachine({ appId, token }) {
           autoGainControl: false,
         },
       })
-
+      if (recordIntentRef.current !== padIdx) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+      streamRef.current = stream
       const source = engine.ctx.createMediaStreamSource(stream)
       const analyser = engine.ctx.createAnalyser()
       analyser.fftSize = 2048
@@ -295,192 +334,250 @@ export default function BeatMachine({ appId, token }) {
       processor.connect(silent)
       silent.connect(engine.ctx.destination)
 
+      recSourceRef.current = source
+      analyserRef.current = analyser
+      recProcessorRef.current = processor
+      recSilentRef.current = silent
       recChunksRef.current = []
       processor.onaudioprocess = (event) => {
         recChunksRef.current.push(new Float32Array(event.inputBuffer.getChannelData(0)))
-        const frames = recChunksRef.current.reduce((sum, chunk) => sum + chunk.length, 0)
-        if (frames >= engine.ctx.sampleRate * MAX_RECORD_SECONDS) {
-          stopRecordingRef.current?.()
-        }
       }
 
-      recStreamRef.current = stream
-      recSourceRef.current = source
-      recProcessorRef.current = processor
-      recSilentRef.current = silent
-      analyserRef.current = analyser
-      recordTargetRef.current = idx
-      isRecordingRef.current = true
-      setSelectedPad(idx)
-      setActivePad(idx)
+      setRecordTarget(padIdx)
+      recordTargetRef.current = padIdx
       setIsRecording(true)
-      setRenaming(false)
+      isRecordingRef.current = true
+      recordIntentRef.current = null
+      setSelectedPad(padIdx)
+      recordingTimerRef.current = window.setTimeout(() => {
+        showToast('Recording saved')
+        stopRecording()
+      }, MAX_RECORD_SECONDS * 1000)
 
       const drawLoop = () => {
         drawLiveWaveform(liveCanvasRef.current, analyserRef.current)
         animFrameRef.current = window.requestAnimationFrame(drawLoop)
       }
       drawLoop()
-      stopTimerRef.current = window.setTimeout(() => {
-        stopRecordingRef.current?.()
-      }, MAX_RECORD_SECONDS * 1000 + 160)
       signal('record_started')
     } catch (err) {
-      cleanupRecordingNodes()
-      isRecordingRef.current = false
+      cleanupRecording()
       setIsRecording(false)
+      isRecordingRef.current = false
+      setRecordTarget(null)
+      recordTargetRef.current = null
+      setActivePadIdx(null)
       showToast(String(err?.message || 'Microphone permission was not granted'))
       signal('record_failed', { message: String(err?.message || err) })
     }
-  }, [cleanupRecordingNodes, ensureEngineReady, showToast])
+  }, [cleanupRecording, initPresets, showToast, stopRecording])
 
-  const clearPad = useCallback((idx) => {
-    if (idx < CUSTOM_START) return
-    setPads((prev) => {
-      const next = [...prev]
-      next[idx] = {
-        ...next[idx],
-        name: '',
-        buffer: null,
-        savedAudio: null,
-        isPreset: false,
-      }
+  const playPad = useCallback((padIdx) => {
+    const engine = initPresets()
+    const pad = padsRef.current[padIdx]
+    if (!pad?.buffer) return null
+    engine.setEcho(echoRef.current)
+    engine.setReverb(reverbRef.current)
+    signal('pad_played', { kind: padIdx < CUSTOM_START ? 'kit' : 'sample' })
+    return engine.play(padIdx, pad.buffer)
+  }, [initPresets])
+
+  const handlePadDown = useCallback((padIdx) => {
+    if (isRecordingRef.current || recordIntentRef.current !== null) return
+    initPresets()
+    setActivePadIdx(padIdx)
+    const pad = padsRef.current[padIdx]
+    if (padIdx >= CUSTOM_START && !pad?.buffer) {
+      startRecording(padIdx)
+    } else if (pad?.buffer) {
+      setSelectedPad(padIdx)
+      activeSrcRef.current = playPad(padIdx)
+    }
+  }, [initPresets, playPad, startRecording])
+
+  const handlePadUp = useCallback(() => {
+    if (!isRecordingRef.current && recordIntentRef.current !== null) {
+      recordIntentRef.current = null
+    }
+    if (isRecordingRef.current) stopRecording()
+    if (activeSrcRef.current) {
+      try { activeSrcRef.current.stop() } catch {}
+      activeSrcRef.current = null
+    }
+    setActivePadIdx(null)
+  }, [stopRecording])
+
+  useEffect(() => {
+    const up = () => handlePadUp()
+    const stopIfHidden = () => {
+      if (document.visibilityState === 'hidden') handlePadUp()
+    }
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    window.addEventListener('blur', up)
+    document.addEventListener('visibilitychange', stopIfHidden)
+    return () => {
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('blur', up)
+      document.removeEventListener('visibilitychange', stopIfHidden)
+    }
+  }, [handlePadUp])
+
+  const toggleCell = useCallback((padIdx, beatIdx) => {
+    initPresets()
+    setGrid((prev) => {
+      const next = prev.map((row) => [...row])
+      next[padIdx][beatIdx] = !next[padIdx][beatIdx]
       return next
     })
-    setRenaming(false)
-    signal('item_deleted', { type: 'sample' })
-  }, [setPads])
+  }, [initPresets, setGrid])
 
-  const startRename = useCallback((idx) => {
-    if (idx < CUSTOM_START) return
-    setRenameValue(padsRef.current[idx]?.name || sampleName(idx))
-    setRenaming(true)
+  const clearGrid = useCallback(() => {
+    setGrid(createEmptyGrid())
+  }, [setGrid])
+
+  const clearPad = useCallback((padIdx) => {
+    if (padIdx < CUSTOM_START) return
+    setPads((prev) => {
+      const next = [...prev]
+      next[padIdx] = { ...next[padIdx], buffer: null, savedAudio: null, name: '', isPreset: false }
+      return next
+    })
+    setGrid((prev) => {
+      const next = prev.map((row) => [...row])
+      next[padIdx] = new Array(TOTAL_BEATS).fill(false)
+      return next
+    })
+    if (selectedPad === padIdx) setSelectedPad(null)
+    signal('item_deleted', { type: 'sample' })
+  }, [selectedPad, setGrid, setPads])
+
+  useEffect(() => {
+    if (selectedPad !== null && pads[selectedPad]?.buffer) {
+      window.requestAnimationFrame(() => {
+        drawWaveform(waveCanvasRef.current, pads[selectedPad].buffer, pads[selectedPad].color)
+      })
+    }
+  }, [selectedPad, pads])
+
+  useEffect(() => {
+    if (currentBeat >= 0 && seqScrollRef.current) {
+      const cellWidth = 30
+      const el = seqScrollRef.current
+      el.scrollLeft = Math.max(0, currentBeat * cellWidth - el.clientWidth / 2 + cellWidth / 2)
+    }
+  }, [currentBeat])
+
+  const startRename = useCallback((padIdx) => {
+    if (padIdx < CUSTOM_START) return
+    setRenamingPad(padIdx)
+    setRenameVal(padsRef.current[padIdx]?.name || `Rec ${padIdx - CUSTOM_START + 1}`)
   }, [])
 
   const finishRename = useCallback(() => {
-    if (selectedPad == null || selectedPad < CUSTOM_START) {
-      setRenaming(false)
-      return
-    }
-    const nextName = renameValue.trim().slice(0, 18)
-    if (nextName) {
+    const name = renameVal.trim().slice(0, 12)
+    if (renamingPad !== null && name) {
       setPads((prev) => {
         const next = [...prev]
-        next[selectedPad] = { ...next[selectedPad], name: nextName }
+        next[renamingPad] = { ...next[renamingPad], name }
         return next
       })
     }
-    setRenaming(false)
-  }, [renameValue, selectedPad, setPads])
+    setRenamingPad(null)
+  }, [renameVal, renamingPad, setPads])
 
-  const setPadVolume = useCallback((idx, value) => {
+  const setPadVolume = useCallback((padIdx, value) => {
     setVolumes((prev) => {
       const next = [...prev]
-      next[idx] = value
+      next[padIdx] = value
       return next
     })
   }, [])
 
-  useEffect(() => {
-    if (selectedPad !== null && padsState[selectedPad]?.buffer) {
-      window.requestAnimationFrame(() => {
-        drawWaveform(waveCanvasRef.current, padsState[selectedPad].buffer, padsState[selectedPad].color)
-      })
-    }
-  }, [padsState, selectedPad])
-
   useEffect(() => () => {
+    window.clearTimeout(schedulerRef.current)
     window.clearTimeout(saveTimerRef.current)
     window.clearTimeout(showToast.timer)
-    cleanupRecordingNodes()
+    window.cancelAnimationFrame(animFrameRef.current)
+    cleanupRecording()
     if (engineRef.current) engineRef.current.dispose()
-  }, [cleanupRecordingNodes])
-
-  const selected = selectedPad == null ? null : padsState[selectedPad]
-  const recordTarget = recordTargetRef.current
+  }, [cleanupRecording])
 
   return (
-    <div className="bm-root">
+    <div className="bm-root" style={S.root}>
       <style>{CSS}</style>
-      <BeatHeader appId={appId} readyCount={readyCount} online={online} />
+      <Header appId={appId} activePads={activePads} online={online} />
 
-      <div className="bm-scroll">
-        <main className="bm-main">
-          <section className="bm-bank" aria-label="Beat pads">
-            <div className="bm-bank-group">
-              <div className="bm-section-head">
-                <h2 className="bm-section-title">Kit</h2>
-                <span className="bm-section-meta">8 built-in</span>
-              </div>
-              <div className="bm-pad-grid">
-                {padsState.slice(0, CUSTOM_START).map((pad, idx) => (
-                  <PadButton
-                    key={idx}
-                    pad={pad}
-                    idx={idx}
-                    selected={selectedPad === idx}
-                    active={activePad === idx}
-                    recording={isRecording && recordTarget === idx}
-                    onTrigger={triggerPad}
-                  />
-                ))}
-              </div>
-            </div>
-            <div className="bm-bank-group">
-              <div className="bm-section-head">
-                <h2 className="bm-section-title">Samples</h2>
-                <span className="bm-section-meta">{customCount}/8 loaded</span>
-              </div>
-              <div className="bm-pad-grid">
-                {padsState.slice(CUSTOM_START).map((pad, offset) => {
-                  const idx = offset + CUSTOM_START
-                  return (
-                    <PadButton
-                      key={idx}
-                      pad={pad}
-                      idx={idx}
-                      selected={selectedPad === idx}
-                      active={activePad === idx}
-                      recording={isRecording && recordTarget === idx}
-                      onTrigger={triggerPad}
-                    />
-                  )
-                })}
-              </div>
-            </div>
-          </section>
+      <Sequencer
+        pads={pads}
+        grid={grid}
+        playing={playing}
+        bpm={bpm}
+        currentBeat={currentBeat}
+        seqScrollRef={seqScrollRef}
+        onBpmChange={setBpm}
+        onTogglePlay={playing ? stopPlayback : startPlayback}
+        onClear={clearGrid}
+        onToggleCell={toggleCell}
+      />
 
-          <aside className="bm-panel" aria-label="Pad details and effects">
-            <PadDetail
-              selected={selected}
-              selectedPad={selectedPad}
-              recordTarget={recordTarget}
-              isRecording={isRecording}
-              liveCanvasRef={liveCanvasRef}
-              waveCanvasRef={waveCanvasRef}
-              volumes={volumes}
-              renaming={renaming}
-              renameValue={renameValue}
-              onRenameValueChange={setRenameValue}
-              onRenameFinish={finishRename}
-              onRenameCancel={() => setRenaming(false)}
-              onRenameStart={startRename}
-              onVolumeChange={setPadVolume}
-              onRecordStart={startRecording}
-              onRecordStop={stopRecording}
-              onClear={clearPad}
-            />
-            <EffectsMixer
-              echo={echo}
-              reverb={reverb}
-              onEchoChange={setEcho}
-              onReverbChange={setReverb}
-            />
-          </aside>
-        </main>
+      <div style={S.bottomSection}>
+        <PadBanks
+          pads={pads}
+          selectedPad={selectedPad}
+          activePadIdx={activePadIdx}
+          isRecording={isRecording}
+          recordTarget={recordTarget}
+          onPadDown={handlePadDown}
+          onPadUp={handlePadUp}
+          onClearPad={clearPad}
+        />
+        <ControlPanel
+          pads={pads}
+          selectedPad={selectedPad}
+          volumes={volumes}
+          echo={echo}
+          reverb={reverb}
+          isRecording={isRecording}
+          recordTarget={recordTarget}
+          renamingPad={renamingPad}
+          renameVal={renameVal}
+          liveCanvasRef={liveCanvasRef}
+          waveCanvasRef={waveCanvasRef}
+          onRenameValChange={setRenameVal}
+          onRenameFinish={finishRename}
+          onRenameCancel={() => setRenamingPad(null)}
+          onStartRename={startRename}
+          onClearPad={clearPad}
+          onVolumeChange={setPadVolume}
+          onEchoChange={setEcho}
+          onReverbChange={setReverb}
+        />
       </div>
 
-      {toast && <div className="bm-toast" role="status">{toast}</div>}
+      {toast && (
+        <div
+          role="status"
+          style={{
+            position: 'absolute',
+            left: 16,
+            right: 16,
+            bottom: 16,
+            minHeight: 38,
+            padding: '9px 12px',
+            borderRadius: 10,
+            background: 'var(--surface)',
+            border: '1px solid #f87171',
+            color: 'var(--text)',
+            fontSize: 12,
+            fontWeight: 650,
+            textAlign: 'center',
+          }}
+        >
+          {toast}
+        </div>
+      )}
     </div>
   )
 }

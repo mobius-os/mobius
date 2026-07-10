@@ -1,13 +1,14 @@
 export const PADS = 16
 export const KIT_PADS = 8
 export const CUSTOM_START = 8
-export const MAX_RECORD_SECONDS = 6
+export const TOTAL_BEATS = 32
+export const MAX_RECORD_SECONDS = 8
 
 export const PAD_COLORS = [
-  '#a78bfa', '#38bdf8', '#f472b6', '#f59e0b',
-  '#34d399', '#818cf8', '#fb7185', '#22d3ee',
-  '#c084fc', '#60a5fa', '#f97316', '#10b981',
-  '#f43f5e', '#8b5cf6', '#eab308', '#06b6d4',
+  '#a78bfa', '#818cf8', '#6366f1', '#7c3aed',
+  '#c084fc', '#a855f7', '#8b5cf6', '#6d28d9',
+  '#f472b6', '#ec4899', '#db2777', '#be185d',
+  '#fb923c', '#f97316', '#ea580c', '#f59e0b',
 ]
 
 function audioContextCtor() {
@@ -121,6 +122,14 @@ export class AudioEngine {
     source.connect(this.padGains[padIdx])
     source.start(typeof when === 'number' ? when : 0)
     return source
+  }
+
+  get currentTime() {
+    return this.ctx ? this.ctx.currentTime : 0
+  }
+
+  get sampleRate() {
+    return this.ctx ? this.ctx.sampleRate : 44100
   }
 
   dispose() {
@@ -393,9 +402,11 @@ export function restoreSavedAudio(ctx, saved) {
 }
 
 export function createRecordingBuffer(ctx, chunks, maxSeconds = MAX_RECORD_SECONDS) {
-  const maxLength = Math.max(1, Math.round(ctx.sampleRate * maxSeconds))
   const sourceLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-  const length = Math.min(sourceLength, maxLength)
+  const cappedLength = Number.isFinite(maxSeconds)
+    ? Math.round(ctx.sampleRate * Math.max(0.1, maxSeconds))
+    : sourceLength
+  const length = Math.min(sourceLength, cappedLength)
   if (!length) return null
 
   const buffer = ctx.createBuffer(1, length, ctx.sampleRate)
