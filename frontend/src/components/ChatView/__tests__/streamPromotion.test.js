@@ -9,6 +9,7 @@ import {
   promoteAssistantStream,
   assistantStreamCoversMessage,
   messageCoversAssistantStream,
+  chooseActiveAssistantSurface,
   assistantMessageText,
   findTrailingAssistantPartialIndex,
   streamItemsHaveRenderableContent,
@@ -130,6 +131,71 @@ test('messageCoversAssistantStream prefers a richer DB partial over a stale one-
   const items = [{ type: 'text', content: 'I' }]
   assert.equal(assistantStreamCoversMessage(msg, items), false)
   assert.equal(messageCoversAssistantStream(msg, items), true)
+})
+
+test('chooseActiveAssistantSurface hides DB partial when live replay is same turn but block metadata drifted', () => {
+  const msg = {
+    role: 'assistant',
+    ts: 2,
+    content: 'I’ll inspect the component and patch the active flow.',
+    blocks: [
+      { type: 'text', content: 'I’ll inspect the component and patch the active flow.' },
+      { type: 'tool', tool: 'Bash', status: 'done', input: 'sed -n 1,200p app.jsx' },
+      { type: 'thinking', content: 'I' },
+    ],
+  }
+  const items = [
+    { type: 'text', content: 'I’ll inspect the component and patch the active flow.' },
+    // Same live turn, but catch-up/tool summaries can temporarily differ.
+    { type: 'tool', tool: 'Bash', status: 'running', input: 'grep -n lookup app.jsx' },
+    { type: 'thinking', content: 'I’m checking the active renderer path now.' },
+  ]
+
+  assert.equal(assistantStreamCoversMessage(msg, items), false)
+  assert.equal(messageCoversAssistantStream(msg, items), false)
+  assert.deepEqual(chooseActiveAssistantSurface(msg, items), {
+    hideMessage: true,
+    suppressStream: false,
+  })
+})
+
+test('chooseActiveAssistantSurface suppresses under-caught-up stream when DB partial is richer', () => {
+  const msg = {
+    role: 'assistant',
+    ts: 2,
+    content: 'I’ll inspect the component and patch the active flow.',
+    blocks: [
+      { type: 'text', content: 'I’ll inspect the component and patch the active flow.' },
+      { type: 'tool', tool: 'Bash', status: 'running', input: 'python3 very-long-inspection.py --all' },
+      { type: 'thinking', content: 'I’m already well into the inspection.' },
+    ],
+  }
+  const items = [
+    { type: 'text', content: 'I’ll inspect the component and patch the active flow.' },
+    { type: 'tool', tool: 'Bash', status: 'running', input: '' },
+  ]
+
+  assert.equal(assistantStreamCoversMessage(msg, items), false)
+  assert.equal(messageCoversAssistantStream(msg, items), false)
+  assert.deepEqual(chooseActiveAssistantSurface(msg, items), {
+    hideMessage: false,
+    suppressStream: true,
+  })
+})
+
+test('chooseActiveAssistantSurface does not collapse unrelated assistant and stream surfaces', () => {
+  const msg = {
+    role: 'assistant',
+    ts: 2,
+    content: 'Previous answer',
+    blocks: [{ type: 'text', content: 'Previous answer' }],
+  }
+  const items = [{ type: 'text', content: 'New active answer' }]
+
+  assert.deepEqual(chooseActiveAssistantSurface(msg, items), {
+    hideMessage: false,
+    suppressStream: false,
+  })
 })
 
 test('text prefix does not hide a persisted tool block when stream lacks it', () => {

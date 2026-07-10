@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
+  serverSnapshotBehindLocal,
   startedMessagesFromResponse,
 } from '../chatRuntimeState.js'
 
@@ -42,4 +43,31 @@ test('canFastForwardQueue requires active turn and server-confirmed queued rows'
   assert.equal(canFastForwardQueue([{ ts: 1, serverTs: false }], true), false)
   assert.equal(canFastForwardQueue([{ ts: '1', serverTs: true }], true), false)
   assert.equal(canFastForwardQueue([{ ts: 1, serverTs: true }, { ts: 2, serverTs: true }], true), true)
+})
+
+test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () => {
+  const server = [
+    { role: 'user', content: 'saved one', ts: 1 },
+    { role: 'assistant', content: 'saved two', ts: 2 },
+  ]
+
+  assert.equal(serverSnapshotBehindLocal(server, [
+    ...server,
+    { role: 'assistant', content: 'stale duplicate from old client', ts: 3 },
+  ]), false)
+
+  assert.equal(serverSnapshotBehindLocal(server, [
+    ...server,
+    { role: 'user', content: 'posting', ts: 4, optimistic: true },
+  ]), true)
+
+  assert.equal(serverSnapshotBehindLocal(server, [
+    ...server,
+    { role: 'user', content: 'queued', ts: 5, queued: true },
+  ]), true)
+
+  assert.equal(serverSnapshotBehindLocal(server, [
+    ...server,
+    { role: 'user', content: 'waiting for canonical ts', ts: 6, serverTs: false },
+  ]), true)
 })

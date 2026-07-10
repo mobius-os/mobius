@@ -87,6 +87,84 @@ function streamBlocksCoverMessageBlocks(msgBlocks, streamBlocks) {
   return true
 }
 
+function blockWeight(block) {
+  if (!block) return 0
+  if (block.type === 'text' || block.type === 'thinking') {
+    return normalizeMirrorText(block.content).length
+  }
+  if (block.type === 'tool') {
+    return 40
+      + normalizeMirrorText(block.tool).length
+      + normalizeMirrorText(block.input).length
+      + normalizeMirrorText(block.output).length
+  }
+  if (block.type === 'question') {
+    return 40
+      + (Array.isArray(block.questions)
+        ? block.questions.map(q => normalizeMirrorText(q?.question || q?.text)).join(' ').length
+        : 0)
+      + (block.answers ? 20 : 0)
+  }
+  if (block.type === 'error') return 40 + normalizeMirrorText(block.message).length
+  return 0
+}
+
+function surfaceWeight({ content, blocks }) {
+  const blockTotal = Array.isArray(blocks)
+    ? blocks.reduce((sum, block) => sum + blockWeight(block), 0)
+    : 0
+  return normalizeMirrorText(content).length + blockTotal
+}
+
+function firstMeaningfulBlock(blocks) {
+  if (!Array.isArray(blocks)) return null
+  return blocks.find(block => {
+    if (!block) return false
+    if (block.type === 'text' || block.type === 'thinking') {
+      return !!normalizeMirrorText(block.content)
+    }
+    return true
+  }) || null
+}
+
+function blocksLookLikeSameTurn(a, b) {
+  if (!a || !b || a.type !== b.type) return false
+  if (a.type === 'text' || a.type === 'thinking') {
+    const aText = normalizeMirrorText(a.content)
+    const bText = normalizeMirrorText(b.content)
+    return !!(aText && bText && (aText.startsWith(bText) || bText.startsWith(aText)))
+  }
+  if (a.type === 'tool') return !!(a.tool && a.tool === b.tool)
+  if (a.type === 'question') return questionKey(a) === questionKey(b)
+  if (a.type === 'error') return (a.message || '') === (b.message || '')
+  return false
+}
+
+function assistantSurfacesLookRelated(msg, streamPayload) {
+  const msgText = normalizeMirrorText(assistantMessageText(msg))
+  const streamText = normalizeMirrorText(streamPayload.content)
+  if (msgText && streamText) {
+    if (msgText.startsWith(streamText) || streamText.startsWith(msgText)) {
+      return true
+    }
+    // Allow a small amount of metadata drift around the same opening prose.
+    // This is deliberately a prefix-only heuristic: unrelated turns often
+    // share generic words later in the paragraph, but a long shared opener is
+    // a strong signal that the DB partial and replay stream are the same turn.
+    const n = Math.min(msgText.length, streamText.length, 48)
+    if (n >= 24 && msgText.slice(0, n) === streamText.slice(0, n)) {
+      return true
+    }
+  }
+
+  const msgBlocks = Array.isArray(msg?.blocks) ? msg.blocks.filter(Boolean) : []
+  const streamBlocks = Array.isArray(streamPayload?.blocks) ? streamPayload.blocks.filter(Boolean) : []
+  return blocksLookLikeSameTurn(
+    firstMeaningfulBlock(msgBlocks),
+    firstMeaningfulBlock(streamBlocks),
+  )
+}
+
 export function assistantStreamCoversMessage(msg, items) {
   if (!msg || msg.role !== 'assistant') return false
   if (!Array.isArray(items) || items.length === 0) return false
@@ -119,6 +197,33 @@ export function messageCoversAssistantStream(msg, items) {
     if (block.type === 'error') return (msgBlock.message || '') === (block.message || '')
     return false
   })
+}
+
+export function chooseActiveAssistantSurface(msg, items) {
+  if (!msg || msg.role !== 'assistant' || !Array.isArray(items) || items.length === 0) {
+    return { hideMessage: false, suppressStream: false }
+  }
+
+  if (assistantStreamCoversMessage(msg, items)) {
+    return { hideMessage: true, suppressStream: false }
+  }
+  if (messageCoversAssistantStream(msg, items)) {
+    return { hideMessage: false, suppressStream: true }
+  }
+
+  const streamPayload = streamItemsToAssistantPayload(items)
+  if (!assistantSurfacesLookRelated(msg, streamPayload)) {
+    return { hideMessage: false, suppressStream: false }
+  }
+
+  const msgPayload = {
+    content: assistantMessageText(msg),
+    blocks: Array.isArray(msg.blocks) ? msg.blocks.filter(Boolean) : [],
+  }
+  if (surfaceWeight(streamPayload) >= surfaceWeight(msgPayload)) {
+    return { hideMessage: true, suppressStream: false }
+  }
+  return { hideMessage: false, suppressStream: true }
 }
 
 export function findTrailingAssistantPartialIndex(messages) {
