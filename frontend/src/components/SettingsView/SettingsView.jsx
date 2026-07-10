@@ -107,25 +107,79 @@ function SaveState({ saving, saved, error }) {
   return null
 }
 
-function SettingsEffortSelect({ provider, value, disabled, onChange }) {
+function effortShortLabel(effort) {
+  const value = effort?.value || ''
+  if (value === 'none') return 'N'
+  if (value === 'minimal') return 'Min'
+  if (value === 'low') return 'L'
+  if (value === 'medium') return 'M'
+  if (value === 'high') return 'H'
+  if (value === 'xhigh') return 'X'
+  if (value === 'max') return 'Max'
+  if (value === 'ultracode') return 'U'
+  return (effort?.label || value || '-').slice(0, 3)
+}
+
+function SettingsEffortStepper({ provider, value, disabled, onChange }) {
   const efforts = PROVIDER_INFO[provider]?.efforts || []
   if (!efforts.length) return null
+  const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
   return (
-    <span className="settings-effort-select">
-      <select
-        className="settings-effort-select__control"
-        value={value || defaultEffort(provider)}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled}
+    <div
+      className={`settings-effort-stepper${disabled ? ' settings-effort-stepper--disabled' : ''}`}
+      style={{ '--effort-count': efforts.length }}
+    >
+      <div
+        className="settings-effort-stepper__track"
+        role="radiogroup"
         aria-label={`${providerLabel(provider)} background effort`}
       >
-        {efforts.map((effort) => (
-          <option key={effort.value} value={effort.value}>
-            {effort.label}
-          </option>
+        {efforts.map((effort, index) => (
+          <button
+            key={effort.value}
+            type="button"
+            role="radio"
+            aria-checked={index === selectedIndex}
+            aria-label={effort.label}
+            disabled={disabled}
+            tabIndex={index === selectedIndex ? 0 : -1}
+            className={
+              'settings-effort-stepper__stop'
+              + (index === selectedIndex ? ' settings-effort-stepper__stop--on' : '')
+              + (index < selectedIndex ? ' settings-effort-stepper__stop--filled' : '')
+            }
+            onClick={() => onChange(effort.value)}
+            onKeyDown={(event) => {
+              let next
+              if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+                next = Math.min(efforts.length - 1, index + 1)
+              } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                next = Math.max(0, index - 1)
+              } else if (event.key === 'Home') {
+                next = 0
+              } else if (event.key === 'End') {
+                next = efforts.length - 1
+              } else {
+                return
+              }
+              event.preventDefault()
+              onChange(efforts[next].value)
+              event.currentTarget.parentElement?.children[next]?.focus()
+            }}
+          />
         ))}
-      </select>
-    </span>
+      </div>
+      <div className="settings-effort-stepper__labels" aria-hidden="true">
+        {efforts.map((effort, index) => (
+          <span
+            key={effort.value}
+            className={index === selectedIndex ? 'settings-effort-stepper__label--on' : ''}
+          >
+            {effortShortLabel(effort)}
+          </span>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -133,12 +187,13 @@ function BackgroundProviderRow({
   row,
   index,
   models,
+  dragging,
+  dropTarget,
+  rowRef,
   onModelChange,
   onEffortChange,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
+  onMove,
+  onReorderStart,
 }) {
   const info = PROVIDER_INFO[row.provider]
   const Logo = info?.Logo
@@ -147,18 +202,31 @@ function BackgroundProviderRow({
   const hasModel = selectedModel && models.some(m => m.id === selectedModel)
   return (
     <div
-      className={`settings-bg-row${enabled ? '' : ' settings-bg-row--off'}`}
+      ref={rowRef}
+      className={
+        'settings-bg-row'
+        + (enabled ? '' : ' settings-bg-row--off')
+        + (dragging ? ' settings-bg-row--dragging' : '')
+        + (dropTarget ? ' settings-bg-row--drop-target' : '')
+      }
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
     >
       <span
         className="settings-bg-row__icon"
-        draggable
-        onDragStart={onDragStart}
-        onDragEnd={onDragEnd}
         title="Drag to change priority"
+        role="button"
+        tabIndex={0}
         aria-label={`Drag ${info?.label || row.provider} to change priority`}
+        onPointerDown={(event) => onReorderStart(event, index)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+            event.preventDefault()
+            onMove(-1)
+          } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+            event.preventDefault()
+            onMove(1)
+          }
+        }}
       >
         {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
       </span>
@@ -183,7 +251,7 @@ function BackgroundProviderRow({
         </span>
       </div>
       <div className="settings-bg-row__effort">
-        <SettingsEffortSelect
+        <SettingsEffortStepper
           provider={row.provider}
           value={row.effort}
           disabled={!enabled}
@@ -291,7 +359,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundSaved, setBackgroundSaved] = useState(false)
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
-  const [backgroundDragIndex, setBackgroundDragIndex] = useState(null)
+  const [backgroundDrag, setBackgroundDrag] = useState(null)
+  const backgroundRowRefs = useRef([])
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
@@ -424,6 +493,62 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       return next
     })
   }, [backgroundDraft, settingsQuery.data, updateBackgroundDraft])
+
+  const backgroundIndexFromY = useCallback((clientY) => {
+    const rows = backgroundRowRefs.current
+    let fallback = Math.max(0, rows.length - 1)
+    for (let index = 0; index < rows.length; index++) {
+      const node = rows[index]
+      if (!node) continue
+      const rect = node.getBoundingClientRect()
+      fallback = index
+      if (clientY < rect.top + rect.height / 2) return index
+    }
+    return fallback
+  }, [])
+
+  const startBackgroundReorder = useCallback((event, index) => {
+    if (event.button !== undefined && event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const next = { fromIndex: index, toIndex: index }
+    setBackgroundDrag(next)
+  }, [])
+
+  const activeBackgroundDragFromIndex = backgroundDrag?.fromIndex ?? null
+  useEffect(() => {
+    if (activeBackgroundDragFromIndex === null) return undefined
+    const fromIndex = activeBackgroundDragFromIndex
+
+    const onPointerMove = (event) => {
+      event.preventDefault()
+      const toIndex = backgroundIndexFromY(event.clientY)
+      setBackgroundDrag((current) => {
+        if (!current || current.toIndex === toIndex) return current
+        return { ...current, toIndex }
+      })
+    }
+
+    const finish = (event) => {
+      event.preventDefault()
+      const toIndex = backgroundIndexFromY(event.clientY)
+      setBackgroundDrag(null)
+      if (toIndex !== fromIndex) moveBackgroundProvider(fromIndex, toIndex)
+    }
+
+    const cancel = () => {
+      setBackgroundDrag(null)
+    }
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false })
+    window.addEventListener('pointerup', finish, { passive: false })
+    window.addEventListener('pointercancel', cancel)
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', cancel)
+    }
+  }, [activeBackgroundDragFromIndex, backgroundIndexFromY, moveBackgroundProvider])
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
@@ -796,6 +921,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       settingsQuery.data?.background_agents,
       providerFromSettings(settingsQuery.data),
     )
+  useEffect(() => {
+    backgroundRowRefs.current.length = effectiveBackgroundDraft.length
+  }, [effectiveBackgroundDraft.length])
   const showGeminiForm = !configured || geminiExpanded
 
   return (
@@ -888,35 +1016,21 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       row={row}
                       index={index}
                       models={modelsForProvider(row.provider)}
+                      dragging={backgroundDrag?.fromIndex === index}
+                      dropTarget={
+                        backgroundDrag?.toIndex === index
+                        && backgroundDrag?.fromIndex !== index
+                      }
+                      rowRef={(node) => {
+                        backgroundRowRefs.current[index] = node
+                      }}
                       onModelChange={(model) => setBackgroundProviderChoice(row.provider, {
                         enabled: !!model,
                         model: model || defaultModel(row.provider),
                       })}
                       onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
-                      onDragStart={(event) => {
-                        event.dataTransfer.effectAllowed = 'move'
-                        event.dataTransfer.setData('text/plain', String(index))
-                        event.dataTransfer.setData('application/x-mobius-provider', row.provider)
-                        setBackgroundDragIndex(index)
-                      }}
-                      onDragOver={(event) => {
-                        event.preventDefault()
-                        event.dataTransfer.dropEffect = 'move'
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault()
-                        const fallbackIndex = Number.parseInt(
-                          event.dataTransfer.getData('text/plain'),
-                          10,
-                        )
-                        const fromIndex = backgroundDragIndex !== null
-                          ? backgroundDragIndex
-                          : (Number.isFinite(fallbackIndex) ? fallbackIndex : null)
-                        if (fromIndex === null) return
-                        moveBackgroundProvider(fromIndex, index)
-                        setBackgroundDragIndex(null)
-                      }}
-                      onDragEnd={() => setBackgroundDragIndex(null)}
+                      onMove={(delta) => moveBackgroundProvider(index, index + delta)}
+                      onReorderStart={startBackgroundReorder}
                     />
                   ))}
                 </div>
