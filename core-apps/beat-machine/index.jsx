@@ -232,6 +232,8 @@ export default function BeatMachine({ appId, token }) {
     playRef.current = false
     setPlaying(false)
     setCurrentBeat(-1)
+    currentBeatRef.current = 0
+    if (seqScrollRef.current) seqScrollRef.current.scrollLeft = 0
     window.clearTimeout(schedulerRef.current)
   }, [])
 

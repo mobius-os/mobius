@@ -20,4 +20,4 @@
 # Format (catalog-synced apps only): <slug>  <owner/repo>  <commit-sha>
 memory      mobius-os/app-memory      f74ea4da3b02ef46d40f1de6ce43ca31d89d6832
 reflection  mobius-os/app-reflection  cf51c2805cd31cf01b7fb56d8f22adc654dcbf9b
-beat-machine  mobius-os/app-beat-machine  d71bb63f2afbb8a5a51b8f8a42842d5cf34c57bf
+beat-machine  mobius-os/app-beat-machine  511ca1ae3609b83a478f8b6cd307ed4e3039b8cf
