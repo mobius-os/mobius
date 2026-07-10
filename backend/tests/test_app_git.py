@@ -216,6 +216,66 @@ def test_origin_repo_refresh_preserves_custom_info_exclude(tmp_path):
   assert "README.md.mobius-drop-bak" not in tracked
 
 
+def test_origin_repo_refresh_drops_stale_managed_gitignore(tmp_path):
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => null\n", encoding="utf-8")
+  _commit_all(fixture, "fixture")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True, env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+  (source_dir / ".gitignore").write_text(app_git._GITIGNORE, encoding="utf-8")
+  (source_dir / "index.jsx").write_text(
+    "export default () => <div>local</div>\n", encoding="utf-8",
+  )
+
+  app_git.commit_local(source_dir, "local edit")
+
+  assert not (source_dir / ".gitignore").exists()
+  tracked = app_git._run(source_dir, "ls-files").stdout.split()
+  assert ".gitignore" not in tracked
+  changed = app_git._run(
+    source_dir, "diff", "--name-only", f"{app_git.UPSTREAM_BRANCH}..main",
+  ).stdout.split()
+  assert changed == ["index.jsx"]
+
+
+def test_origin_repo_refresh_keeps_app_authored_gitignore(tmp_path):
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => null\n", encoding="utf-8")
+  _commit_all(fixture, "fixture")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True, env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+  (source_dir / ".gitignore").write_text("local-cache/\n", encoding="utf-8")
+  (source_dir / "index.jsx").write_text(
+    "export default () => <div>local</div>\n", encoding="utf-8",
+  )
+
+  app_git.commit_local(source_dir, "local edit")
+
+  assert (source_dir / ".gitignore").read_text(encoding="utf-8") == "local-cache/\n"
+  tracked = app_git._run(source_dir, "ls-files").stdout.split()
+  assert ".gitignore" in tracked
+  changed = app_git._run(
+    source_dir, "diff", "--name-only", f"{app_git.UPSTREAM_BRANCH}..main",
+  ).stdout.split()
+  assert changed == [".gitignore", "index.jsx"]
+
+
 def test_has_origin_distinguishes_clone_from_synthetic_repo(tmp_path):
   """Cloned apps have origin; record_upstream synthetic apps do not."""
   fixture = tmp_path / "fixture"
