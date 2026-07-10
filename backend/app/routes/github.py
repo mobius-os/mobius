@@ -708,31 +708,39 @@ def _github_remote_slug(remote_url: str) -> str | None:
   return f"{parts[0]}/{parts[1]}"
 
 
-def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> None:
+def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str:
   """Make local remote `fork` point at the approving owner's fork."""
-  repo_name = upstream_repo.split("/", 1)[1]
-  expected_slug = f"{login}/{repo_name}"
   existing = _git(repo, "remote", "get-url", "fork", check=False)
   if existing.returncode == 0:
     actual_slug = _github_remote_slug(existing.stdout)
-    if actual_slug and actual_slug.lower() == expected_slug.lower():
-      return
+    if actual_slug and actual_slug.split("/", 1)[0].lower() == login.lower():
+      return actual_slug
     # The staged contribution checkout is disposable. Replacing a stale
     # remote is safer than pushing reviewed code to an ambient `fork` URL.
     _git(repo, "remote", "remove", "fork", check=False)
 
-  _gh(
-    repo,
-    "repo", "fork", upstream_repo,
-    "--remote", "--remote-name", "fork",
+  origin = _git(repo, "remote", "get-url", "origin", check=False)
+  origin_slug = (
+    _github_remote_slug(origin.stdout) if origin.returncode == 0 else None
   )
+  if not origin_slug or origin_slug.lower() != upstream_repo.lower():
+    _git(
+      repo,
+      "remote", "set-url" if origin.returncode == 0 else "add",
+      "origin", f"https://github.com/{upstream_repo}.git",
+    )
+
+  # gh 2.96 rejects --remote with a repository argument; origin selects
+  # the upstream repo for the in-repo fork command.
+  _gh(repo, "repo", "fork", "--remote", "--remote-name", "fork")
   final = _git(repo, "remote", "get-url", "fork", check=False)
   final_slug = _github_remote_slug(final.stdout) if final.returncode == 0 else None
-  if not final_slug or final_slug.lower() != expected_slug.lower():
+  if not final_slug or final_slug.split("/", 1)[0].lower() != login.lower():
     raise ContributionSubmitError(
       "Could not verify the fork remote for this GitHub account. "
       "Reconnect GitHub or ask the agent to prepare the contribution again."
     )
+  return final_slug
 
 
 def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None, dict]:
@@ -794,9 +802,10 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
       raise _merge_error_patch(exc, record_patch) from exc
 
     try:
-      _ensure_owner_fork_remote(repo, upstream_repo, login)
+      fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
     except ContributionSubmitError as exc:
       raise _merge_error_patch(exc, record_patch) from exc
+    record_patch = _record_patch_with(record_patch, {"head_repository": fork_slug})
 
     last_push_error = None
     for _ in range(_PUSH_RETRIES):
@@ -816,8 +825,7 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
         record_patch=record_patch,
       )
     pushed_branch_url = (
-      f"https://github.com/{login}/{upstream_repo.split('/', 1)[1]}"
-      f"/tree/{quote(branch, safe='/')}"
+      f"https://github.com/{fork_slug}/tree/{quote(branch, safe='/')}"
     )
     pushed_patch = {
       **record_patch,
