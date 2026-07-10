@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app import legacy_platform_apps, models
 from app.config import get_settings
-from app.install import install_from_manifest
+from app.install import _is_historical_platform_app_source_dir, install_from_manifest
 
 log = logging.getLogger("mobius.bootstrap")
 
@@ -42,8 +42,10 @@ _SKIP_ENV = "MOEBIUS_SKIP_BOOTSTRAP"
 
 
 def _is_legacy_platform_row(app: models.App) -> bool:
-  """True for active old rows whose source is /data/platform/core-apps/<slug>."""
+  """True for active old rows whose source matches retired baked-app shapes."""
   return legacy_platform_apps.is_legacy_source_dir(
+    app.source_dir, get_settings().data_dir, app.slug,
+  ) or _is_historical_platform_app_source_dir(
     app.source_dir, get_settings().data_dir, app.slug,
   )
 
