@@ -14,6 +14,7 @@ export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
   'app_built',
   'shell_rebuilding',
   'shell_rebuilt',
+  'shell_apply_now',
   'shell_rebuild_failed',
   'chat_run_started',
   'chat_run_finished',
@@ -22,6 +23,7 @@ export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
 const CATCH_UP_UNSAFE_SYSTEM_EVENTS = new Set([
   'shell_rebuilding',
   'shell_rebuilt',
+  'shell_apply_now',
   'shell_rebuild_failed',
 ])
 

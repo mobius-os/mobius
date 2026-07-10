@@ -122,6 +122,8 @@ export default function Shell() {
   const pendingShellReloadRef = useRef(false)
   const shellReloadTimerRef = useRef(null)
   const lastShellInteractionAtRef = useRef(0)
+  // Guards the once-per-mount deferred shell-update pickup effect below.
+  const shellUpdatePickupRef = useRef(false)
   const [composerFocusRequest, setComposerFocusRequest] = useState(null)
   const composerFocusTokenRef = useRef(0)
 
@@ -149,7 +151,7 @@ export default function Shell() {
     }
   }
 
-  function performShellReload() {
+  async function performShellReload() {
     pendingShellReloadRef.current = false
     if (shellReloadTimerRef.current) {
       clearTimeout(shellReloadTimerRef.current)
@@ -161,7 +163,50 @@ export default function Shell() {
     // briefly put the page out of scope and Chromium can refuse the
     // next manifest update in-place.
     replaceNavEntry('base', '/shell/')
-    setTimeout(() => window.location.reload(), 180)
+    // SW UPDATE LEASH (sw.js): the new service worker installed and is WAITING
+    // — it never skipWaiting()s on its own. THIS is the one moment we hand it
+    // control, so the SW generation flips exactly when the page generation does.
+    // Mark the reload page-initiated first so index.html's controllerchange
+    // handler treats any resulting controllerchange as OURS (an expected apply),
+    // not a spontaneous background SW flip to suppress.
+    try { sessionStorage.setItem('sw-skip-initiated', '1') } catch { /* ignore */ }
+
+    // Deferred stale-precache recovery (flagged by index.html at boot): a
+    // Chromium bug can keep serving the old precached index even after sw.js
+    // advertises a new bundle. Clearing Workbox's precache forces the reload to
+    // fall through to the network for index.html + the new hashed assets. Done
+    // HERE, at the same idle boundary as the reload, instead of index.html's old
+    // boot-time force-reload — so it can never blank a live turn.
+    let stalePrecache = false
+    try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
+    if (stalePrecache) {
+      if (typeof caches !== 'undefined') {
+        try {
+          const keys = await caches.keys()
+          await Promise.all(
+            keys.filter(k => k.startsWith('workbox-precache-')).map(k => caches.delete(k)),
+          )
+        } catch { /* best-effort — the reload still self-heals via updateViaCache */ }
+      }
+      try { sessionStorage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
+      // Loop-prevention: index.html's boot check reads this and skips
+      // re-flagging on the recovered load (then clears it).
+      try { sessionStorage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
+    }
+
+    // Hand control to the waiting worker (if any) at THIS idle moment. No
+    // waiting worker (unchanged sw.js, e.g. a backend-only rebuild) → the reload
+    // alone re-fetches the current generation. The SW skips-waiting only on this
+    // message, never on its own. Fire-and-forget: the reload below (220ms — a
+    // touch longer than the plain-reload delay to give skipWaiting→activate room
+    // before the navigation adopts the new worker) is the durable apply, and the
+    // mount-time pickup + stale-precache recovery self-heal a lost handoff race.
+    if (navigator.serviceWorker?.getRegistration) {
+      navigator.serviceWorker.getRegistration()
+        .then(reg => reg?.waiting?.postMessage({ type: 'SKIP_WAITING' }))
+        .catch(() => {})
+    }
+    setTimeout(() => window.location.reload(), 220)
   }
 
   function shellReloadWouldDisruptUser() {
@@ -721,6 +766,39 @@ export default function Shell() {
 
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
 
+  // Deferred shell-update pickup: a service worker that finished installing and
+  // is now WAITING (leashed — it never took over on its own), or index.html's
+  // boot-time stale-precache flag. Route it through the SAME hold-until-idle
+  // path as a live shell_rebuilt (requestShellReload → apply if idle, else hold
+  // the reload until the running turn ends). This recovers a lost apply race:
+  // the SW generation that installed just after an earlier apply signal, or a
+  // stale precache the boot check spotted. Gate on a live-confirmed chats list
+  // so streamingChatIds reflects any running background turn — a cold mount's
+  // empty pre-fetch list would otherwise read as idle and reload straight
+  // through a reconnecting turn. Runs at most once per mount.
+  useEffect(() => {
+    if (shellUpdatePickupRef.current) return
+    if (!(chatsQuery.isSuccess && chatsQuery.isFetchedAfterMount)) return
+    let cancelled = false
+    ;(async () => {
+      let flagged = false
+      try { flagged = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
+      let waiting = false
+      if (navigator.serviceWorker?.getRegistration) {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration()
+          waiting = !!reg?.waiting
+        } catch { /* ignore */ }
+      }
+      if (cancelled || (!flagged && !waiting)) return
+      shellUpdatePickupRef.current = true
+      // requestShellReload reads streaming/view state from refs at call time, so
+      // the captured closure is fresh even though it isn't in this effect's deps.
+      requestShellReload()
+    })()
+    return () => { cancelled = true }
+  }, [chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
+
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
     if (ev.type === 'theme_updated') {
@@ -795,21 +873,34 @@ export default function Shell() {
         }
       }
       refreshChats()
-    } else if (ev.type === 'shell_rebuilt') {
-      // Deduplicate against the SSE catch-up burst to avoid reload loops.
+    } else if (ev.type === 'shell_rebuilt' || ev.type === 'shell_apply_now') {
+      // A new shell generation is available. `shell_rebuilt` fires automatically
+      // when the frontend rebuilds; `shell_apply_now` is the agent's EXPLICIT
+      // "look now" signal (design §1.5, whitelisted in backend/app/events.py).
+      // Both carry identical client policy — apply if idle, else hold — so they
+      // share this branch.
+      //
+      // Deduplicate against the SSE catch-up burst (both the global system
+      // stream and the per-chat stream can deliver these) to avoid reload loops.
+      // The two event types use SEPARATE dedup windows so an early
+      // shell_apply_now cannot swallow the subsequent automatic shell_rebuilt,
+      // nor vice versa.
       const now = Date.now()
-      const lastRebuilt = Number(sessionStorage.getItem('shell-rebuilt-at') || 0)
-      if (now - lastRebuilt < 5000) return
-      sessionStorage.setItem('shell-rebuilt-at', String(now))
-      // Read view state from refs, not closure-captured state. The
-      // callback's dependency array includes the scalar state values
-      // (activeView, activeAppId, etc.) because React requires them for
-      // correctness checking, but by the time shell_rebuilt fires those
-      // closure values may be one render behind concurrent state updates.
-      // Sibling branches (chat_run_started, chat_run_finished) already
-      // use refs for exactly this reason. If the owner is typing, steering,
-      // or reading the currently-running chat, hold the refresh quietly until
-      // the page is idle instead of stealing focus.
+      const dedupKey = ev.type === 'shell_apply_now'
+        ? 'shell-apply-now-at'
+        : 'shell-rebuilt-at'
+      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
+      if (now - lastSignal < 5000) return
+      sessionStorage.setItem(dedupKey, String(now))
+      // Apply-on-idle: the streaming view is sacred. requestShellReload reads
+      // view + streaming state from refs (not closure-captured scalars, which
+      // can lag concurrent updates by a render) and applies immediately when
+      // idle, or holds the refresh quietly until the page is idle when the
+      // owner is typing, steering, or reading a running chat
+      // (shellReloadPolicy.shouldDeferShellReload) — no focus stealing. The SW
+      // leash rides the same moment: performShellReload posts SKIP_WAITING to
+      // the waiting worker so the SW generation flips exactly when the page
+      // reloads.
       requestShellReload()
     }
   }, [
