@@ -59,6 +59,7 @@
   align-items: center;
   gap: 8px;
   flex: 1;
+  min-width: 0;
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
@@ -84,6 +85,115 @@
   font-weight: 600;
   letter-spacing: 0;
   color: var(--text); /* CONTRACT: high-contrast text on the opaque --bg of .shell__bar */
+}
+
+
+/* Shell update lifecycle. This is intentionally top-bar chrome, not a toast:
+   it shows owner-requested shell work while it is building, keeps "ready"
+   visible without stealing focus, and still offers an explicit refresh. */
+.shell__update {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  max-width: min(42vw, 320px);
+  margin-left: 8px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface2, #212121) 78%, transparent);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 14%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.shell__update-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+  flex-shrink: 0;
+}
+
+.shell__update--building .shell__update-dot,
+.shell__update--refreshing .shell__update-dot {
+  animation: shell-update-pulse 1.2s ease-in-out infinite;
+}
+
+.shell__update--ready {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-light));
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface2, #212121));
+}
+
+.shell__update--failed {
+  color: var(--danger, #f87171);
+  border-color: color-mix(in srgb, var(--danger, #f87171) 38%, transparent);
+  background: color-mix(in srgb, var(--danger, #f87171) 12%, var(--surface2, #212121));
+}
+
+.shell__update--failed .shell__update-dot {
+  background: var(--danger, #f87171);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger, #f87171) 16%, transparent);
+}
+
+.shell__update-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell__update-action {
+  margin: -3px -4px -3px 2px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shell__update-action:focus { outline: none; }
+.shell__update-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+@media (hover: hover) {
+  .shell__update-action:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+}
+
+@keyframes shell-update-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.86); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (max-width: 560px) {
+  .shell__update {
+    max-width: 42vw;
+    gap: 6px;
+    padding-inline: 7px;
+  }
+
+  .shell__update-label {
+    max-width: 18ch;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell__update--building .shell__update-dot,
+  .shell__update--refreshing .shell__update-dot {
+    animation: none;
+  }
 }
 
 /* ── Immersive mode (moebius:immersive, .pm/128) ───── */

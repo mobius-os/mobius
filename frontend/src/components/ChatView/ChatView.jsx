@@ -861,7 +861,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // can't double-insert the steered user message. Insert by transcript ts
       // instead of blindly appending: if a fetch/replay already committed the
       // post-steer assistant row, the steered user still belongs before it.
-      commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
+      // Arm the scroll mode BEFORE rendering the steered row. EventSource
+      // callbacks are outside React's synthetic event layer, and query-cache
+      // listeners can observe the transcript update immediately; setting the
+      // mode first prevents a one-frame "row appears low, then snaps up" steer.
       setSpacerActive(true)
       if (shouldPinSteered) {
         if (spacerRef.current) spacerRef.current.style.height = '0px'
@@ -869,6 +872,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       } else if (pinStillValid) {
         settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
       }
+      commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       steerPinIntentRef.current = null
     },
   })
@@ -2171,6 +2175,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           wasNearScrollBottom: wasNearContentBottomAtSteer,
         })
         steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+        // The queued tray is part of the footer height. If it stays visible
+        // until after the steered row is inserted, the scroll system pins with
+        // one layout and then immediately reflows when the tray disappears — the
+        // visible "down, then up" fast-forward jump. Hide only the confirmed
+        // rows this request is steering; restore the snapshot below if the
+        // backend says the turn was not steered.
+        pendingQueue.promoteManyByTs(consumePendingTs)
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingTs,
@@ -2194,14 +2205,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         if (result?.status !== 'steered') {
           steerPinIntentRef.current = null
+          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
         }
         // not_steered (the turn closed between the gate and the POST) or any
-        // other status: leave the queue intact. The backend kept the
-        // messages queued and they drain at turn-end — surface nothing
-        // scary, the tray simply stays until the natural drain.
+        // other status: restore the queue and let it drain at turn-end. The
+        // tray may disappear briefly during the optimistic steer attempt, but
+        // it never gets lost.
       } catch {
         steerPinIntentRef.current = null
-        // Network/POST error — leave the queue intact for the turn-end drain.
+        pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+        // Network/POST error — restore the queue for the turn-end drain.
       }
     } finally {
       handlingSteerRef.current = false
