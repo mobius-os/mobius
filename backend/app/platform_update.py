@@ -102,6 +102,14 @@ _FETCH_TIMEOUT = 120
 # as probe-fail -> roll back.
 _PROBE_TIMEOUT = 60
 
+# Update-preview payload bounds. A whole-platform deploy can carry a huge diff;
+# the review sheet renders the file summary (always small) by default and the raw
+# diff only on demand, so cap the diff bytes on the wire and flag truncation. The
+# commit list is capped too — a normal deploy is a handful, and the sheet lists
+# them, not paginates.
+MAX_PREVIEW_DIFF_CHARS = 200_000
+_PREVIEW_COMMIT_LIMIT = 100
+
 # Serialise Apply in-process (uvicorn is single-worker; belt-and-braces against a
 # double-click racing two reconciles). The cross-process guard is RECONCILE_LOCK.
 _APPLY_LOCK = asyncio.Lock()
@@ -162,6 +170,42 @@ class PlatformConflictResolverChatOut(TypedDict):
   chat_id: str
   created: bool
   started: bool
+
+
+class PlatformCommitSummary(TypedDict):
+  """One incoming commit in an update preview: short sha + subject line."""
+
+  sha: str
+  subject: str
+
+
+class PlatformFileChange(TypedDict):
+  """One file the incoming update touches. ``insertions``/``deletions`` are None
+  for a binary file (git reports ``-`` in numstat)."""
+
+  path: str
+  status: str
+  insertions: int | None
+  deletions: int | None
+
+
+class PlatformUpdatePreview(TypedDict):
+  """Response shape for ``GET /api/platform/update-preview``.
+
+  The upstream-side changes ``origin/main`` brings relative to the served clone,
+  so the owner can review what a clean Apply would pull BEFORE applying. ``diff``
+  is capped at :data:`MAX_PREVIEW_DIFF_CHARS`; ``files``/``commits`` stay small
+  and are the compact default the review sheet renders."""
+
+  state: str
+  available: bool
+  current_sha: str | None
+  target_sha: str | None
+  commits: list[PlatformCommitSummary]
+  files: list[PlatformFileChange]
+  diff: str | None
+  diff_truncated: bool
+  conflict_paths: list[str]
 
 
 @dataclass(frozen=True)
@@ -787,6 +831,137 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
         if target and _is_ancestor(repo, target, local):
           _set_upstream(repo, target)
   return platform_status(repo)
+
+
+def empty_platform_update_preview(
+  *, current_sha: str | None = None, target_sha: str | None = None,
+) -> PlatformUpdatePreview:
+  """A preview carrying no incoming changes — the up-to-date / unreadable case.
+  The review sheet reads ``available``/``files`` and shows "nothing to review"
+  rather than an empty diff panel."""
+  return PlatformUpdatePreview(
+    state=PlatformUpdateState.UP_TO_DATE.value, available=False,
+    current_sha=current_sha, target_sha=target_sha,
+    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
+  )
+
+
+def _preview_commits(
+  repo: Path, base: str, target: str,
+) -> list[PlatformCommitSummary]:
+  """The commits ``target`` adds beyond ``base`` (newest first), capped."""
+  proc = _git(
+    "log", f"--max-count={_PREVIEW_COMMIT_LIMIT}", "--format=%h%x1f%s",
+    f"{base}..{target}", repo=repo, check=False,
+  )
+  if proc.returncode != 0:
+    return []
+  commits: list[PlatformCommitSummary] = []
+  for line in proc.stdout.splitlines():
+    if "\x1f" not in line:
+      continue
+    sha, subject = line.split("\x1f", 1)
+    commits.append(PlatformCommitSummary(sha=sha.strip(), subject=subject.strip()))
+  return commits
+
+
+def _preview_files(repo: Path, base: str, target: str) -> list[PlatformFileChange]:
+  """Per-file change summary for ``base..target``.
+
+  ``--name-status`` is authoritative for the path list + status letter (A/M/D/R);
+  ``--numstat`` counts are merged in best-effort, keyed on the same path. A rename
+  spells its numstat path differently, so its counts stay None — a display nicety,
+  not load-bearing (the status letter still reads ``R``)."""
+  by_path: dict[str, PlatformFileChange] = {}
+  order: list[str] = []
+  name_status = _git(
+    "diff", "--name-status", f"{base}..{target}", repo=repo, check=False,
+  )
+  if name_status.returncode == 0:
+    for line in name_status.stdout.splitlines():
+      parts = line.split("\t")
+      if len(parts) < 2:
+        continue
+      status = (parts[0].strip() or "M")[:1]
+      path = parts[-1].strip()  # rename: last field is the new path
+      if not path or path in by_path:
+        continue
+      by_path[path] = PlatformFileChange(
+        path=path, status=status, insertions=None, deletions=None,
+      )
+      order.append(path)
+  numstat = _git(
+    "diff", "--numstat", f"{base}..{target}", repo=repo, check=False,
+  )
+  if numstat.returncode == 0:
+    for line in numstat.stdout.splitlines():
+      parts = line.split("\t")
+      if len(parts) < 3:
+        continue
+      record = by_path.get(parts[-1].strip())
+      if record is None:
+        continue
+      ins, dele = parts[0], parts[1]
+      record["insertions"] = None if ins == "-" else (int(ins) if ins.isdigit() else None)
+      record["deletions"] = None if dele == "-" else (int(dele) if dele.isdigit() else None)
+  return [by_path[path] for path in order]
+
+
+def _preview_diff(repo: Path, base: str, target: str) -> tuple[str | None, bool]:
+  """The unified diff for ``base..target``, capped at :data:`MAX_PREVIEW_DIFF_CHARS`.
+  Returns ``(diff, truncated)``; ``(None, False)`` when git could not produce it."""
+  proc = _git(
+    "diff", "--no-ext-diff", f"{base}..{target}", repo=repo, check=False,
+  )
+  if proc.returncode != 0:
+    return None, False
+  text = proc.stdout
+  if len(text) > MAX_PREVIEW_DIFF_CHARS:
+    return text[:MAX_PREVIEW_DIFF_CHARS], True
+  return (text or None), False
+
+
+def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview:
+  """Read-only preview of the incoming platform update, for the Settings review
+  step before Apply (fetch-free, never mutates the tree).
+
+  Shows the upstream-side changes ``origin/main`` brings since the shared merge
+  base — local edits are excluded, so the owner reviews exactly what a clean Apply
+  would pull. Availability is the same ancestry check :func:`platform_status`
+  uses; an up-to-date instance returns an empty preview. Degrades to an empty
+  preview (never raises) when the clone or ancestry can't be read, so it can never
+  break Settings."""
+  if not (repo / ".git").exists() or not _has_origin(repo):
+    return empty_platform_update_preview()
+  local = _local_branch(repo)
+  local_sha = _rev(repo, local) or None
+  target = _rev(repo, DEFAULT_TARGET_REF) or None
+  available = bool(target) and not _is_ancestor(repo, target, local)
+  if not target or not available:
+    return empty_platform_update_preview(
+      current_sha=local_sha, target_sha=target,
+    )
+  base = _git(
+    "merge-base", local, target, repo=repo, check=False,
+  ).stdout.strip() or local_sha
+  if not base:
+    # No shared base and no local tip to diff against — surface availability
+    # without a diff rather than raising.
+    return PlatformUpdatePreview(
+      state=PlatformUpdateState.AVAILABLE.value, available=True,
+      current_sha=local_sha, target_sha=target, commits=[], files=[],
+      diff=None, diff_truncated=False, conflict_paths=[],
+    )
+  diff, truncated = _preview_diff(repo, base, target)
+  conflict = _read_conflict_flag() or {}
+  return PlatformUpdatePreview(
+    state=PlatformUpdateState.AVAILABLE.value, available=True,
+    current_sha=local_sha, target_sha=target,
+    commits=_preview_commits(repo, base, target),
+    files=_preview_files(repo, base, target),
+    diff=diff, diff_truncated=truncated,
+    conflict_paths=conflict.get("paths") or [],
+  )
 
 
 async def apply_platform_update(
