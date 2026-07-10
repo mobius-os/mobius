@@ -36,7 +36,6 @@ export function continuationRowsFromPromotedMessage(promotedMessage, localPromot
 export function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
   if (!Array.isArray(localMsgs) || localMsgs.length === 0) return false
   if (!Array.isArray(serverMsgs)) return false
-  if (serverMsgs.length < localMsgs.length) return true
   if (serverMsgs.length > localMsgs.length) return false
 
   const serverTs = new Set(serverMsgs.map(m => m?.ts).filter(v => v != null))

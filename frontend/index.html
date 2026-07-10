@@ -197,11 +197,27 @@
         // reload when the page was ALREADY controlled and a NEW worker takes over
         // (a genuine deploy/update).
         const hadControllerAtLoad = !!navigator.serviceWorker.controller
+        const rememberShellStateForAutoReload = () => {
+          try {
+            const activeView = localStorage.getItem('moebius_active_view') || 'chat'
+            const rawAppId = localStorage.getItem('moebius_active_app')
+            const activeAppId = rawAppId ? Number(rawAppId) : null
+            sessionStorage.setItem('shell-reload', JSON.stringify({
+              activeView,
+              activeAppId: Number.isFinite(activeAppId) ? activeAppId : null,
+              drawerOpen: false,
+              activeChatId: localStorage.getItem('moebius_active_chat') || null,
+            }))
+          } catch (_) {
+            // Best-effort: a failed storage read should not block an update.
+          }
+        }
         const reloadAfterControllerChange = () => {
           if (hadControllerAtLoad
               && navigator.serviceWorker.controller
               && !sessionStorage.getItem('sw-auto-reloaded')) {
             sessionStorage.setItem('sw-auto-reloaded', '1')
+            rememberShellStateForAutoReload()
             window.location.reload()
           }
         }
@@ -227,6 +243,63 @@
             watchWorker(reg.installing)
           })
         }
+        // Stale-precache escape hatch.
+        //
+        // The normal path is: /sw.js updates → controllerchange → reload onto
+        // the new Workbox precache. We have seen Chromium keep serving the old
+        // precached index after a shell rebuild even though network /sw.js
+        // already advertises a newer Vite bundle. In that state a normal
+        // reload is a no-op: the old service worker keeps handing out the old
+        // /index.html, and the chat UI can look like saved rows are missing.
+        //
+        // Detect that exact mismatch at boot. /sw.js is not runtime-cached by
+        // the service worker and is registered with updateViaCache:'none', so
+        // fetch('/sw.js', {cache:'reload'}) is the reliable network identity.
+        // If the current document loaded bundle A but network /sw.js precaches
+        // bundle B, delete only Workbox's precache and reload once. The old
+        // worker then falls through to network for /index.html and the new
+        // hashed asset, while app/runtime caches remain untouched.
+        const stalePrecacheRecoveryKey = 'sw-stale-precache-recovering'
+        const wasRecoveringStalePrecache =
+          sessionStorage.getItem(stalePrecacheRecoveryKey) === '1'
+        if (wasRecoveringStalePrecache) {
+          sessionStorage.removeItem(stalePrecacheRecoveryKey)
+        }
+        let stalePrecacheCheckStarted = false
+        const currentShellBundle = () => {
+          const scripts = Array.from(document.scripts || [])
+            .map(s => s.src || '')
+          return scripts.find(src => /\/assets\/index-[A-Za-z0-9_-]+\.js(?:[?#].*)?$/.test(src)) || ''
+        }
+        const expectedShellBundleFromSw = (swText) => {
+          const matches = String(swText || '').match(/assets\/index-[A-Za-z0-9_-]+\.js/g)
+          return matches && matches.length ? matches[matches.length - 1] : ''
+        }
+        const recoverStalePrecacheIfNeeded = async (reg) => {
+          if (stalePrecacheCheckStarted || wasRecoveringStalePrecache) return
+          stalePrecacheCheckStarted = true
+          try {
+            if (!hadControllerAtLoad || !navigator.serviceWorker.controller || !window.caches) return
+            const current = currentShellBundle()
+            if (!current) return
+            const res = await fetch('/sw.js', { cache: 'reload' })
+            if (!res.ok) return
+            const expected = expectedShellBundleFromSw(await res.text())
+            if (!expected || current.includes(expected)) return
+            try { await reg?.update?.() } catch (_) {}
+            const keys = await caches.keys()
+            await Promise.all(
+              keys
+                .filter(k => k.startsWith('workbox-precache-'))
+                .map(k => caches.delete(k))
+            )
+            sessionStorage.setItem(stalePrecacheRecoveryKey, '1')
+            rememberShellStateForAutoReload()
+            window.location.reload()
+          } catch (_) {
+            // Best-effort self-heal only; never block shell boot.
+          }
+        }
         // Watchdog: if the registration we just installed sees a NEW
         // SW available, refresh once it activates. Attach to the registration
         // returned by register() immediately; waiting for
@@ -234,6 +307,7 @@
         navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
         .then(reg => {
           watchRegistration(reg)
+          recoverStalePrecacheIfNeeded(reg)
           // Poll for a new SW whenever the PWA returns to the foreground.
           // The explicit `shell_rebuilt` SSE event (Shell.jsx) handles a
           // PWA with a LIVE connection, but a backgrounded/reopened install
@@ -249,7 +323,10 @@
             }
           })
         }).catch(() => {})
-        navigator.serviceWorker.ready.then(watchRegistration).catch(() => {})
+        navigator.serviceWorker.ready.then(reg => {
+          watchRegistration(reg)
+          recoverStalePrecacheIfNeeded(reg)
+        }).catch(() => {})
       }
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —
