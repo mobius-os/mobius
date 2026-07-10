@@ -162,17 +162,35 @@ body,
 
 /* Theme flips should feel like one surface changing, not every descendant
    repainting separately. Modern Chromium/Safari get a View Transition bloom
-   from the user's tap point; older browsers fall back to this narrow color
-   transition so shadow/blur-heavy chat surfaces stay cheap on mobile. */
+   from the user's tap point; older browsers — and the Settings toggle, which
+   opts out of the View Transition to protect the back-stack sentinel
+   (themeService.toggleTheme passes preferViewTransition:false) — fall back to
+   this color transition.
+
+   The property list stays narrow (colors only, never box-shadow/filter) so
+   shadow/blur-heavy surfaces stay cheap on mobile; that property narrowness,
+   not a short element list, is what keeps the fallback lightweight. The
+   selector is therefore scoped per PANEL, not per leaf: a bounded control
+   panel gets BOTH its own class AND a `<panel> *` descendant wildcard, so
+   every current and future surface inside it (section cards, rows, inputs,
+   status dots) eases together and no newly-added leaf can silently snap while
+   the chrome around it animates. The wildcard is deliberately NOT
+   document-wide (`.theme-transitioning *`) — that would drag the whole chat
+   message/token tree into the transition, the exact cost this fallback exists
+   to avoid and chatUiPolish.test.js forbids. Bounded control panels only; the
+   chat keeps only its chrome (pill/plus) so its message list still snaps. */
 :root.theme-transitioning,
 :root.theme-transitioning body,
 :root.theme-transitioning #root,
 :root.theme-transitioning .shell,
 :root.theme-transitioning .shell__bar,
-:root.theme-transitioning .drawer,
 :root.theme-transitioning .chat,
 :root.theme-transitioning .chat__pill,
-:root.theme-transitioning .chat__plus {
+:root.theme-transitioning .chat__plus,
+:root.theme-transitioning .drawer,
+:root.theme-transitioning .drawer *,
+:root.theme-transitioning .settings,
+:root.theme-transitioning .settings * {
   transition-property: background-color, border-color, color, fill, stroke;
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
