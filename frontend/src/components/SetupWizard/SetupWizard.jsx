@@ -296,6 +296,23 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     return FALLBACK_MODELS[provider] || []
   }
 
+  function connectedMap(extraProvider = '') {
+    return {
+      codex: codexConnected || extraProvider === 'codex',
+      claude: claudeConnected || extraProvider === 'claude',
+    }
+  }
+
+  function choiceConnected(choice, extraProvider = '') {
+    const connected = connectedMap(extraProvider)
+    return !!choice?.provider && connected[choice.provider] === true
+  }
+
+  function firstConnectedProvider(extraProvider = '') {
+    const connected = connectedMap(extraProvider)
+    return PROVIDERS.find(provider => connected[provider.id])?.id || ''
+  }
+
   const persistAgentChoices = useCallback(async (nextChat, nextPrimary, nextSecondary) => {
     if (!nextChat?.provider || !nextPrimary?.provider) return
     setAgentSaving(true)
@@ -359,11 +376,30 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     persistAgentChoices(nextChat, nextPrimary, nextSecondary)
   }
 
-  function handleConnected() {
+  function handleConnected(provider) {
+    const preferred = firstConnectedProvider(provider) || provider
+    if (preferred) {
+      const nextChat = choiceConnected(chatChoice, provider)
+        ? chatChoice
+        : { provider: preferred, model: '' }
+      const nextPrimary = choiceConnected(primaryChoice, provider)
+        ? primaryChoice
+        : { provider: preferred, model: '' }
+      setChatChoice(nextChat)
+      setPrimaryChoice(nextPrimary)
+      persistAgentChoices(nextChat, nextPrimary, secondaryChoice)
+    }
     settingsQueries.owner.invalidate(queryClient)
     authQueries.provider.claudeStatus.invalidate(queryClient)
     setExpanded(null)
   }
+
+  const defaultsReady =
+    connectedAny &&
+    choiceConnected(chatChoice) &&
+    choiceConnected(primaryChoice) &&
+    !agentSaving &&
+    !agentError
 
   return (
     <div className="setup">
@@ -386,7 +422,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
             expanded={expanded === 'codex'}
             onToggleExpand={() => toggle('codex')}
           >
-            <CodexAuth onConnected={handleConnected} />
+            <CodexAuth onConnected={() => handleConnected('codex')} />
           </ProviderRow>
 
           <ProviderRow
@@ -400,7 +436,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
             <ProviderAuth
               authenticated={claudeAuthenticated}
               compact
-              onDone={handleConnected}
+              onDone={() => handleConnected('claude')}
             />
           </ProviderRow>
         </div>
@@ -444,7 +480,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
           className="setup__btn setup__btn--full"
           type="button"
           onClick={onContinue}
-          disabled={!connectedAny}
+          disabled={!defaultsReady}
         >
           Continue
         </button>

@@ -8,6 +8,15 @@ export const CSS = `
 .bm-root button:disabled {
   cursor: default !important;
 }
+.bm-root .bm-scroll-skin {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.bm-root .bm-scroll-skin::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
 @media (prefers-reduced-motion: reduce) {
   .bm-root *, .bm-root *::before, .bm-root *::after {
     transition-duration: 0.01ms !important;

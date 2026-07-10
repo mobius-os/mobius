@@ -18,7 +18,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -209,7 +209,6 @@ def update_settings(
       owner.gemini_api_key_enc = encrypt_api_key(body.gemini_api_key)
   if body.provider is not None:
     owner.provider = body.provider
-  db.commit()
   # `skills_enabled` lives in the shared agent-settings.json (the
   # Owner model is frozen / chmod 444), so it's persisted outside the
   # DB transaction. Merge into the existing file so we don't clobber
@@ -229,16 +228,26 @@ def update_settings(
       existing = providers.background_agent_settings(
         data_dir, owner.provider or "claude"
       )
-      primary = (
-        _background_choice_payload(body.background_agents.primary)
-        or existing.get("primary")
-      )
-      fallback = _background_choice_payload(body.background_agents.fallback)
+      fields_set = getattr(body.background_agents, "model_fields_set", set())
+      primary = existing.get("primary")
+      if "primary" in fields_set:
+        primary = (
+          _background_choice_payload(body.background_agents.primary)
+          or existing.get("primary")
+        )
+      fallback = existing.get("fallback")
+      if "fallback" in fields_set:
+        fallback = _background_choice_payload(body.background_agents.fallback)
       current["background_agents"] = {
         "primary": primary,
         "fallback": fallback,
       }
-    providers.write_agent_settings(data_dir, current)
+    if not providers.write_agent_settings(data_dir, current):
+      raise HTTPException(
+        status_code=500,
+        detail="Could not save agent settings to disk. The previous settings are unchanged.",
+      )
+  db.commit()
   return {"ok": True}
 
 

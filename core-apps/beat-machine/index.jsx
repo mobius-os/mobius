@@ -127,36 +127,42 @@ export default function BeatMachine({ appId, token }) {
   useEffect(() => {
     let alive = true
     ;(async () => {
-      const saved = await loadBeatState(appId, token)
-      if (!alive) return
-      setGrid(saved.grid)
-      setBpm(saved.bpm)
-      setVolumes(saved.volumes)
-      setEcho(saved.echo)
-      setReverb(saved.reverb)
-      if (saved.customPads.length) {
-        const engine = getEngine()
-        setPads((prev) => {
-          const next = [...prev]
-          for (const item of saved.customPads) {
-            const buffer = restoreSavedAudio(engine.ctx, item.audio)
-            if (!buffer) continue
-            next[item.idx] = {
-              ...next[item.idx],
-              name: item.name || `Rec ${item.idx - CUSTOM_START + 1}`,
-              color: item.color || next[item.idx].color,
-              buffer,
-              savedAudio: item.audio,
-              isPreset: false,
+      try {
+        const saved = await loadBeatState(appId, token)
+        if (!alive) return
+        setGrid(saved.grid)
+        setBpm(saved.bpm)
+        setVolumes(saved.volumes)
+        setEcho(saved.echo)
+        setReverb(saved.reverb)
+        if (saved.customPads.length) {
+          const engine = getEngine()
+          setPads((prev) => {
+            const next = [...prev]
+            for (const item of saved.customPads) {
+              const buffer = restoreSavedAudio(engine.ctx, item.audio)
+              if (!buffer) continue
+              next[item.idx] = {
+                ...next[item.idx],
+                name: item.name || `Rec ${item.idx - CUSTOM_START + 1}`,
+                color: item.color || next[item.idx].color,
+                buffer,
+                savedAudio: item.audio,
+                isPreset: false,
+              }
             }
-          }
-          return next
-        })
+            return next
+          })
+        }
+        setStateLoaded(true)
+      } catch (err) {
+        if (!alive) return
+        showToast("Couldn't load saved beat")
+        signal('error', { operation: 'load_state', message: String(err?.message || err) })
       }
-      setStateLoaded(true)
     })()
     return () => { alive = false }
-  }, [appId, token, getEngine, setGrid, setPads])
+  }, [appId, token, getEngine, setGrid, setPads, showToast])
 
   useEffect(() => {
     if (engineRef.current) {

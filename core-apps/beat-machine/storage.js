@@ -13,19 +13,15 @@ function headers(token) {
 }
 
 export async function loadBeatState(appId, token) {
-  try {
-    const bridge = storageBridge()
-    if (bridge && typeof bridge.get === 'function') {
-      return sanitizeState(await bridge.get(SAVE_PATH))
-    }
-    if (!appId || !token) return sanitizeState(null)
-    const res = await fetch(`/api/storage/apps/${appId}/${SAVE_PATH}`, { headers: headers(token) })
-    if (res.status === 404) return sanitizeState(null)
-    if (!res.ok) throw new Error(`GET ${SAVE_PATH} failed (${res.status})`)
-    return sanitizeState(await res.json())
-  } catch {
-    return sanitizeState(null)
+  const bridge = storageBridge()
+  if (bridge && typeof bridge.get === 'function') {
+    return sanitizeState(await bridge.get(SAVE_PATH))
   }
+  if (!appId || !token) return sanitizeState(null)
+  const res = await fetch(`/api/storage/apps/${appId}/${SAVE_PATH}`, { headers: headers(token) })
+  if (res.status === 404) return sanitizeState(null)
+  if (!res.ok) throw new Error(`GET ${SAVE_PATH} failed (${res.status})`)
+  return sanitizeState(await res.json())
 }
 
 export async function saveBeatState(appId, token, data) {
@@ -133,7 +129,11 @@ export function useOnline() {
     window.addEventListener('online', up)
     window.addEventListener('offline', down)
     let unsub = null
-    if (window.mobius && typeof window.mobius.onChange === 'function') {
+    if (window.mobius && typeof window.mobius.onOnlineChange === 'function') {
+      unsub = window.mobius.onOnlineChange((next) => {
+        setOnline(next !== false)
+      })
+    } else if (window.mobius && typeof window.mobius.onChange === 'function') {
       unsub = window.mobius.onChange((state) => {
         if (typeof state?.online === 'boolean') setOnline(state.online)
       })
