@@ -182,9 +182,7 @@ export default function ManageModelsModal({
           >×</button>
         </div>
         <p className="mmm__subtext">
-          Hide models you don't want to see in the chat picker. The
-          model a chat is currently using stays visible there even
-          if you hide it here.
+          Choose which models appear in the chat picker.
         </p>
 
         <div className="mmm__body-shell">

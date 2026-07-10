@@ -214,7 +214,21 @@ def effective_agent_settings(
   return merged
 
 
-def _clean_background_choice(raw: Any, fallback_provider: str | None = None) -> dict | None:
+def _background_default_choice(provider: str, *, enabled: bool = False) -> dict:
+  return {
+    "provider": provider,
+    "model": DEFAULT_MODELS.get(provider),
+    "effort": DEFAULT_EFFORT,
+    "enabled": enabled,
+  }
+
+
+def _clean_background_choice(
+  raw: Any,
+  fallback_provider: str | None = None,
+  *,
+  include_enabled: bool = False,
+) -> dict | None:
   if not isinstance(raw, dict):
     return None
   provider = raw.get("provider")
@@ -230,40 +244,100 @@ def _clean_background_choice(raw: Any, fallback_provider: str | None = None) -> 
   out["model"] = model
   effort = raw.get("effort")
   out["effort"] = effort.strip() if isinstance(effort, str) and effort.strip() else None
+  if include_enabled:
+    out["enabled"] = raw.get("enabled") is not False
   return out
 
 
 def background_agent_settings(data_dir: str, default_provider: str | None = None) -> dict:
-  """Return the system-level background primary/fallback model choices.
+  """Return the system-level background provider choices.
 
   Stored in /data/shared/agent-settings.json under:
     {
       "background_agents": {
+        "providers": [
+          {"provider": "claude", "model": "...", "effort": "...", "enabled": true},
+          {"provider": "codex", "model": "...", "effort": "...", "enabled": true}
+        ],
         "primary": {"provider": "claude", "model": "...", "effort": "..."},
         "fallback": {"provider": "codex", "model": "...", "effort": "..."}
       }
     }
 
-  Absence stays backwards-compatible: primary inherits the owner's chat
-  provider plus global model/effort defaults, and fallback is disabled until
-  the owner explicitly chooses one. Apps that need background setup can then
-  inherit this without silently changing existing instances.
+  `primary`/`fallback` are kept for older runners and app settings. The richer
+  `providers` list is the owner-facing source of truth: one default per
+  provider, plus enabled/order for quota fallback. Absence stays backwards-
+  compatible: only the owner's chat provider is enabled until the owner opts
+  additional providers in.
   """
   provider = default_provider if default_provider in PROVIDERS else DEFAULT_PROVIDER
   file_layer = _load_agent_settings(data_dir)
   raw = file_layer.get("background_agents")
   bg = raw if isinstance(raw, dict) else {}
 
-  primary = _clean_background_choice(bg.get("primary"), provider)
-  if primary is None:
+  rows: list[dict[str, Any]] = []
+  seen: set[str] = set()
+
+  def add_row(choice: dict | None, *, enabled_default: bool) -> None:
+    if choice is None:
+      return
+    provider_id = choice["provider"]
+    if provider_id in seen:
+      return
+    row = dict(choice)
+    row["enabled"] = (
+      bool(row.get("enabled"))
+      if "enabled" in row
+      else enabled_default
+    )
+    rows.append(row)
+    seen.add(provider_id)
+
+  raw_rows = bg.get("providers")
+  if isinstance(raw_rows, list):
+    for raw_choice in raw_rows:
+      add_row(
+        _clean_background_choice(raw_choice, include_enabled=True),
+        enabled_default=True,
+      )
+  else:
+    primary = _clean_background_choice(bg.get("primary"), provider)
+    if primary is None:
+      effective = effective_agent_settings(data_dir, None, provider=provider)
+      primary = {
+        "provider": provider,
+        "model": effective.get("model"),
+        "effort": effective.get("effort"),
+      }
+    add_row(primary, enabled_default=True)
+    add_row(_clean_background_choice(bg.get("fallback")), enabled_default=True)
+
+  if not rows:
     effective = effective_agent_settings(data_dir, None, provider=provider)
-    primary = {
+    add_row({
       "provider": provider,
       "model": effective.get("model"),
       "effort": effective.get("effort"),
-    }
-  fallback = _clean_background_choice(bg.get("fallback"))
-  return {"primary": primary, "fallback": fallback}
+    }, enabled_default=True)
+
+  for provider_id in PROVIDERS:
+    if provider_id not in seen:
+      rows.append(_background_default_choice(provider_id, enabled=False))
+
+  enabled_rows = [dict(row) for row in rows if row.get("enabled") is not False]
+  if not enabled_rows:
+    rows = [
+      {**row, "enabled": row["provider"] == provider}
+      for row in rows
+    ]
+    enabled_rows = [dict(row) for row in rows if row.get("enabled") is not False]
+
+  primary = {k: v for k, v in enabled_rows[0].items() if k != "enabled"}
+  fallback = (
+    {k: v for k, v in enabled_rows[1].items() if k != "enabled"}
+    if len(enabled_rows) > 1 else None
+  )
+  return {"providers": rows, "primary": primary, "fallback": fallback}
 
 
 def get_skill_path() -> Path | None:

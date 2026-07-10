@@ -172,6 +172,31 @@ def test_resolve_search_agents_uses_background_primary_and_fallback(
   ]
 
 
+def test_resolve_search_agents_uses_ordered_provider_list(monkeypatch, tmp_path):
+  ms = _load()
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(
+    """
+    {
+      "background_agents": {
+        "providers": [
+          {"provider": "claude", "model": "claude-sonnet-4-6", "enabled": false},
+          {"provider": "codex", "model": "gpt-5.5", "effort": "high", "enabled": true}
+        ],
+        "primary": {"provider": "claude", "model": "claude-opus-4-8"}
+      }
+    }
+    """,
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(ms, "DATA_DIR", tmp_path)
+
+  assert ms._resolve_search_agents() == [
+    {"provider": "codex", "model": "gpt-5.5", "effort": "high"},
+  ]
+
+
 def test_clean_choice_drops_known_cross_provider_model():
   ms = _load()
   assert ms._clean_choice(

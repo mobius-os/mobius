@@ -581,6 +581,8 @@ def _clean_agent_choice(
   """
   if not isinstance(raw, dict):
     return None
+  if raw.get("enabled") is False:
+    return None
   provider = raw.get("provider")
   if provider not in ("claude", "codex"):
     provider = fallback_provider if fallback_provider in ("claude", "codex") else None
@@ -645,12 +647,33 @@ def _resolve_agents(settings: dict) -> dict:
   global_settings = load_global_agent_settings()
   raw_background = global_settings.get("background_agents")
   background = raw_background if isinstance(raw_background, dict) else {}
-  global_primary = _clean_agent_choice(
-    background.get("primary"),
-    fallback_provider=DEFAULT_PROVIDER,
-    label="global background primary",
-  )
-  if global_primary is None:
+  global_choices: list[dict] = []
+  raw_choices = background.get("providers")
+  if isinstance(raw_choices, list):
+    for index, raw_choice in enumerate(raw_choices):
+      choice = _clean_agent_choice(
+        raw_choice,
+        label=f"global background provider {index + 1}",
+      )
+      if choice and not any(_same_agent_choice(choice, existing) for existing in global_choices):
+        global_choices.append(choice)
+
+  if not global_choices:
+    global_primary = _clean_agent_choice(
+      background.get("primary"),
+      fallback_provider=DEFAULT_PROVIDER,
+      label="global background primary",
+    )
+    global_fallback = _clean_agent_choice(
+      background.get("fallback"),
+      label="global background fallback",
+    )
+    if global_primary:
+      global_choices.append(global_primary)
+    if global_fallback and not _same_agent_choice(global_primary, global_fallback):
+      global_choices.append(global_fallback)
+
+  if not global_choices:
     global_primary = _clean_agent_choice(
       {
         "provider": DEFAULT_PROVIDER,
@@ -660,6 +683,11 @@ def _resolve_agents(settings: dict) -> dict:
       fallback_provider=DEFAULT_PROVIDER,
       label="global primary",
     )
+    if global_primary:
+      global_choices.append(global_primary)
+
+  global_primary = global_choices[0]
+  global_fallback = global_choices[1] if len(global_choices) > 1 else None
   primary_provider = global_primary.get("provider") or DEFAULT_PROVIDER
   has_app_primary = _has_app_primary_override(settings)
   primary = None
@@ -683,9 +711,10 @@ def _resolve_agents(settings: dict) -> dict:
       "model": settings.get("fallback_model"),
       "effort": settings.get("fallback_effort"),
     }
-  else:
-    raw_fallback = background.get("fallback")
-  fallback = _clean_agent_choice(raw_fallback, label="reflection fallback")
+  fallback = (
+    _clean_agent_choice(raw_fallback, label="reflection fallback")
+    if raw_fallback is not None else global_fallback
+  )
   if _same_agent_choice(primary, fallback):
     fallback = None
   return {"primary": primary, "fallback": fallback}

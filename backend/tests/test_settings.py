@@ -408,6 +408,20 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
   merged = providers._load_agent_settings(data_dir)
   assert merged["skills_enabled"] is True
   assert merged["background_agents"] == {
+    "providers": [
+      {
+        "provider": "claude",
+        "model": "claude-sonnet-4-6",
+        "effort": "high",
+        "enabled": True,
+      },
+      {
+        "provider": "codex",
+        "model": "gpt-5.4",
+        "effort": "medium",
+        "enabled": True,
+      },
+    ],
     "primary": {
       "provider": "claude",
       "model": "claude-sonnet-4-6",
@@ -421,6 +435,58 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
   }
   body = client.get("/api/settings", headers=auth).json()
   assert body["background_agents"] == merged["background_agents"]
+
+
+def test_set_background_agent_provider_order_persists_legacy_mirror(client, auth):
+  """The ordered provider list is the source of truth; primary/fallback mirror it."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  data_dir = _gs().data_dir
+  r = client.post(
+    "/api/settings",
+    json={
+      "background_agents": {
+        "providers": [
+          {
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "effort": "medium",
+            "enabled": True,
+          },
+          {
+            "provider": "claude",
+            "model": "claude-opus-4-8",
+            "effort": "xhigh",
+            "enabled": False,
+          },
+        ],
+      },
+    },
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  merged = providers._load_agent_settings(data_dir)
+  assert merged["background_agents"]["providers"] == [
+    {
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+      "enabled": True,
+    },
+    {
+      "provider": "claude",
+      "model": "claude-opus-4-8",
+      "effort": "xhigh",
+      "enabled": False,
+    },
+  ]
+  assert merged["background_agents"]["primary"] == {
+    "provider": "codex",
+    "model": "gpt-5.5",
+    "effort": "medium",
+  }
+  assert merged["background_agents"]["fallback"] is None
 
 
 def test_set_background_agents_primary_only_preserves_existing_fallback(client, auth):
@@ -496,6 +562,10 @@ def test_set_background_agents_explicit_null_clears_fallback(client, auth):
   assert r.status_code == 200, r.text
   merged = providers._load_agent_settings(data_dir)
   assert merged["background_agents"]["fallback"] is None
+  assert [
+    row for row in merged["background_agents"]["providers"]
+    if row["provider"] == "codex"
+  ][0]["enabled"] is False
 
 
 def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkeypatch):

@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
+import { ArrowDown, ArrowUp, GripVertical } from 'lucide-react'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import * as themeService from '../../lib/themeService.js'
@@ -27,30 +28,54 @@ const FALLBACK_MODEL_ROWS = {
   codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label })),
 }
 
-function normalizeBackgroundAgents(backgroundAgents) {
-  const primaryProvider = PROVIDER_CHOICES.some(p => p.id === backgroundAgents?.primary?.provider)
-    ? backgroundAgents.primary.provider
-    : 'claude'
-  const fallbackProvider = PROVIDER_CHOICES.some(p => p.id === backgroundAgents?.fallback?.provider)
-    ? backgroundAgents.fallback.provider
-    : ''
-  return {
-    primary: {
-      provider: primaryProvider,
-      model: backgroundAgents?.primary?.model || '',
-      effort: backgroundAgents?.primary?.effort || defaultEffort(primaryProvider),
-    },
-    fallback: {
-      provider: fallbackProvider,
-      model: backgroundAgents?.fallback?.model || '',
-      effort: backgroundAgents?.fallback?.effort || defaultEffort(fallbackProvider),
-    },
-  }
-}
-
 function defaultEffort(provider) {
   const efforts = PROVIDER_INFO[provider]?.efforts || []
   return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
+}
+
+function defaultModel(provider) {
+  return FALLBACK_MODEL_ROWS[provider]?.[0]?.id || ''
+}
+
+function isKnownProvider(provider) {
+  return PROVIDER_CHOICES.some(p => p.id === provider)
+}
+
+function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude') {
+  const rows = []
+  const seen = new Set()
+  const resolvedDefaultProvider = isKnownProvider(defaultProvider)
+    ? defaultProvider
+    : 'claude'
+
+  const addChoice = (choice, enabledDefault) => {
+    const provider = isKnownProvider(choice?.provider) ? choice.provider : null
+    if (!provider || seen.has(provider)) return
+    rows.push({
+      provider,
+      model: choice?.model || defaultModel(provider),
+      effort: choice?.effort || defaultEffort(provider),
+      enabled: Object.prototype.hasOwnProperty.call(choice || {}, 'enabled')
+        ? choice.enabled !== false
+        : enabledDefault,
+    })
+    seen.add(provider)
+  }
+
+  if (Array.isArray(backgroundAgents?.providers)) {
+    backgroundAgents.providers.forEach((choice) => addChoice(choice, true))
+  } else {
+    addChoice(
+      backgroundAgents?.primary || { provider: resolvedDefaultProvider },
+      true,
+    )
+    addChoice(backgroundAgents?.fallback, true)
+  }
+
+  if (!rows.length) addChoice({ provider: resolvedDefaultProvider }, true)
+  PROVIDER_ORDER.forEach((provider) => addChoice({ provider }, false))
+  if (!rows.some(row => row.enabled)) rows[0].enabled = true
+  return rows
 }
 
 function normalizeChatAgent(settings) {
@@ -74,11 +99,156 @@ function providerLabel(provider) {
   return PROVIDER_CHOICES.find(p => p.id === provider)?.label || 'No provider'
 }
 
+function modelLabel(model, models) {
+  if (!model) return 'provider default'
+  return models.find(m => m.id === model)?.label || model
+}
+
 function SaveState({ saving, saved, error }) {
   if (error) return <span className="settings-agent-state settings-agent-state--error">Not saved</span>
   if (saving) return <span className="settings-agent-state">Saving…</span>
   if (saved) return <span className="settings-agent-state settings-agent-state--saved">Saved</span>
   return <span className="settings-agent-state">Auto-saves</span>
+}
+
+function SettingsEffortSlider({ provider, value, disabled, onChange }) {
+  const efforts = PROVIDER_INFO[provider]?.efforts || []
+  if (!efforts.length) return null
+  const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
+  const selected = efforts[selectedIndex] || efforts[0]
+  return (
+    <div className={`settings-effort${disabled ? ' settings-effort--disabled' : ''}`}>
+      <div className="settings-effort__track" role="radiogroup" aria-label={`${providerLabel(provider)} effort`}>
+        {efforts.map((effort, index) => (
+          <button
+            key={effort.value}
+            type="button"
+            role="radio"
+            aria-checked={index === selectedIndex}
+            aria-label={effort.label}
+            disabled={disabled}
+            tabIndex={index === selectedIndex ? 0 : -1}
+            className={
+              'settings-effort__stop'
+              + (index === selectedIndex ? ' settings-effort__stop--on' : '')
+              + (index < selectedIndex ? ' settings-effort__stop--filled' : '')
+            }
+            onClick={() => onChange(effort.value)}
+          />
+        ))}
+      </div>
+      <span className="settings-effort__label">{selected.label}</span>
+    </div>
+  )
+}
+
+function BackgroundProviderRow({
+  row,
+  index,
+  total,
+  selectedCount,
+  models,
+  connected,
+  onToggle,
+  onModelChange,
+  onEffortChange,
+  onMove,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+}) {
+  const info = PROVIDER_INFO[row.provider]
+  const Logo = info?.Logo
+  const enabled = row.enabled !== false
+  const disableToggle = enabled && selectedCount <= 1
+  const hasModel = models.some(m => m.id === row.model)
+  return (
+    <div
+      className={`settings-bg-row${enabled ? '' : ' settings-bg-row--off'}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+    >
+      <span className="settings-bg-row__drag" aria-hidden="true">
+        <GripVertical size={16} strokeWidth={1.8} />
+      </span>
+      <label className="settings-bg-row__toggle">
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={disableToggle}
+          onChange={(event) => onToggle(event.target.checked)}
+          aria-label={`${info?.label || row.provider} enabled for background tasks`}
+        />
+        <span>Use</span>
+      </label>
+      <div className="settings-bg-row__main">
+        <div className="settings-bg-row__head">
+          <span className="settings-bg-row__icon" aria-hidden="true">
+            {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
+          </span>
+          <span className="settings-bg-row__copy">
+            <span className="settings-bg-row__title">{info?.label || row.provider}</span>
+            <StatusDot color={connected ? '--green' : '--muted'}>
+              {connected ? 'Connected' : 'Not connected'}
+            </StatusDot>
+          </span>
+        </div>
+        <div className="settings-bg-row__controls">
+          <label className="settings-agent-field">
+            <span>Model</span>
+            <select
+              className="settings__select"
+              value={row.model || ''}
+              onChange={(event) => onModelChange(event.target.value)}
+              disabled={!enabled}
+            >
+              {row.model && !hasModel && (
+                <option value={row.model}>{row.model}</option>
+              )}
+              {models.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label || model.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="settings-agent-field settings-agent-field--effort">
+            <span>Effort</span>
+            <SettingsEffortSlider
+              provider={row.provider}
+              value={row.effort}
+              disabled={!enabled}
+              onChange={onEffortChange}
+            />
+          </label>
+        </div>
+      </div>
+      <div className="settings-bg-row__order" aria-label={`${info?.label || row.provider} priority`}>
+        <button
+          type="button"
+          className="settings-icon-btn"
+          onClick={() => onMove(-1)}
+          disabled={index === 0}
+          aria-label={`Move ${info?.label || row.provider} up`}
+        >
+          <ArrowUp size={15} strokeWidth={2} />
+        </button>
+        <button
+          type="button"
+          className="settings-icon-btn"
+          onClick={() => onMove(1)}
+          disabled={index === total - 1}
+          aria-label={`Move ${info?.label || row.provider} down`}
+        >
+          <ArrowDown size={15} strokeWidth={2} />
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function AgentChoiceCard({
@@ -175,13 +345,14 @@ function returnToSettingsAfterReload() {
   try { sessionStorage.setItem(RETURN_VIEW_KEY, 'settings') } catch {}
 }
 
-export default function SettingsView({ onThemeChange, onOpenChat }) {
+export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = null }) {
   const queryClient = useQueryClient()
   const settingsQuery = settingsQueries.owner.useQuery()
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const versionQuery = versionQueries.current.useQuery()
   const [geminiKey, setGeminiKey] = useState('')
+  const [geminiExpanded, setGeminiExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState(null)
   const [errorMsg, setErrorMsg] = useState('')
@@ -272,7 +443,14 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   const [backgroundSaved, setBackgroundSaved] = useState(false)
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
+  const [backgroundDragIndex, setBackgroundDragIndex] = useState(null)
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
+  const setupFocusRefs = useRef({})
+  const [attentionSection, setAttentionSection] = useState('')
+
+  const setSetupFocusRef = useCallback((section, node) => {
+    if (node) setupFocusRefs.current[section] = node
+  }, [])
 
   useEffect(() => {
     if (!settingsQuery.data) return
@@ -280,9 +458,37 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   }, [settingsQuery.data])
 
   useEffect(() => {
-    if (!settingsQuery.data?.background_agents) return
-    setBackgroundDraft(normalizeBackgroundAgents(settingsQuery.data.background_agents))
-  }, [settingsQuery.data?.background_agents])
+    if (!settingsQuery.data) return
+    const chatDefaults = normalizeChatAgent(settingsQuery.data)
+    setBackgroundDraft(
+      normalizeBackgroundAgents(
+        settingsQuery.data.background_agents,
+        chatDefaults.provider,
+      ),
+    )
+  }, [settingsQuery.data])
+
+  useEffect(() => {
+    const requested = focusTarget?.section
+    if (!requested) return undefined
+    const section = requested === 'models' ? 'ai-providers' : requested
+    if (requested === 'models') setManageModelsOpen(true)
+    let clearTimer = null
+    const raf = requestAnimationFrame(() => {
+      const node = setupFocusRefs.current[section]
+      if (!node) return
+      node.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      node.focus({ preventScroll: true })
+      setAttentionSection(section)
+      clearTimer = setTimeout(() => {
+        setAttentionSection((current) => current === section ? '' : current)
+      }, 1800)
+    })
+    return () => {
+      cancelAnimationFrame(raf)
+      if (clearTimer) clearTimeout(clearTimer)
+    }
+  }, [focusTarget, providerReady])
 
   const connectedByProvider = {
     claude: claudeAuthenticated,
@@ -352,25 +558,30 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   }, [chatDraft, persistChatAgent, settingsQuery.data])
 
   const persistBackgroundAgents = useCallback(async (draft) => {
-    if (!draft?.primary?.provider) return
+    const rows = Array.isArray(draft) ? draft : []
+    const enabled = rows.filter(row => row.enabled !== false)
+    if (!enabled.length) {
+      setBackgroundError('Keep at least one background provider selected.')
+      return
+    }
     const reqId = ++backgroundSaveReqRef.current
     setBackgroundSaving(true)
     setBackgroundError('')
     setBackgroundSaved(false)
     try {
+      const toChoice = (row, includeEnabled = false) => {
+        const choice = {
+          provider: row.provider,
+          model: row.model || null,
+          effort: row.effort || null,
+        }
+        if (includeEnabled) choice.enabled = row.enabled !== false
+        return choice
+      }
       const payload = {
-        primary: {
-          provider: draft.primary.provider,
-          model: draft.primary.model || null,
-          effort: draft.primary.effort || null,
-        },
-        fallback: draft.fallback?.provider
-          ? {
-              provider: draft.fallback.provider,
-              model: draft.fallback.model || null,
-              effort: draft.fallback.effort || null,
-            }
-          : null,
+        providers: rows.map(row => toChoice(row, true)),
+        primary: toChoice(enabled[0]),
+        fallback: enabled[1] ? toChoice(enabled[1]) : null,
       }
       const res = await api.settings.save({ background_agents: payload })
       if (reqId !== backgroundSaveReqRef.current) return
@@ -393,18 +604,39 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     }
   }, [queryClient])
 
-  const setBackgroundChoice = useCallback((slot, patch) => {
+  const updateBackgroundDraft = useCallback((updater) => {
+    const chatDefaults = normalizeChatAgent(settingsQuery.data)
     const current = backgroundDraft ||
-      normalizeBackgroundAgents(settingsQuery.data?.background_agents)
-    const nextChoice = { ...current[slot], ...patch }
-    if ('provider' in patch) {
-      nextChoice.model = ''
-      nextChoice.effort = patch.provider ? defaultEffort(patch.provider) : ''
-    }
-    const next = { ...current, [slot]: nextChoice }
+      normalizeBackgroundAgents(
+        settingsQuery.data?.background_agents,
+        chatDefaults.provider,
+      )
+    const next = typeof updater === 'function' ? updater(current) : updater
     setBackgroundDraft(next)
     persistBackgroundAgents(next)
-  }, [backgroundDraft, persistBackgroundAgents, settingsQuery.data?.background_agents])
+  }, [backgroundDraft, persistBackgroundAgents, settingsQuery.data])
+
+  const setBackgroundProviderChoice = useCallback((provider, patch) => {
+    updateBackgroundDraft((current) => current.map((row) => {
+      if (row.provider !== provider) return row
+      return { ...row, ...patch }
+    }))
+  }, [updateBackgroundDraft])
+
+  const moveBackgroundProvider = useCallback((fromIndex, toIndex) => {
+    const total = (backgroundDraft ||
+      normalizeBackgroundAgents(
+        settingsQuery.data?.background_agents,
+        normalizeChatAgent(settingsQuery.data).provider,
+      )).length
+    if (toIndex < 0 || toIndex >= total || fromIndex === toIndex) return
+    updateBackgroundDraft((current) => {
+      const next = [...current]
+      const [row] = next.splice(fromIndex, 1)
+      next.splice(toIndex, 0, row)
+      return next
+    })
+  }, [backgroundDraft, settingsQuery.data, updateBackgroundDraft])
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
@@ -497,6 +729,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
       setGeminiKey('')
       setStatus('success')
       setJustSaved(true)
+      setGeminiExpanded(false)
       setTimeout(() => setJustSaved(false), 2000)
     } catch {
       setErrorMsg('Network error.')
@@ -771,9 +1004,19 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
       : updatePhase === 'checked'
         ? 'No updates found'
         : 'Check for updates'
-  const effectiveBackgroundDraft = backgroundDraft ||
-    normalizeBackgroundAgents(settingsQuery.data?.background_agents)
   const effectiveChatDraft = chatDraft || normalizeChatAgent(settingsQuery.data)
+  const effectiveBackgroundDraft = backgroundDraft ||
+    normalizeBackgroundAgents(
+      settingsQuery.data?.background_agents,
+      effectiveChatDraft.provider,
+    )
+  const chatModelLabel = modelLabel(
+    effectiveChatDraft.model,
+    modelsForProvider(effectiveChatDraft.provider),
+  )
+  const backgroundSelectedCount = effectiveBackgroundDraft
+    .filter(row => row.enabled !== false).length
+  const showGeminiForm = !configured || geminiExpanded
   const modelLoadNote = modelRegistryQuery.isError
     ? 'Could not refresh the live model list. Saved defaults still work.'
     : modelRegistryQuery.isLoading
@@ -785,7 +1028,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
       <div className="settings__content">
         <h1 className="settings__title">Settings</h1>
 
-        <section className="settings__section">
+        <section
+          className={`settings__section${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
+          id="settings-ai-providers"
+          ref={(node) => setSetupFocusRef('ai-providers', node)}
+          tabIndex={-1}
+        >
           <h2 className="settings__section-title">AI providers</h2>
 
           {providerReady ? (
@@ -823,26 +1071,25 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
               <div className="settings-agent-group">
                 <div className="settings-agent-group__head">
                   <div>
-                    <h3 className="settings__agent-title">Chat agents</h3>
+                    <h3 className="settings__agent-title">Chat model</h3>
                     <p className="settings__subtext settings__subtext--tight">
-                      Defaults for new chats. Existing chats keep their own
-                      picker in the composer.
+                      New chats default to the last used model: {chatModelLabel}.
                     </p>
                   </div>
                   <button
-                    className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                    className="settings__pill-action"
                     type="button"
                     onClick={() => setManageModelsOpen(true)}
                   >
-                    Configure models
+                    Configure
                   </button>
                 </div>
                 {modelLoadNote && (
                   <div className="settings__notice">{modelLoadNote}</div>
                 )}
                 <AgentChoiceCard
-                  title="Default chat agent"
-                  description="Used when you start a new conversation."
+                  title="Default for new chats"
+                  description={providerLabel(effectiveChatDraft.provider)}
                   choice={effectiveChatDraft}
                   models={modelsForProvider(effectiveChatDraft.provider)}
                   connected={connectedByProvider[effectiveChatDraft.provider]}
@@ -863,44 +1110,56 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                 )}
               </div>
 
-              <div className="settings-agent-group">
+              <div
+                className={`settings-agent-group${attentionSection === 'background-agents' ? ' settings-setup-target' : ''}`}
+                id="settings-background-agents"
+                ref={(node) => setSetupFocusRef('background-agents', node)}
+                tabIndex={-1}
+              >
                 <div className="settings-agent-group__head">
                   <div>
                     <h3 className="settings__agent-title">Background tasks</h3>
                     <p className="settings__subtext settings__subtext--tight">
-                      Used by Memory, Reflection, and scheduled app work.
+                      System defaults for unattended work. Apps can override
+                      these in their own settings.
                     </p>
                   </div>
+                  <SaveState
+                    saving={backgroundSaving}
+                    saved={backgroundSaved}
+                    error={backgroundError}
+                  />
                 </div>
-                <AgentChoiceCard
-                  title="Primary"
-                  description="First choice for unattended work."
-                  choice={effectiveBackgroundDraft.primary}
-                  models={modelsForProvider(effectiveBackgroundDraft.primary.provider)}
-                  connected={connectedByProvider[effectiveBackgroundDraft.primary.provider]}
-                  connectedByProvider={connectedByProvider}
-                  saving={backgroundSaving}
-                  saved={backgroundSaved}
-                  error={backgroundError}
-                  onProviderChange={(provider) => setBackgroundChoice('primary', { provider })}
-                  onModelChange={(model) => setBackgroundChoice('primary', { model })}
-                  onEffortChange={(effort) => setBackgroundChoice('primary', { effort })}
-                />
-                <AgentChoiceCard
-                  title="Secondary"
-                  description="Used if the primary is unavailable or out of usage."
-                  allowNone
-                  choice={effectiveBackgroundDraft.fallback}
-                  models={modelsForProvider(effectiveBackgroundDraft.fallback.provider)}
-                  connected={connectedByProvider[effectiveBackgroundDraft.fallback.provider]}
-                  connectedByProvider={connectedByProvider}
-                  saving={backgroundSaving}
-                  saved={backgroundSaved}
-                  error={backgroundError}
-                  onProviderChange={(provider) => setBackgroundChoice('fallback', { provider })}
-                  onModelChange={(model) => setBackgroundChoice('fallback', { model })}
-                  onEffortChange={(effort) => setBackgroundChoice('fallback', { effort })}
-                />
+                <div className="settings-bg-list">
+                  {effectiveBackgroundDraft.map((row, index) => (
+                    <BackgroundProviderRow
+                      key={row.provider}
+                      row={row}
+                      index={index}
+                      total={effectiveBackgroundDraft.length}
+                      selectedCount={backgroundSelectedCount}
+                      models={modelsForProvider(row.provider)}
+                      connected={connectedByProvider[row.provider]}
+                      onToggle={(enabled) => setBackgroundProviderChoice(row.provider, { enabled })}
+                      onModelChange={(model) => setBackgroundProviderChoice(row.provider, { model })}
+                      onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
+                      onMove={(delta) => moveBackgroundProvider(index, index + delta)}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = 'move'
+                        event.dataTransfer.setData('text/plain', row.provider)
+                        setBackgroundDragIndex(index)
+                      }}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        if (backgroundDragIndex === null) return
+                        moveBackgroundProvider(backgroundDragIndex, index)
+                        setBackgroundDragIndex(null)
+                      }}
+                      onDragEnd={() => setBackgroundDragIndex(null)}
+                    />
+                  ))}
+                </div>
                 {backgroundError && (
                   <Alert
                     color="danger"
@@ -945,44 +1204,66 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           )}
         </section>
 
-        <section className="settings__section">
+        <section
+          className={`settings__section${attentionSection === 'image-generation' ? ' settings-setup-target' : ''}`}
+          id="settings-image-generation"
+          ref={(node) => setSetupFocusRef('image-generation', node)}
+          tabIndex={-1}
+        >
           <h2 className="settings__section-title">Image generation</h2>
-          <form className="settings__form" onSubmit={handleSave}>
-            <label className="settings__label">
-              Gemini API key
-              {configured && <StatusDot color="--green">Configured</StatusDot>}
-            </label>
-            <p className="settings__subtext">
-              Get one at{' '}
-              <TextLink href="https://aistudio.google.com/apikey" forceExternal>
-                aistudio.google.com
-              </TextLink>.
-            </p>
-            {/* The key is always pasted, never typed, so there's no reveal
-                toggle — keep the field a plain masked paste target. */}
-            <input
-              className="settings__input"
-              type="password"
-              value={geminiKey}
-              onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
-              placeholder={configured ? '••••••••' : 'AIza...'}
-              autoComplete="off"
-            />
-            {status === 'error' && (
-              <Alert
-                color="danger"
-                variant="soft"
-                description={errorMsg}
-              />
+          <div className="settings-integration-row">
+            <div className="settings-integration-row__copy">
+              <span className="settings__label">
+                Gemini API key
+                {configured && <StatusDot color="--green">Configured</StatusDot>}
+              </span>
+              <p className="settings__subtext settings__subtext--tight">
+                Used for image generation. Get a key at{' '}
+                <TextLink href="https://aistudio.google.com/apikey" forceExternal>
+                  AI Studio
+                </TextLink>.
+              </p>
+            </div>
+            {configured && (
+              <button
+                className="settings__pill-action"
+                type="button"
+                onClick={() => setGeminiExpanded(prev => !prev)}
+                aria-expanded={geminiExpanded}
+              >
+                {geminiExpanded ? 'Close' : 'Reconfigure'}
+              </button>
             )}
-            <button
-              className="settings__btn"
-              type="submit"
-              disabled={saving || !geminiKey.trim()}
-            >
-              {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
-            </button>
-          </form>
+          </div>
+          {showGeminiForm && (
+            <form className="settings__form" onSubmit={handleSave}>
+              {/* The key is always pasted, never typed, so there's no reveal
+                  toggle — keep the field a plain masked paste target. */}
+              <input
+                className="settings__input"
+                type="password"
+                value={geminiKey}
+                onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
+                placeholder={configured ? '••••••••' : 'AIza...'}
+                autoComplete="off"
+                aria-label="Gemini API key"
+              />
+              {status === 'error' && (
+                <Alert
+                  color="danger"
+                  variant="soft"
+                  description={errorMsg}
+                />
+              )}
+              <button
+                className="settings__btn"
+                type="submit"
+                disabled={saving || !geminiKey.trim()}
+              >
+                {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
+              </button>
+            </form>
+          )}
         </section>
 
         <section className="settings__section settings__section--compact">

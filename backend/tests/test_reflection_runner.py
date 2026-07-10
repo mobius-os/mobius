@@ -260,6 +260,37 @@ def test_resolve_agents_inherits_system_background_defaults(tmp_path, monkeypatc
   }
 
 
+def test_resolve_agents_uses_ordered_provider_list(tmp_path, monkeypatch):
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _write_global_agents(tmp_path, {
+    "background_agents": {
+      "providers": [
+        {
+          "provider": "claude",
+          "model": "claude-opus-4-8",
+          "effort": "xhigh",
+          "enabled": False,
+        },
+        {
+          "provider": "codex",
+          "model": "gpt-5.5",
+          "effort": "medium",
+          "enabled": True,
+        },
+      ],
+      "primary": {"provider": "claude", "model": "claude-sonnet-4-6"},
+    },
+  })
+  assert dr._resolve_agents({}) == {
+    "primary": {
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+    },
+    "fallback": None,
+  }
+
+
 def test_resolve_agents_app_primary_override_keeps_system_fallback(
   tmp_path, monkeypatch,
 ):
