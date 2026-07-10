@@ -325,7 +325,12 @@ def test_connect_token_rejects_fine_grained(client, auth):
   r = client.post("/api/github/connect/token",
                   json={"token": "github_pat_11ABCDEF_secret"}, headers=auth)
   assert r.status_code == 400
-  assert "fine-grained" in r.json()["detail"]
+  detail = r.json()["detail"]
+  assert "fine-grained" in detail
+  # The rejection is actionable: it links straight to the classic-token
+  # creation page with the required scope pre-filled, and says why.
+  assert "https://github.com/settings/tokens/new" in detail
+  assert "scopes=public_repo" in detail
 
 
 def test_connect_token_rejects_missing_scope(client, auth, monkeypatch):
@@ -1433,3 +1438,320 @@ def test_submit_contribution_rolls_back_unready_record(
   )
   assert stored["status"] == "prepared"
   assert "last_submit_error" in stored
+
+
+# --- contribution CI feedback loop (checks refresh + classification) ---
+
+
+_HEAD_SHA = "f" * 40
+
+
+def _pr_node(
+  *, number=4, state="OPEN", is_draft=False, base_ref="main",
+  head_sha=_HEAD_SHA, rollup_state="FAILURE", contexts=None,
+):
+  """A statusCheckRollup GraphQL `pullRequest` node for the mock transport."""
+  if contexts is None:
+    contexts = [
+      {"__typename": "CheckRun", "name": "e2e", "conclusion": "FAILURE",
+       "status": "COMPLETED",
+       "detailsUrl": "https://github.com/mobius-os/app-demo/runs/e2e"},
+      {"__typename": "CheckRun", "name": "core-apps-sync",
+       "conclusion": "FAILURE", "status": "COMPLETED",
+       "detailsUrl": "https://github.com/mobius-os/app-demo/runs/cas"},
+      {"__typename": "CheckRun", "name": "backend", "conclusion": "SUCCESS",
+       "status": "COMPLETED",
+       "detailsUrl": "https://github.com/mobius-os/app-demo/runs/be"},
+    ]
+  rollup = None
+  if rollup_state is not None or contexts:
+    rollup = {"state": rollup_state, "contexts": {"nodes": contexts}}
+  return {
+    "number": number,
+    "state": state,
+    "isDraft": is_draft,
+    "baseRefName": base_ref,
+    "url": f"https://github.com/mobius-os/app-demo/pull/{number}",
+    "commits": {"nodes": [{"commit": {
+      "oid": head_sha,
+      "statusCheckRollup": rollup,
+    }}]},
+  }
+
+
+def test_parse_rollup_extracts_jobs_head_and_state():
+  from app.routes.github import _parse_rollup
+
+  parsed = _parse_rollup(_pr_node(contexts=[
+    {"__typename": "CheckRun", "name": "e2e", "conclusion": "FAILURE",
+     "status": "COMPLETED", "detailsUrl": "https://x/runs/e2e"},
+    {"__typename": "StatusContext", "context": "legacy-ci", "state": "SUCCESS",
+     "targetUrl": "https://x/status/legacy"},
+    {"__typename": "CheckRun", "name": "", "conclusion": "SUCCESS"},
+  ]))
+  assert parsed["pr_state"] == "OPEN"
+  assert parsed["head_sha"] == _HEAD_SHA
+  assert parsed["base_ref"] == "main"
+  assert parsed["rollup_state"] == "FAILURE"
+  by_name = {j["name"]: j for j in parsed["jobs"]}
+  # Nameless contexts are dropped; both CheckRun and StatusContext normalize.
+  assert set(by_name) == {"e2e", "legacy-ci"}
+  assert by_name["e2e"]["conclusion"] == "FAILURE"
+  assert by_name["e2e"]["url"] == "https://x/runs/e2e"
+  assert by_name["legacy-ci"]["conclusion"] == "SUCCESS"
+  assert by_name["legacy-ci"]["url"] == "https://x/status/legacy"
+
+
+def test_parse_rollup_handles_missing_pr_and_empty_rollup():
+  from app.routes.github import _parse_rollup
+
+  assert _parse_rollup(None) is None
+  assert _parse_rollup("nope") is None
+  # PR with no checks reported yet: resolvable, but zero jobs, null state.
+  empty = _parse_rollup(_pr_node(rollup_state=None, contexts=[]))
+  assert empty["jobs"] == []
+  assert empty["rollup_state"] is None
+  assert empty["head_sha"] == _HEAD_SHA
+
+
+def test_classify_jobs_inherited_suspect_unknown():
+  from app.routes.github import _classify_jobs
+
+  jobs = [
+    {"name": "e2e", "conclusion": "FAILURE"},
+    {"name": "core-apps-sync", "conclusion": "FAILURE"},
+    {"name": "backend", "conclusion": "SUCCESS"},
+  ]
+  # core-apps-sync is also red on base → inherited; e2e is green on base →
+  # suspect; passing jobs get no classification.
+  _classify_jobs(jobs, {"core-apps-sync"})
+  assert jobs[0]["classification"] == "suspect-pr-caused"
+  assert jobs[1]["classification"] == "inherited"
+  assert "classification" not in jobs[2]
+
+  # No base data at all → every failing job is unknown.
+  unknown = [{"name": "e2e", "conclusion": "FAILURE"}]
+  _classify_jobs(unknown, None)
+  assert unknown[0]["classification"] == "unknown"
+
+  # Empty base set (base is green) → the failure is suspect, not inherited.
+  suspect = [{"name": "e2e", "conclusion": "FAILURE"}]
+  _classify_jobs(suspect, set())
+  assert suspect[0]["classification"] == "suspect-pr-caused"
+
+
+def test_build_pr_checks_query_aliases_and_variables():
+  from app.routes.github import _build_pr_checks_query
+
+  query, variables = _build_pr_checks_query([
+    ("pr0", "mobius-os", "app-demo", 4),
+    ("pr1", "mobius-os", "app-notes", 7),
+  ])
+  assert variables == {
+    "pr0o": "mobius-os", "pr0n": "app-demo", "pr0p": 4,
+    "pr1o": "mobius-os", "pr1n": "app-notes", "pr1p": 7,
+  }
+  assert "pr0: repository(owner: $pr0o, name: $pr0n)" in query
+  assert "pullRequest(number: $pr0p)" in query
+  assert "pr1: repository(owner: $pr1o, name: $pr1n)" in query
+  assert "fragment prChecks on PullRequest" in query
+  # No repo slug is interpolated into the query text (injection guard).
+  assert "app-demo" not in query
+
+
+def test_checks_failure_notification_payload_is_self_contained():
+  from app.routes.github import _checks_failure_notification
+
+  record = {
+    "repo": "mobius-os/app-demo", "number": 4,
+    "url": "https://github.com/mobius-os/app-demo/pull/4",
+  }
+  checks = {
+    "head_sha": _HEAD_SHA,
+    "jobs": [
+      {"name": "e2e", "conclusion": "FAILURE",
+       "classification": "suspect-pr-caused",
+       "url": "https://github.com/mobius-os/app-demo/runs/e2e"},
+      {"name": "core-apps-sync", "conclusion": "FAILURE",
+       "classification": "inherited",
+       "url": "https://github.com/mobius-os/app-demo/runs/cas"},
+      {"name": "backend", "conclusion": "SUCCESS"},
+    ],
+  }
+  n = _checks_failure_notification(record, checks)
+  assert n["title"] == "PR checks failing: mobius-os/app-demo#4"
+  # repo, PR number, head SHA, per-job name + URL + classification all present.
+  assert "mobius-os/app-demo#4" in n["body"]
+  assert "fffffff" in n["body"]
+  assert "e2e — suspect (PR-caused)" in n["body"]
+  assert "core-apps-sync — inherited (also red on upstream main)" in n["body"]
+  assert "https://github.com/mobius-os/app-demo/runs/e2e" in n["body"]
+  # Passing jobs are not surfaced as failures.
+  assert "backend" not in n["body"]
+  assert n["target"] == record["url"]
+  assert n["actions"][0]["target"] == record["url"]
+
+
+def _write_open_pr_record(app_id, record_id="rec-open-pr", number=4):
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "open",
+    "number": number,
+    "url": f"https://github.com/mobius-os/app-demo/pull/{number}",
+    "branch": "fix/demo",
+    "plan": {"action": "pr", "repo": "mobius-os/app-demo"},
+  }
+  _write_contribution(app_id, record_id, record)
+  return record_id
+
+
+def _checks_refresh_handler(seen, *, pr_node=None):
+  if pr_node is None:
+    pr_node = _pr_node()
+
+  def handler(request):
+    url = str(request.url)
+    if url == "https://api.github.com/graphql" and request.method == "POST":
+      seen["graphql"] = json.loads(request.content)
+      assert request.headers.get("authorization") == "Bearer gh-checks-tok"
+      return httpx.Response(200, json={"data": {"pr0": {"pullRequest": pr_node}}})
+    if (
+      request.method == "GET"
+      and url.startswith(
+        "https://api.github.com/repos/mobius-os/app-demo/commits/main/check-runs"
+      )
+    ):
+      seen["base_calls"] = seen.get("base_calls", 0) + 1
+      # core-apps-sync is red on main (inherited); e2e is green (suspect).
+      return httpx.Response(200, json={"check_runs": [
+        {"name": "core-apps-sync", "conclusion": "failure"},
+        {"name": "e2e", "conclusion": "success"},
+        {"name": "backend", "conclusion": "success"},
+      ]})
+    return _fail(request)
+
+  return handler
+
+
+def _stored_checks(app_id, record_id):
+  return json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )["checks"]
+
+
+def _all_notifications():
+  from app import models
+  from app.database import SessionLocal
+  s = SessionLocal()
+  try:
+    return s.query(models.Notification).all()
+  finally:
+    s.close()
+
+
+def test_refresh_requires_github_connection(client, owner_token):
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  r = client.post(f"/api/github/contributions/{app_id}/refresh",
+                  headers={"Authorization": f"Bearer {owner_token}"})
+  assert r.status_code == 401
+  assert "not connected" in r.json()["detail"].lower()
+
+
+def test_refresh_no_records_is_noop(client, owner_token, monkeypatch):
+  _write_token(token="gh-checks-tok")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  # No upstream call should happen when there are no tracked PRs.
+  _install_mock_transport(monkeypatch, _fail)
+  r = client.post(f"/api/github/contributions/{app_id}/refresh",
+                  headers={"Authorization": f"Bearer {owner_token}"})
+  assert r.status_code == 200
+  assert r.json() == {"refreshed": [], "notified": 0}
+
+
+def test_refresh_persists_checks_classifies_and_notifies(
+  client, owner_token, monkeypatch,
+):
+  _write_token(token="gh-checks-tok")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = _write_open_pr_record(app_id)
+  seen = {}
+  _install_mock_transport(monkeypatch, _checks_refresh_handler(seen))
+
+  r = client.post(f"/api/github/contributions/{app_id}/refresh",
+                  headers={"Authorization": f"Bearer {owner_token}"})
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert body["notified"] == 1
+  assert len(body["refreshed"]) == 1
+
+  # The batched query carried the PR ref as a variable, not interpolated.
+  assert seen["graphql"]["variables"]["pr0p"] == 4
+
+  checks = _stored_checks(app_id, record_id)
+  assert checks["state"] == "FAILURE"
+  assert checks["head_sha"] == _HEAD_SHA
+  assert checks["pr_state"] == "OPEN"
+  assert checks["base_ref"] == "main"
+  assert checks["notified_sha"] == _HEAD_SHA
+  by_name = {j["name"]: j for j in checks["jobs"]}
+  assert by_name["e2e"]["classification"] == "suspect-pr-caused"
+  assert by_name["core-apps-sync"]["classification"] == "inherited"
+  # Passing jobs carry no classification.
+  assert "classification" not in by_name["backend"]
+
+  notes = _all_notifications()
+  assert len(notes) == 1
+  assert notes[0].source_type == "app"
+  assert notes[0].source_id == str(app_id)
+  assert "core-apps-sync — inherited" in notes[0].body
+  assert "e2e — suspect" in notes[0].body
+  assert notes[0].target == "https://github.com/mobius-os/app-demo/pull/4"
+
+
+def test_refresh_dedupes_notification_on_unchanged_head(
+  client, owner_token, monkeypatch,
+):
+  _write_token(token="gh-checks-tok")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _write_open_pr_record(app_id)
+  seen = {}
+  _install_mock_transport(monkeypatch, _checks_refresh_handler(seen))
+
+  first = client.post(f"/api/github/contributions/{app_id}/refresh",
+                      headers={"Authorization": f"Bearer {owner_token}"})
+  assert first.json()["notified"] == 1
+  # Second refresh, same red head SHA — must NOT re-notify (dedupe on
+  # checks.notified_sha), and base check-runs are cached per repo per call.
+  second = client.post(f"/api/github/contributions/{app_id}/refresh",
+                       headers={"Authorization": f"Bearer {owner_token}"})
+  assert second.status_code == 200
+  assert second.json()["notified"] == 0
+  assert len(_all_notifications()) == 1
+
+
+def test_refresh_skips_non_open_and_success_without_notifying(
+  client, owner_token, monkeypatch,
+):
+  _write_token(token="gh-checks-tok")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = _write_open_pr_record(app_id)
+  # All green: checks persist, base branch is never queried, nothing notifies.
+  green = _pr_node(rollup_state="SUCCESS", contexts=[
+    {"__typename": "CheckRun", "name": "e2e", "conclusion": "SUCCESS",
+     "status": "COMPLETED", "detailsUrl": "https://x/runs/e2e"},
+  ])
+  seen = {}
+  _install_mock_transport(monkeypatch, _checks_refresh_handler(seen, pr_node=green))
+
+  r = client.post(f"/api/github/contributions/{app_id}/refresh",
+                  headers={"Authorization": f"Bearer {owner_token}"})
+  assert r.status_code == 200
+  assert r.json()["notified"] == 0
+  assert seen.get("base_calls", 0) == 0
+  checks = _stored_checks(app_id, record_id)
+  assert checks["state"] == "SUCCESS"
+  assert "notified_sha" not in checks
+  assert _all_notifications() == []
