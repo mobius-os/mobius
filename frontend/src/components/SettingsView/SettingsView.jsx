@@ -13,6 +13,7 @@ import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
+import UpdateReviewModal from './UpdateReviewModal.jsx'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
 import './SettingsView.css'
@@ -325,6 +326,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [platform, setPlatform] = useState(null)
   const [platformPhase, setPlatformPhase] = useState('idle')
   const [platformError, setPlatformError] = useState('')
+  // Whether the update-review sheet is open. The "Update" button routes through
+  // it so the owner reviews the incoming changes before applying, rather than
+  // Apply firing on the first click.
+  const [reviewOpen, setReviewOpen] = useState(false)
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check cached frontend assets and re-reads
   // /api/version. 'checked' is a short-lived success label when no update is
@@ -869,11 +874,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Press Update -> merge the baked platform release into the live backend.
-  // Clean -> the row flips to "restart needed"; conflict -> show a resolver
-  // action, but wait for the owner's click before opening an agent chat.
+  // Apply the reviewed update: merge the fetched platform release into the live
+  // backend. Clean -> the row flips to "restart needed"; conflict -> show a
+  // resolver action, but wait for the owner's click before opening an agent
+  // chat. Returns whether the apply landed cleanly so the review sheet can close
+  // on success and keep itself open (showing the error) on failure.
   async function applyPlatformUpdate() {
-    if (platformPhase !== 'idle') return
+    if (platformPhase !== 'idle') return false
     setPlatformError('')
     setPlatformPhase('applying')
     try {
@@ -882,11 +889,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         let detail = ''
         try { detail = (await res.json())?.detail || '' } catch {}
         setPlatformError(detail ? `Update failed: ${detail}` : 'Update failed — the instance is unchanged.')
-        return
+        return false
       }
       await refreshPlatform()
+      return true
     } catch {
       setPlatformError('Update failed — the instance is unchanged.')
+      return false
     } finally {
       setPlatformPhase('idle')
     }
@@ -921,13 +930,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
   }
 
-  // One "Update" button for the platform updater. A clean merge marks
-  // restart-needed, so the row advances to "Restart to finish"; that restart
-  // reloads onto the fresh service worker too.
-  async function applyMobiusUpdate() {
-    if (platform?.available) {
-      await applyPlatformUpdate()
-    }
+  // The "Update" button opens the review sheet instead of applying immediately,
+  // so the owner sees the incoming changes first. Apply happens from inside the
+  // sheet (which then advances the row to "Restart to finish").
+  function openUpdateReview() {
+    if (platformPhase !== 'idle' || !platform?.available) return
+    setPlatformError('')
+    setReviewOpen(true)
   }
 
   // Poll until the restart is actually safe to navigate. A plain successful
@@ -1386,10 +1395,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               <button
                 className="settings__btn settings__btn--sm settings__btn--nowrap"
                 type="button"
-                onClick={applyMobiusUpdate}
+                onClick={openUpdateReview}
                 disabled={mobiusUpdating}
               >
-                {mobiusUpdating ? 'Updating…' : 'Update'}
+                {mobiusUpdating ? 'Updating…' : 'Review update'}
               </button>
             ) : (
               // Nothing to apply — offer an explicit refresh. Subtle outline (a
@@ -1416,6 +1425,15 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
             <Alert color="danger" variant="soft" description={platformError} />
           )}
         </section>
+
+        {reviewOpen && (
+          <UpdateReviewModal
+            onClose={() => setReviewOpen(false)}
+            onApply={applyPlatformUpdate}
+            applying={platformPhase === 'applying'}
+            applyError={platformError}
+          />
+        )}
 
         <section className="settings__section settings__section--compact settings__section--server">
           <h2 className="settings__section-title">Server</h2>
