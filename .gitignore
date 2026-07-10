@@ -48,6 +48,9 @@ tests/.auth/
 test-results/
 playwright-report/
 
+# Core app unit-test bundles
+core-apps/*/tests/.build*/
+
 # Internal planning docs — not for public release
 docs/
 

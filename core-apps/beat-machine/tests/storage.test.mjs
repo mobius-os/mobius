@@ -5,25 +5,24 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import test from 'node:test'
+import { buildEnv, esbuildPath } from './test-deps.mjs'
 
 const execFileAsync = promisify(execFile)
 const root = dirname(fileURLToPath(import.meta.url))
-const repoRoot = join(root, '..', '..', '..')
-const esbuildBin = join(repoRoot, 'frontend', 'node_modules', '.bin', 'esbuild')
 const buildDir = join(root, '.build')
 const bundled = join(buildDir, 'storage.mjs')
 
 async function bundle() {
   await rm(buildDir, { recursive: true, force: true })
   await mkdir(buildDir, { recursive: true })
-  await execFileAsync(esbuildBin, [
+  await execFileAsync(esbuildPath, [
     join(root, '..', 'storage.js'),
     '--bundle',
     '--format=esm',
     '--platform=node',
     `--alias:react=${join(root, 'fixtures', 'react-stub.mjs')}`,
     `--outfile=${bundled}`,
-  ])
+  ], { env: buildEnv() })
   return import(pathToFileURL(bundled))
 }
 

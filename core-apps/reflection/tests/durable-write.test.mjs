@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import test from 'node:test'
+import { buildEnv, esbuildPath } from './test-deps.mjs'
 
 const execFileAsync = promisify(execFile)
 const root = dirname(fileURLToPath(import.meta.url))
@@ -27,14 +28,14 @@ const bundled = join(buildDir, 'index.mjs')
 async function bundle() {
   await rm(buildDir, { recursive: true, force: true })
   await mkdir(buildDir, { recursive: true })
-  await execFileAsync('/home/hmzmrzx/projects/mobius/frontend/node_modules/.bin/esbuild', [
+  await execFileAsync(esbuildPath, [
     join(root, '..', 'index.jsx'),
     '--bundle',
     '--format=esm',
     '--platform=node',
     '--jsx=automatic',
     `--outfile=${bundled}`,
-  ], { env: { ...process.env, NODE_PATH: '/home/hmzmrzx/projects/mobius/frontend/node_modules' } })
+  ], { env: buildEnv() })
   return import(pathToFileURL(bundled))
 }
 

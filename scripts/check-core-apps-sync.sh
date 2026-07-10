@@ -37,7 +37,7 @@ sync_local_excludes() {  # $1=slug -> prints one `--exclude=<file>` per line
 fail=0
 while read -r slug repo commit _rest; do
   case "$slug" in ''|\#*) continue ;; esac
-  mapfile -t excludes < <(sync_local_excludes "$slug")
+  mapfile -t excludes < <(printf '%s\n' '--exclude=.build*'; sync_local_excludes "$slug")
   if ! diff -rq "${excludes[@]}" "$tmp/$slug" "$ROOT/core-apps/$slug" >/dev/null 2>&1; then
     echo "ERROR: core-apps/$slug has drifted from $repo@${commit:0:10}." >&2
     diff -rq "${excludes[@]}" "$tmp/$slug" "$ROOT/core-apps/$slug" >&2 || true
