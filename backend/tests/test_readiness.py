@@ -28,7 +28,10 @@ def test_ready_returns_200_when_writer_running(client):
   # Liveness is unaffected and stays simple.
   h = client.get("/api/health")
   assert h.status_code == 200
-  assert h.json() == {"status": "ok"}
+  health = h.json()
+  assert health["status"] == "ok"
+  assert isinstance(health["boot_id"], str)
+  assert health["boot_id"]
 
 
 def test_ready_returns_503_when_writer_fatal_then_recovers(client):

@@ -8,8 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "npm run test:lib && npm run test:hooks",
-    "test:lib": "node --loader=./src/lib/__tests__/vite-env-loader.mjs --test src/lib src/utils src/components/ProviderAuth src/components/ChatView/__tests__",
-    "test:hooks": "node --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test src/components/ChatView/hooks"
+    "test:lib": "node ./scripts/run-node-tests.mjs ./src/lib/__tests__/vite-env-loader.mjs src/lib src/utils src/components/ProviderAuth src/components/ChatView/__tests__",
+    "test:hooks": "node ./scripts/run-node-tests.mjs ./src/components/ChatView/hooks/__tests__/react-loader.mjs src/components/ChatView/hooks"
   },
   "dependencies": {
     "@openai/apps-sdk-ui": "0.2.2",

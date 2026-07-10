@@ -6,6 +6,7 @@ import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { SHELL_BUILD } from '../../lib/buildInfo.js'
+import { restartCanReload } from '../../lib/restartReadiness.js'
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
@@ -14,6 +15,48 @@ import StatusDot from '../ui/StatusDot.jsx'
 import '../ui/StatusDot.css'
 import './SettingsView.css'
 
+const UPDATE_CHECKED_RESET_MS = 2200
+const RESTART_POLL_INTERVAL_MS = 1500
+const RESTART_POLL_MAX = 40
+const RESTART_SHELL_READY_PATH = '/shell/'
+
+async function readRestartHealth() {
+  const response = await fetch('/api/health', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  })
+  if (!response.ok) return { ok: false, bootId: '' }
+  let body = null
+  try { body = await response.json() } catch {}
+  return {
+    ok: true,
+    bootId: typeof body?.boot_id === 'string' ? body.boot_id : '',
+  }
+}
+
+async function readRestartBootId() {
+  try {
+    const health = await readRestartHealth()
+    return health.ok ? health.bootId : ''
+  } catch {
+    return ''
+  }
+}
+
+async function shellDocumentReady() {
+  if (typeof window === 'undefined') return false
+  try {
+    const response = await fetch(new URL(RESTART_SHELL_READY_PATH, window.location.origin), {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { Accept: 'text/html' },
+    })
+    if (!response.ok) return false
+    return (response.headers.get('content-type') || '').toLowerCase().includes('text/html')
+  } catch {
+    return false
+  }
+}
 
 export default function SettingsView({ onThemeChange }) {
   const queryClient = useQueryClient()
@@ -43,6 +86,11 @@ export default function SettingsView({ onThemeChange }) {
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check for a new shell build and re-reads /api/version.
   const [updatePhase, setUpdatePhase] = useState('idle')
+  useEffect(() => {
+    if (updatePhase !== 'checked') return undefined
+    const timer = window.setTimeout(() => setUpdatePhase('idle'), UPDATE_CHECKED_RESET_MS)
+    return () => window.clearTimeout(timer)
+  }, [updatePhase])
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -188,56 +236,98 @@ export default function SettingsView({ onThemeChange }) {
     }
   }
 
-  // Ref to track the active health-poll interval so we can cancel it on
-  // component unmount or on a second restart attempt (shouldn't happen —
-  // the button is disabled while restarting, but belt-and-braces).
+  // Ref to track the active health-poll timeout so we can cancel it on
+  // component unmount or on a second restart attempt.
   const restartPollRef = useRef(null)
-  useEffect(() => {
-    return () => {
-      if (restartPollRef.current) clearInterval(restartPollRef.current)
-    }
+  const clearRestartPoll = useCallback(() => {
+    if (!restartPollRef.current) return
+    window.clearTimeout(restartPollRef.current)
+    restartPollRef.current = null
   }, [])
+  useEffect(() => {
+    return () => clearRestartPoll()
+  }, [clearRestartPoll])
 
   async function restartServer() {
     if (restartPhase === 'restarting') return
     setRestartPhase('restarting')
     setRestartError('')
     try {
+      const previousBootId = await readRestartBootId()
       const res = await api.admin.restart()
       if (!res.ok) {
         let detail = ''
         try { detail = (await res.json()).detail || '' } catch {}
         throw new Error(detail || `Restart failed (${res.status})`)
       }
-      // Poll /api/health every ~1.5s instead of a fixed 10s blind reload.
-      // Reload as soon as the server is back; surface a notice if it hasn't
-      // returned within ~45s (30 polls × 1500ms) so the user knows to check
-      // the container rather than waiting indefinitely.
-      const POLL_INTERVAL_MS = 1500
-      const POLL_MAX = 30
-      let polls = 0
-      restartPollRef.current = setInterval(async () => {
-        polls++
-        try {
-          const probe = await fetch('/api/health', { cache: 'no-store' })
-          if (probe.ok) {
-            clearInterval(restartPollRef.current)
-            restartPollRef.current = null
-            window.location.reload()
-            return
-          }
-        } catch (_) { /* server still down — keep polling */ }
-        if (polls >= POLL_MAX) {
-          clearInterval(restartPollRef.current)
-          restartPollRef.current = null
+      pollRestartThenReload({
+        previousBootId,
+        onTimeout: () => {
           setRestartError("Server hasn't come back yet — check the container.")
           setRestartPhase('idle')
-        }
-      }, POLL_INTERVAL_MS)
+        },
+      })
     } catch (err) {
       setRestartPhase('idle')
       setRestartError(err.message || 'Restart request failed.')
     }
+  }
+
+  async function reloadOntoReadyShell() {
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration()
+        if (reg) {
+          await reg.update()
+          if (reg.installing || reg.waiting) {
+            await new Promise((resolve) => {
+              navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
+              window.setTimeout(resolve, 5000)
+            })
+          }
+        }
+      } catch {
+        // A service-worker refresh miss should not force a browser error page.
+      }
+    }
+    if (!(await shellDocumentReady())) return false
+    window.location.reload()
+    return true
+  }
+
+  function pollRestartThenReload({ previousBootId = '', onTimeout }) {
+    clearRestartPoll()
+    const startedAt = Date.now()
+    let attempts = 0
+    let sawUnavailable = false
+
+    const poll = async () => {
+      restartPollRef.current = null
+      attempts += 1
+      try {
+        const health = await readRestartHealth()
+        if (!health.ok) {
+          sawUnavailable = true
+        } else if (restartCanReload({
+          previousBootId,
+          currentBootId: health.bootId,
+          sawUnavailable,
+          elapsedMs: Date.now() - startedAt,
+        })) {
+          const reloaded = await reloadOntoReadyShell()
+          if (reloaded) return
+        }
+      } catch {
+        sawUnavailable = true
+      }
+      if (attempts >= RESTART_POLL_MAX) {
+        onTimeout()
+        return
+      }
+      restartPollRef.current = window.setTimeout(poll, RESTART_POLL_INTERVAL_MS)
+    }
+
+    restartPollRef.current = window.setTimeout(poll, RESTART_POLL_INTERVAL_MS)
   }
 
   // Ask the service worker to re-check for a newer shell build and re-read the
@@ -275,6 +365,30 @@ export default function SettingsView({ onThemeChange }) {
     version.shell_sha !== 'unknown' &&
     version.sha !== 'unknown' &&
     version.shell_sha !== version.sha
+  const updateStatusLabel = newerBuildInstalled
+    ? 'Ready to update'
+    : versionQuery.isError && !version
+      ? 'Status unavailable'
+      : updatePhase === 'checking'
+        ? 'Checking updates'
+        : 'Up to date'
+  const updateStatusColor = newerBuildInstalled
+    ? '--accent'
+    : versionQuery.isError && !version
+      ? '--danger'
+      : '--green'
+  const updateActionLabel = newerBuildInstalled
+    ? 'Reload'
+    : updatePhase === 'checking'
+      ? 'Checking…'
+      : updatePhase === 'checked'
+        ? 'No updates found'
+        : 'Check'
+  const updateBuildLabel = `${SHELL_BUILD}${
+    version?.sha && version.sha !== 'unknown'
+      ? ` · ${version.sha.slice(0, 7)}`
+      : ''
+  }`
 
   return (
     <div className="settings">
@@ -417,7 +531,7 @@ export default function SettingsView({ onThemeChange }) {
           </div>
           {restartPhase === 'restarting' && (
             <div className="settings__notice" role="status">
-              Restart signal sent. The page will reload shortly.
+              Restart signal sent. Keeping this page open until the shell is ready.
             </div>
           )}
           {restartError && (
@@ -429,33 +543,24 @@ export default function SettingsView({ onThemeChange }) {
           )}
 
           <div className="settings__row settings__row--top">
-            <div>
-              <span className="settings__label">Shell version</span>
-              <p className="settings__subtext settings__subtext--tight">
-                {SHELL_BUILD}
-                {version?.sha && version.sha !== 'unknown'
-                  ? ` · ${version.sha.slice(0, 7)}`
-                  : ''}
-              </p>
+            <div className="settings__update">
+              <span className="settings__label">
+                Updates
+                <StatusDot color={updateStatusColor}>
+                  {updateStatusLabel}
+                </StatusDot>
+              </span>
+              <p className="settings__build">{updateBuildLabel}</p>
             </div>
             <button
-              className="settings__btn settings__btn--outline settings__btn--sm"
+              className={`settings__btn settings__btn--sm settings__btn--nowrap${newerBuildInstalled ? '' : ' settings__btn--outline'}`}
               type="button"
-              onClick={checkForUpdates}
+              onClick={newerBuildInstalled ? reloadOntoReadyShell : checkForUpdates}
               disabled={updatePhase === 'checking'}
             >
-              {updatePhase === 'checking'
-                ? 'Checking…'
-                : updatePhase === 'checked'
-                  ? 'Up to date'
-                  : 'Check for updates'}
+              {updateActionLabel}
             </button>
           </div>
-          {newerBuildInstalled && (
-            <div className="settings__notice" role="status">
-              A newer build is installed — reload to use it.
-            </div>
-          )}
         </section>
 
         <section className="settings__section settings__section--compact">

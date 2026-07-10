@@ -204,6 +204,25 @@
   align-items: flex-start;
 }
 
+.settings__update {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings__build {
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
+.settings__btn--nowrap {
+  white-space: nowrap;
+}
+
 /* Tailwind v4's Preflight resets button backgrounds in the base
    layer, which fights the SDK Switch's component-layer
    `background: var(--switch-track-color-*)` rules and leaves the

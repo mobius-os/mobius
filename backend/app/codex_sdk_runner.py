@@ -426,7 +426,7 @@ def _is_closed_turn_error(exc: BaseException) -> bool:
   sdk: dict[str, Any] | None = None
   try:
     sdk = _sdk_imports()
-  except ModuleNotFoundError:
+  except ImportError:
     sdk = None
   if sdk is not None and isinstance(
     exc, (sdk["InvalidParamsError"], sdk["AppServerRpcError"])

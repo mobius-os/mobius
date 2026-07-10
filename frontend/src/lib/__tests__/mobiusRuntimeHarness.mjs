@@ -146,7 +146,11 @@ export function freshEnv() {
   // Wipe any DB from a prior test — fake-indexeddb's factory is global.
   globalThis.indexedDB = new IDBFactory()
   const server = makeServer()
-  globalThis.navigator = { onLine: true }
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { onLine: true },
+    configurable: true,
+    writable: true,
+  })
   globalThis.fetch = server.fetch
   return { server }
 }

@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timezone
 from email.utils import formatdate, parsedate_to_datetime
@@ -40,6 +41,8 @@ from app.routes import (
   client_error_router, standalone_router, storage_router,
   theme_router, uploads_router,
 )
+
+_BOOT_ID = uuid.uuid4().hex
 
 
 def _init_db():
@@ -430,7 +433,7 @@ def health(response: Response):
   (a suspected contributor to the Android offline-probe-returns-true anomaly).
   """
   response.headers["Cache-Control"] = "no-store"
-  return {"status": "ok"}
+  return {"status": "ok", "boot_id": _BOOT_ID}
 
 
 @app.get("/api/ready")
