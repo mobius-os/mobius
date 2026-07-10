@@ -3274,6 +3274,90 @@ def test_trusted_catalog_install_adopts_historical_data_apps_row(
   assert (data_dir / "apps" / "beat-machine" / "index.jsx").read_text() == JSX
 
 
+def test_historical_data_apps_adoption_preserves_owner_edits(
+  client, auth, db, bypass_url_validation,
+):
+  """Adopting a pre-git-model app must NOT silently reset the owner's edits.
+
+  The historical shape is editable source on disk + a DB jsx_source with NO
+  per-app git repo and NO recorded upstream. Before the fix, adoption reached
+  align_local_to_upstream (reset --hard) and the owner's on-disk edits ended up in
+  ZERO git blobs — unrecoverable. Now the adoption captures the on-disk tree onto
+  `main` first, then three-way merges: because the owner's index.jsx diverges from
+  the catalog entry the merge verdicts a conflict, so the served source stays
+  theirs until they resolve it AND the owner bytes live in a recoverable git blob.
+  The identity still migrates once (canonical manifest_url stamped even on
+  conflict) so the boot migration never re-fires.
+  """
+  from app import bootstrap, models
+  data_dir = Path(get_settings().data_dir)
+  slug = "beat-machine"
+  src_dir = data_dir / "apps" / slug
+  src_dir.mkdir(parents=True, exist_ok=True)
+  owner_jsx = (
+    "export default function App() { /* OWNER EDIT */ return <div>mine</div> }"
+  )
+  (src_dir / "index.jsx").write_text(owner_jsx)
+  assert not app_git.is_repo(src_dir)
+
+  app = models.App(
+    name="Beat Machine",
+    description="",
+    jsx_source=owner_jsx,
+    source_dir=str(src_dir),
+    slug=slug,
+    manifest_url=None,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+  app_id = app.id
+  canonical = "https://raw.githubusercontent.com/mobius-os/app-beat-machine/main"
+  base = canonical + "/"
+
+  # The catalog entry (JSX) differs from the owner's edit — a real divergence.
+  r = _install_simple(
+    client, auth, base, _simple_manifest("beat-machine", version="1.0.5"),
+  )
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "conflict", payload
+  assert "index.jsx" in payload["conflict_paths"]
+  assert payload["id"] == app_id
+
+  # The served source on disk is STILL the owner's, never the catalog bytes.
+  assert (src_dir / "index.jsx").read_text() == owner_jsx
+  assert (src_dir / "index.jsx").read_text() != JSX
+
+  # The owner bytes survive in a git blob (recoverable): captured on `main`
+  # before the catalog upstream was recorded.
+  assert app_git.is_repo(src_dir)
+  main_tree = app_git.read_ref_tree(src_dir, app_git.LOCAL_BRANCH)
+  assert main_tree.get("index.jsx") == owner_jsx.encode()
+
+  # Identity migrated (one-shot): the row now carries the canonical manifest_url,
+  # so the boot predicate no longer treats it as an un-migrated historical row.
+  db.refresh(app)
+  assert app.manifest_url == canonical + "#manifest-id=beat-machine"
+  assert bootstrap._is_legacy_platform_row(app) is False
+
+  # A second catalog install (the next boot's Store update) resolves the row by
+  # its now-canonical manifest_url — a normal update, NOT a re-triggered
+  # migration — and still guards the unresolved owner edits behind a conflict,
+  # forking no duplicate.
+  r2 = _install_simple(
+    client, auth, base, _simple_manifest("beat-machine", version="1.0.6"),
+  )
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "conflict"
+  assert r2.json()["id"] == app_id
+  assert (src_dir / "index.jsx").read_text() == owner_jsx
+  rows = db.query(models.App).filter(models.App.slug.like("beat-machine%")).all()
+  assert len(rows) == 1, [row.slug for row in rows]
+
+
 @pytest.mark.parametrize("stored_manifest_url_shape", ["raw_mobius_json", "canonical"])
 def test_trusted_catalog_update_migrates_legacy_platform_row_found_by_url(
   stored_manifest_url_shape, client, auth, db, bypass_url_validation,

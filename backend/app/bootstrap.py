@@ -42,11 +42,22 @@ _SKIP_ENV = "MOEBIUS_SKIP_BOOTSTRAP"
 
 
 def _is_legacy_platform_row(app: models.App) -> bool:
-  """True for active old rows whose source matches retired baked-app shapes."""
+  """True for active old rows whose source matches retired baked-app shapes.
+
+  The historical /data/apps/<slug> shape additionally requires an empty
+  manifest_url: once a migration stamps the canonical identity the row is on the
+  catalog model and must NOT be re-migrated on the next boot. Re-migrating
+  re-fetched the catalog from GitHub every restart and, when upstream had
+  advanced with no local edits, silently fast-forwarded the app past owner
+  review. The platform-core shape (`is_legacy_source_dir`) needs no such gate —
+  a migrated row moves out of /data/platform/core-apps, so it stops matching on
+  the source path alone.
+  """
+  data_dir = get_settings().data_dir
   return legacy_platform_apps.is_legacy_source_dir(
-    app.source_dir, get_settings().data_dir, app.slug,
+    app.source_dir, data_dir, app.slug,
   ) or _is_historical_platform_app_source_dir(
-    app.source_dir, get_settings().data_dir, app.slug,
+    app.source_dir, app.manifest_url, data_dir, app.slug,
   )
 
 
