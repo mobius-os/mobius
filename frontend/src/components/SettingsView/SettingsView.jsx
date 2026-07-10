@@ -4,7 +4,7 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
-import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
+import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
 import * as themeService from '../../lib/themeService.js'
 import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
@@ -17,7 +17,6 @@ import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx
 import '../ui/StatusDot.css'
 import './SettingsView.css'
 
-const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
 const SYSTEM_SETUP_READY_KEY = 'mobius:system-setup-ready:v1'
 const RESTART_POLL_INTERVAL_MS = 1500
@@ -296,7 +295,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const settingsQuery = settingsQueries.owner.useQuery()
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
-  const versionQuery = versionQueries.current.useQuery()
   const [geminiKey, setGeminiKey] = useState('')
   const [geminiExpanded, setGeminiExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -325,16 +323,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [platform, setPlatform] = useState(null)
   const [platformPhase, setPlatformPhase] = useState('idle')
   const [platformError, setPlatformError] = useState('')
-  // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
-  // service worker to re-check cached frontend assets and re-reads
-  // /api/version. 'checked' is a short-lived success label when no update is
-  // available.
+  // 'idle' | 'checking' — the "Check for updates" button asks the service
+  // worker and platform updater to look for a newer release. We keep the
+  // visible feedback to the active check only; "up to date" badges add noise.
   const [updatePhase, setUpdatePhase] = useState('idle')
-  useEffect(() => {
-    if (updatePhase !== 'checked') return undefined
-    const timer = window.setTimeout(() => setUpdatePhase('idle'), UPDATE_CHECKED_RESET_MS)
-    return () => window.clearTimeout(timer)
-  }, [updatePhase])
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -775,33 +767,26 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
   }
 
-  // Refresh both Möbius update signals on demand: the service worker cache and
-  // platform git availability. `registration.update()` forces a fresh fetch of
-  // /sw.js (served `no-cache`) and we re-read /api/version for the current
-  // served identity. Platform: POST /platform/check runs the `git fetch` that the cheap
-  // /status read deliberately skips, so a deploy that landed since boot becomes
-  // visible without waiting for a reboot. Both run in parallel and neither
-  // failing blocks the other (allSettled) — a hiccup just leaves the last-known
-  // state on the row.
+  // Refresh both release signals on demand: the shell service worker and
+  // platform git availability. Neither failure blocks Settings; a hiccup just
+  // leaves the row unchanged.
   async function checkForUpdates() {
     if (updatePhase === 'checking') return
     setUpdatePhase('checking')
     try {
-      const frontendP = (async () => {
+      const shellP = (async () => {
         if ('serviceWorker' in navigator) {
           const reg = await navigator.serviceWorker.getRegistration()
           if (reg) await reg.update()
         }
-        await versionQueries.current.invalidate(queryClient)
-        await versionQuery.refetch()
       })()
       const platformP = (async () => {
         const res = await api.platform.check()
         if (res.ok) setPlatform(await res.json())
       })()
-      await Promise.allSettled([frontendP, platformP])
+      await Promise.allSettled([shellP, platformP])
     } finally {
-      setUpdatePhase('checked')
+      setUpdatePhase('idle')
     }
   }
 
@@ -843,31 +828,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
   }, [])
   useEffect(() => { refreshPlatform() }, [refreshPlatform])
-
-  // Silent freshen on opening Settings: ask the SW for a newer cache manifest
-  // and re-read /api/version so the Möbius row's served identity is current the
-  // moment it renders. This is the cheap on-open pass (no git fetch) — it
-  // complements the explicit "Check for updates" button, which additionally
-  // fetches platform availability. Once per open; never touches updatePhase, so
-  // it can't make the Update/Check button look busy.
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        if ('serviceWorker' in navigator) {
-          const reg = await navigator.serviceWorker.getRegistration()
-          if (reg) await reg.update()
-        }
-        if (cancelled) return
-        await versionQueries.current.invalidate(queryClient)
-        await versionQuery.refetch()
-      } catch {
-        // a refresh hiccup just leaves the last-known status on the row
-      }
-    })()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   // Press Update -> merge the baked platform release into the live backend.
   // Clean -> the row flips to "restart needed"; conflict -> an agent chat opens.
@@ -973,39 +933,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
   }
 
-  const version = versionQuery.data
-  // The short SHA of the served platform tree. Fall back to the image build
-  // sha and finally 'unknown'. First 7 chars, matching the shell version row.
-  const mobiusBuildSha = (() => {
-    const raw = version?.served_sha && version.served_sha !== 'unknown'
-      ? version.served_sha
-      : version?.sha && version.sha !== 'unknown'
-        ? version.sha
-        : null
-    return raw ? raw.slice(0, 7) : 'unknown'
-  })()
-  // The commit date (YYYY-MM-DD) baked at build time, shown next to the sha as
-  // a human "version · date". Null on a dev build that didn't stamp it.
-  const buildDate = version?.build_date && version.build_date !== 'unknown'
-    ? version.build_date
-    : null
   // Derived state for the single "Möbius" update row (see the section below).
   const platformConflict = platform?.state === 'conflict'
-  // A text-clean update that failed the post-rebase import probe was rolled back
-  // to the previous served version — the update is still available, but its last
-  // apply needs a repair pass, so the row says so distinctly rather than reading
-  // as a plain "New update available".
-  const platformRolledBack = platform?.state === 'rolled_back'
   const platformRestart = !!platform?.needs_restart
   const updateAvailable = !!platform?.available
-  const mobiusUpdating =
-    platformPhase === 'applying' || updatePhase === 'checking'
-  const checkUpdatesLabel =
-    updatePhase === 'checking'
-      ? 'Checking…'
-      : updatePhase === 'checked'
-        ? 'No updates found'
-        : 'Check for updates'
+  const platformApplying = platformPhase === 'applying'
   const effectiveBackgroundDraft = backgroundDraft ||
     normalizeBackgroundAgents(
       settingsQuery.data?.background_agents,
@@ -1288,42 +1220,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           )}
         </section>
 
-        {/* ONE honest "Möbius" update surface. Folds platform availability,
-            conflict repair, and restart-to-finish into a single row: one status
-            line, one action. Priority: an in-progress conflict, then a pending
-            restart, then an available update, then up to date. Per-layer
-            mechanics stay invisible (the SW + platform_update.py). Always
-            renders (it carries the Möbius build identity), so there is no second
-            surface. The action slot holds exactly one contextual button; when
-            up to date that button is an explicit "Check for updates" (git fetch
-            + SW re-check) with its own "Checking…" text — it never mutates the
-            status label beside it. */}
+        {/* One quiet update control. Hidden mechanics stay hidden; the row only
+            exposes the action available right now. */}
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Möbius</h2>
-          <div className="settings__row settings__row--top">
-            <div className="settings__update">
-              <StatusDot
-                color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
-              >
-                {platformConflict
-                  ? 'Resolving a conflict'
-                  : platformRolledBack
-                    ? 'Update needs repair'
-                    : platformRestart
-                      ? 'Restart to finish'
-                      : updateAvailable
-                        ? 'New update available'
-                        : 'Up to date'}
-              </StatusDot>
-              {/* The honest build identity is the served platform commit when
-                  available, falling back to the image build stamp. Hidden on a
-                  dev build where no sha is stamped. */}
-              {mobiusBuildSha !== 'unknown' && (
-                <p className="settings__build">
-                  {mobiusBuildSha}{buildDate ? ` · ${buildDate}` : ''}
-                </p>
-              )}
-            </div>
+          <div className="settings__row">
+            <span className="settings__label">Updates</span>
             {platformConflict ? (
               platform?.conflict_chat_id && onOpenChat ? (
                 <button
@@ -1331,7 +1233,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   type="button"
                   onClick={() => onOpenChat(platform.conflict_chat_id)}
                 >
-                  Open chat
+                  Resolve
                 </button>
               ) : null
             ) : platformRestart ? (
@@ -1341,10 +1243,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 onClick={restartToFinish}
                 disabled={platformPhase === 'restarting'}
               >
-                {/* "Restart to finish", not bare "Restart" — the Server section's
-                    standalone "Restart" sits in the same view, so the word
-                    "Restart" must mean exactly one thing. This one completes a
-                    pending update; the label says so. */}
                 {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
               </button>
             ) : updateAvailable ? (
@@ -1352,23 +1250,18 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 className="settings__btn settings__btn--sm settings__btn--nowrap"
                 type="button"
                 onClick={applyMobiusUpdate}
-                disabled={mobiusUpdating}
+                disabled={platformApplying}
               >
-                {mobiusUpdating ? 'Updating…' : 'Update'}
+                {platformApplying ? 'Updating…' : 'Update'}
               </button>
             ) : (
-              // Nothing to apply — offer an explicit refresh. Subtle outline (a
-              // secondary action, not a call-to-action) and its own transient
-              // feedback text, so it never mutates the status label beside it.
-              // If the check surfaces an update, this slot re-renders to the
-              // Update button on the next paint.
               <button
                 className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                 type="button"
                 onClick={checkForUpdates}
                 disabled={updatePhase === 'checking'}
               >
-                {checkUpdatesLabel}
+                {updatePhase === 'checking' ? 'Checking…' : 'Check'}
               </button>
             )}
           </div>
