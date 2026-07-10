@@ -686,6 +686,29 @@ def _is_legacy_platform_source_dir(
   return legacy_platform_apps.is_legacy_source_dir(source_dir, data_dir, slug)
 
 
+def _is_historical_platform_app_source_dir(
+  source_dir: str | None,
+  data_dir: str | Path,
+  slug: str | None,
+) -> bool:
+  """True for retired core-app rows sourced directly from /data/apps/<slug>.
+
+  One prod-era installer shape registered Memory/Reflection/Beat Machine as
+  editable app rows under /data/apps/<slug> with no manifest_url. They are not
+  platform-owned source dirs, but they are still the predecessor rows the
+  trusted mobius-os catalog entry must update in place. Keep this narrow:
+  only historical platform slugs from legacy_platform_apps may match.
+  """
+  if not source_dir or not slug or slug not in HISTORICAL_PLATFORM_APP_SLUGS:
+    return False
+  try:
+    resolved = Path(source_dir).resolve()
+  except (OSError, RuntimeError):
+    return False
+  apps_root = source_dirs.apps_root(data_dir)
+  return resolved.parent == apps_root and resolved.name == slug
+
+
 def _is_trusted_legacy_platform_catalog_install(
   app: models.App | None,
   manifest_id: str,
@@ -1805,11 +1828,17 @@ async def install_from_manifest(
       )
       .first()
     )
-    if platform_row and _is_legacy_platform_source_dir(
-      platform_row.source_dir, settings_data_dir, manifest_id,
-    ):
-      existing = platform_row
-      adopt_kind = "legacy-platform"
+    if platform_row:
+      if _is_legacy_platform_source_dir(
+        platform_row.source_dir, settings_data_dir, manifest_id,
+      ):
+        existing = platform_row
+        adopt_kind = "legacy-platform"
+      elif _is_historical_platform_app_source_dir(
+        platform_row.source_dir, settings_data_dir, manifest_id,
+      ):
+        existing = platform_row
+        adopt_kind = "legacy-catalog"
   mode = "update" if existing else "install"
   legacy_platform_migration = adopt_kind == "legacy-platform"
   if (
@@ -2110,7 +2139,7 @@ async def install_from_manifest(
           previous_upstream_paths = await asyncio.to_thread(
             _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
           )
-          # If a PRIOR update left an unresolved conflict (MERGE_HEAD still
+          # If a PRIOR resolver left an unresolved conflict (MERGE_HEAD still
           # set, markers on disk), abort it first — otherwise the commit_local
           # below would commit the conflict markers as "local edits" (silent
           # source corruption). The newer update supersedes the abandoned one
@@ -2314,21 +2343,15 @@ async def install_from_manifest(
             app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
           )
         if mode == "conflict":
-          # Conflict: materialize a REAL working-tree merge conflict (markers +
-          # MERGE_HEAD) so the agent resolves it with ordinary git, exactly like
-          # a `git pull` conflict — then the install ENDPOINT spawns a resolver
-          # chat. We deliberately do NOT recompile: the marker-bearing source
-          # won't compile, so the file watcher keeps serving the prior good
-          # bundle until the agent finishes the merge (resolve markers + commit →
-          # commit_local finalizes a single-parent replay → base advances).
+          # Conflict: leave the working tree exactly as it was. The app keeps
+          # serving its prior good bundle and Settings/App Store surface the
+          # conflict paths. Only the owner's click-gated resolver endpoint
+          # materializes a REAL working-tree merge conflict (markers +
+          # MERGE_HEAD) for the agent to resolve with ordinary git.
           # `app.jsx_source` stays the LOCAL source and the upstream provenance
           # (upstream_commit / upstream_jsx_sha, set above) persists for the
-          # resolution; the agent can back out anytime with `git merge --abort`.
-          # Materialized inside the held source_dir_lock so a watcher commit
-          # can't interleave; the DB commit + return run after the lock releases.
-          conflict_paths = await asyncio.to_thread(
-            app_git.start_conflict_merge, git_source_dir,
-          ) or conflict_paths
+          # later resolution.
+          pass
 
       # The disk-write phase runs INSIDE the same held lock for the git path so
       # no watcher commit interleaves between the merge decision and the write; a
@@ -2511,9 +2534,9 @@ async def install_from_manifest(
         source_lock.release()
 
     if mode == "conflict":
-      # The conflict merge was materialized on disk inside the held lock above;
-      # commit the recorded upstream provenance + return so the install ENDPOINT
-      # can spawn a resolver chat. The served bundle stays the prior good one.
+      # Commit the recorded upstream provenance + return so the App Store can
+      # surface a click-gated resolver. The served source/bundle stay the prior
+      # good ones until the owner chooses Resolve in chat.
       db.commit()
       db.refresh(app)
       activity.log_event(

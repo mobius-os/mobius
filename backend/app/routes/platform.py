@@ -4,10 +4,12 @@ Small endpoints behind ``get_current_owner`` + ``reject_cross_site``:
 ``GET /status`` (cheap, read-only, fetch-free — drives the Settings "Updates"
 line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``POST /apply`` (fetch
-origin + rebase local edits onto the new version, or open a resolver chat on
-conflict), and ``POST /restart`` (owner-confirmed self-restart, same SIGTERM
-pattern as the normal Settings restart). The status/check routes are wrapped so a
-transient git error can never break the Settings page.
+origin + rebase local edits onto the new version, or record a conflict),
+``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
+``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
+normal Settings restart). The status/check routes are wrapped so a transient git
+error can never break the Settings page. Conflict resolution is a separate
+owner-clicked endpoint so applying an update never silently starts an agent turn.
 """
 
 from __future__ import annotations
@@ -23,7 +25,10 @@ from starlette.background import BackgroundTask
 from app import models, platform_update
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
-from app.platform_update import PlatformApplyResult, PlatformStatus, PlatformUpdateError
+from app.platform_update import (
+  PlatformApplyResult, PlatformConflictResolverChatOut, PlatformStatus,
+  PlatformUpdateError,
+)
 from app.restart_util import restart_this_worker
 
 log = logging.getLogger("mobius.platform")
@@ -80,13 +85,25 @@ async def apply_platform_update(
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformApplyResult:
   """Fetch origin and rebase the local edits onto the new platform version, or
-  open an agent resolver chat when it conflicts with local edits. A clean apply
-  advances the served tree on disk and marks a restart to load it."""
+  record a conflict for an owner-clicked resolver chat. A clean apply advances
+  the served tree on disk and marks a restart to load it."""
   try:
     return await platform_update.apply_platform_update(db)
   except PlatformUpdateError as exc:
     # A known, recoverable precondition failure (offline fetch, not a clone) —
     # tell the UI plainly; the instance is untouched.
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])
+async def create_platform_conflict_resolver_chat(
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+) -> PlatformConflictResolverChatOut:
+  """Create or return the resolver chat for a recorded platform update conflict."""
+  try:
+    return await platform_update.create_platform_conflict_resolver_chat(db)
+  except PlatformUpdateError as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

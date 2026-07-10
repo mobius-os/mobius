@@ -294,6 +294,9 @@ export const api = {
     status: () => apiFetch('/platform/status'),
     check: () => apiFetch('/platform/check', { method: 'POST' }),
     apply: () => apiFetch('/platform/apply', { method: 'POST' }),
+    conflictResolverChat: () => apiFetch('/platform/conflict-resolver-chat', {
+      method: 'POST',
+    }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
   },
   push: {

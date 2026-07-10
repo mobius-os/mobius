@@ -31,11 +31,9 @@ def _bypass_cron_scaffold():
 
 @pytest.fixture(autouse=True)
 def _stub_resolver_run_chat():
-  """A conflicting update spawns a resolver chat that calls run_chat to start a
-  real agent turn. Install tests never want a real turn, so stub run_chat to a
-  no-op — the StartTurn actor still sets the run marker, so the spawn is fully
-  exercised up to (but not including) the agent subprocess. A test that needs
-  the real spawn behavior patches over this locally."""
+  """Resolver-chat endpoint tests never want a real agent turn, so stub
+  run_chat to a no-op. A test that needs the real spawn behavior patches over
+  this locally."""
   async def _noop(*args, **kwargs):
     return None
   with patch("app.chat.run_chat", new=_noop):
@@ -2495,15 +2493,14 @@ def test_flag_on_static_asset_update_leaves_clean_app_repo(
   assert app_git._run(source_dir, "ls-files", "*.mobius-bak").stdout == ""
 
 
-def test_flag_on_conflicting_update_materializes_real_merge_conflict(
+def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   client, auth, bypass_url_validation,
 ):
   """A local edit + an upstream edit to the SAME region conflicts. The endpoint
-  returns mode='conflict' and materializes a REAL working-tree merge — conflict
-  markers + MERGE_HEAD — for the agent to resolve like a `git pull` conflict.
-  The DB row is NOT stamped with the upstream bytes (the served version stays
-  local/old, markers won't compile), and the new upstream is recorded for the
-  resolution. (Per-app git is unconditional now — no enabler needed.)"""
+  returns mode='conflict' but leaves the live source untouched. The DB row is
+  NOT stamped with the upstream bytes (the served version stays local/old), and
+  the new upstream is recorded for the click-gated resolver. (Per-app git is
+  unconditional now — no enabler needed.)"""
   base = "https://on3.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2512,7 +2509,8 @@ def test_flag_on_conflicting_update_materializes_real_merge_conflict(
   app_dir = data_dir / "apps" / "on-conflict"
   jsx_file = app_dir / "index.jsx"
 
-  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
+  jsx_file.write_text(local)
 
   # Upstream v2 edits the SAME title line differently → conflict.
   jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
@@ -2524,11 +2522,12 @@ def test_flag_on_conflicting_update_materializes_real_merge_conflict(
   assert payload["upstream_version"] == "2.0.0"
   assert "index.jsx" in payload["conflict_paths"]
 
-  # A REAL merge conflict is materialized in the working tree for the agent.
+  # The update attempt itself does not write conflict markers or leave a merge
+  # in progress. The owner must click Resolve in chat before that happens.
   served = jsx_file.read_text()
-  assert "<<<<<<<" in served and ">>>>>>>" in served
-  assert "AGENT TITLE" in served and "UPSTREAM TITLE" in served
-  assert (app_dir / ".git" / "MERGE_HEAD").exists()
+  assert served == local
+  assert "<<<<<<<" not in served and ">>>>>>>" not in served
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
 
   # The DB row is NOT stamped with the upstream bytes — served version stays
   # local/old until the agent resolves; the new upstream is recorded for it.
@@ -2562,9 +2561,7 @@ def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
   app_dir = data_dir / "apps" / "on-cleanempty"
   jsx_file = app_dir / "index.jsx"
 
-  # Local edit (diverged) that collides with the upstream edit below, so
-  # start_conflict_merge materializes a real working-tree conflict once the
-  # fix routes us there.
+  # Local edit (diverged) that collides with the upstream edit below.
   jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
   jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
 
@@ -2604,13 +2601,12 @@ def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
 def test_conflicting_update_returns_conflict_without_auto_spawning(
   client, auth, bypass_url_validation,
 ):
-  """A conflicting update returns mode=conflict and materializes the merge on
-  disk (markers), but does NOT auto-spawn a resolver chat or fire a
+  """A conflicting update returns mode=conflict and leaves source untouched.
+  It does NOT auto-spawn a resolver chat, materialize markers, or fire a
   notification. Whether to involve the agent is the owner's call, made via the
   store's click-gated "Resolve in chat" affordance — auto-spawning here preempted
   that choice and raced a duplicate chat against the store's own. A repeated
-  conflict behaves the same (the abort guard still prevents committing stale
-  markers)."""
+  conflict behaves the same."""
   base = "https://spawn-conflict.test/repo/"
   m = {**MANIFEST_NEWS, "id": "spawn-conflict", "name": "Spawn Conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2618,15 +2614,17 @@ def test_conflicting_update_returns_conflict_without_auto_spawning(
   data_dir = Path(get_settings().data_dir)
   jsx_file = data_dir / "apps" / "spawn-conflict" / "index.jsx"
 
-  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
+  jsx_file.write_text(local)
   jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
   r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "conflict"
   assert r2.json()["conflict_paths"]  # the store surfaces these to the owner
-  # The merge IS materialized on disk so the owner's opt-in resolver has real
-  # markers to fix; the app keeps serving its prior version meanwhile.
-  assert "<<<<<<<" in jsx_file.read_text()
+  # No markers until the owner clicks Resolve in chat; the app keeps serving its
+  # prior version meanwhile.
+  assert jsx_file.read_text() == local
+  assert "<<<<<<<" not in jsx_file.read_text()
 
   from app.models import Chat, Notification
   from app.database import SessionLocal
@@ -2643,17 +2641,64 @@ def test_conflicting_update_returns_conflict_without_auto_spawning(
   finally:
     db.close()
 
-  # A repeated conflicting update still just returns mode=conflict with no chat,
-  # and the abort guard keeps it from committing the stale markers.
+  # A repeated conflicting update still just returns mode=conflict with no chat
+  # and no live source mutation.
   jsx_v3 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE 3")
   r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
   assert r3.status_code == 201, r3.text
   assert r3.json()["mode"] == "conflict"
+  assert jsx_file.read_text() == local
   db = SessionLocal()
   try:
     assert db.query(Chat).filter(Chat.title.like("%Spawn Conflict%")).count() == 0
   finally:
     db.close()
+
+
+def test_conflict_resolver_click_materializes_merge_for_agent(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  """The update attempt is read-only on conflict; the owner's resolver click is
+  the moment a real git merge with markers is materialized for the agent."""
+  base = "https://click-conflict.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "click-conflict", "name": "Click Conflict"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+  data_dir = Path(get_settings().data_dir)
+  app_dir = data_dir / "apps" / "click-conflict"
+  jsx_file = app_dir / "index.jsx"
+
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
+  jsx_file.write_text(local)
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "conflict"
+  assert jsx_file.read_text() == local
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+
+  async def fake_start_turn(*args, **kwargs):
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.apps._start_conflict_resolver_turn",
+    fake_start_turn,
+  )
+  r3 = client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat",
+    headers=auth,
+  )
+  assert r3.status_code == 200, r3.text
+  payload = r3.json()
+  assert payload["chat_id"]
+  assert payload["created"] is True
+  assert payload["started"] is True
+
+  materialized = jsx_file.read_text()
+  assert "<<<<<<<" in materialized and ">>>>>>>" in materialized
+  assert "AGENT TITLE" in materialized and "UPSTREAM TITLE" in materialized
+  assert (app_dir / ".git" / "MERGE_HEAD").exists()
 
 
 def test_flag_on_conflict_does_not_apply_upstream_capabilities(
@@ -2787,10 +2832,10 @@ def test_store_id_from_spoofed_path_still_preserves_local_conflict(
   assert payload["mode"] == "conflict"
   assert "index.jsx" in payload["conflict_paths"]
   # NOT force-take-upstream (only the exact mobius-os/app-store source is) — a
-  # normal conflict materializes real markers for the agent, keeping both sides.
+  # normal conflict leaves local source untouched until the owner resolves.
   served = jsx_file.read_text()
-  assert "<<<<<<<" in served
-  assert "LOCAL SPOOF TITLE" in served and "UPSTREAM SPOOF TITLE" in served
+  assert served == local
+  assert "<<<<<<<" not in served and "UPSTREAM SPOOF TITLE" not in served
 
 
 def test_update_preview_clean_returns_upstream_diff(
@@ -2897,11 +2942,12 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "conflict"
 
-  # The conflict install already materialized real markers in the LIVE tree
-  # (start_conflict_merge); the preview reads from a throwaway worktree and
-  # must not further mutate the live tree.
+  # The conflict update did not materialize markers in the LIVE tree. The preview
+  # reads from a throwaway worktree and must not mutate the live tree either.
   before_preview = jsx_file.read_text()
-  assert "<<<<<<<" in before_preview
+  assert before_preview == local
+  assert "<<<<<<<" not in before_preview
+  assert not (jsx_file.parent / ".git" / "MERGE_HEAD").exists()
 
   preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
   assert preview.status_code == 200, preview.text
@@ -2919,6 +2965,7 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   assert "AGENT TITLE" in markers
   assert "UPSTREAM TITLE" in markers
   assert jsx_file.read_text() == before_preview
+  assert not (jsx_file.parent / ".git" / "MERGE_HEAD").exists()
 
 
 # --------------------------------------------------------------------------
@@ -3190,6 +3237,41 @@ def test_trusted_catalog_install_migrates_legacy_platform_row(
   assert app.manifest_url == base.rstrip("/") + "#manifest-id=memory"
   assert (data_dir / "apps" / "memory" / "index.jsx").exists()
   assert (src_dir / "index.jsx").exists()
+
+
+def test_trusted_catalog_install_adopts_historical_data_apps_row(
+  client, auth, db, bypass_url_validation,
+):
+  """Beat Machine shipped in a prod-era shape at /data/apps/<slug> with no
+  manifest_url. Its trusted same-id catalog install must update that row in
+  place, not create beat-machine-2."""
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  legacy_id = _seed_null_manifest_core(db, "beat-machine")
+  base = "https://raw.githubusercontent.com/mobius-os/app-beat-machine/main/"
+
+  r = _install_simple(
+    client, auth, base,
+    _simple_manifest("beat-machine", version="1.0.5"),
+  )
+
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == legacy_id
+  assert payload["slug"] == "beat-machine"
+  assert payload["source_dir"] == str(data_dir / "apps" / "beat-machine")
+  assert payload["manifest_url"] == (
+    base.rstrip("/") + "#manifest-id=beat-machine"
+  )
+
+  rows = (
+    db.query(models.App)
+    .filter(models.App.slug.like("beat-machine%"))
+    .all()
+  )
+  assert len(rows) == 1, [row.slug for row in rows]
+  assert (data_dir / "apps" / "beat-machine" / "index.jsx").read_text() == JSX
 
 
 @pytest.mark.parametrize("stored_manifest_url_shape", ["raw_mobius_json", "canonical"])
@@ -3697,7 +3779,9 @@ def test_clone_update_conflict_keeps_served_old_source(
   assert r2.json()["mode"] == "conflict"
   assert "index.jsx" in r2.json()["conflict_paths"]
   worktree_source = (src / "index.jsx").read_text()
-  assert "<<<<<<<" in worktree_source and ">>>>>>>" in worktree_source
+  assert worktree_source == local_index
+  assert "<<<<<<<" not in worktree_source and ">>>>>>>" not in worktree_source
+  assert not (src / ".git" / "MERGE_HEAD").exists()
   from app.database import SessionLocal
   from app.models import App
   db = SessionLocal()
