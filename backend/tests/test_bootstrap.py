@@ -86,8 +86,9 @@ async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manifest_url_shape", ["empty", "raw", "canonical"])
+@pytest.mark.parametrize("source_shape", ["platform_core", "data_apps"])
 async def test_bootstrap_migrates_active_legacy_platform_rows(
-  manifest_url_shape, db, monkeypatch,
+  source_shape, manifest_url_shape, db, monkeypatch,
 ):
   """Old baked app rows are moved forward through the trusted catalog entry."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
@@ -95,7 +96,10 @@ async def test_bootstrap_migrates_active_legacy_platform_rows(
   from app.install import _canonical_identity_key
 
   data_dir = get_settings().data_dir
-  legacy_source = f"{data_dir}/platform/core-apps/memory"
+  legacy_source = {
+    "platform_core": f"{data_dir}/platform/core-apps/memory",
+    "data_apps": f"{data_dir}/apps/memory",
+  }[source_shape]
   raw_memory_manifest = LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
   stored_manifest_url = {
     "empty": None,
