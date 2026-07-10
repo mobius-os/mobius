@@ -221,7 +221,12 @@ def _safe_repo_path(raw: object) -> Path:
   except (OSError, RuntimeError):
     raise ContributionSubmitError("The staged repo path is invalid.")
   data_dir = Path(get_settings().data_dir).resolve()
+  # A durable repo must live under one of these roots so a restart can find it
+  # again. "contrib" is the de-facto staging root the agent prepares work in
+  # (often nested, e.g. contrib/<audit>/<slug>); the plural "contributions" is
+  # kept alongside it for back-compat with older docs that named that form.
   allowed_roots = (
+    data_dir / "contrib",
     data_dir / "apps",
     data_dir / "platform",
     data_dir / "contributions",
@@ -234,8 +239,8 @@ def _safe_repo_path(raw: object) -> Path:
       continue
   raise ContributionSubmitError(
     "This prepared PR was staged outside Mobius' durable contribution folders. "
-    "Ask the agent to prepare it again from /data/apps, /data/platform, or "
-    "/data/contributions; nothing was sent to GitHub."
+    "Ask the agent to prepare it again from /data/contrib, /data/apps, or "
+    "/data/platform; nothing was sent to GitHub."
   )
 
 
