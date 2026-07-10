@@ -58,16 +58,20 @@
  * ║      on iOS Safari without waiting for the 300ms click           ║
  * ║      synthesis. Don't remove either handler.                     ║
  * ║                                                                  ║
- * ║   7. `_isTouchPrimary` is detected once via                      ║
+ * ║   7. ENTER / SHORTCUT SEND                                       ║
+ * ║      `_isTouchPrimary` is detected once via                      ║
  * ║      `matchMedia('(hover: none) and (pointer: coarse)')` and     ║
- * ║      gates Enter-to-send. Touch devices: Enter inserts a         ║
- * ║      newline. Desktop: Enter sends.                              ║
+ * ║      gates plain Enter. Touch devices: Enter inserts a           ║
+ * ║      newline. Desktop: Enter sends or steers. Cmd/Ctrl+Enter     ║
+ * ║      is an explicit hardware-keyboard shortcut for the same      ║
+ * ║      send/steer action. Shift+Enter always inserts a newline.    ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
 
 import { useRef, useLayoutEffect } from 'react'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
+import { resolveComposerEnterAction } from './composerShortcuts.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -261,6 +265,10 @@ function FileChips({ files, onRemove }) {
  *   canSteer           — true when there are queued messages that can be
  *                        steered right now (all server-confirmed). Drives
  *                        the FastForward-vs-Stop choice in PrimaryAction.
+ *   canRequestSteer    — true when the keyboard shortcut may ask the
+ *                        existing steer handler to reconcile/steer queued
+ *                        messages, even before the visual fast-forward gate
+ *                        is ready.
  *   pendingFiles       — file upload chips state
  *   onAddFiles         — receives FileList from file picker
  *   onRemoveFile       — receives chip id
@@ -292,6 +300,7 @@ export default function ChatInputBar({
   onStop,
   onSteer,
   canSteer,
+  canRequestSteer = canSteer,
   offline,
   pendingFiles,
   onAddFiles,
@@ -367,8 +376,19 @@ export default function ChatInputBar({
   }
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey && !_isTouchPrimary) {
-      e.preventDefault()
+    const action = resolveComposerEnterAction(e, {
+      hasInput,
+      canSteer,
+      canRequestSteer,
+      isTouchPrimary: _isTouchPrimary,
+    })
+    if (!action) return
+    e.preventDefault()
+    if (action === 'steer') {
+      onSteer()
+      return
+    }
+    if (action === 'submit') {
       onSubmit(e)
     }
   }
