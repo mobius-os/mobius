@@ -160,9 +160,10 @@ body,
   color-scheme: light;
 }
 
-/* Theme flips should recolor the shell, not animate every descendant. A
-   document-wide transition repaints shadow/blur-heavy chat surfaces and makes
-   light/dark switching feel sticky on mobile. Keep this narrow and cheap. */
+/* Theme flips should feel like one surface changing, not every descendant
+   repainting separately. Modern Chromium/Safari get a View Transition bloom
+   from the user's tap point; older browsers fall back to this narrow color
+   transition so shadow/blur-heavy chat surfaces stay cheap on mobile. */
 :root.theme-transitioning,
 :root.theme-transitioning body,
 :root.theme-transitioning #root,
@@ -173,8 +174,48 @@ body,
 :root.theme-transitioning .chat__pill,
 :root.theme-transitioning .chat__plus {
   transition-property: background-color, border-color, color, fill, stroke;
-  transition-duration: 90ms;
-  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html.theme-view-transitioning::view-transition-group(root) {
+  animation-duration: 260ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html.theme-view-transitioning::view-transition-old(root),
+html.theme-view-transitioning::view-transition-new(root) {
+  animation-duration: 260ms;
+  animation-fill-mode: both;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  mix-blend-mode: normal;
+}
+
+html.theme-view-transitioning::view-transition-old(root) {
+  animation-name: mobius-theme-old;
+}
+
+html.theme-view-transitioning::view-transition-new(root) {
+  animation-name: mobius-theme-new;
+}
+
+@keyframes mobius-theme-old {
+  0%, 62% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes mobius-theme-new {
+  0% {
+    opacity: 0.01;
+    clip-path: circle(0 at var(--theme-transition-x, 50%) var(--theme-transition-y, 50%));
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    clip-path: circle(150vmax at var(--theme-transition-x, 50%) var(--theme-transition-y, 50%));
+  }
 }
 
 html, body, #root {
