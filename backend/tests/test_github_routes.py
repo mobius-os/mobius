@@ -626,6 +626,14 @@ def test_safe_repo_path_accepts_durable_contribution_roots():
   assert _safe_repo_path(str(data_dir / "contributions" / "rec" / "repo")) == (
     data_dir / "contributions" / "rec" / "repo"
   ).resolve()
+  assert _safe_repo_path(str(data_dir / "contrib" / "mobius-fix-x")) == (
+    data_dir / "contrib" / "mobius-fix-x"
+  ).resolve()
+  assert _safe_repo_path(
+    str(data_dir / "contrib" / "audit-20260710-1617" / "scroll-intent-return")
+  ) == (
+    data_dir / "contrib" / "audit-20260710-1617" / "scroll-intent-return"
+  ).resolve()
 
 
 def test_safe_repo_path_rejects_non_durable_locations(tmp_path):
@@ -636,6 +644,24 @@ def test_safe_repo_path_rejects_non_durable_locations(tmp_path):
 
   assert "durable contribution folders" in exc.value.message
   assert "nothing was sent to GitHub" in exc.value.message
+
+  data_dir = Path(get_settings().data_dir)
+
+  # Component-wise ancestry, not string-prefix: a sibling dir sharing the
+  # "contrib" prefix must not ride the allowlist.
+  with pytest.raises(ContributionSubmitError):
+    _safe_repo_path(str(data_dir / "contribXX" / "repo"))
+
+  # A symlink under an allowed root resolves BEFORE the ancestry check, so it
+  # cannot smuggle in a repo that really lives outside /data.
+  outside = tmp_path / "outside-repo"
+  outside.mkdir()
+  contrib = data_dir / "contrib"
+  contrib.mkdir(parents=True, exist_ok=True)
+  link = contrib / "escape"
+  link.symlink_to(outside)
+  with pytest.raises(ContributionSubmitError):
+    _safe_repo_path(str(link))
 
 
 def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
