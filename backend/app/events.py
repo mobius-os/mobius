@@ -38,6 +38,7 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "app_updated",
   "shell_rebuilding",
   "shell_rebuilt",
+  "shell_apply_now",
   "shell_rebuild_failed",
   "chat_run_started",
   "chat_run_finished",

@@ -326,6 +326,28 @@ async def test_notify_shell_rebuilt_reaches_system_broadcast(client, auth):
     sb.unsubscribe(q)
 
 
+@pytest.mark.asyncio
+async def test_notify_shell_apply_now_reaches_system_broadcast(client, auth):
+  """POST /api/notify {shell_apply_now} must be accepted and broadcast.
+
+  Agents use this system event after a burst of shell edits so the Shell can
+  apply rebuilt frontend changes at a safe moment instead of mid-turn.
+  """
+  sb = get_system_broadcast()
+  q = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify",
+      headers=auth,
+      json={"type": "shell_apply_now"},
+    )
+    assert r.status_code == 204, r.text
+    event = await asyncio.wait_for(q.get(), timeout=1.0)
+    assert event["type"] == "shell_apply_now"
+  finally:
+    sb.unsubscribe(q)
+
+
 def test_notify_rejects_cross_site_request(client, auth):
   cross = client.post(
     "/api/notify",
