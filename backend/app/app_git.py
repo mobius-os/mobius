@@ -117,6 +117,13 @@ _GITIGNORE = "\n".join([
 ])
 
 _MANAGED_RUNTIME_PATHS = (
+  ".mobius-static-assets.json",
+  "*.bak",
+  "*.mobius-bak",
+  "*.mobius-drop-bak",
+  ":(glob)**/*.bak",
+  ":(glob)**/*.mobius-bak",
+  ":(glob)**/*.mobius-drop-bak",
   "init-cron.sh",
   "init-cron.sh.tombstoned",
   ".cron-pending.json",
