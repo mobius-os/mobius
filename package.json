@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "test:core-apps": "node scripts/test-core-apps.mjs",
     "test:packager": "node --test scripts/package-static-app.test.mjs"
   },
   "devDependencies": {

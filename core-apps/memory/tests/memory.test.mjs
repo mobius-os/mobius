@@ -2,11 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
+import { buildEnv, esbuildPath } from './test-deps.mjs'
 
-const esbuild = '/home/hmzmrzx/projects/mobius/frontend/node_modules/.bin/esbuild'
-const nodePath = '/home/hmzmrzx/projects/mobius/frontend/node_modules'
 mkdirSync(new URL('./.build/', import.meta.url), { recursive: true })
-execFileSync(esbuild, [
+execFileSync(esbuildPath, [
   '--bundle',
   '--format=esm',
   '--jsx=automatic',
@@ -15,7 +14,7 @@ execFileSync(esbuild, [
   '--outfile=tests/.build/index.mjs',
 ], {
   cwd: new URL('..', import.meta.url),
-  env: { ...process.env, NODE_PATH: nodePath },
+  env: buildEnv(),
   stdio: 'pipe',
 })
 

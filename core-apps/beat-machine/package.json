@@ -1,6 +1,6 @@
 {
-  "name": "app-memory",
-  "version": "1.2.1",
+  "name": "app-beat-machine",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Dev/test harness only — Mobius installs index.jsx as a single compiled module.",
