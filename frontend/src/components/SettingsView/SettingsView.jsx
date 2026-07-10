@@ -104,37 +104,28 @@ function SaveState({ saving, saved, error }) {
   if (error) return <span className="settings-agent-state settings-agent-state--error">Not saved</span>
   if (saving) return <span className="settings-agent-state">Saving…</span>
   if (saved) return <span className="settings-agent-state settings-agent-state--saved">Saved</span>
-  return <span className="settings-agent-state">Auto-saves</span>
+  return null
 }
 
-function SettingsEffortSlider({ provider, value, disabled, onChange }) {
+function SettingsEffortSelect({ provider, value, disabled, onChange }) {
   const efforts = PROVIDER_INFO[provider]?.efforts || []
   if (!efforts.length) return null
-  const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
-  const selected = efforts[selectedIndex] || efforts[0]
   return (
-    <div className={`settings-effort${disabled ? ' settings-effort--disabled' : ''}`}>
-      <div className="settings-effort__track" role="radiogroup" aria-label={`${providerLabel(provider)} effort`}>
-        {efforts.map((effort, index) => (
-          <button
-            key={effort.value}
-            type="button"
-            role="radio"
-            aria-checked={index === selectedIndex}
-            aria-label={effort.label}
-            disabled={disabled}
-            tabIndex={index === selectedIndex ? 0 : -1}
-            className={
-              'settings-effort__stop'
-              + (index === selectedIndex ? ' settings-effort__stop--on' : '')
-              + (index < selectedIndex ? ' settings-effort__stop--filled' : '')
-            }
-            onClick={() => onChange(effort.value)}
-          />
+    <span className="settings-effort-select">
+      <select
+        className="settings-effort-select__control"
+        value={value || defaultEffort(provider)}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+        aria-label={`${providerLabel(provider)} background effort`}
+      >
+        {efforts.map((effort) => (
+          <option key={effort.value} value={effort.value}>
+            {effort.label}
+          </option>
         ))}
-      </div>
-      <span className="settings-effort__label">{selected.label}</span>
-    </div>
+      </select>
+    </span>
   )
 }
 
@@ -157,24 +148,27 @@ function BackgroundProviderRow({
   return (
     <div
       className={`settings-bg-row${enabled ? '' : ' settings-bg-row--off'}`}
-      draggable
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
-      onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      onDragEnd={onDragEnd}
     >
-      <span className="settings-bg-row__icon" aria-hidden="true">
+      <span
+        className="settings-bg-row__icon"
+        draggable
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        title="Drag to change priority"
+        aria-label={`Drag ${info?.label || row.provider} to change priority`}
+      >
         {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
       </span>
-      <label className="settings-agent-field settings-agent-field--model">
-        <span>Model</span>
+      <div className="settings-bg-row__agent">
         <span className={`settings-model-select${isUpdatedModel(selectedModel) ? ' settings-model-select--updated' : ''}`}>
           <select
             className="settings-model-select__control"
             value={selectedModel}
             onChange={(event) => onModelChange(event.target.value)}
-            aria-label={`${info?.label || row.provider} background model`}
+            aria-label={`${info?.label || row.provider} background agent`}
           >
             <option value="">None</option>
             {selectedModel && !hasModel && (
@@ -187,16 +181,15 @@ function BackgroundProviderRow({
             ))}
           </select>
         </span>
-      </label>
-      <label className="settings-agent-field settings-agent-field--effort">
-        <span>Effort</span>
-        <SettingsEffortSlider
+      </div>
+      <div className="settings-bg-row__effort">
+        <SettingsEffortSelect
           provider={row.provider}
           value={row.effort}
           disabled={!enabled}
           onChange={onEffortChange}
         />
-      </label>
+      </div>
     </div>
   )
 }
@@ -876,10 +869,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               >
                 <div className="settings-agent-group__head">
                   <div>
-                    <h3 className="settings__agent-title">Background tasks</h3>
+                    <h3 className="settings__agent-title">Background agents</h3>
                     <p className="settings__subtext settings__subtext--tight">
-                      Priority order for background agents. Drag rows to reorder;
-                      if quota or auth fails, Möbius moves down the list. Apps can override this.
+                      Priority order. Drag a logo to reorder; if quota or auth fails,
+                      Möbius tries the next enabled agent.
                     </p>
                   </div>
                   <SaveState
@@ -902,14 +895,25 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
                       onDragStart={(event) => {
                         event.dataTransfer.effectAllowed = 'move'
-                        event.dataTransfer.setData('text/plain', row.provider)
+                        event.dataTransfer.setData('text/plain', String(index))
+                        event.dataTransfer.setData('application/x-mobius-provider', row.provider)
                         setBackgroundDragIndex(index)
                       }}
-                      onDragOver={(event) => event.preventDefault()}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        event.dataTransfer.dropEffect = 'move'
+                      }}
                       onDrop={(event) => {
                         event.preventDefault()
-                        if (backgroundDragIndex === null) return
-                        moveBackgroundProvider(backgroundDragIndex, index)
+                        const fallbackIndex = Number.parseInt(
+                          event.dataTransfer.getData('text/plain'),
+                          10,
+                        )
+                        const fromIndex = backgroundDragIndex !== null
+                          ? backgroundDragIndex
+                          : (Number.isFinite(fallbackIndex) ? fallbackIndex : null)
+                        if (fromIndex === null) return
+                        moveBackgroundProvider(fromIndex, index)
                         setBackgroundDragIndex(null)
                       }}
                       onDragEnd={() => setBackgroundDragIndex(null)}
