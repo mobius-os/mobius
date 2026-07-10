@@ -312,11 +312,10 @@ class SendMessage(BaseModel):
   # joined row.
   steered_messages: list[dict] | None = None
   # When `hidden=True` and the user is answering an AskUserQuestion,
-  # frontend includes the resolved answers here. Backend writes them
-  # into the question block in the same transaction that appends the
-  # hidden user message — eliminating the POST /question-answers +
-  # POST /messages race that left answers missing on mid-stream
-  # remounts.
+  # frontend includes the resolved answers here. Backend either resolves the
+  # live parked future or persists the answer with a recovered hidden
+  # continuation — eliminating the POST /question-answers + POST /messages
+  # race that left answers missing on mid-stream remounts.
   answers: dict | None = None
   # Optional identity of the question being answered (the runner-
   # published PendingQuestion id). When supplied, the backend writes

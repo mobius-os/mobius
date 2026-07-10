@@ -124,6 +124,22 @@ def test_cancel_cancels_future_and_removes_entry():
     questions.cancel("chat-f")
     assert questions.get("chat-f") is None
     assert pending.future.cancelled()
+    assert questions.was_cancelled("chat-f", pending.question_id)
+
+  asyncio.run(go())
+
+
+def test_register_clears_prior_cancel_tombstone():
+  async def go():
+    first = _make_pending()
+    questions.register("chat-f2", first)
+    questions.cancel("chat-f2")
+    assert questions.was_cancelled("chat-f2", first.question_id)
+
+    second = _make_pending()
+    questions.register("chat-f2", second)
+    assert not questions.was_cancelled("chat-f2", first.question_id)
+    questions.cancel("chat-f2")
 
   asyncio.run(go())
 

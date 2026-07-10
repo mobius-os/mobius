@@ -1085,12 +1085,11 @@ export default function useStreamConnection(chatId, {
     } = {},
   ) => {
     activeStreamChatIdRef.current = chatIdRef.current
-    // Answer submissions (hidden+answers) ride the EXISTING turn —
-    // the runner is paused on the AskUserQuestion future and resumes
-    // in place. Wiping streamItems here would erase the question card
-    // the user just answered, and the post-answer agent output would
-    // render as if a fresh turn started (no context for what the user
-    // is replying to). Keep streamItems intact for the answer path.
+    // Answer submissions usually ride the EXISTING turn: the runner is
+    // paused on the AskUserQuestion future and resumes in place. Wiping
+    // streamItems before the POST would erase the question card the user just
+    // answered. If the backend reports `started` instead, it recovered a
+    // restarted question as a fresh hidden continuation and we reset below.
     const isAnswerSubmission = !!answers
     // A force_steer injects into the LIVE turn — it is not a new turn.
     // The fresh-send reset below (setStreamItems([]) + setIsStreaming +
@@ -1126,9 +1125,9 @@ export default function useStreamConnection(chatId, {
       if (forceSteer && Array.isArray(steeredMessages) && steeredMessages.length > 0) {
         body.steered_messages = steeredMessages
       }
-      // AskUserQuestion answers persist atomically with the hidden
-      // user message — backend writes them into the question block
-      // in the same transaction (see chats_stream.py).
+      // AskUserQuestion answers are carried with the hidden submission. The
+      // backend either resolves the live future or persists the answer with a
+      // recovered hidden continuation.
       if (answers) body.answers = answers
       if (question_id) body.question_id = question_id
       if (attachments && attachments.length > 0) {
@@ -1195,6 +1194,23 @@ export default function useStreamConnection(chatId, {
       // prevents a redundant reconnect that would close the live
       // stream and replay the full catch-up burst.
       if (data.status === 'answer_delivered') return data
+      // A recovered AskUserQuestion answer (the process restarted after
+      // persisting the question block) starts a fresh hidden continuation.
+      // That is a NEW stream, unlike the in-process answer_delivered path
+      // above, so initialize the same reconnect state a visible fresh send
+      // would use.
+      if (isAnswerSubmission && data.status === 'started') {
+        wantsReconnectRef.current = true
+        justSentAtRef.current = Date.now()
+        clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+        lastGoodItemsRef.current = []
+        setStreamItems([])
+        textBufferRef.current = ''
+        forceNewTextBlockRef.current = false
+        setIsStreaming(true)
+        setConnectionError(null)
+        clearReconnectingNote()
+      }
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
       if (queueOnly || data.status === 'queued') {

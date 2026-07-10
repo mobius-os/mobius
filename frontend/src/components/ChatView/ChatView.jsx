@@ -1755,10 +1755,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   // Sends the answer without a visible user message bubble.
   // Sends the answer to an AskUserQuestion as a hidden user message.
-  // Answers ride along in the SAME POST as the hidden message —
-  // backend writes them atomically into the existing question block
-  // (see chats_stream.py:_apply_answers_to_last_question). One
-  // transaction, no race. The previous flow had a separate
+  // Answers ride along in the SAME POST as the hidden message. The backend
+  // either resolves the live parked future or, after a process restart,
+  // records the answer and starts a recovered hidden continuation. The
+  // previous flow had a separate
   // POST /question-answers that could race with the GET on a mid-
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
@@ -1780,10 +1780,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // for exactly this POST. BOTH gates must relax — `sending` is set
     // by the originating user prompt and stays true through the whole
     // turn, `isStreaming` is true while the SSE stream is open. Without
-    // both relaxations, Submit on a question card silently no-ops and
-    // the Codex bridge times out after 10 minutes (the user sees "card
-    // came back with no answer"). QuestionCard's own `submitted` state
-    // guards against double-clicks on the same card.
+    // both relaxations, Submit on a question card silently no-ops even
+    // though the agent is parked indefinitely for the answer. QuestionCard's
+    // own `submitted` state guards against double-clicks on the same card.
     if ((sendingRef.current || isStreamingRef.current) && !resolvedAnswers) {
       sendSilentInFlightRef.current = false
       return
@@ -1843,13 +1842,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       setSending(false)
       setServerRunningState(false)
       if (err.message === 'HTTP 410') {
-        // The pending question is stale — the backend process restarted and
-        // the in-memory future is gone. Backend reconcile_interrupted_chats
-        // already dropped the unanswered question block from the transcript
-        // and appended an interruption error block (see chat.py). Force-
-        // refetching shows the reconciled state: the card is gone (replaced
-        // by the error note) so the UI automatically presents the interrupted
-        // state without any further client-side changes.
+        // The backend refused this answer because the durable transcript no
+        // longer has that open question (for example Stop cancelled it, or a
+        // newer question superseded it). Refetch authoritative state rather
+        // than keeping the optimistic answer locally.
         setLiveQuestionId(null)
         fetchMessages({ force: true })
         sendSilentInFlightRef.current = false
@@ -2386,7 +2382,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Detect a pending card in whichever surface currently renders it:
   // the live stream (a question item without answers) or the durable
   // tail-question invariant on the last visible assistant message (the
-  // same rule MsgContent's blockAnswerable enforces — see its comment).
+  // same rule MsgContent's blockAnswerable enforces; recovery preserves
+  // that tail question even when the original process was interrupted).
   const pendingQuestionInStream = showStreamingSurface
     && streamItems.some(it => it.type === 'question' && !it.answers)
   const pendingQuestionInMessages = (() => {
@@ -2410,9 +2407,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // can change: pending-flag flips, stream↔messages promotion, or a
   // messages commit.
   // The LAST un-answered card is the pending one: it lives in the last
-  // assistant message or the streaming <li> (both render after any old
-  // orphaned question a reconcile note retired, which keeps its plain
-  // .qcard class but is history).
+  // assistant message or the streaming <li>.
   const findPendingQuestionCard = () =>
     [...(scrollRef.current?.querySelectorAll('.qcard:not(.qcard--answered)') ?? [])].pop()
 
@@ -2604,10 +2599,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // invariant stands on its own.
             //
             // MsgContent enforces the "tail block" half (the question is the
-            // LAST block): once the turn truly ends or `reconcile` appends an
-            // interrupted-turn note, a block follows the question and it
-            // stops being answerable, so a dead/orphaned turn's card doesn't
-            // linger. Double-submit is prevented by QuestionCard's own
+            // LAST block). Recovery may insert an interruption note before a
+            // still-open question, but once the turn truly moves on and any
+            // block follows the question, that older card becomes transcript
+            // history. Double-submit is prevented by QuestionCard's own
             // `submitted` state + doSendSilent's synchronous sendingRef flip.
             //
             // isLastMsg + liveQuestionId are passed as stable scalars so

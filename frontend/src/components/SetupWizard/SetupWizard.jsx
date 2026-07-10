@@ -400,6 +400,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     choiceConnected(primaryChoice) &&
     !agentSaving &&
     !agentError
+  const connectedChoices = connectedMap()
 
   return (
     <div className="setup">
@@ -450,6 +451,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
             label="Chats"
             choice={chatChoice}
             models={modelsFor(chatChoice.provider)}
+            connected={connectedChoices}
             onProviderChange={(provider) => updateChoice('chat', { provider })}
             onModelChange={(model) => updateChoice('chat', { model })}
           />
@@ -457,6 +459,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
             label="Background primary"
             choice={primaryChoice}
             models={modelsFor(primaryChoice.provider)}
+            connected={connectedChoices}
             onProviderChange={(provider) => updateChoice('primary', { provider })}
             onModelChange={(model) => updateChoice('primary', { model })}
           />
@@ -465,6 +468,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
             allowNone
             choice={secondaryChoice}
             models={modelsFor(secondaryChoice.provider)}
+            connected={connectedChoices}
             onProviderChange={(provider) => updateChoice('secondary', { provider })}
             onModelChange={(model) => updateChoice('secondary', { model })}
           />
@@ -497,9 +501,14 @@ function SetupAgentChoice({
   choice,
   models,
   allowNone = false,
+  connected,
   onProviderChange,
   onModelChange,
 }) {
+  const hasConnectedProvider = connected && Object.values(connected).some(Boolean)
+  const providerChoices = PROVIDERS.filter(provider => (
+    !hasConnectedProvider || connected[provider.id] || provider.id === choice.provider
+  ))
   return (
     <div className="setup-agent-row">
       <div className="setup-agent-row__label">{label}</div>
@@ -511,7 +520,7 @@ function SetupAgentChoice({
           aria-label={`${label} provider`}
         >
           {allowNone && <option value="">No fallback</option>}
-          {PROVIDERS.map(provider => (
+          {providerChoices.map(provider => (
             <option key={provider.id} value={provider.id}>{provider.label}</option>
           ))}
         </select>

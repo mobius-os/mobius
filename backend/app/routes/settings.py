@@ -179,15 +179,16 @@ def get_settings_view(
   """
   data_dir = get_app_settings().data_dir
   codex_creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
+  provider = providers.resolve_default_provider(data_dir, owner.provider)
   return {
     "gemini_configured": owner.gemini_api_key_enc is not None,
     "codex_authenticated": codex_creds.exists(),
-    "provider": owner.provider or "claude",
+    "provider": provider,
     "agent_settings": providers.effective_agent_settings(
-      data_dir, None, owner.provider or "claude"
+      data_dir, None, provider
     ),
     "background_agents": providers.background_agent_settings(
-      data_dir, owner.provider or "claude"
+      data_dir, provider
     ),
     "skills_enabled": providers.skills_enabled(data_dir),
     "claude_version": _format_cli_version(_cli_version("claude")),
@@ -225,8 +226,9 @@ def update_settings(
     if body.agent_settings is not None:
       current.update(_agent_settings_payload(body.agent_settings))
     if body.background_agents is not None:
+      provider = providers.resolve_default_provider(data_dir, owner.provider)
       existing = providers.background_agent_settings(
-        data_dir, owner.provider or "claude"
+        data_dir, provider
       )
       fields_set = getattr(body.background_agents, "model_fields_set", set())
       primary = existing.get("primary")
@@ -243,6 +245,7 @@ def update_settings(
         "fallback": fallback,
       }
     if not providers.write_agent_settings(data_dir, current):
+      db.rollback()
       raise HTTPException(
         status_code=500,
         detail="Could not save agent settings to disk. The previous settings are unchanged.",

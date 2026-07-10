@@ -33,7 +33,7 @@ from app.chat_writer import (
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
-from app.providers import _load_agent_settings
+from app.providers import _load_agent_settings, resolve_default_provider
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
@@ -106,6 +106,8 @@ def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
 async def _append_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
   *, initiated_by_app_id: int | None = None,
+  front: bool = False,
+  require_answer_match: bool = False,
 ) -> dict:
   """Queue a message via the actor's AppendPending; return the stored dict.
 
@@ -132,6 +134,8 @@ async def _append_to_pending(
       answers=body.answers,
       question_id=body.question_id,
       initiated_by_app_id=initiated_by_app_id,
+      front=front,
+      require_answer_match=require_answer_match,
     )
   )
   result = await await_ack(ack)
@@ -149,6 +153,35 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
     status_code=202,
     content={"status": "answer_delivered", "chat_id": chat_id},
   )
+
+
+def _has_unanswered_question(
+  chat: models.Chat,
+  question_id: str | None,
+) -> bool:
+  """Whether the durable tail prompt is the question being answered."""
+  msgs = list(chat.messages or [])
+  tail_questions: list[dict] = []
+  for msg in reversed(msgs):
+    if msg.get("hidden"):
+      continue
+    if msg.get("role") != "assistant":
+      return False
+    blocks = list(msg.get("blocks") or [])
+    while blocks:
+      block = blocks.pop()
+      if block.get("type") != "question" or block.get("answers"):
+        break
+      tail_questions.append(block)
+    break
+
+  if not tail_questions:
+    return False
+  if question_id:
+    return any(
+      block.get("question_id") == question_id for block in tail_questions
+    )
+  return True
 
 
 def _queued_response(
@@ -401,14 +434,13 @@ async def send_message(
   """
   chat = get_active_chat_for_principal(db, chat_id, principal)
 
-  # SDK in-process answer delivery: if a live SDK turn is blocked waiting
-  # for an AskUserQuestion answer (held in `questions._pending[chat_id]`),
-  # persist the answer through the writer actor, then resolve the future
-  # in-place and return — the SDK continues the active turn. The answer
-  # merge is NO LONGER written inline on this request's session: the
-  # actor's `AnswerQuestion` command re-reads the chat fresh, merges the
-  # answer into the right question block (by id), and commits — the SOLE
-  # runtime mutator of the JSON blob, so the answer can't lost-update
+  # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
+  # the answer (held in `questions._pending[chat_id]`), persist through the
+  # writer actor, then resolve the future in-place and return — the SDK
+  # continues the active turn. If the process restarted and only the durable
+  # question block remains, save the answer and start a hidden continuation
+  # below. The answer merge is NO LONGER written inline on this request's
+  # session: the actor owns the JSON blob so the answer can't lost-update
   # against a concurrent streaming snapshot.
   #
   # Registration race: the frontend renders the card the instant the
@@ -418,7 +450,8 @@ async def send_message(
   # answers in the tens-of-ms window before the entry lands used to hit
   # 410. We PEEK (not pop) with a short grace period; the `await sleep`
   # yields so the runner can write the entry. 500ms covers the race in
-  # practice; a genuinely stale UI still gets the 410 fast.
+  # practice; after that, the durable-transcript fallback below decides
+  # whether this is recoverable or genuinely stale.
   if body.answers:
     async with chat_queue.get_lock(chat_id):
       _GRACE_ATTEMPTS = 10
@@ -496,13 +529,95 @@ async def send_message(
             "answers": body.answers,
           })
         return _answer_delivered_response(chat_id)
-      # No pending question (Stop cancelled it, or stale UI). Falling
-      # through would land the answer text as a new turn prompt (e.g.
-      # "- Which color?: Red"), nonsense to the agent. 410 tells the
-      # client the question is no longer accepting answers.
-      raise HTTPException(
-        status_code=410,
-        detail="The question is no longer accepting answers.",
+      # No in-memory pending question. If the chat is still alive, this is a
+      # stale/foreign card (or Stop cancelled the question) and must not answer
+      # whichever turn is now running. If the chat is idle, however, the process
+      # may have restarted while the durable transcript still carries the open
+      # question. Treat that transcript question as the source of truth: save
+      # the answer, queue the hidden continuation at the FRONT of pending work,
+      # and immediately promote it into a new run. The human wait survives the
+      # process; only the SDK future needed rehydrating.
+      if is_chat_running(chat_id):
+        raise HTTPException(
+          status_code=410,
+          detail="The question is no longer accepting answers.",
+        )
+      if questions.was_cancelled(chat_id, body.question_id):
+        raise HTTPException(
+          status_code=410,
+          detail="The question is no longer accepting answers.",
+        )
+
+      db.expire(chat)
+      if not _has_unanswered_question(chat, body.question_id):
+        raise HTTPException(
+          status_code=410,
+          detail="The question is no longer accepting answers.",
+        )
+
+      if not mark_starting(chat_id):
+        raise HTTPException(
+          status_code=409,
+          detail="The chat is starting another turn; please try again.",
+        )
+
+      started_message = None
+      try:
+        await _append_to_pending(
+          chat,
+          body,
+          db,
+          initiated_by_app_id=principal.app_id,
+          front=True,
+          require_answer_match=True,
+        )
+        drain_token = alloc_run_token()
+        next_messages, next_user, next_session_id = (
+          await chat_queue.promote_pending_messages_locked(
+            db, chat_id, drain_token,
+          )
+        )
+        if not next_user:
+          raise HTTPException(
+            status_code=503,
+            detail="Could not resume the question; please try again.",
+          )
+        started_message = next_user
+        get_system_broadcast().publish({
+          "type": "chat_run_started",
+          "chatId": chat_id,
+        })
+        _schedule_continuation(
+          chat_id=chat_id,
+          messages=next_messages,
+          session_id=next_session_id,
+          provider_id=chat.provider,
+          next_user=next_user,
+          run_token=drain_token,
+        )
+        bc = get_broadcast(chat_id)
+        if bc is not None:
+          bc.publish({
+            "type": "answers_applied",
+            "question_id": body.question_id,
+            "answers": body.answers,
+          })
+      except HTTPException:
+        discard_starting(chat_id)
+        raise
+      except Exception as exc:
+        discard_starting(chat_id)
+        log.warning(
+          "Could not resume durable question chat_id=%s: %s", chat_id, exc,
+        )
+        raise HTTPException(
+          status_code=503,
+          detail="Could not save your answer; please try again.",
+        ) from exc
+
+      return JSONResponse(
+        status_code=202,
+        content={"status": "started", "message": started_message},
       )
 
   # One choke point for every genuine user send (initial / queued / steered all
@@ -765,7 +880,9 @@ async def send_message(
     run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
     owner = db.query(models.Owner).first()
-    default_provider = (owner.provider if owner else "claude") or "claude"
+    default_provider = resolve_default_provider(
+      get_settings().data_dir, owner.provider if owner else None,
+    )
 
     ack = get_writer().submit(
       StartTurn(

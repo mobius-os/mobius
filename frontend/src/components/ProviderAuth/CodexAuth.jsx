@@ -18,8 +18,10 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   const [status, setStatus] = useState('idle') // idle | connecting | pending | complete | failed
   const [url, setUrl] = useState('')
   const [code, setCode] = useState('')
+  const [copyState, setCopyState] = useState(null)
   const [error, setError] = useState('')
   const pollRef = useRef(null)
+  const copyTimerRef = useRef(null)
   // Generation counter for in-flight poll fetches. setInterval gets
   // cleared on cancel, but a request that was already awaiting a
   // response when cancel ran could still resolve after and call
@@ -35,6 +37,15 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     }
   }, [])
 
+  const showCopyState = useCallback((nextState) => {
+    setCopyState(nextState)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => {
+      setCopyState(null)
+      copyTimerRef.current = null
+    }, 1800)
+  }, [])
+
   // On unmount, also bump the gen so any in-flight fetch (login or
   // poll) that resolves after the component is gone won't call
   // setStatus/onConnected on a dead React tree. The original cancel
@@ -42,11 +53,28 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   useEffect(() => () => {
     pollGenRef.current += 1
     stopPolling()
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
   }, [stopPolling])
+
+  async function copyCodeToClipboard(value = code) {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      showCopyState('copied')
+    } catch {
+      showCopyState('failed')
+    }
+  }
+
+  function openVerificationPage() {
+    if (!url) return
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
 
   async function startLogin() {
     setError('')
     setStatus('connecting')
+    setCopyState(null)
     // Capture the gen as of this call so a login that completes
     // after unmount/cancel doesn't transition the state machine.
     pollGenRef.current += 1
@@ -64,6 +92,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       setUrl(data.url)
       setCode(data.code)
       setStatus('pending')
+      window.open(data.url, '_blank', 'noopener,noreferrer')
 
       // Poll for completion. Bump the generation again for the poll
       // loop so cancel/unmount invalidates pending /status fetches.
@@ -126,6 +155,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     setStatus('idle')
     setUrl('')
     setCode('')
+    setCopyState(null)
     setError('')
   }
 
@@ -133,22 +163,56 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     return (
       <div className="codex-auth">
         <p className="pa__muted">
-          Complete sign-in in your browser:
+          Complete sign-in in your browser. The page opened in a new tab;
+          if it asks for a code, copy this one.
         </p>
         <div className="codex-auth__device">
           <div className="codex-auth__step">
             <span className="codex-auth__step-num">1</span>
-            <span>Open <a href={url} target="_blank" rel="noopener noreferrer">{url}</a></span>
+            <span>
+              Open{' '}
+              <a href={url} target="_blank" rel="noopener noreferrer">
+                verification page
+              </a>
+            </span>
           </div>
           <div className="codex-auth__step">
             <span className="codex-auth__step-num">2</span>
-            <span>Enter code: <strong className="codex-auth__code">{code}</strong></span>
+            <span className="codex-auth__code-copy">
+              <span className="codex-auth__code-label">Enter code</span>
+              <code
+                className="codex-auth__code"
+                title="Click to copy"
+                onClick={() => copyCodeToClipboard()}
+              >
+                {code}
+              </code>
+              <button
+                type="button"
+                className="pa__btn pa__btn--sm codex-auth__copy-btn"
+                onClick={() => copyCodeToClipboard()}
+              >
+                {copyState === 'copied' ? 'Copied' : 'Copy code'}
+              </button>
+            </span>
           </div>
+          {copyState === 'failed' && (
+            <p className="pa__error codex-auth__copy-error">
+              Could not copy. Select the code above.
+            </p>
+          )}
         </div>
         <div className="codex-auth__pending-actions">
           <p className="pa__muted codex-auth__waiting">
             Waiting for sign-in to complete…
           </p>
+          <button
+            type="button"
+            className="pa__btn pa__btn--sm"
+            onClick={openVerificationPage}
+          >
+            Open page
+          </button>
           <button
             type="button"
             className="pa__btn pa__btn--sm"

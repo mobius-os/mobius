@@ -1178,19 +1178,13 @@ def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch
   )
 
 
-# -- 15 (final-review Area 6). reconcile scrubs an orphan question card -----
-def test_reconcile_scrubs_unanswered_question_card():
+# -- 15 (question wait contract). reconcile preserves an open question -------
+def test_reconcile_preserves_tail_unanswered_question_card():
   """A crash after a QuestionCommit (the unanswered question block is durable)
-  but before the next turn leaves an orphan card: the in-memory pending future
-  died with the process, so the card 410s on submit yet renders interactive
-  (questionAnswerable = hasQuestion && isLastMsg && !sending — none of which
-  reconcile changes). Reconcile must DROP the unanswered question block while
-  KEEPING an already-answered one + other blocks, then append the
-  interruption note.
-
-  Regression: before the fix, reconcile left the unanswered question block in
-  place, so the reloaded UI showed an interactive card that dead-ended on
-  submit.
+  but before the answer no longer expires the prompt. The in-memory future died
+  with the process, but the durable question remains the human handoff:
+  reconcile keeps it as the tail block and inserts the interruption note before
+  it so the later answer can restart a hidden continuation.
   """
   _seed_chat(
     "tq",
@@ -1217,15 +1211,23 @@ def test_reconcile_scrubs_unanswered_question_card():
   assert state["run_status"] is None
   blocks = state["messages"][-1]["blocks"]
   qids = [b.get("question_id") for b in blocks if b.get("type") == "question"]
-  assert "q-open" not in qids, "the unanswered orphan card must be scrubbed"
+  assert "q-open" in qids, "the open question must remain answerable"
   assert "q-answered" in qids, "an already-answered question is real transcript"
   assert any(
     b.get("type") == "text" and b.get("content") == "thinking" for b in blocks
-  ), "non-question blocks must survive the scrub"
-  assert any(
-    b.get("type") == "error" and "interrupted" in b["message"].lower()
-    for b in blocks
-  ), "the interruption note must be appended"
+  ), "non-question blocks must survive recovery"
+  assert blocks[-1].get("question_id") == "q-open", (
+    "the open question must stay at the tail"
+  )
+  err_idx = next(
+    i for i, b in enumerate(blocks)
+    if b.get("type") == "error" and "interrupted" in b["message"].lower()
+  )
+  open_idx = next(
+    i for i, b in enumerate(blocks)
+    if b.get("question_id") == "q-open"
+  )
+  assert err_idx < open_idx, "the interruption note belongs before the prompt"
 
 
 # -- 16. Stop during the StartTurn commit: no spawn -----------------------------------------------
