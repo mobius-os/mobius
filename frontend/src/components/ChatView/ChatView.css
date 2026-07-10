@@ -1090,6 +1090,7 @@
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__question-nudge,
+.chat__foot .chat__open-app,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
@@ -1761,26 +1762,13 @@
 
 /* ── Open app CTA ──────────────────────────────────── */
 
-/* Floats ABOVE the composer (which is `position: absolute; bottom: 0;
-   z-index: 5`). Without an explicit z-index this banner — a normal-
-   flow sibling of `.chat__foot` — would render in the same visual
-   slot as the composer pill and the pill's opaque frosted-glass
-   surface would paint over it, making the "Open app →" button
-   unclickable. `bottom: calc(var(--composer-h) + 8px)` anchors it
-   8px above the composer's measured height (published by the
-   ResizeObserver in ChatView.jsx). z-index 6 sits just above the
-   composer's 5 — anything notification-shaped should be reachable
-   over the chat surface but not over modal/drawer layers. */
 .chat__open-app {
-  position: absolute;
-  bottom: calc(var(--composer-h, 80px) + 8px);
-  right: 0;
-  left: 0;
+  max-width: 720px;
+  margin: 0 auto 8px;
   display: flex;
   justify-content: flex-end;
-  padding: 0 16px;
+  padding: 0 4px;
   pointer-events: none;
-  z-index: 6;
 }
 
 .chat__open-app > * {
@@ -1801,6 +1789,10 @@
   color: var(--accent); /* CONTRACT: vivid accent text */
   border-radius: 8px;
   padding: 8px 16px;
+  max-width: min(100%, 360px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;

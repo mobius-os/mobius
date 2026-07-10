@@ -65,6 +65,20 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 1
 fi
 
+# Prefer the runner-provided per-chat session/profile. Fall back from CHAT_ID
+# inside the helper so authenticated screenshots stay isolated even if a
+# provider forgets to export AGENT_BROWSER_SESSION. Raw agent-browser calls
+# still depend on the provider env; this only protects the screenshot path.
+if [ -n "${CHAT_ID:-}" ]; then
+  if [ -z "${AGENT_BROWSER_SESSION:-}" ]; then
+    export AGENT_BROWSER_SESSION="chat-${CHAT_ID}"
+  fi
+  if [ -z "${AGENT_BROWSER_PROFILE:-}" ]; then
+    CHAT_ID_SAFE="$(printf '%s' "$CHAT_ID" | tr -c 'A-Za-z0-9_-' '_')"
+    export AGENT_BROWSER_PROFILE="/data/agent-browser-profiles/chat-${CHAT_ID_SAFE}"
+  fi
+fi
+
 # Match the partner's actual viewport so the screenshot frames what
 # they see. chat.py exports VIEWPORT_WIDTH/HEIGHT from the React
 # shell's per-turn payload; screenshots require those values.

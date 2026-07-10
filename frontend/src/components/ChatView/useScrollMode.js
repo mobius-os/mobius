@@ -288,6 +288,18 @@ export function modeForForegroundReturn(scrollEl) {
 }
 
 
+/** Leaving a chat is different from actively watching its tail. Persist the
+ *  exact visible reading position — even when that position is currently the
+ *  physical bottom — so new content that arrives while the chat is inactive
+ *  appears below the restored viewport instead of redefining "bottom" and
+ *  yanking the reader to the latest tail. */
+export function modeForChatExit(scrollEl) {
+  if (!scrollEl) return null
+  return anchorModeFromScroll(scrollEl)
+    || (isNearScrollBottom(scrollEl) ? { kind: 'FOLLOW_BOTTOM' } : null)
+}
+
+
 /**
  * Hook that owns the chat scroll subsystem.
  *
@@ -395,10 +407,14 @@ export default function useScrollMode({
   // already changed, so we need the last known pre-change tail snapshot.
   const nearScrollBottomRef = useRef(false)
 
-  const persistMode = () => {
+  const persistMode = ({ freezeToCurrentPosition = false } = {}) => {
     try {
-      if (modeRef.current && modeRef.current.kind !== 'INITIAL') {
-        _scrollModes[chatId] = modeRef.current
+      const mode = freezeToCurrentPosition
+        ? (modeForChatExit(scrollRef.current) || modeRef.current)
+        : modeRef.current
+      if (mode && mode.kind !== 'INITIAL') {
+        if (freezeToCurrentPosition) modeRef.current = mode
+        _scrollModes[chatId] = mode
         sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
       }
     } catch {}
@@ -408,7 +424,7 @@ export default function useScrollMode({
   // (Layout effect can't easily handle persistence because it runs
   // on every messages change; cleanup is only fired on chatId change.)
   useLayoutEffect(() => {
-    return () => persistMode()
+    return () => persistMode({ freezeToCurrentPosition: true })
   }, [chatId])
 
   // A hard shell refresh/page background does not reliably run React's
@@ -417,12 +433,19 @@ export default function useScrollMode({
   // position rather than an older mode saved during the last message change.
   useLayoutEffect(() => {
     if (typeof window === 'undefined') return
-    const onPageLeaving = () => persistMode()
+    const onPageLeaving = () => persistMode({ freezeToCurrentPosition: true })
+    const onVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        persistMode({ freezeToCurrentPosition: true })
+      }
+    }
     window.addEventListener('pagehide', onPageLeaving)
     window.addEventListener('beforeunload', onPageLeaving)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       window.removeEventListener('pagehide', onPageLeaving)
       window.removeEventListener('beforeunload', onPageLeaving)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [chatId])
 

@@ -57,7 +57,7 @@ def test_effective_settings_chat_override_wins(tmp_path):
 
 
 def test_effective_settings_ignores_none_values(tmp_path):
-  """A None in the override means "no opinion" — fall through to default."""
+  """A None model in the override means "use the provider default"."""
   shared = tmp_path / "shared"
   shared.mkdir()
   (shared / "agent-settings.json").write_text(
@@ -66,7 +66,17 @@ def test_effective_settings_ignores_none_values(tmp_path):
   result = effective_agent_settings(
     str(tmp_path), {"model": None, "effort": "high"},
   )
-  assert result == {"model": "claude-opus-4-5", "effort": "high"}
+  assert result == {"model": None, "effort": "high"}
+
+
+def test_effective_settings_has_no_model_until_manual_pick(tmp_path):
+  """No global/chat model means the SDK receives no model override."""
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "agent-settings.json").write_text(json.dumps({}))
+  result = effective_agent_settings(str(tmp_path), None)
+  assert result["model"] is None
+  assert result["effort"] == "medium"
 
 
 def test_patch_chat_writes_override(client, auth, chat):

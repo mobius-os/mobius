@@ -67,3 +67,8 @@ backend/static/
 # platform runtime markers (created by the entrypoint in the clone)
 .baked-sha
 frontend/node_modules
+
+# Recovery / core files are image-managed (root-owned chmod 444);
+# they leave the platform git model entirely. See protected-files.txt.
+/scripts/entrypoint.sh
+/scripts/recovery_restore.sh

@@ -4,12 +4,14 @@ import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { webcrypto, createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { resolve as pathResolve } from 'node:path'
+import { dirname, resolve as pathResolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto
 }
 
+const __dirname = dirname(fileURLToPath(import.meta.url))
 const cacheDir = process.env.MOBIUS_VITE_CACHE || 'node_modules/.vite'
 
 // Stamp `<meta name="mobius-frame-rev">` into the BUILT index.html so the

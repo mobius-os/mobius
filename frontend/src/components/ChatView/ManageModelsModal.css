@@ -1,18 +1,31 @@
 /* Manage-models modal. Design language mirrors SettingsView's
    card-on-surface treatment (1px border, 8px radius, soft shadow
-   in light mode). The overlay paints over the whole shell so the
-   chat behind dims; click-outside closes. Max-width keeps long
+   in light mode). The overlay paints over the shell content while
+   leaving the persistent shell bar visible; click-outside closes. Max-width keeps long
    model ID strings from stretching the dialog on a wide viewport. */
 
 .mmm__overlay {
   position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  display: grid;
-  place-items: center;
+  /* Settings lives under the persistent shell bar. This modal is inside the
+     shell content stacking context, so it cannot paint over that bar anyway;
+     start below it so a tall/narrow dialog never hides its title underneath. */
+  top: calc(58px + env(safe-area-inset-top, 0px));
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: rgba(0, 0, 0, 0.50);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   z-index: 1000;
-  padding: 24px;
+  padding:
+    max(18px, env(safe-area-inset-top, 0px))
+    max(18px, env(safe-area-inset-right, 0px))
+    max(18px, env(safe-area-inset-bottom, 0px))
+    max(18px, env(safe-area-inset-left, 0px));
   box-sizing: border-box;
+  overflow: hidden;
+  overscroll-behavior: contain;
   /* Tap-anywhere-outside-to-close — we listen on the overlay's
      click handler in the component. */
 }
@@ -22,23 +35,29 @@
 }
 
 .mmm {
-  background: var(--surface);
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--surface2) 24%, transparent),
+      transparent 38%
+    ),
+    var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  width: 100%;
-  max-width: 460px;
-  /* dvh tracks the *visible* viewport under mobile browser chrome + the
-     keyboard, so the footer buttons don't land below the fold; vh stays as
-     the fallback for browsers without dvh. */
-  max-height: calc(100vh - 48px);
-  max-height: calc(100dvh - 48px);
+  border-radius: 20px;
+  width: min(560px, 100%);
+  /* Explicit height (not just max-height) gives the middle row a reliable
+     minmax(0, 1fr) scroll area. dvh tracks mobile browser chrome. */
+  height: min(720px, calc(100vh - 36px));
+  height: min(720px, calc(100dvh - 36px));
+  max-height: 100%;
   overflow: hidden;
-  padding: 20px;
+  padding: 18px;
   box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   gap: 14px;
   color: var(--text);
+  min-height: 0;
 }
 
 [data-theme="light"] .mmm {
@@ -62,20 +81,25 @@
 }
 
 .mmm__close {
-  background: none;
-  border: 0;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--surface2) 62%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
   color: var(--muted);
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1;
   cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 8px;
-  transition: background 0.12s, color 0.12s;
+  padding: 0;
+  border-radius: 999px;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .mmm__close:hover {
     background: var(--surface2);
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
     color: var(--text);
   }
 }
@@ -100,8 +124,8 @@
   min-height: 0;
   position: relative;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg) 86%, var(--surface));
   overflow: hidden;
 }
 
@@ -118,12 +142,20 @@
 
 .mmm__body-shell::before {
   top: 0;
-  background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 0%, transparent));
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--bg) 86%, var(--surface)),
+    color-mix(in srgb, var(--bg) 0%, transparent)
+  );
 }
 
 .mmm__body-shell::after {
   bottom: 0;
-  background: linear-gradient(to top, var(--bg), color-mix(in srgb, var(--bg) 0%, transparent));
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--bg) 86%, var(--surface)),
+    color-mix(in srgb, var(--bg) 0%, transparent)
+  );
 }
 
 .mmm__body {
@@ -131,8 +163,9 @@
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 40%, transparent) transparent;
+  -ms-overflow-style: auto;
   -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
@@ -141,15 +174,19 @@
 }
 
 .mmm__body::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+  width: 8px;
+  height: 8px;
+}
+
+.mmm__body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 28%, transparent);
+  border-radius: 999px;
 }
 
 .mmm__section {
   background: var(--surface);
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  border-radius: 8px;
+  border-radius: 14px;
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -193,9 +230,10 @@
   align-items: center;
   gap: 10px;
   padding: 8px;
-  border-radius: 8px;
+  border-radius: 12px;
   cursor: pointer;
   transition: background 0.12s ease, opacity 0.12s ease;
+  touch-action: pan-y;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -236,8 +274,8 @@
 
 .mmm-row__toggle {
   flex-shrink: 0;
-  width: 34px;
-  height: 20px;
+  width: 38px;
+  height: 22px;
   appearance: none;
   accent-color: var(--accent);
   border-radius: 999px;
@@ -253,8 +291,8 @@
   position: absolute;
   top: 50%;
   left: 3px;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 999px;
   background: var(--muted);
   transform: translateY(-50%);
@@ -268,7 +306,7 @@
 
 .mmm-row__toggle:checked::before {
   background: var(--accent);
-  transform: translate(13px, -50%);
+  transform: translate(16px, -50%);
 }
 
 .mmm__skeleton {
@@ -302,7 +340,7 @@
 .mmm__confirm {
   background: color-mix(in srgb, var(--accent) 5%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
-  border-radius: 8px;
+  border-radius: 14px;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -342,7 +380,7 @@
   background: var(--accent);
   color: var(--accent-fg, #ffffff);
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: 999px;
   padding: 8px 14px;
   font-size: 13px;
   font-weight: 500;
@@ -388,17 +426,32 @@
 
 @media (max-width: 520px) {
   .mmm__overlay {
-    padding: 12px;
+    padding:
+      max(10px, env(safe-area-inset-top, 0px))
+      max(10px, env(safe-area-inset-right, 0px))
+      max(10px, env(safe-area-inset-bottom, 0px))
+      max(10px, env(safe-area-inset-left, 0px));
     align-items: center;
   }
 
   .mmm {
-    max-height: calc(100vh - 24px);
-    max-height: calc(100dvh - 24px);
-    padding: 16px;
+    height: calc(100vh - 20px);
+    height: calc(100dvh - 20px);
+    border-radius: 18px;
+    padding: 14px;
   }
 
   .mmm__btn {
     min-height: 36px;
+  }
+
+  .mmm__foot {
+    gap: 6px;
+  }
+
+  .mmm__foot-spacer {
+    flex-basis: 100%;
+    height: 0;
+    order: 1;
   }
 }

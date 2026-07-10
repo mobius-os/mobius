@@ -4,8 +4,13 @@ import assert from 'node:assert/strict'
 import {
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
+  openAppCtaViewModel,
+  previewReadyAnnouncement,
+  resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
+  shouldShowOpenAppCta,
   startedMessagesFromResponse,
+  systemEventForChat,
 } from '../chatRuntimeState.js'
 
 test('startedMessagesFromResponse preserves backend _messages as separate visible rows', () => {
@@ -45,6 +50,47 @@ test('canFastForwardQueue requires active turn and server-confirmed queued rows'
   assert.equal(canFastForwardQueue([{ ts: 1, serverTs: true }, { ts: 2, serverTs: true }], true), true)
 })
 
+test('shouldShowOpenAppCta is tied to the built app, not turn completion', () => {
+  assert.equal(shouldShowOpenAppCta(null), false)
+  assert.equal(shouldShowOpenAppCta({}), false)
+  assert.equal(shouldShowOpenAppCta({ id: 42, name: 'Habits' }), true)
+})
+
+test('openAppCtaViewModel names the active preview and idle app action', () => {
+  assert.equal(openAppCtaViewModel(null, true), null)
+  assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, true), {
+    label: 'Open Habits preview',
+    ariaLabel: 'Open live preview of Habits',
+  })
+  assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, false), {
+    label: 'Open Habits',
+    ariaLabel: 'Open Habits',
+  })
+  assert.deepEqual(openAppCtaViewModel({ id: 42 }, true), {
+    label: 'Open app preview',
+    ariaLabel: 'Open live preview of app',
+  })
+})
+
+test('previewReadyAnnouncement announces when a preview becomes available', () => {
+  assert.equal(previewReadyAnnouncement(null), '')
+  assert.equal(previewReadyAnnouncement({ id: 42, name: 'Habits' }), 'Live preview ready for Habits.')
+})
+
+test('systemEventForChat annotates forwarded stream events with their chat id', () => {
+  assert.deepEqual(systemEventForChat({ type: 'app_built', appId: '7' }, 'chat-a'), {
+    type: 'app_built',
+    appId: '7',
+    chatId: 'chat-a',
+  })
+  assert.deepEqual(systemEventForChat({ type: 'app_built', chatId: 'old' }, 'chat-a'), {
+    type: 'app_built',
+    chatId: 'chat-a',
+  })
+  assert.equal(systemEventForChat(null, 'chat-a'), null)
+  assert.deepEqual(systemEventForChat({ type: 'app_built' }, null), { type: 'app_built' })
+})
+
 test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () => {
   const server = [
     { role: 'user', content: 'saved one', ts: 1 },
@@ -70,4 +116,36 @@ test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () 
     ...server,
     { role: 'user', content: 'waiting for canonical ts', ts: 6, serverTs: false },
   ]), true)
+})
+
+test('resolveSteeredPinDecision falls back to live scroll when local intent is missing', () => {
+  assert.deepEqual(resolveSteeredPinDecision({
+    pinTargetTs: 123,
+    pinIntent: null,
+    fallbackWillPin: () => true,
+  }), {
+    intentStillCurrent: true,
+    shouldPin: true,
+  })
+
+  assert.deepEqual(resolveSteeredPinDecision({
+    pinTargetTs: 123,
+    pinIntent: null,
+    fallbackWillPin: () => false,
+  }), {
+    intentStillCurrent: true,
+    shouldPin: false,
+  })
+})
+
+test('resolveSteeredPinDecision honors stale local intent over fallback', () => {
+  assert.deepEqual(resolveSteeredPinDecision({
+    pinTargetTs: 123,
+    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
+    pinIntentStillCurrent: () => false,
+    fallbackWillPin: () => true,
+  }), {
+    intentStillCurrent: false,
+    shouldPin: false,
+  })
 })

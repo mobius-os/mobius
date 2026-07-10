@@ -11,7 +11,7 @@ auth + env surface — there is no polymorphic command/parse shape:
     run through the Agent SDK: `chat.py` dispatches to
     `codex_sdk_runner.run_codex_sdk_turn`. The SDK runner reuses one
     helper from `codex_appserver.py` (`_extract_bash_command`); the
-    provider itself only shapes credentials + env.
+    provider itself shapes credentials + env.
 
 `BaseProvider` carries the whole surface (`check_auth`, `build_env`,
 and the `name`/`cli_cmd`/`auth_dir` identifiers); every provider
@@ -38,13 +38,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# Fallback models per provider, with the top entry treated as the
-# default when live registry fetches are unavailable. Listing known
-# values also lets the snapshot logic detect cross-provider model
-# mismatches (e.g. the global file remembers a Codex model but a new
-# chat starts on Claude) and fall back cleanly to the provider's own
-# top entry. On successful registry fetches, the SDK/CLI list is the
-# source of truth.
+# Fallback models per provider, ordered the same way the pickers display
+# them. Listing known values lets the snapshot logic detect cross-provider
+# model mismatches (e.g. the global file remembers a Codex model but a new
+# chat starts on Claude) while live registry fetches remain the broader
+# source of truth for newly released IDs.
 KNOWN_MODELS = {
   "claude": [
     # Anthropic switched to dateless pinned IDs starting with 4.6;
@@ -158,19 +156,20 @@ def effective_agent_settings(
   chat_overrides: "AgentSettingsOverride | dict[str, Any] | None" = None,
   provider: str | None = None,
 ) -> dict:
-  """Merges per-chat overrides on top of the global defaults, with
-  provider-aware fallback so model+effort are ALWAYS populated.
+  """Merges per-chat overrides on top of the global defaults.
 
   Layer order (later wins per key):
-    1. Hard-coded provider defaults (top model + medium effort).
+    1. Hard-coded effort default (medium). There is intentionally
+       NO hard-coded model default: until the owner manually picks a
+       model, the provider SDK runs with its own default.
     2. Global file at /data/shared/agent-settings.json.
     3. Per-chat overrides from Chat.agent_settings_json.
 
-  Provider-aware fallback fires when neither the file nor the
-  override supplies a key — that guarantees the picker always shows
-  a real selection and the runner always uses a real model. Existing
-  chats created before the snapshot-on-create change have no
-  override; the fallback bridges them without a migration.
+  Provider-aware filtering still rejects a saved model that belongs
+  to the other provider, but it now resolves that case to ``None``
+  rather than silently inventing the provider's top model. A model
+  becomes the default only after a manual picker choice mirrors into
+  /data/shared/agent-settings.json.
 
   Known keys today: `model`, `effort`. Future picker fields (thinking
   budget, sandbox mode) follow the same path — add the key here
@@ -184,7 +183,7 @@ def effective_agent_settings(
   else:
     overrides = dict(chat_overrides)
   merged = {
-    "model": DEFAULT_MODELS.get(prov, DEFAULT_MODELS["claude"]),
+    "model": None,
     "effort": DEFAULT_EFFORT,
   }
   # File layer: only carry the model if it belongs to this provider.
@@ -198,24 +197,42 @@ def effective_agent_settings(
     merged["effort"] = file_layer["effort"]
   if file_layer.get("effort_by_provider") is not None:
     merged["effort_by_provider"] = file_layer["effort_by_provider"]
-  fm = file_layer.get("model")
-  if fm and not _model_belongs_to_other_provider(fm, prov):
-    merged["model"] = fm
-  # Per-chat overrides are authoritative — the user explicitly
-  # picked them for THIS chat, so they trump the cross-provider
-  # check.
+  if "model" in file_layer:
+    fm = file_layer.get("model")
+    merged["model"] = (
+      fm
+      if isinstance(fm, str) and fm and not _model_belongs_to_other_provider(fm, prov)
+      else None
+    )
+  # Per-chat overrides are authoritative for the active chat, while
+  # still applying the same cross-provider safety rail: a stale Codex
+  # model on a Claude chat resolves to provider default rather than
+  # sending the wrong ID into the SDK.
   if overrides:
     for k, v in overrides.items():
+      if k == "model":
+        model = v if isinstance(v, str) and v else None
+        merged["model"] = (
+          model
+          if model and not _model_belongs_to_other_provider(model, prov)
+          else None
+        )
+        continue
       if v is None:
         continue
       merged[k] = v
   return merged
 
 
-def _background_default_choice(provider: str, *, enabled: bool = False) -> dict:
+def _background_default_choice(
+  provider: str,
+  *,
+  enabled: bool = False,
+  model: str | None = None,
+) -> dict:
   return {
     "provider": provider,
-    "model": DEFAULT_MODELS.get(provider),
+    "model": model,
     "effort": DEFAULT_EFFORT,
     "enabled": enabled,
   }
@@ -235,10 +252,18 @@ def _clean_background_choice(
   if provider not in PROVIDERS:
     return None
   out: dict[str, Any] = {"provider": provider}
-  model = raw.get("model")
-  model = model.strip() if isinstance(model, str) and model.strip() else None
-  if model and _model_belongs_to_other_provider(model, provider):
+  raw_model = raw.get("model")
+  if isinstance(raw_model, str) and raw_model.strip():
+    model = raw_model.strip()
+    if _model_belongs_to_other_provider(model, provider):
+      model = DEFAULT_MODELS.get(provider)
+  elif "model" in raw:
+    # Explicit null/empty means "let this provider use its native default".
     model = None
+  else:
+    # Legacy provider-only choices predate nullable model defaults; keep them
+    # concrete so background runners do not inherit the chat model by accident.
+    model = DEFAULT_MODELS.get(provider)
   out["model"] = model
   effort = raw.get("effort")
   out["effort"] = effort.strip() if isinstance(effort, str) and effort.strip() else None
@@ -272,6 +297,13 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   file_layer = _load_agent_settings(data_dir)
   raw = file_layer.get("background_agents")
   bg = raw if isinstance(raw, dict) else {}
+  # When the owner has already picked a chat model, synthesize a concrete
+  # provider-native background model rather than inheriting that chat default.
+  # With no manual model choice at all, keep the background model nullable so
+  # the provider SDK can use its own default until the owner saves a row.
+  synthetic_default_model = (
+    DEFAULT_MODELS.get(provider) if "model" in file_layer else None
+  )
 
   rows: list[dict[str, Any]] = []
   seen: set[str] = set()
@@ -283,7 +315,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
     if provider_id in seen:
       return
     row = dict(choice)
-    row["model"] = row.get("model") or DEFAULT_MODELS.get(provider_id)
+    row["model"] = row.get("model")
     row["effort"] = row.get("effort") or DEFAULT_EFFORT
     row["enabled"] = (
       bool(row.get("enabled"))
@@ -303,16 +335,33 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   else:
     primary = _clean_background_choice(bg.get("primary"), provider)
     if primary is None:
-      primary = _background_default_choice(provider, enabled=True)
+      primary = _background_default_choice(
+        provider,
+        enabled=True,
+        model=synthetic_default_model,
+      )
     add_row(primary, enabled_default=True)
     add_row(_clean_background_choice(bg.get("fallback")), enabled_default=True)
 
   if not rows:
-    add_row(_background_default_choice(provider, enabled=True), enabled_default=True)
+    add_row(
+      _background_default_choice(
+        provider,
+        enabled=True,
+        model=synthetic_default_model,
+      ),
+      enabled_default=True,
+    )
 
   for provider_id in PROVIDERS:
     if provider_id not in seen:
-      rows.append(_background_default_choice(provider_id, enabled=False))
+      rows.append(
+        _background_default_choice(
+          provider_id,
+          enabled=False,
+          model=DEFAULT_MODELS.get(provider_id),
+        )
+      )
 
   enabled_rows = [dict(row) for row in rows if row.get("enabled") is not False]
   if not enabled_rows:
@@ -391,8 +440,9 @@ class BaseProvider:
     agent-browser session) the runtime — SDK or subprocess — inherits.
 
     Each provider shapes a different set of variables (Claude needs
-    `CLAUDE_CONFIG_DIR` + `AGENT_BROWSER_SESSION`; Codex needs
-    `CODEX_HOME`), so subclasses always override. Raises on the base
+    `CLAUDE_CONFIG_DIR`; Codex needs `CODEX_HOME`; both inherit the
+    per-chat `AGENT_BROWSER_SESSION` when a chat id is available), so
+    subclasses always override. Raises on the base
     class to make a missing override loud instead of silently passing
     an unshaped env to the runtime.
     """
@@ -488,7 +538,8 @@ class CodexProvider(BaseProvider):
   """OpenAI Codex provider.
 
   Live chat runs through the Codex Agent SDK (`codex_sdk_runner`); this
-  class only shapes identity, auth, and the subprocess env (`CODEX_HOME`).
+  class shapes identity, auth, and the subprocess env (`CODEX_HOME` plus
+  the per-chat agent-browser session).
   """
 
   name = "Codex"
@@ -510,9 +561,16 @@ class CodexProvider(BaseProvider):
     data_dir: str,
     chat_id: str | None = None,
   ) -> dict[str, str]:
-    del chat_id  # codex doesn't use AGENT_BROWSER_SESSION
     env = dict(base_env)
     env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
+    # Match Claude's per-chat agent-browser isolation. Without this, Codex
+    # turns that invoke `agent-browser` all attach to the CLI's global
+    # "default" session; a browser launched by one Codex chat can then leak
+    # viewport, tabs, and profile choice into another, and chat.py's
+    # terminal `agent-browser --session chat-<id> close` misses the live
+    # default session.
+    if chat_id:
+      env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
 
 
