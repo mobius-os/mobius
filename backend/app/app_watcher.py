@@ -1,12 +1,13 @@
 """File watcher that auto-recompiles mini-app source on edit.
 
-Watches source-like files under `/data/apps/<slug>/`.  When `index.jsx`
-or one of its sibling modules changes, looks up the app by its exact
-`source_dir` in the DB, re-reads `index.jsx`, recompiles from that real
-entry path so relative imports resolve, and persists the current entry
-source + `compiled_path`.  Publishes `app_updated` to the SystemBroadcast
-so the Shell (which subscribes via /api/events/system) picks up the change
-without a manual `register_app.py` roundtrip.
+Watches source-like files under user app source dirs (`/data/apps/<slug>/`)
+and platform-owned core app source dirs (`/data/platform/core-apps/<slug>/`).
+When `index.jsx` or one of its sibling modules changes, looks up the app by
+its exact `source_dir` in the DB, re-reads `index.jsx`, recompiles from that
+real entry path so relative imports resolve, and persists the current entry
+source + `compiled_path`. Publishes `app_updated` to the SystemBroadcast so the
+Shell (which subscribes via /api/events/system) picks up the change without a
+manual `register_app.py` roundtrip.
 
 Debounced (1s) to coalesce rapid saves during multi-line edits.
 
@@ -30,7 +31,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
-from app import app_git, fs_locks, models
+from app import app_git, fs_locks, models, source_dirs
 from app.compiler import recompile_app_bundle
 from app.config import get_settings
 from app.database import SessionLocal
@@ -49,27 +50,44 @@ _IGNORED_SOURCE_PARTS = {
 }
 
 
+def _source_roots() -> list[Path]:
+  data_dir = Path(get_settings().data_dir)
+  roots = [source_dirs.apps_root(data_dir)]
+  platform_core = source_dirs.platform_core_root(data_dir)
+  if platform_core.is_dir():
+    roots.append(platform_core)
+  return roots
+
+
 def _source_dir_for_changed_path(path: str | Path) -> Path | None:
-  """Returns the immediate `/data/apps/<slug>` owner for a source edit."""
+  """Returns the immediate source-tree owner for a source edit."""
   p = Path(path)
   if p.suffix not in _SOURCE_SUFFIXES:
     return None
-  apps_dir = (Path(get_settings().data_dir) / "apps").resolve()
   try:
-    rel = p.resolve().relative_to(apps_dir)
-  except ValueError:
+    resolved = p.resolve()
+  except (OSError, RuntimeError):
     return None
-  if len(rel.parts) < 2:
-    return None
-  ignored_parts = rel.parts[1:-1]
-  if any(
-    part in _IGNORED_SOURCE_PARTS or part.startswith(".")
-    for part in ignored_parts
-  ):
-    return None
-  if rel.name.startswith("."):
-    return None
-  return apps_dir / rel.parts[0]
+  for root in _source_roots():
+    try:
+      rel = resolved.relative_to(root)
+    except ValueError:
+      continue
+    if len(rel.parts) < 2:
+      return None
+    if root == source_dirs.platform_core_root(get_settings().data_dir):
+      if not source_dirs.is_core_app_slug(rel.parts[0]):
+        return None
+    ignored_parts = rel.parts[1:-1]
+    if any(
+      part in _IGNORED_SOURCE_PARTS or part.startswith(".")
+      for part in ignored_parts
+    ):
+      return None
+    if rel.name.startswith("."):
+      return None
+    return root / rel.parts[0]
+  return None
 
 
 class _JsxHandler(FileSystemEventHandler):
@@ -294,7 +312,7 @@ class _JsxHandler(FileSystemEventHandler):
 def start_watcher(
   loop: asyncio.AbstractEventLoop,
 ) -> tuple[PollingObserver, _JsxHandler]:
-  """Starts a watchdog Observer on the apps directory.
+  """Starts a watchdog Observer on app source directories.
 
   Returns `(observer, handler)` so the caller can stop the observer
   AND drain the handler's pending debounce timers on shutdown.
@@ -306,10 +324,14 @@ def start_watcher(
   # unreliable on the Docker volume backing /data (overlay/bind mounts can
   # silently drop IN_MODIFY/IN_CLOSE_WRITE), which left an agent's edit during
   # an app-update merge un-recompiled and the merge unfinalized (.pm/124).
-  # Polling stats the small /data/apps tree on an interval — reliable
-  # everywhere, negligible cost for this watch.
+  # Polling stats the small source trees on an interval — reliable everywhere,
+  # negligible cost for these watch roots.
   observer = PollingObserver()
-  observer.schedule(handler, str(apps_dir), recursive=True)
+  watched: list[str] = []
+  for root in _source_roots():
+    if root.is_dir():
+      observer.schedule(handler, str(root), recursive=True)
+      watched.append(str(root))
   observer.start()
-  log.info("app watcher started on %s", apps_dir)
+  log.info("app watcher started on %s", ", ".join(watched))
   return observer, handler

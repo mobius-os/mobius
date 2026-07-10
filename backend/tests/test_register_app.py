@@ -8,6 +8,7 @@ rename) is the fix.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 _SCRIPT = (
@@ -62,3 +63,71 @@ def test_source_dir_match_beats_name_collision():
     apps, source_dir="/data/apps/notes", name="Notes",
   )
   assert existing is not None and existing["id"] == 4
+
+
+def test_core_migration_matches_explicit_legacy_source_dir():
+  """The core installer can move a row from the old copied source tree to
+  /data/platform/core-apps without creating a duplicate."""
+  mod = _load_module()
+  apps = [
+    {"id": 10, "name": "Beat Machine", "source_dir": "/data/apps/beatmachine"},
+  ]
+  existing = mod._find_existing(
+    apps,
+    source_dir="/data/platform/core-apps/beat-machine",
+    name="Beat Machine",
+    legacy_source_dirs=["/data/apps/beatmachine"],
+  )
+  assert existing is not None and existing["id"] == 10
+
+
+def test_core_migration_ignores_unrelated_legacy_source_dir():
+  """A legacy source-dir hint is not enough to adopt an unrelated row."""
+  mod = _load_module()
+  apps = [
+    {
+      "id": 10,
+      "name": "Notebook",
+      "slug": "notebook",
+      "source_dir": "/data/apps/memory",
+    },
+  ]
+  existing = mod._find_existing(
+    apps,
+    source_dir="/data/platform/core-apps/memory",
+    name="Memory",
+    legacy_source_dirs=["/data/apps/memory"],
+  )
+  assert existing is None
+
+
+def test_update_patch_includes_name(monkeypatch, tmp_path):
+  """Registering an existing source dir should carry core display renames."""
+  mod = _load_module()
+  entry = tmp_path / "index.jsx"
+  entry.write_text("export default function App() { return null }")
+  patches = []
+
+  def fake_call(url, token, method, data=None):
+    if method == "GET":
+      return [{
+        "id": 7,
+        "name": "Memory Graph",
+        "slug": "memory",
+        "source_dir": str(tmp_path),
+      }]
+    if method == "PATCH":
+      patches.append(data)
+      return {"id": 7}
+    raise AssertionError(f"unexpected call: {method} {url}")
+
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  monkeypatch.setattr(sys, "argv", [
+    "register_app.py", "Memory", "new description", str(entry),
+  ])
+  monkeypatch.setattr(mod, "_call", fake_call)
+  monkeypatch.setattr(mod, "_notify", lambda *_args, **_kwargs: None)
+
+  mod.main()
+
+  assert patches and patches[0]["name"] == "Memory"

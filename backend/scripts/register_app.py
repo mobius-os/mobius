@@ -13,6 +13,7 @@ Prints the created or updated app JSON to stdout.
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -38,7 +39,27 @@ def _call(url: str, token: str, method: str, data: dict | None = None):
     sys.exit(1)
 
 
-def _find_existing(apps: list, source_dir: str, name: str):
+def _slugify_for_match(value: str | None) -> str:
+  slug = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+  return slug or "app"
+
+
+def _row_matches_name_or_slug(app: dict, name: str) -> bool:
+  expected = _slugify_for_match(name)
+  return (
+    app.get("name") == name
+    or app.get("slug") == expected
+    or _slugify_for_match(app.get("name")) == expected
+  )
+
+
+def _find_existing(
+  apps: list,
+  source_dir: str,
+  name: str,
+  *,
+  legacy_source_dirs: list[str] | None = None,
+):
   """Find the app this (re-)registration refers to, by STABLE identity.
 
   Identity is source_dir, not the display name. A core app renamed in place
@@ -54,6 +75,18 @@ def _find_existing(apps: list, source_dir: str, name: str):
   )
   if by_dir is not None:
     return by_dir
+  legacy_dirs = set(legacy_source_dirs or [])
+  if legacy_dirs:
+    by_legacy_dir = next(
+      (
+        a for a in apps
+        if a.get("source_dir") in legacy_dirs
+        and _row_matches_name_or_slug(a, name)
+      ),
+      None,
+    )
+    if by_legacy_dir is not None:
+      return by_legacy_dir
   return next(
     (a for a in apps if not a.get("source_dir") and a.get("name") == name),
     None,
@@ -99,6 +132,13 @@ def main() -> None:
   base = os.environ.get("API_BASE_URL", "http://localhost:8000")
   # Tag the app with the current chat so errors can be routed back to it.
   chat_id = os.environ.get("CHAT_ID") or None
+  legacy_source_dirs = [
+    os.path.abspath(p)
+    for p in os.environ.get("MOBIUS_REGISTER_LEGACY_SOURCE_DIRS", "").split(
+      os.pathsep
+    )
+    if p
+  ]
 
   # Trailing slash required — FastAPI redirects /api/apps → /api/apps/ and
   # urllib does not follow POST redirects, so use the canonical URL directly.
@@ -106,7 +146,9 @@ def main() -> None:
   # Match on the stable source_dir, not the display name: a rename keeps the
   # source dir but changes the name, and a name-only match would create a
   # duplicate row for the renamed app (feature 097).
-  existing = _find_existing(apps, source_dir, name)
+  existing = _find_existing(
+    apps, source_dir, name, legacy_source_dirs=legacy_source_dirs,
+  )
 
   if existing:
     app = _call(
@@ -114,6 +156,7 @@ def main() -> None:
       token,
       "PATCH",
       {
+        "name": name,
         "description": description,
         "jsx_source": jsx_source,
         "chat_id": chat_id,
