@@ -2,7 +2,8 @@
 # Land the current session branch onto origin/main without clobbering siblings.
 set -euo pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
 cd "$ROOT"
 
 err() { printf 'land: %s\n' "$*" >&2; }
