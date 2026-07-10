@@ -101,7 +101,10 @@ Next steps (run from the repo root or from inside the worktree):
     docker compose -p $project -f docker-compose.test.yml run --rm pytest
 
   # When the branch is ready to ship (direct-to-main, no PR needed):
-  cd $worktree && git fetch origin && git rebase origin/main && git push origin HEAD:main
+  cd $worktree && scripts/land.sh
+
+  # If a sibling lands first, land.sh prints the manual recovery loop:
+  # git fetch origin && git rebase origin/main && scripts/land.sh
 
   # Tear down when done:
   docker compose -p $project -f docker-compose.test.yml down -v

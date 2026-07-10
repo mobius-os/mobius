@@ -26,6 +26,18 @@ any non-trivial change.
 
 CI is `.github/workflows/test.yml`; the commands below mirror it.
 
+## Landing a session branch
+
+Parallel work should land through `scripts/land.sh` from the session worktree.
+It refuses dirty or detached checkouts, backs up the branch tip under
+`origin/preserve/session-*`, rebases onto the latest `origin/main`, then pushes
+to `main` without force or hook bypass flags. If a sibling lands first, follow
+the recovery loop it prints:
+
+```bash
+git fetch origin && git rebase origin/main && scripts/land.sh
+```
+
 **Backend (pytest).** Hermetic Docker path (no local venv, tests current source
 against the real image — esbuild, node, all deps):
 
