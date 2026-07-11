@@ -343,6 +343,37 @@ def test_fetch_upstream_advances_real_origin_and_reads_full_tree(tmp_path):
   assert tree["cards.js"] == b"export const label = 'v2'\n"
 
 
+def test_fetch_upstream_rejects_unrelated_origin_without_moving_ref(tmp_path):
+  """A synthetic app that accidentally has an origin remote must not have its
+  installer-owned upstream branch moved onto unrelated real-repo history."""
+  source_dir = tmp_path / "synthetic"
+  app_git.record_upstream(
+    source_dir,
+    {"index.jsx": b"export default () => <div>v1</div>\n"},
+    "https://example.invalid/mobius.json",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(source_dir)
+  old_upstream = app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH)
+
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => <div>real</div>\n")
+  _commit_all(fixture, "real repo root")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+  app_git._run(source_dir, "remote", "add", "origin", bare.as_uri())
+
+  with pytest.raises(RuntimeError, match="unrelated"):
+    app_git.fetch_upstream(source_dir, "main")
+
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == old_upstream
+
+
 def test_read_tree_exec_paths_reports_only_executables(tmp_path):
   """read_tree_exec_paths returns the 100755 paths in a tree — the bit the
   cloned-update byte-write loop must restore so a repo-tracked helper script

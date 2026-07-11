@@ -3924,6 +3924,99 @@ def test_clone_update_fetch_failure_falls_back_to_record_upstream(
   assert (src / "cards.js").read_text() == cards_v2
 
 
+def test_synthetic_app_with_accidental_origin_restores_ref_and_updates(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """An older synthetic-history app may have picked up an origin remote later.
+
+  If a failed cloned-update attempt also moved its installer-owned upstream ref
+  onto that unrelated origin history, the next update must trust the DB-recorded
+  upstream commit, restore the ref, and fall back to the manifest-fetched source
+  path instead of crashing with "refusing to merge unrelated histories".
+  """
+  base = "https://synthetic-origin.test/repo/"
+  manifest = {
+    "id": "synthetic-origin",
+    "name": "Synthetic Origin",
+    "version": "1.0.0",
+    "description": "Synthetic app with stray origin",
+    "entry": "index.jsx",
+    "source_files": ["cards.js"],
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  index_v1 = "import './cards.js'\nexport default () => <div>HTTP_V1</div>\n"
+  cards_v1 = "export const card = 'HTTP_CARD_V1'\n"
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, index_v1.encode()),
+    base + "cards.js": (200, cards_v1.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+
+  src = Path(get_settings().data_dir) / "apps" / "synthetic-origin"
+  from app.database import SessionLocal
+  from app.models import App
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "synthetic-origin").first()
+    db_upstream = app.upstream_commit
+  finally:
+    db.close()
+  assert db_upstream == app_git.head_sha(src, app_git.UPSTREAM_BRANCH)
+
+  # Add a real origin that is unrelated to the synthetic install history, then
+  # simulate the exact failed-attempt residue: upstream was moved to origin/main
+  # while the DB row still points at the synthetic commit.
+  work, bare, real_head = _make_clone_fixture(
+    tmp_path,
+    "import './cards.js'\nexport default () => <div>REAL_REPO</div>\n",
+    "export const card = 'REAL_CARD'\n",
+  )
+  app_git._run(src, "remote", "add", "origin", bare.as_uri())
+  app_git._run(src, "fetch", "--depth", "1", "origin", "main")
+  app_git._run(src, "branch", "-f", app_git.UPSTREAM_BRANCH, "origin/main")
+  assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == real_head
+
+  index_v2 = index_v1.replace("HTTP_V1", "HTTP_V2")
+  cards_v2 = cards_v1.replace("HTTP_CARD_V1", "HTTP_CARD_V2")
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps({
+      **manifest, "version": "2.0.0",
+    }).encode()),
+    base + "index.jsx": (200, index_v2.encode()),
+    base + "cards.js": (200, cards_v2.encode()),
+  }
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["version"] == "2.0.0"
+  assert (src / "index.jsx").read_text() == index_v2
+  assert (src / "cards.js").read_text() == cards_v2
+  assert "REAL_REPO" not in (src / "index.jsx").read_text()
+  new_upstream = app_git.head_sha(src, app_git.UPSTREAM_BRANCH)
+  assert new_upstream != real_head
+  assert app_git._run(
+    src, "merge-base", "--is-ancestor", db_upstream, new_upstream,
+    check=False,
+  ).returncode == 0
+
+
 def test_multifile_install_writes_siblings_and_bundles(
   client, auth, bypass_url_validation,
 ):
