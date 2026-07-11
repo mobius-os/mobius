@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   hasActiveChatTurn,
+  hasProtectedEditingContent,
   isTextEditingElement,
   shouldDeferShellReload,
 } from '../shellReloadPolicy.js'
@@ -61,4 +62,53 @@ test('hidden pages can reload without disrupting focus', () => {
     lastUserInteractionAt: 10000,
     now: 10001,
   }), false)
+})
+
+test('only editors holding content block an apply-on-idle reload', () => {
+  // The regression case: an EMPTY composer that kept focus after send is idle,
+  // not "composing" — a reload would destroy nothing.
+  assert.equal(hasProtectedEditingContent(el('textarea', { value: '' })), false)
+  assert.equal(hasProtectedEditingContent(el('input', { type: 'text', value: '' })), false)
+  assert.equal(hasProtectedEditingContent(el('div', { isContentEditable: true, textContent: '' })), false)
+  // A draft in progress IS protected — a reload mid-typing would lose it.
+  assert.equal(hasProtectedEditingContent(el('textarea', { value: 'half typed' })), true)
+  assert.equal(hasProtectedEditingContent(el('input', { type: 'text', value: 'x' })), true)
+  assert.equal(hasProtectedEditingContent(el('div', { isContentEditable: true, textContent: 'note' })), true)
+  // Opaque / non-text focus targets stay protected regardless.
+  assert.equal(hasProtectedEditingContent(el('iframe')), true)
+  assert.equal(hasProtectedEditingContent(el('select')), true)
+  // Not an editing surface at all — nothing to protect.
+  assert.equal(hasProtectedEditingContent(el('body')), false)
+  assert.equal(hasProtectedEditingContent(el('input', { type: 'checkbox' })), false)
+})
+
+test('a focused but empty composer is idle enough to apply at turn-end', () => {
+  // Exactly the shell-update-idle case 2: turn is done (streaming set empty),
+  // the composer keeps focus on desktop but is empty → do NOT defer.
+  assert.equal(shouldDeferShellReload({
+    activeElement: el('textarea', { value: '' }),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(),
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }), false)
+  // A non-empty composer still defers (protect the draft).
+  assert.equal(shouldDeferShellReload({
+    activeElement: el('textarea', { value: 'draft' }),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(),
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }), true)
+  // A live turn still defers even with an empty composer (never during stream).
+  assert.equal(shouldDeferShellReload({
+    activeElement: el('textarea', { value: '' }),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(['c1']),
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }), true)
 })
