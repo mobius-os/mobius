@@ -99,3 +99,23 @@ export function resolveSteeredPinDecision({
       && (pinIntent ? !!pinIntent.willPin : !!fallbackWillPin?.()),
   }
 }
+
+export function resolveFreshPinRetarget({
+  startedMessages,
+  fallbackTs,
+  willPin,
+  pinIntent,
+  pinIntentStillCurrent,
+}) {
+  const pinTargetTs = Array.isArray(startedMessages) && startedMessages.length > 0
+    ? startedMessages[0]?.ts
+    : fallbackTs
+  const intentStillCurrent = pinIntent
+    ? !!pinIntentStillCurrent?.(pinIntent)
+    : true
+  return {
+    pinTargetTs,
+    intentStillCurrent,
+    shouldPin: pinTargetTs != null && intentStillCurrent && !!willPin,
+  }
+}
