@@ -98,6 +98,33 @@ def _persisted_block(block: dict) -> dict:
   return persisted
 
 
+# Event types that begin (or belong to) a DIFFERENT visible content block and
+# therefore legitimately END a trailing thinking run. This is EXACTLY the set of
+# branches below that APPEND a new sibling block: text, text_final, text_boundary,
+# tool_start, error, question.
+#
+# Every OTHER event type must be TRANSPARENT to thinking coalescing:
+#  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
+#    `ping`, `signature_delta`, `content_block_stop`, `input_json_delta`), plus
+#    usage / session_init / done / catch_up_done / queued_turn_starting. These
+#    interleave BETWEEN successive thinking_delta events; closing the run on them
+#    fragmented one continuous reasoning pass into dozens of ~1s "Thought for 1
+#    second" blocks (even splitting mid-word). They change no block, so they must
+#    not touch thinking structure.
+#  - tool_input / tool_output / tool_sources / tool_end / skill_loaded only MUTATE
+#    an existing tool block. tool_start (which IS in this set) has already closed
+#    thinking and made a tool the trailing block before any of these arrive, so a
+#    later thinking auto-separates regardless.
+_THINKING_INTERRUPTING_TYPES: frozenset[str] = frozenset({
+  "text",
+  "text_final",
+  "text_boundary",
+  "tool_start",
+  "question",
+  "error",
+})
+
+
 def process_event(event: dict, assistant_blocks: list) -> bool:
   """Accumulates a parsed event into the assistant blocks list.
 
@@ -107,7 +134,10 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
   """
   event_type = event.get("type")
 
-  if event_type != "thinking":
+  # Only a NEW visible content block ends a thinking run. Closing on transparent
+  # bookkeeping events (unknown_sdk_event/ping/signature_delta, usage, done, …)
+  # is what fragmented one reasoning pass into dozens of tiny blocks.
+  if event_type in _THINKING_INTERRUPTING_TYPES:
     _close_trailing_thinking(assistant_blocks)
 
   if event_type == "text":
