@@ -27,7 +27,12 @@ export default function MarkerCard({ icon, title, subtitle, children }) {
       </span>
       {collapsible && (
         <span className="chat__marker-toggle" aria-hidden="true">
-          {open ? '▾' : '▸'}
+          <svg
+            className={`chat__chevron${open ? '' : ' chat__chevron--collapsed'}`}
+            width="10" height="10" viewBox="0 0 10 10" fill="none"
+          >
+            <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </span>
       )}
     </>

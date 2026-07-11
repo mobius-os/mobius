@@ -946,6 +946,18 @@
   flex-shrink: 0;
   font-size: 12px;
   color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
+  display: inline-flex;
+}
+
+/* Rotating disclosure chevron shared by the tool-activity and marker cards,
+   matching the queued-tray chevron idiom: the SVG points down when open and
+   rotates to point right when collapsed, easing the transform so the state
+   change reads as motion rather than an instant glyph swap. */
+.chat__chevron {
+  transition: transform 0.15s;
+}
+.chat__chevron--collapsed {
+  transform: rotate(-90deg);
 }
 
 /* The individual tool blocks, stacked with a small gap when expanded. */
@@ -1037,6 +1049,7 @@
   flex-shrink: 0;
   font-size: 12px;
   color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
+  display: inline-flex;
 }
 
 .chat__marker-body {
@@ -1336,6 +1349,8 @@
   font-weight: 600;
   line-height: 1.35;
   cursor: pointer;
+  /* Same transform/opacity entrance as the CTA (foot ResizeObserver contract). */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out) both;
   transition: background 0.15s, color 0.15s, transform 0.08s;
 }
 .chat__question-nudge:hover {
@@ -1796,11 +1811,31 @@
 
 /* ── Open app CTA ──────────────────────────────────── */
 
+/* Chat-foot entrance: opacity + translateY ONLY. The foot is absolutely
+   positioned and its ResizeObserver publishes --composer-h to size the
+   message-list spacer, so a height/margin animation here would reflow the
+   list mid-stream. Transform + opacity paint without touching layout. */
+@keyframes chat-foot-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* One accent ring that expands and fades — box-shadow only, so it never
+   affects layout. Reused for the CTA's first-plant welcome and the recompile
+   confirmation so "your change landed" rhymes with the app's arrival. */
+@keyframes chat-cta-ring {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+  to   { box-shadow: 0 0 0 7px transparent; }
+}
+
 .chat__open-app {
   max-width: 720px;
   margin: 0 auto 8px;
   display: flex;
-  justify-content: flex-end;
+  /* One CTA row per built app, stacked and right-aligned (most recent last). */
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
   padding: 0 4px;
   pointer-events: none;
 }
@@ -1824,18 +1859,47 @@
   border-radius: 8px;
   padding: 8px 16px;
   max-width: min(100%, 360px);
-  overflow: hidden;
+  position: relative; /* anchors the recompile-pulse ring pseudo-element */
+  overflow: hidden; /* long app names ellipsis; an element's OWN box-shadow
+                       (the plant ring below) is not clipped by its overflow */
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s;
+  /* Entrance on plant: rise in, then one subtle accent ring (the button's own
+     box-shadow, so overflow:hidden doesn't clip it). Both run once on mount
+     and never replay — the recompile pulse rides a pseudo-element, not this
+     list, so toggling that class can't restart these. */
+  animation:
+    chat-foot-rise 0.22s var(--ease-out-soft, ease-out) both,
+    chat-cta-ring 0.9s ease-out 0.12s;
+  transition: background 0.15s, transform 0.08s;
 }
 
 .chat__open-app-btn:hover {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
+}
+
+.chat__open-app-btn:active { transform: scale(0.97); }
+
+/* Recompile confirmation: a one-shot INSET accent ring on a pseudo-element. It
+   plays whenever the --pulse class toggles without disturbing the button's own
+   one-time entrance animation, and an inset ring stays inside overflow:hidden
+   (a descendant's box-shadow would otherwise be clipped). Label swap is in JSX. */
+.chat__open-app-btn--pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: chat-cta-flash 0.9s ease-out;
+}
+
+@keyframes chat-cta-flash {
+  from { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 75%, transparent); }
+  to   { box-shadow: inset 0 0 0 2px transparent; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */
@@ -1850,6 +1914,9 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Same transform/opacity entrance as the CTA — the tray shares the foot's
+     ResizeObserver, so no height/margin animation here. */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out) both;
 }
 
 .queued__hdr {

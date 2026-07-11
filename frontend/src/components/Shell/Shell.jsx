@@ -23,10 +23,16 @@ import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
 import {
-  builtAppForChat,
+  builtAppsForChat,
+  coerceBuiltAppsByChat,
   withBuiltAppForChat,
   withoutBuiltAppForChat,
 } from './builtAppState.js'
+import {
+  freshAppIds,
+  withAppsFlagged,
+  withoutAppFlagged,
+} from './newAppAttention.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
   reloadWhenWorkerTakesOver,
@@ -50,6 +56,23 @@ function _warmTargetSw() {
 }
 
 const SHELL_RELOAD_RECHECK_MS = 6000
+
+// The per-chat built-app CTAs are session-scoped UI, not server state, so
+// they persist to sessionStorage: a reload or a platform-apply that remounts
+// the shell would otherwise wipe the CTA that just planted a route back to a
+// freshly built app. Restored defensively — any legacy scalar value (from a
+// mid-deploy reload of the older one-app-per-chat shape) is coerced to a list
+// so ChatView can always map over it.
+const BUILT_APPS_STORAGE_KEY = 'mobius-built-apps-by-chat'
+
+function readBuiltAppsByChat() {
+  try {
+    const raw = sessionStorage.getItem(BUILT_APPS_STORAGE_KEY)
+    return raw ? coerceBuiltAppsByChat(JSON.parse(raw)) : {}
+  } catch {
+    return {}
+  }
+}
 
 export default function Shell() {
   const {
@@ -304,8 +327,26 @@ export default function Shell() {
   // guarantees the has_messages flag is now true and the reuse guard
   // (which reads has_messages from the chats query) is reliable again.
   const recoveredChatIdsRef = useRef(new Set())
-  const [builtAppsByChatId, setBuiltAppsByChatId] = useState({})
-  const builtApp = builtAppForChat(builtAppsByChatId, activeChatId)
+  const [builtAppsByChatId, setBuiltAppsByChatId] = useState(readBuiltAppsByChat)
+  const builtApps = builtAppsForChat(builtAppsByChatId, activeChatId)
+  // Event handlers read the live map through a ref so they don't have to be in
+  // handleSystemEvent's dep list; the effect also mirrors the map to
+  // sessionStorage so a reload restores the planted CTAs.
+  const builtAppsByChatIdRef = useRef(builtAppsByChatId)
+  useEffect(() => {
+    builtAppsByChatIdRef.current = builtAppsByChatId
+    try {
+      sessionStorage.setItem(
+        BUILT_APPS_STORAGE_KEY, JSON.stringify(builtAppsByChatId))
+    } catch { /* private mode / quota — CTAs stay in memory only */ }
+  }, [builtAppsByChatId])
+  // Transient signal to the active chat's CTA that its app just recompiled.
+  // Carries a nonce so a repeat recompile of the same app still fires the
+  // effect in ChatView (identity changes each time).
+  const [recompilePulse, setRecompilePulse] = useState(null)
+  // Ids of apps that appeared in the fetched list AFTER this session's
+  // baseline — the drawer renders a subtle accent dot until each is opened.
+  const [newAppIds, setNewAppIds] = useState(() => new Set())
   // First-sign-in walkthrough. The query result is the source of
   // truth — backend persists completion via
   // POST /api/owner/walkthrough/complete. We render the overlay iff
@@ -376,6 +417,27 @@ export default function Shell() {
   useEffect(() => {
     if (activeView === 'chat') clearChatAttention(activeChatId)
   }, [activeChatId, activeView, clearChatAttention])
+
+  // New-app arrival dot. `appBaselineRef` holds every id the session has
+  // already accounted for (the apps present at the first live fetch, plus any
+  // arrival we've since flagged), so a freshly built or App-Store-installed
+  // app — which lands at the bottom of the oldest-first drawer list with no
+  // affordance — gets a subtle accent dot until it's opened. Separate from
+  // `seenAppIdsRef`, which starts empty and drives eviction: keying the dot
+  // off that would mark every app "new" on first boot.
+  const appBaselineRef = useRef(null)
+  const clearAppAttention = useCallback((appId) => {
+    setNewAppIds(prev => withoutAppFlagged(prev, appId))
+  }, [])
+  // The detection effect lives beside the apps-eviction effect below, where
+  // `appsLiveFetched` is in scope. Opening an app clears its dot on any path
+  // (drawer tap, back-nav, moebius:open-app) because it keys on the active
+  // canvas rather than a single onSelect handler.
+  useEffect(() => {
+    if (activeView === 'canvas' && activeAppId != null) {
+      clearAppAttention(activeAppId)
+    }
+  }, [activeAppId, activeView, clearAppAttention])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of
   // the app holding an immersive request (or null); it's APPLIED — bar
@@ -564,6 +626,22 @@ export default function Shell() {
     }
   }, [apps, appsLiveFetched, appCache, activeView, activeAppId,
       navStackRef, setActiveAppId, setActiveView])
+
+  // New-app dot detection (state + open-clear live up beside the chat
+  // attention machinery). First live list = the session baseline; anything
+  // appearing after it is a genuine arrival and gets flagged.
+  useEffect(() => {
+    if (!appsLiveFetched) return
+    const ids = apps.map(a => a.id)
+    if (appBaselineRef.current === null) {
+      appBaselineRef.current = new Set(ids.map(Number))
+      return
+    }
+    const fresh = freshAppIds(appBaselineRef.current, ids)
+    if (fresh.length === 0) return
+    for (const id of fresh) appBaselineRef.current.add(id)
+    setNewAppIds(prev => withAppsFlagged(prev, fresh))
+  }, [apps, appsLiveFetched])
 
   // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
   // useNavigation can't see the apps list. Once the live list lands, if the
@@ -860,6 +938,15 @@ export default function Shell() {
       // isn't guaranteed).
       if (ev.appId) {
         const sourceChatId = ev.chatId || activeChatIdRef.current
+        // Recompile pulse: the watcher re-fires `app_built` on EVERY source
+        // compile, so a re-plant of an app already in this chat's CTA list is a
+        // recompile (not a first build — that's a brand-new id) and gets zero
+        // signal otherwise. Keying off the re-plant rather than `app_updated`
+        // (which also fires on the FIRST build) avoids flashing "Preview
+        // updated" on an app that was just created, and is order-independent.
+        const alreadyShown = builtAppsForChat(
+          builtAppsByChatIdRef.current, sourceChatId,
+        ).some(a => Number(a.id) === Number(ev.appId))
         refreshApps().then(updatedApps => {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           const name = app?.name || null
@@ -872,6 +959,15 @@ export default function Shell() {
           // "Open app" CTA tap is served from cache.
           if (app) warmAppCode(app)
         })
+        if (alreadyShown
+            && String(sourceChatId) === String(activeChatIdRef.current)) {
+          // Scope to its chat + carry a nonce: recompilePulse lingers in state
+          // after firing, so ChatView gates on chatId (a remount for another
+          // chat ignores it) and re-fires on a fresh nonce for the same app.
+          setRecompilePulse({
+            appId: Number(ev.appId), nonce: Date.now(), chatId: sourceChatId,
+          })
+        }
       }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) markStreamingStart(ev.chatId)
@@ -1489,6 +1585,7 @@ export default function Shell() {
         }}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
+        newAppIds={newAppIds}
         settingsWarning={providerAuth.anyDisconnected}
       />
 
@@ -1556,16 +1653,20 @@ export default function Shell() {
                 setActiveChatId(chatsRef.current[0]?.id || null)
               }
             }}
-            builtApp={builtApp}
+            builtApps={builtApps}
+            recompilePulse={recompilePulse}
             onOpenApp={(appId) => {
+              // Opening no longer clears the CTA — it stays planted (its label
+              // flips to "Open {name}" when the turn ends) so the owner can
+              // return to it. It clears when a NEW message is sent (below).
               navTo('canvas', { appId })
-              setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}
             onMessageStart={() => {
               // User just sent a message — the agent is about to
               // stream a response. Mark this chat as streaming so the
               // drawer's pulse dot picks it up immediately (no
-              // round-trip wait for the first SSE event).
+              // round-trip wait for the first SSE event). A new turn also
+              // retires this chat's built-app CTAs.
               markStreamingStart(activeChatId)
               setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}

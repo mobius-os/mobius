@@ -124,6 +124,25 @@ function readDeviceInsets() {
   return readSafeAreaInsets(getComputedStyle(_insetProbe))
 }
 
+// The first-open loading surface — the emotional peak of a build, so it's
+// accent-forward rather than a generic gray spinner: the app name is present,
+// and shimmer skeleton bars hint a header + list are on their way. Shared by
+// both loading branches (no-token and online-fetching) so they never drift.
+// Presentational only; the 80ms fade-in guard lives on .canvas-loading.
+function CanvasLoadingBrand({ appName }) {
+  return (
+    <>
+      <div className="canvas-loading__spinner" />
+      {appName && <div className="canvas-loading__name">{appName}</div>}
+      <div className="canvas-loading__skeleton" aria-hidden="true">
+        <div className="canvas-loading__bar canvas-loading__bar--head" />
+        <div className="canvas-loading__bar" />
+        <div className="canvas-loading__bar canvas-loading__bar--short" />
+      </div>
+    </>
+  )
+}
+
 // `version` is bumped by Shell when an `app_updated` event arrives
 // for this app, busting the iframe cache and forcing a fresh frame
 // load (the frame HTML includes the theme CSS, so it needs to refetch
@@ -517,8 +536,7 @@ export default function AppCanvas({
     return (
       <div className="canvas-wrap">
         <div className="canvas-loading" aria-live="polite">
-          <div className="canvas-loading__spinner" />
-          {appName && <div className="canvas-loading__name">{appName}</div>}
+          <CanvasLoadingBrand appName={appName} />
         </div>
       </div>
     )
@@ -589,12 +607,7 @@ export default function AppCanvas({
               </div>
             </div>
           ) : (
-            <>
-              <div className="canvas-loading__spinner" />
-              {appName && (
-                <div className="canvas-loading__name">{appName}</div>
-              )}
-            </>
+            <CanvasLoadingBrand appName={appName} />
           )}
         </div>
       )}
