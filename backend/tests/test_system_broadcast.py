@@ -481,6 +481,90 @@ async def test_notify_app_built_only_when_owning_chat_streaming(
     sb.unsubscribe(sq)
 
 
+# --- Chat-scoped build_phase milestone rail (feature 212) --------------
+
+
+@pytest.mark.asyncio
+async def test_notify_build_phase_publishes_to_active_chat_only(client, auth):
+  """POST /api/notify {build_phase, label} lands ONLY on the active building
+  chat's broadcast — carrying label + ts so a reconnect's catch-up replay can
+  rebuild the rail — and never on the system broadcast or a bystander chat."""
+  building = bc_mod.create_broadcast("phase-builder")
+  other = bc_mod.create_broadcast("phase-bystander")
+  set_active_broadcast(building)
+  sb = get_system_broadcast()
+  sq = sb.subscribe()
+  q_build = building.subscribe()[1]
+  try:
+    r = client.post(
+      "/api/notify",
+      headers=auth,
+      json={"type": "build_phase", "label": "Storage wired"},
+    )
+    assert r.status_code == 204, r.text
+
+    ev = await asyncio.wait_for(q_build.get(), timeout=1.0)
+    assert ev["type"] == "build_phase"
+    assert ev["label"] == "Storage wired"
+    assert isinstance(ev["ts"], int)
+
+    # It must not fan out to the always-live system broadcast, and a
+    # bystander chat's broadcast must never see it.
+    assert sq.empty(), "build_phase must not reach the system broadcast"
+    assert all(
+      e.get("type") != "build_phase" for e in other.event_log
+    ), other.event_log
+  finally:
+    sb.unsubscribe(sq)
+    set_active_broadcast(None)
+    bc_mod.remove_broadcast("phase-builder")
+    bc_mod.remove_broadcast("phase-bystander")
+
+
+@pytest.mark.asyncio
+async def test_notify_build_phase_dropped_without_active_chat(client, auth):
+  """With no active building turn there is no rail to feed, so a build_phase
+  POST is accepted (204) but publishes nothing — and never raises."""
+  set_active_broadcast(None)
+  sb = get_system_broadcast()
+  sq = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify",
+      headers=auth,
+      json={"type": "build_phase", "label": "First layer openable"},
+    )
+    assert r.status_code == 204, r.text
+    assert sq.empty(), "build_phase must not touch the system broadcast"
+  finally:
+    sb.unsubscribe(sq)
+
+
+def test_notify_build_phase_label_capped_at_80():
+  """A build_phase label longer than the cap is truncated server-side so a
+  single POST cannot flood the rail (or the polite live region)."""
+  body = NotifyBody(type="build_phase", label="x" * 200)
+  assert len(body.label) == 80
+  assert body.label == "x" * 80
+
+
+def test_notify_rejects_label_on_non_build_phase():
+  """`label` is confined to build_phase: any other type carrying a label is a
+  malformed request so the closed schema keeps its meaning."""
+  with pytest.raises(ValidationError):
+    NotifyBody(type="app_updated", appId="7", label="nope")
+
+
+def test_notify_endpoint_rejects_label_on_non_build_phase(client, auth):
+  """The endpoint 422s a label on a non-build_phase type."""
+  r = client.post(
+    "/api/notify",
+    headers=auth,
+    json={"type": "app_updated", "appId": "7", "label": "nope"},
+  )
+  assert r.status_code == 422, r.text
+
+
 # --- clear_active_broadcast_if: identity-keyed compare-and-clear -------
 
 

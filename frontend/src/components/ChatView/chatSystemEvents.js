@@ -12,6 +12,14 @@ export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
   // exclusively on the stream of the chat that built the app. The handler sets
   // the "Open app" CTA. (app_updated stays list-refresh-only.)
   'app_built',
+  // build_phase is the chat-SCOPED milestone signal: the backend publishes it
+  // onto only the building chat's broadcast (see routes/notify.py), so it
+  // arrives exclusively on the stream of the chat that is building. ChatView
+  // accumulates it into the live phase rail. It is REPLAY-SAFE on purpose (not
+  // in the catch-up-unsafe set below) so a reconnect's catch-up burst rebuilds
+  // the rail; the rail state dedupes by ts, so replaying a phase never
+  // double-counts it.
+  'build_phase',
   'shell_rebuilding',
   'shell_rebuilt',
   'shell_apply_now',
