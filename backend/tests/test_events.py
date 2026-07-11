@@ -251,6 +251,57 @@ def test_thinking_event_after_tool_starts_fresh_block():
   assert [b["duration_ms"] for b in thinking_blocks] == [0, 0]
 
 
+def test_thinking_survives_interleaved_unknown_event():
+  # A provider `ping` heartbeat is forwarded as an "unknown_sdk_event" and lands
+  # BETWEEN two thinking_delta chunks (it can even split mid-word). It must NOT
+  # close the thinking run, else one reasoning pass fragments into many tiny
+  # "Thought for 1 second" blocks. Regression guard for that exact bug.
+  blocks = []
+  process_event({"type": "thinking", "content": "The sl", "ts": 1000}, blocks)
+  process_event(
+    {"type": "unknown_sdk_event", "kind": "stream:ping", "raw": {}}, blocks
+  )
+  process_event({"type": "thinking", "content": "iders move", "ts": 2200}, blocks)
+
+  assert len(blocks) == 1
+  assert blocks[0]["type"] == "thinking"
+  assert blocks[0]["content"] == "The sliders move"
+  assert blocks[0]["duration_ms"] == 1200
+
+
+def test_thinking_survives_interleaved_usage_and_signature():
+  # The full bookkeeping set is transparent to thinking coalescing: a `usage`
+  # event and a signature-style unknown_sdk_event between thinking chunks still
+  # yield one block. Only a real new content block (text/tool_start/…) splits it.
+  blocks = []
+  process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
+  process_event({"type": "usage", "input_tokens": 5, "output_tokens": 7}, blocks)
+  process_event(
+    {"type": "unknown_sdk_event",
+     "kind": "stream:content_block_delta:signature_delta", "raw": {}},
+    blocks,
+  )
+  process_event({"type": "thinking", "content": "b", "ts": 1600}, blocks)
+
+  thinking_blocks = [b for b in blocks if b.get("type") == "thinking"]
+  assert len(thinking_blocks) == 1
+  assert thinking_blocks[0]["content"] == "ab"
+  assert thinking_blocks[0]["duration_ms"] == 600
+
+
+def test_thinking_split_by_text_boundary_then_text():
+  # The interrupting set is COMPLETE, not over-broad: a real text item between
+  # two thinking passes still splits them (thinking, text, thinking).
+  blocks = []
+  process_event({"type": "thinking", "content": "before", "ts": 1000}, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  process_event({"type": "text", "content": "answer"}, blocks)
+  process_event({"type": "thinking", "content": "after", "ts": 2000}, blocks)
+
+  assert [b["type"] for b in blocks] == ["thinking", "text", "thinking"]
+  assert [b["content"] for b in blocks] == ["before", "answer", "after"]
+
+
 def test_finalize_blocks_keeps_thinking_and_strips_transients():
   blocks = []
   process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)

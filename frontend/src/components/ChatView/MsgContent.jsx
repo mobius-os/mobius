@@ -2,7 +2,7 @@ import { memo } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import ToolActivityGroup from './ToolActivityGroup.jsx'
-import { groupToolRuns } from './groupBlocks.js'
+import { groupToolRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -236,7 +236,12 @@ function MsgContentInner({
     const entries = msg.blocks
       .map((block, i) => ({ item: block, idx: i }))
       .filter(({ idx }) => !skipToolIdx.has(idx))
-    const nodes = groupToolRuns(entries)
+    // Repair already-persisted transcripts where a continuous reasoning pass was
+    // fragmented into many thinking blocks: coalesce runs of adjacent thinking
+    // AFTER idx assignment (each survivor keeps its original persisted idx) so
+    // ToolBlock's blockIdx stays a correct absolute index into msg.blocks and the
+    // lazy tool-output fetch keeps working. See groupBlocks.coalesceThinkingEntries.
+    const nodes = groupToolRuns(coalesceThinkingEntries(entries))
 
     return (
       <>
