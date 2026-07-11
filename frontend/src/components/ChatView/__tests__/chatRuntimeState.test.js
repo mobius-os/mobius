@@ -6,6 +6,7 @@ import {
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
   previewReadyAnnouncement,
+  resolveFreshPinRetarget,
   resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
   shouldShowOpenAppCta,
@@ -145,6 +146,34 @@ test('resolveSteeredPinDecision honors stale local intent over fallback', () => 
     pinIntentStillCurrent: () => false,
     fallbackWillPin: () => true,
   }), {
+    intentStillCurrent: false,
+    shouldPin: false,
+  })
+})
+
+test('resolveFreshPinRetarget moves pin from optimistic ts to canonical server ts', () => {
+  assert.deepEqual(resolveFreshPinRetarget({
+    startedMessages: [{ role: 'user', content: 'hello', ts: 222 }],
+    fallbackTs: 111,
+    willPin: true,
+    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
+    pinIntentStillCurrent: () => true,
+  }), {
+    pinTargetTs: 222,
+    intentStillCurrent: true,
+    shouldPin: true,
+  })
+})
+
+test('resolveFreshPinRetarget yields to a user scroll after submit', () => {
+  assert.deepEqual(resolveFreshPinRetarget({
+    startedMessages: [{ role: 'user', content: 'hello', ts: 222 }],
+    fallbackTs: 111,
+    willPin: true,
+    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
+    pinIntentStillCurrent: () => false,
+  }), {
+    pinTargetTs: 222,
     intentStillCurrent: false,
     shouldPin: false,
   })
