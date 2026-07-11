@@ -20,11 +20,14 @@ from typing import Literal
 # fields too. Whitelisted (not a blanket passthrough) so an unexpected event
 # key can't silently pollute the durable transcript: `resumable` drives the
 # one-tap Resume affordance (MsgContent), `parked_until` + `park_reason` make
-# a provider-limit error render as a live "resets at … · Resume now" card.
+# a provider-limit error render as a live "resets at … · Resume now" card, and
+# `pause_kind` ('restart' | 'stall') marks a benign maintenance pause so the
+# card renders in the calm "Paused" family instead of the danger-red error.
 ERROR_PASSTHROUGH_FIELDS: tuple[str, ...] = (
   "resumable",
   "parked_until",
   "park_reason",
+  "pause_kind",
 )
 
 

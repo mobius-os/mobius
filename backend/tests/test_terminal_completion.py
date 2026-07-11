@@ -197,7 +197,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
     "reconcile PRESERVES the queue (bug #2); it drains on the next send"
   )
   err = [b for b in state["messages"][-1]["blocks"] if b["type"] == "error"]
-  assert err and "interrupted" in err[0]["message"].lower()
+  assert err and "paused" in err[0]["message"].lower()
 
 
 # -- 3. await_ack boundary trips mid-promote (small-timeout seam) --------
@@ -1221,7 +1221,7 @@ def test_reconcile_preserves_tail_unanswered_question_card():
   )
   err_idx = next(
     i for i, b in enumerate(blocks)
-    if b.get("type") == "error" and "interrupted" in b["message"].lower()
+    if b.get("type") == "error" and "paused" in b["message"].lower()
   )
   open_idx = next(
     i for i, b in enumerate(blocks)

@@ -21,6 +21,7 @@ import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
+import { formatResetTime } from './resetTime.js'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
@@ -319,6 +320,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // out of the viewport — drives the footer "tap to answer" chip. Written
   // only by the IntersectionObserver effect below (near hasPendingQuestion).
   const [pendingCardOffscreen, setPendingCardOffscreen] = useState(false)
+  // True while a resumable tail pause/park card exists but is scrolled out of
+  // the viewport — drives the footer "tap to resume" chip. Written only by the
+  // IntersectionObserver effect below (near hasPendingResume), mirroring the
+  // pending-question nudge.
+  const [resumeCardOffscreen, setResumeCardOffscreen] = useState(false)
   const [showInspector, setShowInspector] = useState(false)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   const lastAnnouncedPreviewRef = useRef(null)
@@ -2569,6 +2575,26 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   })()
   const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
 
+  // ── Sticky "tap to resume" affordance ──────────────────────────────
+  // A turn paused by a drain-gated restart, a stall, or a provider-limit park
+  // persists a resumable error block at the tail of the last assistant message
+  // (the same tail invariant MsgContent's Resume gate enforces). Like a pending
+  // question, that card can sit outside the viewport after a scroll — the chat
+  // then just looks stopped. Detect the tail resumable block so the offscreen
+  // nudge + SR status can name the recovery. A pause is terminal (the turn has
+  // ended), so it only ever lives in `messages`, never in a live stream item.
+  const pendingResumeBlock = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].hidden) continue
+      const msg = messages[i]
+      if (msg.role !== 'assistant' || !msg.blocks?.length) return null
+      const tail = msg.blocks[msg.blocks.length - 1]
+      return tail.type === 'error' && tail.resumable ? tail : null
+    }
+    return null
+  })()
+  const hasPendingResume = !!pendingResumeBlock
+
   // Visibility of that card is a pure viewport question — an
   // IntersectionObserver rooted at the scroll container is the signal,
   // no scroll math and no interaction with the spacer machinery. The
@@ -2599,6 +2625,31 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     return () => io.disconnect()
   }, [hasPendingQuestion, showStreamingSurface, messages])
 
+  // Same offscreen-detection machinery for the resume card. Only the tail
+  // resumable note renders `.chat__resume` (MsgContent gates the button on
+  // isLastMsg), so observing that button is enough to know the card's
+  // visibility; a tap on the nudge scrolls it into view.
+  const findResumeCard = () =>
+    [...(scrollRef.current?.querySelectorAll('.chat__resume') ?? [])].pop()
+
+  useEffect(() => {
+    if (!hasPendingResume) {
+      setResumeCardOffscreen(false)
+      return undefined
+    }
+    const scrollEl = scrollRef.current
+    const card = findResumeCard()
+    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
+      setResumeCardOffscreen(false)
+      return undefined
+    }
+    const io = new IntersectionObserver(entries => {
+      setResumeCardOffscreen(!entries[0]?.isIntersecting)
+    }, { root: scrollEl, threshold: 0 })
+    io.observe(card)
+    return () => io.disconnect()
+  }, [hasPendingResume, showStreamingSurface, messages])
+
   // The streaming <li> carries a stable data-key so the scroll state machine
   // can anchor inside an in-flight answer. Without this, returning to a
   // streaming chat while scrolled into the live bubble had no anchorable row,
@@ -2623,11 +2674,27 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   // Polite aria-live status: announced once per state transition, not per
   // token. Visually hidden via the sr-only utility in ChatView.css.
+  // When the tail turn paused/parked and needs a Resume tap, announce the
+  // recovery state — "Response ready." would be a lie (a paused turn isn't
+  // ready, it's waiting on the owner), and a screen-reader user has no visual
+  // Resume card to fall back on.
+  const resumeStatus = (() => {
+    if (!pendingResumeBlock) return null
+    if (pendingResumeBlock.parked_until) {
+      const label = formatResetTime(pendingResumeBlock.parked_until)
+      return label
+        ? `Rate limit reached, resets ${label} — Resume available.`
+        : 'Rate limit reached — Resume available.'
+    }
+    return 'Turn paused — Resume available.'
+  })()
   const ariaStatus = turnActive
     ? 'Assistant is responding…'
-    : (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
-        ? 'Response ready.'
-        : '')
+    : (resumeStatus
+        ?? (messages.length > 0
+            && messages[messages.length - 1]?.role === 'assistant'
+              ? 'Response ready.'
+              : ''))
   const openAppCta = openAppCtaViewModel(builtApp, turnActive)
 
   return (
@@ -2872,6 +2939,22 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             }}
           >
             Möbius asked you something — tap to answer
+          </button>
+        )}
+        {hasPendingResume && resumeCardOffscreen && (
+          <button
+            type="button"
+            className="chat__resume-nudge"
+            onClick={() => {
+              // USER-initiated scroll — same contract as the question nudge: a
+              // tap is the user asking to be taken to the card, not the app
+              // moving the viewport on its own.
+              findResumeCard()?.scrollIntoView({ block: 'nearest' })
+            }}
+          >
+            {pendingResumeBlock?.parked_until
+              ? 'Rate limit reached — tap to resume'
+              : 'Turn paused — tap to resume'}
           </button>
         )}
         <ConnectionStatus
