@@ -359,6 +359,7 @@ def test_notify_rejects_cross_site_request(client, auth):
 
 def test_notify_body_type_validator_rejects_unknown():
   """NotifyBody rejects unknown system-event types."""
+  assert NotifyBody(type="app_build_failed").type == "app_build_failed"
   try:
     NotifyBody(type="bogus")
   except ValidationError:

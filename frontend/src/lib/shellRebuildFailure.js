@@ -1,4 +1,5 @@
-const FALLBACK_MESSAGE = 'Shell rebuild failed. Previous shell is still running.'
+const REASSURANCE = 'Previous shell is still running.'
+const FALLBACK_MESSAGE = `Shell rebuild failed. ${REASSURANCE}`
 const MAX_SUMMARY_LENGTH = 160
 const MAX_DETAILS_LENGTH = 8000
 
@@ -50,7 +51,7 @@ export function summarizeShellRebuildFailure(eventOrError) {
 
 export function shellRebuildFailureMessage(eventOrError) {
   const summary = summarizeShellRebuildFailure(eventOrError)
-  return summary ? `Shell rebuild failed: ${summary}` : FALLBACK_MESSAGE
+  return summary ? `Shell rebuild failed: ${summary}. ${REASSURANCE}` : FALLBACK_MESSAGE
 }
 
 export function shellRebuildFailureDetails(eventOrError) {

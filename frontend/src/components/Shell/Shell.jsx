@@ -27,6 +27,8 @@ import {
   withBuiltAppForChat,
   withoutBuiltAppForChat,
 } from './builtAppState.js'
+import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
+import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
   reloadWhenWorkerTakesOver,
@@ -156,6 +158,15 @@ export default function Shell() {
   }
 
   async function performShellReload() {
+    let stalePrecache = false
+    try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
+    if (stalePrecache && navigator.onLine === false) {
+      // An offline reload is safe only while the existing precache remains
+      // intact; purging Workbox offline can strand an installed PWA on the
+      // fallback page, so stale recovery waits for an online idle boundary.
+      deferShellReload()
+      return
+    }
     pendingShellReloadRef.current = false
     if (shellReloadTimerRef.current) {
       clearTimeout(shellReloadTimerRef.current)
@@ -181,8 +192,6 @@ export default function Shell() {
     // fall through to the network for index.html + the new hashed assets. Done
     // HERE, at the same idle boundary as the reload, instead of index.html's old
     // boot-time force-reload — so it can never blank a live turn.
-    let stalePrecache = false
-    try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
     if (stalePrecache) {
       if (typeof caches !== 'undefined') {
         try {
@@ -228,6 +237,7 @@ export default function Shell() {
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
       streamingChatIds: streamingChatIdsRef.current,
+      voiceListeningChatIds: voiceListeningChatIdsRef.current,
       lastUserInteractionAt: lastShellInteractionAtRef.current,
       visibilityState: document.visibilityState,
     })
@@ -324,6 +334,7 @@ export default function Shell() {
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
+  const [voiceListeningChatIds, setVoiceListeningChatIds] = useState(() => new Set())
   const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
   const streamingChatIds = useMemo(() => {
     const next = new Set(localStreamingChatIds)
@@ -334,6 +345,10 @@ export default function Shell() {
   }, [localStreamingChatIds, chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
+  const voiceListeningChatIdsRef = useRef(voiceListeningChatIds)
+  useEffect(() => {
+    voiceListeningChatIdsRef.current = voiceListeningChatIds
+  }, [voiceListeningChatIds])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -359,6 +374,19 @@ export default function Shell() {
       if (!prev.has(chatId)) return prev
       const next = new Set(prev)
       next.delete(chatId)
+      return next
+    })
+  }, [])
+
+  const markVoiceListening = useCallback((chatId, listening) => {
+    if (!chatId) return
+    setVoiceListeningChatIds(prev => {
+      const hasChat = prev.has(chatId)
+      if (listening && hasChat) return prev
+      if (!listening && !hasChat) return prev
+      const next = new Set(prev)
+      if (listening) next.add(chatId)
+      else next.delete(chatId)
       return next
     })
   }, [])
@@ -873,6 +901,16 @@ export default function Shell() {
           if (app) warmAppCode(app)
         })
       }
+    } else if (ev.type === 'app_build_failed') {
+      const now = Date.now()
+      const dedupKey = `app-build-failed-at:${ev.appId || ev.appName || ''}`
+      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
+      if (now - lastSignal < 5000) return
+      sessionStorage.setItem(dedupKey, String(now))
+      showToast(appBuildFailureMessage(ev), {
+        variant: 'error',
+        duration: 10000,
+      })
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) markStreamingStart(ev.chatId)
       refreshChats()
@@ -922,6 +960,16 @@ export default function Shell() {
       // the waiting worker so the SW generation flips exactly when the page
       // reloads.
       requestShellReload()
+    } else if (ev.type === 'shell_rebuild_failed') {
+      const now = Date.now()
+      const dedupKey = 'shell-rebuild-failed-at'
+      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
+      if (now - lastSignal < 5000) return
+      sessionStorage.setItem(dedupKey, String(now))
+      showToast(shellRebuildFailureMessage(ev), {
+        variant: 'error',
+        duration: 10000,
+      })
     }
   }, [
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
@@ -1569,6 +1617,7 @@ export default function Shell() {
               markStreamingStart(activeChatId)
               setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}
+            onVoiceListeningChange={markVoiceListening}
             composerFocusRequest={composerFocusRequest}
             onComposerFocusHandled={handleComposerFocusHandled}
           />
