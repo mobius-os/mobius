@@ -603,6 +603,44 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       pointer-events: none;
     }}
     #ic-toast.visible {{ opacity: 1; }}
+    /* Live-update pill (feature 214): a non-disruptive "Updated — tap to
+       refresh" OFFER anchored bottom-center. Active use is sacred — the shell
+       NEVER auto-reloads; the pill is the offer and the tap is the apply.
+       Themed from the shell's own CSS variables so it tracks the owner's
+       theme. Hidden via visibility (not display) so it stays out of the tab
+       order and the a11y tree until an update lands. */
+    #update-pill {{
+      position: fixed; left: 50%; bottom: 24px;
+      transform: translateX(-50%) translateY(8px);
+      display: flex; align-items: center; gap: 8px;
+      max-width: calc(100% - 32px);
+      padding: 10px 18px; border-radius: 999px;
+      background: var(--surface, #14181f); color: var(--text, #d4d4d8);
+      border: 1px solid var(--border, #252b36);
+      box-shadow: 0 6px 22px rgba(0,0,0,0.45);
+      font-family: var(--font); font-size: 13px; font-weight: 600;
+      cursor: pointer;
+      z-index: 10002;
+      opacity: 0; visibility: hidden; pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }}
+    #update-pill.visible {{
+      opacity: 1; visibility: visible; pointer-events: auto;
+      transform: translateX(-50%) translateY(0);
+    }}
+    #update-pill::before {{
+      content: '\\21bb'; color: var(--accent, #a78bfa);
+      font-size: 15px; font-weight: 700; line-height: 1;
+    }}
+    #update-pill:focus-visible {{ outline: 2px solid var(--accent, #a78bfa); }}
+    /* Respect reduced-motion on the entrance: pin the transform so only
+       opacity fades in (no slide). */
+    @media (prefers-reduced-motion: reduce) {{
+      #update-pill {{
+        transform: translateX(-50%); transition: opacity 0.2s ease;
+      }}
+      #update-pill.visible {{ transform: translateX(-50%); }}
+    }}
     </style>
 </head>
 <body>
@@ -729,6 +767,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   </div>
   <input id="ic-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
   <div id="ic-toast" role="status" aria-live="polite"></div>
+  <button id="update-pill" type="button" aria-live="polite">Updated — tap to refresh</button>
   <script type="module">
     const APP_ID = {app_id};
     const APP_SLUG = {json.dumps(slug)};
@@ -742,6 +781,116 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const ret = encodeURIComponent(window.location.pathname);
       window.location.href = '/?return=' + ret;
     }} else {{
+      // Live-update pill (feature 214). An installed standalone PWA otherwise
+      // never learns the agent edited its app mid-build: the in-shell preview
+      // hot-updates on app_updated, but this separate /apps/<slug>/ scope did
+      // not. Subscribe to THIS app's own update stream and OFFER a refresh; the
+      // shell NEVER auto-reloads (active use is sacred - the pill is the offer,
+      // the tap is the apply).
+      let liveUpdatesStarted = false;
+      function startLiveUpdates(appToken) {{
+        // Guard the retry path: loadAndRender can run twice (transient-failure
+        // auto-retry / manual Try again), but the subscription starts once.
+        if (liveUpdatesStarted) return;
+        liveUpdatesStarted = true;
+        const pill = document.getElementById('update-pill');
+        let controller = null;
+        let backoffMs = 1000;
+        let stopped = false;
+
+        function showPill() {{
+          // Re-assign the text so the aria-live region announces on reveal.
+          pill.textContent = 'Updated \\u2014 tap to refresh';
+          pill.classList.add('visible');
+        }}
+
+        // Tap APPLIES the update. A plain location.reload() can serve STALE for
+        // an offline_capable app: the SW caches /apps/<slug>/ cache-first, so
+        // the reload returns the old HTML (old baked APP_VERSION, hence old
+        // module ?v=). Rotating a fresh ?v= on the URL changes the standalone-
+        // nav cache key, forcing a cache miss then a network fetch of fresh
+        // HTML whose new APP_VERSION busts the module cache key in turn - the
+        // ?v= freshness scheme docs/offline.md prescribes.
+        pill.addEventListener('click', function() {{
+          const u = new URL(window.location.href);
+          u.searchParams.set('v', String(Date.now()));
+          window.location.replace(u.pathname + u.search + u.hash);
+        }});
+
+        async function connect() {{
+          if (stopped || document.hidden) return;
+          controller = new AbortController();
+          try {{
+            const res = await fetch('/api/apps/' + APP_ID + '/events', {{
+              headers: {{ Authorization: 'Bearer ' + appToken }},
+              signal: controller.signal,
+            }});
+            // A 401 means the app token is stale; retrying it would loop
+            // forever. A genuine relaunch mints a fresh token, so stop here.
+            if (res.status === 401) {{ stopped = true; return; }}
+            if (!res.ok || !res.body) throw new Error('events ' + res.status);
+            backoffMs = 1000;  // reset on a clean connect
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (!stopped) {{
+              const chunk = await reader.read();
+              if (chunk.done) break;
+              buffer += decoder.decode(chunk.value, {{ stream: true }});
+              let nl;
+              while ((nl = buffer.indexOf('\\n\\n')) !== -1) {{
+                const frame = buffer.slice(0, nl);
+                buffer = buffer.slice(nl + 2);
+                for (const line of frame.split('\\n')) {{
+                  if (!line.startsWith('data: ')) continue;
+                  try {{
+                    const ev = JSON.parse(line.slice(6));
+                    // The server already filters to THIS app's app_updated;
+                    // the client id-check is belt-and-suspenders.
+                    if (ev && ev.type === 'app_updated' &&
+                        String(ev.appId) === String(APP_ID)) {{
+                      showPill();
+                    }}
+                  }} catch (e) {{ /* malformed frame - skip */ }}
+                }}
+              }}
+            }}
+          }} catch (e) {{
+            if (stopped || (e && e.name === 'AbortError')) return;
+          }} finally {{
+            controller = null;
+          }}
+          // Reconnect with capped exponential backoff - no reconnect storm.
+          if (!stopped && !document.hidden) {{
+            await new Promise(function(r) {{ setTimeout(r, backoffMs); }});
+            backoffMs = Math.min(backoffMs * 2, 30000);
+            connect();
+          }}
+        }}
+
+        function disconnect() {{
+          if (controller) {{ try {{ controller.abort(); }} catch (e) {{}} }}
+          controller = null;
+        }}
+
+        // Battery/lifecycle: hold the socket open only while the app is
+        // visible. Backgrounding aborts it; returning to the foreground
+        // reconnects. No polling, no wakeful timers. (SystemBroadcast has no
+        // catch-up, so an edit made entirely while backgrounded is not
+        // replayed on resume - acceptable for v1; the live cross-device build
+        // case is foreground.)
+        document.addEventListener('visibilitychange', function() {{
+          if (document.hidden) {{
+            disconnect();
+          }} else if (!stopped) {{
+            backoffMs = 1000;
+            connect();
+          }}
+        }});
+
+        connect();
+      }}
+
       // Module load can fail transiently during PWA install transitions,
       // SW state swaps, and minibrowser-overlay contexts — wrap so we
       // can silently auto-retry once, then surface a Retry button for
@@ -798,6 +947,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const root = createRoot(document.getElementById('root'));
         root.render(React.createElement(Component, {{ appId: APP_ID, token: appToken }}));
         document.getElementById('loading').classList.add('hidden');
+        // Offer live updates once the app is actually on screen.
+        startLiveUpdates(appToken);
       }}
 
       function paintLoadError(err, allowRetry) {{
