@@ -50,10 +50,21 @@ export function hasProtectedEditingContent(el) {
   return true
 }
 
-export function hasActiveChatTurn({ activeView, activeChatId, streamingChatIds }) {
-  if (activeView !== 'chat' || !activeChatId || !streamingChatIds) return false
-  if (typeof streamingChatIds.has === 'function') return streamingChatIds.has(activeChatId)
-  if (Array.isArray(streamingChatIds)) return streamingChatIds.includes(activeChatId)
+export function hasActiveChatTurn({ streamingChatIds }) {
+  if (!streamingChatIds) return false
+  if (typeof streamingChatIds.size === 'number') return streamingChatIds.size > 0
+  if (Array.isArray(streamingChatIds)) return streamingChatIds.length > 0
+  return false
+}
+
+export function hasActiveVoiceDictation({ voiceListeningChatIds }) {
+  if (!voiceListeningChatIds) return false
+  if (typeof voiceListeningChatIds.size === 'number') {
+    return voiceListeningChatIds.size > 0
+  }
+  if (Array.isArray(voiceListeningChatIds)) {
+    return voiceListeningChatIds.length > 0
+  }
   return false
 }
 
@@ -62,6 +73,7 @@ export function shouldDeferShellReload({
   activeView,
   activeChatId,
   streamingChatIds,
+  voiceListeningChatIds,
   lastUserInteractionAt = 0,
   now = Date.now(),
   visibilityState = 'visible',
@@ -69,6 +81,7 @@ export function shouldDeferShellReload({
   if (visibilityState === 'hidden') return false
   if (hasProtectedEditingContent(activeElement)) return true
   if (hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })) return true
+  if (hasActiveVoiceDictation({ voiceListeningChatIds })) return true
   if (lastUserInteractionAt && now - lastUserInteractionAt < RECENT_SHELL_INTERACTION_MS) return true
   return false
 }

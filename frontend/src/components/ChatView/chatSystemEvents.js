@@ -12,6 +12,7 @@ export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
   // exclusively on the stream of the chat that built the app. The handler sets
   // the "Open app" CTA. (app_updated stays list-refresh-only.)
   'app_built',
+  'app_build_failed',
   'shell_rebuilding',
   'shell_rebuilt',
   'shell_apply_now',
@@ -25,6 +26,7 @@ const CATCH_UP_UNSAFE_SYSTEM_EVENTS = new Set([
   'shell_rebuilt',
   'shell_apply_now',
   'shell_rebuild_failed',
+  'app_build_failed',
 ])
 
 export function isChatStreamSystemEvent(type) {

@@ -897,8 +897,94 @@ async def test_watcher_recompiles_when_imported_module_changes(
 
 
 @pytest.mark.asyncio
+async def test_watcher_publish_app_build_failed_on_owning_chat(
+  client, owner_token,
+):
+  """A watcher compile failure tells only the building chat."""
+  import asyncio
+  import os
+  import app.models as models
+  from app import broadcast as bc_mod
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "watch-fail")
+  os.makedirs(src, exist_ok=True)
+  initial = "export default function App(){ return <div>V0</div> }"
+  app_id = client.post("/api/apps/", json={
+    "name": "Watch Fail",
+    "description": "x",
+    "jsx_source": initial,
+    "source_dir": src,
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+
+  s = SessionLocal()
+  try:
+    row = s.query(models.App).filter(models.App.id == app_id).first()
+    row.chat_id = "builder-chat"
+    s.commit()
+  finally:
+    s.close()
+
+  building = bc_mod.create_broadcast("builder-chat")
+  other = bc_mod.create_broadcast("bystander-chat")
+  q_build = building.subscribe()[1]
+  q_system = bc_mod.get_system_broadcast().subscribe()
+  jsx_path = os.path.join(src, "index.jsx")
+  with open(jsx_path, "w", encoding="utf-8") as f:
+    f.write("export default function App(){ return <div>Broken</div")
+
+  try:
+    await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
+    ev = await asyncio.wait_for(q_build.get(), timeout=1.0)
+    assert ev["type"] == "app_build_failed"
+    assert ev["appId"] == str(app_id)
+    assert ev["appName"] == "Watch Fail"
+    assert "Expected" in ev["summary"] or "Unexpected" in ev["summary"]
+    assert all(
+      e.get("type") != "app_build_failed" for e in other.event_log
+    ), other.event_log
+    # The failure must also ride the system broadcast so the Shell's
+    # toast fires when the owner is on the canvas or another chat.
+    sys_ev = await asyncio.wait_for(q_system.get(), timeout=1.0)
+    assert sys_ev["type"] == "app_build_failed"
+    assert sys_ev["appId"] == str(app_id)
+  finally:
+    bc_mod.get_system_broadcast().unsubscribe(q_system)
+    bc_mod.remove_broadcast("builder-chat")
+    bc_mod.remove_broadcast("bystander-chat")
+
+  s = SessionLocal()
+  try:
+    row = s.query(models.App).filter(models.App.id == app_id).first()
+    assert row.jsx_source == initial
+  finally:
+    s.close()
+
+
+def test_summarize_app_build_failure_extracts_esbuild_error_line():
+  """Owner-facing app build summaries skip esbuild framing."""
+  from app.app_watcher import _summarize_app_build_failure
+
+  output = "\n".join([
+    "✘ [ERROR] Expected \">\" but found end of file",
+    "",
+    "    /data/apps/demo/index.jsx:1:46:",
+    "      1 │ export default function App(){ return <div>Broken</div",
+    "        ╵                                               ^",
+    "",
+    "1 error",
+  ])
+  assert (
+    _summarize_app_build_failure(output)
+    == 'Expected ">" but found end of file'
+  )
+
+
+@pytest.mark.asyncio
 async def test_watcher_ignores_platform_core_source():
-  """Only /data/apps source edits are watched; platform core paths are legacy."""
+  """Only /data/apps source edits are watched."""
   import os
   from app.app_watcher import _source_dir_for_changed_path
 

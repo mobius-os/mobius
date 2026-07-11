@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -48,6 +49,83 @@ _IGNORED_SOURCE_PARTS = {
   "node_modules",
   "static",
 }
+_MAX_FAILURE_SUMMARY = 160
+
+
+def _compact_failure_text(text: str) -> str:
+  """Normalize compiler output into one display-safe line."""
+  return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _truncate_failure_text(text: str, limit: int = _MAX_FAILURE_SUMMARY) -> str:
+  """Return ``text`` trimmed to the owner-visible summary budget."""
+  if len(text) <= limit:
+    return text
+  return text[:max(0, limit - 1)].rstrip() + "…"
+
+
+def _is_build_noise(line: str) -> bool:
+  """Return True for esbuild framing lines that hide the real error."""
+  return bool(re.search(
+    r"^(vite v|transforming|rendering chunks|computing gzip size|"
+    r"[✓✗]|\d+\s+error|warning:|files generated$)",
+    line,
+    flags=re.IGNORECASE,
+  ))
+
+
+def _summarize_app_build_failure(error: object) -> str:
+  """Extract the first meaningful mini-app compiler error line."""
+  raw = getattr(error, "stderr", None) or str(error or "")
+  lines = [
+    _compact_failure_text(line)
+    for line in str(raw).splitlines()
+  ]
+  lines = [line for line in lines if line]
+  if not lines:
+    return ""
+
+  high_signal = next((
+    line for line in lines
+    if (
+      re.search(r"\bERROR\b|Failed to resolve|Cannot find module", line, re.I)
+      or "Unexpected" in line
+      or "Expected" in line
+    )
+  ), None)
+  summary = high_signal or next((
+    line for line in lines if not _is_build_noise(line)
+  ), lines[0])
+  summary = re.sub(r"^.*?\[ERROR\]\s*", "", summary, flags=re.IGNORECASE)
+  summary = re.sub(r"^.*?\bERROR:\s*", "", summary, flags=re.IGNORECASE)
+  return _truncate_failure_text(summary)
+
+
+def _publish_app_build_failed(
+  *, app_id: int, app_name: str, chat_id: str | None, summary: str,
+) -> None:
+  """Emit an app build failure to the system bus and the building chat."""
+  from app.broadcast import get_broadcast, get_system_broadcast
+  event = {
+    "type": "app_build_failed",
+    "appId": str(app_id),
+    "appName": app_name,
+    "summary": summary,
+  }
+  # The system broadcast reaches Shell.handleSystemEvent in every view;
+  # without it the failure toast is dropped the moment the owner
+  # navigates away from the building chat — the most likely posture,
+  # since "the previous version is still running" describes an owner
+  # who went to look at the app. SystemBroadcast subscribers get no
+  # backlog replay, and the Shell's per-app dedup window collapses the
+  # double delivery when the chat stream also forwards the copy below.
+  get_system_broadcast().publish(event)
+  if not chat_id:
+    return
+  bc = get_broadcast(str(chat_id))
+  if bc is None or not bc.running:
+    return
+  bc.publish(event)
 
 
 def _source_roots() -> list[Path]:
@@ -259,10 +337,18 @@ class _JsxHandler(FileSystemEventHandler):
                   changed_path, exc,
                 )
           except RuntimeError as exc:
+            summary = _summarize_app_build_failure(exc)
+            failure = {
+              "app_id": app.id,
+              "app_name": app.name,
+              "chat_id": app.chat_id,
+              "summary": summary,
+            }
             log.warning(
               "auto-recompile: compile failed for %s: %s", changed_path, exc,
             )
             db.rollback()
+            _publish_app_build_failed(**failure)
             return
         log.info(
           "auto-recompiled app id=%s name=%s", app.id, app.name,
