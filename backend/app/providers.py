@@ -135,6 +135,21 @@ def skills_enabled(data_dir: str) -> bool:
   return bool(_load_agent_settings(data_dir).get("skills_enabled") is True)
 
 
+def auto_resume_on_limit(data_dir: str) -> bool:
+  """Whether to auto-resume a limit-parked turn at reset (default OFF).
+
+  Reads the `auto_resume_on_limit` flag from /data/shared/agent-settings.json
+  (design §2.4). Off by default: the reset sweep only push-notifies and leaves
+  a one-tap Resume. When the owner opts in, the sweep additionally starts a
+  serial "continue" turn once the limit resets, re-parking if it re-hits.
+  Absent / malformed flag reads as off — opt-in is explicit, mirroring
+  `skills_enabled`.
+  """
+  return bool(
+    _load_agent_settings(data_dir).get("auto_resume_on_limit") is True
+  )
+
+
 def write_agent_settings(data_dir: str, settings: dict) -> bool:
   """Persists `settings` to /data/shared/agent-settings.json.
 

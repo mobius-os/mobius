@@ -24,6 +24,17 @@ function thoughtLine(durationMs) {
 }
 
 
+// A provider-limit park block carries `parked_until` as an explicit-UTC ISO
+// string; render it as the viewer's LOCAL clock time ("1:40 AM"). Returns null
+// on a missing / unparseable value so the card degrades to just the message.
+function formatResetTime(iso) {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+
 // Answerability is purely a function of the block + its position + live hint.
 // Computing it here (rather than passing an arrow from ChatView's render loop)
 // lets React.memo skip re-renders for non-last messages on every streaming
@@ -180,19 +191,36 @@ function MsgContentInner({
         // live provider errors never show a Resume button. One tap re-sends a
         // short "continue" as a normal visible send.
         const resumable = !!(block.resumable && isLastMsg && onResume)
+        // A provider-limit park (design §2.4) is a resumable error carrying
+        // `parked_until`: it renders as a live "Rate limit — resets at … ·
+        // Resume now" card instead of a bare error. Same tail-only Resume
+        // gate; the button just re-sends "continue" like the restart resume.
+        const resetLabel = block.parked_until
+          ? formatResetTime(block.parked_until)
+          : null
+        const parked = !!block.parked_until
         return (
-          <div key={i} className="chat__text--error" role="alert">
-            <span className="chat__error-label">Error</span>
+          <div
+            key={i}
+            className={`chat__text--error${parked ? ' chat__text--parked' : ''}`}
+            role="alert"
+          >
+            <span className="chat__error-label">
+              {parked ? 'Rate limit' : 'Error'}
+            </span>
             <StandardMarkdown
               text={block.message || 'The agent ran into an issue.'}
             />
+            {parked && resetLabel && (
+              <div className="chat__parked-reset">Resets at {resetLabel}</div>
+            )}
             {resumable && (
               <button
                 type="button"
                 className="chat__resume"
                 onClick={() => onResume('continue')}
               >
-                Resume
+                {parked ? 'Resume now' : 'Resume'}
               </button>
             )}
           </div>

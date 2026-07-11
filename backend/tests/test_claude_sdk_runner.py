@@ -1283,3 +1283,104 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
   assert isinstance(result, PermissionResultAllow)
   assert bus.events == before
   assert logged == [("chat-42", "notifications")]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_resets_at_rides_the_terminal_result(monkeypatch):
+  """A RateLimitEvent's structured resets_at lands on the terminal dict so
+  the limit park (design §2.4) can use the exact reset time; a turn with NO
+  rate-limit event carries no such key and completes cleanly — the
+  regression here was an unbound attempt-scope local that error'd every
+  ordinary turn."""
+  from app import claude_sdk_runner
+
+  epoch = 1783813200  # any fixed unix-seconds reset time
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries = []
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield _stream_delta("text_delta", text="working")
+      yield RateLimitEvent(
+        rate_limit_info=RateLimitInfo(
+          status="rejected", resets_at=epoch, rate_limit_type="five_hour",
+        ),
+        uuid="rl-1",
+        session_id="sess-1",
+      )
+      yield _success_result()
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-42",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["error"] is None
+  assert result["rate_limit_resets_at"] == epoch
+
+
+@pytest.mark.asyncio
+async def test_turn_without_rate_limit_event_has_no_resets_key(monkeypatch):
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      return None
+
+    async def interrupt(self):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield _stream_delta("text_delta", text="fine")
+      yield _success_result()
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-42",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["error"] is None
+  assert "rate_limit_resets_at" not in result

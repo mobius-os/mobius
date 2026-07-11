@@ -871,7 +871,18 @@ export default function useStreamConnection(chatId, {
               // had no branch for it (which is the bug we're
               // fixing — the error visibly disappeared on chat
               // return).
-              updated.push({ type: 'error', message: event.message })
+              // Carry the whitelisted extras so a LIVE error card matches its
+              // persisted shape: `resumable` renders the one-tap Resume, and
+              // `parked_until`/`park_reason` render the provider-limit "resets
+              // at … · Resume now" card the instant the limit kill streams in
+              // (before promote). streamItemToBlock carries the same on promote.
+              updated.push({
+                type: 'error',
+                message: event.message,
+                ...(event.resumable ? { resumable: true } : {}),
+                ...(event.parked_until ? { parked_until: event.parked_until } : {}),
+                ...(event.park_reason ? { park_reason: event.park_reason } : {}),
+              })
               return updated
             })
           } else if (event.type === 'queued_turn_starting') {

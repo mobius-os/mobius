@@ -40,14 +40,17 @@ from app.broadcast import (
   set_active_broadcast,
 )
 from app.chat_writer import (
+  AppendPending,
   AppendSteeredUserMessage,
   Barrier,
   ClearPending,
   ClearRunStatus,
   Finalize,
+  ParkRun,
   PersistError,
   PersistTranscript,
   QuestionCommit,
+  ResolvePark,
   alloc_run_token,
   await_ack as _await_ack,
   get_writer,
@@ -702,26 +705,28 @@ def _parked_until_for_chat(
   db: Session,
   chat_id: str,
 ) -> datetime | None:
-  """Return a provider-park timestamp if a future schema has one.
+  """Return the provider-park reset time when the chat's LATEST run is parked.
 
-  V1 has no parking column yet. This defensive probe keeps the liveness checks
-  forward-compatible without requiring the provider-limit work to land first.
+  Latest-run-wins, deliberately: only the chat's most recent `chat_runs` row
+  counts, and only while it still reads ``status == "parked"``. A fresh turn
+  on a previously-parked chat inserts a newer "running" row (and StartTurn /
+  PromotePending close the stale park via `_close_running_runs`), so an
+  orphaned park can never exempt the NEW live turn from the stall watchdog or
+  keep the health surface reporting "parked". Query failures read as
+  not-parked — the liveness checks must never crash on this probe.
   """
-  if not hasattr(models.ChatRun, "parked_until"):
-    return None
   try:
     run = (
       db.query(models.ChatRun)
       .filter(models.ChatRun.chat_id == chat_id)
-      .filter(models.ChatRun.status == "running")
       .order_by(models.ChatRun.started_at.desc())
       .first()
     )
   except Exception:
     return None
-  if run is None:
+  if run is None or run.status != "parked":
     return None
-  parked_until = getattr(run, "parked_until", None)
+  parked_until = run.parked_until
   if isinstance(parked_until, datetime):
     return parked_until
   return None
@@ -1390,12 +1395,19 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
       )
       continue
     sink = get_active_sink(chat_id)
+    # `resumable` rides the event LIVE now that events.process_event carries
+    # the whitelisted extras onto the persisted block — the stalled note gets
+    # its one-tap Resume without waiting for a boot reconcile.
     if sink is not None:
-      sink.publish({"type": "error", "message": STALLED_TURN_MESSAGE})
+      sink.publish({
+        "type": "error", "message": STALLED_TURN_MESSAGE, "resumable": True,
+      })
     elif bc is not None:
       # Transport-only fallback for the rare inconsistent state where a handle
       # is live but chat.py no longer has its sink. Do not persist directly.
-      bc.publish({"type": "error", "message": STALLED_TURN_MESSAGE})
+      bc.publish({
+        "type": "error", "message": STALLED_TURN_MESSAGE, "resumable": True,
+      })
       log.warning(
         "stalled-live watchdog has no active sink for chat_id=%s; "
         "published transport error only",
@@ -1476,7 +1488,13 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
   begin_drain()
   log = _get_logger()
   drained: list[str] = []
-  note = {"type": "error", "message": PAUSED_FOR_RESTART_MESSAGE}
+  # `resumable` rides the event LIVE (events.process_event carries the
+  # whitelisted extras onto the persisted block), so a drained turn's Resume
+  # button renders immediately; boot reconcile's text-keyed marking stays as
+  # the crash-path fallback for a note that never made it through the sink.
+  note = {
+    "type": "error", "message": PAUSED_FOR_RESTART_MESSAGE, "resumable": True,
+  }
   for chat_id in sorted(registry.all_alive_chat_ids()):
     handles = registry.get_handles(chat_id)
     if not handles:
@@ -1531,6 +1549,184 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
       len(drained), ", ".join(drained),
     )
   return drained
+
+
+# One-shot notify copy for a limit park whose reset time has arrived
+# (design §2.4 step "at parked_until, push-notify").
+LIMIT_RESET_NOTIFY_TITLE = "Your limit has reset"
+LIMIT_RESET_NOTIFY_BODY = "Your limit has reset — tap to resume."
+
+
+async def _auto_resume_chat(chat_id: str, provider_id: str | None) -> bool:
+  """Start ONE continue turn for a limit-parked chat whose reset arrived.
+
+  The opt-in half of design §2.4 — mirrors the stale-pending drain in
+  chats_stream.send_message (the same claim → append → promote → schedule
+  sequence), minus the HTTP request:
+
+    - `mark_starting` claims the chat; a concurrent owner send (or another
+      sweep tick) that got there first makes this a no-op — never two turns.
+    - The synthetic "continue" lands in `pending_messages` via the actor's
+      AppendPending, exactly the message the one-tap Resume button sends, so
+      the agent sees the same instruction either way. It is appended BEHIND
+      any queue preserved by the limit park, and the promote combines the
+      whole queue into ONE continuation turn — the preserved sends run, in
+      order, with "continue" trailing; no per-message limit storm.
+    - `promote_pending_messages` (self-locking) moves the queue into the
+      transcript and sets the run marker under a fresh run token;
+      `_schedule_continuation` spawns the runner (its precondition — caller
+      holds _starting and the promote landed — is satisfied here) and owns
+      the failure path (releases _starting, leaves the marker for
+      reconciliation).
+
+  Re-park-on-re-hit is automatic: the resumed turn is an ordinary turn, so
+  if it dies on the limit again it parks again with a fresh reset time.
+  Returns True when a turn was scheduled.
+  """
+  if is_chat_running(chat_id):
+    return False
+  if not mark_starting(chat_id):
+    return False
+  try:
+    ack = get_writer().submit(
+      AppendPending(
+        chat_id=chat_id,
+        run_token="",
+        user_msg={
+          "role": "user",
+          "content": "continue",
+          "ts": int(time.time() * 1000),
+        },
+      )
+    )
+    await _await_ack(ack)
+    drain_token = alloc_run_token()
+    next_messages, next_user, next_session_id = (
+      await chat_queue.promote_pending_messages(None, chat_id, drain_token)
+    )
+    if not next_user:
+      discard_starting(chat_id)
+      return False
+    get_system_broadcast().publish({
+      "type": "chat_run_started",
+      "chatId": chat_id,
+    })
+    _schedule_continuation(
+      chat_id=chat_id,
+      messages=next_messages,
+      session_id=next_session_id,
+      provider_id=provider_id,
+      next_user=next_user,
+      run_token=drain_token,
+    )
+    return True
+  except Exception:
+    _get_logger().warning(
+      "auto-resume failed chat_id=%s", chat_id, exc_info=True,
+    )
+    discard_starting(chat_id)
+    return False
+
+
+async def sweep_reset_parks(db: Session) -> list[str]:
+  """Notify (and optionally auto-resume) limit-parked chats at reset time.
+
+  The third lifespan sweep (same 60s loop shape as the wedged-marker and
+  stalled-live sweeps). A due park is a `chat_runs` row still
+  ``status == "parked"`` whose `parked_until` has passed. For each, oldest
+  reset first:
+
+    - Resolve FIRST (ResolvePark → "parked_notified", strict ack), THEN
+      notify. Resolve-before-notify means a push failure can lose one
+      notification but a crash can never re-fire it every tick (the sweep
+      only selects "parked") — one notify per park, the design's exact ask.
+      A resolve failure leaves the row parked for the next tick.
+    - A park whose chat was deleted resolves silently.
+    - Auto-resume (owner setting, OFF by default) is STRICTLY SERIAL: at
+      most one park is processed per tick, and none while any turn is live
+      anywhere — the resumed turn must settle before the next park is
+      touched. Remaining due parks stay "parked" (notify deferred with
+      them), so nothing is lost, just spaced. With the setting off, every
+      due park is resolved + notified in one pass; resumption stays the
+      owner's one-tap.
+
+  Stands down while draining — a restart is in progress, and the boot
+  reconcile + this sweep's next tick pick everything up. Never raises.
+  """
+  log = _get_logger()
+  resolved: list[str] = []
+  if draining:
+    return resolved
+  now = datetime.now(UTC).replace(tzinfo=None)
+  try:
+    due = (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.status == "parked")
+      .filter(models.ChatRun.parked_until.isnot(None))
+      .filter(models.ChatRun.parked_until <= now)
+      .order_by(models.ChatRun.parked_until.asc())
+      .all()
+    )
+  except Exception:
+    log.exception("sweep_reset_parks: query failed")
+    return resolved
+  if not due:
+    return resolved
+  auto_resume = False
+  try:
+    from app.providers import auto_resume_on_limit
+    auto_resume = auto_resume_on_limit(get_settings().data_dir)
+  except Exception:
+    log.warning("sweep_reset_parks: settings read failed", exc_info=True)
+  for run in due:
+    chat_id = run.chat_id
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat_gone = chat is None or chat.deleted_at is not None
+    if auto_resume and not chat_gone and registry.all_alive_chat_ids():
+      # Strictly-serial gate: a live turn (an earlier auto-resume, or the
+      # owner's own send) must settle before the next park is processed.
+      # Leave this park (and the rest) untouched for a later tick.
+      break
+    try:
+      ack = get_writer().submit(
+        ResolvePark(chat_id=chat_id, run_token=run.id)
+      )
+      await _await_ack(ack)
+    except Exception:
+      log.warning(
+        "sweep_reset_parks: resolve failed chat_id=%s (retried next tick)",
+        chat_id, exc_info=True,
+      )
+      continue
+    resolved.append(chat_id)
+    if chat_gone:
+      continue
+    try:
+      owner = db.query(models.Owner).first()
+      if owner is not None:
+        from app import push
+        push.notify_owner(
+          db,
+          owner.id,
+          title=LIMIT_RESET_NOTIFY_TITLE,
+          body=LIMIT_RESET_NOTIFY_BODY,
+          source_type="system",
+          source_id=chat_id,
+          target=f"/shell/?chat={chat_id}",
+        )
+    except Exception:
+      log.warning(
+        "limit-reset notify failed chat_id=%s", chat_id, exc_info=True,
+      )
+    if auto_resume:
+      await _auto_resume_chat(chat_id, chat.provider)
+      break
+  if resolved:
+    log.info(
+      "limit-reset sweep resolved %d park(s): %s",
+      len(resolved), ", ".join(resolved),
+    )
+  return resolved
 
 
 async def _clear_pending(chat_id: str) -> list[int]:
@@ -2056,6 +2252,246 @@ def _is_limit_terminal(runner_result: dict) -> bool:
   return _is_limit_error_text(runner_result.get("error"))
 
 
+# Provider-limit parking (design §2.4). When the reset time can't be parsed
+# from the structured event or the error text, re-check in 30 minutes —
+# "degrades to notified late, never never notified". The clamp window keeps a
+# bad parse from parking in the past (an instant, storm-y notify) or into
+# next month (a park the owner would reasonably assume is lost).
+PARK_FALLBACK_DELAY = timedelta(minutes=30)
+_PARK_MIN_DELAY = timedelta(seconds=60)
+_PARK_MAX_DELAY = timedelta(days=7)
+
+# Relative form: "resets in 2 hours", "try again in 30 minutes".
+_RESET_RELATIVE_RE = re.compile(
+  r"(?:resets?|try again|retry|available)[^.\n]{0,24}?"
+  r"in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)",
+  re.IGNORECASE,
+)
+# ISO form anywhere in the text: "2026-07-11T01:40:00Z".
+_RESET_ISO_RE = re.compile(
+  r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+# Clock form: "resets 1:40am", "try again at 3pm", "resets at 14:30". Minutes
+# or an am/pm suffix is REQUIRED so a bare number (e.g. the "429" in a status
+# line) can never read as a clock time.
+_RESET_CLOCK_RE = re.compile(
+  r"(?:resets?|try again|retry|available)[^.\n]{0,24}?"
+  r"\b(\d{1,2})(?::(\d{2}))\s*(am|pm)?\b"
+  r"|(?:resets?|try again|retry|available)[^.\n]{0,24}?"
+  r"\b(\d{1,2})\s*(am|pm)\b",
+  re.IGNORECASE,
+)
+
+
+def _coerce_reset_datetime(value) -> datetime | None:
+  """Best-effort convert a structured reset value to a NAIVE-UTC datetime.
+
+  Accepts a datetime (aware → converted, naive → assumed UTC), a unix epoch
+  in seconds or milliseconds, or an ISO-8601 string. Anything else — or any
+  parse error — reads as None so the caller falls through to text parsing.
+  """
+  try:
+    if isinstance(value, datetime):
+      if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+      return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+      seconds = float(value)
+      if seconds > 1e12:  # milliseconds epoch
+        seconds /= 1000.0
+      return datetime.fromtimestamp(seconds, UTC).replace(tzinfo=None)
+    if isinstance(value, str) and value.strip():
+      parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+      if parsed.tzinfo is not None:
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+      return parsed
+  except Exception:
+    return None
+  return None
+
+
+def _parse_reset_text(text: str, now: datetime) -> datetime | None:
+  """Lenient reset-time parse from a provider limit-error string.
+
+  Tries, in order: a relative duration ("resets in 2 hours"), an ISO
+  timestamp, and a clock time ("resets 1:40am" — read as UTC and rolled to
+  the NEXT occurrence, since the strings carry no date). Returns naive UTC,
+  or None when nothing parses — the caller applies the 30-minute fallback.
+  A clock time without a timezone is genuinely ambiguous; UTC keeps the
+  server-side math consistent and the clamp bounds the damage (design
+  trade-off: "degrades to notified late, never never notified").
+  """
+  if not text:
+    return None
+  match = _RESET_RELATIVE_RE.search(text)
+  if match:
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit.startswith("h"):
+      delta = timedelta(hours=amount)
+    elif unit.startswith("s"):
+      delta = timedelta(seconds=amount)
+    else:
+      delta = timedelta(minutes=amount)
+    return now + delta
+  match = _RESET_ISO_RE.search(text)
+  if match:
+    parsed = _coerce_reset_datetime(match.group(0))
+    if parsed is not None:
+      return parsed
+  match = _RESET_CLOCK_RE.search(text)
+  if match:
+    if match.group(1) is not None:
+      hour, minute = int(match.group(1)), int(match.group(2))
+      meridiem = (match.group(3) or "").lower()
+    else:
+      hour, minute = int(match.group(4)), 0
+      meridiem = (match.group(5) or "").lower()
+    if meridiem == "pm" and hour != 12:
+      hour += 12
+    elif meridiem == "am" and hour == 12:
+      hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+      return None
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+      candidate += timedelta(days=1)
+    return candidate
+  return None
+
+
+def _limit_park_fields(
+  runner_result: dict,
+  error_text: str | None,
+  now: datetime | None = None,
+) -> tuple[datetime, str]:
+  """Compute (parked_until, park_reason) for a limit-killed turn.
+
+  Precedence: the structured reset time the runner captured
+  (`rate_limit_resets_at`, from the SDK's RateLimitEvent) → lenient text
+  parse of the error string → 30-minute re-check fallback. The result is
+  clamped to [now+60s, now+7d] so a bad parse can neither park in the past
+  nor beyond any real provider window. NEVER raises — a parse failure must
+  still park (design §2.4), so the whole computation degrades to the
+  fallback on any error.
+  """
+  if now is None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+  try:
+    target = _coerce_reset_datetime(
+      (runner_result or {}).get("rate_limit_resets_at")
+    )
+    if target is None:
+      target = _parse_reset_text(error_text or "", now)
+    if target is None:
+      target = now + PARK_FALLBACK_DELAY
+    target = max(now + _PARK_MIN_DELAY, min(target, now + _PARK_MAX_DELAY))
+    low = (error_text or "").lower()
+    if any(m in low for m in ("usage limit", "usage_limit", "weekly limit",
+                              "session limit", "quota")):
+      reason = "usage_limit"
+    else:
+      reason = "rate_limit"
+    return target, reason
+  except Exception:
+    _get_logger().warning(
+      "limit-park reset parse failed; using fallback", exc_info=True,
+    )
+    return now + PARK_FALLBACK_DELAY, "rate_limit"
+
+
+def _limit_error_event(
+  message: str,
+  parked_until: datetime,
+  park_reason: str,
+) -> dict:
+  """The enriched error event a limit kill publishes through the sink.
+
+  Carries the park fields (whitelisted through events.process_event onto the
+  persisted block) so the transcript card renders live as "Rate limit —
+  resets at … · Resume now". `parked_until` is serialized as EXPLICIT-UTC
+  ISO — a naive isoformat would be parsed as local time by the client's
+  `new Date()` and shift the displayed reset by the viewer's UTC offset.
+  """
+  return {
+    "type": "error",
+    "message": message,
+    "resumable": True,
+    "parked_until": parked_until.replace(tzinfo=UTC).isoformat(),
+    "park_reason": park_reason,
+  }
+
+
+async def _park_run_strict(
+  chat_id: str,
+  run_token: str,
+  parked_until: datetime,
+  park_reason: str,
+) -> None:
+  """Park the run via the actor (commit-before-return); raises on failure.
+
+  The limit-exit sibling of `_clear_run_status_strict`: same await-the-ack
+  discipline, same identity-keyed ownership inside the actor. A tokenless
+  caller (legacy/test paths with no per-run row) degrades to the plain
+  marker clear — there is no row to park on, so the chat keeps today's
+  LIMIT_PARKED contract (marker cleared, queue preserved) without the
+  notify-at-reset upgrade.
+  """
+  if not chat_id:
+    return
+  if not run_token:
+    await _clear_run_status_strict(chat_id, "")
+    return
+  ack = get_writer().submit(
+    ParkRun(
+      chat_id=chat_id,
+      run_token=run_token,
+      parked_until=parked_until,
+      park_reason=park_reason,
+    )
+  )
+  await _await_ack(ack)
+
+
+def _limit_exit(
+  sink, runner_result: dict | None, error_text: str | None,
+) -> dict:
+  """Classify a turn exit for limit parking and publish its error event.
+
+  One seam shared by all four SDK exits (claude/codex × success/except) so
+  the classification, the park-target parse, and the enriched error event
+  can't drift apart. `runner_result` is None on an exception exit (classify
+  by text only); on a terminal-result exit the structured
+  `api_error_status`/`rate_limit_resets_at` take precedence. Publishes the
+  error through the SINK before the caller's finalize, so the block — with
+  the park fields on a limit kill — is persisted alongside any partial
+  response. A limit kill with NO error text (a bare 429 result) still gets a
+  synthetic message: the persisted block IS the parked card, so it must
+  exist. Returns the `_complete_turn` kwargs for the limit disposition.
+  """
+  if runner_result is not None:
+    limit = _is_limit_terminal(runner_result)
+  else:
+    limit = _is_limit_error_text(error_text)
+  if not limit:
+    if error_text:
+      sink.publish({"type": "error", "message": error_text})
+    return {"limit_reached": False}
+  parked_until, park_reason = _limit_park_fields(
+    runner_result or {}, error_text
+  )
+  message = error_text or (
+    "The provider's rate limit was reached; this turn is paused until the "
+    "limit resets."
+  )
+  sink.publish(_limit_error_event(message, parked_until, park_reason))
+  return {
+    "limit_reached": True,
+    "parked_until": parked_until,
+    "park_reason": park_reason,
+  }
+
+
 async def _complete_turn(
   *,
   bc,
@@ -2067,6 +2503,8 @@ async def _complete_turn(
   cost_usd: float | int,
   close_browser: bool,
   limit_reached: bool = False,
+  parked_until: datetime | None = None,
+  park_reason: str | None = None,
 ) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
@@ -2195,29 +2633,38 @@ async def _complete_turn(
   # (an unconditional clear would erase the successor's pointer).
   clear_active_broadcast_if(bc)
   if limit_reached:
-    # Provider rate/usage-limit kill. Clear the marker (the turn is over) but
-    # do NOT drain-and-promote the queue: promoting would fire every queued
-    # message straight into the same limit (the limit storm — a single kill
-    # burning the whole queue in seconds). Leave pending_messages intact; the
-    # chat drops into the markerless-queue state that self-heals on the user's
-    # next send (chats_stream's stale-pending drain). No auto-resume scheduler
-    # by design — the user resends, or waits for the limit to reset. The limit
-    # error itself was already published + persisted by the call site before
-    # finalize, and the preserved queue stays visible in the composer tray, so
-    # the "why didn't my queue run" is already answered on screen.
+    # Provider rate/usage-limit kill. PARK the run (design §2.4): the marker
+    # is cleared (the turn is over) but the run's `chat_runs` row moves to
+    # "parked" carrying `parked_until` + `park_reason`, so the reset sweep
+    # push-notifies at the reset time (and optionally auto-resumes). Do NOT
+    # drain-and-promote the queue: promoting would fire every queued message
+    # straight into the same limit (the limit storm — a single kill burning
+    # the whole queue in seconds). Leave pending_messages intact; the chat
+    # drops into the markerless-queue state that self-heals on the user's
+    # next send (chats_stream's stale-pending drain). The limit error itself
+    # was already published + persisted by the call site before finalize
+    # (with the park fields, so it renders as the live "resets at …" card).
+    if parked_until is None:
+      # Direct/legacy callers that didn't parse a target still park with the
+      # fallback re-check — a limit exit must never skip the park silently.
+      parked_until, park_reason = _limit_park_fields({}, None)
     try:
-      # Clear under the SAME bounded terminal lock the drain uses, so a racing
-      # stale-pending self-heal drain / append can't interleave with the marker
-      # clear. Identity-keyed on THIS run's token so a fresh turn that raced in
-      # during finalize isn't wiped (the actor no-ops a non-owning clear). On a
-      # lock/ack timeout the marker is LEFT set for reconciliation — the queue
-      # is preserved either way, so a wedged lock can't burn it.
+      # Park under the SAME bounded terminal lock the drain uses, so a racing
+      # stale-pending self-heal drain / append can't interleave with the
+      # marker clear. Identity-keyed on THIS run's token so a fresh turn that
+      # raced in during finalize isn't wiped (the actor no-ops a non-owning
+      # park onto the marker). On a lock/ack timeout the marker is LEFT set
+      # for reconciliation — the queue is preserved either way, so a wedged
+      # lock can't burn it.
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          await _clear_run_status_strict(chat_id, sink.run_token or "")
+          await _park_run_strict(
+            chat_id, sink.run_token or "",
+            parked_until, park_reason or "rate_limit",
+          )
     except (Exception, asyncio.TimeoutError):
       _get_logger().warning(
-        "limit-park ClearRunStatus did not persist chat_id=%s "
+        "limit-park ParkRun did not persist chat_id=%s "
         "(reconciliation will repair)", chat_id, exc_info=True,
       )
       bc.publish({"type": "done"})
@@ -3521,24 +3968,25 @@ async def _run_chat_impl(
         )
     except Exception as exc:
       log.exception("codex SDK turn failed chat_id=%s: %s", chat_id, exc)
-      # Publish through the sink BEFORE finalize so the error lands
-      # in the persisted assistant transcript, not just the live wire.
-      sink.publish({"type": "error", "message": str(exc)})
+      # _limit_exit publishes through the sink BEFORE finalize so the error
+      # (with park fields on a limit kill) lands in the persisted assistant
+      # transcript, not just the live wire.
+      limit_kwargs = _limit_exit(sink, None, str(exc))
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=False,
-        limit_reached=_is_limit_error_text(str(exc)),
+        **limit_kwargs,
       )
     err = runner_result.get("error")
-    if err:
-      # Same save-before-broadcast rationale: publish through sink before finalize so
-      # the error is persisted alongside any partial response that
-      # streamed before the failure.
-      sink.publish({"type": "error", "message": err})
+    # Same save-before-broadcast rationale: _limit_exit publishes through the
+    # sink before finalize so the error is persisted alongside any partial
+    # response that streamed before the failure (enriched with the park
+    # fields when the terminal was a limit kill).
+    limit_kwargs = _limit_exit(sink, runner_result, err)
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True, limit_reached=_is_limit_terminal(runner_result),
+      close_browser=True, **limit_kwargs,
     )
 
   if is_claude:
@@ -3626,22 +4074,23 @@ async def _run_chat_impl(
         )
     except Exception as exc:
       log.exception("claude SDK turn failed chat_id=%s: %s", chat_id, exc)
-      # Publish through the sink BEFORE finalize so the error lands
-      # in the persisted assistant transcript, not just the live wire.
-      sink.publish({"type": "error", "message": str(exc)})
+      # _limit_exit publishes through the sink BEFORE finalize so the error
+      # (with park fields on a limit kill) lands in the persisted assistant
+      # transcript, not just the live wire.
+      limit_kwargs = _limit_exit(sink, None, str(exc))
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=False,
-        limit_reached=_is_limit_error_text(str(exc)),
+        **limit_kwargs,
       )
-    if err:
-      # Same save-before-broadcast rationale: persist the error alongside any partial
-      # response that streamed before the failure.
-      sink.publish({"type": "error", "message": err})
+    # Same save-before-broadcast rationale: _limit_exit persists the error
+    # alongside any partial response that streamed before the failure
+    # (enriched with the park fields when the terminal was a limit kill).
+    limit_kwargs = _limit_exit(sink, runner_result, err)
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True, limit_reached=_is_limit_terminal(runner_result),
+      close_browser=True, **limit_kwargs,
     )
 
   # Unknown provider — every supported provider is handled by an SDK

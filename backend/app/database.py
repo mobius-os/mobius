@@ -446,6 +446,27 @@ def run_migrations(eng) -> None:
           conn.execute(text(stmt))
         conn.commit()
 
+  # `chat_runs` is a newer table (persistence redesign Step 3): create_all
+  # builds it fresh with the current schema, but on an already-deployed DB the
+  # table exists WITHOUT the provider-park columns, so add them here. Guarded on
+  # the table existing — a fresh install returned above (create_all handles it).
+  if "chat_runs" in tables:
+    chat_runs_cols = {c["name"] for c in inspector.get_columns("chat_runs")}
+    _add_runs = []
+    if "parked_until" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN parked_until DATETIME NULL"
+      )
+    if "park_reason" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN park_reason VARCHAR(32) NULL"
+      )
+    if _add_runs:
+      with eng.connect() as conn:
+        for stmt in _add_runs:
+          conn.execute(text(stmt))
+        conn.commit()
+
 
 def get_db():
   """Yields a database session and closes it after the request."""

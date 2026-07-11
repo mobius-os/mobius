@@ -430,6 +430,22 @@
   text-transform: uppercase;
   color: var(--danger);
 }
+/* Provider-limit park (design §2.4): a rate-limit note is a WAIT state, not a
+   failure, so soften the danger tint toward the neutral accent and let the
+   reset time + Resume-now button carry the card. Declared after
+   .chat__text--error so the override wins (the element carries both classes). */
+.chat__text--parked {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
+}
+.chat__text--parked .chat__error-label {
+  color: var(--accent);
+}
+.chat__parked-reset {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.8;
+}
 /* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
    Rendered only on the tail resumable interrupt note; re-sends "continue". */
 .chat__resume {

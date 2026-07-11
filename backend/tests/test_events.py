@@ -442,6 +442,66 @@ def test_process_error_event_coalesces_duplicates():
   assert any(b.get("type") == "text" for b in blocks)
 
 
+def test_process_error_event_carries_whitelisted_extras_on_append():
+  """The park/resume extras ride the error event onto the persisted block.
+
+  Item 4 could only mark notes resumable at boot reconcile because this path
+  stripped everything but `message`; the whitelist passthrough makes the
+  stalled/drain/limit notes live-resumable and the parked card live by
+  construction (design §2.4).
+  """
+  blocks = []
+  process_event({
+    "type": "error",
+    "message": "rate limited",
+    "resumable": True,
+    "parked_until": "2026-07-11T01:40:00+00:00",
+    "park_reason": "usage_limit",
+  }, blocks)
+  err = next(b for b in blocks if b.get("type") == "error")
+  assert err["resumable"] is True
+  assert err["parked_until"] == "2026-07-11T01:40:00+00:00"
+  assert err["park_reason"] == "usage_limit"
+
+
+def test_process_error_event_extras_are_whitelist_only():
+  """An unexpected event key must NOT leak into the durable transcript."""
+  blocks = []
+  process_event({
+    "type": "error",
+    "message": "boom",
+    "resumable": True,
+    "surprise_key": "nope",
+  }, blocks)
+  err = next(b for b in blocks if b.get("type") == "error")
+  assert err["resumable"] is True
+  assert "surprise_key" not in err
+
+
+def test_process_error_event_coalesce_updates_and_preserves_extras():
+  """Coalescing replaces `message` but only overwrites extras the NEW event
+  carries — a later bare error must not erase an earlier limit park's
+  fields (the card would lose its reset time mid-stream)."""
+  blocks = []
+  process_event({
+    "type": "error",
+    "message": "rate limited",
+    "resumable": True,
+    "parked_until": "2026-07-11T01:40:00+00:00",
+  }, blocks)
+  process_event({"type": "error", "message": "final text"}, blocks)
+  error_blocks = [b for b in blocks if b.get("type") == "error"]
+  assert len(error_blocks) == 1
+  assert error_blocks[0]["message"] == "final text"
+  assert error_blocks[0]["resumable"] is True
+  assert error_blocks[0]["parked_until"] == "2026-07-11T01:40:00+00:00"
+  # And a coalescing event CAN update an extra it explicitly carries.
+  process_event({
+    "type": "error", "message": "again", "park_reason": "rate_limit",
+  }, blocks)
+  assert error_blocks[0]["park_reason"] == "rate_limit"
+
+
 def test_immediate_save_types_are_event_types():
   """_IMMEDIATE_SAVE_TYPES stays a subset of the exported vocabulary."""
   assert _ChatEventSink._IMMEDIATE_SAVE_TYPES <= set(get_args(EventType))

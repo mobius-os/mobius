@@ -25,7 +25,18 @@ export function streamItemToBlock(item) {
       ...(item.answers ? { answers: item.answers } : {}),
     }
   }
-  if (item.type === 'error') return { type: 'error', message: item.message }
+  if (item.type === 'error') {
+    // Carry the whitelisted extras (resumable drives the one-tap Resume;
+    // parked_until/park_reason drive the live provider-limit card) so a
+    // promoted stream error renders identically to its persisted DB twin.
+    return {
+      type: 'error',
+      message: item.message,
+      ...(item.resumable ? { resumable: true } : {}),
+      ...(item.parked_until ? { parked_until: item.parked_until } : {}),
+      ...(item.park_reason ? { park_reason: item.park_reason } : {}),
+    }
+  }
   const status = item.status === 'running' ? 'done' : item.status
   return { type: 'tool', ...item, status }
 }

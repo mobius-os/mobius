@@ -14,6 +14,20 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
+# Extra fields an "error" event may carry through onto its persisted block.
+# process_event otherwise reduces an error to {type, message}, which stripped
+# item 4's boot-set `resumable` flag and would strip the provider-limit park
+# fields too. Whitelisted (not a blanket passthrough) so an unexpected event
+# key can't silently pollute the durable transcript: `resumable` drives the
+# one-tap Resume affordance (MsgContent), `parked_until` + `park_reason` make
+# a provider-limit error render as a live "resets at … · Resume now" card.
+ERROR_PASSTHROUGH_FIELDS: tuple[str, ...] = (
+  "resumable",
+  "parked_until",
+  "park_reason",
+)
+
+
 EventType = Literal[
   "text",
   "text_final",
@@ -255,13 +269,22 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # both). Coalesce: a single error is enough — additional error
     # events on the same turn replace rather than stack.
     message = event.get("message", "") or ""
+    # Carry the whitelisted extras through onto the persisted block. Only keys
+    # this event actually supplied are applied, so a later bare error on the
+    # same turn keeps the extras an earlier limit/park error set rather than
+    # erasing them (the coalesce still replaces `message`).
+    extras = {
+      key: event[key] for key in ERROR_PASSTHROUGH_FIELDS if key in event
+    }
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "error"):
       assistant_blocks[-1]["message"] = message
+      assistant_blocks[-1].update(extras)
     else:
       assistant_blocks.append({
         "type": "error",
         "message": message,
+        **extras,
       })
     return True
 

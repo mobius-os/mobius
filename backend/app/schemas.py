@@ -413,6 +413,11 @@ class SettingsUpdate(BaseModel):
   # to the shared agent-settings.json rather than the frozen Owner
   # model. None means "leave unchanged".
   skills_enabled: bool | None = None
+  # Opt-in to automatically resuming a turn parked on a provider limit once
+  # the limit resets (design §2.4). Default-off; the default path is a push
+  # notification + one-tap Resume. Persisted to the shared agent-settings.json
+  # (see providers.auto_resume_on_limit). None means "leave unchanged".
+  auto_resume_on_limit: bool | None = None
 
   @field_validator("provider")
   @classmethod
