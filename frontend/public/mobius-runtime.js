@@ -1634,6 +1634,14 @@ export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) 
     const pid = opts.projectId == null ? '' : String(opts.projectId).trim()
     if (pid) body.project_id = pid
   }
+  if (hasOwn(opts, 'scope')) {
+    const scope = opts.scope == null ? '' : String(opts.scope).trim()
+    if (scope) body.scope = scope
+  }
+  if (hasOwn(opts, 'scopeLabel')) {
+    const label = opts.scopeLabel == null ? '' : String(opts.scopeLabel).trim()
+    if (label) body.scope_label = label
+  }
   return body
 }
 
@@ -1674,11 +1682,22 @@ function makeChat({ appId, getToken, storage }) {
   // Call an /api/app-chats endpoint with the app-scoped token, re-minting once on
   // a 401 (the app token expired mid-session). init.headers is merged so the
   // caller sets Content-Type without clobbering Authorization.
-  async function appChatFetch(url, init) {
+  async function appChatFetch(url, init = {}) {
     const withAuth = (t) => ({ ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${t}` } })
     let res = await fetch(url, withAuth(await appChatToken()))
     if (res.status === 401) res = await fetch(url, withAuth(await appChatToken(true)))
     return res
+  }
+
+  async function listChats(opts = {}) {
+    const scope = opts.scope == null ? '' : String(opts.scope).trim()
+    const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+    const res = await appChatFetch(`/api/app-chats${qs}`)
+    if (!res.ok) {
+      throw new Error(`window.mobius.chat: list failed (${res.status})`)
+    }
+    const data = await res.json()
+    return Array.isArray(data) ? data : []
   }
 
   async function createChat(opts) {
@@ -1788,6 +1807,10 @@ function makeChat({ appId, getToken, storage }) {
       savePersistedId(chatId)
     }
     const pickerOn = opts.picker !== false
+    const scopeValue = hasOwn(opts, 'scope') && opts.scope != null
+      ? String(opts.scope).trim()
+      : ''
+    const controlsOn = opts.controls === true || (opts.controls !== false && !!scopeValue)
     const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
     // Sticky 'ready'/'error' so a handler attached after `await chat(...)`
     // still observes the embed's mount-time READY (see makeEmbedEmitter).
@@ -1797,6 +1820,14 @@ function makeChat({ appId, getToken, storage }) {
     if (typeof opts.onTurnDone === 'function') onEvent('turn-done', opts.onTurnDone)
     if (typeof opts.onMessageSent === 'function') onEvent('message-sent', opts.onMessageSent)
     if (typeof opts.onError === 'function') onEvent('error', opts.onError)
+
+    function embedSrcFor(id) {
+      const params = new URLSearchParams()
+      if (id) params.set('chatId', id)
+      if (!pickerOn) params.set('picker', '0')
+      const qs = params.toString()
+      return qs ? `/shell/embed/chat?${qs}` : '/shell/embed/chat'
+    }
 
     const iframe = document.createElement('iframe')
     iframe.title = 'Agent chat'
@@ -1810,11 +1841,7 @@ function makeChat({ appId, getToken, storage }) {
       'sandbox',
       'allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation',
     )
-    const params = new URLSearchParams()
-    if (chatId) params.set('chatId', chatId)
-    if (!pickerOn) params.set('picker', '0')
-    const qs = params.toString()
-    iframe.src = qs ? `/shell/embed/chat?${qs}` : '/shell/embed/chat'
+    iframe.src = embedSrcFor(chatId)
 
     // Sanitize quickActions: max 4, each must have string label + prompt.
     const quickActions = Array.isArray(opts.quickActions)
@@ -1822,6 +1849,135 @@ function makeChat({ appId, getToken, storage }) {
           .filter(a => a && typeof a.label === 'string' && typeof a.prompt === 'string')
           .slice(0, 4)
       : undefined
+
+    let controlsShell = null
+    let frameMount = mount
+    let selectEl = null
+    let newChatButton = null
+    let onChatSelectChange = null
+    let onNewChatClick = null
+
+    function errorText(err) {
+      return err && err.message ? err.message : String(err || 'Unknown error')
+    }
+
+    function chatOptionLabel(chat) {
+      const label = chat && typeof chat.scope_label === 'string' ? chat.scope_label.trim() : ''
+      const title = chat && typeof chat.title === 'string' ? chat.title.trim() : ''
+      if (label) return label
+      if (title) return title
+      return chat && chat.id ? `Chat ${String(chat.id).slice(0, 8)}` : 'Chat'
+    }
+
+    function renderChatOptions(chats) {
+      if (!selectEl) return
+      const options = []
+      const seen = new Set()
+      for (const chat of chats || []) {
+        if (!chat || !chat.id) continue
+        const id = String(chat.id)
+        if (seen.has(id)) continue
+        seen.add(id)
+        options.push({ ...chat, id })
+      }
+      if (chatId && !seen.has(chatId)) {
+        options.unshift({
+          id: chatId,
+          title: opts.title || 'Current chat',
+          scope_label: opts.scopeLabel || opts.title || 'Current chat',
+        })
+      }
+      selectEl.replaceChildren(...options.map((chat) => {
+        const option = document.createElement('option')
+        option.value = chat.id
+        option.textContent = chatOptionLabel(chat)
+        return option
+      }))
+      selectEl.value = chatId || ''
+    }
+
+    async function refreshChatOptions() {
+      if (!controlsOn || !selectEl) return
+      try {
+        renderChatOptions(await listChats(opts))
+      } catch (e) {
+        emit('error', { chatId, error: errorText(e) })
+      }
+    }
+
+    async function switchToChat(nextId) {
+      nextId = nextId ? String(nextId) : ''
+      if (!nextId || nextId === chatId) return
+      const previousId = chatId
+      if (selectEl) selectEl.disabled = true
+      try {
+        await updateChat(nextId, opts)
+        chatId = nextId
+        savePersistedId(chatId)
+        iframe.src = embedSrcFor(chatId)
+      } catch (e) {
+        if (selectEl) selectEl.value = previousId || ''
+        emit('error', { chatId: previousId, error: errorText(e) })
+      } finally {
+        if (selectEl) selectEl.disabled = false
+      }
+    }
+
+    async function startNewChat() {
+      if (newChatButton) newChatButton.disabled = true
+      try {
+        chatId = await createChat(opts)
+        savePersistedId(chatId)
+        iframe.src = embedSrcFor(chatId)
+        await refreshChatOptions()
+        if (selectEl) selectEl.value = chatId
+      } catch (e) {
+        emit('error', { chatId, error: errorText(e) })
+      } finally {
+        if (newChatButton) newChatButton.disabled = false
+      }
+    }
+
+    if (controlsOn) {
+      controlsShell = document.createElement('div')
+      controlsShell.style.cssText = (
+        'width:100%;height:100%;min-height:0;display:flex;flex-direction:column;'
+      )
+      const chrome = document.createElement('div')
+      chrome.style.cssText = (
+        'display:flex;align-items:center;gap:6px;flex:0 0 auto;'
+        + 'padding:6px 8px;border-bottom:1px solid rgba(148,163,184,.28);'
+        + 'background:rgba(248,250,252,.94);'
+      )
+      selectEl = document.createElement('select')
+      selectEl.setAttribute('aria-label', 'Chat')
+      selectEl.style.cssText = (
+        'min-width:0;flex:1 1 auto;height:28px;border:1px solid rgba(148,163,184,.55);'
+        + 'border-radius:6px;background:#fff;color:#111827;font:500 12px system-ui,sans-serif;'
+        + 'padding:0 26px 0 8px;'
+      )
+      newChatButton = document.createElement('button')
+      newChatButton.type = 'button'
+      newChatButton.textContent = '+'
+      newChatButton.title = 'New chat'
+      newChatButton.setAttribute('aria-label', 'New chat')
+      newChatButton.style.cssText = (
+        'width:28px;height:28px;flex:0 0 28px;border:1px solid rgba(148,163,184,.55);'
+        + 'border-radius:6px;background:#fff;color:#111827;font:600 18px/1 system-ui,sans-serif;'
+        + 'display:grid;place-items:center;cursor:pointer;'
+      )
+      onChatSelectChange = () => { switchToChat(selectEl.value).catch(() => {}) }
+      onNewChatClick = () => { startNewChat().catch(() => {}) }
+      selectEl.addEventListener('change', onChatSelectChange)
+      newChatButton.addEventListener('click', onNewChatClick)
+      chrome.appendChild(selectEl)
+      chrome.appendChild(newChatButton)
+      frameMount = document.createElement('div')
+      frameMount.style.cssText = 'min-height:0;flex:1 1 auto;'
+      controlsShell.appendChild(chrome)
+      controlsShell.appendChild(frameMount)
+      renderChatOptions([])
+    }
 
     function sendInit() {
       const w = iframe.contentWindow
@@ -1888,10 +2044,14 @@ function makeChat({ appId, getToken, storage }) {
     // same handshake AppCanvas ↔ app-frame.html rely on.
     window.addEventListener('message', onMessage)
     iframe.addEventListener('load', sendInit)
-    mount.appendChild(iframe)
+    frameMount.appendChild(iframe)
+    if (controlsShell) {
+      mount.appendChild(controlsShell)
+      refreshChatOptions().catch(() => {})
+    }
 
     return {
-      chatId,
+      get chatId() { return chatId },
       instanceId,
       iframe,
       on(event, cb) {
@@ -1903,7 +2063,17 @@ function makeChat({ appId, getToken, storage }) {
       destroy() {
         window.removeEventListener('message', onMessage)
         iframe.removeEventListener('load', sendInit)
-        if (iframe.parentNode) iframe.parentNode.removeChild(iframe)
+        if (selectEl && onChatSelectChange) {
+          selectEl.removeEventListener('change', onChatSelectChange)
+        }
+        if (newChatButton && onNewChatClick) {
+          newChatButton.removeEventListener('click', onNewChatClick)
+        }
+        if (controlsShell && controlsShell.parentNode) {
+          controlsShell.parentNode.removeChild(controlsShell)
+        } else if (iframe.parentNode) {
+          iframe.parentNode.removeChild(iframe)
+        }
       },
     }
   }
