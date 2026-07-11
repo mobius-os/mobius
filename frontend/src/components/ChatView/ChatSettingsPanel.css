@@ -47,8 +47,7 @@
 }
 
 .csp-row:focus-visible,
-.csp__confirm-btn:focus-visible,
-.csp-effort__stop:focus-visible {
+.csp__confirm-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -143,90 +142,12 @@
   transform: rotate(45deg);
 }
 
-/* ── Effort stepper-slider ───────────────────────────────
-   A horizontal track with N stops + a label on the side
-   showing the long-form name of the selected stop. Single
-   line regardless of N (Codex=6, Claude=5) so the popover
-   width is independent of which provider is selected. The
-   layout is: [track grows to fill] [12px gap] [label].
-   Indent matches the row title (icon 30 + gap 12 + row pad 10 = 52). */
-.csp-effort {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+/* The effort control is now the shared <EffortStepper> (ui/EffortStepper.css
+   owns its visuals). This wrapper only supplies the indent that aligns it
+   under the row title (icon 30 + gap 12 + row pad 10 = 52) plus the bottom
+   spacing that the old .csp-effort margin used to carry. */
+.csp-effort-indent {
   margin: 4px 12px 8px 52px;
-}
-
-.csp-effort__track {
-  flex: 1;
-  min-width: 0;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  position: relative;
-}
-
-/* The track's connecting line — drawn behind the stops via ::before.
-   Inset so the line starts under the first stop and ends under the
-   last; pseudo-element doesn't take pointer events so stops stay
-   clickable. */
-.csp-effort__track::before {
-  content: '';
-  position: absolute;
-  left: 7px;
-  right: 7px;
-  top: 50%;
-  height: 2px;
-  background: var(--border);
-  border-radius: 2px;
-  transform: translateY(-50%);
-}
-
-.csp-effort__stop {
-  position: relative;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 1.5px solid var(--border);
-  background: var(--surface);
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-  transition: background 0.15s, border-color 0.15s, transform 0.15s;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .csp-effort__stop:hover {
-    border-color: var(--accent);
-  }
-}
-
-/* Stops at or below the selected one read as "filled" — fill in
-   accent, no inner cutout. Use --filled (≤ selected) rather than
-   only --on (=== selected) so the user gets the slider feel. */
-.csp-effort__stop--filled {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-/* The selected stop sits proud of its neighbors — larger, with a
-   white-ish ring around the accent fill to read as the slider
-   thumb. */
-.csp-effort__stop--on {
-  background: var(--accent);
-  border-color: var(--accent);
-  transform: scale(1.35);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-.csp-effort__label {
-  font-size: 12px;      /* --font-text-xs */
-  font-weight: 500;
-  color: var(--text);
-  white-space: nowrap;
-  min-width: 70px;
-  text-align: right;
 }
 
 .csp__loading {
