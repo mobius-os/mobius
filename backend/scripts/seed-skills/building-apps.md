@@ -304,7 +304,25 @@ window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes — for sync logic only, never rendered as UI
 ```
 
-Conflict policy is last-write-wins per path; where a lost edit would matter, store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber. `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
+Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
+
+### Concurrent writers — compare-and-swap, not last-write-wins
+
+`set()` is last-write-wins: the last PUT clips whatever landed between your read and your write. That silently drops edits on any file **several writers touch** — the agent (a chat turn) + cron + the open UI all appending to one `topics.txt`, `index.json`, or a per-day log. When more than one writer shares a mutable file, compare-and-swap instead:
+
+```jsx
+// read the value AND its server version, merge, then write conditionally
+const { value, version } = await window.mobius.storage.getWithVersion('index.json')
+const next = mergeInMyItem(value || [])   // YOUR merge — add your item, don't overwrite theirs
+try {
+  await window.mobius.storage.durableWrite('index.json', next, { ifMatch: version })
+} catch (e) {
+  if (e.code === 'conflict') { /* someone wrote first — re-read (getWithVersion) and retry */ }
+  else throw e
+}
+```
+
+`durableWrite({ ifMatch: version })` sends the version as an `If-Match`; the server rejects a stale write with a `DurableWriteError` whose `code === 'conflict'` (`retryable: true`). The runtime does NOT loop for you — you own the merge, so re-read and retry on conflict. For a create-only write pass `{ ifNoneMatch: true }` (conflicts if the path already exists). If the data is naturally per-record, one file per record sidesteps contention entirely — reach for CAS only when writers genuinely share one file. (A React list document can let `window.mobius.createUseDocument(React)`'s `useDocument(path, {mode:'cas'})` do the read-merge-retry for you.)
 
 **Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes (the Workout current-session card was the case). If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
 
@@ -757,6 +775,8 @@ useEffect(() => {
   window.mobius.chat({
     mount,
     persist: 'chat_id.json',   // create the app-chat ONCE, save its id here, reuse it forever
+    scope: 'workout-session:session-123', // optional: list/switch/new chats in this app-defined group
+    scopeLabel: 'Workout Jul 11', // optional label for the scoped chat picker
     systemPrompt,              // shapes the chat on create + re-applies on resume
     picker: false,             // hide the provider/effort picker inside the app sheet
     onTurnDone: () => refresh(),   // a turn finished — reload app state
@@ -770,6 +790,10 @@ useEffect(() => {
 - `persist` makes the helper create the chat the first time and **reuse the same
   one** on every later mount (PATCHing `systemPrompt` on resume) — the persistent
   transcript the user expects. Omit it only for a throwaway chat.
+- `scope` gives the embed a compact chat picker plus a new-chat button for that
+  app-defined group. Pair it with a scope-specific `persist` key when the app
+  wants one remembered chat per domain object, such as one chat per workout
+  session.
 - `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
   embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
 - **Viewer variant:** to display an EXISTING chat the app didn't create (e.g. a

@@ -4204,3 +4204,303 @@ def test_multifile_update_deletes_dropped_sibling(
   assert r3.json()["mode"] == "update"
   assert r3.json()["divergence"] != "conflict"
   assert r3.json()["conflict_paths"] == []
+
+
+# --------------------------------------------------------------------------
+# GET /{app_id}/update-check — read-only, git-native update detection.
+#
+# Content-compares the CURRENT upstream source (fetched the same way install
+# does) against the pristine `upstream` branch the last install recorded, so a
+# push that changed code WITHOUT bumping the version still reads as an update.
+# --------------------------------------------------------------------------
+
+
+def _install_with_sources(client, auth, base, manifest, jsx, sources):
+  """Install a manifest whose `source_files` need extra fetched bytes.
+
+  `_install_v1` only maps the entry/icon/seed/job set; a multi-file manifest
+  also has to serve each declared source_files sibling, which this adds."""
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  for rel, data in sources.items():
+    responses[base + rel] = (200, data if isinstance(data, bytes) else data.encode())
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def _check_responses(base, manifest, jsx, sources=None, job=b""):
+  """Response map for the upstream fetch a GET /update-check performs.
+
+  update-check fetches ONLY tracked source — the manifest, the entry, declared
+  source_files, and the job — never the icon or storage seeds, so only those
+  are mapped (a stray unmapped fetch would 404 → degrade to unknown)."""
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+  }
+  sched = manifest.get("schedule")
+  if isinstance(sched, dict) and sched.get("job"):
+    responses[base + sched["job"]] = (200, job)
+  for rel, data in (sources or {}).items():
+    responses[base + rel] = (200, data if isinstance(data, bytes) else data.encode())
+  return responses
+
+
+def _update_check(client, headers, base, app_id, manifest, jsx, sources=None, job=b""):
+  responses = _check_responses(base, manifest, jsx, sources=sources, job=job)
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.get(f"/api/apps/{app_id}/update-check", headers=headers)
+
+
+def test_update_check_unchanged_upstream_is_false(
+  client, auth, bypass_url_validation,
+):
+  """Byte-identical upstream → update_available is a real False, not null."""
+  base = "https://uc-unchanged.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-unchanged"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  res = _update_check(client, auth, base, app_id, m, JSX)
+  assert res.status_code == 200, res.text
+  payload = res.json()
+  assert payload["update_available"] is False
+  assert payload["upstream_version"] == "1.0.0"
+  assert payload["local_version"] == "1.0.0"
+  assert payload["checked_at"]
+
+
+def test_update_check_changed_file_is_true(
+  client, auth, bypass_url_validation,
+):
+  """A changed entry byte upstream → update_available True."""
+  base = "https://uc-changed.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-changed"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  res = _update_check(
+    client, auth, base, app_id, m, JSX.replace("ok", "CHANGED"),
+  )
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is True
+
+
+def test_update_check_version_unchanged_content_changed_is_true(
+  client, auth, bypass_url_validation,
+):
+  """The whole point: version string identical, content changed → True."""
+  base = "https://uc-samever.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-samever"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  # Same manifest (same version "1.0.0"), different entry bytes.
+  res = _update_check(
+    client, auth, base, app_id, m, JSX.replace("ok", "SILENT PUSH"),
+  )
+  assert res.status_code == 200, res.text
+  payload = res.json()
+  assert payload["update_available"] is True
+  assert payload["upstream_version"] == payload["local_version"] == "1.0.0"
+
+
+def test_update_check_added_file_is_true(
+  client, auth, bypass_url_validation,
+):
+  """A new source_files sibling upstream → update_available True."""
+  base = "https://uc-added.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-added"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  m2 = {**m, "source_files": ["helper.js"]}
+  res = _update_check(
+    client, auth, base, app_id, m2, JSX,
+    sources={"helper.js": b"export const x = 1\n"},
+  )
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is True
+
+
+def test_update_check_removed_file_is_true(
+  client, auth, bypass_url_validation,
+):
+  """A source file dropped from the manifest upstream → update_available True."""
+  base = "https://uc-removed.test/repo/"
+  m1 = {**MANIFEST_NEWS, "id": "uc-removed", "source_files": ["helper.js"]}
+  r1 = _install_with_sources(
+    client, auth, base, m1, JSX, {"helper.js": b"export const x = 1\n"},
+  )
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  # Upstream drops the sibling — same entry bytes, no more source_files.
+  m2 = {**MANIFEST_NEWS, "id": "uc-removed"}
+  res = _update_check(client, auth, base, app_id, m2, JSX)
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is True
+
+
+def test_update_check_no_manifest_url_is_null(client, auth, db, tmp_path):
+  """An app with no manifest_url can't be checked git-natively → null."""
+  from app import models
+  app = models.App(
+    name="uc-nomani", description="", jsx_source="export default () => null",
+    source_dir=str(tmp_path / "nomani"), slug="uc-nomani",
+    manifest_url=None, version="3.0.0",
+    cross_app_access="none", share_with_apps="none",
+    offline_capable=False, manage_apps=False,
+  )
+  db.add(app)
+  db.commit()
+
+  res = client.get(f"/api/apps/{app.id}/update-check", headers=auth)
+  assert res.status_code == 200, res.text
+  payload = res.json()
+  assert payload["update_available"] is None
+  # Version still flows through so the caller can fall back to comparing it.
+  assert payload["local_version"] == "3.0.0"
+  assert payload["upstream_version"] is None
+
+
+def test_update_check_no_git_repo_is_null(client, auth, db, tmp_path):
+  """A manifest_url'd app whose source_dir isn't a git repo → null."""
+  from app import models
+  plain = tmp_path / "norepo"
+  plain.mkdir()
+  app = models.App(
+    name="uc-norepo", description="", jsx_source="export default () => null",
+    source_dir=str(plain), slug="uc-norepo",
+    manifest_url="https://uc-norepo.test/repo#manifest-id=uc-norepo",
+    version="1.0.0",
+    cross_app_access="none", share_with_apps="none",
+    offline_capable=False, manage_apps=False,
+  )
+  db.add(app)
+  db.commit()
+
+  res = client.get(f"/api/apps/{app.id}/update-check", headers=auth)
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is None
+
+
+def test_update_check_no_upstream_branch_is_null(client, auth, db, tmp_path):
+  """A git repo with no recorded `upstream` branch → null (nothing to diff)."""
+  from app import models
+  repo = tmp_path / "bare-repo"
+  repo.mkdir()
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  app = models.App(
+    name="uc-noups", description="", jsx_source="export default () => null",
+    source_dir=str(repo), slug="uc-noups",
+    manifest_url="https://uc-noups.test/repo#manifest-id=uc-noups",
+    version="1.0.0",
+    cross_app_access="none", share_with_apps="none",
+    offline_capable=False, manage_apps=False,
+  )
+  db.add(app)
+  db.commit()
+
+  res = client.get(f"/api/apps/{app.id}/update-check", headers=auth)
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is None
+
+
+def test_update_check_network_failure_degrades_to_null(
+  client, auth, bypass_url_validation,
+):
+  """An unreachable upstream is a 200 + null (store open must degrade)."""
+  base = "https://uc-netfail.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-netfail"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  # Empty response map → every fetch 404s → fetch_upstream_source raises →
+  # the route swallows it and returns unknown rather than erroring.
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({}),
+  ):
+    res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is None
+
+
+def test_update_check_unknown_app_id_is_404(client, auth):
+  """A genuinely invalid request keeps its normal HTTP error — not a degrade."""
+  res = client.get("/api/apps/9999999/update-check", headers=auth)
+  assert res.status_code == 404, res.text
+
+
+def test_update_check_rejects_ordinary_app_token_for_other_app(
+  client, db, auth, bypass_url_validation,
+):
+  """App tokens without manage_apps cannot check another app — mirrors preview."""
+  from app.auth import create_access_token
+  base = "https://uc-denied.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-denied-target"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  target_app_id = r1.json()["id"]
+
+  caller_app_id = _seed_app_with_perms(
+    db, perms_cross_write="none", manage_apps=False,
+  )
+  db.commit()
+  token = create_access_token({
+    "sub": "test", "scope": "app", "app_id": caller_app_id,
+  })
+
+  res = client.get(
+    f"/api/apps/{target_app_id}/update-check",
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert res.status_code == 403, res.text
+  assert "manage_apps" in res.json()["detail"]
+
+
+def test_update_check_accepts_app_token_with_manage_apps_for_other_app(
+  client, db, auth, bypass_url_validation,
+):
+  """A manage_apps token (the App Store) may check apps it manages."""
+  from app.auth import create_access_token
+  base = "https://uc-manager.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-manager-target"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  target_app_id = r1.json()["id"]
+
+  manager_app_id = _seed_app_with_perms(
+    db, perms_cross_write="none", manage_apps=True,
+  )
+  db.commit()
+  token = create_access_token({
+    "sub": "test", "scope": "app", "app_id": manager_app_id,
+  })
+
+  res = _update_check(
+    client, {"Authorization": f"Bearer {token}"}, base, target_app_id, m, JSX,
+  )
+  assert res.status_code == 200, res.text
+  payload = res.json()
+  assert payload["update_available"] is False
+  assert payload["upstream_version"] == "1.0.0"

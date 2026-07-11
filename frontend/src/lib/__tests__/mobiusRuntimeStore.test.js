@@ -475,6 +475,108 @@ test('412 CAS conflict is retryable and does not emit dead-letter', async () => 
   unsub()
 })
 
+// ── Compare-and-swap: getWithVersion + conditional durableWrite ────────────
+
+test('getWithVersion returns the value AND its server version (ETag)', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('index.json', [{ id: 'a' }])
+
+  const { value, version } = await s.getWithVersion('index.json')
+  assert.deepEqual(value, [{ id: 'a' }])
+  assert.equal(typeof version, 'string')
+  assert.ok(version.length > 0)               // the ETag the server handed back
+
+  // The versioned read opted in with X-Mobius-Version:1 (that's what makes the
+  // server echo the ETag) — a plain get() must NOT, so it stays a cheap read.
+  const vget = server.log.filter((e) => e.method === 'GET' && e.url.includes('index.json')).pop()
+  assert.equal(vget.headers['X-Mobius-Version'], '1')
+})
+
+test('durableWrite({ifMatch}) sends If-Match and succeeds when the version matches', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('doc.json', { n: 0 })
+
+  const { version } = await s.getWithVersion('doc.json')
+  const r = await s.durableWrite('doc.json', { n: 1 }, { ifMatch: version })
+
+  assert.equal(r.durability, 'synced')
+  assert.deepEqual(server.serverValue('doc.json'), { n: 1 })
+  // The conditional write carried the held version as an If-Match precondition.
+  const put = server.log.filter((e) => e.method === 'PUT' && e.url.includes('doc.json')).pop()
+  assert.equal(put.headers['If-Match'], version)
+  // ...and the accepted write returns the NEW version for the next CAS round.
+  assert.equal(typeof r.version, 'string')
+  assert.notEqual(r.version, version)
+})
+
+test('a stale ifMatch surfaces as a retryable conflict; a re-read + retry lands both edits', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const { DurableWriteError } = await runtimeExports()
+  server.seed('topics.json', [{ t: 'a' }])
+
+  // We read at version V1, then a CONCURRENT writer (cron/agent) moves the ETag.
+  const first = await s.getWithVersion('topics.json')
+  server.seed('topics.json', [{ t: 'a' }, { t: 'cron' }])   // now at V2 on the server
+
+  // Our conditional write on the stale V1 is rejected as a retryable conflict,
+  // NOT silently last-write-wins (which would drop the cron edit).
+  await assert.rejects(
+    () => s.durableWrite('topics.json', [{ t: 'a' }, { t: 'ui' }], { ifMatch: first.version }),
+    (err) => err instanceof DurableWriteError &&
+      err.code === 'conflict' &&
+      err.status === 412 &&
+      err.retryable === true,
+  )
+  assert.equal(await s.pendingCount(), 0)                    // the conflicted op is not stuck
+  // The server still holds the concurrent writer's value — our stale write never landed.
+  assert.deepEqual(server.serverValue('topics.json'), [{ t: 'a' }, { t: 'cron' }])
+
+  // The app owns the retry: re-read at the fresh version, merge, write again.
+  const second = await s.getWithVersion('topics.json')
+  assert.notEqual(second.version, first.version)
+  const merged = [...second.value, { t: 'ui' }]
+  const r = await s.durableWrite('topics.json', merged, { ifMatch: second.version })
+
+  assert.equal(r.durability, 'synced')
+  // Both edits survive — the whole point of CAS over last-write-wins.
+  assert.deepEqual(server.serverValue('topics.json'), [{ t: 'a' }, { t: 'cron' }, { t: 'ui' }])
+})
+
+test('ifNoneMatch:true is a create-only write that conflicts when the path already exists', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const { DurableWriteError } = await runtimeExports()
+
+  const created = await s.durableWrite('new.json', { first: true }, { ifNoneMatch: true })
+  assert.equal(created.durability, 'synced')
+  assert.deepEqual(server.serverValue('new.json'), { first: true })
+
+  await assert.rejects(
+    () => s.durableWrite('new.json', { clobber: true }, { ifNoneMatch: true }),
+    (err) => err instanceof DurableWriteError && err.code === 'conflict' && err.status === 412,
+  )
+  assert.deepEqual(server.serverValue('new.json'), { first: true })   // not clobbered
+})
+
+test('plain set()/durableWrite (last-write-wins) send NO If-Match — CAS is opt-in', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+
+  await s.set('plain.json', { a: 1 })
+  await s.durableWrite('plain2.json', { b: 2 })
+
+  assert.deepEqual(server.serverValue('plain.json'), { a: 1 })
+  assert.deepEqual(server.serverValue('plain2.json'), { b: 2 })
+  for (const name of ['plain.json', 'plain2.json']) {
+    const put = server.log.filter((e) => e.method === 'PUT' && e.url.includes(name)).pop()
+    assert.equal(put.headers['If-Match'], undefined)
+    assert.equal(put.headers['If-None-Match'], undefined)
+  }
+})
+
 test('onDeadLetter replays an offline-queued write later refused on drain', async () => {
   const { server } = freshEnv()
   const s = await newStorage()

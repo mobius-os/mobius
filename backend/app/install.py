@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import warnings as _warnings_mod
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -1585,6 +1586,85 @@ def _check_source_completeness(
       422,
       f"{app_name} has an incomplete `source_files` manifest — {detail}",
     )
+
+
+@dataclass
+class FetchedUpstream:
+  """The manifest + source bytes install would record, fetched read-only.
+
+  `source_files` and `job_bytes` mirror what `install_from_manifest` records on
+  the per-app `upstream` branch — the entry, its declared sibling modules, and
+  the schedule job script. The entry name the manifest declares is carried
+  separately in `manifest["entry"]` so the caller can key the entry the way the
+  recorded tree does (synthetic installs record it as "index.jsx"; a cloned
+  repo keys it by its repo path)."""
+  manifest: dict
+  entry_bytes: bytes
+  source_files: dict[str, bytes]
+  job_name: str | None
+  job_bytes: bytes | None
+
+
+async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
+  """Fetch a manifest and its source files read-only — no install, DB, or git.
+
+  The read-only twin of `install_from_manifest`'s fetch phase: GET the manifest
+  at `manifest_url`, then the entry JSX, every declared `source_files` sibling,
+  and the schedule job script — exactly the files install records on the
+  per-app `upstream` branch. Reuses the same `_http_get` (SSRF-validated,
+  size-capped, manual-redirect) and `_validate_manifest` that install uses, so
+  the fetched bytes match install's byte-for-byte and a later content compare
+  against the recorded upstream tree is apples-to-apples.
+
+  Storage seeds, static assets, and the icon are deliberately NOT fetched: none
+  of them are tracked source (seeds land in the id-keyed storage tree, static
+  assets under gitignored `static/`, the icon as a processed PNG), so they never
+  appear on the `upstream` branch an update-check compares against.
+
+  Raises HTTPException on any fetch or validation failure. The caller decides
+  whether that is a hard error or a degrade-to-unknown."""
+  # follow_redirects=False — _http_get walks the chain manually so every hop is
+  # re-validated against SSRF, matching install_from_manifest's client setup.
+  async with httpx.AsyncClient(
+    timeout=_HTTP_TIMEOUT, follow_redirects=False,
+  ) as cli:
+    raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
+    try:
+      manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+      raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
+    _validate_manifest(manifest)
+    raw_base = _normalize_raw_base(_derive_raw_base(manifest_url))
+
+    entry_bytes = await _http_get(
+      cli, raw_base + manifest["entry"], _ENTRY_MAX_BYTES,
+    )
+
+    source_files: dict[str, bytes] = {}
+    source_files_total = 0
+    for rel in manifest.get("source_files") or []:
+      data = await _http_get(cli, raw_base + rel, _ENTRY_MAX_BYTES)
+      source_files_total += len(data)
+      if source_files_total > _SOURCE_FILES_TOTAL_MAX:
+        raise HTTPException(
+          400,
+          f"Manifest source_files exceed {_SOURCE_FILES_TOTAL_MAX} bytes total.",
+        )
+      source_files[rel] = data
+
+    sched = manifest.get("schedule")
+    job_name = sched.get("job") if isinstance(sched, dict) else None
+    job_bytes: bytes | None = None
+    if job_name:
+      job_bytes = await _http_get(cli, raw_base + job_name, _ENTRY_MAX_BYTES)
+
+  return FetchedUpstream(
+    manifest=manifest,
+    entry_bytes=entry_bytes,
+    source_files=source_files,
+    job_name=job_name,
+    job_bytes=job_bytes,
+  )
 
 
 async def install_from_manifest(
