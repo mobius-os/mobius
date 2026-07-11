@@ -863,6 +863,150 @@ def _materialize_conflict_files(
     shutil.rmtree(tmp_parent, ignore_errors=True)
 
 
+def _fetched_differs_from_upstream(
+  repo: Path,
+  fetched_tree: dict[str, bytes],
+  cloned: bool,
+  non_source: frozenset[str],
+) -> bool:
+  """Whether the freshly-fetched upstream source differs from what the app
+  recorded on its `upstream` branch — the git-native update signal.
+
+  Reads the pristine `upstream` tree via git cat-file (`read_ref_tree`), which
+  only reads objects — it never touches the index or working tree, so this is
+  safe to call on every store open. Any fetched file that is new (absent
+  upstream) or whose bytes changed means upstream moved, which catches a code
+  push that forgot to bump the version.
+
+  Removal is only inferable for a SYNTHETIC install: there the recorded upstream
+  tree is exactly the declared source set, so a source file present upstream but
+  gone from the fetch is a genuine removal. A CLONED (real-origin) repo's
+  upstream tree also holds repo-native non-source files (README, the manifest,
+  the repo's own .gitignore) that were never part of the fetched declared set,
+  so a raw set-diff there would false-flag every catalog app — only added and
+  changed content is compared for those.
+  """
+  upstream_tree = app_git.read_ref_tree(repo, app_git.UPSTREAM_BRANCH)
+  for rel, data in fetched_tree.items():
+    if upstream_tree.get(rel) != data:
+      return True
+  if not cloned:
+    upstream_source = {
+      rel for rel in upstream_tree if rel not in non_source
+    }
+    if upstream_source - set(fetched_tree):
+      return True
+  return False
+
+
+@router.get(
+  "/{app_id}/update-check",
+  response_model=schemas.UpdateCheckOut,
+)
+async def update_check(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read-only, git-native update detection for an installed app.
+
+  Content-compares the app's CURRENT upstream source (fetched the same way
+  install does) against the pristine `upstream` branch the last install
+  recorded, so a push that changed code WITHOUT bumping the version string
+  still surfaces as an update. Strictly read-only — no working-tree mutation,
+  no `record_upstream`, no DB write — which is what makes it safe to call on
+  every store open.
+
+  `update_available` is null (unknown) whenever the compare can't run — no
+  `manifest_url`, no git repo, no recorded upstream branch, or the upstream
+  fetch failed — and the caller then falls back to version comparison. A store
+  open must degrade, not error, so a network failure is a 200 with null rather
+  than a 5xx; only a genuinely invalid request (unknown app id) keeps its normal
+  HTTP error.
+  """
+  # Mirror update-preview's trust boundary exactly: an app token may check its
+  # OWN app; an App-Store-style manager token (manage_apps) may check other
+  # apps; the owner (app_id is None) may check any.
+  if principal.app_id is not None and principal.app_id != app_id:
+    caller = (
+      db.query(models.App)
+      .filter(models.App.id == principal.app_id)
+      .first()
+    )
+    if caller is None:
+      raise HTTPException(status_code=401, detail="App not found.")
+    if not bool(caller.manage_apps):
+      raise HTTPException(
+        status_code=403,
+        detail=(
+          "This app needs permissions.manage_apps=true in its manifest "
+          "to check updates for other apps."
+        ),
+      )
+  from app import install
+
+  app = live_app_or_404(db, app_id)
+  checked_at = datetime.now(UTC)
+  local_version = app.version
+
+  def _unknown() -> schemas.UpdateCheckOut:
+    # Null is "we can't tell git-natively" — NOT an error. The caller falls back
+    # to version comparison. Shared by every precondition-miss + fetch failure.
+    return schemas.UpdateCheckOut(
+      update_available=None,
+      upstream_version=None,
+      local_version=local_version,
+      checked_at=checked_at,
+    )
+
+  if not app.manifest_url or not app.source_dir:
+    return _unknown()
+  repo = Path(app.source_dir)
+  if not app_git.is_repo(repo) or not app_git.ref_exists(
+    repo, app_git.UPSTREAM_BRANCH,
+  ):
+    return _unknown()
+
+  # Reconstruct the fetchable manifest URL from the stored canonical identity
+  # key (`<base>#manifest-id=<id>`): the raw manifest lives at <base>/mobius.json,
+  # exactly where a store-driven update re-fetches it.
+  base = install._canonical_base(app.manifest_url)
+  fetch_manifest_url = base + "/mobius.json"
+  try:
+    fetched = await install.fetch_upstream_source(fetch_manifest_url)
+  except HTTPException:
+    # Upstream unreachable / rate-limited / now-invalid — degrade to unknown so
+    # a store open never errors on a transient network failure.
+    return _unknown()
+
+  # Build the fetched source tree the way install records it on `upstream`. A
+  # synthetic install keys the entry as "index.jsx" regardless of the manifest's
+  # entry name; a cloned (real-origin) repo keys files by their repo paths, so
+  # the entry sits under manifest["entry"] there.
+  cloned = await asyncio.to_thread(app_git.has_origin, repo)
+  entry_key = fetched.manifest["entry"] if cloned else "index.jsx"
+  fetched_tree: dict[str, bytes] = {entry_key: fetched.entry_bytes}
+  fetched_tree.update(fetched.source_files)
+  if fetched.job_name and fetched.job_bytes is not None:
+    fetched_tree[fetched.job_name] = fetched.job_bytes
+
+  # Hold the source-dir lock only around the git read so a concurrent installer's
+  # record_upstream can't move the `upstream` ref mid-read. The read itself
+  # (read_ref_tree = ls-tree + cat-file) never touches the index or working tree.
+  async with fs_locks.source_dir_lock(str(repo)):
+    update_available = await asyncio.to_thread(
+      _fetched_differs_from_upstream,
+      repo, fetched_tree, cloned, install._MERGED_NON_SOURCE,
+    )
+
+  return schemas.UpdateCheckOut(
+    update_available=update_available,
+    upstream_version=fetched.manifest.get("version"),
+    local_version=local_version,
+    checked_at=checked_at,
+  )
+
+
 @router.get(
   "/{app_id}/update-preview",
   response_model=schemas.UpdatePreviewOut,
