@@ -2867,6 +2867,32 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
     log.debug("sync_chat_title failed", exc_info=True)
 
 
+# Fallback viewport for turns no shell initiated (cron, reflection,
+# background continuations spawned by apps.py / platform_update.py).
+# 412x915 is the owner's PWA size — the shape screenshots should default
+# to when no real client viewport exists for the turn.
+DEFAULT_VIEWPORT_WIDTH = 412
+DEFAULT_VIEWPORT_HEIGHT = 915
+
+
+def viewport_env(viewport: dict | None) -> dict[str, str]:
+  """Returns the VIEWPORT_* env vars for an agent turn.
+
+  The React shell sends `{width, height}` with every message POST and
+  agent-screenshot.sh hard-requires both vars (deliberately strict — it
+  is the guard that surfaced the missing-viewport bug). Shell-less turns
+  have no sender, so a missing or malformed viewport falls back to the
+  documented default instead of leaving the vars unset and failing every
+  screenshot in those contexts.
+  """
+  vp_w = (viewport or {}).get("width")
+  vp_h = (viewport or {}).get("height")
+  if not (vp_w and vp_h):
+    vp_w = DEFAULT_VIEWPORT_WIDTH
+    vp_h = DEFAULT_VIEWPORT_HEIGHT
+  return {"VIEWPORT_WIDTH": str(vp_w), "VIEWPORT_HEIGHT": str(vp_h)}
+
+
 async def _run_chat_impl(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -3134,12 +3160,9 @@ async def _run_chat_impl(
   # Partner viewport (sent by the React shell on each turn). The agent
   # uses these when taking screenshots so the framing matches what the
   # partner actually sees — preview_shell.sh reads them, mini-app
-  # screenshots in the seed/skill recipes use them.
-  vp_w = (viewport or {}).get("width")
-  vp_h = (viewport or {}).get("height")
-  if vp_w and vp_h:
-    base_env["VIEWPORT_WIDTH"] = str(vp_w)
-    base_env["VIEWPORT_HEIGHT"] = str(vp_h)
+  # screenshots in the seed/skill recipes use them. Always set: shell-less
+  # turns get the documented 412x915 default (see viewport_env).
+  base_env.update(viewport_env(viewport))
   # Per-chat persistent Chrome profile for agent-browser. Default
   # (no AGENT_BROWSER_PROFILE) spins up a fresh ephemeral profile per
   # invocation — no SW registered, no warm cache, no localStorage
