@@ -28,6 +28,10 @@ import {
   withoutBuiltAppForChat,
 } from './builtAppState.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
+import {
+  reloadWhenWorkerTakesOver,
+  shouldRearmShellApply,
+} from './swHandoff.js'
 import './Shell.css'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -194,19 +198,28 @@ export default function Shell() {
       try { sessionStorage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
     }
 
-    // Hand control to the waiting worker (if any) at THIS idle moment. No
-    // waiting worker (unchanged sw.js, e.g. a backend-only rebuild) → the reload
-    // alone re-fetches the current generation. The SW skips-waiting only on this
-    // message, never on its own. Fire-and-forget: the reload below (220ms — a
-    // touch longer than the plain-reload delay to give skipWaiting→activate room
-    // before the navigation adopts the new worker) is the durable apply, and the
-    // mount-time pickup + stale-precache recovery self-heal a lost handoff race.
+    // Hand control to the waiting worker (if any) and reload only once it has
+    // actually TAKEN OVER — the waiting worker reaching 'activated' (or a
+    // controllerchange), with a bounded fallback if the SW wedges. A blind
+    // ~220ms timer here used to reload before skipWaiting()->activate finished
+    // on a client's first update cycle, so the navigation was answered by the
+    // OUTGOING worker's precache and the page came back on the old generation
+    // and stuck (feature 207). No waiting worker (unchanged sw.js, e.g. a
+    // backend-only rebuild) → reload immediately: the reload alone re-fetches
+    // the current generation. The boot-time re-arm net (shouldRearmShellApply,
+    // mount effect below) still catches a stale landing if the fallback fires.
+    const doReload = () => window.location.reload()
     if (navigator.serviceWorker?.getRegistration) {
       navigator.serviceWorker.getRegistration()
-        .then(reg => reg?.waiting?.postMessage({ type: 'SKIP_WAITING' }))
-        .catch(() => {})
+        .then(reg => reloadWhenWorkerTakesOver({
+          registration: reg,
+          serviceWorker: navigator.serviceWorker,
+          reload: doReload,
+        }))
+        .catch(doReload)
+    } else {
+      doReload()
     }
-    setTimeout(() => window.location.reload(), 220)
   }
 
   function shellReloadWouldDisruptUser() {
@@ -771,9 +784,11 @@ export default function Shell() {
   // boot-time stale-precache flag. Route it through the SAME hold-until-idle
   // path as a live shell_rebuilt (requestShellReload → apply if idle, else hold
   // the reload until the running turn ends). This recovers a lost apply race:
-  // the SW generation that installed just after an earlier apply signal, or a
-  // stale precache the boot check spotted. Gate on a live-confirmed chats list
-  // so streamingChatIds reflects any running background turn — a cold mount's
+  // the SW generation that installed just after an earlier apply signal, a
+  // stale precache the boot check spotted, or an ACTIVE worker newer than the
+  // page's controller (feature 207 — reg.waiting is null in that settled
+  // state, so a waiting-only check misses it). Gate on a live-confirmed chats
+  // list, so streamingChatIds reflects any running background turn — a cold mount's
   // empty pre-fetch list would otherwise read as idle and reload straight
   // through a reconnecting turn. Runs at most once per mount.
   useEffect(() => {
@@ -783,14 +798,19 @@ export default function Shell() {
     ;(async () => {
       let flagged = false
       try { flagged = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-      let waiting = false
+      let rearm = flagged
       if (navigator.serviceWorker?.getRegistration) {
         try {
           const reg = await navigator.serviceWorker.getRegistration()
-          waiting = !!reg?.waiting
+          rearm = shouldRearmShellApply({
+            stalePrecacheFlagged: flagged,
+            waiting: reg?.waiting || null,
+            active: reg?.active || null,
+            controller: navigator.serviceWorker.controller || null,
+          })
         } catch { /* ignore */ }
       }
-      if (cancelled || (!flagged && !waiting)) return
+      if (cancelled || !rearm) return
       shellUpdatePickupRef.current = true
       // requestShellReload reads streaming/view state from refs at call time, so
       // the captured closure is fresh even though it isn't in this effect's deps.
