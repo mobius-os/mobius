@@ -9,6 +9,7 @@ import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
+import { formatResetTime } from './resetTime.js'
 
 
 function thoughtSeconds(durationMs) {
@@ -21,17 +22,6 @@ function thoughtLine(durationMs) {
   const seconds = thoughtSeconds(durationMs)
   if (!seconds) return '> Thought'
   return `> Thought for ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
-}
-
-
-// A provider-limit park block carries `parked_until` as an explicit-UTC ISO
-// string; render it as the viewer's LOCAL clock time ("1:40 AM"). Returns null
-// on a missing / unparseable value so the card degrades to just the message.
-function formatResetTime(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return null
-  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
 
@@ -199,20 +189,40 @@ function MsgContentInner({
           ? formatResetTime(block.parked_until)
           : null
         const parked = !!block.parked_until
+        // A drain-gated restart or a stall is a benign maintenance pause, not a
+        // failure; the backend marks it with `pause_kind` (design §2.2). Both a
+        // park and a benign pause read as WAIT states, so they get the soft
+        // `.chat__text--parked` treatment and a calm label — "Rate limit" keeps
+        // the honest, specific name a park deserves; a restart/stall reads
+        // "Paused". The danger-red "Error" card is reserved for genuine
+        // failures. Old persisted blocks predate `pause_kind` and, absent a
+        // `parked_until`, fall back to today's error rendering.
+        const benign = parked || !!block.pause_kind
+        const label = parked
+          ? 'Rate limit'
+          : (block.pause_kind ? 'Paused' : 'Error')
         return (
           <div
             key={i}
-            className={`chat__text--error${parked ? ' chat__text--parked' : ''}`}
+            className={`chat__text--error${benign ? ' chat__text--parked' : ''}`}
             role="alert"
           >
-            <span className="chat__error-label">
-              {parked ? 'Rate limit' : 'Error'}
-            </span>
+            <span className="chat__error-label">{label}</span>
             <StandardMarkdown
               text={block.message || 'The agent ran into an issue.'}
             />
             {parked && resetLabel && (
-              <div className="chat__parked-reset">Resets at {resetLabel}</div>
+              <div className="chat__parked-reset">Resets {resetLabel}</div>
+            )}
+            {parked && resetLabel && (
+              // Reassure that the wait resolves on its own: a reset push is
+              // coming. Tapping Resume now before the reset just re-parks (the
+              // provider limit is still in force), so name that honestly rather
+              // than letting the button look broken.
+              <div className="chat__parked-note">
+                You'll get a notification when it resets — or tap Resume now to
+                try sooner (it may pause again).
+              </div>
             )}
             {resumable && (
               <button

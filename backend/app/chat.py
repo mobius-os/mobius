@@ -568,8 +568,8 @@ _clear_after_terminal_generation: dict[str, int] = {}
 # Liveness watchdog. Derived-only in v1: no persisted run-state enum.
 PROGRESS_TIMEOUT = 600.0
 STALLED_TURN_MESSAGE = (
-  "The turn stalled (no activity for 10 minutes) and was stopped — your "
-  "message is preserved; send again to resume."
+  "The turn stalled (no activity for 10 minutes) and was stopped. Your "
+  "message is safe — tap Resume to pick up where it left off."
 )
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
@@ -1027,7 +1027,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     try:
       queued = len(chat.pending_messages or [])
       msgs = list(chat.messages or [])
-      note = "The previous turn was interrupted (the server restarted)."
+      note = "This turn was paused when Möbius restarted."
       if queued:
         # The queue is PRESERVED across the restart (it is NOT cleared
         # below); it drains on the next send. Tell the user it is still
@@ -1045,7 +1045,14 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       # note for the one-tap Resume affordance (MsgContent renders a Resume
       # button on a resumable interrupt note); every interrupted turn — crash
       # or drain-gated restart — is resumable via a fresh "continue" send.
-      err_block = {"type": "error", "message": note, "resumable": True}
+      # `pause_kind` marks this as a benign restart pause (not a failure) so the
+      # card renders in the calm "Paused" family rather than the danger-red
+      # error styling — a restart is a maintenance event, not something the
+      # turn did wrong.
+      err_block = {
+        "type": "error", "message": note, "resumable": True,
+        "pause_kind": "restart",
+      }
       if msgs and msgs[-1].get("role") == "assistant":
         blocks = list(msgs[-1].get("blocks") or [])
         finalize_blocks(blocks)
@@ -1412,12 +1419,16 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
     if sink is not None:
       sink.publish({
         "type": "error", "message": STALLED_TURN_MESSAGE, "resumable": True,
+        # A stall is a benign timeout, not a failure — `pause_kind` renders it
+        # in the calm "Paused" family rather than the danger-red error card.
+        "pause_kind": "stall",
       })
     elif bc is not None:
       # Transport-only fallback for the rare inconsistent state where a handle
       # is live but chat.py no longer has its sink. Do not persist directly.
       bc.publish({
         "type": "error", "message": STALLED_TURN_MESSAGE, "resumable": True,
+        "pause_kind": "stall",
       })
       log.warning(
         "stalled-live watchdog has no active sink for chat_id=%s; "
@@ -1505,6 +1516,10 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
   # the crash-path fallback for a note that never made it through the sink.
   note = {
     "type": "error", "message": PAUSED_FOR_RESTART_MESSAGE, "resumable": True,
+    # A drain-gated restart is a benign maintenance pause; `pause_kind` lets the
+    # card render in the calm "Paused" family instead of the danger-red error
+    # styling reserved for genuine failures.
+    "pause_kind": "restart",
   }
   for chat_id in sorted(registry.all_alive_chat_ids()):
     handles = registry.get_handles(chat_id)

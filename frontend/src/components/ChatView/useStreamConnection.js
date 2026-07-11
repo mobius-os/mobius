@@ -887,6 +887,7 @@ export default function useStreamConnection(chatId, {
                 ...(event.resumable ? { resumable: true } : {}),
                 ...(event.parked_until ? { parked_until: event.parked_until } : {}),
                 ...(event.park_reason ? { park_reason: event.park_reason } : {}),
+                ...(event.pause_kind ? { pause_kind: event.pause_kind } : {}),
               })
               return updated
             })
