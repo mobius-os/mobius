@@ -30,6 +30,7 @@ import {
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
   previewReadyAnnouncement,
+  resolveFreshPinRetarget,
   resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
   shouldShowOpenAppCta,
@@ -1657,6 +1658,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       isFirstUserMsg,
       wasNearScrollBottom: wasNearContentBottomAtSubmit,
     })
+    // The first rendered row uses this optimistic ts, but the backend often
+    // returns a canonical server ts a moment later. Carry the send-time intent
+    // across that swap so the "new sent message at the top" pin does not point
+    // at a removed optimistic DOM node on fast second sends / start races.
+    const freshPinIntent = makeSendPinIntent(willPin)
 
     const userMsg = { role: 'user', content: text, ts: Date.now(), optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
@@ -1743,12 +1749,30 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             pendingQueue.promoteManyByTs(result.message._consumed_ts)
           }
           const startedMessages = startedMessagesFromResponse(result)
+          const freshPin = resolveFreshPinRetarget({
+            startedMessages,
+            fallbackTs: userMsg.ts,
+            willPin,
+            pinIntent: freshPinIntent,
+            pinIntentStillCurrent,
+          })
+          if (freshPin.shouldPin) {
+            setSpacerActive(true)
+            if (spacerRef.current) spacerRef.current.style.height = '0px'
+            modeRef.current = { kind: 'PIN_USER_MSG', ts: freshPin.pinTargetTs }
+          } else if (freshPin.intentStillCurrent) {
+            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
+          }
           if (startedMessages) {
             commitMessages(prev => appendMessageBatch(prev, startedMessages))
           }
           return
         }
         if (!result.started) {
+          const queuedPinStillValid = pinIntentStillCurrent(freshPinIntent)
+          if (queuedPinStillValid) {
+            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
+          }
           setSending(false)
           setServerRunningState(false)
         }
@@ -1756,6 +1780,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       const startedMessages = startedMessagesFromResponse(result)
       if (startedMessages) {
+        const freshPin = resolveFreshPinRetarget({
+          startedMessages,
+          fallbackTs: userMsg.ts,
+          willPin,
+          pinIntent: freshPinIntent,
+          pinIntentStillCurrent,
+        })
+        if (freshPin.shouldPin) {
+          setSpacerActive(true)
+          if (spacerRef.current) spacerRef.current.style.height = '0px'
+          modeRef.current = { kind: 'PIN_USER_MSG', ts: freshPin.pinTargetTs }
+        } else if (freshPin.intentStillCurrent) {
+          settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
+        }
         commitMessages(prev => {
           return replaceOptimisticWithBatch(prev, userMsg.ts, startedMessages)
         })
