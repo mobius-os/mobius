@@ -32,6 +32,9 @@ import {
   previewReadyAnnouncement,
   resolveFreshPinRetarget,
   resolveSteeredPinDecision,
+  shouldRetryStopAfterConfirm,
+  stopConfirmedIdle,
+  stopRequestSucceeded,
   serverSnapshotBehindLocal,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -52,6 +55,12 @@ const EMPTY_PROMPTS = [
   { label: 'Plan a task', prompt: 'Help me break down a task I need to finish this week.' },
   { label: 'Analyze an idea', prompt: 'Help me think through an idea and find the sharpest next step.' },
 ]
+
+const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 /** Cheap structural equality for chat-message arrays. Returns true when
  *  the lists have the same length AND the last message has the same
@@ -2054,12 +2063,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       forgetAllQueuedPinIntents()
       pendingQueue.clear()
 
-      let stoppedCleanly = true
+      let stoppedCleanly = false
       // The backend reports which queued ts it actually removed. null = an
       // older backend without the field (→ fall back to resending all); an
       // array is the authoritative cleared set.
       let clearedPendingTs = null
-      try {
+      const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
           headers: {
@@ -2068,28 +2077,66 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           },
           body: JSON.stringify({ chat_id: chatId }),
         })
+        let data = null
         if (stopRes.ok) {
           // stop_chat returns {stopped: false} when the SDK interrupt
           // timed out — the runner is still alive. We must NOT tear
           // down local state or re-send the collapsed queue, because
           // that would mean two concurrent runs of the same chat.
-          // Leave the stream attached and surface the failure so the
-          // user can retry. Network errors are treated as success-ish
-          // (we have to assume the proc died on our end too).
+          // Leave the stream attached so the user can retry. Likewise,
+          // a non-OK / missing response is NOT success: keeping Stop visible
+          // is safer than pretending the turn halted while the backend runs on.
           try {
-            const data = await stopRes.json()
-            if (data && data.stopped === false) stoppedCleanly = false
-            // Resend only what Stop truly cleared: a queued message the
-            // turn-end drain already promoted into a continuation (right as
-            // Stop landed) is gone from the queue, so it's absent here and
-            // must NOT be re-sent — that was the natural-finish-races-Stop
-            // double-send (PM 115).
-            if (Array.isArray(data?.cleared_pending_ts)) {
-              clearedPendingTs = data.cleared_pending_ts
-            }
-          } catch { /* non-JSON body — assume legacy success */ }
+            data = await stopRes.json()
+          } catch { /* non-JSON body — legacy success if HTTP itself was OK */ }
+          // Resend only what Stop truly cleared: a queued message the
+          // turn-end drain already promoted into a continuation (right as
+          // Stop landed) is gone from the queue, so it's absent here and
+          // must NOT be re-sent — that was the natural-finish-races-Stop
+          // double-send (PM 115).
+          if (clearedPendingTs === null && Array.isArray(data?.cleared_pending_ts)) {
+            clearedPendingTs = data.cleared_pending_ts
+          }
         }
-      } catch { /* network error during stop is non-critical */ }
+        return stopRequestSucceeded({ responseOk: stopRes.ok, data })
+      }
+      const confirmStopIdle = async () => {
+        try {
+          const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 5000 })
+          if (!res.ok) return { failed: true, running: null }
+          const data = await res.json()
+          return { failed: false, running: data?.running }
+        } catch {
+          return { failed: true, running: null }
+        }
+      }
+      for (const retryDelayMs of STOP_RETRY_DELAYS_MS) {
+        if (retryDelayMs > 0) await delay(retryDelayMs)
+        let requestSucceeded = false
+        try {
+          requestSucceeded = await requestStopOnce()
+        } catch {
+          requestSucceeded = stopRequestSucceeded({ fetchFailed: true })
+        }
+        if (!requestSucceeded) {
+          stoppedCleanly = false
+          break
+        }
+        const confirmation = await confirmStopIdle()
+        stoppedCleanly = stopConfirmedIdle({
+          stopSucceeded: requestSucceeded,
+          confirmRunning: confirmation.running,
+          confirmFailed: confirmation.failed,
+        })
+        if (stoppedCleanly) break
+        if (!shouldRetryStopAfterConfirm({
+          requestSucceeded,
+          confirmRunning: confirmation.running,
+          confirmFailed: confirmation.failed,
+        })) {
+          break
+        }
+      }
 
       // Resolve WHAT to resend from the queued snapshot + the set the
       // backend reports it actually cleared, via the SHARED, pure

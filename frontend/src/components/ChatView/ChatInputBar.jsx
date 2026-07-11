@@ -116,7 +116,19 @@ function PrimaryAction({
   }
   if (sending && !hasInput) {
     return (
-      <button key="stop" className="chat__action chat__stop" type="button" onClick={onStop} aria-label="Stop">
+      <button
+        key="stop"
+        className="chat__action chat__stop"
+        type="button"
+        // Match Send's touch handling: the composer keeps focus on
+        // pointerdown, then dispatches the action on touchend instead of
+        // waiting for a synthesized click. Without this, a focused mobile
+        // textarea can eat the first Stop tap while the keyboard settles.
+        onPointerDown={(e) => e.preventDefault()}
+        onTouchEnd={(e) => { e.preventDefault(); onStop() }}
+        onClick={onStop}
+        aria-label="Stop"
+      >
         <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor">
           <rect width="12" height="12" rx="2" />
         </svg>

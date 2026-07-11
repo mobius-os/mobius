@@ -9,8 +9,11 @@ import {
   resolveFreshPinRetarget,
   resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
+  shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
+  stopConfirmedIdle,
+  stopRequestSucceeded,
   systemEventForChat,
 } from '../chatRuntimeState.js'
 
@@ -177,4 +180,58 @@ test('resolveFreshPinRetarget yields to a user scroll after submit', () => {
     intentStillCurrent: false,
     shouldPin: false,
   })
+})
+
+
+test('stopRequestSucceeded requires a confirmed backend stop', () => {
+  assert.equal(stopRequestSucceeded({ responseOk: true, data: { stopped: true } }), true)
+  assert.equal(stopRequestSucceeded({ responseOk: true, data: {} }), true,
+    'legacy 200/non-json stop responses are accepted')
+  assert.equal(stopRequestSucceeded({ responseOk: true, data: { stopped: false } }), false)
+  assert.equal(stopRequestSucceeded({ responseOk: false, data: null }), false)
+  assert.equal(stopRequestSucceeded({ fetchFailed: true }), false)
+})
+
+test('stopConfirmedIdle requires the chat runtime to report idle', () => {
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: false,
+  }), true)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: true,
+  }), false)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: undefined,
+  }), false)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: false,
+    confirmRunning: false,
+  }), false)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: false,
+    confirmFailed: true,
+  }), false)
+})
+
+test('shouldRetryStopAfterConfirm retries only the start-window running race', () => {
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: true,
+    confirmRunning: true,
+  }), true)
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: true,
+    confirmRunning: false,
+  }), false)
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: false,
+    confirmRunning: true,
+  }), false)
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: true,
+    confirmRunning: true,
+    confirmFailed: true,
+  }), false)
 })
