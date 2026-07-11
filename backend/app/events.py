@@ -269,17 +269,24 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # both). Coalesce: a single error is enough — additional error
     # events on the same turn replace rather than stack.
     message = event.get("message", "") or ""
-    # Carry the whitelisted extras through onto the persisted block. Only keys
-    # this event actually supplied are applied, so a later bare error on the
-    # same turn keeps the extras an earlier limit/park error set rather than
-    # erasing them (the coalesce still replaces `message`).
+    # Carry the whitelisted extras through onto the persisted block,
+    # LATEST-EVENT-WINS: a coalescing error event's extras replace the
+    # block's wholesale — keys the new event omits are REMOVED, not kept.
+    # A park error followed by a different terminal error must degrade to a
+    # plain error, not keep rendering a stale "resets at …" card for a park
+    # the backend never scheduled (or already superseded).
     extras = {
       key: event[key] for key in ERROR_PASSTHROUGH_FIELDS if key in event
     }
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "error"):
-      assistant_blocks[-1]["message"] = message
-      assistant_blocks[-1].update(extras)
+      block = assistant_blocks[-1]
+      block["message"] = message
+      for key in ERROR_PASSTHROUGH_FIELDS:
+        if key in extras:
+          block[key] = extras[key]
+        else:
+          block.pop(key, None)
     else:
       assistant_blocks.append({
         "type": "error",

@@ -716,10 +716,21 @@ def _parked_until_for_chat(
   not-parked — the liveness checks must never crash on this probe.
   """
   try:
+    # id.desc() is a deterministic tiebreak: two rows CAN share a started_at
+    # (a park + the fresh run that superseded it within the same timestamp
+    # precision), and "latest run" must not depend on SQLite's unspecified
+    # tie order — consecutive sweeps flip-flopping between "parked" and
+    # "live" is worse than either answer. Tokens are random hex, so on a
+    # true tie the winner is arbitrary but STABLE, which is the property the
+    # exemption/health checks need; in practice microsecond timestamps make
+    # real ties vanishingly rare.
     run = (
       db.query(models.ChatRun)
       .filter(models.ChatRun.chat_id == chat_id)
-      .order_by(models.ChatRun.started_at.desc())
+      .order_by(
+        models.ChatRun.started_at.desc(),
+        models.ChatRun.id.desc(),
+      )
       .first()
     )
   except Exception:
@@ -1687,15 +1698,30 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       # owner's own send) must settle before the next park is processed.
       # Leave this park (and the rest) untouched for a later tick.
       break
+    # Resolve BEFORE notify/auto-resume, deliberately (adjudicated M2): a
+    # crash or push failure after the resolve loses at most one notification
+    # (the card + one-tap Resume remain), while notify-before-resolve could
+    # re-fire the push every tick forever. Same order for auto-resume: a
+    # post-resolve resume failure means notified-but-not-resumed, which the
+    # owner recovers with the one tap — crash-safe notify beats a retryable
+    # auto-resume.
     try:
       ack = get_writer().submit(
         ResolvePark(chat_id=chat_id, run_token=run.id)
       )
-      await _await_ack(ack)
+      was_parked = await _await_ack(ack)
     except Exception:
       log.warning(
         "sweep_reset_parks: resolve failed chat_id=%s (retried next tick)",
         chat_id, exc_info=True,
+      )
+      continue
+    if not was_parked:
+      # Superseded between this sweep's query and the resolve — an owner
+      # send's StartTurn closed the park. The owner is already driving the
+      # chat; a "limit reset" push now would be noise. Not counted resolved.
+      log.info(
+        "sweep_reset_parks: park superseded chat_id=%s (no notify)", chat_id,
       )
       continue
     resolved.append(chat_id)
@@ -2476,6 +2502,17 @@ def _limit_exit(
   if not limit:
     if error_text:
       sink.publish({"type": "error", "message": error_text})
+    elif runner_result is None:
+      # An EXCEPTION exit must always persist an error block. A bare
+      # exception (e.g. `TimeoutError()`) stringifies to "" — publishing
+      # nothing here would let finalize no-op on an empty turn and the
+      # failure would vanish from the transcript as if the turn were clean.
+      # (A terminal-result exit with no error text stays silent, as before —
+      # that IS a clean turn.)
+      sink.publish({
+        "type": "error",
+        "message": "The turn failed unexpectedly. Please try again.",
+      })
     return {"limit_reached": False}
   parked_until, park_reason = _limit_park_fields(
     runner_result or {}, error_text
@@ -2662,11 +2699,42 @@ async def _complete_turn(
             chat_id, sink.run_token or "",
             parked_until, park_reason or "rate_limit",
           )
+          # Release the send's `_starting` claim NOW, under the same lock —
+          # not in run_chat's finally. The limit path skips drain_and_release
+          # (which releases the claim for every other terminal), so without
+          # this the claim stayed held across the `done` publish + the
+          # browser-session close below; a Resume tap in that window read
+          # is_chat_running()==True and QUEUED without promotion ("queued
+          # until the next send"). Ownership is re-decided under the lock
+          # exactly like drain_and_release; discard+forget are synchronous
+          # (no await between them and mark_completed below), so no send can
+          # interleave half-released state. run_chat's finally re-discard is
+          # idempotent; after forget the generation resets, which makes the
+          # finally's own-gen check correctly skip.
+          if run_gen is None or current_run_generation(chat_id) == run_gen:
+            discard_starting(chat_id)
+            forget_chat(chat_id)
     except (Exception, asyncio.TimeoutError):
       _get_logger().warning(
         "limit-park ParkRun did not persist chat_id=%s "
         "(reconciliation will repair)", chat_id, exc_info=True,
       )
+      # The call site already published the parked card ("resets at …")
+      # BEFORE this park was durable. The park did NOT land, so the sweep
+      # will never fire for it — degrade the card honestly: this follow-up
+      # error coalesces onto the same tail block and, per the latest-wins
+      # extras contract in events.process_event, STRIPS parked_until/
+      # park_reason while keeping one-tap Resume. Persistence is the sink's
+      # fire-and-forget PersistError (finalize already ran) — best-effort,
+      # and boot reconcile repairs the marker either way.
+      sink.publish({
+        "type": "error",
+        "message": (
+          "Rate limited — the reset reminder could not be scheduled. "
+          "Send a message or tap Resume to continue."
+        ),
+        "resumable": True,
+      })
       bc.publish({"type": "done"})
       bc.mark_completed()
       _publish_chat_run_finished(chat_id)

@@ -583,3 +583,160 @@ def test_debug_status_lists_parked_runs(client, auth):
   assert entry["run_id"] == "rt-park-debug"
   assert entry["parked_until"] == until.isoformat()
   assert entry["park_reason"] == "usage_limit"
+
+
+# -- adversarial-review fixes (adjudicated 2026-07-11) --------------------------
+
+def test_limit_exit_exception_with_empty_text_still_publishes():
+  """H2: an exception exit whose str() is empty (a bare TimeoutError) must
+  still persist an error block — otherwise finalize no-ops and the failed
+  turn reads as clean."""
+  sink = _Sink()
+  kwargs = chat_mod._limit_exit(sink, None, "")
+
+  assert kwargs == {"limit_reached": False}
+  assert len(sink.events) == 1
+  assert sink.events[0]["type"] == "error"
+  assert sink.events[0]["message"]  # non-empty fallback text
+
+  # A TERMINAL-result exit with no error text stays silent (a clean turn).
+  quiet = _Sink()
+  assert chat_mod._limit_exit(quiet, {"error": None}, None) == {
+    "limit_reached": False,
+  }
+  assert quiet.events == []
+
+
+def test_sweep_skips_notify_when_park_superseded_mid_sweep(
+  owner_token, monkeypatch,
+):
+  """M1: when ResolvePark reports the row was no longer parked (an owner
+  send's StartTurn closed it between the sweep's query and the resolve),
+  the sweep must not push a 'limit reset' notification at the owner who is
+  already driving the chat."""
+  del owner_token
+  calls = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+  )
+
+  async def _ack_not_parked(ack, timeout=None):
+    del ack, timeout
+    return False
+
+  monkeypatch.setattr(chat_mod, "_await_ack", _ack_not_parked)
+  _due_park("sweep-superseded", "rt-sweep-superseded")
+
+  assert _run_sweep() == []
+  assert calls == []
+
+
+def test_parked_probe_tiebreak_is_deterministic():
+  """L1: two runs sharing a started_at must resolve latest-run-wins by the
+  id.desc() tiebreak — stable across reads, never SQLite's arbitrary tie
+  order (consecutive sweeps must not flip between 'parked' and 'live')."""
+  ts = datetime.now(UTC).replace(tzinfo=None)
+  until = ts + timedelta(hours=1)
+
+  def _seed_tie(cid, parked_token, running_token):
+    _seed_chat(cid)
+    db = SessionLocal()
+    try:
+      db.add(models.ChatRun(
+        id=parked_token, chat_id=cid, status="parked",
+        provider="claude", started_at=ts, parked_until=until,
+      ))
+      db.add(models.ChatRun(
+        id=running_token, chat_id=cid, status="running",
+        provider="claude", started_at=ts,
+      ))
+      db.commit()
+    finally:
+      db.close()
+
+  # Parked row wins the id.desc() tie -> the park is honored.
+  _seed_tie("tie-park-wins", "rt-z-park", "rt-a-run")
+  # Running row wins the tie -> the park is hidden.
+  _seed_tie("tie-run-wins", "rt-a-park", "rt-z-run")
+
+  db = SessionLocal()
+  try:
+    assert chat_mod._parked_until_for_chat(db, "tie-park-wins") == until
+    assert chat_mod._parked_until_for_chat(db, "tie-run-wins") is None
+  finally:
+    db.close()
+
+
+def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
+                         park_raises=False):
+  """Drive _complete_turn's limit branch with a real bc + sink + seeded run."""
+  from app.broadcast import create_broadcast
+
+  _seed_chat(cid, run_status="running")
+  _seed_run(cid, f"rt-{cid}")
+  bc = create_broadcast(cid)
+  sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}")
+  sink.publish({"type": "text", "content": "partial answer"})
+  sink.publish(chat_mod._limit_error_event(
+    "hit your weekly limit · resets 1:40am", parked_until, "usage_limit",
+  ))
+  if park_raises:
+    async def _boom(*a, **kw):
+      raise RuntimeError("park exploded")
+    monkeypatch.setattr(chat_mod, "_park_run_strict", _boom)
+
+  db = SessionLocal()
+  disposition = asyncio.run(chat_mod._complete_turn(
+    bc=bc, sink=sink, db=db, chat_id=cid, run_gen=None,
+    provider_id="claude", cost_usd=0, close_browser=False,
+    limit_reached=True, parked_until=parked_until,
+    park_reason="usage_limit",
+  ))
+  _drain_writer()
+  return disposition
+
+
+def test_park_failure_degrades_card_and_keeps_resume(monkeypatch):
+  """H3: the parked card is published BEFORE ParkRun is durable; when the
+  park fails, a follow-up plain resumable error must coalesce onto the same
+  block (latest-event-wins) so the persisted card stops claiming a reset
+  reminder the sweep will never fire."""
+  cid = "park-degrade"
+  until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+
+  disposition = _limit_complete_turn(
+    cid, parked_until=until, monkeypatch=monkeypatch, park_raises=True,
+  )
+
+  assert disposition.value == "failed_leave_marker"
+  blocks = _chat_row(cid)["messages"][-1]["blocks"]
+  errors = [b for b in blocks if b.get("type") == "error"]
+  assert len(errors) == 1
+  tail = errors[0]
+  assert "could not be scheduled" in tail["message"]
+  assert tail["resumable"] is True
+  assert "parked_until" not in tail
+  assert "park_reason" not in tail
+
+
+def test_limit_park_releases_starting_claim_before_returning():
+  """H1: the limit exit must release the send's `_starting` claim inside the
+  terminal transition — not leave it held across the done publish + browser
+  close — so a Resume tap right after `done` starts a fresh turn instead of
+  queueing unpromoted until the next send."""
+  cid = "park-release"
+  until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+  assert chat_mod.mark_starting(cid)  # the send's claim, normally held here
+
+  try:
+    disposition = _limit_complete_turn(cid, parked_until=until)
+
+    assert disposition.value == "limit_parked"
+    assert _run_row(f"rt-{cid}")["status"] == "parked"
+    # The claim is gone and the chat reads idle: a Resume tap now takes the
+    # fresh StartTurn path immediately.
+    assert not chat_mod.is_chat_running(cid)
+    assert chat_mod.mark_starting(cid)
+  finally:
+    chat_mod.discard_starting(cid)

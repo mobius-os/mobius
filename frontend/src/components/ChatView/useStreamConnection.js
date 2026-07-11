@@ -871,11 +871,16 @@ export default function useStreamConnection(chatId, {
               // had no branch for it (which is the bug we're
               // fixing — the error visibly disappeared on chat
               // return).
-              // Carry the whitelisted extras so a LIVE error card matches its
+              // Carry the whitelisted extras so the promoted block matches the
               // persisted shape: `resumable` renders the one-tap Resume, and
               // `parked_until`/`park_reason` render the provider-limit "resets
-              // at … · Resume now" card the instant the limit kill streams in
-              // (before promote). streamItemToBlock carries the same on promote.
+              // at … · Resume now" card. Accepted limitation (adjudicated
+              // 2026-07-11): while this is still a live stream item, the
+              // streaming renderer shows the generic error styling — the full
+              // parked card appears at promotion. A limit kill is terminal, so
+              // `done` (and promotion) follows within the same breath; not
+              // worth a parallel live-card path. streamItemToBlock carries the
+              // same fields on promote.
               updated.push({
                 type: 'error',
                 message: event.message,
