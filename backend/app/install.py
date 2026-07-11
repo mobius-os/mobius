@@ -2254,6 +2254,15 @@ async def install_from_manifest(
         )
         if merge_existing_source:
           prev_upstream_commit = app.upstream_commit
+          restored_upstream = await asyncio.to_thread(
+            app_git.restore_upstream_ref,
+            git_source_dir, prev_upstream_commit,
+          )
+          if restored_upstream:
+            log.warning(
+              "install: restored %s upstream ref to DB-recorded commit %s",
+              git_source_dir, prev_upstream_commit,
+            )
           previous_upstream_paths = await asyncio.to_thread(
             _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
           )
