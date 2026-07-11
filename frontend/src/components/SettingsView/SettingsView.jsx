@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { GripVertical } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
@@ -14,7 +13,6 @@ import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
-import EffortStepper from '../ui/EffortStepper.jsx'
 import ModelSheet from '../ui/ModelSheet.jsx'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
@@ -122,11 +120,83 @@ function BackgroundProviderRow({
   const enabled = row.enabled !== false
   const selectedModel = enabled ? (row.model || defaultModel(row.provider)) : ''
   const selectedRow = models.find((m) => m.id === selectedModel)
+  const efforts = info?.efforts || []
+  const effortLabel = enabled
+    ? (efforts.find((e) => e.value === row.effort)?.label || '')
+    : ''
   const [sheetOpen, setSheetOpen] = useState(false)
+
+  // Press-and-hold anywhere on the row to drag it — there's no separate
+  // grip handle. A quick tap still opens the model sheet; only a
+  // deliberate hold that doesn't turn into a scroll starts a reorder.
+  const holdTimerRef = useRef(null)
+  const pressRef = useRef(null)
+  const draggedRef = useRef(false)
+  const clearHold = () => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current)
+      holdTimerRef.current = null
+    }
+  }
+  useEffect(() => clearHold, [])
+  const handleRowPointerDown = (event) => {
+    if (event.button !== undefined && event.button !== 0) return
+    // The open sheet's full-screen backdrop is a DOM descendant of this
+    // row, so its presses bubble here — don't let them arm a drag.
+    if (sheetOpen) return
+    draggedRef.current = false
+    pressRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      pointerId: event.pointerId,
+      node: event.currentTarget,
+    }
+    clearHold()
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = null
+      const press = pressRef.current
+      if (!press) return
+      draggedRef.current = true
+      onReorderStart(index, {
+        clientY: press.y,
+        pointerId: press.pointerId,
+        node: press.node,
+      })
+    }, 240)
+  }
+  const handleRowPointerMove = (event) => {
+    if (draggedRef.current) return
+    const press = pressRef.current
+    if (!press) return
+    // Movement before the hold elapses means the finger is scrolling,
+    // not holding — cancel the pending drag and let the page scroll.
+    if (
+      Math.abs(event.clientY - press.y) > 10
+      || Math.abs(event.clientX - press.x) > 10
+    ) {
+      clearHold()
+      pressRef.current = null
+    }
+  }
+  const handleRowPointerUp = () => {
+    clearHold()
+    pressRef.current = null
+  }
+  const handleRowClickCapture = (event) => {
+    // Swallow the click that ends a hold-drag so releasing over the
+    // model trigger doesn't also pop the sheet open.
+    if (draggedRef.current) {
+      event.preventDefault()
+      event.stopPropagation()
+      draggedRef.current = false
+    }
+  }
+
   // This row is a fixed provider, so the sheet shows only that
   // provider's models plus a "None" row that disables the background
-  // agent (the old <select>'s empty option). The active model floats
-  // to the top of the list.
+  // agent. Effort lives inside the sheet, under the selected model:
+  // providers expose different effort scales, so it belongs with the
+  // model choice (mirrors the chat composer's picker).
   const groups = [{
     key: row.provider,
     label: info?.label || row.provider,
@@ -148,28 +218,24 @@ function BackgroundProviderRow({
       }
       style={dragStyle}
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
+      onPointerDown={handleRowPointerDown}
+      onPointerMove={handleRowPointerMove}
+      onPointerUp={handleRowPointerUp}
+      onPointerCancel={handleRowPointerUp}
+      onClickCapture={handleRowClickCapture}
+      onKeyDown={(event) => {
+        // Alt+Arrow reorders from the keyboard. Focus lands on the model
+        // trigger; requiring Alt keeps plain arrows free for scrolling.
+        if (!event.altKey) return
+        if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          onMove(-1)
+        } else if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          onMove(1)
+        }
+      }}
     >
-      <span
-        className="settings-bg-row__icon"
-        title="Drag to change priority"
-        role="button"
-        tabIndex={0}
-        aria-label={`Drag ${info?.label || row.provider} to change priority`}
-        onPointerDown={(event) => onReorderStart(event, index)}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
-            event.preventDefault()
-            onMove(-1)
-          } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
-            event.preventDefault()
-            onMove(1)
-          }
-        }}
-      >
-        {/* Drag-to-reorder grip. The provider's own logo lives in the
-            model trigger below; showing it here too doubled the logo. */}
-        <GripVertical size={16} aria-hidden="true" />
-      </span>
       <div className="settings-bg-row__body">
         <button
           type="button"
@@ -177,6 +243,7 @@ function BackgroundProviderRow({
           onClick={() => setSheetOpen(true)}
           aria-haspopup="dialog"
           aria-label={`${info?.label || row.provider} background model`}
+          title="Press and hold to reorder"
         >
           <span className="model-trigger__icon">
             {Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}
@@ -187,15 +254,11 @@ function BackgroundProviderRow({
               <span className="model-trigger__id">{selectedModel}</span>
             )}
           </span>
+          {effortLabel && (
+            <span className="model-trigger__effort">{effortLabel}</span>
+          )}
           <span className="model-trigger__caret" aria-hidden="true">▾</span>
         </button>
-        <EffortStepper
-          efforts={info?.efforts || []}
-          value={row.effort}
-          disabled={!enabled}
-          ariaLabel={`${info?.label || row.provider} background effort`}
-          onChange={onEffortChange}
-        />
       </div>
       <ModelSheet
         open={sheetOpen}
@@ -204,6 +267,9 @@ function BackgroundProviderRow({
         groups={groups}
         provider={enabled ? row.provider : ''}
         model={selectedModel}
+        efforts={efforts}
+        effort={row.effort}
+        onEffortChange={onEffortChange}
         onPick={(pid, id) => onModelChange(id)}
         allowNone
         noneLabel="None (disable)"
@@ -527,9 +593,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     return rows.length - 1
   }, [])
 
-  const startBackgroundReorder = useCallback((event, index) => {
-    if (event.button !== undefined && event.button !== 0) return
-    const node = backgroundRowRefs.current[index]
+  // Called by a row once its press-and-hold elapses. `pointer` carries
+  // the captured hold position/id (the original pointerdown event is
+  // long gone by the time the hold timer fires).
+  const startBackgroundReorder = useCallback((index, pointer) => {
+    const node = backgroundRowRefs.current[index] || pointer?.node
     if (!node) return
     const rowRect = node.getBoundingClientRect()
     const rows = backgroundRowRefs.current
@@ -542,13 +610,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         center: rect.top + rect.height / 2,
       }
     }).filter(Boolean)
-    event.preventDefault()
-    event.stopPropagation()
-    event.currentTarget.setPointerCapture?.(event.pointerId)
+    try { node.setPointerCapture?.(pointer?.pointerId) } catch { /* best-effort */ }
+    const grabY = typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top
     const next = {
       fromIndex: index,
       toIndex: index,
-      grabOffsetY: event.clientY - rowRect.top,
+      grabOffsetY: grabY - rowRect.top,
       rowHeight: rowRect.height,
       slots,
     }
@@ -1158,8 +1225,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   <div>
                     <h3 className="settings__agent-title">Background agents</h3>
                     <p className="settings__subtext settings__subtext--tight">
-                      Priority order. Drag the handle to reorder; if quota or auth fails,
-                      Möbius tries the next enabled agent.
+                      Priority order. Press and hold a row to reorder; if quota or auth
+                      fails, Möbius tries the next enabled agent.
                     </p>
                   </div>
                 </div>

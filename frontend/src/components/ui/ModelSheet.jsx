@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import EffortStepper from './EffortStepper.jsx'
 import './ModelSheet.css'
 
 /**
@@ -17,6 +18,13 @@ import './ModelSheet.css'
  * the current selection — the owner must always be able to see and
  * switch away from what's active. `allowNone` adds a leading "none"
  * row for the optional fallback slot; picking it calls `onNone`.
+ *
+ * When `efforts` is passed, a reasoning-effort stepper renders inline
+ * under the selected model row (the effort scale is provider-specific,
+ * so it belongs with the model choice — this mirrors the chat
+ * composer's picker). Providing `efforts` also keeps the sheet OPEN on
+ * a model pick so the owner can set effort in the same interaction;
+ * without it, picking a model closes the sheet as before.
  */
 export default function ModelSheet({
   open,
@@ -30,7 +38,11 @@ export default function ModelSheet({
   allowNone = false,
   noneLabel = 'No fallback',
   onNone,
+  efforts,
+  effort,
+  onEffortChange,
 }) {
+  const hasEfforts = Array.isArray(efforts) && efforts.length > 0
   const closeRef = useRef(null)
 
   useEffect(() => {
@@ -97,20 +109,31 @@ export default function ModelSheet({
                   const on = provider === group.key && model === m.id
                   const disabled = !connected && !on
                   return (
-                    <button
-                      key={`${group.key}-${m.id}`}
-                      type="button"
-                      className={`model-sheet__row${on ? ' model-sheet__row--sel' : ''}`}
-                      disabled={disabled}
-                      onClick={() => { onPick(group.key, m.id); onClose() }}
-                    >
-                      <span className="model-sheet__row-icon">{Logo && <Logo />}</span>
-                      <span className="model-sheet__row-main">
-                        <span className="model-sheet__row-title">{m.name || m.label || m.id}</span>
-                        <span className="model-sheet__row-id">{m.id}</span>
-                      </span>
-                      {on && <span className="model-sheet__check" aria-hidden="true" />}
-                    </button>
+                    <div key={`${group.key}-${m.id}`}>
+                      <button
+                        type="button"
+                        className={`model-sheet__row${on ? ' model-sheet__row--sel' : ''}`}
+                        disabled={disabled}
+                        onClick={() => { onPick(group.key, m.id); if (!hasEfforts) onClose() }}
+                      >
+                        <span className="model-sheet__row-icon">{Logo && <Logo />}</span>
+                        <span className="model-sheet__row-main">
+                          <span className="model-sheet__row-title">{m.name || m.label || m.id}</span>
+                          <span className="model-sheet__row-id">{m.id}</span>
+                        </span>
+                        {on && <span className="model-sheet__check" aria-hidden="true" />}
+                      </button>
+                      {on && hasEfforts && (
+                        <div className="model-sheet__effort">
+                          <EffortStepper
+                            efforts={efforts}
+                            value={effort}
+                            onChange={onEffortChange}
+                            ariaLabel="Reasoning effort"
+                          />
+                        </div>
+                      )}
+                    </div>
                   )
                 })}
               </div>
