@@ -115,8 +115,8 @@ scrolls; nothing here can crush or collapse a child.
 ```
 
 Pin a header with `position: sticky; top: 0` (omit it for a header that scrolls
-away). For a reading column (prose, a changelog, an FAQ) cap an inner wrapper at
-`max-width: 680px; margin: 0 auto`; for an FAQ/accordion add the `mobius-ui:Disclosure`
+away). For a reading column (prose, a changelog, an FAQ) cap an inner wrapper with
+the `mobius-ui:Page` block below; for an FAQ/accordion add the `mobius-ui:Disclosure`
 block (§10) — a native `<details>` flows fine in a Root, no AppShell needed. The
 `.ma-empty` block centers per its own note.
 
@@ -154,9 +154,52 @@ block (§10) — a native `<details>` flows fine in a Root, no AppShell needed. 
 /* /mobius-ui:AppShell */
 ```
 
-Diverge on padding, a desktop `max-width` cap, or (rarely, for a full-bleed canvas
-like a map) `position: fixed; inset: 0`. On AppShell, `min-height: 0` on the scroll
-child is non-negotiable.
+Diverge on padding, a desktop `max-width` cap (the `mobius-ui:Page` block below), or
+(rarely, for a full-bleed canvas like a map) `position: fixed; inset: 0`. On AppShell,
+`min-height: 0` on the scroll child is non-negotiable.
+
+**Reading column — `mobius-ui:Page` (cap CONTENT on wide viewports).** A mobile-first
+app looks right at 412px and then, at 1280px, its rows / cards / prose stretch
+edge-to-edge into ~180-char lines. The fix is a reading column: the scroll container
+stays full-bleed (its scrollbar hugs the device edge), and an inner `.ma-page` wrapper
+caps the CONTENT — centered above a ~760px breakpoint, full-bleed below it so phones are
+untouched. Cap the CONTENT wrapper, never the scroll container itself — a `max-width` on
+the scroller strands its scrollbar in mid-screen.
+
+```jsx
+<div className="ma-scroll">          {/* full-bleed; owns the scroll + scrollbar */}
+  <div className="ma-page">          {/* capped, centered reading column */}
+    {/* search, list, cards, empty — the scrolling content */}
+  </div>
+</div>
+```
+
+```css
+/* mobius-ui:Page — app-owned; a future-library candidate (no sync owed).
+   Reading column: full-bleed on phones, centered + capped on wide viewports.
+   Cap the CONTENT wrapper, never the scroll container (a capped scroller floats
+   its scrollbar mid-screen). */
+.ma-page { width: 100%; }
+@media (min-width: 760px) {
+  .ma-page { max-width: 680px; margin-inline: auto; }
+}
+/* /mobius-ui:Page */
+```
+
+Pick the cap to match the app's own content: 680px reads well for text; a card list
+that already caps its detail / reader view (640–720px) should reuse THAT number so list
+and detail agree — mismatched caps are the same edge-to-edge complaint one zoom level
+down. A pinned `ma-header` stays full-bleed (its divider still reaches both edges); only
+the scrolling content gets the column, and a sticky child (a search bar) keeps working
+inside the wrapper. On a flow Root the same wrapper caps prose — drop the breakpoint for
+pure prose that should never go full-bleed.
+
+**Exempt — do NOT cap.** Immersive / canvas apps that own the whole viewport (a game,
+the atlas globe, a map) and true multi-pane editors that manage their own columns
+(latex, webstudio, a split editor) are full-bleed by design — a reading column would
+letterbox them. `ma-chat-embed` and `ChatSplit` panes size themselves too. If the app is
+a single column of content that reads, cap it; if it's a canvas or a multi-pane
+workspace, leave it full-bleed.
 
 **Safe area:** a full-bleed root (one that paints to the device edges — a
 `position: fixed; inset: 0` canvas, or a root with no edge-pinned header/sheet
