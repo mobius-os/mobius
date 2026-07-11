@@ -119,3 +119,28 @@ export function resolveFreshPinRetarget({
     shouldPin: pinTargetTs != null && intentStillCurrent && !!willPin,
   }
 }
+
+export function stopRequestSucceeded({ responseOk, data = null, fetchFailed = false }) {
+  if (fetchFailed) return false
+  if (!responseOk) return false
+  if (data && data.stopped === false) return false
+  return true
+}
+
+export function stopConfirmedIdle({
+  stopSucceeded,
+  confirmRunning,
+  confirmFailed = false,
+}) {
+  if (!stopSucceeded) return false
+  if (confirmFailed) return false
+  return confirmRunning === false
+}
+
+export function shouldRetryStopAfterConfirm({
+  requestSucceeded,
+  confirmRunning,
+  confirmFailed = false,
+}) {
+  return !!requestSucceeded && !confirmFailed && confirmRunning === true
+}
