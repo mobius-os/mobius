@@ -197,6 +197,21 @@ class UpdatePreviewOut(BaseModel):
   upstream_diff: str | None = None
 
 
+class UpdateCheckOut(BaseModel):
+  """Git-native update detection: fetched upstream source vs recorded upstream.
+
+  `update_available` is null (unknown) when a content compare can't run — no
+  manifest_url, no git repo, no recorded upstream branch, or the upstream fetch
+  failed — so the caller falls back to version comparison. It is a real
+  true/false only when a byte-level compare actually ran, so a push that changed
+  code WITHOUT bumping the version still reads as an update. The version strings
+  are display-only, never the detection signal."""
+  update_available: bool | None = None
+  upstream_version: str | None = None
+  local_version: str | None = None
+  checked_at: datetime
+
+
 class AppConflictResolverChatOut(BaseModel):
   chat_id: str
   created: bool
