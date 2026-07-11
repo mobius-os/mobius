@@ -1311,6 +1311,49 @@ def test_stop_during_starting_does_not_spawn_superseded_turn(monkeypatch):
   assert state is not None and len(state["messages"]) == 1
 
 
+def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
+  """A Stop can land after run_chat's entry generation check but before the
+  SDK handle is registered (for example during a preflight await). The turn
+  must re-check the generation after that await; otherwise Stop returns
+  success, clears the marker, and the now-untracked runner starts anyway."""
+  _seed_owner_and_creds()
+  cid = "setup-stop"
+  _seed_chat(
+    cid,
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[],
+    run_status="running",
+  )
+  gen = chat_mod.registry.bump_generation(cid)
+
+  import app.claude_sdk_runner as csr
+  import app.providers as providers
+
+  dispatched = []
+
+  async def fake_runner(*, bc, **kwargs):
+    dispatched.append(kwargs)
+    bc.publish({"type": "text", "content": "must not run"})
+    return {"session_id": "sess", "cost_usd": 0.0}
+
+  async def stopping_ensure_auth(self, data_dir):
+    stopped, _ = await chat_mod.stop_chat_for(cid)
+    assert stopped is True
+
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
+  monkeypatch.setattr(providers.ClaudeProvider, "ensure_auth", stopping_ensure_auth)
+
+  _run_real_chat(cid, run_token="rt-setup-stop", run_gen=gen)
+  _drain_actor()
+
+  assert dispatched == [], (
+    "a Stop during provider setup must prevent SDK dispatch before a handle "
+    "exists"
+  )
+  state = _load(cid)
+  assert state["run_status"] is None
+
+
 def test_normal_send_spawns_turn(monkeypatch):
   """Control for the Stop-during-StartTurn guard: with NO racing Stop (generation unchanged
   across the StartTurn await), send_message creates the broadcast and spawns

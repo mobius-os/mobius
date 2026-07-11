@@ -66,7 +66,7 @@ import os
 import re
 import shutil
 import time
-from typing import Any
+from typing import Any, Callable
 
 from app.codex_appserver import _extract_bash_command
 from app.providers import get_skill_path
@@ -782,6 +782,7 @@ async def run_codex_sdk_turn(
   db,
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
+  should_abort: Callable[[], bool] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -882,6 +883,16 @@ async def run_codex_sdk_turn(
   current_session_id = session_id
   completed_turn: Any | None = None
 
+  def abort_requested() -> bool:
+    return bool(should_abort and should_abort())
+
+  def aborted_result() -> RunnerResult:
+    return {
+      "session_id": current_session_id,
+      "cost_usd": None,
+      "error": None,
+    }
+
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
       # Install AskUserQuestion bridge on the sync CodexClient's
@@ -958,7 +969,13 @@ async def run_codex_sdk_turn(
         )
 
       current_session_id = thread.id
+      if abort_requested():
+        log.info("Codex turn aborted before session persistence chat_id=%s", chat_id)
+        return aborted_result()
       await _persist_session_id(db, chat_id, current_session_id)
+      if abort_requested():
+        log.info("Codex turn aborted after session persistence chat_id=%s", chat_id)
+        return aborted_result()
       if session_id is not None and current_session_id != session_id:
         error_text = (
           "Codex resume returned a different session id "
@@ -989,6 +1006,17 @@ async def run_codex_sdk_turn(
         effort=effort,
         summary=reasoning_summary,
       )
+      if abort_requested():
+        try:
+          await turn.interrupt()
+        except Exception:
+          log.warning(
+            "Codex stale turn interrupt failed chat_id=%s",
+            chat_id,
+            exc_info=True,
+          )
+        log.info("Codex turn aborted before stream registration chat_id=%s", chat_id)
+        return aborted_result()
       active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
       registry.register(active_turn)
 

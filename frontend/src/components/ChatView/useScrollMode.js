@@ -167,12 +167,15 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  The spacer's only job is reserving bottom room — it does NOT touch
  *  scrollTop and it does NOT decide whether a send pins.
  *
- *  Formula: max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH).
+ *  Formula:
+ *    max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH
+ *           + PIN_BOTTOM_ROOM).
  *
  *  The (− PIN_OFFSET) must match applyMode's PIN_USER_MSG target so
- *  scrollTop-max equals the PIN target — otherwise the message
- *  lands PIN_OFFSET pixels below the top (visual "extra space" at
- *  the top + phantom over-scroll room at the bottom).
+ *  the target is reachable. PIN_BOTTOM_ROOM deliberately leaves a little
+ *  real scroll room under the pinned message instead of stranding the new
+ *  send exactly at maxScrollTop; without it, the row can technically be at
+ *  the top while still feeling cramped / end-stopped.
  *
  *  Reservation is intentionally independent from pinning. The send rule
  *  decides whether to move scrollTop (first message / already at bottom).
@@ -181,12 +184,13 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  that message lose its reachable "top of screen" position.
  */
 const PIN_OFFSET = 4
+const PIN_BOTTOM_ROOM = 96
 export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
   if (!scrollEl || !listEl) return 0
   if (!lastUserMsgEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
   const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
-  return Math.max(0, viewH + pinTarget - listEl.offsetHeight)
+  return Math.max(0, viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM)
 }
 
 
