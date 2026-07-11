@@ -46,6 +46,7 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
+from app.app_source_check import check_app_source
 from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
 # Keep the underscore alias: install._http_get calls _validate_url_safe, and
@@ -1531,6 +1532,61 @@ async def _sync_app_skills(
       )
 
 
+def _check_source_completeness(
+  *,
+  app_name: str,
+  manifest: dict,
+  source_tree: dict[str, bytes],
+  entry_key: str,
+  static_dests: list[str],
+  job_name: str | None,
+) -> None:
+  """Assert the source tree the manifest declares is self-contained.
+
+  Runs the static ``app_source_check`` against the tree about to be compiled:
+  every relative sibling import reachable from the entry (and the job) must be
+  declared in ``source_files`` (an incomplete list installs fine from a git
+  clone but breaks every synthetic-fetch install), and no shipped module may
+  reference an off-origin http(s) host the ``connect-src 'self'`` CSP blocks.
+
+  The completeness misses are ERRORS and raise ``HTTPException(422)`` — caught
+  by the install's ``except HTTPException`` handler, which rolls the source
+  writes back exactly like a compile failure. External-host references are
+  logged as warnings (runtime quality, not install-breaking).
+
+  The caller invokes this only on the synthetic-fetch path, where
+  ``source_tree`` IS the whole declared tree (entry + every fetched
+  ``source_files`` entry + the job script), so it is the sole source of bytes.
+  Static-asset dests are recorded as empty-content keys so a relative import
+  onto one (``import logo from './static/x.png'``) resolves instead of tripping
+  a false "missing import".
+  """
+  files: dict[str, str] = {
+    rel: data.decode("utf-8", "replace") for rel, data in source_tree.items()
+  }
+  for dest in static_dests:
+    files.setdefault(dest, "")
+
+  result = check_app_source(
+    files,
+    entry=entry_key,
+    source_files=manifest.get("source_files") or [],
+    job=job_name,
+    static_assets=list(static_dests),
+  )
+  for warning in result.warnings:
+    log.warning(
+      "install: %s external-host reference in %s — %s",
+      app_name, warning.path, warning.detail,
+    )
+  if result.errors:
+    detail = "; ".join(f"{e.path}: {e.detail}" for e in result.errors)
+    raise HTTPException(
+      422,
+      f"{app_name} has an incomplete `source_files` manifest — {detail}",
+    )
+
+
 async def install_from_manifest(
   db: Session,
   manifest_url: str | None,
@@ -2514,6 +2570,27 @@ async def install_from_manifest(
               source_dir_path, dropped_source_paths,
               rollback_actions, commit_actions,
             )
+            # On the synthetic-fetch path the on-disk tree is EXACTLY what the
+            # manifest declared (entry + source_files + job), so an entry that
+            # imports an undeclared sibling ships an incomplete tree that can't
+            # load — the Editor launch bug. Reject it here with a precise 422
+            # (esbuild would too, but with a cryptic "Could not resolve"). A
+            # git-origin-backed tree (`cloned_install` fresh clone, or
+            # `cloned_update` origin fetch) is skipped: it carries the whole
+            # repo, complete by construction, so source_files completeness is
+            # moot for it — the standalone CLI (scripts/validate-app.py) is the
+            # pre-push gate that holds a cloned app's manifest to the same bar
+            # for OTHER install paths. Errors raise HTTPException(422) → the
+            # outer handler rolls the source writes back.
+            if not cloned_update:
+              _check_source_completeness(
+                app_name=str(manifest.get("name") or app.slug),
+                manifest=manifest,
+                source_tree=source_tree,
+                entry_key=entry_key,
+                static_dests=list(static_assets_fetched.keys()),
+                job_name=job_name,
+              )
           # Compile now that the whole source tree is on disk. Passing the real
           # entry path makes esbuild resolve `./cards.js`-style sibling imports
           # from the files just written; promotion of the staged bundle into the
