@@ -775,6 +775,8 @@ useEffect(() => {
   window.mobius.chat({
     mount,
     persist: 'chat_id.json',   // create the app-chat ONCE, save its id here, reuse it forever
+    scope: 'workout-session:session-123', // optional: list/switch/new chats in this app-defined group
+    scopeLabel: 'Workout Jul 11', // optional label for the scoped chat picker
     systemPrompt,              // shapes the chat on create + re-applies on resume
     picker: false,             // hide the provider/effort picker inside the app sheet
     onTurnDone: () => refresh(),   // a turn finished — reload app state
@@ -788,6 +790,10 @@ useEffect(() => {
 - `persist` makes the helper create the chat the first time and **reuse the same
   one** on every later mount (PATCHing `systemPrompt` on resume) — the persistent
   transcript the user expects. Omit it only for a throwaway chat.
+- `scope` gives the embed a compact chat picker plus a new-chat button for that
+  app-defined group. Pair it with a scope-specific `persist` key when the app
+  wants one remembered chat per domain object, such as one chat per workout
+  session.
 - `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
   embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
 - **Viewer variant:** to display an EXISTING chat the app didn't create (e.g. a
