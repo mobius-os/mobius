@@ -16,12 +16,15 @@ Failure handling:
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import filecmp
 import logging
 import os
 import shutil
 import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -39,6 +42,14 @@ _ATTIC_DIR = _FRONTEND_DIR / ".assets-attic"
 _ATTIC_KEEP = 3
 _CACHE_DIR = _FRONTEND_DIR / ".vite-cache"
 _TMP_DIR = _FRONTEND_DIR / ".vite-tmp"
+# The explicit full-rebuild path gets its own cache/temp dirs: rebuild_shell.sh
+# runs it in a SEPARATE process while the warm watch may be building, and
+# vite's transform cache is not designed for concurrent writers.
+_REBUILD_CACHE_DIR = _FRONTEND_DIR / ".vite-cache-rebuild"
+_REBUILD_TMP_DIR = _FRONTEND_DIR / ".vite-tmp-rebuild"
+# In-process serialization only — rebuild_shell.sh publishes from its own
+# process, so _publish_built_dir additionally takes an OS-level flock (derived
+# from _FRONTEND_DIR at call time so tests that repoint the dir stay isolated).
 _PUBLISH_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
@@ -198,13 +209,17 @@ def _ensure_node_modules() -> None:
     log.warning("could not link frontend node_modules to %s", source)
 
 
-def _vite_env() -> dict[str, str]:
+def _vite_env(
+  cache_dir: Path | None = None, tmp_dir: Path | None = None,
+) -> dict[str, str]:
   """Return Vite env with cache/temp dirs and polling watch enabled."""
-  _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-  _TMP_DIR.mkdir(parents=True, exist_ok=True)
+  cache_dir = cache_dir if cache_dir is not None else _CACHE_DIR
+  tmp_dir = tmp_dir if tmp_dir is not None else _TMP_DIR
+  cache_dir.mkdir(parents=True, exist_ok=True)
+  tmp_dir.mkdir(parents=True, exist_ok=True)
   env = os.environ.copy()
-  env["MOBIUS_VITE_CACHE"] = str(_CACHE_DIR)
-  env["TMPDIR"] = str(_TMP_DIR)
+  env["MOBIUS_VITE_CACHE"] = str(cache_dir)
+  env["TMPDIR"] = str(tmp_dir)
   # Docker volume events have been unreliable here. Vite/Rollup watch uses
   # chokidar underneath, so force polling rather than reintroducing a Python
   # source watcher beside Vite's own watch mode.
@@ -266,24 +281,74 @@ def _prepare_next_from(source_dir: Path) -> None:
     )
 
 
-def _publish_built_dir(source_dir: Path, reason: str) -> None:
-  """Publish ``source_dir`` through the single atomic dist+attic path."""
+def _content_identical(a: Path, b: Path) -> bool:
+  """True when two build trees hold the same files with the same bytes.
+
+  Guards against no-op publishes: ``vite build --watch`` performs an initial
+  build on every (re)start, which rewrites staging with fresh mtimes even when
+  the output is byte-identical to the served ``dist``. Publishing that would
+  fire a spurious ``shell_rebuilt`` (an idle-client reload per container
+  restart) and burn an attic slot per boot — three restarts could evict a
+  generation an unreloaded tab still needs. Byte comparison, not mtimes: the
+  question here is "would clients see anything new", not "did files move".
+  """
+  if not (a.is_dir() and b.is_dir()):
+    return False
+  files_a = sorted(
+    p.relative_to(a).as_posix() for p in a.rglob("*") if p.is_file()
+  )
+  files_b = sorted(
+    p.relative_to(b).as_posix() for p in b.rglob("*") if p.is_file()
+  )
+  if files_a != files_b:
+    return False
+  try:
+    return all(
+      filecmp.cmp(a / rel, b / rel, shallow=False) for rel in files_a
+    )
+  except OSError:
+    return False
+
+
+def _publish_built_dir(source_dir: Path, reason: str) -> bool:
+  """Publish ``source_dir`` through the single atomic dist+attic path.
+
+  Returns True when a new generation was actually swapped in, False when the
+  built tree is byte-identical to the served ``dist`` (nothing published, no
+  event owed, no attic rotation). Serialized twice: the threading lock covers
+  in-process callers, and an OS-level flock covers rebuild_shell.sh publishing
+  from its own process concurrently with the warm watcher (a per-process lock
+  alone let the two interleave .dist-next/dist renames mid-deploy).
+  """
   log.info("frontend publish requested: %s", reason)
   with _PUBLISH_LOCK:
-    _prepare_next_from(source_dir)
-    _replace_dist()
+    lock_path = _FRONTEND_DIR / ".publish.lock"
+    with open(lock_path, "w") as lock_fh:
+      fcntl.flock(lock_fh, fcntl.LOCK_EX)
+      try:
+        _prepare_next_from(source_dir)
+        if _content_identical(_NEXT_DIST_DIR, _DIST_DIR):
+          shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
+          log.info(
+            "frontend publish skipped (%s): built tree is identical to the "
+            "served dist", reason,
+          )
+          return False
+        _replace_dist()
+        return True
+      finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
 def _run_vite_build_once(out_dir: Path) -> str:
   """Run one explicit full Vite build into ``out_dir``."""
   _ensure_node_modules()
-  _vite_env()
   if out_dir.exists():
     shutil.rmtree(out_dir)
   result = subprocess.run(
     _vite_build_cmd(out_dir, watch=False),
     cwd=str(_FRONTEND_DIR),
-    env=_vite_env(),
+    env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     text=True,
@@ -310,7 +375,7 @@ def rebuild_frontend_now(
     _publish_system_event({"type": "shell_rebuilding"})
   try:
     output = _run_vite_build_once(_REBUILD_DIST_DIR)
-    _publish_built_dir(_REBUILD_DIST_DIR, reason)
+    published = _publish_built_dir(_REBUILD_DIST_DIR, reason)
   except Exception as exc:
     if emit_events:
       _publish_system_event({
@@ -318,7 +383,10 @@ def rebuild_frontend_now(
         "error": str(exc),
       })
     raise
-  if emit_events:
+  # An identical build published nothing, so clients owe no reload — emitting
+  # shell_rebuilt anyway would bounce every idle tab for a byte-identical
+  # bundle.
+  if emit_events and published:
     _publish_system_event({"type": "shell_rebuilt"})
   return output
 
@@ -434,6 +502,7 @@ class _FrontendHandler:
     backoff = 1.0
     while not self._closed.is_set():
       proc: subprocess.Popen | None = None
+      started_at = time.monotonic()
       try:
         _ensure_node_modules()
         env = _vite_env()
@@ -466,6 +535,11 @@ class _FrontendHandler:
             self._watch_proc = None
       if self._closed.is_set():
         break
+      # A watch that survived a healthy stretch earns a fresh backoff — an
+      # isolated crash after hours of stability should restart in 1s, not
+      # inherit a 30s penalty from an unstable period long past.
+      if time.monotonic() - started_at >= 60.0:
+        backoff = 1.0
       log.warning(
         "frontend vite watch exited rc=%s; restarting in %.1fs", rc, backoff,
       )
@@ -520,7 +594,7 @@ class _FrontendHandler:
         return False
       self._staging_dirty = False
     try:
-      _publish_built_dir(_STAGING_DIST_DIR, reason)
+      published = _publish_built_dir(_STAGING_DIST_DIR, reason)
     except _StagingChangedDuringPublish:
       log.info("frontend staging changed during publish; waiting to settle")
       with self._state_lock:
@@ -529,10 +603,23 @@ class _FrontendHandler:
       return False
     except Exception as exc:
       log.warning("frontend publish failed: %s", exc)
+      # Restore the dirty flag: it was cleared above, and the staging
+      # signature already matches the poll loop's snapshot, so without this a
+      # transient publish failure would strand the edit forever — the poll
+      # never re-marks dirty and even shell_apply_now's publish_now would
+      # no-op on the clean flag. Dirty must mean "differs from what dist
+      # serves", not "differs from the last publish attempt".
+      with self._state_lock:
+        self._staging_dirty = True
       _publish_system_event({
         "type": "shell_rebuild_failed",
         "error": str(exc),
       })
+      return False
+    if not published:
+      # Byte-identical to the served dist (e.g. the watch process's initial
+      # build after a restart): nothing changed for clients, so no event.
+      # The dirty flag stays cleared — staging and dist agree.
       return False
     _publish_system_event({"type": "shell_rebuilt"})
     return True

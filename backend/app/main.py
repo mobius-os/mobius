@@ -1152,9 +1152,16 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     if path == "manifest.webmanifest":
       import json
       from fastapi.responses import JSONResponse
-      manifest = json.loads(
-        (static_dir / "manifest.webmanifest").read_text()
-      )
+      try:
+        manifest = json.loads(
+          (static_dir / "manifest.webmanifest").read_text()
+        )
+      except OSError:
+        # The dist swap has a microsecond two-rename window where the resolved
+        # static dir can vanish; mirror the index.html guard below — a 503
+        # asks the client to retry rather than 500ing a manifest fetch that
+        # raced the publish.
+        return Response(status_code=503, headers={"Retry-After": "1"})
       bg = get_bg_color(settings.data_dir)
       manifest["background_color"] = bg
       manifest["theme_color"] = bg
