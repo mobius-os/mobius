@@ -133,6 +133,52 @@ def test_app_chat_create_and_patch_store_custom_system_prompt(
   assert "model" not in row.agent_settings_json
 
 
+def test_app_chat_list_can_filter_by_scope(client, owner_token):
+  _, app_token = _make_app(client, owner_token, "scoped-chatter")
+  _, other_app_token = _make_app(client, owner_token, "other-scoped-chatter")
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  other_auth = {"Authorization": f"Bearer {other_app_token}"}
+
+  def create(title, scope, headers=app_auth):
+    r = client.post(
+      "/api/app-chats",
+      json={
+        "title": title,
+        "scope": scope,
+        "scope_label": "Session A",
+      },
+      headers=headers,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+  session_a_1 = create("Session A notes", "workout-session:session-a")
+  session_b = create("Session B notes", "workout-session:session-b")
+  session_a_2 = create("Session A follow-up", "workout-session:session-a")
+  foreign = create(
+    "Other app same scope", "workout-session:session-a", headers=other_auth,
+  )
+
+  owner_list = client.get(
+    "/api/app-chats",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert owner_list.status_code == 403, owner_list.text
+
+  scoped = client.get(
+    "/api/app-chats?scope=workout-session:session-a",
+    headers=app_auth,
+  )
+  assert scoped.status_code == 200, scoped.text
+  rows = scoped.json()
+  ids = {row["id"] for row in rows}
+  assert ids == {session_a_1, session_a_2}
+  assert session_b not in ids
+  assert foreign not in ids
+  assert all(row["scope"] == "workout-session:session-a" for row in rows)
+  assert all(row["scope_label"] == "Session A" for row in rows)
+
+
 def test_app_chat_create_stores_report_date_and_kind(client, owner_token, db):
   """An app opening a chat about one of its reports stores the link.
 
