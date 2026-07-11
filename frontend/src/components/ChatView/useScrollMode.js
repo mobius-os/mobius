@@ -136,9 +136,12 @@ export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
   if (!el) return false
   const target = Math.max(0, el.offsetTop - PIN_OFFSET)
   const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
+  const targetReachable = maxScrollTop >= target - 1
   const clampedShort = scrollEl.scrollTop < target - 1
-    && maxScrollTop >= target - 1
-  return el.offsetTop !== lastPinTop || clampedShort
+    && targetReachable
+  const driftedPastTarget = scrollEl.scrollTop > target + 1
+    && targetReachable
+  return el.offsetTop !== lastPinTop || clampedShort || driftedPastTarget
 }
 
 
@@ -172,8 +175,8 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *           + PIN_BOTTOM_ROOM).
  *
  *  The (− PIN_OFFSET) must match applyMode's PIN_USER_MSG target so
- *  the target is reachable. PIN_BOTTOM_ROOM deliberately leaves a little
- *  real scroll room under the pinned message instead of stranding the new
+ *  the target is reachable. PIN_BOTTOM_ROOM deliberately leaves real
+ *  scroll room under the pinned message instead of stranding the new
  *  send exactly at maxScrollTop; without it, the row can technically be at
  *  the top while still feeling cramped / end-stopped.
  *
@@ -184,7 +187,7 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  that message lose its reachable "top of screen" position.
  */
 const PIN_OFFSET = 4
-const PIN_BOTTOM_ROOM = 96
+const PIN_BOTTOM_ROOM = 180
 export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
   if (!scrollEl || !listEl) return 0
   if (!lastUserMsgEl) return 0
