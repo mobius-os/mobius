@@ -6,6 +6,7 @@ import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
+import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
 import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
@@ -319,10 +320,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // it so the owner reviews the incoming changes before applying, rather than
   // Apply firing on the first click.
   const [reviewOpen, setReviewOpen] = useState(false)
-  // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
-  // service worker to re-check cached frontend assets and re-reads
+  // 'idle' | 'checking' | 'checked' | 'error' — the "Check for updates" button
+  // asks the service worker to re-check cached frontend assets and re-reads
   // /api/version. 'checked' is a short-lived success label when no update is
-  // available.
+  // available; 'error' means a probe failed, so we say so instead of falsely
+  // claiming "No updates found". 'error' persists (no auto-reset) until the
+  // owner clicks the button again to retry.
   const [updatePhase, setUpdatePhase] = useState('idle')
   useEffect(() => {
     if (updatePhase !== 'checked') return undefined
@@ -774,28 +777,27 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // served identity. Platform: POST /platform/check runs the `git fetch` that the cheap
   // /status read deliberately skips, so a deploy that landed since boot becomes
   // visible without waiting for a reboot. Both run in parallel and neither
-  // failing blocks the other (allSettled) — a hiccup just leaves the last-known
-  // state on the row.
+  // failing blocks the other (allSettled). If either probe rejects we land in
+  // 'error' and say "Couldn't check for updates" rather than falsely reporting
+  // "No updates found" — an honest failure the owner can retry with the same
+  // button (see updateCheckOutcome).
   async function checkForUpdates() {
     if (updatePhase === 'checking') return
     setUpdatePhase('checking')
-    try {
-      const frontendP = (async () => {
-        if ('serviceWorker' in navigator) {
-          const reg = await navigator.serviceWorker.getRegistration()
-          if (reg) await reg.update()
-        }
-        await versionQueries.current.invalidate(queryClient)
-        await versionQuery.refetch()
-      })()
-      const platformP = (async () => {
-        const res = await api.platform.check()
-        if (res.ok) setPlatform(await res.json())
-      })()
-      await Promise.allSettled([frontendP, platformP])
-    } finally {
-      setUpdatePhase('checked')
-    }
+    const frontendP = (async () => {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration()
+        if (reg) await reg.update()
+      }
+      await versionQueries.current.invalidate(queryClient)
+      await versionQuery.refetch()
+    })()
+    const platformP = (async () => {
+      const res = await api.platform.check()
+      if (res.ok) setPlatform(await res.json())
+    })()
+    const results = await Promise.allSettled([frontendP, platformP])
+    setUpdatePhase(updateCheckOutcome(results))
   }
 
   // Reload onto the FRESH service worker so the new precache — including the
@@ -1027,12 +1029,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
-  const checkUpdatesLabel =
-    updatePhase === 'checking'
-      ? 'Checking…'
-      : updatePhase === 'checked'
-        ? 'No updates found'
-        : 'Check for updates'
+  const checkUpdatesLabel = updateCheckLabel(updatePhase)
   const effectiveBackgroundDraft = backgroundDraft ||
     normalizeBackgroundAgents(
       settingsQuery.data?.background_agents,
