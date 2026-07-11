@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { GripVertical } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
@@ -165,7 +166,9 @@ function BackgroundProviderRow({
           }
         }}
       >
-        {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
+        {/* Drag-to-reorder grip. The provider's own logo lives in the
+            model trigger below; showing it here too doubled the logo. */}
+        <GripVertical size={16} aria-hidden="true" />
       </span>
       <div className="settings-bg-row__body">
         <button
@@ -1155,7 +1158,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   <div>
                     <h3 className="settings__agent-title">Background agents</h3>
                     <p className="settings__subtext settings__subtext--tight">
-                      Priority order. Drag a logo to reorder; if quota or auth fails,
+                      Priority order. Drag the handle to reorder; if quota or auth fails,
                       Möbius tries the next enabled agent.
                     </p>
                   </div>
