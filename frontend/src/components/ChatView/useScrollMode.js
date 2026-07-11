@@ -175,10 +175,14 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *           + PIN_BOTTOM_ROOM).
  *
  *  The (− PIN_OFFSET) must match applyMode's PIN_USER_MSG target so
- *  the target is reachable. PIN_BOTTOM_ROOM deliberately leaves real
- *  scroll room under the pinned message instead of stranding the new
- *  send exactly at maxScrollTop; without it, the row can technically be at
- *  the top while still feeling cramped / end-stopped.
+ *  the target is reachable. PIN_BOTTOM_ROOM is extra reservable room BELOW
+ *  the pin, ON TOP of what's needed to reach it. It defaults to 0: the
+ *  spacer reserves *exactly* enough for the message to sit at the top, so
+ *  maxScrollTop == pinTarget and the row rests with its top flush to the
+ *  viewport top — "just enough for the message to be on top", with no extra
+ *  blank the reader can scroll into below the last content. (This restores
+ *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
+ *  end-of-scroll rest ever feels cramped.)
  *
  *  Reservation is intentionally independent from pinning. The send rule
  *  decides whether to move scrollTop (first message / already at bottom).
@@ -187,7 +191,7 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  that message lose its reachable "top of screen" position.
  */
 const PIN_OFFSET = 4
-const PIN_BOTTOM_ROOM = 180
+const PIN_BOTTOM_ROOM = 0
 export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
   if (!scrollEl || !listEl) return 0
   if (!lastUserMsgEl) return 0

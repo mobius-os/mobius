@@ -296,7 +296,7 @@ test('spacer reservation is independent from pin mode', () => {
 
   assert.equal(
     _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
-    576,
+    396,
   )
 })
 
@@ -320,15 +320,15 @@ test('queued tray does not shorten spacer reservation', () => {
 
   assert.equal(
     _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
-    576,
+    396,
   )
 })
 
 // R5 regression contract: a send while at the bottom must pin the new user
 // message to the TOP, which requires the dynamic spacer to reserve enough
 // bottom room that the pin target is actually REACHABLE (maxScrollTop >=
-// pinTarget). It also leaves a real bottom-room cushion so the pinned row
-// does not feel cramped at the exact end of the scroll range. When
+// pinTarget). By default it reserves EXACTLY that — no extra cushion — so
+// maxScrollTop == pinTarget and the row rests flush at the top. When
 // fullViewH is stale-SMALL (the keyboard-open height used after the keyboard
 // has already closed and grown clientHeight), the spacer is undersized, the
 // pin clamps short, and the message lands mid-viewport. The fix keeps
@@ -352,8 +352,8 @@ test('R5: spacer keeps the pin reachable when fullViewH tracks the (grown) clien
   // fullViewH is >= clientHeight, so the pin target is reachable → top pin.
   const r = pinReachable({ fullViewH: 700, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
   assert.equal(r.reachable, true, 'message can reach the top when fullViewH >= clientHeight')
-  assert.ok(r.maxScrollTop > r.pinTarget, 'spacer leaves breathing room below the pinned message')
-  assert.equal(r.maxScrollTop - r.pinTarget, 180, 'bottom breathing room stays intentional and bounded')
+  assert.equal(r.maxScrollTop, r.pinTarget, 'spacer reserves exactly enough to reach the pin — no extra cushion')
+  assert.equal(r.maxScrollTop - r.pinTarget, 0, 'no reservable blank below the pinned message by default')
 })
 
 test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-viewport (the bug)', () => {
