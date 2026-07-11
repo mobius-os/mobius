@@ -1072,6 +1072,11 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
             trailing_open_start -= 1
           if trailing_open_start < len(blocks):
             wait_note = dict(err_block)
+            # The tail affordance here is the QUESTION card — answering it is
+            # how this turn resumes. A Resume button on the note would compete
+            # with the card and send a visible "continue" instead of the
+            # answer, so this variant must not be resumable.
+            wait_note.pop("resumable", None)
             wait_note["message"] = (
               note
               + " Your answer is still needed; I will continue once you submit it."

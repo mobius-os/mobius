@@ -15,9 +15,14 @@ dist/
 .vite/
 .vite-cache/
 .vite-tmp/
+.vite-cache-rebuild/
+.vite-tmp-rebuild/
 .dist-next/
 .dist-old/
+.dist-staging/
+.dist-rebuild/
 .assets-attic/
+.publish.lock
 
 # OS
 .DS_Store

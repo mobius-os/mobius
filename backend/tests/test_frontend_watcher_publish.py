@@ -75,7 +75,7 @@ async def test_settle_coalesces_many_staged_builds(monkeypatch):
   monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 0.02)
   monkeypatch.setattr(
     fw, "_publish_built_dir",
-    lambda source, reason: calls.append((source, reason)),
+    lambda source, reason: calls.append((source, reason)) or True,
   )
   monkeypatch.setattr(fw, "_publish_system_event", lambda event: events.append(
     event,
@@ -108,7 +108,7 @@ async def test_apply_now_forces_immediate_publish(monkeypatch):
   monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 60.0)
   monkeypatch.setattr(
     fw, "_publish_built_dir",
-    lambda source, reason: calls.append((source, reason)),
+    lambda source, reason: calls.append((source, reason)) or True,
   )
   monkeypatch.setattr(fw, "_publish_system_event", lambda event: events.append(
     event,
@@ -145,6 +145,60 @@ def test_notify_shell_apply_now_calls_publish_hook(client, auth, monkeypatch):
 
   assert response.status_code == 204, response.text
   assert calls == ["shell_apply_now"]
+
+
+def test_identical_publish_is_skipped_without_event_or_attic(
+  fw_dirs, monkeypatch,
+):
+  """vite --watch rebuilds staging on every (re)start with fresh mtimes even
+  when the output is byte-identical to the served dist. Publishing that would
+  reload every idle client per container restart and burn an attic slot per
+  boot (three restarts could evict a generation an unreloaded tab needs)."""
+  events = []
+  monkeypatch.setattr(fw, "_publish_system_event", events.append)
+  dist, staging, attic = fw_dirs["dist"], fw_dirs["staging"], fw_dirs["attic"]
+  _write_build(dist, "same")
+  _write_build(staging, "same")
+
+  assert fw._publish_built_dir(staging, "boot rebuild") is False
+
+  assert (dist / "assets" / "index-same.js").is_file()
+  assert not fw_dirs["next"].exists()
+  assert not (attic.exists() and list(attic.glob("gen-*")))
+  assert events == []
+
+
+def test_publish_failure_restores_dirty_flag(monkeypatch):
+  """A transient publish failure must not strand the edit: the dirty flag is
+  restored so the next publish_now (shell_apply_now) can retry — without this
+  the flag stayed cleared, the poll loop never re-marked it (signature already
+  matched), and the last edit was unpublishable until an unrelated change."""
+  events = []
+  monkeypatch.setattr(fw, "_publish_system_event", events.append)
+
+  def boom(source, reason):
+    raise RuntimeError("transient publish failure")
+
+  monkeypatch.setattr(fw, "_publish_built_dir", boom)
+  loop = asyncio.new_event_loop()
+  try:
+    handler = fw._FrontendHandler(loop, start_threads=False)
+    with handler._state_lock:
+      handler._staging_dirty = True
+
+    assert handler._publish_dirty_sync("settle:edit") is False
+    assert handler._staging_dirty is True
+    assert events == [
+      {"type": "shell_rebuild_failed", "error": "transient publish failure"},
+    ]
+
+    monkeypatch.setattr(
+      fw, "_publish_built_dir", lambda source, reason: True,
+    )
+    assert handler._publish_dirty_sync("shell_apply_now") is True
+    assert handler._staging_dirty is False
+  finally:
+    loop.close()
 
 
 def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):

@@ -223,6 +223,35 @@ def test_reconcile_crash_note_is_resumable():
   assert note["resumable"] is True
 
 
+def test_reconcile_question_tail_note_is_not_resumable():
+  """When the interrupted turn ends on an unanswered question, the question
+  card is the tail affordance — answering it resumes the turn. The inserted
+  wait-note must NOT carry resumable, or a Resume button would compete with
+  the card and send a visible 'continue' instead of the answer."""
+  cid = "reco-question"
+  _seed(cid, messages=[
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "ts": 2, "content": "", "blocks": [
+      {"type": "text", "content": "thinking"},
+      {"type": "question", "id": "q1", "text": "Which one?"},
+    ]},
+  ])
+
+  db = SessionLocal()
+  try:
+    reconciled = chat_mod.reconcile_interrupted_chats(db)
+  finally:
+    db.close()
+
+  assert cid in reconciled
+  blocks = _chat(cid)["messages"][-1]["blocks"]
+  # The question stays the tail block, and the inserted note is inert.
+  assert blocks[-1].get("type") == "question"
+  note = next(b for b in blocks if b.get("type") == "error")
+  assert "answer is still needed" in note["message"]
+  assert not note.get("resumable")
+
+
 def test_notify_after_reconcile_fires_once(owner_token, monkeypatch):
   del owner_token  # fixture creates the owner row notify_after_reconcile needs
   calls = []
