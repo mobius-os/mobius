@@ -32,6 +32,11 @@
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
 //   window.mobius.storage.pendingCount()          -> Promise<number>
+//   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   read + its server ETag, for compare-and-swap
+//   window.mobius.storage.durableWrite(path, data, opts?) -> {durability, path, writeId, version?}
+//     opts.ifMatch=version makes it a CONDITIONAL write; a 412 rejects with DurableWriteError{code:'conflict', retryable:true}.
+//     CAS a file with several writers (agent + cron + UI): getWithVersion -> merge -> durableWrite({ifMatch:version}); on a
+//     'conflict' error re-read + retry (the app owns its merge; the runtime does NOT retry for you). See building-apps.md.
 //   window.mobius.chat({mount, chatId?, picker?, ...}) -> Promise<handle>
 //     Embeds the real agent chat (ChatView) in a nested iframe inside
 //     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
@@ -1199,9 +1204,9 @@ export function makeStorage({ appId, getToken }) {
     async pendingCount() {
       return (await listOps()).length
     },
+    getWithVersion,
     _drain: drain,
     _notify: notify,
-    _getWithVersion: getWithVersion,
   }
 }
 
@@ -1279,8 +1284,8 @@ export function createUseDocument(storage, reactProvider = null) {
 
     const refresh = React.useCallback(async () => {
       try {
-        const loaded = storage._getWithVersion
-          ? await storage._getWithVersion(path, 'json')
+        const loaded = storage.getWithVersion
+          ? await storage.getWithVersion(path, 'json')
           : { value: await storage.get(path), version: undefined }
         const next = loaded.value == null ? initialValue : loaded.value
         const reconciled = reconcileIdentity(valueRef.current, next, identity)
@@ -1319,8 +1324,8 @@ export function createUseDocument(storage, reactProvider = null) {
           const base = baseRef.current
           let theirs = base
           let version = versionRef.current
-          if (mode === 'cas' && storage._getWithVersion) {
-            const loaded = await storage._getWithVersion(path, 'json')
+          if (mode === 'cas' && storage.getWithVersion) {
+            const loaded = await storage.getWithVersion(path, 'json')
             theirs = loaded.value == null ? initialValue : loaded.value
             version = loaded.version || null
           } else if (mode === 'lww') {
