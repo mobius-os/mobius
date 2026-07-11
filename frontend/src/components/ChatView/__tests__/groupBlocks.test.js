@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { groupToolRuns, toolGroupState, toolGroupSummary } from '../groupBlocks.js'
+import {
+  groupToolRuns,
+  coalesceThinkingEntries,
+  toolGroupState,
+  toolGroupSummary,
+} from '../groupBlocks.js'
 import { toolActivityLabel } from '../toolActivityLabel.js'
 
 const e = item => ({ item })
@@ -158,4 +163,60 @@ test('toolActivityLabel: maps known tools, falls back to the raw name', () => {
   assert.equal(toolActivityLabel(undefined), 'Tool')
   // Prototype-chain names must not resolve to Object internals.
   assert.equal(toolActivityLabel('constructor'), 'constructor')
+})
+
+
+const think = (content, duration_ms = 0) => ({ type: 'thinking', content, duration_ms })
+
+test('coalesceThinkingEntries: adjacent thinking merges into one, content + duration summed', () => {
+  const entries = [
+    { item: think('The sl', 700), idx: 0 },
+    { item: think('iders move', 500), idx: 1 },
+  ]
+  const out = coalesceThinkingEntries(entries)
+  assert.equal(out.length, 1)
+  assert.equal(out[0].item.content, 'The sliders move')
+  assert.equal(out[0].item.duration_ms, 1200)
+})
+
+test('coalesceThinkingEntries: preserves the FIRST survivor idx so tool blockIdx stays absolute', () => {
+  // Persisted shape [thinking, thinking, thinking, tool] — the fragmented case.
+  // The tool MUST keep idx 3 so ToolBlock's GET /tool-output?i=3 hits the real block.
+  const entries = [
+    { item: think('a', 100), idx: 0 },
+    { item: think('b', 100), idx: 1 },
+    { item: think('c', 100), idx: 2 },
+    { item: { type: 'tool', tool: 'Bash' }, idx: 3 },
+  ]
+  const out = coalesceThinkingEntries(entries)
+  assert.equal(out.length, 2)
+  assert.equal(out[0].idx, 0)
+  assert.equal(out[0].item.content, 'abc')
+  assert.equal(out[1].idx, 3)
+  assert.equal(out[1].item.type, 'tool')
+})
+
+test('coalesceThinkingEntries: thinking separated by a tool stays two distinct blocks', () => {
+  const entries = [
+    { item: think('first', 100), idx: 0 },
+    { item: { type: 'tool', tool: 'Bash' }, idx: 1 },
+    { item: think('second', 100), idx: 2 },
+  ]
+  const out = coalesceThinkingEntries(entries)
+  assert.deepEqual(out.map(x => x.item.type), ['thinking', 'tool', 'thinking'])
+  assert.deepEqual(out.map(x => x.idx), [0, 1, 2])
+})
+
+test('coalesceThinkingEntries: groupToolRuns after coalesce yields one thinking single + tool group', () => {
+  const entries = [
+    { item: think('a', 100), idx: 0 },
+    { item: think('b', 100), idx: 1 },
+    { item: { type: 'tool', tool: 'Read' }, idx: 2 },
+    { item: { type: 'tool', tool: 'Edit' }, idx: 3 },
+  ]
+  const nodes = groupToolRuns(coalesceThinkingEntries(entries))
+  assert.equal(nodes.length, 2)
+  assert.equal(nodes[0].single.item.type, 'thinking')
+  assert.equal(nodes[0].single.item.content, 'ab')
+  assert.equal(nodes[1].group.map(x => x.idx).join(','), '2,3')
 })
