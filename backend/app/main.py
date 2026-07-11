@@ -286,8 +286,13 @@ async def lifespan(app):
   # can't kill the loop; the loop is cancelled on shutdown.
   _wedged_sweep_task = None
   _stalled_live_task = None
+  _reset_park_task = None
   try:
-    from app.chat import sweep_stalled_live_runs, sweep_wedged_run_markers
+    from app.chat import (
+      sweep_reset_parks,
+      sweep_stalled_live_runs,
+      sweep_wedged_run_markers,
+    )
     from app.database import SessionLocal as _SweepSession
 
     async def _wedged_marker_loop():
@@ -321,6 +326,25 @@ async def lifespan(app):
           _log.error("stalled-live sweep failed: %s", _exc, exc_info=True)
 
     _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
+
+    # Provider-limit reset sweep (design §2.4): notifies once when a parked
+    # turn's reset time arrives, and — when the owner opted in — starts the
+    # strictly-serial auto-resume. Same shape as the two loops above.
+    async def _reset_park_loop():
+      while True:
+        await _asyncio.sleep(60)
+        try:
+          _rp_db = _SweepSession()
+          try:
+            await sweep_reset_parks(_rp_db)
+          finally:
+            _rp_db.close()
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+
+    _reset_park_task = _asyncio.create_task(_reset_park_loop())
   except Exception as exc:
     _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
   try:
@@ -331,6 +355,8 @@ async def lifespan(app):
       _wedged_sweep_task.cancel()
     if _stalled_live_task is not None:
       _stalled_live_task.cancel()
+    if _reset_park_task is not None:
+      _reset_park_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.

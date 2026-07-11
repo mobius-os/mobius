@@ -394,6 +394,45 @@ class ClearRunStatus(_Command):
 
 
 @dataclass
+class ParkRun(_Command):
+  """Park a turn that died on a provider rate/usage limit (design §2.4).
+
+  The identity-keyed sibling of `ClearRunStatus` for the limit exit: the
+  turn is over, so the per-chat marker (`Chat.run_status`) is cleared the
+  same way — but instead of closing the run's `chat_runs` row "completed",
+  the row moves to ``status="parked"`` carrying `parked_until` (the parsed
+  reset time, naive UTC) and `park_reason`. That parked row IS the
+  provider-parked signal the liveness exemptions and the reset sweep read;
+  no separate state enum exists. Same ownership discipline as
+  ClearRunStatus: a dying run whose marker was taken by a fresh turn still
+  closes its OWN row (as "completed", NOT parked — the owner already moved
+  on, so a stale park must not resurrect a notify) but leaves the fresh
+  marker and owner map untouched.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  parked_until: object = None
+  park_reason: str = ""
+
+
+@dataclass
+class ResolvePark(_Command):
+  """Move a parked run to ``parked_notified`` once its reset time passed.
+
+  Submitted by the reset sweep AFTER `parked_until` elapses and BEFORE the
+  one-shot notify, so a notify/auto-resume failure can never re-fire the
+  push on the next tick (the sweep only selects ``status == "parked"``).
+  Not identity-keyed against `_run_token_owner`: the parked turn ended long
+  ago and ParkRun already dropped its ownership entry. Idempotent — a row
+  no longer parked is a no-op.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
 class Barrier(_Command):
   """Acked only after every preceding command is processed.
 
@@ -459,6 +498,8 @@ _FENCE_COMMANDS = (
   ClearPending,
   ReplaceTranscript,
   ClearRunStatus,
+  ParkRun,
+  ResolvePark,
 )
 
 
@@ -1151,6 +1192,10 @@ class ChatWriterActor:
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ClearRunStatus):
       return self._clear_run_status(db, cmd)
+    if isinstance(cmd, ParkRun):
+      return self._park_run(db, cmd)
+    if isinstance(cmd, ResolvePark):
+      return self._resolve_park(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
 
   # -- real DB dispatch (one method per command) -------------------------
@@ -1651,8 +1696,16 @@ class ChatWriterActor:
 
     from app.models import ChatRun
 
+    # "parked" rows (a provider-limit park, design §2.4) are superseded here
+    # too: a fresh StartTurn / PromotePending on a parked chat means the owner
+    # resumed it themselves (one-tap Resume, or any new send), so the stale
+    # park must be closed — otherwise it would fire a spurious reset notify /
+    # auto-resume later, and its parked_until could wrongly exempt the NEW
+    # live turn from the stall watchdog. "parked_notified" rows are already
+    # resolved and stay untouched.
     q = db.query(ChatRun).filter(
-      ChatRun.chat_id == chat_id, ChatRun.status == "running"
+      ChatRun.chat_id == chat_id,
+      ChatRun.status.in_(("running", "parked")),
     )
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)
@@ -1722,6 +1775,75 @@ class ChatWriterActor:
       raise _PersistFailed("ClearRunStatus did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
     return None
+
+  def _park_run(self, db, cmd: ParkRun):
+    """Park the run's row on a provider limit + clear the per-chat marker.
+
+    Mirrors `_clear_run_status`'s ownership discipline exactly — the same
+    identity-keyed compare against `_run_token_owner` — with one difference:
+    when this token still owns the marker, its `chat_runs` row becomes
+    ``status="parked"`` (carrying `parked_until` + `park_reason`) instead of
+    "completed". A dying run whose marker a fresh turn already took closes
+    its own row "completed" WITHOUT parking: the owner has moved on, and a
+    stale park would fire a spurious reset notify later. The per-chat marker
+    (`Chat.run_status`) is cleared either way the marker is ours — the turn
+    IS over, so the chat must not look busy, must not be reaped by the
+    wedged sweep, and must not get a spurious "server restarted" note from
+    boot reconcile.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat, ChatRun
+
+    owner = self._run_token_owner.get(cmd.chat_id)
+    marker_is_ours = not (
+      cmd.run_token and owner is not None and owner != cmd.run_token
+    )
+    changed = False
+    if cmd.run_token:
+      run = (
+        db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+      )
+      if run is not None and run.status == "running":
+        if marker_is_ours:
+          run.status = "parked"
+          run.parked_until = cmd.parked_until
+          run.park_reason = (cmd.park_reason or None)
+        else:
+          run.status = "completed"
+        run.ended_at = datetime.now(UTC)
+        changed = True
+    if not marker_is_ours:
+      if changed and not _commit_or_rollback(db):
+        raise _PersistFailed("ParkRun did not persist")
+      return None
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is not None and (
+      chat.run_status is not None or chat.run_started_at is not None
+    ):
+      chat.run_status = None
+      chat.run_started_at = None
+      changed = True
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("ParkRun did not persist")
+    self._run_token_owner.pop(cmd.chat_id, None)
+    return None
+
+  def _resolve_park(self, db, cmd: ResolvePark):
+    """Move a parked row to ``parked_notified``; idempotent; commit."""
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+    if run is None or run.status != "parked":
+      return False
+    run.status = "parked_notified"
+    if run.ended_at is None:
+      run.ended_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ResolvePark did not persist")
+    return True
 
   @staticmethod
   def _commit_snapshot(db, snapshot: dict):

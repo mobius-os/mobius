@@ -95,11 +95,33 @@ def debug_status(
   # when reconciliation succeeded so the field is stable to check.
   reconciliation_failed = getattr(request.app.state, "reconciliation_failed", False)
 
+  # Provider-limit parks (design §2.4). A parked chat has NO live handle and
+  # NO broadcast — its turn ended — so it appears in none of the lists above;
+  # this is the surface that makes a park observable (the same fields the
+  # reset sweep keys on). Empty list when nothing is parked.
+  parked_runs = [
+    {
+      "chat_id": run.chat_id,
+      "run_id": run.id,
+      "parked_until": (
+        run.parked_until.isoformat() if run.parked_until else None
+      ),
+      "park_reason": run.park_reason,
+    }
+    for run in (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.status == "parked")
+      .order_by(models.ChatRun.started_at.asc())
+      .all()
+    )
+  ]
+
   result = {
     "active_sdk_clients": sdk_clients,
     "active_sdk_sessions": sdk_sessions,
     "starting": list(registry.starting_chat_ids()),
     "broadcasts": broadcasts,
+    "parked_runs": parked_runs,
   }
   if reconciliation_failed:
     result["reconciliation_failed"] = True

@@ -1118,6 +1118,13 @@ async def run_claude_sdk_turn(
     _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
+    # Most recent provider rate-limit reset time seen this attempt (from any
+    # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
+    # can park until the STRUCTURED reset time rather than parsing the error
+    # string (design §2.4). Lives HERE, in the attempt scope where it is
+    # assigned — an outer-scope init would be shadowed by that assignment and
+    # read unbound on turns with no rate-limit event.
+    rate_limit_resets_at = None
     # Skills are gated behind the per-owner `skills_enabled` flag. OFF
     # (the default) keeps the historical posture: `setting_sources=None`
     # means the SDK loads NO user/project settings, so the Skill tool is
@@ -1215,6 +1222,10 @@ async def run_claude_sdk_turn(
             incoming_session_id = getattr(sdk_msg, "session_id", None)
             if incoming_session_id and incoming_session_id != current_session_id:
               await _persist_session_id(db, chat_id, incoming_session_id)
+          if isinstance(sdk_msg, RateLimitEvent):
+            _resets = getattr(sdk_msg.rate_limit_info, "resets_at", None)
+            if _resets is not None:
+              rate_limit_resets_at = _resets
           current_session_id, terminal = dispatch_sdk_message(
             sdk_msg, bc, current_session_id,
           )
@@ -1258,6 +1269,8 @@ async def run_claude_sdk_turn(
             )
             break
           cost_usd = terminal.get("cost_usd")
+          if rate_limit_resets_at is not None:
+            terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
           return terminal
         else:
           # The stream ended without a terminal ResultMessage. Any buffered
