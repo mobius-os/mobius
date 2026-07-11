@@ -348,6 +348,33 @@ def ref_exists(source_dir: str | Path, ref: str) -> bool:
   return proc.returncode == 0
 
 
+def restore_upstream_ref(source_dir: str | Path, expected_sha: str | None) -> bool:
+  """Put installer-owned ``upstream`` back on the DB-recorded commit.
+
+  ``install_from_manifest`` stores the pristine upstream commit in the App row
+  inside the SQL transaction, while the git ref lives outside that transaction.
+  If an update attempt advances the ref and then rolls the DB transaction back,
+  a retry must trust the DB row and restore the ref before doing another merge.
+
+  Returns True when the ref moved, False when it was already correct or the
+  expected commit is unavailable in the repo.
+  """
+  if not expected_sha or not is_repo(source_dir):
+    return False
+  repo = Path(source_dir)
+  exists = _run(repo, "cat-file", "-e", f"{expected_sha}^{{commit}}",
+                check=False)
+  if exists.returncode != 0:
+    return False
+  current = _run(
+    repo, "rev-parse", "--verify", UPSTREAM_BRANCH, check=False,
+  )
+  if current.returncode == 0 and current.stdout.strip() == expected_sha:
+    return False
+  _run(repo, "update-ref", f"refs/heads/{UPSTREAM_BRANCH}", expected_sha)
+  return True
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 
@@ -463,6 +490,14 @@ def fetch_upstream(source_dir: str | Path, ref: str) -> str:
     )
     if related.returncode != 0 and (repo / ".git" / "shallow").exists():
       _run(repo, "fetch", "--unshallow", "origin", ref)
+      related = _run(
+        repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
+      )
+    if related.returncode != 0:
+      raise RuntimeError(
+        f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
+        "falling back to manifest-source update"
+      )
   _run(repo, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
   return sha
 
