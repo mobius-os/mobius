@@ -338,14 +338,20 @@
 .settings-bg-row {
   position: relative;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
   min-height: 54px;
   padding: 8px;
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface) 68%, var(--bg));
+  /* The whole row is the drag handle now — press and hold to reorder.
+     Keep default touch-action so a plain swipe still scrolls the page;
+     the JS only claims the gesture once a still hold has elapsed. */
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   transition:
     transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
     background 0.15s ease,
@@ -364,6 +370,10 @@
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
   box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
   opacity: 0.96;
+  cursor: grabbing;
+  /* Once a hold has become a drag, stop the page from scrolling under
+     the finger so the vertical drag reorders instead. */
+  touch-action: none;
 }
 
 .settings-bg-row--drop-target {
@@ -397,38 +407,9 @@
   opacity: 0.78;
 }
 
-.settings-bg-row__icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-  background: color-mix(in srgb, var(--surface2) 72%, var(--surface));
-  color: var(--text);
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  font-size: 13px;
-  cursor: grab;
-  user-select: none;
-  touch-action: none;
-}
-
-.settings-bg-row__icon:active {
-  cursor: grabbing;
-}
-
-.settings-bg-row--dragging .settings-bg-row__icon {
-  cursor: grabbing;
-}
-
-.settings-bg-row__icon svg {
-  pointer-events: none;
-}
-
-/* Body stacks the model trigger over the effort stepper, both full
-   width. The grip stays in its own grid column so drag-to-reorder is
-   unchanged; only the model control modernized from a native <select>
-   to the shared bottom-sheet trigger. */
+/* The body holds the model trigger, full width. Effort moved into the
+   model sheet (under the selected model), and the grip column is gone —
+   the whole row is the drag handle now. */
 .settings-bg-row__body {
   min-width: 0;
   display: flex;
@@ -444,8 +425,7 @@
 
 @media (max-width: 620px) {
   .settings-bg-row {
-    grid-template-columns: 30px minmax(0, 1fr);
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr);
     padding-inline: 6px;
   }
 }

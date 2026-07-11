@@ -71,10 +71,32 @@
   white-space: nowrap;
 }
 
+/* A compact read-only summary of the current reasoning effort on the
+   collapsed trigger — the actual control lives inside the sheet, but
+   this keeps the level glanceable without opening it. */
+.model-trigger__effort {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface2));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  white-space: nowrap;
+}
+
 .model-trigger__caret {
   color: var(--muted);
   font-size: 11px;
   flex-shrink: 0;
+}
+
+/* Reasoning-effort stepper nested under the selected model row, indented
+   to align beneath the row title (row pad 10 + icon 30 + gap 12). */
+.model-sheet__effort {
+  margin: 2px 10px 8px 52px;
 }
 
 /* ── sheet ──────────────────────────────────────────────── */
