@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useReducer, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
@@ -6,6 +6,9 @@ import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
+import {
+  initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
+} from '../../lib/previewSwapState.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
@@ -124,17 +127,32 @@ function readDeviceInsets() {
   return readSafeAreaInsets(getComputedStyle(_insetProbe))
 }
 
-// `version` is bumped by Shell when an `app_updated` event arrives
-// for this app, busting the iframe cache and forcing a fresh frame
-// load (the frame HTML includes the theme CSS, so it needs to refetch
-// when the agent updates either the app or the theme).
+// `version` is bumped by Shell when an `app_updated` event arrives for this
+// app (a recompile advanced app.updated_at). Rather than remount the one iframe
+// on every bump — which blanked the running preview to a full-frame spinner and
+// dropped all in-app state on each ~1s agent save — we DOUBLE-BUFFER the swap:
+// keep the current frame visible and load the new version in a hidden frame
+// alongside it, then swap it in only once it has actually rendered. The abstract
+// state machine lives in lib/previewSwapState.js (pure + unit-tested); this
+// component owns the DOM, refs, message routing, and timers. See the
+// "Double-buffered version swap" block in the component body.
 //
-// The app token is cached via the query layer so navigating away
-// from the canvas and back doesn't fetch a fresh token, which
-// previously cycled the iframe `key` and triggered a full app
-// reload (~1–3s of visible jank). Tokens are short-lived but stable
-// across React remounts — a 5-minute staleTime is well within the
-// server-side validity window.
+// TWO FRAMES ARE ALIVE DURING A SWAP. Every consequence of that is load-bearing:
+//   - Messages are attributed to the frame that sent them by comparing
+//     e.source to each frame's contentWindow — never assume one contentWindow.
+//   - `data-app-id` is set on the VISIBLE frame only, so useNavigation's
+//     `iframe[data-app-id="…"]` selector resolves the frame the user sees.
+//   - Nav-sentinel and immersive callbacks route to the VISIBLE frame only.
+//   - Frames render in a version-deterministic DOM order so React never
+//     reparents a survivor (a sandboxed-iframe reparent = reload = the module
+//     we just loaded is thrown away).
+//
+// The app token is cached via the query layer so navigating away from the
+// canvas and back doesn't fetch a fresh token, which previously cycled the
+// iframe `key` and triggered a full app reload (~1–3s of visible jank). Tokens
+// are short-lived but stable across React remounts — a 5-minute staleTime is
+// well within the server-side validity window. The token is app-scoped (keyed
+// by appId server-side), so it is identical for both buffered versions.
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
   immersive = false,
@@ -180,6 +198,17 @@ export default function AppCanvas({
   // log showed the token dropping to NONE-blank after mount, i.e. the component
   // remounted and a useRef would have reset. Synchronous read/write, so no
   // effect-timing window leaks a stale latch across an app switch.
+  //
+  // Double-buffering keeps two versions of the SAME app alive, but the token is
+  // app-scoped (identical for both), so we resolve it ONCE — keyed on the newest
+  // requested `version` (the prop), exactly as the single-iframe code did. That
+  // means the latch tracks the INCOMING version continuously through the swap
+  // window, so the frame we promote already has its token latched (no gap at the
+  // instant of promotion). resolveLatchedToken's "drop older versions of the
+  // same app" step harmlessly forgets the outgoing version's latch — that frame
+  // is already initialized and about to unmount — and because we never resolve
+  // for two versions in one render, the two live frames can never fight over the
+  // latch. See lib/appToken.js.
   const token = resolveLatchedToken(appId, version, liveToken, appToken)
 
   // AppCanvas was passive (enabled: false) — relied on Shell's
@@ -192,31 +221,73 @@ export default function AppCanvas({
     queryFn: themeQueries.fetch,
   })
 
-  const [loaded, setLoaded] = useState(false)
-  const iframeRef = useRef(null)
-  // Synchronous mirror of "iframe has fired its load event." We can't
-  // read `loaded` inside `sendInit` because that closure captures the
-  // render-time value; we need a ref so the LATEST render path can
-  // see the load state without waiting for the next render.
-  const loadedRef = useRef(false)
+  // ── Double-buffered version swap ─────────────────────────────────
+  // The pure state machine (lib/previewSwapState.js) decides which frames must
+  // exist: the live (visible) frame, plus a hidden incoming frame during a swap.
+  // It never touches the DOM — this component maps its state onto iframes below.
+  const [swap, dispatchSwap] = useReducer(reduceSwap, version, initSwapState)
 
-  // Reset state whenever the iframe key changes (new app or version
-  // bump). Without this, navigating to a different app would briefly
-  // show the previous app's "loaded" state.
-  useEffect(() => {
-    setLoaded(false)
-    loadedRef.current = false
-  }, [appId, version])
+  // version -> HTMLIFrameElement for every currently-mounted frame (one, or two
+  // during a swap). Message routing and targeted posts look frames up here BY
+  // VERSION — a Map, not a single ref, because two iframes are alive during the
+  // swap window and each must be addressable independently.
+  const framesRef = useRef(new Map())
+  // Versions whose iframe has fired its document `load` event — i.e. its message
+  // listener is live and it can receive frame-init/theme/insets. Per frame,
+  // because the two buffered frames finish loading independently.
+  const loadedDocsRef = useRef(new Set())
+  // version -> last immersive intent (bool) that frame declared. Recorded for
+  // EVERY frame, including a hidden incoming one whose real-time immersive post
+  // is withheld (only the visible frame drives chrome live). On a swap we replay
+  // the promoted frame's recorded intent so an immersive game stays immersive
+  // across a rebuild without a chrome flash.
+  const frameImmersiveRef = useRef(new Map())
+  // A STABLE callback-ref per version. React only invokes a callback ref when
+  // its identity changes, so caching one per version means a frame's ref never
+  // churns across re-renders (a churning ref would delete+re-add the Map entry
+  // and could mis-route a message that arrived in that window). The closure
+  // captures its own version, so unmount (el === null) prunes exactly that frame.
+  const refCbCacheRef = useRef(new Map())
+  function frameRefCb(v) {
+    const cache = refCbCacheRef.current
+    let cb = cache.get(v)
+    if (!cb) {
+      cb = (el) => {
+        if (el) framesRef.current.set(v, el)
+        else {
+          framesRef.current.delete(v)
+          loadedDocsRef.current.delete(v)
+          frameImmersiveRef.current.delete(v)
+          cache.delete(v)
+        }
+      }
+      cache.set(v, cb)
+    }
+    return cb
+  }
 
-  // Send init to the iframe. Idempotent on the iframe side — its
-  // own `initialized` flag dedups. We do NOT track sent-state on the
-  // parent because if the iframe genuinely reloads (DOM reparenting,
-  // browser forced reload, etc.) its `initialized` flag resets and
-  // it needs a fresh init. A parent-side dedup would silently drop
-  // the re-init and the iframe would hit its 10s timeout.
-  function sendInit() {
-    if (!loadedRef.current) return
+  // The VISIBLE frame's version, mirrored into a ref so the long-lived message
+  // listener (registered once, deliberately minimal deps) can gate
+  // visible-frame-only concerns — nav sentinels and immersive — without going
+  // stale. Assigned during render: idempotent, no side effect.
+  const liveVersionRef = useRef(swap.liveVersion)
+  liveVersionRef.current = swap.liveVersion
+
+  function postToFrame(v, message) {
+    framesRef.current.get(v)?.contentWindow?.postMessage(message, window.location.origin)
+  }
+
+  // Send the init handshake to ONE frame. Idempotent on the frame side — its own
+  // `initialized` flag dedups. We deliberately do NOT track sent-state on the
+  // parent: a genuine iframe reload (DOM reparenting, browser forced reload)
+  // resets the frame's flag but not parent state, and the re-init MUST fire or
+  // the frame sits at its 10s loading-timeout. Each buffered frame runs its own
+  // handshake.
+  function sendInit(v) {
+    if (!loadedDocsRef.current.has(v)) return
     if (!token) return
+    const win = framesRef.current.get(v)?.contentWindow
+    if (!win) return
     // NOTE: do NOT gate on `theme`. Previously this returned early until the
     // theme query resolved, to avoid a one-frame flash from the iframe's
     // fallback theme repainting when `frame-theme` arrives. But offline (cold
@@ -227,20 +298,15 @@ export default function AppCanvas({
     // worse than a brief theme flash. So we send init as soon as the token is
     // ready; the frame applies its fallback theme and a later `frame-theme`
     // message (the effect below + the theme-broadcast effect) repaints it.
-    const iframe = iframeRef.current
-    if (!iframe || !iframe.contentWindow) return
-    // Send the CURRENTLY-APPLIED shell theme, not the `/api/theme`
-    // query result. getEffectiveTheme() reads what the shell already
-    // painted onto its own DOM (the `<style id="mobius-theme">` block
-    // + data-theme), which is present even when the theme query is
-    // unresolved (cold offline reopen) — whereas `theme?.css` is
+    //
+    // Send the CURRENTLY-APPLIED shell theme, not the `/api/theme` query result.
+    // getEffectiveTheme() reads what the shell already painted onto its own DOM
+    // (the `<style id="mobius-theme">` block + data-theme), present even when the
+    // theme query is unresolved (cold offline reopen) — whereas `theme?.css` is
     // `undefined` there, and an `undefined` themeCss makes the frame's
-    // applyTheme() a no-op so a stale/dark-injected cached frame STAYS
-    // dark. Posting the effective theme on every mount repaints the
-    // frame to the shell's current theme, correcting any stale
-    // server-injection in the cached frame, online OR offline.
+    // applyTheme() a no-op so a stale/dark-injected cached frame STAYS dark.
     const eff = getEffectiveTheme()
-    iframe.contentWindow.postMessage(
+    win.postMessage(
       {
         type: 'moebius:frame-init',
         token,
@@ -251,178 +317,226 @@ export default function AppCanvas({
     )
   }
 
-  // Re-attempt init when token or theme becomes available. Covers
-  // (a) iframe finished loading before token resolved, (b) iframe
-  // finished loading + token resolved before theme cache populated.
-  // The iframe's own `initialized` flag dedups any extras, so it's
-  // safe to depend on identity-churn-prone theme fields here.
+  // Keep the swap state machine fed by the `version` prop. On mount this
+  // dispatch is a no-op (the reducer was lazily initialised from the same
+  // version); it only does work when a recompile bumps the prop.
   useEffect(() => {
-    sendInit()
+    dispatchSwap({ type: 'version', version })
+  }, [version])
+
+  // Re-attempt init on every mounted-but-loaded frame when token or theme
+  // becomes available. Covers (a) an iframe that finished loading before the
+  // token resolved, (b) token resolved before the theme cache populated, and
+  // (c) a freshly-mounted incoming frame during a swap. Each frame's own
+  // `initialized` flag dedups extras, so depending on identity-churn-prone
+  // theme fields is safe.
+  useEffect(() => {
+    for (const v of framesRef.current.keys()) sendInit(v)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, appId, version, theme?.css, theme?.bg])
 
-  // Listen for the frame's `frame-mounted` signal, which fires AFTER
-  // the React component is rendered inside the iframe. This is the
-  // correct moment to hide the loading overlay — `iframe.onLoad`
-  // alone fires too early (just the document's load event, before
-  // module import + render). Registered ONCE per appId mount so
-  // there's no race with the message arriving before the listener.
+  // Parent-side load timeout for the HIDDEN incoming frame. The frame's own 10s
+  // "no init from parent" timeout cannot fire once we deliver init (its
+  // `initialized` flag flips true), so a bundle that imports fine but then hangs
+  // in render would leave the incoming frame buffered forever. If it doesn't
+  // mount within the budget, treat it as a failed swap: discard the incoming and
+  // keep the OLD live frame visible (the reducer decides; see incoming-timeout).
+  useEffect(() => {
+    if (swap.incomingVersion == null) return
+    const v = swap.incomingVersion
+    const id = setTimeout(() => {
+      dispatchSwap({ type: 'incoming-timeout', version: v })
+    }, INCOMING_SWAP_TIMEOUT_MS)
+    return () => clearTimeout(id)
+  }, [swap.incomingVersion])
+
+  // Single message listener for BOTH buffered frames. Registered once per appId
+  // mount (deliberately minimal deps: it reads live state through refs +
+  // dispatch, never through render-scope closures, so it never needs
+  // re-registering and never goes stale). The `frame-mounted` signal fires AFTER
+  // the React component renders inside the iframe — the correct moment to hide
+  // the overlay / promote a swap; `iframe.onLoad` alone is too early (document
+  // loaded ≠ React rendered).
   useEffect(() => {
     if (!appId) return
     function onMessage(e) {
       if (e.origin !== window.location.origin) return
-      const iframe = iframeRef.current
-      if (!iframe || e.source !== iframe.contentWindow) return
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
+      // ATTRIBUTE the message to the exact frame that sent it. Two frames are
+      // alive during a swap, so we must NOT assume a single contentWindow —
+      // compare e.source to each mounted frame's window and recover its version.
+      let srcVersion = null
+      for (const [v, el] of framesRef.current) {
+        if (el?.contentWindow && el.contentWindow === e.source) { srcVersion = v; break }
+      }
+      if (srcVersion == null) return   // not one of our frames (stale/unknown)
+
+      // frame-mounted: the reducer routes it — promotion if it's the incoming
+      // frame, first-load settle if it's the live frame, ignored if stale.
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
-        setLoaded(true)
+        dispatchSwap({ type: 'frame-mounted', version: srcVersion })
+        return
       }
-      // The frame hit a terminal load failure (bad import, no token, no
-      // default export, init timeout) and is showing its own error panel.
-      // Hide the loading overlay so that panel is visible — without this
-      // the opaque spinner covers it and the app looks like a dead,
-      // never-resolving spinner. Same origin + source + appId guards as
-      // frame-mounted; the offline panel (rendered when !loaded) is a
-      // separate path and is unaffected.
+      // frame-error: a TERMINAL load failure (bad import, no token, no default
+      // export, init timeout). If it's the HIDDEN incoming frame, the reducer
+      // discards it and keeps the OLD working frame visible — the owner is never
+      // stranded on a broken swap. If it's the first-load frame (nothing working
+      // to fall back to), the reducer hides the overlay so the frame's own error
+      // panel becomes visible (existing behaviour).
       if (msg.type === 'moebius:frame-error' && String(msg.appId) === String(appId)) {
-        setLoaded(true)
+        dispatchSwap({ type: 'frame-error', version: srcVersion })
+        return
       }
-      // Token-expiry recovery. The frame detects a 401/403 on the module
-      // import probe and posts this instead of showing a permanent error
-      // panel. We invalidate the app-token query so React Query refetches
-      // a fresh 8h token from the server, then sendInit() fires on the
-      // next token change (the useEffect below depends on `token`) and
-      // the frame re-receives moebius:frame-init with the new value.
-      // The frame resets its own `initialized` flag before posting this,
-      // so the listener accepts the follow-up frame-init.
-      // Latch semantics are preserved: the latch for this app+version is
-      // cleared when the fresh token resolves (resolveLatchedToken stores
-      // the new live token and returns it as the latch).
+      // Token-expiry recovery. The frame detects a 401/403 on the module import
+      // probe and posts this instead of a permanent error panel. We invalidate
+      // the app-token query so React Query refetches a fresh token; sendInit
+      // then fires on the next token change and the frame re-receives frame-init.
+      // The token is app-scoped (shared by both buffered versions), so a single
+      // invalidate serves whichever frame reported the expiry. The frame resets
+      // its own `initialized` flag before posting, so it accepts the follow-up.
       if (msg.type === 'moebius:token-expired' && String(msg.appId) === String(appId)) {
         appQueries.token.invalidate(queryClient, appId)
+        return
       }
-      // Mini-app back-nav protocol (see useNavigation.appNavPush /
-      // appNavPop). The app announces nested-view enter/exit via
-      // postMessage; the shell installs a real top-level history
-      // sentinel so Android's swipe-back gesture has something to
-      // snapshot for the preview, and routes back-gestures back to
-      // the iframe via moebius:nav-back instead of changing the
-      // shell view.
+
+      // Immersive intent. Record it for EVERY frame — including a hidden
+      // incoming one — so a swap can replay the promoted frame's intent the
+      // instant it becomes visible (an immersive game stays immersive across a
+      // rebuild, no chrome flash, no dependence on message ordering vs the
+      // promotion re-render). Only the VISIBLE frame drives the chrome in real
+      // time. Forward with THIS canvas's appId, not msg.appId — the source check
+      // already proved identity, and trusting the payload would let any frame
+      // toggle immersive for a different app. `=== true` keeps the wire contract
+      // strictly boolean (truthy garbage reads as a release, the safe direction).
+      if (msg.type === 'moebius:immersive') {
+        const value = msg.value === true
+        frameImmersiveRef.current.set(srcVersion, value)
+        if (srcVersion === liveVersionRef.current) onImmersive?.(appId, value)
+        return
+      }
+
+      // Everything below is a concern of the VISIBLE frame only. Ignore it from
+      // a hidden incoming frame: it isn't interactive and shouldn't emit these,
+      // but a mount-time nav-push must never install a shell history sentinel for
+      // a frame the user cannot see (the sentinel would belong to the wrong
+      // browsing context). Route acks back to the source frame via e.source
+      // directly — it is the verified sender window.
+      if (srcVersion !== liveVersionRef.current) return
+
+      // Mini-app back-nav protocol (see useNavigation.appNavPush / appNavPop).
+      // The app announces nested-view enter/exit; the shell installs a real
+      // top-level history sentinel so Android's swipe-back has something to
+      // snapshot, and routes back-gestures to the iframe via moebius:nav-back.
       if (msg.type === 'moebius:nav-push') {
         const ok = onNavPush?.(appId)
-        // Echo the iframe's optional requestId on both ack and reject
-        // so the app can correlate when multiple nav-pushes are in
-        // flight. Apps that don't pass a requestId get undefined back
-        // and treat the next ack/reject as theirs (backwards compatible
-        // with the pre-ack protocol).
+        // Echo the iframe's optional requestId on both ack and reject so the app
+        // can correlate when multiple nav-pushes are in flight. Apps that don't
+        // pass a requestId get undefined back (backwards compatible).
         const requestId = msg.requestId
         if (ok === false) {
-          // Cap hit (MAX_APP_SENTINELS) or pushState threw. Tell the
-          // app so it can correct its own bookkeeping — otherwise its
-          // count drifts above the shell's and the next nav-pop pops
-          // a sentinel it never owned, breaking back-nav permanently.
-          iframe.contentWindow?.postMessage(
+          // Cap hit (MAX_APP_SENTINELS) or pushState threw. Tell the app so it
+          // can correct its own bookkeeping — otherwise its count drifts above
+          // the shell's and the next nav-pop pops a sentinel it never owned,
+          // breaking back-nav permanently.
+          e.source.postMessage(
             { type: 'moebius:nav-push-rejected', requestId },
             window.location.origin,
           )
         } else {
-          // Confirm the sentinel is installed so the app can defer
-          // opening its nested view until the OS back-gesture preview
-          // would snapshot the previous screen. Without this ack the
-          // app has to open optimistically and may render the nested
-          // view before the shell's pushState lands — the BFCache then
-          // snapshots the nested view and uses it as the back preview
-          // (wrong background).
-          iframe.contentWindow?.postMessage(
+          // Confirm the sentinel is installed so the app can defer opening its
+          // nested view until the OS back-gesture preview would snapshot the
+          // previous screen. Without this ack the app opens optimistically and
+          // may render the nested view before the shell's pushState lands — the
+          // BFCache then snapshots the wrong background as the back preview.
+          e.source.postMessage(
             { type: 'moebius:nav-push-ack', requestId },
             window.location.origin,
           )
         }
       } else if (msg.type === 'moebius:nav-pop') {
         onNavPop?.(appId)
-      } else if (msg.type === 'moebius:immersive') {
-        // Immersive request/release. Forward with THIS canvas's appId, not
-        // msg.appId — the source check above already proved the message
-        // came from this app's iframe, and trusting the payload instead
-        // would let any frame toggle immersive for a different app.
-        // `=== true` keeps the wire contract strictly boolean (a truthy
-        // garbage value reads as a release, the safe direction).
-        onImmersive?.(appId, msg.value === true)
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [appId, onNavPush, onNavPop, onImmersive, queryClient])
 
-  // Clear this app's pending nav-sentinels when the iframe stops
+  // Clear this app's pending nav-sentinels when the VISIBLE frame stops
   // representing the same browsing context. That happens on:
   //   - AppCanvas unmount (LRU eviction, logout)
-  //   - appId change (different app in the same AppCanvas slot)
-  //   - version bump (app_updated → iframe key changes → DOM
-  //     remount with a fresh internal nav stack starting at 0)
+  //   - a SWAP (swap.liveVersion advances → the old frame, with its internal
+  //     nav stack, unmounts and a fresh frame starting at 0 takes over)
   //
-  // Without resetting, the shell's per-app sentinel count outlives
-  // the iframe's internal state, and later back-gestures fire
-  // moebius:nav-back postMessages into an iframe whose own nav
-  // stack is empty — silently consumed or mishandled by the app.
+  // NOTE the dep is `swap.liveVersion`, NOT the raw `version` prop. Under
+  // double-buffering a version bump loads a HIDDEN frame and does NOT tear down
+  // the live frame; resetting on the prop would wrongly clear the sentinels of a
+  // frame the user is still interacting with. Reset only when the visible frame
+  // actually changes.
   //
-  // Browser history entries from earlier appNavPush calls remain in
-  // history. Once the shell count is 0, _anyAppHasSentinels returns
-  // false so popstate skips interception and back-gestures through
-  // those orphan entries fall through to native handling.
+  // Without resetting, the shell's per-app sentinel count outlives the iframe's
+  // internal state, and later back-gestures fire moebius:nav-back into an iframe
+  // whose own nav stack is empty — silently consumed or mishandled. Once the
+  // shell count is 0, _anyAppHasSentinels returns false so popstate skips
+  // interception and back-gestures through orphan history entries fall through
+  // to native handling.
   useEffect(() => {
     if (!appId) return
     return () => { onNavReset?.(appId) }
-  }, [appId, version, onNavReset])
+  }, [appId, swap.liveVersion, onNavReset])
 
-  // Release any immersive request when the iframe stops representing the
-  // same browsing context (unmount / LRU eviction, appId change, version
-  // remount). The app's own cleanup-post can't cover these: tearing down
-  // an iframe destroys its document without running the app's effect
-  // cleanups, so without this the shell would stay chrome-less with the
-  // requesting app gone. A version remount is also a release — the fresh
-  // mount re-posts if it still wants immersive. Releasing an app that
-  // doesn't hold the slot is a no-op (lib/immersive.js).
+  // Drive the shell chrome from the VISIBLE frame's immersive intent. On a swap
+  // (swap.liveVersion changes) replay the promoted frame's recorded intent the
+  // instant it becomes visible — its real-time immersive post was withheld while
+  // it was the hidden incoming frame, so without this an immersive game would
+  // lose immersive after a rebuild (or, if the new version dropped immersive, we
+  // correctly fall back to false). On unmount, release: a torn-down iframe can't
+  // run its own cleanup-post, so without this the shell could stay chrome-less
+  // with the app gone. Releasing an app that doesn't hold the slot is a no-op
+  // (lib/immersive.js). Keyed on swap.liveVersion, not the prop, for the same
+  // reason as the nav reset above (a bump alone must not touch the live frame).
   useEffect(() => {
     if (!appId) return
+    onImmersive?.(appId, frameImmersiveRef.current.get(swap.liveVersion) === true)
     return () => { onImmersive?.(appId, false) }
-  }, [appId, version, onImmersive])
+  }, [appId, swap.liveVersion, onImmersive])
 
-  // Broadcast theme updates to an already-loaded iframe so it can
-  // refresh its theme without remounting (and losing app state).
-  // Prefer the query result (`theme.css`): it is this effect's trigger
-  // and is guaranteed fresh here. useTheme's applyThemeToDom and this
-  // broadcast are both passive effects with no guaranteed ordering, so
-  // on an SSE/agent refetch getEffectiveTheme() may still read the
-  // PRE-change DOM — using it first would broadcast a stale css. Fall
-  // back to the applied-DOM theme only when theme.css is absent
-  // (offline/unresolved), where it is the offline-safe source (the
-  // toggle path applies it before invalidating, so the DOM is fresh).
+  // Broadcast theme updates to every loaded frame (live + any incoming) so each
+  // refreshes its theme without remounting (and losing app state).
+  // Prefer the query result (`theme.css`): it is this effect's trigger and is
+  // guaranteed fresh here. useTheme's applyThemeToDom and this broadcast are both
+  // passive effects with no guaranteed ordering, so on an SSE/agent refetch
+  // getEffectiveTheme() may still read the PRE-change DOM — using it first would
+  // broadcast a stale css. Fall back to the applied-DOM theme only when theme.css
+  // is absent (offline/unresolved), the offline-safe source (the toggle path
+  // applies it before invalidating, so the DOM is fresh).
   useEffect(() => {
-    if (!loadedRef.current || !iframeRef.current || !theme) return
+    if (!theme) return
     const eff = getEffectiveTheme()
-    iframeRef.current.contentWindow?.postMessage(
-      {
+    for (const v of framesRef.current.keys()) {
+      if (!loadedDocsRef.current.has(v)) continue
+      postToFrame(v, {
         type: 'moebius:frame-theme',
         themeCss: theme.css ?? eff?.css,
         bg: theme.bg ?? eff?.bg,
-      },
-      window.location.origin,
-    )
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme?.css, theme?.bg])
 
+  // One-shot shell intent, delivered to the VISIBLE frame once it has mounted.
+  // Re-delivers to the promoted frame after a swap (dep on swap.liveVersion):
+  // the new module didn't receive the intent the old one did.
   useEffect(() => {
-    if (!pendingIntent || !loaded || !iframeRef.current?.contentWindow) return
-    iframeRef.current.contentWindow.postMessage(
-      {
-        type: 'moebius:app-intent',
-        intent: pendingIntent.intent,
-        nonce: pendingIntent.nonce,
-      },
-      window.location.origin,
-    )
+    if (!pendingIntent || !swap.liveLoaded) return
+    if (!framesRef.current.get(swap.liveVersion)?.contentWindow) return
+    postToFrame(swap.liveVersion, {
+      type: 'moebius:app-intent',
+      intent: pendingIntent.intent,
+      nonce: pendingIntent.nonce,
+    })
     onIntentDelivered?.(appId, pendingIntent)
-  }, [appId, loaded, pendingIntent, onIntentDelivered])
+  }, [appId, swap.liveLoaded, swap.liveVersion, pendingIntent, onIntentDelivered])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
@@ -438,17 +552,14 @@ export default function AppCanvas({
   //
   // Standalone context (routes/standalone.py) has no AppCanvas, so the
   // runtime's navigator.onLine fallback is the only signal there — graceful.
-  function sendOnlineStatus() {
-    if (!iframeRef.current?.contentWindow) return
-    iframeRef.current.contentWindow.postMessage(
-      { type: 'moebius:online-status', online },
-      window.location.origin,
-    )
+  function sendOnlineStatus(v) {
+    postToFrame(v, { type: 'moebius:online-status', online })
   }
 
   useEffect(() => {
-    if (!loadedRef.current) return
-    sendOnlineStatus()
+    for (const v of framesRef.current.keys()) {
+      if (loadedDocsRef.current.has(v)) sendOnlineStatus(v)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online])
 
@@ -463,20 +574,21 @@ export default function AppCanvas({
   // immersive verdict flips, and on resize/orientationchange while immersive
   // (a rotation moves the cutout, so the cached insets would otherwise go
   // stale — see the geometry-change effect below).
-  function sendInsets() {
-    if (!iframeRef.current?.contentWindow) return
-    const insets = immersive ? readDeviceInsets() : zeroInsets()
-    iframeRef.current.contentWindow.postMessage(
-      { type: 'moebius:frame-insets', insets },
-      window.location.origin,
-    )
+  // Insets are non-zero ONLY for the VISIBLE frame while it is immersive. A
+  // hidden incoming frame is never the immersive holder, so it gets zeros; a
+  // windowed frame whose chrome already owns the inset padding also gets zeros
+  // so it can't double-pad.
+  function sendInsets(v) {
+    const insets = (v === liveVersionRef.current && immersive) ? readDeviceInsets() : zeroInsets()
+    postToFrame(v, { type: 'moebius:frame-insets', insets })
   }
 
   useEffect(() => {
-    if (!loadedRef.current) return
-    sendInsets()
+    for (const v of framesRef.current.keys()) {
+      if (loadedDocsRef.current.has(v)) sendInsets(v)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersive])
+  }, [immersive, swap.liveVersion])
 
   // Re-forward insets on viewport geometry change WHILE immersive. Rotating the
   // device or a window resize moves the notch/home-indicator (landscape puts
@@ -488,7 +600,7 @@ export default function AppCanvas({
   // probe element resolves the fresh env() values after layout settles.
   useEffect(() => {
     if (!immersive) return
-    function onGeometryChange() { sendInsets() }
+    function onGeometryChange() { sendInsets(liveVersionRef.current) }
     window.addEventListener('resize', onGeometryChange)
     window.addEventListener('orientationchange', onGeometryChange)
     return () => {
@@ -524,51 +636,77 @@ export default function AppCanvas({
     )
   }
 
-  // Token NOT in URL anymore — sent via postMessage above. `v` is in the
-  // URL because offline-capable apps are also cached by the service worker:
-  // without a versioned cache key, a cold/unknown-connectivity SW can serve
-  // a stale frame/module even after the backend updated the app.
+  // Token NOT in the URL — sent via postMessage above. `v` IS in the URL: it is
+  // the SW's offline cache key (a cold/unknown-connectivity SW could otherwise
+  // serve a stale frame after a backend update). frameRev folds in the shared
+  // app-frame.html content hash so a frame-only redeploy busts every app's frame.
   const frameRev =
     (typeof document !== 'undefined' &&
       document.querySelector('meta[name="mobius-frame-rev"]')?.content) || ''
-  const src = `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}${frameRev ? '-' + frameRev : ''}`
+  function frameSrc(v) {
+    return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(v)}${frameRev ? '-' + frameRev : ''}`
+  }
 
-  // The iframe key intentionally OMITS `token` — the token may
-  // refresh (after staleTime) but the iframe should keep its in-app
-  // state. Only `appId` and `version` should force a remount.
+  function handleFrameLoad(v) {
+    // Per the HTML spec, the iframe's `load` event fires after every
+    // <script type="module"> has executed, so the frame's message listener is
+    // live by now — a single init postMessage reaches it, no race, no retry. We
+    // do NOT mark the swap "loaded" here: the loading overlay hides only when the
+    // frame posts `frame-mounted` (after React renders inside it); onLoad is too
+    // early (document loaded ≠ app rendered).
+    loadedDocsRef.current.add(v)
+    sendInit(v)
+    sendOnlineStatus(v)
+    sendInsets(v)
+  }
+
+  // The frames to render: the live (visible) frame, plus a hidden incoming frame
+  // during a swap. ORDER MUST be a pure function of version (never of live vs
+  // incoming ROLE): a frame's DOM slot then never changes across renders, so
+  // React never reparents a surviving iframe when the outgoing one is removed —
+  // and reparenting a sandboxed iframe reloads its document, throwing away the
+  // module we just loaded. See compareVersions.
+  const frameVersions = [swap.liveVersion]
+  if (swap.incomingVersion != null) frameVersions.push(swap.incomingVersion)
+  frameVersions.sort(compareVersions)
+
+  // The iframe key OMITS `token` (a token refresh must not remount and drop
+  // in-app state) — only appId+version identify a frame. During a swap the
+  // incoming frame keeps the same key when promoted (only its className flips),
+  // so it is NOT reloaded at the moment it becomes visible.
   return (
     <div className="canvas-wrap">
-      <iframe
-        ref={iframeRef}
-        key={`${appId}-${version}`}
-        className="canvas"
-        src={src}
-        title={appName || 'Mini-app'}
-        data-app-id={appId}
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation"
-        allow="microphone; fullscreen"
-        allowFullScreen
-        onLoad={() => {
-          // Per the HTML spec, the iframe's `load` event fires after
-          // every <script type="module"> has executed. The frame's
-          // message listener is registered at the top of its module
-          // script, so by the time we get here it's live and ready
-          // to receive init via a single postMessage — no race, no
-          // retry. If the token isn't ready yet, the effect above
-          // will catch up when it resolves.
-          //
-          // We do NOT setLoaded(true) here — the loading overlay
-          // hides only when the frame posts `frame-mounted`, which
-          // fires AFTER the React component renders inside the
-          // iframe. iframe.onLoad fires too early (document loaded
-          // ≠ app rendered).
-          loadedRef.current = true
-          sendInit()
-          sendOnlineStatus()
-          sendInsets()
-        }}
-      />
-      {!loaded && (
+      {frameVersions.map((v) => {
+        const isLive = v === swap.liveVersion
+        return (
+          <iframe
+            ref={frameRefCb(v)}
+            key={`${appId}-${v}`}
+            className={`canvas ${isLive ? 'canvas--live' : 'canvas--incoming'}`}
+            src={frameSrc(v)}
+            title={appName || 'Mini-app'}
+            // data-app-id marks the app's VISIBLE browsing context. Exactly one
+            // frame carries it (the live one) at every observable moment, so
+            // useNavigation's `iframe[data-app-id="…"]` selector always resolves
+            // the frame the user sees — even mid-swap. The hidden incoming frame
+            // withholds it.
+            data-app-id={isLive ? appId : undefined}
+            data-frame-version={v}
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation"
+            allow="microphone; fullscreen"
+            allowFullScreen
+            onLoad={() => handleFrameLoad(v)}
+          />
+        )
+      })}
+      {/* One-shot "updated" shimmer on a successful swap. Keyed on the live
+          version so it remounts and replays each time; suppressed on first load
+          (swaps === 0). Opacity-only + pointer-events:none, so it never blocks
+          input or reflows — it just confirms the preview refreshed in place. */}
+      {swap.liveLoaded && swap.swaps > 0 && (
+        <div className="canvas-swap-flash" key={`flash-${swap.liveVersion}`} aria-hidden="true" />
+      )}
+      {!swap.liveLoaded && (
         <div className="canvas-loading" aria-live="polite">
           {!online && !offlineCapable ? (
             // A non-offline-capable app whose frame + module aren't cached

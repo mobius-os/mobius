@@ -15,6 +15,57 @@
   background: var(--bg);
 }
 
+/* Double-buffered version swap. Both frames (the live one, plus a hidden
+   incoming frame while a rebuild loads) are stacked absolutely so the incoming
+   frame renders at full size off-screen and can post frame-mounted before it is
+   ever shown. Scoped to `.canvas-wrap >` so the top-level `.canvas--empty`
+   placeholder (not inside the wrap) keeps its own flex layout. */
+.canvas-wrap > .canvas {
+  position: absolute;
+  inset: 0;
+}
+
+/* Hidden incoming frame: fully rendering (opacity 0, NOT display:none) but
+   invisible and non-interactive until it is promoted. */
+.canvas--incoming {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Visible frame. We SNAP the promoted frame to visible rather than cross-fading
+   two live iframes: it already finished rendering (it posted frame-mounted), so
+   snapping shows a complete app with zero blank, and the old frame is unmounted
+   in the same commit — keeping memory strictly bounded to two frames on phones.
+   The "updated" feel comes from .canvas-swap-flash below, not an opacity fade
+   (a fade from 0 would flash the wrapper background as the old frame leaves). */
+.canvas--live {
+  opacity: 1;
+}
+
+/* One-shot shimmer confirming the preview refreshed in place. A faint accent
+   veil that pulses and fades; opacity-only + pointer-events:none so it never
+   blocks input or forces layout. Sits above the frames but below nothing that
+   matters. Keyed on the live version in JSX so it replays on each swap. */
+.canvas-swap-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--accent, #8b6cf7);
+  opacity: 0;
+  animation: canvas-swap-flash 460ms ease-out;
+}
+
+@keyframes canvas-swap-flash {
+  0% { opacity: 0; }
+  22% { opacity: 0.1; }
+  100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-swap-flash { animation: none; }
+}
+
 .canvas--empty {
   display: flex;
   align-items: center;
