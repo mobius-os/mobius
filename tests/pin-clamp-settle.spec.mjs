@@ -21,8 +21,11 @@
  * exactly the shape where the settle-time clamp is never compensated by
  * content growth and the drift is permanent.
  *
- * RED on origin/main (message lands ~24px+ below top); GREEN after the
- * RO clamp-fix re-pins PIN_USER_MSG when scrollTop drifts below target.
+ * Invariant this locks in: after the settle, the ResizeObserver re-pins
+ * PIN_USER_MSG whenever scrollTop drifts below the pin target, so the message
+ * stays flush at the top instead of stranding ~24px+ down. This is the
+ * clamp-fix obligation for PIN_USER_MSG — already honored for
+ * FOLLOW_BOTTOM/ANCHOR_AT.
  *
  * Mirrors tests/second-send-pin.spec.mjs's route-mock SSE flow.
  */
