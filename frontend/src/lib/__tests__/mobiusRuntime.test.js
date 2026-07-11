@@ -83,6 +83,16 @@ test('app chat metadata body can omit provider for existing-chat updates', () =>
   })
 })
 
+test('app chat metadata body forwards scoped chat fields', () => {
+  assert.deepEqual(appChatMetadataBody({
+    scope: ' workout-session:session-123 ',
+    scopeLabel: ' Workout Jul 11 ',
+  }), {
+    scope: 'workout-session:session-123',
+    scope_label: 'Workout Jul 11',
+  })
+})
+
 async function withFakeWindow(fn) {
   const previousWindow = globalThis.window
   const listeners = new Set()

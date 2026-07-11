@@ -332,6 +332,22 @@ def head_sha(source_dir: str | Path, branch: str) -> str:
   return _run(Path(source_dir), "rev-parse", branch).stdout.strip()
 
 
+def ref_exists(source_dir: str | Path, ref: str) -> bool:
+  """Whether `ref` resolves in this repo. Read-only; never raises.
+
+  Lets a caller tell "this app has a recorded upstream branch" apart from "the
+  branch was never recorded" before reading its tree — `read_ref_tree` would
+  raise on a missing ref, so the guard belongs here. `--verify --quiet` resolves
+  the ref without printing, exiting non-zero when it doesn't exist. A repo with
+  no `.git` is trivially false rather than a git error."""
+  if not is_repo(source_dir):
+    return False
+  proc = _run(
+    Path(source_dir), "rev-parse", "--verify", "--quiet", ref, check=False,
+  )
+  return proc.returncode == 0
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 
