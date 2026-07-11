@@ -900,6 +900,21 @@ _REPORT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A project_id is used directly as a storage path component, so it must be a
 # safe slug — alphanumerics, dash, underscore only; no separators or traversal.
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_CHAT_SCOPE_MAX = 160
+_CHAT_SCOPE_LABEL_MAX = 120
+
+
+def _clean_app_chat_text(value: str | None, max_len: int, field: str) -> str | None:
+  if value is None:
+    return None
+  value = value.strip()
+  if not value:
+    return None
+  if len(value) > max_len:
+    raise ValueError(f"{field} must be <= {max_len} chars")
+  if any(ord(ch) < 32 for ch in value):
+    raise ValueError(f"{field} must not contain control characters")
+  return value
 
 
 class AppChatCreate(BaseModel):
@@ -910,6 +925,8 @@ class AppChatCreate(BaseModel):
   report_date: str | None = None
   report_kind: str | None = Field(default=None, max_length=64)
   project_id: str | None = Field(default=None, max_length=64)
+  scope: str | None = Field(default=None, max_length=_CHAT_SCOPE_MAX)
+  scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
   owner_visible: bool = False
 
   @field_validator("project_id")
@@ -936,11 +953,37 @@ class AppChatCreate(BaseModel):
       raise ValueError("report_date must be an ISO date (YYYY-MM-DD)")
     return value
 
+  @field_validator("scope")
+  @classmethod
+  def _validate_scope(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(value, _CHAT_SCOPE_MAX, "scope")
+
+  @field_validator("scope_label")
+  @classmethod
+  def _validate_scope_label(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(
+      value, _CHAT_SCOPE_LABEL_MAX, "scope_label",
+    )
+
 
 class AppChatPatch(BaseModel):
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
   provider: str | None = None
+  scope: str | None = Field(default=None, max_length=_CHAT_SCOPE_MAX)
+  scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
+
+  @field_validator("scope")
+  @classmethod
+  def _validate_scope(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(value, _CHAT_SCOPE_MAX, "scope")
+
+  @field_validator("scope_label")
+  @classmethod
+  def _validate_scope_label(cls, value: str | None) -> str | None:
+    return _clean_app_chat_text(
+      value, _CHAT_SCOPE_LABEL_MAX, "scope_label",
+    )
 
 
 def _merge_app_chat_settings(
@@ -951,6 +994,8 @@ def _merge_app_chat_settings(
   report_date: str | None = None,
   report_kind: str | None = None,
   project_id: str | None = None,
+  scope: str | None = None,
+  scope_label: str | None = None,
   owner_visible: bool | None = None,
 ) -> None:
   """Merge app-supplied runtime metadata into Chat.agent_settings_json."""
@@ -993,6 +1038,16 @@ def _merge_app_chat_settings(
       settings["project_id"] = value
     else:
       settings.pop("project_id", None)
+  # Scoped embedded chats let one app host multiple durable conversations
+  # grouped by its own domain object, such as one chat per workout session.
+  if scope is not None:
+    value = scope.strip()
+    if value:
+      settings["chat_scope"] = value
+  if scope_label is not None:
+    value = scope_label.strip()
+    if value:
+      settings["chat_scope_label"] = value
   if owner_visible is not None:
     if owner_visible:
       settings["owner_visible"] = True
@@ -1010,6 +1065,71 @@ def _has_real_assistant_turn(chat: models.Chat) -> bool:
     and m.get("kind") != "compaction"
     for m in (chat.messages or [])
   )
+
+
+def _app_chat_scope(chat: models.Chat) -> str | None:
+  value = _coerce_agent_settings(chat.agent_settings_json).get("chat_scope")
+  return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _app_chat_scope_label(chat: models.Chat) -> str | None:
+  value = _coerce_agent_settings(chat.agent_settings_json).get("chat_scope_label")
+  return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _app_chat_sort_ts(chat: models.Chat) -> float:
+  ts = chat.activity_at or chat.updated_at or chat.created_at
+  if ts is None:
+    return 0
+  if ts.tzinfo is None:
+    ts = ts.replace(tzinfo=UTC)
+  return ts.timestamp()
+
+
+def _app_chat_summary(chat: models.Chat) -> dict:
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "created_by_app_id": chat.created_by_app_id,
+    "created_at": chat.created_at.isoformat() if chat.created_at else None,
+    "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
+    "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
+    "has_messages": bool(chat.messages and len(chat.messages) > 0),
+    "provider": chat.provider or "claude",
+    "scope": _app_chat_scope(chat),
+    "scope_label": _app_chat_scope_label(chat),
+  }
+
+
+@app_chat_router.get("")
+def list_app_chats(
+  scope: str | None = None,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Lists active app-owned chats for the calling app token.
+
+  `scope` is an app-defined grouping key for embedded UX (for example, a
+  workout session id). Owner tokens stay on `/api/chats`; this endpoint is the
+  app's private chat index and never returns another app's rows.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="App chats may only be listed by an app token.",
+    )
+  try:
+    clean_scope = _clean_app_chat_text(scope, _CHAT_SCOPE_MAX, "scope")
+  except ValueError as exc:
+    raise HTTPException(status_code=422, detail=str(exc))
+  chats = db.query(models.Chat).filter(
+    models.Chat.deleted_at.is_(None),
+    models.Chat.created_by_app_id == principal.app_id,
+  ).all()
+  if clean_scope is not None:
+    chats = [c for c in chats if _app_chat_scope(c) == clean_scope]
+  chats.sort(key=_app_chat_sort_ts, reverse=True)
+  return [_app_chat_summary(c) for c in chats]
 
 
 @app_chat_router.post(
@@ -1067,6 +1187,8 @@ def create_app_chat(
     report_date=body.report_date,
     report_kind=body.report_kind,
     project_id=body.project_id,
+    scope=body.scope,
+    scope_label=body.scope_label,
     owner_visible=body.owner_visible,
   )
   db.add(chat)
@@ -1119,6 +1241,8 @@ def patch_app_chat(
     chat,
     system_prompt=body.system_prompt,
     model=body.model,
+    scope=body.scope,
+    scope_label=body.scope_label,
   )
   chat.updated_at = datetime.now(UTC)
   db.commit()
