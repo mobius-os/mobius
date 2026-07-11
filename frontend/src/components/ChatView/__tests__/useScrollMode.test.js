@@ -151,6 +151,46 @@ test('pin reapply waits until the target is reachable to avoid stepwise pin jitt
   )
 })
 
+test('pin reapply holds a pinned send when streaming drags the viewport toward bottom', () => {
+  const scrollEl = {
+    scrollHeight: 2000,
+    // Target is 996. This simulates browser/follow-bottom drift after content
+    // streams below the pinned user row.
+    scrollTop: 1200,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.chat__msg--user[data-ts="123"]') {
+        return { offsetTop: 1000 }
+      }
+      return null
+    },
+  }
+
+  assert.equal(
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    true,
+  )
+})
+
+test('pin reapply is idle when the pinned send is still at its target', () => {
+  const scrollEl = {
+    scrollHeight: 2000,
+    scrollTop: 996,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.chat__msg--user[data-ts="123"]') {
+        return { offsetTop: 1000 }
+      }
+      return null
+    },
+  }
+
+  assert.equal(
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    false,
+  )
+})
+
 test('viewport resize at physical bottom retires stale pin mode', () => {
   const stalePin = { kind: 'PIN_USER_MSG', ts: 123 }
   assert.deepEqual(
@@ -256,7 +296,7 @@ test('spacer reservation is independent from pin mode', () => {
 
   assert.equal(
     _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
-    492,
+    576,
   )
 })
 
@@ -280,14 +320,14 @@ test('queued tray does not shorten spacer reservation', () => {
 
   assert.equal(
     _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
-    492,
+    576,
   )
 })
 
 // R5 regression contract: a send while at the bottom must pin the new user
 // message to the TOP, which requires the dynamic spacer to reserve enough
 // bottom room that the pin target is actually REACHABLE (maxScrollTop >=
-// pinTarget). It also leaves a small bottom-room cushion so the pinned row
+// pinTarget). It also leaves a real bottom-room cushion so the pinned row
 // does not feel cramped at the exact end of the scroll range. When
 // fullViewH is stale-SMALL (the keyboard-open height used after the keyboard
 // has already closed and grown clientHeight), the spacer is undersized, the
@@ -313,7 +353,7 @@ test('R5: spacer keeps the pin reachable when fullViewH tracks the (grown) clien
   const r = pinReachable({ fullViewH: 700, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
   assert.equal(r.reachable, true, 'message can reach the top when fullViewH >= clientHeight')
   assert.ok(r.maxScrollTop > r.pinTarget, 'spacer leaves breathing room below the pinned message')
-  assert.equal(r.maxScrollTop - r.pinTarget, 96, 'bottom breathing room stays intentional and bounded')
+  assert.equal(r.maxScrollTop - r.pinTarget, 180, 'bottom breathing room stays intentional and bounded')
 })
 
 test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-viewport (the bug)', () => {
@@ -321,6 +361,6 @@ test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-
   // height (400) after clientHeight had already grown to 700.
   const r = pinReachable({ fullViewH: 400, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
   assert.equal(r.reachable, false, 'stale-small fullViewH leaves the pin target unreachable')
-  assert.ok(r.pinTarget - r.maxScrollTop > 150,
+  assert.ok(r.pinTarget - r.maxScrollTop > 80,
     'the message is still stranded far below the top — visually mid-viewport')
 })
