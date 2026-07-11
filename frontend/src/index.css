@@ -282,6 +282,33 @@ html, body {
   }
 }
 
+/* Reduced-motion fallback for border-arc spinners. The rule above pins
+   animation-duration to 1ms on everything, which freezes a rotating arc as a
+   lopsided static partial ring that no longer reads as "working." For these
+   three spinners we instead show a COMPLETE ring and pulse its OPACITY (a
+   reduced-motion-safe cue) so activity still registers without rotation.
+   This escapes the global 1ms clamp by specificity: a class selector (0,1,0)
+   outranks the universal selector (0,0,0), so with both marked !important the
+   longhands here win over `* { animation-*: ... !important }`. Overriding
+   animation-name to the opacity pulse also drops the rotate transform, and a
+   uniform border-color turns each arc into a full ring. */
+@media (prefers-reduced-motion: reduce) {
+  .canvas-loading__spinner,
+  .chat__tool-spin,
+  .chat__attach-card-spin {
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    animation-name: rm-spinner-pulse !important;
+    animation-duration: 1.4s !important;
+    animation-timing-function: ease-in-out !important;
+    animation-iteration-count: infinite !important;
+  }
+
+  @keyframes rm-spinner-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+}
+
 
 /*
  * Shell fade-in animation.
