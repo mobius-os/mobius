@@ -43,6 +43,42 @@ export function groupToolRuns(entries) {
   return nodes
 }
 
+// Merge runs of ADJACENT thinking entries into one, so a persisted transcript
+// renders a continuous reasoning pass as a SINGLE "Thought for Ns" disclosure
+// instead of many tiny fragments. Fragments only exist in already-saved chats
+// from before the backend stopped closing the thinking run on transparent
+// bookkeeping events (see events.py _THINKING_INTERRUPTING_TYPES); the live path
+// already coalesces in streamReducers.appendThinkingChunk. This is a render-time
+// repair with no migration — same spirit as suppressedQuestionToolIndices.
+//
+// CRITICAL: this runs on the ENTRIES array (each `{ item, idx }`) AFTER idx has
+// been assigned from the persisted position, and it PRESERVES the first merged
+// entry's original `idx`. idx is an absolute reference into the persisted
+// msg.blocks (ToolBlock uses it for the lazy GET /tool-output fetch), so
+// re-deriving it from a shortened array would fetch the wrong block / 404. Only
+// truly-adjacent thinking entries merge; anything between them (a tool/text
+// block) breaks the run, so distinct reasoning segments around tool calls stay
+// separate. Pure — new entries, inputs untouched.
+export function coalesceThinkingEntries(entries) {
+  const out = []
+  for (const entry of entries) {
+    const prev = out[out.length - 1]
+    if (prev?.item?.type === 'thinking' && entry?.item?.type === 'thinking') {
+      out[out.length - 1] = {
+        ...prev,
+        item: {
+          ...prev.item,
+          content: (prev.item.content || '') + (entry.item.content || ''),
+          duration_ms: (prev.item.duration_ms || 0) + (entry.item.duration_ms || 0),
+        },
+      }
+    } else {
+      out.push(entry)
+    }
+  }
+  return out
+}
+
 // Derive the collapsed status of a tool group from its children: a failed tool
 // dominates (so a broken step is visible without expanding), then a running
 // tool, else done. Shared by ToolActivityGroup, which maps this to the header
