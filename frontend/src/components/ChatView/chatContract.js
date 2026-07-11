@@ -12,6 +12,19 @@
  * a reason — never a throw, because a monitor that crashes on a half-rendered
  * frame is worse than one that reports "indeterminate".
  *
+ * INJECTION CONTRACT: the module is injected or bundled WHOLE into a browser
+ * context (vite import, or injecting the file's text and evaluating it as a
+ * module). Individual functions are NOT serializable through a bare
+ * page.evaluate(fn) — they close over module scope (constants, helpers).
+ *
+ * PREDICATE SELECTION is the caller's job, keyed on submit-time intent: an
+ * at-bottom send is judged by pinLanded/pinHeld; a not-at-bottom send or
+ * steer by scrollUnmoved. pinLanded deliberately cannot know whether a given
+ * send SHOULD have pinned — the caller captures that at submit time.
+ *
+ * OUT OF SCOPE: transient ordering/jitter and the hide-then-reveal blank
+ * window belong to the replay harness and runtime monitor (.pm 210/208).
+ *
  * CONSTANTS-SYNC DECISION: PIN_OFFSET / PIN_BOTTOM_ROOM are re-declared here,
  * not imported from useScrollMode.js. They are module-private there (not
  * exported), and importing anything from that file would pull React and a
@@ -75,7 +88,9 @@ export const CHAT_CONTRACT = [
     summary:
       'Exactly one streaming assistant surface is mounted per turn — the '
       + 'catch-up burst replays all prior events, so a missed reset duplicates '
-      + 'the response. Checked from a caller-supplied selector count.',
+      + 'the response. Checked from a caller-supplied selector count: this '
+      + 'catches duplicates/absence only. Surface IDENTITY (the right surface '
+      + 'chosen) is covered by chooseActiveAssistantSurface\'s own unit tests.',
   },
 ]
 
@@ -123,16 +138,19 @@ function indeterminate(id, expected, reason) {
   return { ok: false, id, measured: null, expected, reason }
 }
 
-/** Shared shape for the two "pinned gap must not drift" invariants. */
-function gapPreserved(id, before, after, tolerance) {
-  const expected = `|Δ pinGap| <= ${tolerance}`
+/** Shared core for the two "pinned row stays at the top" invariants. Zero
+ *  drift alone is not enough — a row parked mid-viewport with a steady gap is
+ *  still a violation — so ok requires the AFTER gap to sit at the pin target.
+ *  Drift and before/after gaps stay in `measured` for diagnostics. */
+function pinStillAtTop(id, before, after, tolerance, pinOffset) {
+  const expected = `|after.pinGap - ${pinOffset}| <= ${tolerance}`
   if (!before || !after || before.pinGap == null || after.pinGap == null) {
     return indeterminate(id, expected,
       'no pinGap in before/after (missing user message)')
   }
   const drift = after.pinGap - before.pinGap
   return {
-    ok: Math.abs(drift) <= tolerance, id, expected,
+    ok: Math.abs(after.pinGap - pinOffset) <= tolerance, id, expected,
     measured: { drift, before: before.pinGap, after: after.pinGap },
   }
 }
@@ -151,14 +169,14 @@ export function pinLanded(snap, { tolerance = 8, pinOffset = PIN_OFFSET } = {}) 
   }
 }
 
-/** C2 pin-holds-streaming: the pin did not drift as content grew. */
-export function pinHeld(before, after, { tolerance = 8 } = {}) {
-  return gapPreserved('pin-holds-streaming', before, after, tolerance)
+/** C2 pin-holds-streaming: the row is still AT the top after content grew. */
+export function pinHeld(before, after, { tolerance = 8, pinOffset = PIN_OFFSET } = {}) {
+  return pinStillAtTop('pin-holds-streaming', before, after, tolerance, pinOffset)
 }
 
-/** C5 reanchor-on-promote: the pin did not jump when items promoted. */
-export function reanchored(before, after, { tolerance = 8 } = {}) {
-  return gapPreserved('reanchor-on-promote', before, after, tolerance)
+/** C5 reanchor-on-promote: the row is still AT the top after promote. */
+export function reanchored(before, after, { tolerance = 8, pinOffset = PIN_OFFSET } = {}) {
+  return pinStillAtTop('reanchor-on-promote', before, after, tolerance, pinOffset)
 }
 
 /** C3 no-scroll-on-read-send: a scrolled-up send/steer left scrollTop put. */
@@ -185,8 +203,13 @@ export function cushionPresent(snap, { min = PIN_BOTTOM_ROOM, pinOffset = PIN_OF
     return indeterminate(id, expected,
       'cannot derive cushion (missing scroll element or user message)')
   }
+  // Keyboard-closed terms: an open keyboard shrinks clientHeight, which would
+  // inflate (scrollHeight - clientHeight) and green-light an undersized
+  // spacer. fullViewH is the caller-known full viewport height; fall back to
+  // clientHeight only when the caller did not supply it.
+  const viewH = snap.fullViewH ?? snap.clientHeight
   const pinTarget = Math.max(0, snap.lastUserTop - pinOffset)
-  const cushion = (snap.scrollHeight - snap.clientHeight) - pinTarget
+  const cushion = (snap.scrollHeight - viewH) - pinTarget
   return { ok: cushion >= min, id, measured: cushion, expected }
 }
 
@@ -201,9 +224,20 @@ export function singleAssistantSurface(count, { expected = 1 } = {}) {
 }
 
 /** Aggregate any set of predicate results into one verdict plus the failing
- *  checks — the shape a unit test asserts on and a runtime monitor logs. */
+ *  checks — the shape a unit test asserts on and a runtime monitor logs.
+ *  Fails closed on missing evidence: an empty or non-array check list means
+ *  nothing actually ran (failed injection, skipped monitor setup) and must
+ *  never read as green. */
 export function checkContract(checks) {
-  const list = Array.isArray(checks) ? checks : []
-  const violations = list.filter(c => !c || !c.ok)
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return {
+      ok: false,
+      violations: [{
+        ok: false, id: 'contract-no-evidence', measured: null,
+        expected: 'at least one check', reason: 'no checks supplied',
+      }],
+    }
+  }
+  const violations = checks.filter(c => !c || !c.ok)
   return { ok: violations.length === 0, violations }
 }

@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   CHAT_CONTRACT,
@@ -117,6 +118,16 @@ test('pinHeld fails when the pin drifts off the top (offsetTop shift not re-pinn
   assert.equal(r.measured.drift, 500)
 })
 
+test('pinHeld fails when the row holds steady but was never at the top', () => {
+  // Zero drift is not enough: a row parked 400px down with a rock-steady gap
+  // violates "pinned row holds at the top" just as much as a drifting one.
+  const mid = { ...pinnedEnv, scrollEl: scrollEl({ scrollTop: 600, scrollHeight: 1876, clientHeight: 700 }) }
+  const r = pinHeld(snapshotChatUX(mid), snapshotChatUX(mid))
+  assert.equal(r.ok, false)
+  assert.equal(r.measured.drift, 0)
+  assert.equal(r.measured.after, 400)
+})
+
 test('pinHeld is indeterminate when a snapshot lacks a pinGap', () => {
   const before = snapshotChatUX(pinnedEnv)
   const after = snapshotChatUX({ ...pinnedEnv, lastUserMsgEl: null })
@@ -138,6 +149,13 @@ test('reanchored fails when promote lets the message jump', () => {
   const after = snapshotChatUX({ ...pinnedEnv, scrollEl: scrollEl({ scrollTop: 900, scrollHeight: 1876, clientHeight: 700 }) })
   const r = reanchored(before, after)
   assert.equal(r.ok, false) // gap jumped 4 -> 100
+})
+
+test('reanchored fails when the row is stable across promote but off the top', () => {
+  const mid = { ...pinnedEnv, scrollEl: scrollEl({ scrollTop: 700, scrollHeight: 1876, clientHeight: 700 }) }
+  const r = reanchored(snapshotChatUX(mid), snapshotChatUX(mid))
+  assert.equal(r.ok, false) // drift 0, but gap 300 is nowhere near the pin
+  assert.equal(r.measured.drift, 0)
 })
 
 test('scrollUnmoved passes when a scrolled-up send leaves scrollTop put', () => {
@@ -169,20 +187,39 @@ test('cushionPresent passes when the spacer reserves PIN_BOTTOM_ROOM below the p
   assert.equal(r.measured, PIN_BOTTOM_ROOM) // exactly 180 reserved
 })
 
-test('cushionPresent fails on the R5 bug: a stale-small fullViewH undersizes the spacer', () => {
-  // Stale fullViewH 400 (keyboard-open) after clientHeight grew back to 700:
-  // spacer = max(0, 400 + 996 - 1040 + 180) = 536, scrollHeight = 1040 + 536.
+test('cushionPresent fails on the R5 bug: an undersized spacer leaves no keyboard-closed room', () => {
+  // The hook's stale-small fullViewH (400, the keyboard-open height) sized the
+  // spacer: max(0, 400 + 996 - 1040 + 180) = 536, so scrollHeight = 1576. The
+  // SNAPSHOT carries the true full view height (700 — clientHeight has grown
+  // back), so the cushion reads (1576 - 700) - 996 = -120: pin stranded.
   const buggy = {
     scrollEl: scrollEl({ scrollTop: 876, scrollHeight: 1576, clientHeight: 700 }),
     listEl: listEl(1040),
     lastUserMsgEl: userEl(1000),
-    fullViewH: 400,
+    fullViewH: 700,
   }
   const snap = snapshotChatUX(buggy)
   assert.equal(snap.spacerReachable, false) // pin target unreachable
   const r = cushionPresent(snap)
   assert.equal(r.ok, false)
   assert.ok(r.measured < PIN_BOTTOM_ROOM)
+})
+
+test('cushionPresent fails on a keyboard-open snapshot with an undersized spacer', () => {
+  // Keyboard open: clientHeight shrank to 400; the full viewport is 700 and
+  // the spacer only produced scrollHeight 1576. clientHeight-based math would
+  // read (1576 - 400) - 996 = 180 — a false green. Keyboard-closed terms
+  // (fullViewH) read (1576 - 700) - 996 = -120: no room once the keyboard
+  // closes.
+  const snap = snapshotChatUX({
+    scrollEl: scrollEl({ scrollTop: 876, scrollHeight: 1576, clientHeight: 400 }),
+    listEl: listEl(1040),
+    lastUserMsgEl: userEl(1000),
+    fullViewH: 700,
+  })
+  const r = cushionPresent(snap)
+  assert.equal(r.ok, false)
+  assert.equal(r.measured, -120)
 })
 
 test('cushionPresent is indeterminate when geometry is missing', () => {
@@ -231,8 +268,39 @@ test('checkContract collects the failing checks', () => {
   )
 })
 
-test('checkContract tolerates a non-array argument', () => {
-  assert.deepEqual(checkContract(undefined), { ok: true, violations: [] })
+test('checkContract fails closed when no checks are supplied (non-array)', () => {
+  // Missing evidence — failed injection, skipped monitor setup — must never
+  // read as green.
+  const r = checkContract(undefined)
+  assert.equal(r.ok, false)
+  assert.equal(r.violations.length, 1)
+  assert.equal(r.violations[0].id, 'contract-no-evidence')
+  assert.equal(r.violations[0].measured, null)
+  assert.match(r.violations[0].reason, /no checks/)
+})
+
+test('checkContract fails closed on an empty check list', () => {
+  const r = checkContract([])
+  assert.equal(r.ok, false)
+  assert.equal(r.violations[0].id, 'contract-no-evidence')
+})
+
+test('mirrored constants stay in sync with useScrollMode.js (sync obligation)', () => {
+  // Read as TEXT, never import — importing useScrollMode.js would drag React
+  // and its module-load sessionStorage read into this suite.
+  const src = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
+  assert.ok(
+    src.includes(`PIN_OFFSET = ${PIN_OFFSET}`),
+    `useScrollMode.js no longer declares PIN_OFFSET = ${PIN_OFFSET}. The value `
+    + 'is mirrored in chatContract.js (see its header CONSTANTS-SYNC note) — '
+    + 'update BOTH files together.',
+  )
+  assert.ok(
+    src.includes(`PIN_BOTTOM_ROOM = ${PIN_BOTTOM_ROOM}`),
+    `useScrollMode.js no longer declares PIN_BOTTOM_ROOM = ${PIN_BOTTOM_ROOM}. `
+    + 'The value is mirrored in chatContract.js (see its header CONSTANTS-SYNC '
+    + 'note) — update BOTH files together.',
+  )
 })
 
 test('every predicate id is registered in CHAT_CONTRACT (registry is the map)', () => {
