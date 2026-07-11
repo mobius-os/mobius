@@ -59,7 +59,7 @@
  * ║      three-guard contract for the full story. Touch starts are   ║
  * ║      allowed to pan so long model lists can scroll.              ║
  * ║                                                                  ║
- * ║   The EffortSlider component renders a stepper track — NOT       ║
+ * ║   The shared <EffortStepper> renders a stepper track — NOT       ║
  * ║   pills, NOT a chip group. The slider was explicitly chosen      ║
  * ║   over chips by the user; an earlier proposed revert to chips    ║
  * ║   was rejected. Each provider's slider has its own length        ║
@@ -81,6 +81,7 @@ import {
   CLAUDE_MODELS,
   CODEX_MODELS,
 } from '../ProviderModelPicker/ProviderModelPicker.jsx'
+import EffortStepper from '../ui/EffortStepper.jsx'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -213,55 +214,6 @@ function resolveDisplayedModels(
 }
 
 
-/** Horizontal stepper-slider for picking an effort level. Renders
- *  a single-row track with N stops; the selected stop and any
- *  stops below it are filled, stops above are hollow. The
- *  selected stop's long-form label sits to the right of the track
- *  so the row fits in one line regardless of how many stops the
- *  provider exposes (Codex has 6, Claude has 5). */
-function EffortSlider({ efforts, value, onChange }) {
-  const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
-  const selected = efforts[selectedIndex] || efforts[0]
-  return (
-    <div className="csp-effort">
-      <div className="csp-effort__track" role="radiogroup" aria-label="Reasoning effort">
-        {efforts.map((e, i) => (
-          <button
-            key={e.value}
-            type="button"
-            role="radio"
-            aria-checked={i === selectedIndex}
-            aria-label={e.label}
-            // Roving tabindex: Tab lands on the selected stop, arrows move
-            // within the group (idiomatic radiogroup keyboard nav).
-            tabIndex={i === selectedIndex ? 0 : -1}
-            className={
-              'csp-effort__stop'
-              + (i === selectedIndex ? ' csp-effort__stop--on' : '')
-              + (i < selectedIndex ? ' csp-effort__stop--filled' : '')
-            }
-            // Keep textarea focused for mouse/pen clicks, but let touch
-            // gestures pan the scroll container.
-            onPointerDown={preserveFocusUnlessTouch}
-            onClick={() => onChange(e.value)}
-            onKeyDown={(ev) => {
-              let next
-              if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') next = Math.min(efforts.length - 1, i + 1)
-              else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') next = Math.max(0, i - 1)
-              else if (ev.key === 'Home') next = 0
-              else if (ev.key === 'End') next = efforts.length - 1
-              else return
-              ev.preventDefault()
-              onChange(efforts[next].value)
-              ev.currentTarget.parentElement?.children[next]?.focus()
-            }}
-          />
-        ))}
-      </div>
-      <span className="csp-effort__label">{selected.label}</span>
-    </div>
-  )
-}
 
 
 export default function ChatSettingsPanel({
@@ -466,7 +418,7 @@ export default function ChatSettingsPanel({
       // is harmless — the runner ignores unknown values at turn
       // time. The picker also auto-defaults the slider to index 0
       // if the persisted value doesn't appear in the provider's
-      // enum (see EffortSlider's findIndex/Math.max guard).
+      // enum (see EffortStepper's findIndex/Math.max guard).
       const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
       setDraftModel(value)
       setDraftProvider(providerValue)
@@ -656,11 +608,18 @@ export default function ChatSettingsPanel({
                 <span className="csp-row__dot" />
               </button>
               {isSelected && !isPendingRow && (
-                <EffortSlider
-                  efforts={info.efforts}
-                  value={draftEffort}
-                  onChange={handleEffortChange}
-                />
+                // Indent aligns the stepper under the row title (icon 30 +
+                // gap 12 + row pad 10 = 52). onStopPointerDown preserves the
+                // composer's soft-keyboard-focus contract — a stop tap must
+                // not blur the chat textarea (see preserveFocusUnlessTouch).
+                <div className="csp-effort-indent">
+                  <EffortStepper
+                    efforts={info.efforts}
+                    value={draftEffort}
+                    onChange={handleEffortChange}
+                    onStopPointerDown={preserveFocusUnlessTouch}
+                  />
+                </div>
               )}
               {isPendingRow && (
                 <div className="csp__confirm" role="group" aria-label="Confirm provider switch">

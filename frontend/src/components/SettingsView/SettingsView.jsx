@@ -13,11 +13,26 @@ import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
+import EffortStepper from '../ui/EffortStepper.jsx'
+import ModelSheet from '../ui/ModelSheet.jsx'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
+import '../ui/ModelSheet.css'
 import './SettingsView.css'
+
+// Order a provider's models with the currently-selected one first,
+// then the rest in registry order (which the backend returns newest →
+// oldest / most → least capable). Floating the active model to the top
+// of its group is what makes scrolling the picker feel natural — the
+// choice you reach for is always the first thing under your thumb.
+function orderSelectedFirst(models, selectedId) {
+  if (!Array.isArray(models) || !selectedId) return models || []
+  const sel = models.find((m) => m.id === selectedId)
+  if (!sel) return models
+  return [sel, ...models.filter((m) => m.id !== selectedId)]
+}
 
 const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
@@ -87,76 +102,6 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
   return rows
 }
 
-function providerLabel(provider) {
-  return PROVIDER_CHOICES.find(p => p.id === provider)?.label || 'No provider'
-}
-
-function SettingsEffortStepper({ provider, value, disabled, onChange }) {
-  const efforts = PROVIDER_INFO[provider]?.efforts || []
-  if (!efforts.length) return null
-  const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
-  const selected = efforts[selectedIndex] || efforts[0]
-  const selectedPosition = efforts.length > 1
-    ? `${(selectedIndex / (efforts.length - 1)) * 100}%`
-    : '50%'
-  const labelEdge =
-    selectedIndex === 0 ? 'start' : selectedIndex === efforts.length - 1 ? 'end' : 'middle'
-  return (
-    <div
-      className={`settings-effort-stepper${disabled ? ' settings-effort-stepper--disabled' : ''}`}
-      style={{ '--effort-label-left': selectedPosition }}
-    >
-      <div
-        className="settings-effort-stepper__track"
-        role="radiogroup"
-        aria-label={`${providerLabel(provider)} background effort`}
-      >
-        {efforts.map((effort, index) => (
-          <button
-            key={effort.value}
-            type="button"
-            role="radio"
-            aria-checked={index === selectedIndex}
-            aria-label={effort.label}
-            disabled={disabled}
-            tabIndex={index === selectedIndex ? 0 : -1}
-            className={
-              'settings-effort-stepper__stop'
-              + (index === selectedIndex ? ' settings-effort-stepper__stop--on' : '')
-              + (index < selectedIndex ? ' settings-effort-stepper__stop--filled' : '')
-            }
-            onClick={() => onChange(effort.value)}
-            onKeyDown={(event) => {
-              let next
-              if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-                next = Math.min(efforts.length - 1, index + 1)
-              } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-                next = Math.max(0, index - 1)
-              } else if (event.key === 'Home') {
-                next = 0
-              } else if (event.key === 'End') {
-                next = efforts.length - 1
-              } else {
-                return
-              }
-              event.preventDefault()
-              onChange(efforts[next].value)
-              event.currentTarget.parentElement?.children[next]?.focus()
-            }}
-          />
-        ))}
-      </div>
-      <div className="settings-effort-stepper__label-row" aria-hidden="true">
-        <span
-          className={`settings-effort-stepper__label settings-effort-stepper__label--${labelEdge}`}
-        >
-          {selected.label}
-        </span>
-      </div>
-    </div>
-  )
-}
-
 function BackgroundProviderRow({
   row,
   index,
@@ -175,7 +120,21 @@ function BackgroundProviderRow({
   const Logo = info?.Logo
   const enabled = row.enabled !== false
   const selectedModel = enabled ? (row.model || defaultModel(row.provider)) : ''
-  const hasModel = selectedModel && models.some(m => m.id === selectedModel)
+  const selectedRow = models.find((m) => m.id === selectedModel)
+  const [sheetOpen, setSheetOpen] = useState(false)
+  // This row is a fixed provider, so the sheet shows only that
+  // provider's models plus a "None" row that disables the background
+  // agent (the old <select>'s empty option). The active model floats
+  // to the top of the list.
+  const groups = [{
+    key: row.provider,
+    label: info?.label || row.provider,
+    Logo,
+    models: orderSelectedFirst(models, enabled ? selectedModel : null),
+  }]
+  const triggerLabel = enabled
+    ? (selectedRow?.label || selectedModel || 'Choose model')
+    : 'None'
   return (
     <div
       ref={rowRef}
@@ -208,34 +167,45 @@ function BackgroundProviderRow({
       >
         {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
       </span>
-      <div className="settings-bg-row__agent">
-        <span className="settings-model-select">
-          <select
-            className="settings-model-select__control"
-            value={selectedModel}
-            onChange={(event) => onModelChange(event.target.value)}
-            aria-label={`${info?.label || row.provider} background agent`}
-          >
-            <option value="">None</option>
-            {selectedModel && !hasModel && (
-              <option value={selectedModel}>{selectedModel}</option>
+      <div className="settings-bg-row__body">
+        <button
+          type="button"
+          className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
+          onClick={() => setSheetOpen(true)}
+          aria-haspopup="dialog"
+          aria-label={`${info?.label || row.provider} background model`}
+        >
+          <span className="model-trigger__icon">
+            {Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}
+          </span>
+          <span className="model-trigger__main">
+            <span className="model-trigger__name">{triggerLabel}</span>
+            {enabled && selectedModel && (
+              <span className="model-trigger__id">{selectedModel}</span>
             )}
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.label || model.id}
-              </option>
-            ))}
-          </select>
-        </span>
-      </div>
-      <div className="settings-bg-row__effort">
-        <SettingsEffortStepper
-          provider={row.provider}
+          </span>
+          <span className="model-trigger__caret" aria-hidden="true">▾</span>
+        </button>
+        <EffortStepper
+          efforts={info?.efforts || []}
           value={row.effort}
           disabled={!enabled}
+          ariaLabel={`${info?.label || row.provider} background effort`}
           onChange={onEffortChange}
         />
       </div>
+      <ModelSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        title={`${info?.label || row.provider} model`}
+        groups={groups}
+        provider={enabled ? row.provider : ''}
+        model={selectedModel}
+        onPick={(pid, id) => onModelChange(id)}
+        allowNone
+        noneLabel="None (disable)"
+        onNone={() => onModelChange('')}
+      />
     </div>
   )
 }
@@ -1075,7 +1045,16 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const backgroundDropPosition = backgroundDrag?.toIndex < backgroundDrag?.fromIndex
     ? 'before'
     : 'after'
-  const showGeminiForm = !configured || geminiExpanded
+  // The chat model row's status line shows the current default rather
+  // than a connection dot ("Last model: Opus 4.8"). Resolve the label
+  // from the live registry so it reads the friendly name, falling back
+  // to the raw id, then to nothing when no default is set yet.
+  const defaultChatProvider = providerFromSettings(settingsQuery.data)
+  const defaultChatModelId = settingsQuery.data?.agent_settings?.model || ''
+  const lastModelLabel = defaultChatModelId
+    ? (modelsForProvider(defaultChatProvider).find(m => m.id === defaultChatModelId)?.label
+        || defaultChatModelId)
+    : ''
 
   return (
     <div className="settings">
@@ -1120,24 +1099,22 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                     onDone={onClaudeAuthDone}
                   />
                 </ProviderRow>
-              </div>
 
-              <div className="settings-agent-group">
-                <div className="settings-agent-group__head">
-                  <div>
-                    <h3 className="settings__agent-title">Chat model</h3>
-                    <p className="settings__subtext settings__subtext--tight">
-                      Manage which models appear in chat pickers.
-                    </p>
-                  </div>
-                  <button
-                    className="provider-row__action"
-                    type="button"
-                    onClick={() => setManageModelsOpen(true)}
-                  >
-                    Configure
-                  </button>
-                </div>
+                <ProviderRow
+                  id="chat-model"
+                  name="Chat model"
+                  showRadio={false}
+                  connected
+                  subtitle="Which models appear in chat pickers."
+                  statusNode={
+                    <StatusDot color="--muted">
+                      {lastModelLabel ? `Last model: ${lastModelLabel}` : 'No default yet'}
+                    </StatusDot>
+                  }
+                  actionLabel="Configure"
+                  expanded={false}
+                  onToggleExpand={() => setManageModelsOpen(true)}
+                />
               </div>
 
               <div
@@ -1235,59 +1212,60 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           tabIndex={-1}
         >
           <h2 className="settings__section-title">Image generation</h2>
-          <div className="settings-integration-row">
-            <div className="settings-integration-row__copy">
-              <span className="settings__label">
-                Gemini API key
-                {configured && <StatusDot color="--green">Configured</StatusDot>}
-              </span>
-              <p className="settings__subtext settings__subtext--tight">
-                Used for image generation. Get a key at{' '}
-                <TextLink href="https://aistudio.google.com/apikey" forceExternal>
-                  AI Studio
-                </TextLink>.
-              </p>
-            </div>
-            {configured && (
-              <button
-                className="provider-row__action"
-                type="button"
-                onClick={() => setGeminiExpanded(prev => !prev)}
-                aria-expanded={geminiExpanded}
-              >
-                {geminiExpanded ? 'Close' : 'Reconfigure'}
-              </button>
-            )}
-          </div>
-          {showGeminiForm && (
-            <form className="settings__form" onSubmit={handleSave}>
-              {/* The key is always pasted, never typed, so there's no reveal
-                  toggle — keep the field a plain masked paste target. */}
-              <input
-                className="settings__input"
-                type="password"
-                value={geminiKey}
-                onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
-                placeholder={configured ? '••••••••' : 'AIza...'}
-                autoComplete="off"
-                aria-label="Gemini API key"
-              />
-              {status === 'error' && (
-                <Alert
-                  color="danger"
-                  variant="soft"
-                  description={errorMsg}
+          {/* Same unified row as the providers + chat model above: tap the
+              action to reveal the key form (matching "Connect" on a provider).
+              statusNode carries "Configured" instead of "Connected". */}
+          <div className="settings__providers">
+            <ProviderRow
+              id="gemini"
+              name="Gemini API key"
+              showRadio={false}
+              connected={configured}
+              subtitle="Used for image generation in chat."
+              statusNode={
+                <StatusDot color={configured ? '--green' : '--muted'}>
+                  {configured ? 'Configured' : 'Not configured'}
+                </StatusDot>
+              }
+              actionLabel={configured ? 'Reconfigure' : 'Add key'}
+              expanded={geminiExpanded}
+              onToggleExpand={() => setGeminiExpanded(prev => !prev)}
+            >
+              <form className="settings__form" onSubmit={handleSave}>
+                <p className="settings__subtext settings__subtext--tight">
+                  Get a key at{' '}
+                  <TextLink href="https://aistudio.google.com/apikey" forceExternal>
+                    AI Studio
+                  </TextLink>.
+                </p>
+                {/* The key is always pasted, never typed, so there's no reveal
+                    toggle — keep the field a plain masked paste target. */}
+                <input
+                  className="settings__input"
+                  type="password"
+                  value={geminiKey}
+                  onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
+                  placeholder={configured ? '••••••••' : 'AIza...'}
+                  autoComplete="off"
+                  aria-label="Gemini API key"
                 />
-              )}
-              <button
-                className="settings__btn"
-                type="submit"
-                disabled={saving || !geminiKey.trim()}
-              >
-                {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
-              </button>
-            </form>
-          )}
+                {status === 'error' && (
+                  <Alert
+                    color="danger"
+                    variant="soft"
+                    description={errorMsg}
+                  />
+                )}
+                <button
+                  className="settings__btn"
+                  type="submit"
+                  disabled={saving || !geminiKey.trim()}
+                >
+                  {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
+                </button>
+              </form>
+            </ProviderRow>
+          </div>
         </section>
 
         <section className="settings__section settings__section--compact">

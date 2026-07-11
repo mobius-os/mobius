@@ -366,6 +366,24 @@
   border-radius: 6px;
 }
 
+/* Optional one-line description under the name — the "minimal text"
+   line that makes "Gemini API key" / "Chat model" read as the same
+   row family as the provider rows. */
+.provider-row__sub {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* When the status slot carries free text (e.g. the chat model's
+   "Last model: …") rather than the StatusDot, keep it on the muted
+   status scale so every row's third line reads consistently. */
+.provider-row__status-text {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
 /* Provider connected / disconnected indicator now renders via
    the shared <StatusDot> component
    (frontend/src/components/ui/StatusDot.jsx) — the bespoke

@@ -1,0 +1,97 @@
+/* Shared effort stepper. A track (thin connecting line drawn behind
+   the stops) grows to fill available width; the selected level's
+   label sits to the right on one line, so the row width is
+   independent of how many stops the provider exposes (Codex 6,
+   Claude 6). Visuals match the composer popover's original slider. */
+
+.effort-stepper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.effort-stepper--disabled {
+  opacity: 0.55;
+}
+
+.effort-stepper__track {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+}
+
+/* Connecting line behind the stops. Inset so it starts under the
+   first stop and ends under the last; the pseudo-element takes no
+   pointer events so stops stay clickable. */
+.effort-stepper__track::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  top: 50%;
+  height: 2px;
+  background: var(--border);
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+
+.effort-stepper__stop {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .effort-stepper__stop:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+}
+
+/* Stops at or below the selected one read as filled — the slider
+   feel. The selected stop sits proud with an accent-dim ring. */
+.effort-stepper__stop--filled,
+.effort-stepper__stop--on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.effort-stepper__stop--on {
+  transform: scale(1.3);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.effort-stepper__stop:disabled {
+  cursor: not-allowed;
+}
+
+.effort-stepper__stop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.effort-stepper__label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  min-width: 70px;
+  text-align: right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .effort-stepper__stop {
+    transition: none;
+  }
+}

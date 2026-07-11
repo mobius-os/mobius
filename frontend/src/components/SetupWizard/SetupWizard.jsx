@@ -6,8 +6,10 @@ import { authQueries, modelQueries, settingsQueries } from '../../hooks/queries.
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
+import ModelSheet from '../ui/ModelSheet.jsx'
 import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import { PROVIDER_INFO } from '../ChatView/ChatSettingsPanel.jsx'
+import '../ui/ModelSheet.css'
 import './SetupWizard.css'
 
 const SETUP_STEPS = [
@@ -389,6 +391,20 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     persistAgentChoices(nextChat, nextPrimary, nextSecondary)
   }
 
+  // The bottom-sheet picker selects provider + model in one tap, so it
+  // sets both at once — unlike updateChoice, whose provider-resets-model
+  // normalization existed only for the old two-<select> flow where the
+  // provider changed first and the model second.
+  function pickChoice(slot, provider, model) {
+    const nextChat = slot === 'chat' ? { ...chatChoice, provider, model } : chatChoice
+    const nextPrimary = slot === 'primary' ? { ...primaryChoice, provider, model } : primaryChoice
+    const nextSecondary = slot === 'secondary' ? { ...secondaryChoice, provider, model } : secondaryChoice
+    setChatChoice(nextChat)
+    setPrimaryChoice(nextPrimary)
+    setSecondaryChoice(nextSecondary)
+    persistAgentChoices(nextChat, nextPrimary, nextSecondary)
+  }
+
   function handleConnected(provider) {
     const preferred = firstConnectedProvider(provider) || provider
     if (preferred) {
@@ -414,6 +430,19 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     !agentSaving &&
     !agentError
   const connectedChoices = connectedMap()
+  // Provider-grouped model lists for the shared bottom-sheet picker,
+  // plus the set of connected providers (null when none are connected
+  // yet, which the sheet reads as "show everything enabled" so the
+  // owner isn't blocked before authenticating).
+  const agentGroups = PROVIDERS.map(p => ({
+    key: p.id,
+    label: p.label,
+    Logo: PROVIDER_INFO[p.id]?.Logo,
+    models: modelsFor(p.id),
+  }))
+  const connectedSetup = connectedAny
+    ? new Set(PROVIDERS.filter(p => connectedChoices[p.id]).map(p => p.id))
+    : null
 
   return (
     <div className="setup">
@@ -463,27 +492,25 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
           <SetupAgentChoice
             label="Chats"
             choice={chatChoice}
-            models={modelsFor(chatChoice.provider)}
-            connected={connectedChoices}
-            onProviderChange={(provider) => updateChoice('chat', { provider })}
-            onModelChange={(model) => updateChoice('chat', { model })}
+            groups={agentGroups}
+            connectedProviders={connectedSetup}
+            onPick={(provider, model) => pickChoice('chat', provider, model)}
           />
           <SetupAgentChoice
             label="Background primary"
             choice={primaryChoice}
-            models={modelsFor(primaryChoice.provider)}
-            connected={connectedChoices}
-            onProviderChange={(provider) => updateChoice('primary', { provider })}
-            onModelChange={(model) => updateChoice('primary', { model })}
+            groups={agentGroups}
+            connectedProviders={connectedSetup}
+            onPick={(provider, model) => pickChoice('primary', provider, model)}
           />
           <SetupAgentChoice
             label="Background secondary"
             allowNone
             choice={secondaryChoice}
-            models={modelsFor(secondaryChoice.provider)}
-            connected={connectedChoices}
-            onProviderChange={(provider) => updateChoice('secondary', { provider })}
-            onModelChange={(model) => updateChoice('secondary', { model })}
+            groups={agentGroups}
+            connectedProviders={connectedSetup}
+            onPick={(provider, model) => pickChoice('secondary', provider, model)}
+            onNone={() => pickChoice('secondary', '', '')}
           />
           {agentError && <p className="setup__error">{agentError}</p>}
         </div>
@@ -512,44 +539,51 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
 function SetupAgentChoice({
   label,
   choice,
-  models,
+  groups,
+  connectedProviders,
   allowNone = false,
-  connected,
-  onProviderChange,
-  onModelChange,
+  onPick,
+  onNone,
 }) {
-  const hasConnectedProvider = connected && Object.values(connected).some(Boolean)
-  const providerChoices = PROVIDERS.filter(provider => (
-    !hasConnectedProvider || connected[provider.id] || provider.id === choice.provider
-  ))
+  const [open, setOpen] = useState(false)
+  const activeGroup = groups.find(g => g.key === choice.provider)
+  const activeModel = activeGroup?.models.find(m => m.id === choice.model)
+  const Logo = activeGroup?.Logo
+  const triggerName = choice.provider
+    ? `${activeGroup?.label || choice.provider}${activeModel ? ` · ${activeModel.label}` : ''}`
+    : (allowNone ? 'No fallback' : 'Choose model')
   return (
     <div className="setup-agent-row">
       <div className="setup-agent-row__label">{label}</div>
-      <div className="setup-agent-row__controls">
-        <select
-          className="setup__select"
-          value={choice.provider || ''}
-          onChange={(e) => onProviderChange(e.target.value)}
-          aria-label={`${label} provider`}
-        >
-          {allowNone && <option value="">No fallback</option>}
-          {providerChoices.map(provider => (
-            <option key={provider.id} value={provider.id}>{provider.label}</option>
-          ))}
-        </select>
-        <select
-          className="setup__select"
-          value={choice.model || ''}
-          onChange={(e) => onModelChange(e.target.value)}
-          aria-label={`${label} model`}
-          disabled={!choice.provider}
-        >
-          <option value="">Provider default</option>
-          {models.map(model => (
-            <option key={model.id} value={model.id}>{model.label || model.id}</option>
-          ))}
-        </select>
-      </div>
+      <button
+        type="button"
+        className="model-trigger"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-label={`${label} model`}
+      >
+        <span className="model-trigger__icon">{Logo ? <Logo /> : '—'}</span>
+        <span className="model-trigger__main">
+          <span className="model-trigger__name">{triggerName}</span>
+          {choice.provider && (
+            <span className="model-trigger__id">{choice.model || 'Provider default'}</span>
+          )}
+        </span>
+        <span className="model-trigger__caret" aria-hidden="true">▾</span>
+      </button>
+      <ModelSheet
+        open={open}
+        onClose={() => setOpen(false)}
+        title={`${label} model`}
+        groups={groups}
+        provider={choice.provider}
+        model={choice.model}
+        connectedProviders={connectedProviders}
+        onPick={onPick}
+        allowNone={allowNone}
+        noneLabel="No fallback"
+        onNone={onNone}
+      />
     </div>
   )
 }
