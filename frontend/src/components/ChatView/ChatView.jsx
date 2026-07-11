@@ -40,6 +40,12 @@ import {
   startedMessagesFromResponse,
   systemEventForChat,
 } from './chatRuntimeState.js'
+import {
+  EMPTY_BUILD_PHASE_RAIL,
+  accumulateBuildPhase,
+  buildPhaseRailViewModel,
+  latestBuildPhaseAnnouncement,
+} from './buildPhaseRail.js'
 import './ChatView.css'
 
 
@@ -322,6 +328,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const [showInspector, setShowInspector] = useState(false)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   const lastAnnouncedPreviewRef = useRef(null)
+  // Build-milestone rail: phases accumulated from chat-scoped `build_phase`
+  // stream events (deduped by ts so catch-up replay rebuilds it), reset on the
+  // owner's next send. Rendered as a slim rail in the foot near the open-app
+  // CTA; the announcement mirrors previewReadyStatus for the polite live region.
+  const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
+  const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
+  const lastAnnouncedPhaseRef = useRef(null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -846,7 +859,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       onStreamEnd?.({ continues })
     },
-    onSystemEvent: event => onSystemEvent?.(systemEventForChat(event, chatId)),
+    onSystemEvent: event => {
+      // A build_phase is chat-local: it only feeds this chat's milestone rail,
+      // so accumulate it here (deduped by ts) instead of forwarding it to the
+      // Shell, which has no handler for it.
+      if (event?.type === 'build_phase') {
+        setBuildPhases(prev => accumulateBuildPhase(prev, event))
+        return
+      }
+      onSystemEvent?.(systemEventForChat(event, chatId))
+    },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
       const consumedTs = message?._consumed_ts
@@ -1156,7 +1178,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     measureComposerHeight()
     const raf = requestAnimationFrame(measureComposerHeight)
     return () => cancelAnimationFrame(raf)
-  }, [builtApp, sending, measureComposerHeight])
+  }, [builtApp, sending, buildPhases, measureComposerHeight])
+
+  useEffect(() => {
+    const latest = buildPhases[buildPhases.length - 1]
+    if (!latest) {
+      lastAnnouncedPhaseRef.current = null
+      setBuildPhaseStatus('')
+      return
+    }
+    // Announce a phase once, keyed on its ts — an aria-live re-fire on every
+    // rail change (e.g. an unrelated re-render) would re-read the same phrase.
+    if (lastAnnouncedPhaseRef.current === latest.ts) return
+    lastAnnouncedPhaseRef.current = latest.ts
+    setBuildPhaseStatus(latestBuildPhaseAnnouncement(buildPhases))
+  }, [buildPhases])
 
   useEffect(() => {
     if (!shouldShowOpenAppCta(builtApp)) {
@@ -1387,6 +1423,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const pin = opts.pin !== false  // default true
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
+
+    // The milestone rail belongs to the turn in flight; the owner's next send
+    // starts a fresh build context, so clear it (any new turn repopulates it
+    // from its own build_phase events).
+    setBuildPhases(EMPTY_BUILD_PHASE_RAIL)
 
     // Stop voice recognition so a late onresult doesn't refill input
     // after we clear it.
@@ -2629,6 +2670,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         ? 'Response ready.'
         : '')
   const openAppCta = openAppCtaViewModel(builtApp, turnActive)
+  const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
 
   return (
     <div
@@ -2652,6 +2694,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         aria-relevant="text"
       >
         {previewReadyStatus}
+      </div>
+      <div
+        className="chat__sr-status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-relevant="text"
+      >
+        {buildPhaseStatus}
       </div>
       {showInspector && (
         <AgentContextInspector
@@ -2849,6 +2899,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       )}
 
       <div ref={footRef} className="chat__foot">
+        {buildPhaseRail.length > 0 && (
+          <div className="chat__build-rail" role="group" aria-label="Build progress">
+            {buildPhaseRail.map(phase => (
+              <span
+                key={phase.ts}
+                className={`chat__build-phase${
+                  phase.current ? ' chat__build-phase--current' : ''
+                }`}
+              >
+                <span className="chat__build-phase-dot" aria-hidden="true" />
+                <span className="chat__build-phase-label">{phase.label}</span>
+              </span>
+            ))}
+          </div>
+        )}
         {openAppCta && (
           <div className="chat__open-app">
             <button

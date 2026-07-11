@@ -41,7 +41,7 @@ it while the partner can watch and try it:
 2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration can show an open-preview affordance while the turn is still running, so the partner does not have to wait for the final handoff to try the app.
 3. Immediately smoke-check the shell preview before continuing: it renders coherently, has no missing imports/assets, and any storage-backed path used by the slice works.
 4. Continue in visible increments. Each save should leave the app in a coherent state; the file watcher recompiles source edits and an app open in the shell preview/canvas refreshes to the latest compiled bundle. Standalone `/apps/<slug>/` PWAs may need a manual refresh/reopen.
-5. Narrate milestones, not internals: "first layer is openable", "storage is wired", "mobile layout is fixed", "review pass is running." The partner should feel progress without reading raw tool logs.
+5. Signal each milestone with the build-phase helper so the chat renders a live progress rail — `python "$SCRIPTS_DIR/build_phase.py" "Storage wired"` as each lands ("first layer is openable", "storage is wired", "mobile layout is fixed", "review pass running"). The helper is best-effort (a failed signal never breaks a build) and carries the structure; a one-line prose note is now secondary, welcome for color, so the partner feels progress without reading raw tool logs.
 6. If the first visible layer will take more than a few minutes because of packaging, auth, data migration, or a risky dependency, say that early and explain the gating reason.
 
 Layered does **not** mean under-building. It means the first useful slice becomes

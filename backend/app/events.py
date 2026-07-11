@@ -56,6 +56,13 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "shell_rebuild_failed",
   "chat_run_started",
   "chat_run_finished",
+  # The building agent POSTs `build_phase` at each milestone (unlike
+  # `app_built`, which the backend derives from app_updated and never
+  # accepts on the wire), so it must be a recognized type here or the
+  # NotifyBody validator rejects the POST. Its delivery is chat-scoped —
+  # notify.py routes it onto the building chat's broadcast alone, never the
+  # system fan-out.
+  "build_phase",
 })
 
 

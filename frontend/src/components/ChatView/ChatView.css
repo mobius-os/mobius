@@ -1838,6 +1838,74 @@
   color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
 }
 
+/* ── Build-milestone rail ──────────────────────────── */
+/* A slim, non-interactive progress rail in the foot, above the open-app CTA:
+   one dot+label per milestone the building agent emitted this turn. Frosted so
+   it reads as a card over the chat scrolling behind the transparent foot, muted
+   so it stays quiet next to the composer. The most recent phase is emphasized;
+   earlier ones dim to compact history. Entrance is transform/opacity ONLY — the
+   foot's ResizeObserver publishes --composer-h off its height, so a height
+   animation would fight the composer clearance. */
+.chat__build-rail {
+  max-width: 720px;
+  margin: 0 auto 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent); /* CONTRACT: frosted surface floor over the chat */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on the frosted card */
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  font-size: 12px;
+  line-height: 1.3;
+  animation: build-rail-in 0.22s ease both;
+}
+
+@keyframes build-rail-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.chat__build-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted); /* CONTRACT: low-contrast text — earlier phases read as dim history */
+}
+
+.chat__build-phase-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.chat__build-phase-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The most recent phase carries the eye: accent dot, full-contrast label. */
+.chat__build-phase--current {
+  color: var(--text); /* CONTRACT: high-contrast text on the current milestone */
+  font-weight: 600;
+}
+.chat__build-phase--current .chat__build-phase-dot {
+  background: var(--accent); /* CONTRACT: vivid accent marks the live phase */
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__build-rail { animation: none; }
+}
+
 /* ── Queued messages tray ──────────────────────────── */
 
 .queued {
