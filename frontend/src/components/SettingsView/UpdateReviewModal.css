@@ -4,7 +4,11 @@
 
 .urm__overlay {
   position: fixed;
-  top: calc(58px + env(safe-area-inset-top, 0px));
+  /* Starts below the 58px shell bar; the card's height cap (below) subtracts the
+     same offset so the header never clips under the bar. One var keeps them in
+     lockstep — mirrors ManageModelsModal. */
+  --modal-top-offset: calc(58px + env(safe-area-inset-top, 0px));
+  top: var(--modal-top-offset);
   right: 0;
   bottom: 0;
   left: 0;
@@ -38,7 +42,9 @@
   border: 1px solid var(--border);
   border-radius: 20px;
   width: min(560px, 100%);
-  height: min(720px, calc(100dvh - 36px));
+  /* Subtract the shell-bar offset + 18px overlay padding per side so the full
+     card (header included) fits below the bar at any viewport height. */
+  height: min(720px, calc(100dvh - var(--modal-top-offset) - 36px));
   max-height: 100%;
   overflow: hidden;
   padding: 18px;
