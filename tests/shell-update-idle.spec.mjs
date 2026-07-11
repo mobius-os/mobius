@@ -13,6 +13,12 @@
  *      `done`), and does not loop.
  *   3. shell_rebuilt delivered on the GLOBAL system stream while idle applies
  *      immediately (reloads once; the dedup window prevents a loop).
+ *   4. after a REAL SW update (a genuinely new, WAITING worker), an idle apply
+ *      lands the page on the NEW generation — controlled by the registration's
+ *      ACTIVE worker with nothing left waiting. Cases 1-3 assert apply-ONCE but
+ *      never WHICH generation the page ends on; feature 207 is precisely an
+ *      apply that reloads back onto the OUTGOING generation and sticks, so this
+ *      case pins generation identity (the gap that let 207 ship).
  *
  * SYNTHESIS NOTES — why these differ from a naive mock:
  *   - The per-chat stream forwards shell_rebuilt ONLY when live, not during the
@@ -199,5 +205,62 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // One apply-reload on top of the initial load; no immediate loop.
     await page.waitForTimeout(1500)
     expect(await loadCount(page)).toBe(after)
+  })
+
+  test('an idle apply lands the page on the new SW generation, not the outgoing one', async ({ page }) => {
+    // Publish a genuinely new, WAITING service worker (a real update cycle — the
+    // window feature 207 bit, biased to a client's FIRST cycle after install),
+    // drive the idle apply through the shell's own recovery path, and assert the
+    // page settles CONTROLLED BY THE REGISTRATION'S ACTIVE WORKER with nothing
+    // left waiting. That is generation identity: it landed on the new generation,
+    // not back on the outgoing one.
+    let swMarker = ''
+    await page.route('**/sw.js', async (route) => {
+      const res = await route.fetch()
+      let body = await res.text()
+      // A STABLE byte-append once armed → the browser installs ONE genuinely new,
+      // leashed worker; later re-fetches stay byte-identical so it does not
+      // reinstall. The bundle is unchanged — the new WORKER's identity is the
+      // generation the page must land on.
+      if (swMarker) body += `\n//${swMarker}\n`
+      await route.fulfill({ status: res.status(), headers: res.headers(), body })
+    })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemBody: sse([{ type: 'system_stream_open' }]),
+    })
+    // gen A controls the page (first install claims).
+    await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
+
+    // Publish gen B; wait until it is installed and WAITING (leashed — the SW
+    // never skipWaiting()s on its own).
+    swMarker = 'e2e gen B'
+    await page.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
+    await page.waitForFunction(
+      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+      { timeout: 15000 },
+    )
+
+    await resetLoadCount(page)
+    // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
+    // re-arms the idle apply — the recovery path a client hits when a newer
+    // generation is installed but the page has not adopted it.
+    await page.reload({ waitUntil: 'domcontentloaded' })
+
+    // Generation identity: the apply settles with the page controlled by the
+    // registration's ACTIVE worker and NOTHING left waiting.
+    await page.waitForFunction(async () => {
+      const reg = await navigator.serviceWorker.getRegistration()
+      return !!reg && !reg.waiting && !!reg.active
+        && navigator.serviceWorker.controller === reg.active
+    }, { timeout: 20000 })
+
+    // And it does not loop or drift back: the settled state holds.
+    await page.waitForTimeout(1500)
+    const stable = await page.evaluate(async () => {
+      const reg = await navigator.serviceWorker.getRegistration()
+      return !reg.waiting && navigator.serviceWorker.controller === reg.active
+    })
+    expect(stable).toBe(true)
   })
 })
