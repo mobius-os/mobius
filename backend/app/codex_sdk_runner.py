@@ -411,6 +411,22 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     events.append({"type": "tool_end"})
     return events
 
+  if isinstance(item, sdk["AgentMessageThreadItem"]):
+    # Materialize the authoritative full text of the completed assistant
+    # message. Durable prose otherwise rides ONLY on the streamed
+    # AgentMessageDeltaNotification deltas (published as "text" above); if those
+    # were absent/dropped/coalesced (observed on oversized responses, e.g. a
+    # "very long numbered" request that persisted NOTHING) the reply vanishes
+    # silently. text_final REPLACES the accumulated text block, so it is
+    # idempotent when the deltas already delivered identical prose (events.py
+    # returns False), converts the lingering text_boundary into text when no
+    # delta arrived, and recovers a truncated prefix. Guarded on non-empty text
+    # so a genuinely-empty message stays silent.
+    text = item.text or ""
+    if text.strip():
+      return [{"type": "text_final", "content": text}]
+    return []
+
   return []
 
 
