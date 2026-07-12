@@ -44,14 +44,18 @@ test('return-view settings → settings + seedHome, no app', () => {
   assert.equal(r.seedHome, true)
 })
 
-test('deep-link to a DIFFERENT chat than home → seedHome', () => {
+test('deep-link to a specific chat → NO seed (a chat view is never trapped)', () => {
+  // A chat view has no back-sentinel and sets no canvas restore key, and the
+  // seed would resolve to the chat you're already on (a dead Back press). So we
+  // never seed under a chat destination, even a deep-linked one; Back from a
+  // root chat exits the PWA (standard, pre-existing behavior).
   const r = resolveInitialNav({ deepLink: { view: 'chat', chatId: 'chat-X' }, storedChatId: 'chat-home' })
   assert.equal(r.view, 'chat')
   assert.equal(r.chatId, 'chat-X')
-  assert.equal(r.seedHome, true)
+  assert.equal(r.seedHome, false)
 })
 
-test('deep-link to the SAME chat as home → no seed (that chat IS home)', () => {
+test('deep-link to the same chat as home → no seed', () => {
   const r = resolveInitialNav({ deepLink: { view: 'chat', chatId: 'chat-home' }, storedChatId: 'chat-home' })
   assert.equal(r.view, 'chat')
   assert.equal(r.chatId, 'chat-home')
