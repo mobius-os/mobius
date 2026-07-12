@@ -253,7 +253,6 @@ class ActiveClaudeClient:
     """
     if self._finished.done():
       return False
-    self.pending_steer.append(text)
     # Dedup before buffering. A repeated force-steer of the SAME still-live
     # pending row (common when the client retries a send right after an
     # interrupt) re-delivers the same user_msg / consume cid here. The queued
@@ -262,6 +261,12 @@ class ActiveClaudeClient:
     # twice. A queued row carries a stable `cid` (see schemas.SendMessage.cid),
     # so keying on cid drops only true re-deliveries and never a genuinely
     # distinct send — even two sends with identical text carry distinct cids.
+    #
+    # The provider-facing `text` follows the SAME boundary: when every
+    # delivered row is a cid-duplicate, the whole call is a re-delivery and
+    # the redirect text must not queue a second time — otherwise the durable
+    # transcript holds one user message while Claude receives it twice.
+    appended_any = False
     if user_msgs:
       from app.chat_writer import cid_of
       buffered_cids = {cid_of(m) for m in self._steer_user_msgs}
@@ -271,6 +276,10 @@ class ActiveClaudeClient:
           continue
         self._steer_user_msgs.append(m)
         buffered_cids.add(mcid)
+        appended_any = True
+    if user_msgs and not appended_any:
+      return True
+    self.pending_steer.append(text)
     if consume_pending_cids:
       buffered_consume = set(self._steer_consume_cids)
       for cid in consume_pending_cids:

@@ -1104,7 +1104,9 @@ def test_clear_pending_empties_queue_and_returns_count(actor):
     ],
   )
   result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 2, "cleared_cids": ["c-q1", "c-q2"]}
+  assert result == {
+    "cleared": 2, "cleared_cids": ["c-q1", "c-q2"], "cleared_ts": [10, 11],
+  }
   chat = _load_chat()
   assert chat["pending_messages"] == []
 
@@ -1117,7 +1119,7 @@ def test_clear_pending_empty_queue_is_noop(actor):
   and handleStop resends nothing (PM 115)."""
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
   result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 0, "cleared_cids": []}
+  assert result == {"cleared": 0, "cleared_cids": [], "cleared_ts": []}
   chat = _load_chat()
   assert chat["pending_messages"] == []
 
