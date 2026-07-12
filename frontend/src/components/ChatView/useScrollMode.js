@@ -221,6 +221,23 @@ export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
 }
 
 
+/** The height actually written to the spacer node. `_computeSpacerH` is the
+ *  pure geometry; this wraps it with the one owner rule raw geometry cannot
+ *  express: the reservation exists ONLY to serve a pin/send. A chat mounted
+ *  idle (restored, nothing sent this session) must carry no phantom spacer —
+ *  otherwise FOLLOW_BOTTOM's scroll-to-scrollHeight lands past the real
+ *  content and a short completed chat sits entirely above the fold (the
+ *  blank-screen-on-open bug). `active` is ChatView's spacerActive: armed by
+ *  the first visible send of the session, never at mount.
+ */
+export function reservedSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH, {
+  active = true,
+} = {}) {
+  if (!active) return 0
+  return _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH)
+}
+
+
 // "Near the bottom" tolerance for the send rule, matching the
 // auto-follow engage threshold in CLAUDE.md "Chat UX" constraint #2. A
 // reader within this many pixels of the bottom is treated as at-bottom.
@@ -310,10 +327,17 @@ export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = nu
 
 /** Foreground return (visibilitychange/pageshow/online) is not a reading
  *  gesture, so preserve the physical position the browser is already showing.
- *  If the user is at the real tail, keep FOLLOW_BOTTOM; otherwise freeze the
- *  topmost visible message as an ANCHOR_AT. */
-export function modeForForegroundReturn(scrollEl) {
+ *
+ *  Owner rule: if a turn is STREAMING when the app backgrounds, the reader must
+ *  come back to exactly where they were — never re-glued to a NEW tail that
+ *  grew while the tab was hidden. So when `streaming`, freeze the topmost
+ *  visible message as an ANCHOR_AT even at the tail: keeping FOLLOW_BOTTOM there
+ *  would let the next applyMode snap to the grown bottom and yank the reader.
+ *  Keep-follow-at-tail is only correct for an IDLE chat, where nothing grew
+ *  while backgrounded. */
+export function modeForForegroundReturn(scrollEl, { streaming = false } = {}) {
   if (!scrollEl) return null
+  if (streaming) return anchorModeFromScroll(scrollEl)
   if (isNearScrollBottom(scrollEl)) return { kind: 'FOLLOW_BOTTOM' }
   return anchorModeFromScroll(scrollEl)
 }
@@ -408,6 +432,10 @@ export default function useScrollMode({
   messagesRef,
   pendingMessagesLength,
   loadingOlderRef,
+  // True once a visible message has been sent in this chat this session. The
+  // spacer reservation serves a pin/send, so a chat mounted idle (no send)
+  // reserves nothing — otherwise FOLLOW_BOTTOM scrolls past the real content.
+  spacerActive = false,
 }) {
   const [revealed, setRevealed] = useState(false)
   const modeRef = useRef({ kind: 'INITIAL' })
@@ -562,8 +590,9 @@ export default function useScrollMode({
       // so reserving from it keeps the pin target reachable the instant the row
       // exists. Null only when there is genuinely no user message → spacer 0.
       const lastUserEl = lastUserMsgRef.current || _pinnedUserEl(scrollEl, null)
-      const h = _computeSpacerH(
+      const h = reservedSpacerH(
         scrollEl, listEl, lastUserEl, fullViewHRef.current,
+        { active: spacerActive },
       )
       spacerEl.style.height = `${h}px`
     }
@@ -821,7 +850,10 @@ export default function useScrollMode({
         window.visualViewport.removeEventListener('scroll', vvHandler)
       }
     }
-  }, [messages, pendingMessagesLength, chatId])
+    // spacerActive is a dep so the spacer re-sizes the moment the first send
+    // of the session arms the reservation (the send also changes `messages`,
+    // but the flip is an explicit trigger, not an inferred one).
+  }, [messages, pendingMessagesLength, chatId, spacerActive])
 
   return {
     modeRef,

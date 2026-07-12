@@ -10,8 +10,16 @@ import {
   modeForChatExit,
   modeForForegroundReturn,
   modeForViewportChange,
+  reservedSpacerH,
   shouldPinSend,
 } from '../useScrollMode.js'
+import {
+  PIN_BOTTOM_ROOM,
+  PIN_OFFSET,
+  pinHeld,
+  pinLanded,
+  snapshotChatUX,
+} from '../chatContract.js'
 
 function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 }) {
   return {
@@ -422,4 +430,162 @@ test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-
   assert.equal(r.reachable, false, 'stale-small fullViewH leaves the pin target unreachable')
   assert.ok(r.pinTarget - r.maxScrollTop > 80,
     'the message is still stranded far below the top — visually mid-viewport')
+})
+
+
+// ---------------------------------------------------------------------------
+// F1 — the 2nd-and-later direct send must keep pinning through the thinking
+// pause. The ts-swap retarget used to collapse the spacer to 0px; that shrinks
+// scrollHeight below the viewport and the browser CLAMPS scrollTop to 0. On a
+// same-last-message commit sameMessageList skips the re-render, so no layout
+// effect runs to restore the spacer, and the message strands at the top-of-
+// content offset instead of the pin. Two invariants below:
+//   (a) the fix (never collapse): a settled pin HOLDS through the pause; and
+//   (b) the settle path: a clamped-but-now-reachable pin re-applies regardless
+//       of the identity gate.
+// ---------------------------------------------------------------------------
+
+/** A minimal mutable scroll element: scrollHeight tracks listH + spacer, and
+ *  scrollTop writes clamp to [0, maxScrollTop] exactly as a browser does when
+ *  the spacer shrinks. Enough to drive applyMode + _pinReapplyNeeded. */
+function makePinnableScrollEl({ listH, spacerH, clientHeight, userTop, ts }) {
+  return {
+    clientHeight,
+    _spacer: spacerH,
+    _top: 0,
+    get scrollHeight() { return listH + this._spacer },
+    get scrollTop() { return this._top },
+    set scrollTop(v) {
+      const max = Math.max(0, this.scrollHeight - this.clientHeight)
+      this._top = Math.max(0, Math.min(v, max))
+    },
+    setSpacer(h) {
+      this._spacer = h
+      // The browser re-clamps scrollTop when scrollHeight shrinks below it.
+      const max = Math.max(0, this.scrollHeight - this.clientHeight)
+      if (this._top > max) this._top = max
+    },
+    querySelector(sel) {
+      if (sel === '.spacer-dynamic') return { offsetHeight: this._spacer }
+      if (sel === `.chat__msg--user[data-ts="${ts}"]`) return { offsetTop: userTop }
+      return null
+    },
+  }
+}
+
+function snapOf(el, userTop) {
+  return snapshotChatUX({ scrollEl: el, lastUserMsgEl: { offsetTop: userTop } })
+}
+
+test('F1: a settled pin HOLDS through the thinking pause when the retarget leaves the spacer alone', () => {
+  const userTop = 133
+  const el = makePinnableScrollEl({ listH: 400, spacerH: 824, clientHeight: 915, userTop, ts: 111 })
+  applyMode(el, { kind: 'PIN_USER_MSG', ts: 111 })
+  const before = snapOf(el, userTop)
+  assert.ok(pinLanded(before).ok, 'optimistic pin lands flush at the top')
+  assert.equal(before.pinGap, PIN_OFFSET)
+
+  // The ts-swap retarget fires during the thinking pause. With the fix it does
+  // NOT touch the spacer, so scrollHeight is unchanged and scrollTop is never
+  // clamped — even though the same-last-message commit runs no layout effect.
+  const after = snapOf(el, userTop)
+  assert.ok(pinHeld(before, after).ok, 'the row is still at the top after the pause')
+})
+
+test('F1: a collapse-clamped pin is recovered by the settle once the spacer restores reachability', () => {
+  const userTop = 133
+  const el = makePinnableScrollEl({ listH: 400, spacerH: 824, clientHeight: 915, userTop, ts: 111 })
+  const mode = { kind: 'PIN_USER_MSG', ts: 111 }
+  applyMode(el, mode)
+  const lastPinTop = userTop
+  assert.equal(el.scrollTop, userTop - PIN_OFFSET)
+
+  // The old retarget zeroed the spacer -> scrollHeight shrinks below the
+  // viewport -> the browser clamps scrollTop to 0 (the stranded bug state).
+  el.setSpacer(0)
+  assert.equal(el.scrollTop, 0, 'spacer collapse clamps scrollTop to 0')
+  assert.ok(!pinLanded(snapOf(el, userTop)).ok, 'the clamped state is a pin violation')
+  assert.equal(_pinReapplyNeeded(el, mode, lastPinTop), false,
+    'nothing to re-pin to while the target is unreachable')
+
+  // The layout effect's sizeSpacer restores the reservation, making the target
+  // reachable again. The settle MUST now fire regardless of the identity gate.
+  el.setSpacer(824)
+  assert.equal(_pinReapplyNeeded(el, mode, lastPinTop), true,
+    'a clamped-but-now-reachable pin needs re-applying')
+  applyMode(el, mode)
+  assert.ok(pinLanded(snapOf(el, userTop)).ok, 'the settle re-pins flush at the top')
+  assert.equal(el.scrollTop, userTop - PIN_OFFSET)
+})
+
+
+// ---------------------------------------------------------------------------
+// F2 — a chat mounted idle (restored, no send this session) must reserve NO
+// spacer. Otherwise FOLLOW_BOTTOM's scroll-to-scrollHeight includes the phantom
+// spacer and a short completed chat mounts with every message above the fold.
+// ---------------------------------------------------------------------------
+
+test('F2: an idle-mounted chat (no send this session) reserves no spacer; an armed chat reserves room', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 915 })
+  const listEl = { offsetHeight: 260 }        // 2-message short chat, fits the viewport
+  const lastUserMsgEl = { offsetTop: 8 }
+  assert.ok(
+    reservedSpacerH(scrollEl, listEl, lastUserMsgEl, 915, { active: true }) > 500,
+    'an armed chat reserves room to serve a pin',
+  )
+  assert.equal(
+    reservedSpacerH(scrollEl, listEl, lastUserMsgEl, 915, { active: false }),
+    0,
+    'no send this session -> no phantom spacer',
+  )
+})
+
+test('F2: with no spacer FOLLOW_BOTTOM leaves a short completed chat on-screen (the un-gated spacer pushed it above the fold)', () => {
+  const userTop = 8
+  const shortList = 260
+  const clientHeight = 915
+
+  // Fix: idle mount reserves 0 -> content does not overflow -> FOLLOW is a no-op.
+  const fixed = makePinnableScrollEl({ listH: shortList, spacerH: 0, clientHeight, userTop, ts: 1 })
+  applyMode(fixed, { kind: 'FOLLOW_BOTTOM' })
+  assert.equal(fixed.scrollTop, 0, 'no overflow -> no scroll -> messages at the top')
+  assert.ok(userTop - fixed.scrollTop >= 0, 'the message is on-screen')
+
+  // Bug: reserving the full spacer while idle overflows the viewport, so FOLLOW
+  // scrolls to scrollHeight and the chat's earlier messages sit above the fold.
+  // The last user row sits lower here (a short exchange, not a first message),
+  // which is the shape that visibly blanked the screen on open.
+  const lowUserTop = 200
+  const buggySpacer = _computeSpacerH(
+    { clientHeight }, { offsetHeight: shortList }, { offsetTop: lowUserTop }, clientHeight,
+  )
+  const buggy = makePinnableScrollEl({ listH: shortList, spacerH: buggySpacer, clientHeight, userTop: lowUserTop, ts: 1 })
+  applyMode(buggy, { kind: 'FOLLOW_BOTTOM' })
+  const firstMsgTop = 8
+  assert.ok(firstMsgTop - buggy.scrollTop < 0, 'the un-gated spacer scrolls earlier messages above the fold')
+})
+
+
+// ---------------------------------------------------------------------------
+// F4 — returning to the foreground while a turn is STREAMING must freeze the
+// reader where they were (anchor), even at the tail; keep-FOLLOW-at-tail is only
+// right for an idle chat where nothing grew while backgrounded.
+// ---------------------------------------------------------------------------
+
+test('F4: foreground return freezes a STREAMING turn as an anchor even at the tail; idle keeps FOLLOW', () => {
+  const tailItem = { offsetTop: 1200, offsetHeight: 200, dataset: { key: 'a-9' } }
+  const scrollEl = {
+    scrollHeight: 1400, scrollTop: 685, clientHeight: 700,   // near the tail
+    querySelectorAll(sel) { return sel === '.chat__msg[data-key]' ? [tailItem] : [] },
+  }
+  assert.equal(isNearScrollBottom(scrollEl), true, 'precondition: at the tail')
+
+  const streaming = modeForForegroundReturn(scrollEl, { streaming: true })
+  assert.equal(streaming.kind, 'ANCHOR_AT',
+    'streaming return freezes as an anchor, not the grown tail')
+  assert.equal(streaming.key, 'a-9')
+
+  const idle = modeForForegroundReturn(scrollEl, { streaming: false })
+  assert.deepEqual(idle, { kind: 'FOLLOW_BOTTOM' },
+    'an idle chat at the tail keeps following')
 })
