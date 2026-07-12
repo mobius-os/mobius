@@ -13,10 +13,11 @@ settings view.
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app import models
@@ -37,10 +38,23 @@ log = logging.getLogger(__name__)
 # chats_stream so proxies behave consistently.
 _KEEPALIVE_INTERVAL = 30
 
+# Characters kept from a build_phase label. The label is the one free-text
+# field on this otherwise-closed schema and renders untrusted in the chat foot
+# (and the polite live region), so a single POST cannot flood the rail with an
+# unbounded string.
+_LABEL_MAX = 80
+
+
 class NotifyBody(BaseModel):
   type: str
   appId: str | None = None
   error: str | None = None
+  # Milestone-rail fields, permitted ONLY on build_phase events (enforced
+  # below) so the type whitelist stays the meaningful contract: `label` is
+  # the free-text milestone, `chatId` names the building chat explicitly —
+  # build_phase.py sends the $CHAT_ID of its own running turn.
+  label: str | None = None
+  chatId: str | None = None
 
   @field_validator("type")
   @classmethod
@@ -49,6 +63,24 @@ class NotifyBody(BaseModel):
     if value not in SYSTEM_EVENT_TYPES:
       raise ValueError(f"unknown event type: {value}")
     return value
+
+  @model_validator(mode="after")
+  def confine_build_phase_fields(self) -> "NotifyBody":
+    """Confine `label`/`chatId` to build_phase and bound the label.
+
+    Either field on any other event type is rejected so the closed schema
+    keeps its meaning; a build_phase label is truncated to `_LABEL_MAX` so
+    one POST cannot render an unbounded string into the chat foot.
+    """
+    if self.type != "build_phase":
+      if self.label is not None:
+        raise ValueError("label is only valid for build_phase events")
+      if self.chatId is not None:
+        raise ValueError("chatId is only valid for build_phase events")
+      return self
+    if self.label is not None:
+      self.label = self.label[:_LABEL_MAX]
+    return self
 
 
 def publish_app_built_to_owning_chat(db: Session, app_id_str: str) -> None:
@@ -83,6 +115,39 @@ def publish_app_built_to_owning_chat(db: Session, app_id_str: str) -> None:
   bc.publish({"type": "app_built", "appId": app_id_str})
 
 
+def publish_build_phase_to_chat(chat_id: str | None, label: str) -> None:
+  """Emit a chat-scoped `build_phase` on the named building chat's broadcast.
+
+  The milestone rail belongs ONLY to the chat whose turn emitted the
+  milestone, so the chat identity travels explicitly: `build_phase.py` sends
+  the `$CHAT_ID` of its own running turn. Routing via the active-broadcast
+  pointer was wrong — that pointer tracks whichever turn STARTED most
+  recently, so with two concurrent builds chat B swallowed chat A's
+  milestones, and B finishing first cleared the pointer and silently dropped
+  A's later ones. `get_broadcast(chat_id)` addresses the named chat
+  regardless of what else is running. No chat id, no live broadcast, or a
+  finished turn means there is no rail to feed, and the signal is dropped
+  (best-effort by design).
+
+  Single-owner trusted-agent: the only checks are the NotifyBody type gate
+  and a running broadcast for the named chat — deliberately no token-claim
+  validation.
+
+  The event carries the agent-authored label plus a millisecond timestamp
+  the frontend dedupes on across catch-up replay.
+  """
+  if not chat_id:
+    return
+  bc = get_broadcast(chat_id)
+  if bc is None or not bc.running:
+    return
+  bc.publish({
+    "type": "build_phase",
+    "label": label,
+    "ts": int(time.time() * 1000),
+  })
+
+
 @router.post(
   "/api/notify", status_code=204, dependencies=[Depends(reject_cross_site)],
 )
@@ -96,6 +161,14 @@ def notify(
   Requires a valid JWT.  If no broadcast is active (no agent running),
   the event is silently dropped — nobody is listening.
   """
+  # A build_phase is chat-scoped (see publish_build_phase_to_chat): it must
+  # not fan out to the system broadcast or unrelated chats, so route it onto
+  # the named building chat's broadcast alone and return before the general
+  # publish path below (which is for events every view must hear).
+  if body.type == "build_phase":
+    publish_build_phase_to_chat(body.chatId, body.label or "")
+    return
+
   event: dict = {"type": body.type}
   if body.appId is not None:
     event["appId"] = body.appId
