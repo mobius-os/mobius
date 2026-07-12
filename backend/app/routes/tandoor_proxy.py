@@ -80,10 +80,24 @@ async def tandoor_proxy(path: str, request: Request):
             media_type="text/plain",
         )
 
+    # Set-Cookie MUST be forwarded as SEPARATE headers, never merged. httpx's
+    # `.items()` comma-joins repeated headers into one value, and a dict would
+    # collapse duplicate keys anyway — both corrupt Set-Cookie (its Expires
+    # attribute contains commas, and the browser reads the joined blob as a
+    # SINGLE cookie, silently dropping the rest). Tandoor's login response sets
+    # THREE cookies (sessionid + csrftoken + messages); merged into one, the
+    # browser kept csrftoken/messages but dropped `sessionid`, so every request
+    # after a successful 302 login was anonymous → an endless bounce back to the
+    # login page. So: build the non-cookie headers as a dict (comma-joining is
+    # fine for those), and append each Set-Cookie individually via multi_items().
     out_headers = {
         k: v for k, v in upstream.headers.items()
-        if k.lower() not in _HOP_BY_HOP
+        if k.lower() not in _HOP_BY_HOP and k.lower() != "set-cookie"
     }
+    set_cookies = [
+        v for k, v in upstream.headers.multi_items()
+        if k.lower() == "set-cookie"
+    ]
 
     async def _body():
         try:
@@ -93,8 +107,11 @@ async def tandoor_proxy(path: str, request: Request):
             await upstream.aclose()
             await client.aclose()
 
-    return StreamingResponse(
+    response = StreamingResponse(
         _body(),
         status_code=upstream.status_code,
         headers=out_headers,
     )
+    for cookie in set_cookies:
+        response.raw_headers.append((b"set-cookie", cookie.encode("latin-1")))
+    return response
