@@ -189,6 +189,10 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
       ...last,
       startedAt,
       firstTs,
+      // Client wall-clock of THIS (latest) delta. Paired with duration_ms (the
+      // runner-measured span up to here), this lets the live ticker survive a
+      // reconnect/catch-up replay — see thinkingElapsedMs.
+      lastAt: at,
       content: last.content + chunk,
       duration_ms: Number.isFinite(firstTs) && Number.isFinite(eventTs)
         ? Math.max(0, eventTs - firstTs)
@@ -201,8 +205,37 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
     content: chunk,
     startedAt: at,
     firstTs: eventTs,
+    lastAt: at,
     duration_ms: 0,
   }]
+}
+
+/**
+ * Wall-clock elapsed (ms) to show on a LIVE thinking block, anchored to the
+ * runner's clock so it survives a reconnect/catch-up replay.
+ *
+ * The naive `now - startedAt` breaks on reconnect: the server replays the whole
+ * in-flight turn as a burst, so every thinking delta is re-processed "now" and
+ * `startedAt` collapses to the reconnect instant — the timer restarts at 1s no
+ * matter how long the runner has actually been thinking.
+ *
+ * Instead: `duration_ms` is the runner-measured span up to the most recent
+ * delta (eventTs − firstTs, from timestamps the replayed events still carry),
+ * and `lastAt` is the client time that delta was received. Elapsed is that span
+ * plus the wall-clock tail since — replay-invariant, because a burst leaves
+ * duration_ms at the true full span and lastAt at the reconnect moment.
+ *
+ * Falls back to `now - startedAt` for legacy items with no `lastAt` (and for a
+ * provider that sends no runner timestamps, where duration_ms is itself
+ * client-measured and paired with lastAt=at, the two forms coincide).
+ */
+export function thinkingElapsedMs(item, now) {
+  if (item && Number.isFinite(item.lastAt)) {
+    const base = Number.isFinite(item.duration_ms) ? item.duration_ms : 0
+    return base + Math.max(0, now - item.lastAt)
+  }
+  const startedAt = item && Number.isFinite(item.startedAt) ? item.startedAt : now
+  return Math.max(0, now - startedAt)
 }
 
 /**
