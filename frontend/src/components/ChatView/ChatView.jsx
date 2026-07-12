@@ -642,6 +642,7 @@ export default function ChatView({
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
+    spacerActive,
   })
 
   function makeSendPinIntent(willPin) {
@@ -878,7 +879,10 @@ export default function ChatView({
           promotedRef.current = false
           setSpacerActive(true)
           if (contWillPin) {
-            if (spacerRef.current) spacerRef.current.style.height = '0px'
+            // Spacer height belongs to the layout effect's sizeSpacer; do not
+            // zero it here. A retarget/promote that keeps the same last message
+            // won't re-run that effect, so the collapse would clamp scrollTop
+            // with nothing to re-pin (the "second send never pins" strand).
             modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
           } else if (intentStillCurrent) {
             settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
@@ -1003,7 +1007,9 @@ export default function ChatView({
       // mode first prevents a one-frame "row appears low, then snaps up" steer.
       setSpacerActive(true)
       if (shouldPinSteered) {
-        if (spacerRef.current) spacerRef.current.style.height = '0px'
+        // Spacer height belongs to the layout effect's sizeSpacer; zeroing it
+        // here would collapse scrollHeight and clamp scrollTop with no
+        // guaranteed re-run to re-pin.
         modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
       } else if (pinStillValid) {
         settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
@@ -1657,7 +1663,8 @@ export default function ChatView({
             const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
             setSpacerActive(true)
             if (queuedWillPin && pinStillValid) {
-              if (spacerRef.current) spacerRef.current.style.height = '0px'
+              // Spacer height belongs to the layout effect's sizeSpacer; zeroing
+              // it here would clamp scrollTop with no guaranteed re-run to re-pin.
               modeRef.current = {
                 kind: 'PIN_USER_MSG',
                 ts: pinTargetTs,
@@ -1717,7 +1724,8 @@ export default function ChatView({
           const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
           setSpacerActive(true)
           if (queuedWillPin && startedPinStillValid) {
-            if (spacerRef.current) spacerRef.current.style.height = '0px'
+            // Spacer height belongs to the layout effect's sizeSpacer; zeroing
+            // it here would clamp scrollTop with no guaranteed re-run to re-pin.
             modeRef.current = {
               kind: 'PIN_USER_MSG',
               ts: pinTargetTs,
@@ -1823,7 +1831,11 @@ export default function ChatView({
     // fresh-start response.
     setSpacerActive(true)
     if (willPin) {
-      if (spacerRef.current) spacerRef.current.style.height = '0px'
+      // Spacer height belongs to the layout effect's sizeSpacer, which sizes it
+      // from the last user message on the re-render this send triggers. Zeroing
+      // it here only collapses scrollHeight and momentarily clamps scrollTop —
+      // recovered on the fresh send, but stranded on the ts-swap retarget below
+      // whose commit keeps the same last message and skips the re-render.
       modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
     } else {
       settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
@@ -1894,7 +1906,12 @@ export default function ChatView({
           })
           if (freshPin.shouldPin) {
             setSpacerActive(true)
-            if (spacerRef.current) spacerRef.current.style.height = '0px'
+            // Retarget to the server ts. Do NOT zero the spacer: this commit
+            // keeps the same last message (only its ts changes), so
+            // sameMessageList skips the re-render and the layout effect never
+            // re-runs to restore a collapsed spacer — the collapse would clamp
+            // scrollTop to 0 and strand the pin (2nd-send-never-pins). The
+            // spacer already holds the optimistic pin's correct height.
             modeRef.current = { kind: 'PIN_USER_MSG', ts: freshPin.pinTargetTs }
           } else if (freshPin.intentStillCurrent) {
             settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
@@ -1925,7 +1942,6 @@ export default function ChatView({
         })
         if (freshPin.shouldPin) {
           setSpacerActive(true)
-          if (spacerRef.current) spacerRef.current.style.height = '0px'
           // Pin to the OPTIMISTIC ts, not freshPin.pinTargetTs (the canonical
           // server ts). On a fresh send the rendered row keeps its optimistic
           // client ts and never reconciles to the canonical ts (verified: the
@@ -1936,6 +1952,14 @@ export default function ChatView({
           // the row immediately, so the pin lands the just-sent message on the
           // first apply. _pinnedUserEl's last-row fallback still covers the case
           // where a future change does swap the row to the canonical ts.
+          //
+          // Do NOT zero the spacer here. This commit keeps the same last
+          // message (only its ts changes), so sameMessageList skips the
+          // re-render and the layout effect never re-runs to restore a
+          // collapsed spacer; during a thinking pause no ResizeObserver tick
+          // fires either, so a collapse clamps scrollTop to 0 and strands the
+          // pin through the whole quiet window (the 2nd-send-never-pins
+          // strand). The spacer already holds the pin's correct height.
           modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
         } else if (freshPin.intentStillCurrent) {
           settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
@@ -2518,10 +2542,12 @@ export default function ChatView({
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
   // backgrounded-then-resumed streaming chat doesn't snap away from where the
-  // user was reading. If the user is already at the tail, preserve
-  // FOLLOW_BOTTOM so thinking/timer updates keep flowing at the bottom instead
-  // of converting the tail into a fixed anchor. No-op when the turn isn't
-  // active or the tab is hidden.
+  // user was reading. Owner rule: a turn that was STREAMING when the app
+  // backgrounded must return the reader to exactly where they were — never to a
+  // NEW tail that grew while hidden. This handler only runs when the turn is
+  // live (guarded below), so pass streaming:true to freeze the position as an
+  // anchor even at the tail; keeping FOLLOW_BOTTOM there would yank the reader
+  // to the grown bottom. No-op when the turn isn't active or the tab is hidden.
   // (The fast-forward affordance is computed separately at `canSteer` below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
@@ -2532,7 +2558,7 @@ export default function ChatView({
         return
       }
       if (!turnActive) return
-      const nextMode = modeForForegroundReturn(scrollRef.current)
+      const nextMode = modeForForegroundReturn(scrollRef.current, { streaming: true })
       if (nextMode) modeRef.current = nextMode
     }
 
