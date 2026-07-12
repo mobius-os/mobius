@@ -254,10 +254,30 @@ class ActiveClaudeClient:
     if self._finished.done():
       return False
     self.pending_steer.append(text)
+    # Dedup before buffering. A repeated force-steer of the SAME still-live
+    # pending row (common when the client retries a send right after an
+    # interrupt) re-delivers the same user_msg / consume_ts here. The queued
+    # row is not consumed until the interrupt-boundary drain, so without this
+    # guard the buffer grows to [msgA, msgA] and the writer persists the row
+    # twice — a durable duplicate whose second ts is bumped +1ms so it looks
+    # legitimate. A queued row carries a stable ts (see _user_messages_from_
+    # pending, which sets user_msg["ts"] == the pending ts), so keying on ts
+    # drops only true re-deliveries and never a genuinely distinct send.
     if user_msgs:
-      self._steer_user_msgs.extend(user_msgs)
+      buffered_ts = {m.get("ts") for m in self._steer_user_msgs}
+      for m in user_msgs:
+        mts = m.get("ts")
+        if mts is not None and mts in buffered_ts:
+          continue
+        self._steer_user_msgs.append(m)
+        buffered_ts.add(mts)
     if consume_pending_ts:
-      self._steer_consume_ts.extend(consume_pending_ts)
+      buffered_consume = set(self._steer_consume_ts)
+      for ts in consume_pending_ts:
+        if ts in buffered_consume:
+          continue
+        self._steer_consume_ts.append(ts)
+        buffered_consume.add(ts)
     self._steer_requested = True
     return True
 
