@@ -30,26 +30,23 @@ _QUIET_PUSH_SOURCE_TYPES = frozenset({
 })
 
 
-def _is_quiet_maintenance_push(
-  *, source_type: str | None, title: str, body: str | None
-) -> bool:
+def _is_quiet_maintenance_push(*, source_type: str | None) -> bool:
   """Return True for shell/platform maintenance notices.
 
   These remain in notification history but should not become OS/browser
   popups. User-facing agent/app notifications still use the normal push path.
+
+  Suppression is decided PURELY by `source_type` membership, never by the
+  free text of the title/body. The invariant: a push's copy must never change
+  whether it pops. An earlier version substring-matched "platform update" in
+  the text, which meant a legitimate resume push ("Your turn was paused for an
+  update — tap to resume.", source_type="system") survived only by an accident
+  of wording — rephrasing it toward "platform update" would have silently
+  swallowed a recovery notification the owner needs. Any push that must stay
+  quiet declares a maintenance source_type; everything else is delivered.
   """
   source = (source_type or "").strip().lower()
-  if source in _QUIET_PUSH_SOURCE_TYPES:
-    return True
-  if source not in {"", "agent", "system"}:
-    return False
-  text = f"{title or ''}\n{body or ''}".lower()
-  return (
-    ("shell" in text and any(
-      word in text for word in ("build", "rebuild", "building", "rebuilt")
-    ))
-    or ("platform update" in text)
-  )
+  return source in _QUIET_PUSH_SOURCE_TYPES
 
 
 def _key_dir() -> Path:
@@ -195,9 +192,7 @@ def notify_owner(
   if source_id and presence.has_watchers(source_id):
     return notification_id
 
-  if _is_quiet_maintenance_push(
-    source_type=source_type, title=title, body=body,
-  ):
+  if _is_quiet_maintenance_push(source_type=source_type):
     return notification_id
 
   payload = {

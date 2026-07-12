@@ -446,24 +446,42 @@
   font-size: 12px;
   opacity: 0.8;
 }
+/* Reassurance under a park: a reset push is coming, and tapping Resume now
+   before the reset may re-park. Muted so it reads as a calm footnote, not a
+   second warning. */
+.chat__parked-note {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.7;
+}
 /* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
-   Rendered only on the tail resumable interrupt note; re-sends "continue". */
+   Rendered only on the tail resumable interrupt note; re-sends "continue".
+   This is the single most important recovery gesture, so it clears the 44px
+   touch floor (an inline-flex box, not a 31px text pill) and carries an
+   accent-tinted fill so it reads as the PRIMARY next action, not a muted
+   secondary. */
 .chat__resume {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   margin-top: 8px;
-  padding: 6px 14px;
-  border: 1px solid var(--border-light);
+  padding: 8px 18px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-light));
   border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  color: var(--accent);
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.08s;
 }
 .chat__resume:hover {
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-light));
+  background: color-mix(in srgb, var(--accent) 26%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-light));
 }
+.chat__resume:active { transform: scale(0.97); }
 
 /* ── Typing indicator ─────────────────────────────── */
 
@@ -1124,6 +1142,7 @@
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__question-nudge,
+.chat__foot .chat__resume-nudge,
 .chat__foot .chat__open-app,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
@@ -1322,7 +1341,8 @@
    recipe as .chat__open-app-btn: it must read as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
    the whole conversation rather than the queued tray. */
-.chat__question-nudge {
+.chat__question-nudge,
+.chat__resume-nudge {
   display: block;
   margin: 0 auto 8px;
   padding: 5px 14px;
@@ -1338,11 +1358,13 @@
   cursor: pointer;
   transition: background 0.15s, color 0.15s, transform 0.08s;
 }
-.chat__question-nudge:hover {
+.chat__question-nudge:hover,
+.chat__resume-nudge:hover {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
 }
-.chat__question-nudge:active { transform: scale(0.96); }
+.chat__question-nudge:active,
+.chat__resume-nudge:active { transform: scale(0.96); }
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {

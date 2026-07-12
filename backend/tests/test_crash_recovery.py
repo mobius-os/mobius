@@ -66,7 +66,7 @@ def test_startup_reconciles_stale_running_chats(db):
   err_blocks = [b for b in row.messages[-1]["blocks"] if b["type"] == "error"]
   assert err_blocks, "an interrupted-turn error block must be appended"
   # `message` is the field MsgContent.jsx + events.process_event read.
-  assert "interrupted" in err_blocks[0]["message"].lower()
+  assert "paused" in err_blocks[0]["message"].lower()
   # The still-queued count is surfaced to the user (not "cleared").
   assert "1 queued message" in err_blocks[0]["message"]
   assert "still queued" in err_blocks[0]["message"]

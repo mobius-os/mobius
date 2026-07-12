@@ -66,7 +66,11 @@ def test_notify_owner_saves_platform_maintenance_without_push(
   assert sent == []
 
 
-def test_notify_owner_quiets_shell_maintenance_wording(db, auth, monkeypatch):
+def test_notify_owner_quiets_shell_maintenance_source_type(db, auth, monkeypatch):
+  # Shell-rebuild notices stay quiet by declaring a maintenance source_type,
+  # not by their wording. Suppression is gated purely on source_type membership
+  # so a push's copy can never change whether it pops (see
+  # _is_quiet_maintenance_push's invariant).
   owner = _owner_with_subscription(db)
   sent = []
   monkeypatch.setattr(
@@ -79,11 +83,34 @@ def test_notify_owner_quiets_shell_maintenance_wording(db, auth, monkeypatch):
     owner.id,
     title="Shell rebuild failed",
     body=None,
-    source_type="agent",
+    source_type="shell_rebuild_failed",
   )
 
   assert db.get(models.Notification, notif_id) is not None
   assert sent == []
+
+
+def test_notify_owner_resume_push_never_swallowed_by_wording(db, auth, monkeypatch):
+  # A resume push carries maintenance-adjacent wording ("paused … update") but a
+  # system source_type, so it must ALWAYS deliver — the copy must never trip the
+  # maintenance suppressor. This pins the invariant behind item 5.
+  owner = _owner_with_subscription(db)
+  sent = []
+  monkeypatch.setattr(
+    "app.push.send_push",
+    lambda subscription_info, payload: sent.append(payload) or True,
+  )
+
+  notif_id = notify_owner(
+    db,
+    owner.id,
+    title="Turn paused for a platform update",
+    body="Your turn was paused for a platform update — tap to resume.",
+    source_type="system",
+  )
+
+  assert db.get(models.Notification, notif_id) is not None
+  assert len(sent) == 1
 
 
 def test_notify_owner_does_not_quiet_app_update_copy(db, auth, monkeypatch):
