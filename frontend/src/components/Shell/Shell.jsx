@@ -18,6 +18,7 @@ import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
+import { isIncomingFrameWindow } from '../../lib/incomingFrames.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
@@ -1163,11 +1164,19 @@ export default function Shell() {
       // The iframes mount with allow-same-origin so e.origin is always
       // window.location.origin, never the string 'null'. The 'null'-origin
       // branch was dead (sandboxed-without-allow-same-origin iframes).
-      // e.source is intentionally NOT checked: Möbius is single-owner and
-      // every iframe on this origin is owned by the shell, so source
-      // verification would add complexity with no security benefit.
+      // e.source is intentionally NOT checked (Möbius is single-owner and
+      // every iframe on this origin is owned by the shell) — with ONE narrow
+      // exception below: app-error from a hidden incoming preview frame.
       if (e.origin !== window.location.origin) return
       if (e.data?.type === 'moebius:app-error') {
+        // Ignore crash reports from a HIDDEN incoming frame of AppCanvas's
+        // double-buffered version swap. A failed swap usually IS a broken
+        // build; the swap machinery already handles it (the old working
+        // frame stays live, the next rebuild retries), and a hidden frame
+        // must not plant a crash-report draft or yank the view to a chat
+        // while the owner's visible preview works fine. See
+        // lib/incomingFrames.js for the registry contract.
+        if (isIncomingFrameWindow(e.source)) return
         handleAppError(e)
       } else if (e.data?.type === 'moebius:new-chat') {
         newChat({
@@ -1762,6 +1771,12 @@ export default function Shell() {
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
+              // Whether this canvas is the one on screen. AppCanvas gates
+              // immersive forwarding/replay on it — the immersive holder is
+              // global last-writer-wins, so a hidden cached app (or its
+              // rebuilt frame promoting in the background) must not steal
+              // chrome/insets from the active app.
+              isActive={activeView === 'canvas' && String(activeAppId) === String(id)}
               pendingIntent={appIntents[String(id)] || null}
               // Immersive is APPLIED only while this app is the active holder
               // (immersiveActive already requires the canvas view + active
