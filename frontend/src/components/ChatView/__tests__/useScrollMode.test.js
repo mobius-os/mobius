@@ -294,9 +294,12 @@ test('spacer reservation is independent from pin mode', () => {
   const listEl = { offsetHeight: 900 }
   const lastUserMsgEl = { offsetTop: 700 }
 
+  // Deficit-only: 600 + (700 − 4) − 900. No flat cushion — see the
+  // _computeSpacerH docblock for why any additive bottom room breaks
+  // the send-rule / spacer lock-in specs.
   assert.equal(
     _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
-    576,
+    396,
   )
 })
 
@@ -320,20 +323,66 @@ test('queued tray does not shorten spacer reservation', () => {
 
   assert.equal(
     _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
-    576,
+    396,
+  )
+})
+
+test('fits-viewport chat: no phantom room — the pin sits at the true content bottom', () => {
+  // The geometry the overflow tests above never cover: a short chat whose
+  // whole conversation (listH 191) fits the viewport (viewH 857) — a first
+  // short send on a phone. A flat PIN_BOTTOM_ROOM cushion here reserved
+  // 180px of phantom scroll room below the pinned row, so the true-bottom
+  // gap read ≈ ROOM, isNearContentBottom classified the reader as away
+  // from the tail, and the NEXT send refused to pin (the send-rule
+  // "second send still pins" regression). Deficit-only sizing makes
+  // maxScrollTop land exactly on the pin target: reachable, no void below.
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 857 })
+  const listEl = { offsetHeight: 191 }
+  const lastUserMsgEl = { offsetTop: 8 }
+
+  const spacerH = _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 857)
+  assert.equal(spacerH, 670) // 857 + (8 − 4) − 191
+  const maxScrollTop = (191 + spacerH) - 857
+  const pinTarget = 8 - 4
+  assert.equal(maxScrollTop, pinTarget,
+    'pin target is exactly reachable with zero phantom room below')
+  assert.ok(spacerH <= 857,
+    'reserved spacer stays within one viewport on a fits chat')
+})
+
+test('spacer decays continuously to zero as content outgrows the viewport', () => {
+  // Continuity guard across the overflow boundary: as content streams in,
+  // the spacer shrinks 1:1 with listH growth and reaches EXACTLY 0 once
+  // the content below the pin fills the viewport (spacer.spec case 5's
+  // lock-in) — no residual and no scrollHeight step mid-stream.
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
+  const lastUserMsgEl = { offsetTop: 100 }
+
+  // listH == viewH: only the pin deficit remains.
+  assert.equal(
+    _computeSpacerH(scrollEl, { offsetHeight: 600 }, lastUserMsgEl, 600),
+    96,
+  )
+  // 90px more content → 90px less spacer.
+  assert.equal(
+    _computeSpacerH(scrollEl, { offsetHeight: 690 }, lastUserMsgEl, 600),
+    6,
+  )
+  // Content below the pin fills the viewport → spacer is exactly 0.
+  assert.equal(
+    _computeSpacerH(scrollEl, { offsetHeight: 900 }, lastUserMsgEl, 600),
+    0,
   )
 })
 
 // R5 regression contract: a send while at the bottom must pin the new user
 // message to the TOP, which requires the dynamic spacer to reserve enough
 // bottom room that the pin target is actually REACHABLE (maxScrollTop >=
-// pinTarget). It also leaves a real bottom-room cushion so the pinned row
-// does not feel cramped at the exact end of the scroll range. When
-// fullViewH is stale-SMALL (the keyboard-open height used after the keyboard
-// has already closed and grown clientHeight), the spacer is undersized, the
-// pin clamps short, and the message lands mid-viewport. The fix keeps
-// fullViewHRef >= clientHeight at every sizeSpacer() call (grow guard), so
-// this asserts the math the fix preserves.
+// pinTarget). When fullViewH is stale-SMALL (the keyboard-open height used
+// after the keyboard has already closed and grown clientHeight), the spacer
+// is undersized, the pin clamps short, and the message lands mid-viewport.
+// The fix keeps fullViewHRef >= clientHeight at every sizeSpacer() call
+// (grow guard), so this asserts the math the fix preserves.
 function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
   const scrollEl = makeScrollEl({
     scrollHeight: 0, scrollTop: 0, clientHeight,
@@ -352,8 +401,8 @@ test('R5: spacer keeps the pin reachable when fullViewH tracks the (grown) clien
   // fullViewH is >= clientHeight, so the pin target is reachable → top pin.
   const r = pinReachable({ fullViewH: 700, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
   assert.equal(r.reachable, true, 'message can reach the top when fullViewH >= clientHeight')
-  assert.ok(r.maxScrollTop > r.pinTarget, 'spacer leaves breathing room below the pinned message')
-  assert.equal(r.maxScrollTop - r.pinTarget, 180, 'bottom breathing room stays intentional and bounded')
+  assert.equal(r.maxScrollTop, r.pinTarget,
+    'deficit-only spacer lands maxScrollTop exactly on the pin target — no phantom room')
 })
 
 test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-viewport (the bug)', () => {
