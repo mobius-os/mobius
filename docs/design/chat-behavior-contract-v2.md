@@ -50,6 +50,23 @@ the pin decision is `mode === AUTO || isFirstMessage` — pure state. The
 "geometry must never feed policy" property the design critique named as the
 single most valuable structural fix falls out of the contract itself.
 
+## Item 1 status — implemented via the cid landing (2026-07-12, adjudicated)
+
+Both sessions independently implemented this contract. Main's landing
+(0fb832ce..7f142bab + design record 6dff3e48) won the adjudication: cid
+stable identity supersedes the ts+fallback pin model below, the retarget
+machinery is already deleted, chatContract.js was re-justified and KEPT
+(browser-injectable invariant module, .pm 210/208), and main's own
+pinSentMessage funnel + userScrollIntentVersionRef cover the two
+self-review bugs. The commitMode/modeVersion pure-state engine (branch
+session-scroll-v2, kept on origin) is parked pending ONE open owner
+ruling: short-chat second-send — main ships PIN (R2 geometric at-bottom
+reading, owner-annotated in send-rule test 4); the pure-state reading of
+rules 2/3 (AUTO only via manual scroll gesture) implies STAY. If the
+owner rules STAY, session-scroll-v2 is the reference implementation.
+The mechanics section below is retained as the design record of the
+parked variant.
+
 ## Mechanics (item 1) — synthesized from the design pass
 
 State ownership: `useScrollMode.js` owns ALL scroll state. One mutation
