@@ -87,16 +87,28 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The Codex background path does `from app.codex_sdk_runner import ...`; the
-# Claude path uses the pip-installed SDK directly, so only Codex needs the
-# `app` package importable. Reflection runs from cron with a near-empty
-# environment and no PYTHONPATH, so sys.path[0] is this scripts/ dir — which
-# holds no `app` package — and that import would raise ModuleNotFoundError,
-# killing the whole Codex primary/fallback night with no brief. Put the package
-# root (the backend dir holding `app`) on sys.path so the import resolves
-# regardless of cwd, exactly as memory_search.py does for its own app.memory
-# imports.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The Codex path does `from app.codex_sdk_runner import ...` (the Claude path
+# uses the pip-installed SDK directly, so only Codex needs the `app` package).
+# Cron runs with a near-empty environment and no PYTHONPATH, so we must put the
+# backend package root on sys.path ourselves or that import raises
+# ModuleNotFoundError, killing the whole Codex primary/fallback night with no
+# brief.
+#
+# This runner has no single home, so a bare `parent.parent` is not enough: it
+# ships in the platform repo (backend/scripts/, where parent.parent holds `app`)
+# and ALSO installs as a catalog-app copy under /data/apps/reflection/ (whose
+# parent.parent is /data/apps — which holds NO `app` package). So search the
+# known backend roots and put the FIRST that actually contains the `app` package
+# on sys.path — the import then resolves wherever the runner runs. These roots
+# are container deployment constants, same posture as the hard-coded paths below.
+for _pkg_root in (
+    Path(__file__).resolve().parent.parent,  # <backend>/scripts/ layout (platform + baked)
+    Path("/data/platform/backend"),           # served platform clone
+    Path("/app"),                             # baked image floor
+):
+    if (_pkg_root / "app" / "__init__.py").is_file():
+        sys.path.insert(0, str(_pkg_root))
+        break
 
 # --- Fixed locations (the container's data layout) -------------------
 # These are intentionally hard-coded rather than env-derived: Reflection
