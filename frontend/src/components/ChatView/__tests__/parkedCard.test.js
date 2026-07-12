@@ -6,22 +6,38 @@ import assert from 'node:assert/strict'
 // block carrying `parked_until` + `park_reason`, which renders as a live
 // "Rate limit — resets at … · Resume now" card. The extras must survive all
 // three client seams: the live stream reducer, promote-to-block, and the
-// MsgContent renderer.
+// shared ErrorCard renderer (consumed by BOTH MsgContent and
+// StreamingMessage, so the persisted and live surfaces cannot diverge).
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
+const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
+const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
 const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
-test('MsgContent renders a parked card for a parked_until error block', () => {
-  assert.match(msgContent, /block\.parked_until/,
-    'the error branch must key the parked card on block.parked_until')
-  assert.match(msgContent, /Rate limit/,
+test('ErrorCard renders a parked card for a parked_until error block', () => {
+  assert.match(errorCard, /block\.parked_until/,
+    'the card must key the parked classification on block.parked_until')
+  assert.match(errorCard, /Rate limit/,
     'a parked block must be labeled as a rate limit, not a generic error')
-  assert.match(msgContent, /Resets \{resetLabel\}/,
+  assert.match(errorCard, /Resets \{vm\.resetLabel\}/,
     'the card must show the reset time (label carries its own preposition)')
   assert.match(msgContent, /\{parked \? 'Resume now' : 'Resume'\}/,
     'the tail resume button reads "Resume now" on a parked card')
+})
+
+test('both surfaces consume the shared ErrorCard — no private error render', () => {
+  // The live/catch-up surface once hardcoded a red "Error" card, so a benign
+  // pause flashed red until promotion. One renderer is the invariant.
+  assert.match(msgContent, /import ErrorCard from '\.\/ErrorCard\.jsx'/,
+    'MsgContent must consume the shared ErrorCard')
+  assert.match(streamingMessage, /import ErrorCard from '\.\/ErrorCard\.jsx'/,
+    'StreamingMessage must consume the shared ErrorCard')
+  assert.doesNotMatch(streamingMessage, /chat__error-label/,
+    'the live surface must not hand-roll its own error card body')
+  assert.doesNotMatch(msgContent, /chat__error-label/,
+    'the persisted surface must not hand-roll its own error card body')
 })
 
 test('the reset formatter is a defensive, viewer-local, day-aware helper', () => {
@@ -33,9 +49,9 @@ test('the reset formatter is a defensive, viewer-local, day-aware helper', () =>
     'the reset renders in the viewer\'s local clock')
   assert.match(resetTime, /tomorrow at/,
     'the label is day-aware — a 7-day park must not read as a bare time')
-  assert.match(msgContent,
+  assert.match(errorCard,
     /import \{ formatResetTime \} from '\.\/resetTime\.js'/,
-    'MsgContent must consume the shared formatter, not a private copy')
+    'ErrorCard must consume the shared formatter, not a private copy')
 })
 
 test('streamItemToBlock carries the park extras through promote', () => {
@@ -80,18 +96,18 @@ test('a benign pause_kind renders the calm "Paused" family, not red Error', () =
   // A drain-restart or stall carries pause_kind; it must get the soft
   // .chat__text--parked treatment and a "Paused" label. Red "Error" is
   // reserved for genuine failures (no parked_until, no pause_kind).
-  assert.match(msgContent, /block\.pause_kind/,
-    'the error branch must read block.pause_kind')
-  assert.match(msgContent, /parked \|\| !!block\.pause_kind/,
+  assert.match(errorCard, /block\.pause_kind/,
+    'the card must read block.pause_kind')
+  assert.match(errorCard, /parked \|\| !!block\.pause_kind/,
     'a park OR a pause_kind gets the soft treatment')
-  assert.match(msgContent, /block\.pause_kind \? 'Paused' : 'Error'/,
+  assert.match(errorCard, /block\.pause_kind \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
 })
 
 test('the park card reassures that a reset push is coming', () => {
-  assert.match(msgContent, /chat__parked-note/,
+  assert.match(errorCard, /chat__parked-note/,
     'a muted reassurance line renders inside the parked branch')
-  assert.match(msgContent, /notification when it resets/,
+  assert.match(errorCard, /notification when it resets/,
     'the note names the incoming reset push')
   assert.match(css, /\.chat__parked-note\s*\{/,
     'the reassurance line has its own muted style')
