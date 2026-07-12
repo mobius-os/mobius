@@ -382,12 +382,24 @@ class _ChatEventSink:
     """
     if not (self.chat_id and self.run_token):
       return
-    if not self.assistant_blocks:
-      if not self._last_error:
-        # Genuinely empty turn (no content, no error) — nothing to persist.
+    if not blocks_have_renderable_content(self.assistant_blocks):
+      if self._last_error:
+        # Synthesize an error block so the failure is durable in the transcript.
+        blocks = [{"type": "error", "message": self._last_error}]
+      elif getattr(self, "_lost_reply_marker", False):
+        # Defense-in-depth: a normally-owned run reached a CLEAN provider
+        # terminal but produced zero renderable content (a Claude synthetic-
+        # resume no-op, or a codex message whose text was lost). The runner-side
+        # fixes stop those at the source; this guarantees the turn is never a
+        # SILENT user->user gap — persist a neutral marker the client can retry.
+        blocks = [{
+          "type": "error",
+          "message": "This turn ended without a response — tap to retry.",
+        }]
+      else:
+        # Genuinely empty turn (no content, no error, not a lost reply) —
+        # nothing to persist.
         return
-      # Synthesize an error block so the failure is durable in the transcript.
-      blocks = [{"type": "error", "message": self._last_error}]
     else:
       blocks = self.assistant_blocks
     snapshot = build_assistant_message(blocks)
@@ -2671,6 +2683,23 @@ async def _complete_turn(
     bc.mark_completed()
     db.close()
     return chat_queue.TerminalDisposition.STALE_NO_ACTION
+
+  # Lost-reply backstop (defense-in-depth behind the runner-side fixes). A
+  # normally-owned run that reached a CLEAN provider terminal (no error, no
+  # limit/park) yet produced ZERO renderable content is a genuine dropped reply
+  # — a silent user->user gap. Flag it so finalize() persists a neutral,
+  # recoverable marker instead of silently no-oping. Every guard self-excludes a
+  # legitimately-silent turn: a user Stop lands as stop_handoff_successor (or
+  # disowns the generation above), a park sets limit_reached, an errored/refused
+  # turn sets _last_error, and any real text/thinking/tool_use makes the blocks
+  # renderable. cost_usd is unusable (None for every run here) and not consulted.
+  sink._lost_reply_marker = (
+    we_own_gen
+    and not stop_handoff_successor
+    and not limit_reached
+    and not sink._last_error
+    and not blocks_have_renderable_content(sink.assistant_blocks)
+  )
 
   try:
     await sink.finalize()

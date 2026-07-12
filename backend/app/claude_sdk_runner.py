@@ -1204,6 +1204,10 @@ async def run_claude_sdk_turn(
         }
       await client.query(turn_message)
 
+      # At most one automatic re-query per turn (see the synthetic-resume
+      # recovery in the terminal branch below), so a genuinely-empty resume
+      # can never loop.
+      did_auto_requery = False
       while True:
         async for sdk_msg in client.receive_response():
           # Persist the session id ONLY from real conversation messages.
@@ -1267,6 +1271,33 @@ async def run_claude_sdk_turn(
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
+            break
+          # Recover a synthetic no-op RESUME. When a resumed session's prior
+          # turn was interrupted (e.g. a server restart with a dangling
+          # background task), the Claude CLI can spend the resumed turn
+          # RECONCILING state — it writes a synthetic "No response requested."
+          # close-out and returns a CLEAN terminal (is_error False) WITHOUT ever
+          # running the model on the real prompt, so the sink accrues zero
+          # blocks and the reply silently vanishes (proven from CLI transcripts:
+          # the "continue" case, chat 04ef66df). Re-ask the same prompt ONCE to
+          # force a real answer — exactly what a manual re-send recovers, and
+          # what a second reconciled turn produced in the wild. Bounded by
+          # did_auto_requery so a legitimately-empty resume cannot loop; if the
+          # retry is also empty the finalize backstop records a retry marker.
+          if (
+            session_id is not None            # a resume (non-first turn)
+            and not terminal.get("error")     # clean terminal (is_error False)
+            and terminal.get("api_error_status") != 429  # not a bare 429/park
+            and not active_client.pending_steer
+            and not did_auto_requery
+            and len(bc.assistant_blocks) == 0  # zero blocks: the synthetic no-op
+          ):
+            did_auto_requery = True
+            log.info(
+              "claude resume produced no reply (synthetic no-op); "
+              "auto-requerying once chat_id=%s", chat_id,
+            )
+            await client.query(turn_message)
             break
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
