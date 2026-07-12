@@ -316,11 +316,22 @@ class SendMessage(BaseModel):
   timezone: str | None = None
   viewport: dict | None = None
   hidden: bool = False
+  # Client-minted stable identity for the user message, minted once at
+  # compose time and carried across the wire. It is the canonical row
+  # identity (React key, DOM pin target, queue cancel key, steer dedup
+  # key); `ts` is display/ordering metadata only. Untrusted client input:
+  # never an auth boundary — a duplicate cid is treated as a duplicate
+  # POST retry, not a security event.
+  cid: str | None = None
   # Internal UI hint: Stop can collapse already-queued messages and ask
   # the backend to steer them into the live turn even when the chat's
   # normal send-while-running behavior is queueing.
   force_steer: bool = False
-  consume_pending_ts: list[int] | None = None
+  # Which already-queued rows a force-steer should pull into the live
+  # turn, selected by their stable `cid` (the server still reconstructs
+  # the durable rows from Chat.pending_messages so the browser cannot
+  # forge transcript entries).
+  consume_pending_cids: list[str] | None = None
   # Optional UI hint for force-steering multiple already-queued messages.
   # The server still reconstructs the durable rows from Chat.pending_messages
   # so the browser cannot forge transcript entries; this only lets newer

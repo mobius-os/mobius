@@ -25,6 +25,7 @@ from app import models, schemas
 from app.chat_writer import (
   AnswerQuestion,
   AppendPending,
+  AppendSteeredUserMessage,
   Barrier,
   CancelPending,
   ChatWriterActor,
@@ -469,7 +470,10 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   # Cancel one and promote the queued follow-ups concurrently — neither loses
   # the cancellation nor a queued send.
   cancel_ts = stored_ts[3]
-  cf = actor.submit(CancelPending(chat_id="c1", run_token="rt1", ts=cancel_ts))
+  # These sends carried no cid, so the cancel targets the legacy-<ts> id.
+  cf = actor.submit(
+    CancelPending(chat_id="c1", run_token="rt1", cid=f"legacy-{cancel_ts}")
+  )
   pf = actor.submit(PromotePending(chat_id="c1", run_token="rt1"))
   _await(cf)
   promoted = _await(pf)
@@ -480,6 +484,63 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   assert chat["pending_messages"] == []
   assert "m0" in promoted["promoted"]["content"]
   assert "m3" not in promoted["promoted"]["content"]
+
+
+# -- cid identity: dedup + idempotency ------------------------------------
+def test_append_pending_duplicate_cid_is_idempotent(actor):
+  """A retried queue POST carries the SAME cid; the writer returns the
+  existing row and appends no twin (cid is untrusted, never a duplicate)."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  first = _await(actor.submit(
+    AppendPending(
+      chat_id="c1", run_token="",
+      user_msg={"role": "user", "content": "queued", "ts": 10, "cid": "c-dup"},
+    )
+  ))
+  second = _await(actor.submit(
+    AppendPending(
+      chat_id="c1", run_token="",
+      user_msg={"role": "user", "content": "queued", "ts": 99, "cid": "c-dup"},
+    )
+  ))
+  # The second append is a no-op that returns the already-stored row.
+  assert first["stored"]["cid"] == "c-dup"
+  assert second["stored"]["ts"] == first["stored"]["ts"]
+  chat = _load_chat()
+  assert [m["cid"] for m in chat["pending_messages"]] == ["c-dup"]
+
+
+def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
+  """AppendSteeredUserMessage dedups by cid: a re-delivered row (same cid)
+  is dropped, while two genuinely distinct sends with IDENTICAL text (distinct
+  cids) both persist — the case the old (ts,content) key could false-merge."""
+  _seed_chat(messages=[{"role": "user", "content": "Q1", "ts": 1}])
+  # Two distinct sends, identical text, distinct cids — both must land.
+  res = _await(actor.submit(
+    AppendSteeredUserMessage(
+      chat_id="c1", run_token="",
+      user_msgs=[
+        {"role": "user", "content": "same text", "ts": 10, "cid": "c-a"},
+        {"role": "user", "content": "same text", "ts": 11, "cid": "c-b"},
+      ],
+    )
+  ))
+  assert [m["cid"] for m in res["stored_messages"]] == ["c-a", "c-b"]
+  # A re-delivery of c-a (same cid) is dropped — no durable twin.
+  res2 = _await(actor.submit(
+    AppendSteeredUserMessage(
+      chat_id="c1", run_token="",
+      user_msgs=[
+        {"role": "user", "content": "same text", "ts": 12, "cid": "c-a"},
+      ],
+    )
+  ))
+  assert res2["stored_messages"] == []
+  chat = _load_chat()
+  user_cids = [m.get("cid") for m in chat["messages"] if m["role"] == "user"]
+  # The seeded Q1 row (no cid) plus the two distinct steered rows — the
+  # re-delivery of c-a produced no third row.
+  assert user_cids == [None, "c-a", "c-b"]
 
 
 # -- 7. StartTurn atomic --------------------------------------------------
@@ -562,7 +623,7 @@ def test_promote_pending_stops_collapse_at_hidden_boundary(actor):
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
 
   assert result["promoted"]["content"] == "visible"
-  assert result["promoted"]["_consumed_ts"] == [10]
+  assert result["promoted"]["_consumed_cids"] == ["legacy-10"]
   assert "hidden" not in result["promoted"]
   chat = _load_chat()
   assert chat["messages"][-1]["content"] == "visible"
@@ -575,7 +636,7 @@ def test_promote_pending_stops_collapse_at_hidden_boundary(actor):
 
   assert result["promoted"]["content"] == "secret reminder"
   assert result["promoted"]["hidden"] is True
-  assert result["promoted"]["_consumed_ts"] == [11]
+  assert result["promoted"]["_consumed_cids"] == ["legacy-11"]
   chat = _load_chat()
   assert chat["messages"][-1]["content"] == "secret reminder"
   assert chat["messages"][-1]["hidden"] is True
@@ -596,7 +657,7 @@ def test_promote_pending_hidden_head_does_not_hide_visible_followup(actor):
 
   assert result["promoted"]["content"] == "secret reminder"
   assert result["promoted"]["hidden"] is True
-  assert result["promoted"]["_consumed_ts"] == [10]
+  assert result["promoted"]["_consumed_cids"] == ["legacy-10"]
   chat = _load_chat()
   assert chat["messages"][-1]["hidden"] is True
   assert chat["pending_messages"] == [
@@ -626,11 +687,11 @@ def test_promote_pending_uses_first_queued_actor_for_run_attribution(actor):
   )
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
   assert result["promoted"]["content"] == "from app\nalso queued"
-  assert result["promoted"]["_consumed_ts"] == [10, 11]
+  assert result["promoted"]["_consumed_cids"] == ["legacy-10", "legacy-11"]
   assert "_initiated_by_app_id" not in result["promoted"]
   chat = _load_chat()
   assert "_initiated_by_app_id" not in chat["messages"][-1]
-  assert "_consumed_ts" not in chat["messages"][-1]
+  assert "_consumed_cids" not in chat["messages"][-1]
   run = _load_run("rt1")
   assert run["initiated_by_app_id"] == app_id
 
@@ -1031,32 +1092,32 @@ def test_reconciliation_works_independent_of_actor():
 # DB; assert each mutates the row (or no-ops correctly) as the production
 # helper it replicates would.
 def test_clear_pending_empties_queue_and_returns_count(actor):
-  """ClearPending empties pending_messages and returns the count + the ts it
-  removed (cleared_ts) — the Stop / terminal-setup-error path. cleared_ts is
-  what handleStop resends by, closing the natural-finish-races-Stop double-send
-  (PM 115)."""
+  """ClearPending empties pending_messages and returns the count + the cids it
+  removed (cleared_cids) — the Stop / terminal-setup-error path. cleared_cids
+  is what handleStop resends by, closing the natural-finish-races-Stop
+  double-send (PM 115)."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "q1", "ts": 10},
-      {"role": "user", "content": "q2", "ts": 11},
+      {"role": "user", "content": "q1", "ts": 10, "cid": "c-q1"},
+      {"role": "user", "content": "q2", "ts": 11, "cid": "c-q2"},
     ],
   )
   result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 2, "cleared_ts": [10, 11]}
+  assert result == {"cleared": 2, "cleared_cids": ["c-q1", "c-q2"]}
   chat = _load_chat()
   assert chat["pending_messages"] == []
 
 
 def test_clear_pending_empty_queue_is_noop(actor):
-  """ClearPending on an already-empty queue returns cleared=0 / cleared_ts=[]
+  """ClearPending on an already-empty queue returns cleared=0 / cleared_cids=[]
   and commits nothing (the production helper skips the commit when nothing
-  changed). The empty cleared_ts is exactly the natural-finish case: the
+  changed). The empty cleared_cids is exactly the natural-finish case: the
   turn-end drain already promoted the queued message, so Stop reports nothing
   and handleStop resends nothing (PM 115)."""
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
   result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 0, "cleared_ts": []}
+  assert result == {"cleared": 0, "cleared_cids": []}
   chat = _load_chat()
   assert chat["pending_messages"] == []
 

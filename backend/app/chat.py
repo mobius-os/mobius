@@ -411,7 +411,7 @@ class _ChatEventSink:
     await _await_ack(ack)
 
   async def split_for_steer(
-    self, user_msg: dict | list[dict], consume_pending_ts: list[int],
+    self, user_msg: dict | list[dict], consume_pending_cids: list[str],
   ) -> dict:
     """Split the streaming turn at a steer boundary so reload order is
     Q1, A1, Q2, A2.
@@ -497,7 +497,7 @@ class _ChatEventSink:
           chat_id=self.chat_id,
           run_token="",
           user_msgs=user_msgs,
-          consume_pending_ts=consume_pending_ts,
+          consume_pending_cids=consume_pending_cids,
         )
       )
       return await _await_ack(ack)
@@ -1787,7 +1787,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   return resolved
 
 
-async def _clear_pending(chat_id: str) -> list[int]:
+async def _clear_pending(chat_id: str) -> list[str]:
   """Clears persisted queued messages for the chat via the actor.
 
   Routes through the actor's `ClearPending` (the sole runtime mutator of
@@ -1802,7 +1802,7 @@ async def _clear_pending(chat_id: str) -> list[int]:
   stranded queue is reconciled on the next interaction), so a clear
   failure never blocks Stop or a terminal-error bail.
 
-  Returns the timestamps it actually cleared (empty on a no-op, a missing
+  Returns the stable `cid`s it actually cleared (empty on a no-op, a missing
   chat_id, or a failed/swallowed ack). Stop uses this to resend ONLY the
   queued messages it truly removed — a message the turn-end drain already
   promoted into a continuation is gone from the queue, so it isn't in this
@@ -1814,7 +1814,7 @@ async def _clear_pending(chat_id: str) -> list[int]:
     ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
     result = await _await_ack(ack)
     if isinstance(result, dict):
-      return [ts for ts in result.get("cleared_ts", []) if ts is not None]
+      return [c for c in result.get("cleared_cids", []) if c is not None]
     return []
   except Exception:
     _get_logger().warning(
@@ -1897,16 +1897,17 @@ def _log_superseded_run(chat_id: str, phase: str) -> None:
 
 async def stop_chat(
   chat_id: str | None = None, db: Session = None,
-) -> tuple[bool, list[int]]:
+) -> tuple[bool, list[str]]:
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
   after Stop. Session_id is preserved so the next message resumes.
 
-  Returns `(stopped, cleared_pending_ts)`. `cleared_pending_ts` is the ts of
-  the queued messages this Stop actually removed — the frontend resends ONLY
-  those, so a message the turn-end drain already promoted into a continuation
-  (gone from the queue, hence not in this list) isn't double-sent. The global
-  sweep (`chat_id=None`) returns `[]` for it — that path doesn't resend."""
+  Returns `(stopped, cleared_pending_cids)`. `cleared_pending_cids` is the
+  stable `cid` of the queued messages this Stop actually removed — the
+  frontend resends ONLY those, so a message the turn-end drain already
+  promoted into a continuation (gone from the queue, hence not in this list)
+  isn't double-sent. The global sweep (`chat_id=None`) returns `[]` for it —
+  that path doesn't resend."""
   if chat_id is not None:
     return await stop_chat_for(chat_id, db=db)
   from app.broadcast import _broadcasts
@@ -1926,7 +1927,7 @@ async def stop_chat(
 
 async def stop_chat_for(
   chat_id: str, db: Session = None,
-) -> tuple[bool, list[int]]:
+) -> tuple[bool, list[str]]:
   """Kills the agent subprocess for a specific chat.
 
   Bumps the generation counter so the dying run_chat's finally
@@ -1938,12 +1939,13 @@ async def stop_chat_for(
   gets sent. Backend Stop is purely the interrupt; the frontend owns
   the "collapse + resend" UX. See CLAUDE.md "Stop-chat contract".
 
-  Returns `(stopped, cleared_pending_ts)` — `stopped` is whether every live
-  handle stopped within the bound, `cleared_pending_ts` is the ts this Stop
-  actually removed from the queue (empty if the clear timed out, or if the
-  turn-end drain had already promoted the queued message into a continuation
-  before Stop ran). handleStop resends only `cleared_pending_ts`, which closes
-  the natural-finish-races-Stop double-send (PM 115).
+  Returns `(stopped, cleared_pending_cids)` — `stopped` is whether every live
+  handle stopped within the bound, `cleared_pending_cids` is the stable `cid`
+  this Stop actually removed from the queue (empty if the clear timed out, or
+  if the turn-end drain had already promoted the queued message into a
+  continuation before Stop ran). handleStop resends only
+  `cleared_pending_cids`, which closes the natural-finish-races-Stop
+  double-send (PM 115).
 
   Waits for the process to die with a bounded timeout.
   """
@@ -1962,7 +1964,7 @@ async def stop_chat_for(
   # here by design — Stop's job is the interrupt, and a stranded queue
   # self-heals on the next interaction).
   log = _get_logger()
-  cleared_pending_ts: list[int] = []
+  cleared_pending_cids: list[str] = []
   # Restart-drain invariant (design §2.2): the pending queue must survive the
   # restart untouched. A Stop landing inside the drain window would durably
   # delete queued messages here and hand them to the frontend to re-send — but
@@ -1975,7 +1977,7 @@ async def stop_chat_for(
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          cleared_pending_ts = await _clear_pending(chat_id)
+          cleared_pending_cids = await _clear_pending(chat_id)
     except (Exception, asyncio.TimeoutError):
       log.warning(
         "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
@@ -2016,7 +2018,7 @@ async def stop_chat_for(
   if not all_stopped:
     # At least one runner is still alive — leave run-status + broadcast for it.
     registry.discard_starting(chat_id)
-    return all_stopped, cleared_pending_ts
+    return all_stopped, cleared_pending_cids
   # With no active handle there is no runner-side final save left to
   # await, so clear immediately (via the actor's ClearRunStatus). This is the
   # path that resolves the orphaned-run-after-restart case (run_status stuck
@@ -2030,7 +2032,7 @@ async def stop_chat_for(
     await _clear_run_status(chat_id)
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
-  return all_stopped, cleared_pending_ts
+  return all_stopped, cleared_pending_cids
 
 
 def _schedule_continuation(

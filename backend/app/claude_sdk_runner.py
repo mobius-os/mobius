@@ -208,7 +208,7 @@ class ActiveClaudeClient:
     # streamed, so it sealed an empty A1 and the real A1 then merged with A2
     # after the steered row on reload (Q1, Q2, A1A2 instead of Q1, A1, Q2, A2).
     self._steer_user_msgs: list[dict] = []
-    self._steer_consume_ts: list[int] = []
+    self._steer_consume_cids: list[str] = []
     # A steer was requested but not yet cut over. The runner clears the
     # turn at the NEXT completed content-block boundary (an AssistantMessage)
     # rather than mid-token, so the user sees the finished sentence/thought
@@ -230,7 +230,7 @@ class ActiveClaudeClient:
     self,
     text: str,
     user_msgs: list[dict] | None = None,
-    consume_pending_ts: list[int] | None = None,
+    consume_pending_cids: list[str] | None = None,
   ) -> bool:
     """Buffers a steer to cut in at the next content-block boundary.
 
@@ -246,7 +246,7 @@ class ActiveClaudeClient:
     connected client, preserving session context. (Stop is the separate
     immediate-cut path — see `interrupt()`.)
 
-    `user_msgs` / `consume_pending_ts` are the transcript-side payload the
+    `user_msgs` / `consume_pending_cids` are the transcript-side payload the
     runner replays into `sink.split_for_steer` when the interrupted turn
     ends (seal A1, append these rows, reset for A2). They are buffered here
     rather than split at the route so A1 is the real pre-interrupt text.
@@ -256,28 +256,28 @@ class ActiveClaudeClient:
     self.pending_steer.append(text)
     # Dedup before buffering. A repeated force-steer of the SAME still-live
     # pending row (common when the client retries a send right after an
-    # interrupt) re-delivers the same user_msg / consume_ts here. The queued
+    # interrupt) re-delivers the same user_msg / consume cid here. The queued
     # row is not consumed until the interrupt-boundary drain, so without this
     # guard the buffer grows to [msgA, msgA] and the writer persists the row
-    # twice — a durable duplicate whose second ts is bumped +1ms so it looks
-    # legitimate. A queued row carries a stable ts (see _user_messages_from_
-    # pending, which sets user_msg["ts"] == the pending ts), so keying on ts
-    # drops only true re-deliveries and never a genuinely distinct send.
+    # twice. A queued row carries a stable `cid` (see schemas.SendMessage.cid),
+    # so keying on cid drops only true re-deliveries and never a genuinely
+    # distinct send — even two sends with identical text carry distinct cids.
     if user_msgs:
-      buffered_ts = {m.get("ts") for m in self._steer_user_msgs}
+      from app.chat_writer import cid_of
+      buffered_cids = {cid_of(m) for m in self._steer_user_msgs}
       for m in user_msgs:
-        mts = m.get("ts")
-        if mts is not None and mts in buffered_ts:
+        mcid = cid_of(m)
+        if mcid is not None and mcid in buffered_cids:
           continue
         self._steer_user_msgs.append(m)
-        buffered_ts.add(mts)
-    if consume_pending_ts:
-      buffered_consume = set(self._steer_consume_ts)
-      for ts in consume_pending_ts:
-        if ts in buffered_consume:
+        buffered_cids.add(mcid)
+    if consume_pending_cids:
+      buffered_consume = set(self._steer_consume_cids)
+      for cid in consume_pending_cids:
+        if cid in buffered_consume:
           continue
-        self._steer_consume_ts.append(ts)
-        buffered_consume.add(ts)
+        self._steer_consume_cids.append(cid)
+        buffered_consume.add(cid)
     self._steer_requested = True
     return True
 
@@ -344,18 +344,18 @@ async def steer_into_active_turn(
   chat_id: str,
   text: str,
   user_msgs: list[dict] | None = None,
-  consume_pending_ts: list[int] | None = None,
+  consume_pending_cids: list[str] | None = None,
 ) -> bool:
   """Interrupts a live Claude SDK turn so it can resume with `text`.
 
-  `user_msgs` / `consume_pending_ts` are buffered on the handle so the
+  `user_msgs` / `consume_pending_cids` are buffered on the handle so the
   runner can seal A1 and append the steered rows at the interrupt boundary;
   see `ActiveClaudeClient.steer`.
   """
   handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
   if not isinstance(handle, ActiveClaudeClient):
     return False
-  return await handle.steer(text, user_msgs, consume_pending_ts)
+  return await handle.steer(text, user_msgs, consume_pending_cids)
 
 
 async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
@@ -390,14 +390,14 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   rows = list(active_client._steer_user_msgs)
   if not rows:
     return
-  consume = list(active_client._steer_consume_ts)
+  consume = list(active_client._steer_consume_cids)
   split = getattr(bc, "split_for_steer", None)
   if split is None:
     # No live sink (legacy/test caller): there is no streamed A1 to seal
     # against and no way to persist here — drop the buffer.
     active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
-    active_client._steer_consume_ts = (
-      active_client._steer_consume_ts[len(consume):]
+    active_client._steer_consume_cids = (
+      active_client._steer_consume_cids[len(consume):]
     )
     return
   try:
@@ -411,8 +411,8 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   # Success: remove ONLY the rows just sealed; a steer that landed during the
   # await was appended after them and must survive.
   active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
-  active_client._steer_consume_ts = (
-    active_client._steer_consume_ts[len(consume):]
+  active_client._steer_consume_cids = (
+    active_client._steer_consume_cids[len(consume):]
   )
 
 
