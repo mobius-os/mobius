@@ -1593,6 +1593,10 @@ export default function Shell() {
           >
             <AppCanvas
               appId={id}
+              // True only while this app is the visible canvas. Mirrors the
+              // .shell__view--active class above (which toggles visibility) so
+              // the app can pause background work — audio, rAF — when hidden.
+              active={activeView === 'canvas' && activeAppId === id}
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}

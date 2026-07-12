@@ -138,6 +138,13 @@ function readDeviceInsets() {
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
   immersive = false,
+  // Whether this app is the currently-visible canvas. The shell keeps
+  // recently-used apps MOUNTED and merely toggles `visibility:hidden` on the
+  // inactive ones (Shell.css .shell__view) — which does NOT change a nested
+  // iframe's Page Visibility state. `active` is forwarded to the iframe so an
+  // app can pause background work (audio, rAF, timers) when you navigate away.
+  // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
+  active = true,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered,
 }) {
@@ -472,6 +479,32 @@ export default function AppCanvas({
     )
   }
 
+  // ── In-shell foreground/background signal ────────────────────────
+  // Forward whether THIS app is the visible canvas. The shell keeps recently-
+  // used apps mounted and hides the inactive ones with `visibility:hidden` on a
+  // shell ancestor — which does NOT change the nested iframe's
+  // document.visibilityState (no visibilitychange/blur/pagehide fires). So an
+  // app that plays audio or animates keeps running after you navigate away
+  // (the reported "music keeps playing after exiting" bug). Posting the verdict
+  // lets an app pause on `visible:false` and resume on `visible:true`. The
+  // native Page Visibility API still covers real tab-hide (it propagates to
+  // same-origin child frames), so the two compose: an app is foreground only
+  // when it's the active canvas AND the tab is visible.
+  // Sent on iframe load (via onLoad) and whenever `active` flips.
+  function sendVisibility() {
+    if (!iframeRef.current?.contentWindow) return
+    iframeRef.current.contentWindow.postMessage(
+      { type: 'moebius:frame-visibility', visible: active },
+      window.location.origin,
+    )
+  }
+
+  useEffect(() => {
+    if (!loadedRef.current) return
+    sendVisibility()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
+
   useEffect(() => {
     if (!loadedRef.current) return
     sendInsets()
@@ -566,6 +599,7 @@ export default function AppCanvas({
           sendInit()
           sendOnlineStatus()
           sendInsets()
+          sendVisibility()
         }}
       />
       {!loaded && (
