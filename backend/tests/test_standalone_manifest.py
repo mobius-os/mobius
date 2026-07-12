@@ -291,3 +291,23 @@ def test_unknown_top_level_route_still_serves_shell(client):
   r = client.get("/not-an-installed-app")
   assert r.status_code == 200
   assert "text/html" in r.headers.get("content-type", "")
+
+
+def test_standalone_shell_wires_live_update_pill(client, owner_token):
+  """The installed standalone shell embeds the live-update pill + its own-app
+  event subscription (feature 214), so an edit in chat reaches the home-screen
+  PWA as an "Updated - tap to refresh" offer. Also a render smoke that guards
+  the f-string template against a stray brace."""
+  app = _create_app(client, owner_token, "Live App")
+  html = client.get(f"/apps/{app['slug']}/").text
+  # The pill markup + its user-facing copy.
+  assert 'id="update-pill"' in html
+  assert "Updated" in html and "tap to refresh" in html
+  # Subscribes to its OWN app's scoped stream, NOT the owner-only
+  # /api/events/system (an app token is rejected there).
+  assert "'/api/apps/' + APP_ID + '/events'" in html
+  assert "/api/events/system" not in html
+  assert "startLiveUpdates" in html
+  # The apply is a user tap that busts the ?v= cache key; the shell never
+  # auto-reloads.
+  assert "location.replace" in html

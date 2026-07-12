@@ -16,7 +16,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -1065,6 +1065,93 @@ async def update_preview(
     conflict_paths=conflict_paths,
     conflicts=conflicts,
     upstream_diff=upstream_diff,
+  )
+
+
+# Keepalive cadence for the per-app event stream — matches the shell-level
+# /api/events/system so reverse proxies see one consistent traffic pattern.
+_APP_EVENT_KEEPALIVE = 30
+
+
+def _app_stream_should_forward(event: dict, app_id: int) -> bool:
+  """Whether a SystemBroadcast event is visible to app_id's scoped stream.
+
+  The least-privilege invariant behind the app-token event stream: an app
+  may see ONLY `app_updated` notifications for its OWN id. Every other
+  system event — another app's `app_updated`, and the owner-scoped
+  `theme_updated` / `shell_rebuild_*` / `chat_run_*` types — is dropped
+  server-side, so an app token cannot use this stream as a back door to
+  owner-visible platform state. The SystemBroadcast fans one queue out to
+  every subscriber, so the filter (not the subscription) is what keeps the
+  scope narrow.
+  """
+  if event.get("type") != "app_updated":
+    return False
+  return str(event.get("appId")) == str(app_id)
+
+
+@router.get("/{app_id}/events")
+async def stream_app_events(
+  app_id: int,
+  request: Request,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Per-app SSE stream of this app's own `app_updated` events.
+
+  This is what lets an installed standalone PWA (`/apps/<slug>/`) offer a
+  live "Updated — tap to refresh" pill: the standalone shell subscribes
+  with its app-scoped token and reloads onto the fresh bundle when its own
+  app is edited mid-build.
+
+  Auth boundary (least privilege): an app-scoped token may open ONLY its
+  own app's stream — a token whose `app_id` claim differs from the path id
+  is 403, never a way to watch a different app. The owner token (`app_id`
+  is None) may open any app's stream. Beyond opening, the generator filters
+  every event through `_app_stream_should_forward`, so even a broadened
+  SystemBroadcast can never leak theme/shell/other-app events onto an app's
+  stream. This deliberately does NOT grant the App-Store-style manage_apps
+  cross-app read that update-check/update-preview allow — the standalone
+  shell only ever needs to watch itself.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="An app token may only watch its own app's events.",
+    )
+  # 404 a missing/tombstoned app so an owner token can't open a stream for a
+  # nonexistent app (an app token already fails this in get_principal's
+  # scope check, which rejects a token whose app row is gone).
+  live_app_or_404(db, app_id)
+  # Release the pooled DB connection BEFORE the (possibly hours-long) stream
+  # loop, exactly as /api/events/system does — auth already ran against this
+  # session, so holding it open for the stream's lifetime would pin one
+  # connection per open standalone PWA.
+  db.close()
+  queue = get_system_broadcast().subscribe()
+
+  async def generate():
+    try:
+      yield f"data: {json.dumps({'type': 'app_stream_open'})}\n\n"
+      while True:
+        if await request.is_disconnected():
+          break
+        try:
+          event = await asyncio.wait_for(
+            queue.get(), timeout=_APP_EVENT_KEEPALIVE,
+          )
+        except asyncio.TimeoutError:
+          yield ": keepalive\n\n"
+          continue
+        if _app_stream_should_forward(event, app_id):
+          yield f"data: {json.dumps(event)}\n\n"
+    finally:
+      get_system_broadcast().unsubscribe(queue)
+
+  return StreamingResponse(
+    generate(),
+    media_type="text/event-stream",
+    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
   )
 
 
