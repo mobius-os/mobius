@@ -4,6 +4,7 @@ import {
   pushNavEntry,
   replaceNavEntry,
 } from '../lib/navHistory.js'
+import { resolveInitialNav } from '../lib/resolveInitialNav.js'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 const ACTIVE_VIEW_KEY = 'moebius_active_view'
@@ -23,6 +24,11 @@ function _anyAppHasSentinels(map) {
     if (n > 0) return true
   }
   return false
+}
+
+// Last active chat id, read defensively (private-mode / disabled storage throws).
+function safeStoredChatId() {
+  try { return localStorage.getItem(ACTIVE_CHAT_KEY) } catch { return null }
 }
 
 // Parse shell-reload state (shell rebuild preserves view across reload).
@@ -133,20 +139,26 @@ export const coldRestoredCanvasAppId =
  * ~300ms after a back gesture; the hack ignores it).
  */
 export default function useNavigation() {
-  const [activeView, setActiveView] = useState(
-    shellReload?.activeView || deepLink?.view || returnView?.view || restored?.view || 'chat'
-  )
-  const [activeAppId, setActiveAppId] = useState(
-    returnView?.view === 'settings'
-      ? null
-      : shellReload?.activeAppId || deepLink?.appId
-        || (restored?.view === 'canvas' ? restored.appId : null)
-        || null
-  )
-  const [activeChatId, setActiveChatId] = useState(
-    () => shellReload?.activeChatId || deepLink?.chatId || localStorage.getItem(ACTIVE_CHAT_KEY) || null
-  )
+  // Resolve the initial view AND whether HOME must be seeded beneath it as the
+  // back-stack root, in ONE place (resolveInitialNav) — enforces "HOME is always
+  // the root of the shell back-stack" so a deep entry (notification deep-link,
+  // cold-restore, shell-reload) can never strand Back with nothing to pop. Lazy
+  // so it's computed exactly once; `seedHome` is consumed by the mount effect.
+  const [initialNav] = useState(() => resolveInitialNav({
+    shellReload,
+    deepLink,
+    returnView,
+    restored,
+    storedChatId: safeStoredChatId(),
+  }))
+  const [activeView, setActiveView] = useState(initialNav.view)
+  const [activeAppId, setActiveAppId] = useState(initialNav.appId)
+  const [activeChatId, setActiveChatId] = useState(initialNav.chatId)
   const [drawerOpen, setDrawerOpen] = useState(false)
+
+  // Guards the one-shot HOME seed against a StrictMode double-mount / any
+  // remount (pushNavEntry is not idempotent). See the mount effect below.
+  const seededHomeRef = useRef(false)
 
   const navStackRef = useRef([])
   const activeChatIdRef = useRef(activeChatId)
@@ -326,6 +338,25 @@ export default function useNavigation() {
     // scope" and may refuse the next manifest update in-place.
     replaceNavEntry('base', '/shell/')
 
+    // Seed HOME as the back-stack root when this load booted into a deep
+    // destination (resolveInitialNav.seedHome). Push ONE tagged history entry
+    // (so the OS back-gesture is intercepted rather than exiting the PWA) and
+    // put a single semantic-home entry under navStack. Now Back from a
+    // deep-linked app falls to the chat home once the app has unwound its own
+    // sentinels — instead of the old "nothing to go back to → exit PWA" path
+    // that, with the canvas restore key, re-landed on the same app (the trap).
+    // The home entry carries chatId:null so it is immune to chat-delete
+    // scrubbing; handleBack resolves it to the freshest active chat. Guarded by
+    // seededHomeRef so a StrictMode double-mount can't push it twice; the back
+    // listeners below still register on every effect setup.
+    if (initialNav.seedHome && !seededHomeRef.current) {
+      seededHomeRef.current = true
+      try {
+        pushNavEntry('nav')
+        navStackRef.current = [{ view: 'chat', chatId: null, appId: null, homeSeed: true }]
+      } catch { /* history unavailable — leave navStack empty */ }
+    }
+
     function handleBack() {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
@@ -401,7 +432,12 @@ export default function useNavigation() {
         // mounted regardless of activeAppId, so a transition to
         // null doesn't unmount any iframe; the cached AppCanvas
         // simply becomes hidden until the user re-enters it.
-        setActiveChatId(entry.chatId)
+        //
+        // A homeSeed entry is the SEMANTIC chat home, not a specific chat: it
+        // was seeded with chatId:null (so chat-delete scrubbing can't strip it),
+        // so resolve it to the freshest active chat at Back-time. A null there
+        // (zero-chat instance) is filled by Shell's chat-restore effect.
+        setActiveChatId(entry.homeSeed ? activeChatIdRef.current : entry.chatId)
         setActiveAppId(entry.appId)
         setActiveView(entry.view)
       }
@@ -446,6 +482,8 @@ export default function useNavigation() {
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
+  // initialNav is a stable useState value (no setter); all else is refs.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Fade back in after shell-reload.
