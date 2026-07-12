@@ -392,8 +392,10 @@ def test_seal_steer_split_retains_buffer_on_failure_and_delta_clears():
   handle = _make_active_claude_client("sealunit")
 
   async def _run():
-    handle._steer_user_msgs = [{"role": "user", "content": "Q2", "ts": 10}]
-    handle._steer_consume_ts = []
+    handle._steer_user_msgs = [
+      {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
+    ]
+    handle._steer_consume_cids = []
 
     # 1) A failing split must NOT clear the buffer.
     class _FailBc:
@@ -459,7 +461,8 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={
-      "content": "use blue", "force_steer": True, "consume_pending_ts": [10],
+      "content": "use blue", "force_steer": True,
+      "consume_pending_cids": ["legacy-10"],
     },
     headers=auth,
   )
@@ -586,7 +589,7 @@ def test_force_steer_consumes_existing_queued_messages(
     json={
       "content": "use blue\n\nalso square",
       "force_steer": True,
-      "consume_pending_ts": [10, 11],
+      "consume_pending_cids": ["legacy-10", "legacy-11"],
     },
     headers=auth,
   )
@@ -632,7 +635,7 @@ def test_force_steer_failure_does_not_append_duplicate_queue(
     json={
       "content": "use blue",
       "force_steer": True,
-      "consume_pending_ts": [10],
+      "consume_pending_cids": ["legacy-10"],
     },
     headers=auth,
   )
@@ -643,10 +646,13 @@ def test_force_steer_failure_does_not_append_duplicate_queue(
   assert [m["content"] for m in chat.pending_messages] == ["use blue"]
 
 
-def test_force_steer_requires_matching_queued_messages(
+def test_force_steer_requires_known_cids(
   client, auth, monkeypatch,
 ):
-  """Forced steer is the Stop conversion path, not a public steer bypass."""
+  """Forced steer selects queued rows by cid; a consume list naming a cid
+  that isn't in the queue selects nothing → not_steered (the whole batch
+  must resolve, so a partial/unknown selection is refused). This replaces
+  the old content byte-match guard, which cid selection makes unnecessary."""
   chat_id = "codexforceguard"
   _make_codex_chat(chat_id, steer_enabled=False)
   db = SessionLocal()
@@ -671,9 +677,9 @@ def test_force_steer_requires_matching_queued_messages(
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={
-      "content": "different text",
+      "content": "use blue",
       "force_steer": True,
-      "consume_pending_ts": [10],
+      "consume_pending_cids": ["legacy-999"],
     },
     headers=auth,
   )
