@@ -8,12 +8,18 @@ import {
 
 test('chat stream recognizes system events without swallowing unknown events', () => {
   assert.equal(isChatStreamSystemEvent('theme_updated'), true)
+  assert.equal(isChatStreamSystemEvent('app_build_failed'), true)
   assert.equal(isChatStreamSystemEvent('shell_rebuilt'), true)
   assert.equal(isChatStreamSystemEvent('text'), false)
 })
 
 test('chat catch-up does not replay shell rebuild lifecycle events', () => {
-  for (const type of ['shell_rebuilding', 'shell_rebuilt', 'shell_rebuild_failed']) {
+  for (const type of [
+    'shell_rebuilding',
+    'shell_rebuilt',
+    'shell_rebuild_failed',
+    'app_build_failed',
+  ]) {
     assert.equal(
       shouldForwardChatStreamSystemEvent({ type }, { isCatchUp: true }),
       false,

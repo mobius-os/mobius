@@ -50,6 +50,7 @@ EventType = Literal[
 SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "theme_updated",
   "app_updated",
+  "app_build_failed",
   "shell_rebuilding",
   "shell_rebuilt",
   "shell_apply_now",
