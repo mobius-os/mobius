@@ -1818,7 +1818,15 @@ export default function ChatView({
     }
 
     try {
-      const result = await streamSend(sendText, attachments.length > 0 ? attachments : undefined)
+      const result = await streamSend(
+        sendText,
+        attachments.length > 0 ? attachments : undefined,
+        // The minted cid rides the POST so the durable row carries the same
+        // identity the optimistic row (and its pin) already use — without it
+        // the server row derives legacy-<ts> and the strict data-cid pin
+        // selector goes blind after the ack re-render.
+        { cid },
+      )
       releaseComposerFilesAfterAccepted()
       if (result?.status === 'queued') {
         const canonicalPending = result.pending_message || null

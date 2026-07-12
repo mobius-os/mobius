@@ -787,7 +787,7 @@ def test_stop_chat_for_clears_pending_queue(db):
   db.commit()
 
   try:
-    stopped, cleared_cids = asyncio.run(stop_chat_for("stop-for-clears", db=db))
+    stopped, cleared_cids, _ = asyncio.run(stop_chat_for("stop-for-clears", db=db))
     db.refresh(chat)
     assert chat.pending_messages == []
     assert cleared_cids == ["c-q1", "c-q2"]
@@ -813,7 +813,7 @@ def test_stop_chat_for_empty_pending_reports_no_cleared_cids(db):
   db.commit()
 
   try:
-    stopped, cleared_cids = asyncio.run(stop_chat_for("stop-for-empty", db=db))
+    stopped, cleared_cids, _ = asyncio.run(stop_chat_for("stop-for-empty", db=db))
     assert cleared_cids == []
   finally:
     registry.forget("stop-for-empty")

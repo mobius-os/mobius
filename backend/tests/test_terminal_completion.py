@@ -861,9 +861,10 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
   # after the fresh user message (the else-branch append, because msgs[-1] is
   # now a user row). The fix skips finalize, so the fresh user message stays
   # the last row.
-  assert state["messages"][-1] == {
-    "role": "user", "content": "fresh question", "ts": 9
-  }, (
+  last = state["messages"][-1]
+  # StartTurn keeps display ts strictly monotonic (it may bump 9 past the
+  # stale rows) — the invariant here is WHICH row is last, not its ts.
+  assert (last["role"], last["content"]) == ("user", "fresh question"), (
     "the dying run must NOT append its stale assistant content after the "
     "fresh turn's user message"
   )
@@ -1337,7 +1338,7 @@ def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
     return {"session_id": "sess", "cost_usd": 0.0}
 
   async def stopping_ensure_auth(self, data_dir):
-    stopped, _ = await chat_mod.stop_chat_for(cid)
+    stopped, _, _ = await chat_mod.stop_chat_for(cid)
     assert stopped is True
 
   monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
