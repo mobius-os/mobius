@@ -485,13 +485,18 @@ async def test_notify_app_built_only_when_owning_chat_streaming(
 
 
 @pytest.mark.asyncio
-async def test_notify_build_phase_publishes_to_active_chat_only(client, auth):
-  """POST /api/notify {build_phase, label} lands ONLY on the active building
-  chat's broadcast — carrying label + ts so a reconnect's catch-up replay can
-  rebuild the rail — and never on the system broadcast or a bystander chat."""
+async def test_notify_build_phase_routes_by_explicit_chat_id(client, auth):
+  """POST /api/notify {build_phase, chatId, label} lands ONLY on the NAMED
+  chat's broadcast — even when a different chat started more recently and
+  owns the active-broadcast pointer (run_chat overwrites it on every turn
+  start). Routing by that pointer was the wrong-chat bug: chat A's milestone
+  rendered in chat B's rail. The event carries label + ts so a reconnect's
+  catch-up replay can rebuild the rail."""
   building = bc_mod.create_broadcast("phase-builder")
-  other = bc_mod.create_broadcast("phase-bystander")
-  set_active_broadcast(building)
+  later = bc_mod.create_broadcast("phase-later-turn")
+  # A second chat started after the builder: the pointer tracks the LATEST
+  # turn, so pointer-routing would deliver onto `later` instead.
+  set_active_broadcast(later)
   sb = get_system_broadcast()
   sq = sb.subscribe()
   q_build = building.subscribe()[1]
@@ -499,7 +504,11 @@ async def test_notify_build_phase_publishes_to_active_chat_only(client, auth):
     r = client.post(
       "/api/notify",
       headers=auth,
-      json={"type": "build_phase", "label": "Storage wired"},
+      json={
+        "type": "build_phase",
+        "chatId": "phase-builder",
+        "label": "Storage wired",
+      },
     )
     assert r.status_code == 204, r.text
 
@@ -508,33 +517,52 @@ async def test_notify_build_phase_publishes_to_active_chat_only(client, auth):
     assert ev["label"] == "Storage wired"
     assert isinstance(ev["ts"], int)
 
-    # It must not fan out to the always-live system broadcast, and a
-    # bystander chat's broadcast must never see it.
-    assert sq.empty(), "build_phase must not reach the system broadcast"
+    # The wrong-chat regression: the most-recently-started chat must NOT
+    # receive another chat's milestone, and there is no system fan-out.
     assert all(
-      e.get("type") != "build_phase" for e in other.event_log
-    ), other.event_log
+      e.get("type") != "build_phase" for e in later.event_log
+    ), later.event_log
+    assert sq.empty(), "build_phase must not reach the system broadcast"
   finally:
     sb.unsubscribe(sq)
     set_active_broadcast(None)
     bc_mod.remove_broadcast("phase-builder")
-    bc_mod.remove_broadcast("phase-bystander")
+    bc_mod.remove_broadcast("phase-later-turn")
 
 
 @pytest.mark.asyncio
-async def test_notify_build_phase_dropped_without_active_chat(client, auth):
-  """With no active building turn there is no rail to feed, so a build_phase
-  POST is accepted (204) but publishes nothing — and never raises."""
-  set_active_broadcast(None)
-  sb = get_system_broadcast()
-  sq = sb.subscribe()
+async def test_notify_build_phase_dropped_when_chat_not_running(client, auth):
+  """A build_phase for a chat whose turn already ended (broadcast present but
+  no longer running) is accepted (204) and dropped — nothing published, no
+  raise. A late milestone has no rail to feed."""
+  ended = bc_mod.create_broadcast("phase-ended")
+  ended.running = False
+  before = len(ended.event_log)
   try:
     r = client.post(
       "/api/notify",
       headers=auth,
-      json={"type": "build_phase", "label": "First layer openable"},
+      json={"type": "build_phase", "chatId": "phase-ended", "label": "Late"},
     )
     assert r.status_code == 204, r.text
+    assert len(ended.event_log) == before, ended.event_log
+  finally:
+    bc_mod.remove_broadcast("phase-ended")
+
+
+@pytest.mark.asyncio
+async def test_notify_build_phase_dropped_without_target_chat(client, auth):
+  """No chatId, or a chatId with no broadcast at all, means no rail to feed:
+  the POST is accepted (204) but publishes nothing — and never raises."""
+  sb = get_system_broadcast()
+  sq = sb.subscribe()
+  try:
+    for body in (
+      {"type": "build_phase", "label": "First layer openable"},
+      {"type": "build_phase", "chatId": "no-such-chat", "label": "x"},
+    ):
+      r = client.post("/api/notify", headers=auth, json=body)
+      assert r.status_code == 204, r.text
     assert sq.empty(), "build_phase must not touch the system broadcast"
   finally:
     sb.unsubscribe(sq)
@@ -555,12 +583,29 @@ def test_notify_rejects_label_on_non_build_phase():
     NotifyBody(type="app_updated", appId="7", label="nope")
 
 
+def test_notify_rejects_chat_id_on_non_build_phase():
+  """`chatId` is confined to build_phase exactly like `label` — every other
+  event type keeps the closed type/appId schema."""
+  with pytest.raises(ValidationError):
+    NotifyBody(type="app_updated", appId="7", chatId="c1")
+
+
 def test_notify_endpoint_rejects_label_on_non_build_phase(client, auth):
   """The endpoint 422s a label on a non-build_phase type."""
   r = client.post(
     "/api/notify",
     headers=auth,
     json={"type": "app_updated", "appId": "7", "label": "nope"},
+  )
+  assert r.status_code == 422, r.text
+
+
+def test_notify_endpoint_rejects_chat_id_on_non_build_phase(client, auth):
+  """The endpoint 422s a chatId on a non-build_phase type."""
+  r = client.post(
+    "/api/notify",
+    headers=auth,
+    json={"type": "shell_rebuilt", "chatId": "c1"},
   )
   assert r.status_code == 422, r.text
 
