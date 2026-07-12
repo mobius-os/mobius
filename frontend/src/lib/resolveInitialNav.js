@@ -43,7 +43,6 @@ export function resolveInitialNav({
   // cold restore. (Previously activeView/activeAppId/activeChatId were resolved
   // by three separate `||` chains that could cross-contaminate sources.)
   let dest
-  let fromDeepLink = false
   if (shellReload?.activeView) {
     dest = {
       view: shellReload.activeView,
@@ -52,7 +51,6 @@ export function resolveInitialNav({
     }
   } else if (deepLink?.view) {
     dest = { view: deepLink.view, appId: deepLink.appId ?? null, chatId: deepLink.chatId ?? null }
-    fromDeepLink = true
   } else if (returnView?.view) {
     dest = { view: returnView.view, appId: null, chatId: null }
   } else if (restored?.view) {
@@ -61,17 +59,19 @@ export function resolveInitialNav({
     dest = { view: 'chat', appId: null, chatId: null }
   }
 
-  // Seed HOME beneath any initial destination that is NOT the user's plain home
-  // chat surface:
-  //   - canvas  (a mini-app: the trap case — has back-sentinels + the loop)
-  //   - settings
-  //   - a deep-linked SPECIFIC chat that differs from the stored home chat
-  // Never seed under plain-home or a shell-reload that restored the chat surface
-  // (else Back from ordinary home would no-op instead of exiting).
-  const seedHome =
-    dest.view === 'canvas' ||
-    dest.view === 'settings' ||
-    (fromDeepLink && dest.view === 'chat' && dest.chatId != null && dest.chatId !== homeChatId)
+  // Seed HOME beneath an initial destination whose view is NOT chat — i.e. a
+  // canvas (mini-app: the trap case, has back-sentinels + the restore-key loop)
+  // or settings. Both leave activeView !== 'chat', so popping the seeded HOME is
+  // a genuine transition back to the chat surface.
+  //
+  // We deliberately do NOT seed under any 'chat' destination — not plain home,
+  // not a shell-reload into chat, and not a deep-linked SPECIFIC chat. A chat
+  // view is already the home surface (its own drawer reaches everything, it has
+  // no back-sentinel, and it sets no canvas restore key, so it's never trapped),
+  // and the seed would resolve to the chat you're already on — a dead Back press
+  // that just delays the PWA exit. Backing out of a root chat exits the PWA,
+  // which is the standard, pre-existing behavior.
+  const seedHome = dest.view === 'canvas' || dest.view === 'settings'
 
   return {
     view: dest.view,

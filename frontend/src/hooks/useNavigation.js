@@ -349,6 +349,12 @@ export default function useNavigation() {
     // scrubbing; handleBack resolves it to the freshest active chat. Guarded by
     // seededHomeRef so a StrictMode double-mount can't push it twice; the back
     // listeners below still register on every effect setup.
+    //
+    // Accepted minor edge: if a cold-restored canvas app was uninstalled since
+    // last session, Shell demotes it to chat (coldRestore check) — the seed then
+    // sits under a chat we're already on, so the first Back is a harmless no-op
+    // and the second exits. Rare + cosmetic; not worth coupling Shell's demote
+    // to the nav seed to shave one Back press.
     if (initialNav.seedHome && !seededHomeRef.current) {
       seededHomeRef.current = true
       try {
