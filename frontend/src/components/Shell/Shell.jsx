@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Minimize2 } from 'lucide-react'
+import { Minimize2, X, MessageSquare, AppWindow } from 'lucide-react'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -23,6 +23,7 @@ import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
 import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
+import * as tabModel from './tabModel.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
 import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import {
@@ -339,6 +340,25 @@ export default function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [builtAppsSignature(apps, activeChatId)],
   )
+
+  // ── Tabs: hold several chats/apps open and swap between them ───────
+  // The tab data model (shape, dedup+cap, persistence, nav mapping,
+  // active-ness) lives in tabModel.js; this is just the shell's single open
+  // set + the wiring to navigation. Switching a tab is ordinary navTo, so the
+  // back button rides the existing navStack — no new history sentinels. The
+  // planned multi-pane workspace gives each pane its own open set from these
+  // same primitives — see docs/design/multi-pane-workspace.md.
+  const [openTabs, setOpenTabs] = useState(tabModel.readOpenTabs)
+  useEffect(() => { tabModel.writeOpenTabs(openTabs) }, [openTabs])
+  const openInTab = useCallback((kind, id) => {
+    setOpenTabs(prev => tabModel.addTab(prev, kind, id))
+    const { view, opts } = tabModel.tabNavTarget(tabModel.makeTab(kind, id))
+    navTo(view, opts)
+  }, [navTo])
+  const closeTab = useCallback((kind, id) => {
+    setOpenTabs(prev => tabModel.removeTab(prev, kind, id))
+  }, [])
+  const tabStripVisible = openTabs.length >= 1
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -1367,6 +1387,8 @@ export default function Shell() {
     // they re-enter the chat list normally and rebuild navStack via
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
+    // Drop the tab pinned to this chat (local delete only — see deleteApp).
+    setOpenTabs(prev => tabModel.removeTab(prev, 'chat', id))
     if (activeChatId === id) {
       // Exclude the just-deleted id: it's still in `chats` until the
       // refreshChats below, and the reuse filter would otherwise pick it
@@ -1426,6 +1448,11 @@ export default function Shell() {
     navStackRef.current = navStackRef.current.filter(
       e => !(e.view === 'canvas' && e.appId === id)
     )
+    // Drop the tab pinned to this app. Only LOCAL deletes prune the strip; an
+    // out-of-band delete leaves the tab, which degrades gracefully (clicking it
+    // 404s the iframe). Auto-pruning against the live list is unsafe — /api/apps
+    // is NetworkFirst, so a transient stale refetch could drop a live tab.
+    setOpenTabs(prev => tabModel.removeTab(prev, 'app', id))
     if (activeView === 'canvas' && activeAppId === id) {
       setActiveAppId(null)
       setActiveView('chat')
@@ -1559,6 +1586,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
+        onOpenInTab={openInTab}
         onNewChat={() => newChat({ focusComposer: true })}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
@@ -1589,6 +1617,58 @@ export default function Shell() {
           app canvas while the drawer is overlaid in front of it. Boolean
           prop form — see the header's inert note for why the old
           `? '' : undefined` form was a React 19 no-op. */}
+      {/* Tab strip: pinned chats/apps to swap between with one tap.
+          Switching a tab is ordinary navTo, so back works through the
+          existing navStack. The strip shrinks .shell__content by one row;
+          the chat re-measures its spacer at the new height on the next
+          layout event (a ~1-row imprecision on the 0<->1 crossing that
+          self-corrects). Deliberately NOT a ChatView remount — that would
+          reset the send-reservation and freeze stream-follow (the reason the
+          bespoke split view was parked). */}
+      {tabStripVisible && (
+        <nav className="shell__tabstrip" inert={drawerOpen} aria-label="Open tabs">
+          {openTabs.map(tab => {
+            const isChat = tab.kind === 'chat'
+            // Label resolution is the shell's job (it holds the live lists);
+            // identity, active-ness, and the nav target are the tab model's.
+            const meta = isChat
+              ? chats.find(c => String(c.id) === tab.id)
+              : apps.find(a => String(a.id) === tab.id)
+            const label = isChat ? (meta?.title || 'Chat') : (meta?.name || 'App')
+            const active = tabModel.isTabActive(tab, {
+              view: activeView, chatId: activeChatId, appId: activeAppId,
+            })
+            const TabIcon = isChat ? MessageSquare : AppWindow
+            return (
+              <div
+                key={tabModel.tabKey(tab)}
+                className={`shell__tab${active ? ' shell__tab--active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="shell__tab-open"
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => {
+                    const { view, opts } = tabModel.tabNavTarget(tab)
+                    navTo(view, opts)
+                  }}
+                >
+                  <TabIcon size={13} aria-hidden="true" />
+                  <span className="shell__tab-text">{label}</span>
+                </button>
+                <button
+                  type="button"
+                  className="shell__tab-close"
+                  aria-label={`Close ${label} tab`}
+                  onClick={() => closeTab(tab.kind, tab.id)}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              </div>
+            )
+          })}
+        </nav>
+      )}
       <main className="shell__content" inert={drawerOpen}>
         {/* Single-mount ChatView, keyed by activeChatId. Switching
             chats unmounts and remounts; ChatView's hide-then-reveal

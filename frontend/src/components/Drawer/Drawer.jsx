@@ -23,6 +23,8 @@ export default function Drawer({
   activeChatId,
   onChat,
   onApp,
+  // Open a chat/app as a pinned tab in the shell tab strip: onOpenInTab(kind, id).
+  onOpenInTab,
   onNewChat,
   onDeleteChat,
   onDeleteApp,
@@ -464,6 +466,7 @@ export default function Drawer({
                     if (next && next !== chat.title) renameChat(chat.id, next)
                   }}
                   onPin={(next) => pinChat(chat.id, next)}
+                  onOpenInTab={onOpenInTab ? () => onOpenInTab('chat', chat.id) : undefined}
                   onDelete={() => onDeleteChat(chat.id)}
                 />
               )) : (
@@ -491,6 +494,7 @@ export default function Drawer({
                     label={app.name}
                     slug={app.slug}
                     pinned={!!app.pinned_at}
+                    building={!!(app.chat_id && streamingSet.has(app.chat_id))}
                     attention={newAppSet.has(Number(app.id))}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
                     onSelect={() => onApp(app.id)}
@@ -508,6 +512,7 @@ export default function Drawer({
                       if (next && next !== app.name) renameApp(app.id, next)
                     }}
                     onPin={(next) => pinApp(app.id, next)}
+                    onOpenInTab={onOpenInTab ? () => onOpenInTab('app', app.id) : undefined}
                     onDelete={() => onDeleteApp?.(app.id)}
                     onDeleteData={() => onDeleteAppData?.(app.id)}
                     onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
@@ -566,6 +571,11 @@ function DrawerRow({
   active,
   slug,
   streaming,
+  // App rows only: the app's owning chat is streaming, i.e. the agent is
+  // actively building/editing this app right now. Reuses the streaming
+  // dot's animation with a "Building" label so an app under construction
+  // pulses the same way an active chat does.
+  building,
   attention,
   onSelect,
   menuOpen,
@@ -575,6 +585,7 @@ function DrawerRow({
   onRenameCancel,
   onRenameSubmit,
   onPin,
+  onOpenInTab,
   onDelete,
   onDeleteData,
   onInstall,
@@ -691,6 +702,12 @@ function DrawerRow({
             aria-label="Currently streaming"
             title="Currently streaming"
           />
+        ) : building ? (
+          <span
+            className="drawer__streaming-dot"
+            aria-label="Building"
+            title="Building…"
+          />
         ) : attention ? (
           <span
             className="drawer__attention-dot"
@@ -740,6 +757,15 @@ function DrawerRow({
                 <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
+              {onOpenInTab && (
+                // Pin this chat/app as a tab in the shell strip so the owner
+                // can swap to it with one tap. Closes the menu first (same
+                // reason as Delete below — the row can slide as the strip
+                // renders).
+                <Menu.Item onSelect={() => { onMenuToggle(false); onOpenInTab() }}>
+                  Open in tab
+                </Menu.Item>
+              )}
               {kind === 'app' && slug && (
                 // Opens the in-PWA InstallSheet to set the home-screen
                 // name + icon first; the sheet saves, then navigates

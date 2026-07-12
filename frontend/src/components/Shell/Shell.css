@@ -173,6 +173,69 @@
   pointer-events: auto;
 }
 
+/* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
+.shell__tabstrip {
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg);
+  scrollbar-width: none;
+  z-index: 2;
+}
+.shell__tabstrip::-webkit-scrollbar { height: 0; width: 0; }
+
+.shell__tab {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: 160px;
+  border-radius: 8px;
+  border: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg) 92%, var(--text) 6%);
+  overflow: hidden;
+}
+.shell__tab--active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+}
+.shell__tab-open {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 4px 5px 9px;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12.5px;
+  -webkit-tap-highlight-color: transparent;
+}
+.shell__tab-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+}
+.shell__tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  background: none;
+  border: none;
+  color: var(--text);
+  opacity: 0.55;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.shell__tab-close:hover { opacity: 1; }
+
 /* The install affordance lives in the first-sign-in walkthrough now
    (see frontend/src/components/Walkthrough/WalkthroughOverlay.jsx).
    beforeinstallprompt capture and the drawer banner that used to
