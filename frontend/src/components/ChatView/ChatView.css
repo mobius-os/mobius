@@ -1349,8 +1349,10 @@
   font-weight: 600;
   line-height: 1.35;
   cursor: pointer;
-  /* Same transform/opacity entrance as the CTA (foot ResizeObserver contract). */
-  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out) both;
+  /* Same transform/opacity entrance as the CTA (foot ResizeObserver contract).
+     No fill mode — a filled transform would permanently override the :active
+     press scale below; see the CTA button's entrance note. */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
   transition: background 0.15s, color 0.15s, transform 0.08s;
 }
 .chat__question-nudge:hover {
@@ -1870,9 +1872,14 @@
   /* Entrance on plant: rise in, then one subtle accent ring (the button's own
      box-shadow, so overflow:hidden doesn't clip it). Both run once on mount
      and never replay — the recompile pulse rides a pseudo-element, not this
-     list, so toggling that class can't restart these. */
+     list, so toggling that class can't restart these. NO fill mode on the
+     rise: a filled animation's transform keeps applying after it ends and —
+     animations outrank author rules in the cascade — would beat the :active
+     press scale below forever. With no delay there is no pre-play gap for
+     fill to cover, and the `to` keyframe equals the natural styles, so the
+     end of the animation is seamless. */
   animation:
-    chat-foot-rise 0.22s var(--ease-out-soft, ease-out) both,
+    chat-foot-rise 0.22s var(--ease-out-soft, ease-out),
     chat-cta-ring 0.9s ease-out 0.12s;
   transition: background 0.15s, transform 0.08s;
 }
@@ -1915,8 +1922,9 @@
   flex-direction: column;
   gap: 2px;
   /* Same transform/opacity entrance as the CTA — the tray shares the foot's
-     ResizeObserver, so no height/margin animation here. */
-  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out) both;
+     ResizeObserver, so no height/margin animation here. No fill mode: see the
+     CTA button's entrance note. */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
 }
 
 .queued__hdr {

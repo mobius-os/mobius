@@ -25,6 +25,7 @@ import {
 import {
   builtAppsForChat,
   coerceBuiltAppsByChat,
+  prunedBuiltAppsByChat,
   withBuiltAppForChat,
   withoutBuiltAppForChat,
 } from './builtAppState.js'
@@ -641,6 +642,21 @@ export default function Shell() {
     if (fresh.length === 0) return
     for (const id of fresh) appBaselineRef.current.add(id)
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
+  }, [apps, appsLiveFetched])
+
+  // Retire CTAs whose app is gone. A sessionStorage-restored CTA can point at
+  // an app deleted since it was persisted; tapping it would navTo a dead
+  // canvas (onOpenApp trusts the id — it skips the moebius:open-app guard).
+  // Reconciling against every live-fetched list also covers in-session
+  // deletes (deleteApp → refreshApps → this effect). A just-built app is
+  // never falsely pruned: its CTA is planted inside refreshApps().then, so
+  // the query cache already holds the row by the time this effect sees the
+  // new state. prunedBuiltAppsByChat is a same-reference no-op when every
+  // entry is live.
+  useEffect(() => {
+    if (!appsLiveFetched) return
+    const liveIds = new Set(apps.map(a => Number(a.id)))
+    setBuiltAppsByChatId(prev => prunedBuiltAppsByChat(prev, liveIds))
   }, [apps, appsLiveFetched])
 
   // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
