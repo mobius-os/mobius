@@ -1071,14 +1071,19 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
           None,
         )
         if paused_idx is not None:
-          # The drain wrote the terminal note; just make it resumable and fall
-          # through to the shared write-back below (no second note appended).
-          # Replace with a FRESH dict rather than mutating the ORM-loaded block
-          # in place: `Chat.messages` is a plain JSON column with no mutation
-          # tracking, so an in-place edit to a loaded block is not flushed —
-          # only a genuinely new value in the reassigned list persists (every
-          # other reconcile branch appends a fresh block for the same reason).
-          blocks[paused_idx] = {**blocks[paused_idx], "resumable": True}
+          # The drain wrote the terminal note; just make it resumable — and
+          # carry `pause_kind` so a note persisted before the field existed
+          # (or one whose live event never landed) still renders in the calm
+          # "Paused" family — then fall through to the shared write-back below
+          # (no second note appended). Replace with a FRESH dict rather than
+          # mutating the ORM-loaded block in place: `Chat.messages` is a plain
+          # JSON column with no mutation tracking, so an in-place edit to a
+          # loaded block is not flushed — only a genuinely new value in the
+          # reassigned list persists (every other reconcile branch appends a
+          # fresh block for the same reason).
+          blocks[paused_idx] = {
+            **blocks[paused_idx], "resumable": True, "pause_kind": "restart",
+          }
         else:
           # Preserve a tail unanswered question. It is a durable human handoff,
           # not a disposable in-memory callback: the route can record the later

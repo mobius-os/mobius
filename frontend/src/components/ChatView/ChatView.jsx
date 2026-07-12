@@ -82,6 +82,15 @@ function sameBlock(a, b) {
       && a.input === b.input && a.output === b.output
       && a.questions === b.questions && a.answers === b.answers
       && a.question_id === b.question_id
+      // The error-card fields: a warm DB refresh can deliver a message that
+      // differs ONLY in these (e.g. boot reconcile stamped resumable +
+      // pause_kind onto an existing drain note, or a coalescing error event
+      // rewrote message/park fields). Skipping them froze a stale red card
+      // on screen until a remount.
+      && a.message === b.message && a.resumable === b.resumable
+      && a.parked_until === b.parked_until
+      && a.park_reason === b.park_reason
+      && a.pause_kind === b.pause_kind
 }
 
 function sameMessageList(a, b) {

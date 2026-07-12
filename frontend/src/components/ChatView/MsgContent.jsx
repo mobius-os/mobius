@@ -9,7 +9,7 @@ import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
-import { formatResetTime } from './resetTime.js'
+import ErrorCard from './ErrorCard.jsx'
 
 
 function thoughtSeconds(durationMs) {
@@ -168,62 +168,20 @@ function MsgContentInner({
         // branch the block rendered to null and the error
         // vanished on chat return; that was the bug.
         //
-        // Run the message through StandardMarkdown so URLs in
-        // provider error responses (quota links, billing
-        // pages) become clickable — agents' error payloads
-        // typically include "Upgrade to Pro (https://...)" and
-        // "purchase more credits at https://..." that the user
-        // wants to tap straight from the chat.
-        // A turn paused by a drain-gated restart (or interrupted by a crash)
-        // persists a `resumable` note (backend reconcile marks it). Only the
-        // TAIL note on the last message is resumable — mirrors how a question
-        // card is only answerable at the tail — so scrolled-back history and
-        // live provider errors never show a Resume button. One tap re-sends a
-        // short "continue" as a normal visible send.
+        // The card body (label, park/pause classification, reset line) is
+        // ErrorCard — the SAME renderer StreamingMessage uses for the live
+        // stream, so the two surfaces cannot diverge. Only the Resume button
+        // lives here: a turn paused by a drain-gated restart (or interrupted
+        // by a crash) persists a `resumable` note (backend reconcile marks
+        // it), and only the TAIL note on the last message is resumable —
+        // mirrors how a question card is only answerable at the tail — so
+        // scrolled-back history and live provider errors never show a Resume
+        // button. One tap re-sends a short "continue" as a normal visible
+        // send; on a park the button reads "Resume now" (design §2.4).
         const resumable = !!(block.resumable && isLastMsg && onResume)
-        // A provider-limit park (design §2.4) is a resumable error carrying
-        // `parked_until`: it renders as a live "Rate limit — resets at … ·
-        // Resume now" card instead of a bare error. Same tail-only Resume
-        // gate; the button just re-sends "continue" like the restart resume.
-        const resetLabel = block.parked_until
-          ? formatResetTime(block.parked_until)
-          : null
         const parked = !!block.parked_until
-        // A drain-gated restart or a stall is a benign maintenance pause, not a
-        // failure; the backend marks it with `pause_kind` (design §2.2). Both a
-        // park and a benign pause read as WAIT states, so they get the soft
-        // `.chat__text--parked` treatment and a calm label — "Rate limit" keeps
-        // the honest, specific name a park deserves; a restart/stall reads
-        // "Paused". The danger-red "Error" card is reserved for genuine
-        // failures. Old persisted blocks predate `pause_kind` and, absent a
-        // `parked_until`, fall back to today's error rendering.
-        const benign = parked || !!block.pause_kind
-        const label = parked
-          ? 'Rate limit'
-          : (block.pause_kind ? 'Paused' : 'Error')
         return (
-          <div
-            key={i}
-            className={`chat__text--error${benign ? ' chat__text--parked' : ''}`}
-            role="alert"
-          >
-            <span className="chat__error-label">{label}</span>
-            <StandardMarkdown
-              text={block.message || 'The agent ran into an issue.'}
-            />
-            {parked && resetLabel && (
-              <div className="chat__parked-reset">Resets {resetLabel}</div>
-            )}
-            {parked && resetLabel && (
-              // Reassure that the wait resolves on its own: a reset push is
-              // coming. Tapping Resume now before the reset just re-parks (the
-              // provider limit is still in force), so name that honestly rather
-              // than letting the button look broken.
-              <div className="chat__parked-note">
-                You'll get a notification when it resets — or tap Resume now to
-                try sooner (it may pause again).
-              </div>
-            )}
+          <ErrorCard key={i} block={block}>
             {resumable && (
               <button
                 type="button"
@@ -233,7 +191,7 @@ function MsgContentInner({
                 {parked ? 'Resume now' : 'Resume'}
               </button>
             )}
-          </div>
+          </ErrorCard>
         )
       }
       return null
