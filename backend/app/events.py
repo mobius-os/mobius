@@ -10,6 +10,8 @@ tools interleaved between them.
 """
 
 import copy
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -136,6 +138,106 @@ _THINKING_INTERRUPTING_TYPES: frozenset[str] = frozenset({
 })
 
 
+# -- tool-output reduction (contract rule 6) ------------------------------
+# A tool_output larger than this is reduced to a bounded head+tail excerpt on
+# the ONE event funnel (chat.py _ChatEventSink.publish), so the live SSE wire,
+# the catch-up replay, and the persisted Chat.messages blob all carry only the
+# excerpt; the full text is stashed server-side keyed by tool_use_id and
+# fetched lazily on expand. A round-trip costs more than a few KB, so small
+# outputs stay whole.
+TOOL_OUTPUT_INLINE_THRESHOLD = 4096
+# Bytes kept from the start (preserves the start-anchored "Exit code N\n"
+# failure head for a Claude bash result) and the end (the diagnostic tail the
+# reader actually wants) of a carved plain-text output.
+TOOL_OUTPUT_HEAD = 2048
+TOOL_OUTPUT_TAIL = 1024
+# Hard ceiling on the whole excerpt. Per-string carving handles the common shell
+# envelope (one big stdout), but a JSON value with MANY small strings re-
+# serializes near full size, which would defeat "bounded on the wire". When the
+# re-serialized excerpt still exceeds this budget, fall back to a plain head+tail
+# carve of the serialized string. That last carve can break JSON validity, but
+# the exit code is already captured as a separate field (output_exit_code), so
+# the failure chip is unaffected — only the inline preview's pretty rendering is,
+# and the full valid text is one expand away. Generous enough that a realistic
+# terminal envelope (stdout+stderr+exit_code) stays valid JSON.
+TOOL_OUTPUT_EXCERPT_MAX = 16384
+# Claude bash reports a failure as a start-anchored "Exit code N\n<stderr>"
+# (a success is plain stdout with no prefix). Mirror toolResultFormat.js:27.
+_TOOL_OUTPUT_EXIT_RE = re.compile(r"^Exit code (\d+)\r?\n")
+
+
+def _shorten_text(s: str) -> str:
+  """head + a byte-count marker + tail, for a plain-text output over budget."""
+  if len(s) <= TOOL_OUTPUT_HEAD + TOOL_OUTPUT_TAIL:
+    return s
+  head = s[:TOOL_OUTPUT_HEAD]
+  tail = s[-TOOL_OUTPUT_TAIL:]
+  shown = len(head) + len(tail)
+  return f"{head}\n…[{len(s)} B total — {shown} shown, expand for full]…\n{tail}"
+
+
+def _truncate_json_strings(value, depth: int = 0):
+  """Return a copy of a parsed-JSON value with every long string field carved
+  to a head+tail excerpt, so a re-serialization stays VALID JSON. This is how
+  a shell envelope ({stdout, stderr, exit_code}) is truncated: the raw string
+  is never cut mid-way (that breaks the JSON and loses the exit code); the
+  inner stdout/stderr are shortened and small keys (exit_code) pass through."""
+  if isinstance(value, str):
+    return _shorten_text(value)
+  if depth >= 6:
+    return value
+  if isinstance(value, dict):
+    return {k: _truncate_json_strings(v, depth + 1) for k, v in value.items()}
+  if isinstance(value, list):
+    return [_truncate_json_strings(v, depth + 1) for v in value]
+  return value
+
+
+def _tool_output_exit_code(content: str, parsed):
+  """Best-effort integer exit code, or None. A shell envelope carries it as a
+  top-level exit_code/exitCode int; a Claude bash failure as the start-anchored
+  'Exit code N\\n' head. Booleans are rejected (True == 1 in Python)."""
+  if isinstance(parsed, dict):
+    raw = parsed.get("exit_code")
+    if raw is None:
+      raw = parsed.get("exitCode")
+    if isinstance(raw, bool):
+      return None
+    return raw if isinstance(raw, int) else None
+  m = _TOOL_OUTPUT_EXIT_RE.match(content)
+  return int(m.group(1)) if m else None
+
+
+def excerpt_tool_output(content: str):
+  """Reduce a large tool_output string to (excerpt, full_len, exit_code).
+
+  Envelope-aware: a JSON container is parsed, its inner strings carved, and
+  re-serialized so it stays valid JSON with the exit code intact (the frontend
+  failure chip and terminal rendering both depend on parseable JSON). A plain
+  string keeps its head (the 'Exit code N' failure signal survives) and tail.
+  Called only when len(content) > TOOL_OUTPUT_INLINE_THRESHOLD."""
+  full_len = len(content)
+  parsed = None
+  stripped = content.lstrip()
+  if stripped[:1] in ("{", "["):
+    try:
+      parsed = json.loads(content)
+    except (ValueError, TypeError):
+      parsed = None
+  exit_code = _tool_output_exit_code(content, parsed)
+  if parsed is not None:
+    excerpt = json.dumps(_truncate_json_strings(parsed), ensure_ascii=True)
+    # Boundedness ceiling: a JSON value whose size is in its STRUCTURE (many
+    # small strings) survives per-string carving near full size. Cap it with a
+    # plain carve — the exit code is already in `exit_code`, so this costs only
+    # JSON validity of the inline preview (the full text is fetched on expand).
+    if len(excerpt) > TOOL_OUTPUT_EXCERPT_MAX:
+      excerpt = _shorten_text(excerpt)
+  else:
+    excerpt = _shorten_text(content)
+  return excerpt, full_len, exit_code
+
+
 def process_event(event: dict, assistant_blocks: list) -> bool:
   """Accumulates a parsed event into the assistant blocks list.
 
@@ -241,13 +343,21 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return False
 
   if event_type == "tool_start":
-    assistant_blocks.append({
+    block = {
       "type": "tool",
       "tool": event.get("tool", ""),
       "input": event.get("input", ""),
       "output": "",
       "status": "running",
-    })
+    }
+    # Carry the tool's stable identity onto the block (contract rule 6) so a
+    # reduced output can be fetched lazily by tool_use_id. Only stamp it when
+    # the runner supplied one — a tokenless legacy/test event keeps the block
+    # shape unchanged.
+    tool_use_id = event.get("tool_use_id")
+    if tool_use_id:
+      block["tool_use_id"] = tool_use_id
+    assistant_blocks.append(block)
     return True
 
   if event_type == "tool_input":
@@ -266,6 +376,21 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       if (blk.get("type") == "tool"
           and blk.get("status") != "done"):
         blk["output"] = event.get("content", "")
+        # A tool_output the sink reduced (contract rule 6) carries a bounded
+        # excerpt as `content` plus the metadata below; carry it onto the block
+        # so the persisted transcript + wire agree and the frontend can fetch
+        # the full text and read a failure exit code from a field, not a parse
+        # of the possibly-carved excerpt. Absent fields leave the block shape
+        # unchanged (a small, un-reduced output).
+        tool_use_id = event.get("tool_use_id")
+        if tool_use_id and not blk.get("tool_use_id"):
+          blk["tool_use_id"] = tool_use_id
+        if event.get("output_truncated"):
+          blk["output_truncated"] = True
+          blk["output_full_len"] = event.get("output_full_len")
+          exit_code = event.get("output_exit_code")
+          if exit_code is not None:
+            blk["output_exit_code"] = exit_code
         break
     return True
 
