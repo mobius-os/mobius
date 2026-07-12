@@ -45,6 +45,7 @@ import {
   accumulateBuildPhase,
   buildPhaseRailViewModel,
   latestBuildPhaseAnnouncement,
+  railAtRunStart,
 } from './buildPhaseRail.js'
 import './ChatView.css'
 
@@ -329,9 +330,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   const lastAnnouncedPreviewRef = useRef(null)
   // Build-milestone rail: phases accumulated from chat-scoped `build_phase`
-  // stream events (deduped by ts so catch-up replay rebuilds it), reset on the
-  // owner's next send. Rendered as a slim rail in the foot near the open-app
-  // CTA; the announcement mirrors previewReadyStatus for the polite live region.
+  // stream events (deduped by ts so catch-up replay rebuilds it), reset ONLY
+  // when a new run starts for this chat (see buildPhaseRail.js for why a
+  // mid-run reset is replay-incoherent). Rendered as a slim rail in the foot
+  // near the open-app CTA; the announcement mirrors previewReadyStatus for
+  // the polite live region.
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
@@ -871,6 +874,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      // A queued message is being promoted into its OWN run — the rail's
+      // run-start boundary for queue drains. useStreamConnection fires this
+      // callback during catch-up replay too, in event order, so a reconnect
+      // that replays the old run's log applies this reset at the same
+      // position the live stream did (old-run phases, then reset) and the
+      // rail always lands on the run being displayed.
+      setBuildPhases(railAtRunStart())
       const consumedTs = message?._consumed_ts
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
@@ -1424,11 +1434,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
 
-    // The milestone rail belongs to the turn in flight; the owner's next send
-    // starts a fresh build context, so clear it (any new turn repopulates it
-    // from its own build_phase events).
-    setBuildPhases(EMPTY_BUILD_PHASE_RAIL)
-
     // Stop voice recognition so a late onresult doesn't refill input
     // after we clear it.
     if (listeningRef.current) stopVoiceRef.current?.()
@@ -1567,6 +1572,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             }
             onMessageStartRef.current?.()
             promotedRef.current = false
+            // started=true means this send began a NEW run (stale-pending
+            // self-heal) rather than queueing behind one — a run start, so
+            // the rail resets. A plain enqueue (started falsy) must NOT
+            // touch the in-flight build's rail.
+            setBuildPhases(railAtRunStart())
             setSending(true)
             setServerRunningState(true)
             // The queued send was promoted straight into the active turn,
@@ -1612,6 +1622,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingQueue.cancelByCid(queuedMsg.cid)
           onMessageStartRef.current?.()
           promotedRef.current = false
+          // Same run-start semantics as the branch above: this send became
+          // the first message of a NEW run, so the rail resets here too.
+          setBuildPhases(railAtRunStart())
           // Apply the send rule before appending — see shouldPinSend and
           // the fresh-send path. A message that raced into a started turn
           // is still a new send becoming the active turn, so it pins only
@@ -1692,6 +1705,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
+    // A fresh send starts a NEW run — the rail's only reset seam besides
+    // queued_turn_starting. Resetting on ENQUEUE instead (the queue path
+    // above) wiped the in-flight build's rail, which the next catch-up
+    // replay then silently repopulated (see buildPhaseRail.js).
+    setBuildPhases(railAtRunStart())
 
     // The send rule (see shouldPinSend): pin the new message to the top
     // only when it is the first message OR the user is at the bottom.
