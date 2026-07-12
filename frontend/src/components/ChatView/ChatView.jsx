@@ -28,11 +28,10 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
   canFastForwardQueue,
+  cidOf,
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
   previewReadyAnnouncement,
-  resolveFreshPinRetarget,
-  resolveSteeredPinDecision,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -155,17 +154,18 @@ function insertMessageBatchByTs(prev, rows) {
   return changed ? next : prev
 }
 
-function replaceOptimisticWithBatch(prev, optimisticTs, rows) {
-  const base = optimisticTs == null
+function replaceOptimisticWithBatch(prev, cid, rows) {
+  const base = cid == null
     ? prev
-    : prev.filter(m => !(m?.role === 'user' && m.ts === optimisticTs))
+    : prev.filter(m => !(m?.role === 'user' && cidOf(m) === cid))
   return appendMessageBatch(base, rows)
 }
 
-function findOptimisticUserIndex(messages, ts) {
+function findUserIndexByCid(messages, cid) {
+  if (cid == null) return -1
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
-    if (msg?.role === 'user' && msg.ts === ts) return i
+    if (msg?.role === 'user' && cidOf(msg) === cid) return i
   }
   return -1
 }
@@ -401,7 +401,6 @@ export default function ChatView({
   const queuedContinuationLocalPromotedRef = useRef(null)
   const queuedContinuationPinIntentRef = useRef(null)
   const queuedPinIntentByCidRef = useRef(new Map())
-  const queuedPinIntentByTsRef = useRef(new Map())
   const steerPinIntentRef = useRef(null)
   const inlineSteerPinIntentRef = useRef(null)
   const runtimeReconnectInFlightRef = useRef(false)
@@ -662,46 +661,47 @@ export default function ChatView({
     queuedPinIntentByCidRef.current.set(cid, intent)
   }
 
-  function rememberQueuedPinIntentTs(cid, ts) {
-    if (ts == null) return
-    const intent = cid ? queuedPinIntentByCidRef.current.get(cid) : null
-    if (intent) queuedPinIntentByTsRef.current.set(ts, intent)
-  }
-
-  function forgetQueuedPinIntent({ cid = null, ts = null, tsList = null } = {}) {
+  function forgetQueuedPinIntent({ cid = null, cidList = null } = {}) {
     if (cid) queuedPinIntentByCidRef.current.delete(cid)
-    if (ts != null) queuedPinIntentByTsRef.current.delete(ts)
-    if (Array.isArray(tsList)) {
-      for (const value of tsList) queuedPinIntentByTsRef.current.delete(value)
+    if (Array.isArray(cidList)) {
+      for (const value of cidList) queuedPinIntentByCidRef.current.delete(value)
     }
   }
 
-  function takeQueuedPinIntent({ tsList = null, ts = null, localPromoted = null } = {}) {
-    const keys = []
-    if (Array.isArray(tsList)) keys.push(...tsList.filter(v => v != null))
-    if (ts != null) keys.push(ts)
-    let intent = null
-    for (const key of keys) {
-      if (!intent && queuedPinIntentByTsRef.current.has(key)) {
-        intent = queuedPinIntentByTsRef.current.get(key)
-      }
-      queuedPinIntentByTsRef.current.delete(key)
-    }
-    const cid = localPromoted?.cid
-    if (cid) {
-      if (!intent && queuedPinIntentByCidRef.current.has(cid)) {
-        intent = queuedPinIntentByCidRef.current.get(cid)
-      }
-      queuedPinIntentByCidRef.current.delete(cid)
-    }
+  function takeQueuedPinIntent(cid) {
+    if (!cid) return null
+    const intent = queuedPinIntentByCidRef.current.get(cid) || null
+    queuedPinIntentByCidRef.current.delete(cid)
     return intent
   }
 
   function forgetAllQueuedPinIntents() {
     queuedPinIntentByCidRef.current.clear()
-    queuedPinIntentByTsRef.current.clear()
     queuedContinuationPinIntentRef.current = null
     inlineSteerPinIntentRef.current = null
+  }
+
+  // The ONE place a send/steer/promote arms the pin. Owns spacer arming (the
+  // reservation is always armed on a visible send), intent-staleness (a real
+  // user scroll after submit wins), and the PIN-vs-settle mode write. The pin
+  // targets the stable `cid`, which the DOM row already carries from mint, so
+  // the pin lands on the first apply — no ts-swap retarget, ever. Spacer HEIGHT
+  // belongs to the layout effect's sizeSpacer; this never zeroes it (zeroing
+  // would clamp scrollTop with no guaranteed re-run to re-pin).
+  function pinSentMessage(cid, { willPin, intent } = {}) {
+    setSpacerActive(true)
+    if (intent && !pinIntentStillCurrent(intent)) {
+      // A real user scroll landed after submit — the reader wins. Leave
+      // scrollTop where they put it; retire any stale PIN/FOLLOW to their
+      // current anchor so the reserved room stays available below.
+      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
+      return
+    }
+    if (willPin && cid != null) {
+      modeRef.current = { kind: 'PIN_USER_MSG', cid }
+    } else {
+      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
+    }
   }
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
@@ -806,7 +806,7 @@ export default function ChatView({
         pending_question_id: data.pending_question_id || null,
       }))
       // Don't let the fallback poll add/clobber the queue while a turn is live
-      // (localAuthoritative, above) — the optimistic queue + swapOptimisticTs
+      // (localAuthoritative, above) — the optimistic queue + confirmQueued
       // own it during a turn; hydrate only when the stream is dead.
       if (!localAuthoritative) {
         pendingQueue.hydrate(serverPending)
@@ -860,33 +860,22 @@ export default function ChatView({
           const contIsFirstUser = !messagesRef.current.some(
             m => m.role === 'user' && !m.hidden,
           )
-          const pinTargetTs = promotedRows[0]?.ts
+          const pinCid = cidOf(promotedRows[0])
           const fallbackWillPin = () => shouldPinSend({
             scrollEl: scrollRef.current,
             mode: modeRef.current,
             isFirstUserMsg: contIsFirstUser,
             respectFollowMode: false,
           })
-          const intentStillCurrent = continuationPinIntent
-            ? pinIntentStillCurrent(continuationPinIntent)
-            : true
-          const contWillPin = pinTargetTs != null && intentStillCurrent && (
-            continuationPinIntent
-              ? continuationPinIntent.willPin
-              : fallbackWillPin()
-          )
+          const contWillPin = continuationPinIntent
+            ? continuationPinIntent.willPin
+            : fallbackWillPin()
           commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
-          setSpacerActive(true)
-          if (contWillPin) {
-            // Spacer height belongs to the layout effect's sizeSpacer; do not
-            // zero it here. A retarget/promote that keeps the same last message
-            // won't re-run that effect, so the collapse would clamp scrollTop
-            // with nothing to re-pin (the "second send never pins" strand).
-            modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
-          } else if (intentStillCurrent) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-          }
+          pinSentMessage(pinCid, {
+            willPin: contWillPin,
+            intent: continuationPinIntent,
+          })
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
           // with promote). Refetch authoritative state.
@@ -929,20 +918,24 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
-      const consumedTs = message?._consumed_ts
+      const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
         : null
-      const localPromoted = Array.isArray(consumedTs)
-        ? pendingQueue.promoteManyByTs(consumedTs)
-        : pendingQueue.promoteAll(ts)
+      const localPromoted = Array.isArray(consumedCids)
+        ? pendingQueue.promoteManyByCid(consumedCids)
+        : pendingQueue.promoteAll()
       queuedContinuationLocalPromotedRef.current =
         serverRows?.length ? serverRows : localPromoted
-      queuedContinuationPinIntentRef.current = takeQueuedPinIntent({
-        tsList: consumedTs,
-        ts,
-        localPromoted,
-      })
+      // The pin intent was stamped at submit under the queued row's cid; the
+      // backend echoes those cids back as _consumed_cids (or the promoted row
+      // carries the head cid). Look it up by the head cid.
+      const pinCid = cidOf(
+        (serverRows && serverRows[0])
+        || localPromoted
+        || (Array.isArray(consumedCids) ? { cid: consumedCids[0] } : null),
+      )
+      queuedContinuationPinIntentRef.current = takeQueuedPinIntent(pinCid)
     },
     onLiveQuestion: setLiveQuestionId,
     onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
@@ -963,20 +956,26 @@ export default function ChatView({
       // reserved room below it.
       //
       const steeredMessages = Array.isArray(steeredBatch) && steeredBatch.length > 0
-        ? steeredBatch.map((m, i) => ({
-            role: 'user',
-            content: m?.content || '',
-            ts: m?.ts ?? (ts != null ? ts + i : Date.now() + i),
-            ...(m?.attachments ? { attachments: m.attachments } : {}),
-          }))
-        : [{ role: 'user', content, ts: ts ?? Date.now() }]
-      const pinTargetTs = steeredMessages[0]?.ts
-      const steeredTsList = steeredMessages
-        .map(m => m?.ts)
-        .filter(v => v != null)
+        ? steeredBatch.map((m, i) => {
+            const tsv = m?.ts ?? (ts != null ? ts + i : Date.now() + i)
+            return {
+              role: 'user',
+              content: m?.content || '',
+              ts: tsv,
+              // The backend echoes each steered row's stable cid; fall back to
+              // the legacy-<ts> derivation for an older single-row payload.
+              cid: m?.cid ?? cidOf({ ts: tsv }),
+              ...(m?.attachments ? { attachments: m.attachments } : {}),
+            }
+          })
+        : [(() => {
+            const tsv = ts ?? Date.now()
+            return { role: 'user', content, ts: tsv, cid: cidOf({ ts: tsv }) }
+          })()]
+      const pinCid = cidOf(steeredMessages[0])
       const pinIntent = steerPinIntentRef.current
         || inlineSteerPinIntentRef.current
-        || takeQueuedPinIntent({ tsList: steeredTsList, ts })
+        || takeQueuedPinIntent(pinCid)
       inlineSteerPinIntentRef.current = null
       promoteStreamToMessages({ keepTurnOpen: true })
       const steeredIsFirstUser = !messagesRef.current.some(
@@ -988,32 +987,16 @@ export default function ChatView({
         isFirstUserMsg: steeredIsFirstUser,
         respectFollowMode: false,
       })
-      const {
-        intentStillCurrent: pinStillValid,
-        shouldPin: shouldPinSteered,
-      } = resolveSteeredPinDecision({
-        pinTargetTs,
-        pinIntent,
-        pinIntentStillCurrent,
-        fallbackWillPin,
-      })
-      // Dedup by ts so a reconnect's catch-up replay of the same event
-      // can't double-insert the steered user message. Insert by transcript ts
-      // instead of blindly appending: if a fetch/replay already committed the
-      // post-steer assistant row, the steered user still belongs before it.
+      const steerWillPin = pinIntent ? pinIntent.willPin : fallbackWillPin()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
       // listeners can observe the transcript update immediately; setting the
       // mode first prevents a one-frame "row appears low, then snaps up" steer.
-      setSpacerActive(true)
-      if (shouldPinSteered) {
-        // Spacer height belongs to the layout effect's sizeSpacer; zeroing it
-        // here would collapse scrollHeight and clamp scrollTop with no
-        // guaranteed re-run to re-pin.
-        modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
-      } else if (pinStillValid) {
-        settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-      }
+      pinSentMessage(pinCid, { willPin: steerWillPin, intent: pinIntent })
+      // Dedup by ts so a reconnect's catch-up replay of the same event
+      // can't double-insert the steered user message. Insert by transcript ts
+      // instead of blindly appending: if a fetch/replay already committed the
+      // post-steer assistant row, the steered user still belongs before it.
       commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       steerPinIntentRef.current = null
     },
@@ -1551,10 +1534,18 @@ export default function ChatView({
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
+    // Mint the message's stable identity ONCE, before the queue-vs-fresh
+    // branch, so both paths carry the same `cid` from optimistic render
+    // through the wire and into persistence. The row's identity never changes
+    // across the optimistic→server-ts update — that is the whole redesign.
+    const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+
     // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
-    // entry with a stable client-side `cid` (UUID) that survives the
-    // optimistic-ts → server-ts swap. Backend writes to chat.pending_messages
-    // via POST /messages returning {status: "queued", ts, position}.
+    // entry carrying the minted `cid` — the row identity is stable across
+    // the optimistic→server-ts display update. Backend writes to
+    // chat.pending_messages via POST /messages returning {status, ts, position}.
     //
     // Read from refs (not React state) so doSend stays closure-safe.
     // Callers like handleStop invoke doSend AFTER calling
@@ -1568,12 +1559,9 @@ export default function ChatView({
       || serverRunningRef.current
       || pendingQueue.pendingMessagesRef.current.length > 0
     ) {
-      const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
-      pendingQueue.add(queuedMsg)
+      pendingQueue.add(queuedMsg, { inFlight: true })
       // Capture the send rule's inputs AT SEND TIME, before the POST. If
       // this queued send is promoted into the active turn (the backend
       // returns started, either as `queued+started` or the `started` race),
@@ -1614,21 +1602,19 @@ export default function ChatView({
         const result = await streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
-          { queueOnly: true },
+          { queueOnly: true, cid },
         )
         releaseComposerFilesAfterAccepted()
         if (result?.status === 'queued') {
           const canonicalPending = result.pending_message || null
-          // Replace optimistic ts with server's (cid is stable).
+          // Update the DISPLAY ts + canonical content on the cid-matched row.
+          // Identity (cid) never changes, so there is no swap — just a confirm.
           const ackTs = canonicalPending?.ts ?? result.ts
-          rememberQueuedPinIntentTs(queuedMsg.cid, ackTs)
-          pendingQueue.swapOptimisticTs(
-            queuedMsg.cid,
-            ackTs ?? queuedMsg.ts,
-            result.position,
-            canonicalPending,
-            { confirmed: !!canonicalPending || typeof ackTs === 'number' },
-          )
+          pendingQueue.confirmQueued(cid, {
+            ts: ackTs ?? queuedMsg.ts,
+            position: result.position,
+            serverMsg: canonicalPending,
+          })
           if (!canonicalPending) {
             // Older backends acknowledge only {ts, position}. Hydrate
             // immediately so the queued row uses the server's canonical text
@@ -1637,8 +1623,8 @@ export default function ChatView({
             fetchMessages({ force: true })
           }
           if (result.started) {
-            if (Array.isArray(result.message?._consumed_ts)) {
-              pendingQueue.promoteManyByTs(result.message._consumed_ts)
+            if (Array.isArray(result.message?._consumed_cids)) {
+              pendingQueue.promoteManyByCid(result.message._consumed_cids)
             }
             const startedMessages = startedMessagesFromResponse(result)
             if (startedMessages) {
@@ -1653,29 +1639,17 @@ export default function ChatView({
             setBuildPhases(railAtRunStart())
             setSending(true)
             setServerRunningState(true)
-            // The queued send was promoted straight into the active turn,
-            // so it's a new visible user message and follows the send rule
-            // just like a fresh send. Use the at-send-time decision
-            // (captured before the await) and yield to a user scroll that
-            // changed the mode during the POST. Pin keys to the first SERVER
-            // ts from the promoted batch, not the optimistic queuedMsg.ts.
-            const pinStillValid = pinIntentStillCurrent(queuedPinIntent)
-            const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
-            setSpacerActive(true)
-            if (queuedWillPin && pinStillValid) {
-              // Spacer height belongs to the layout effect's sizeSpacer; zeroing
-              // it here would clamp scrollTop with no guaranteed re-run to re-pin.
-              modeRef.current = {
-                kind: 'PIN_USER_MSG',
-                ts: pinTargetTs,
-              }
-            } else if (pinStillValid) {
-              settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-            }
+            // The queued send was promoted straight into the active turn, so
+            // it's a new visible user message and follows the send rule just
+            // like a fresh send. The pin targets the stable cid (the started
+            // row carries the same cid the client minted).
+            pinSentMessage(cid, {
+              willPin: queuedWillPin,
+              intent: queuedPinIntent,
+            })
             forgetQueuedPinIntent({
-              cid: queuedMsg.cid,
-              ts: ackTs,
-              tsList: result.message?._consumed_ts,
+              cid,
+              cidList: result.message?._consumed_cids,
             })
             bridgeHook.markBridged()
           }
@@ -1691,10 +1665,10 @@ export default function ChatView({
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
-          if (Array.isArray(result.message?._consumed_ts)) {
-            pendingQueue.promoteManyByTs(result.message._consumed_ts)
+          if (Array.isArray(result.message?._consumed_cids)) {
+            pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
-          pendingQueue.cancelByCid(queuedMsg.cid)
+          pendingQueue.cancelByCid(cid)
           onMessageStartRef.current?.()
           promotedRef.current = false
           // Same run-start semantics as the branch above: this send became
@@ -1703,39 +1677,27 @@ export default function ChatView({
           // Apply the send rule before appending — see shouldPinSend and
           // the fresh-send path. A message that raced into a started turn
           // is still a new send becoming the active turn, so it pins only
-          // when first-or-at-bottom. The decision was captured at send
-          // time (before the await): reading scrollRef/modeRef HERE would
-          // let a scroll during the POST flip it. `pinStillValid` yields to
-          // a user-driven mode change that landed during the await.
+          // when first-or-at-bottom. The decision was captured at send time.
           const startedMessages = startedMessagesFromResponse(result)
           commitMessages(prev => {
             if (startedMessages) return appendMessageBatch(prev, startedMessages)
-            const { queued: _q, cid: _c, position: _p, ...msg } = queuedMsg
+            // Strip the queue-envelope fields but KEEP cid — the visible user
+            // row needs it as its stable data-cid pin target.
+            const { queued: _q, position: _p, ...msg } = queuedMsg
             return appendMessageBatch(prev, [msg])
           })
           setSending(true)
           setServerRunningState(true)
-          // New visible user msg → pin to the top only when the rule
-          // allows; otherwise convert any stale pin to the reader's
-          // ANCHOR_AT (see settleNonPinMode) so the reader stays put with
-          // reservation still available below. Pin keys to the first SERVER
-          // ts when available; otherwise fall back to the optimistic ts.
-          const startedPinStillValid = pinIntentStillCurrent(queuedPinIntent)
-          const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
-          setSpacerActive(true)
-          if (queuedWillPin && startedPinStillValid) {
-            // Spacer height belongs to the layout effect's sizeSpacer; zeroing
-            // it here would clamp scrollTop with no guaranteed re-run to re-pin.
-            modeRef.current = {
-              kind: 'PIN_USER_MSG',
-              ts: pinTargetTs,
-            }
-          } else if (startedPinStillValid) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-          }
+          // New visible user msg → pin the stable cid to the top when the rule
+          // allows; otherwise the funnel retires any stale pin to the reader's
+          // anchor and reservation stays available below.
+          pinSentMessage(cid, {
+            willPin: queuedWillPin,
+            intent: queuedPinIntent,
+          })
           forgetQueuedPinIntent({
-            cid: queuedMsg.cid,
-            tsList: result.message?._consumed_ts,
+            cid,
+            cidList: result.message?._consumed_cids,
           })
           // This is a NEW turn (not the bridge turn from mount).
           // Retire the bridge gate so the upcoming promote appends a
@@ -1748,7 +1710,7 @@ export default function ChatView({
         }
         // Invariant: every observable queue-path status must resolve
         // the optimistic entry's in-flight flag. queued/steered/started
-        // each clear it above (swapOptimisticTs / cancelByCid). Any
+        // each clear it above (confirmQueued / cancelByCid). Any
         // other status — e.g. streamSend's `not_steered` — leaves the
         // entry as an ordinary queued row, so clear the flag here or it
         // leaks forever and a later hydrate would wrongly preserve it.
@@ -1800,13 +1762,13 @@ export default function ChatView({
     // is not yanked. `pin` stays the caller opt-out (handleStop's queue-collapse
     // passes pin:false).
     const willPin = pin
-    // The first rendered row uses this optimistic ts, but the backend often
-    // returns a canonical server ts a moment later. Carry the send-time intent
-    // across that swap so the "new sent message at the top" pin does not point
-    // at a removed optimistic DOM node on fast second sends / start races.
+    // The send-time pin intent, carried across the async POST so a user scroll
+    // that lands during it can still win. The pinned row's identity is the
+    // minted `cid`, which the optimistic row and the confirmed server row
+    // share — so the pin never needs to be retargeted across a ts swap.
     const freshPinIntent = makeSendPinIntent(willPin)
 
-    const userMsg = { role: 'user', content: text, ts: Date.now(), optimistic: true }
+    const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setInput('')
@@ -1819,25 +1781,12 @@ export default function ChatView({
     }
     setSending(true)
     setServerRunningState(true)
-    // Pin to top only when the rule allows. Reservation is separate:
-    // every visible user send activates the dynamic bottom spacer, but
-    // only first-or-at-bottom sends mutate scrollTop to PIN_USER_MSG.
-    // When not pinning the user is reading (scrolled up), so convert any
-    // stale PIN_USER_MSG from an earlier send into the reader's current
-    // ANCHOR_AT and leave their viewport fixed. The optimistic userMsg.ts is
-    // the rendered data-ts until the backend's canonical row arrives in the
-    // fresh-start response.
-    setSpacerActive(true)
-    if (willPin) {
-      // Spacer height belongs to the layout effect's sizeSpacer, which sizes it
-      // from the last user message on the re-render this send triggers. Zeroing
-      // it here only collapses scrollHeight and momentarily clamps scrollTop —
-      // recovered on the fresh send, but stranded on the ts-swap retarget below
-      // whose commit keeps the same last message and skips the re-render.
-      modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
-    } else {
-      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-    }
+    // Pin the new message to the top when the rule allows (a fresh send always
+    // does unless the caller opted out). The funnel arms the reservation spacer
+    // on every send and, when not pinning, retires any stale PIN to the
+    // reader's anchor so their viewport stays fixed. The row carries its final
+    // cid from mint, so the pin lands on the first apply.
+    pinSentMessage(cid, { willPin, intent: freshPinIntent })
     // Fresh turn — not a bridge from a mounted DB partial.
     bridgeHook.markBridged()
 
@@ -1870,20 +1819,21 @@ export default function ChatView({
         const canonicalPending = result.pending_message || null
         commitMessages(prev => {
           const next = [...prev]
-          const idx = findOptimisticUserIndex(next, userMsg.ts)
+          const idx = findUserIndexByCid(next, cid)
           if (idx >= 0) next.splice(idx, 1)
           return next
         })
+        // The queued row keeps the MINTED cid — its identity does not change
+        // because the server was told to queue a fresh send. It is already
+        // server-confirmed (the POST acked), so it is NOT in flight.
         pendingQueue.add({
           ...(canonicalPending || userMsg),
           ts: canonicalPending?.ts ?? result.ts ?? userMsg.ts,
-          cid: canonicalPending
-            ? `s-${canonicalPending.ts ?? result.ts ?? userMsg.ts}`
-            : `q-${userMsg.ts}`,
+          cid,
           queued: true,
           serverTs: !!canonicalPending || typeof result.ts === 'number',
           position: result.position,
-        })
+        }, { inFlight: false })
         if (!canonicalPending) {
           // Same compatibility path as the queue-only branch: reconcile the
           // visible queued tray with the server's exact pending row before
@@ -1891,29 +1841,11 @@ export default function ChatView({
           fetchMessages({ force: true })
         }
         if (result.started) {
-          if (Array.isArray(result.message?._consumed_ts)) {
-            pendingQueue.promoteManyByTs(result.message._consumed_ts)
+          if (Array.isArray(result.message?._consumed_cids)) {
+            pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
           const startedMessages = startedMessagesFromResponse(result)
-          const freshPin = resolveFreshPinRetarget({
-            startedMessages,
-            fallbackTs: userMsg.ts,
-            willPin,
-            pinIntent: freshPinIntent,
-            pinIntentStillCurrent,
-          })
-          if (freshPin.shouldPin) {
-            setSpacerActive(true)
-            // Retarget to the server ts. Do NOT zero the spacer: this commit
-            // keeps the same last message (only its ts changes), so
-            // sameMessageList skips the re-render and the layout effect never
-            // re-runs to restore a collapsed spacer — the collapse would clamp
-            // scrollTop to 0 and strand the pin (2nd-send-never-pins). The
-            // spacer already holds the optimistic pin's correct height.
-            modeRef.current = { kind: 'PIN_USER_MSG', ts: freshPin.pinTargetTs }
-          } else if (freshPin.intentStillCurrent) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-          }
+          pinSentMessage(cid, { willPin, intent: freshPinIntent })
           if (startedMessages) {
             commitMessages(prev => appendMessageBatch(prev, startedMessages))
           }
@@ -1931,39 +1863,12 @@ export default function ChatView({
       }
       const startedMessages = startedMessagesFromResponse(result)
       if (startedMessages) {
-        const freshPin = resolveFreshPinRetarget({
-          startedMessages,
-          fallbackTs: userMsg.ts,
-          willPin,
-          pinIntent: freshPinIntent,
-          pinIntentStillCurrent,
-        })
-        if (freshPin.shouldPin) {
-          setSpacerActive(true)
-          // Pin to the OPTIMISTIC ts, not freshPin.pinTargetTs (the canonical
-          // server ts). On a fresh send the rendered row keeps its optimistic
-          // client ts and never reconciles to the canonical ts (verified: the
-          // divergence survives reload), so a canonical-ts pin matches no
-          // data-ts and applyMode has to fall back to the last user row — which
-          // during the render swap is briefly the PREVIOUS message, causing a
-          // visible overshoot before it self-corrects. The optimistic ts matches
-          // the row immediately, so the pin lands the just-sent message on the
-          // first apply. _pinnedUserEl's last-row fallback still covers the case
-          // where a future change does swap the row to the canonical ts.
-          //
-          // Do NOT zero the spacer here. This commit keeps the same last
-          // message (only its ts changes), so sameMessageList skips the
-          // re-render and the layout effect never re-runs to restore a
-          // collapsed spacer; during a thinking pause no ResizeObserver tick
-          // fires either, so a collapse clamps scrollTop to 0 and strands the
-          // pin through the whole quiet window (the 2nd-send-never-pins
-          // strand). The spacer already holds the pin's correct height.
-          modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
-        } else if (freshPin.intentStillCurrent) {
-          settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-        }
+        // The started row carries the same cid the client minted, so the pin
+        // targets that cid directly — no retarget from optimistic to canonical
+        // ts, and no last-row fallback. The funnel owns arming + staleness.
+        pinSentMessage(cid, { willPin, intent: freshPinIntent })
         commitMessages(prev => {
-          return replaceOptimisticWithBatch(prev, userMsg.ts, startedMessages)
+          return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
       }
       if (!hadMessagesRef.current) {
@@ -1981,7 +1886,7 @@ export default function ChatView({
       // silently disappears from the durable chat after refresh.
       commitMessages(prev => {
         const next = [...prev]
-        const idx = findOptimisticUserIndex(next, userMsg.ts)
+        const idx = findUserIndexByCid(next, cid)
         if (idx >= 0) next.splice(idx, 1)
         next.push({
           role: 'assistant',
@@ -2104,8 +2009,15 @@ export default function ChatView({
     // message; if the user was at FOLLOW_BOTTOM they'll see it
     // forming, if ANCHOR_AT they stay where they are.
     try {
+      // Mint a cid for symmetry so the persisted hidden row carries a stable
+      // identity for reload dedup. It is inert here — a hidden answer send
+      // renders no visible user bubble and never pins.
+      const silentCid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
       await streamSend(text, undefined, {
         hidden: true,
+        cid: silentCid,
         answers: resolvedAnswers,
         question_id: questionId,
       })
@@ -2139,11 +2051,11 @@ export default function ChatView({
 
   // Cancel a queued message via DELETE. Optimistic remove; reconcile
   // by re-fetching authoritative state on success or on error.
-  const handleCancelPending = useCallback(async (ts) => {
-    pendingQueue.cancelByTs(ts)
-    forgetQueuedPinIntent({ ts })
+  const handleCancelPending = useCallback(async (cid) => {
+    pendingQueue.cancelByCid(cid)
+    forgetQueuedPinIntent({ cid })
     try {
-      const res = await apiFetch(`/chats/${chatId}/pending/${ts}`, {
+      const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
       })
       const data = await res.json()
@@ -2223,10 +2135,10 @@ export default function ChatView({
       pendingQueue.clear()
 
       let stoppedCleanly = false
-      // The backend reports which queued ts it actually removed. null = an
+      // The backend reports which queued cids it actually removed. null = an
       // older backend without the field (→ fall back to resending all); an
       // array is the authoritative cleared set.
-      let clearedPendingTs = null
+      let clearedPendingCids = null
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
@@ -2253,8 +2165,8 @@ export default function ChatView({
           // Stop landed) is gone from the queue, so it's absent here and
           // must NOT be re-sent — that was the natural-finish-races-Stop
           // double-send (PM 115).
-          if (clearedPendingTs === null && Array.isArray(data?.cleared_pending_ts)) {
-            clearedPendingTs = data.cleared_pending_ts
+          if (clearedPendingCids === null && Array.isArray(data?.cleared_pending_cids)) {
+            clearedPendingCids = data.cleared_pending_cids
           }
         }
         return stopRequestSucceeded({ responseOk: stopRes.ok, data })
@@ -2301,7 +2213,7 @@ export default function ChatView({
       // backend reports it actually cleared, via the SHARED, pure
       // resolveStopResend — ONE code path for both the clean-stop and
       // the timeout branch so they can't drift. The timeout branch used
-      // to ignore clearedPendingTs and re-send the full snapshot
+      // to ignore clearedPendingCids and re-send the full snapshot
       // unconditionally, which double-sent a message the natural turn-end
       // drain had already consumed (cleared set []). The full contract +
       // its tests live in resolveStopResend.js.
@@ -2320,7 +2232,7 @@ export default function ChatView({
         // from authoritative server state would silently drop the queued
         // text (the "Stop ate my message" bug). Restore from the LOCAL
         // snapshot instead, via the same doSend re-send path — and
-        // narrowed by clearedPendingTs through the SHARED resolveResend
+        // narrowed by clearedPendingCids through the SHARED resolveResend
         // (above) so a queued message the natural turn-end drain already
         // consumed (cleared set []) is NOT re-sent here: re-sending it
         // would duplicate the message and risk a duplicate follow-up run.
@@ -2343,7 +2255,7 @@ export default function ChatView({
         // The 2s timeout is NOT surfaced as a user-facing error; only a
         // genuine re-queue POST failure (doSend's catch) shows a block.
         const { text: resendText, attachments: resendAttachments } =
-          resolveResend(clearedPendingTs)
+          resolveResend(clearedPendingCids)
         if (resendText) {
           doSend(resendText, {
             pin: false,
@@ -2374,7 +2286,7 @@ export default function ChatView({
       // set → nothing re-sent (the natural-finish-races-Stop double-send,
       // PM 115), exact match → that subset, partial/legacy → full combined.
       const { text: resendText, attachments: resendAttachments } =
-        resolveResend(clearedPendingTs)
+        resolveResend(clearedPendingCids)
 
       if (resendText) {
         // doSend's guard reads sendingRef/isStreamingRef (just synced to false
@@ -2395,8 +2307,8 @@ export default function ChatView({
 
   // Re-entry guard for handleSteer, peer of handlingStopRef. Two rapid
   // taps on the fast-forward button would otherwise both snapshot the
-  // same queue and both POST a force_steer for the same ts → the second
-  // POST's consume_pending_ts no longer matches pending (the first
+  // same queue and both POST a force_steer for the same cids → the second
+  // POST's consume_pending_cids no longer matches pending (the first
   // already consumed them) and comes back not_steered, but the optimistic
   // double-fire is still wasteful. Synchronous flip at entry, cleared in
   // finally.
@@ -2416,14 +2328,12 @@ export default function ChatView({
     handlingSteerRef.current = true
     try {
       const snapshot = pendingQueue.pendingMessagesRef.current
-      // Only entries with a real numeric SERVER ts can be force-steered:
-      // _force_steer_matches_pending compares consume_pending_ts against
-      // chat.pending_messages[].ts, so an optimistic-only entry whose
-      // queue-POST hasn't been server-acked (its ts is a client Date.now(),
-      // not the server's) would make the match fail. We take the
-      // simpler-correct option: only steer when EVERY queued entry is
-      // serverTs-confirmed (usePendingQueue sets that flag on the
-      // server-origin / swapOptimisticTs / hydrate paths). The button gate
+      // Only server-confirmed entries can be force-steered: the backend
+      // reconstructs the durable rows from chat.pending_messages, so an
+      // optimistic-only entry whose queue-POST hasn't acked yet is not visible
+      // there and its cid selects nothing. We take the simpler-correct option:
+      // only steer when EVERY queued entry is serverTs-confirmed (usePendingQueue
+      // sets that flag on the confirmQueued / hydrate paths). The button gate
       // (canSteer below) keeps the fast-forward hidden until then, so this
       // is belt-and-suspenders — if a stray optimistic entry slips in, bail
       // and leave the queue intact (it drains at turn-end as usual).
@@ -2442,17 +2352,17 @@ export default function ChatView({
       )
       if (!allServerConfirmed) return
 
-      // Build content EXACTLY as the backend expects: the non-empty
-      // trimmed contents joined by "\n\n", in pending order. This must
-      // byte-match _force_steer_matches_pending's `expected` or the
-      // request is rejected (not_steered). consume_pending_ts is every
-      // snapshot entry's ts (the backend selects pending rows by this set
-      // and rebuilds the same join over them).
+      // The provider-facing steer text: the non-empty trimmed contents joined
+      // by "\n\n", in pending order. The backend no longer byte-matches this
+      // against the queue — it selects the durable rows by cid — so the join is
+      // just the text delivered into the live turn. consume_pending_cids is
+      // every snapshot entry's stable cid (the backend selects pending rows by
+      // this set and rebuilds its own rows over them).
       const steerTexts = confirmedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
       const content = steerTexts.join('\n\n')
-      const consumePendingTs = confirmedSnapshot.map(m => m.ts)
+      const consumePendingCids = confirmedSnapshot.map(m => cidOf(m))
       // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
       const seenNames = new Set()
       const attachments = []
@@ -2487,7 +2397,7 @@ export default function ChatView({
         // visible "down, then up" fast-forward jump. Hide only the confirmed
         // rows this request is steering; restore the snapshot below if the
         // backend says the turn was not steered.
-        pendingQueue.promoteManyByTs(consumePendingTs)
+        pendingQueue.promoteManyByCid(consumePendingCids)
         const queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
         const restoreOptimisticSteerQueue = () => {
           // If another path touched the queue while the POST was in flight
@@ -2500,9 +2410,10 @@ export default function ChatView({
         }
         const result = await streamSend(content, attachments, {
           forceSteer: true,
-          consumePendingTs,
+          consumePendingCids,
           steeredMessages: confirmedSnapshot.map(m => ({
             ts: m.ts,
+            cid: cidOf(m),
             content: m.content || '',
             ...(m.attachments ? { attachments: m.attachments } : {}),
           })),
@@ -2511,13 +2422,13 @@ export default function ChatView({
           // The steered rows now render inline (onSteeredIntoTurn promotes
           // them from the SSE event + transcript). Drop them from the local
           // tray. Reconcile against the server's authoritative remaining
-          // queue when present, else remove exactly the steered ts.
+          // queue when present, else remove exactly the steered cids.
           if (Array.isArray(result.pending_messages)) {
             pendingQueue.hydrate(result.pending_messages)
           } else {
-            for (const ts of consumePendingTs) pendingQueue.cancelByTs(ts)
+            for (const c of consumePendingCids) pendingQueue.cancelByCid(c)
           }
-          forgetQueuedPinIntent({ tsList: consumePendingTs })
+          forgetQueuedPinIntent({ cidList: consumePendingCids })
         }
         if (result?.status !== 'steered') {
           steerPinIntentRef.current = null
@@ -3028,12 +2939,17 @@ export default function ChatView({
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
             // fall back to role+ts which is also stable across renders.
             const dataKey = msg.id || `${msg.role}-${msg.ts ?? i}`
+            // User rows key + pin on the stable cid so the optimistic→confirm
+            // display-ts update never remounts the row (which would drop the
+            // pin target mid-swap). data-ts stays for the timestamp tooltip only.
+            const userCid = msg.role === 'user' ? cidOf(msg) : null
             return (
             <li
-              key={msg.id || msg.ts || `${msg.role}-${i}`}
+              key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${msg.role}`}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
+              data-cid={userCid || undefined}
               data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
               onClick={msg.ts && msg.role === 'user'
                 ? (e) => { e.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible') }

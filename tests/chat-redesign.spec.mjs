@@ -305,13 +305,16 @@ test.describe('Bug 2/4: scroll state machine', () => {
   })
 
 
-  test('user messages carry data-ts (for PIN_USER_MSG resolution)', async ({ page }) => {
+  test('user messages carry data-cid (for PIN_USER_MSG resolution)', async ({ page }) => {
     await setupWithStreamMock(page, null)
     await newChat(page)
-    await sendMessage(page, 'Send with ts')
-    // First user msg should have data-ts set to its timestamp.
-    const userMsgs = await page.locator('.chat__msg--user[data-ts]').count()
-    expect(userMsgs).toBeGreaterThan(0)
+    await sendMessage(page, 'Send with cid')
+    // The pin resolves the user row by its stable cid (data-cid). data-ts is
+    // kept too, but only for the timestamp tooltip (display metadata).
+    const pinnable = await page.locator('.chat__msg--user[data-cid]').count()
+    expect(pinnable).toBeGreaterThan(0)
+    const withTs = await page.locator('.chat__msg--user[data-ts]').count()
+    expect(withTs).toBeGreaterThan(0)
   })
 
 

@@ -3,19 +3,50 @@ import assert from 'node:assert/strict'
 
 import {
   canFastForwardQueue,
+  cidOf,
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
   previewReadyAnnouncement,
-  resolveFreshPinRetarget,
-  resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
   stopConfirmedIdle,
   stopRequestSucceeded,
+  stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+
+test('cidOf returns the client cid, else derives legacy-<ts>, else null', () => {
+  assert.equal(cidOf({ cid: 'abc', ts: 5 }), 'abc')
+  assert.equal(cidOf({ ts: 5 }), 'legacy-5')
+  assert.equal(cidOf({ ts: 0 }), 'legacy-0')
+  assert.equal(cidOf({}), null)
+  assert.equal(cidOf(null), null)
+})
+
+test('legacy derivation matches on both wire sides for a cid-less row', () => {
+  // The backend cid_of derives the same value for a pre-cid row, so a derived
+  // id compares equal across the wire (e.g. cancel/consume by legacy-<ts>).
+  const row = { role: 'user', content: 'x', ts: 1720000000000 }
+  assert.equal(cidOf(row), 'legacy-1720000000000')
+})
+
+test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {
+  const kept = stripInternalUserMessageFields({
+    role: 'user', content: 'hi', ts: 7, cid: 'keep-me',
+    queued: true, position: 2, _consumed_cids: ['a'], _messages: [{}],
+    _agent_content: 'x',
+  })
+  assert.equal(kept.cid, 'keep-me')
+  assert.equal(kept.queued, undefined)
+  assert.equal(kept.position, undefined)
+  assert.equal(kept._consumed_cids, undefined)
+  assert.equal(kept._messages, undefined)
+  assert.equal(kept._agent_content, undefined)
+  assert.equal(kept.content, 'hi')
+  assert.equal(kept.ts, 7)
+})
 
 test('startedMessagesFromResponse preserves backend _messages as separate visible rows', () => {
   const rows = startedMessagesFromResponse({
@@ -32,7 +63,8 @@ test('startedMessagesFromResponse preserves backend _messages as separate visibl
   assert.deepEqual(rows.map(r => r.content), ['A', 'B'])
   assert.deepEqual(rows.map(r => r.ts), [10, 11])
   assert.equal(rows[0].queued, undefined)
-  assert.equal(rows[0].cid, undefined)
+  // cid now SURVIVES the strip — it is the durable row identity.
+  assert.equal(rows[0].cid, 'x')
 })
 
 test('continuationRowsFromPromotedMessage prefers backend _messages over local combined row', () => {
@@ -121,67 +153,6 @@ test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () 
     { role: 'user', content: 'waiting for canonical ts', ts: 6, serverTs: false },
   ]), true)
 })
-
-test('resolveSteeredPinDecision falls back to live scroll when local intent is missing', () => {
-  assert.deepEqual(resolveSteeredPinDecision({
-    pinTargetTs: 123,
-    pinIntent: null,
-    fallbackWillPin: () => true,
-  }), {
-    intentStillCurrent: true,
-    shouldPin: true,
-  })
-
-  assert.deepEqual(resolveSteeredPinDecision({
-    pinTargetTs: 123,
-    pinIntent: null,
-    fallbackWillPin: () => false,
-  }), {
-    intentStillCurrent: true,
-    shouldPin: false,
-  })
-})
-
-test('resolveSteeredPinDecision honors stale local intent over fallback', () => {
-  assert.deepEqual(resolveSteeredPinDecision({
-    pinTargetTs: 123,
-    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
-    pinIntentStillCurrent: () => false,
-    fallbackWillPin: () => true,
-  }), {
-    intentStillCurrent: false,
-    shouldPin: false,
-  })
-})
-
-test('resolveFreshPinRetarget moves pin from optimistic ts to canonical server ts', () => {
-  assert.deepEqual(resolveFreshPinRetarget({
-    startedMessages: [{ role: 'user', content: 'hello', ts: 222 }],
-    fallbackTs: 111,
-    willPin: true,
-    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
-    pinIntentStillCurrent: () => true,
-  }), {
-    pinTargetTs: 222,
-    intentStillCurrent: true,
-    shouldPin: true,
-  })
-})
-
-test('resolveFreshPinRetarget yields to a user scroll after submit', () => {
-  assert.deepEqual(resolveFreshPinRetarget({
-    startedMessages: [{ role: 'user', content: 'hello', ts: 222 }],
-    fallbackTs: 111,
-    willPin: true,
-    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
-    pinIntentStillCurrent: () => false,
-  }), {
-    pinTargetTs: 222,
-    intentStillCurrent: false,
-    shouldPin: false,
-  })
-})
-
 
 test('stopRequestSucceeded requires a confirmed backend stop', () => {
   assert.equal(stopRequestSucceeded({ responseOk: true, data: { stopped: true } }), true)
