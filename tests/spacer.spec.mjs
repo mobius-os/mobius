@@ -965,13 +965,12 @@ test.describe('Scroll edge cases', () => {
     expect(afterGap).toBeLessThan(50)
   })
 
-  test('26. Fresh second send while scrolled up PINS to the top (deliberate new turn)', async ({ page }) => {
-    // Owner rule (2026-07-12, third revision): a FRESH send — the chat is
-    // idle, the user typed and hit send — is a deliberate new turn and
-    // always lifts the new message to the top, regardless of where the
-    // reader was scrolled. Only mid-turn sends (queue/steer while the
-    // agent is streaming) preserve the reading position; those paths keep
-    // the at-bottom heuristic and are locked in by the queue/steer specs.
+  test('26. Second send while scrolled up (reading) does NOT pin to the top', async ({ page }) => {
+    // Under the send rule, a second send while the user is scrolled up
+    // (reading, possibly with something queued) must NOT pin to the top —
+    // the reader stays where they were; the message just appends. Pre-rule
+    // this test asserted the opposite (a scroll-up second send still
+    // pinned); the owner reversed that: don't yank a reader.
     //
     // Uses the REAL SSE path (not injectContent) so the long first
     // response PERSISTS across the second send — DOM-injected content
@@ -1026,11 +1025,11 @@ test.describe('Scroll edge cases', () => {
     })
     expect(userMsgs).toContain('Second message')
 
-    // CRITICAL: PINNED — the fresh send lifted the new message flush to
-    // the top of the viewport (PIN_OFFSET=4, small settle tolerance).
+    // CRITICAL: NOT pinned — the message is not flush at the top, and the
+    // scroll did not jump there. The reader stays put.
     const after = await measure(page)
-    expect(after.userVisualTop).toBeGreaterThanOrEqual(-2)
-    expect(after.userVisualTop).toBeLessThanOrEqual(12)
+    expect(after.userVisualTop).toBeGreaterThan(50)
+    expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
   })
 
   test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {

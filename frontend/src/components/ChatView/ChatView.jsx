@@ -1787,19 +1787,21 @@ export default function ChatView({
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
 
-    // A fresh send is a deliberate new turn, so it ALWAYS lifts the new message
-    // to the top of the viewport (its reply streams in below) — the partner's
-    // single most important chat behavior. The previous rule ("pin only when
-    // it's the first message OR the reader is already at the bottom") silently
-    // skipped the lift whenever you sent after reading a long reply from the
-    // top, which is exactly the "messages don't go to the top" report: after a
-    // tall reply you are almost never within NEAR_BOTTOM_PX of the content tail,
-    // so shouldPinSend returned false and the send stayed put mid-conversation.
-    // The at-bottom heuristic still governs the QUEUE and STEER paths (their own
-    // shouldPinSend calls above), so sending MID-TURN while scrolled up to read
-    // is not yanked. `pin` stays the caller opt-out (handleStop's queue-collapse
-    // passes pin:false).
-    const willPin = pin
+    // The send rule (see shouldPinSend): pin the new message to the top
+    // only when it is the first message OR the user is at the bottom.
+    // Read both inputs BEFORE the append: `hasPriorVisibleUser` from the
+    // synchronous messagesRef (commitMessages advances it eagerly), and
+    // the at-bottom snapshot from the pre-append scrollHeight. `pin` is
+    // the caller opt-out (handleStop's queue-collapse passes pin:false).
+    const isFirstUserMsg = !messagesRef.current.some(
+      m => m.role === 'user' && !m.hidden,
+    )
+    const willPin = pin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg,
+      wasNearScrollBottom: wasNearContentBottomAtSubmit,
+    })
     // The first rendered row uses this optimistic ts, but the backend often
     // returns a canonical server ts a moment later. Carry the send-time intent
     // across that swap so the "new sent message at the top" pin does not point
