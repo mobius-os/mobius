@@ -19,9 +19,19 @@ async def chat_stop(
 ):
   """Stops the agent subprocess and clears its session.
 
-  `cleared_pending_ts` is the ts of the queued messages this Stop actually
-  removed; the frontend resends only those so a queued message the turn-end
-  drain already promoted into a continuation isn't double-sent (PM 115).
+  `cleared_pending_cids` is the stable `cid` of the queued messages this Stop
+  actually removed; the frontend resends only those so a queued message the
+  turn-end drain already promoted into a continuation isn't double-sent
+  (PM 115).
   """
-  stopped, cleared_pending_ts = await stop_chat(body.chat_id or None, db=db)
-  return {"stopped": stopped, "cleared_pending_ts": cleared_pending_ts}
+  stopped, cleared_pending_cids, cleared_pending_ts = await stop_chat(
+    body.chat_id or None, db=db,
+  )
+  # `cleared_pending_ts` is a deploy-window bridge: a stale service-worker
+  # bundle reads only that field, and without it the old client falls back to
+  # resending its full queue snapshot — the exact duplicate PM-115 closed.
+  return {
+    "stopped": stopped,
+    "cleared_pending_cids": cleared_pending_cids,
+    "cleared_pending_ts": cleared_pending_ts,
+  }

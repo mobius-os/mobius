@@ -447,23 +447,39 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
 `backend/tests/test_chats_stream_steer`) encode this:
 
-- **R1** First message always pins to the viewport top, reserving bottom room for
-  the streaming reply.
-- **R2** Subsequent messages always reserve enough space, but only MOVE the scroll
-  if the user is at the bottom (the autoscroll zone). Scrolled-up/reading → the
-  viewport must NOT jump (the load-bearing guarantee is "don't move a reading
-  user", not "spacer is zero"). At-bottom is read from `scrollTop` before the
-  append (`shouldPinSend`/`isNearScrollBottom` in `useScrollMode.js`), not a
-  sentinel.
+- **R0 — Two modes.** A chat is either in **auto-scroll** (following the tail as the
+  reply streams) or **hold** (staying put — the just-sent message pinned at the top,
+  or a frozen reading position). A new or reopened chat starts in **hold**, even
+  after its first message. Auto-scroll engages ONLY when the user manually scrolls to
+  within 50px of the bottom (`NEAR_BOTTOM_PX`), and it does NOT survive leaving the
+  chat (see R4).
+- **R1 — Reserve on every send.** Every user message — fresh, queued, or steered —
+  activates the dynamic bottom spacer so the message CAN sit at the viewport top,
+  unless the message is taller than the viewport (`max(0, …)`). Reservation is
+  independent of whether the viewport actually moves.
+- **R2 — Pin gates on MODE, not turn-state.** The viewport lifts the new message to
+  the top iff it is the chat's **first message** OR the chat is in **auto-scroll** (at
+  the bottom) at submit time; a send while in **hold / scrolled-up** reserves space
+  but must NOT move the reader (the load-bearing guarantee is "don't move a reading
+  user", not "spacer is zero"). At-bottom is read from `scrollTop` before the append
+  (`shouldPinSend`/`isNearScrollBottom` in `useScrollMode.js`), not a sentinel.
+  **This narrows the earlier "every fresh send lifts the new message to the top" rule
+  (commit `9b9ab86b`):** a fresh send made while you are reading earlier history is
+  treated like a mid-turn send — reserve, but don't yank you down. The only
+  unconditional pins are the first message and an at-bottom (auto-scroll) send. Owner
+  decision 2026-07-12; `CLAUDE.md`/`AGENTS.md` constraint #1 has been updated to
+  match.
 - **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
 - **R4** Leave-and-return restores the same scroll position, even mid-stream
   (hide-then-reveal + the versioned snapshot cache).
 - **Steer = separate rows, one turn.** Steered queued messages render as separate
   transcript rows in send order (`insertMessageBatchByTs`), never one stranded
   after the reply. The agent receives them joined by `\n\n` (clean paragraphs,
-  not a `\n` blob) — matched byte-for-byte FE (`handleSteer`) + BE
-  (`_selected_force_steer_pending`). The fast-forward button shows only when every
-  queued row is server-confirmed (`canFastForwardQueue`); confirm on a numeric ts.
+  not a `\n` blob). The request binds to specific queued rows by their stable
+  `cid` (`consume_pending_cids`; `_selected_force_steer_pending` selects by cid) —
+  the earlier byte-for-byte content match existed only because no shared id
+  crossed the wire, and is gone. The fast-forward button shows only when every
+  queued row is server-confirmed (`canFastForwardQueue`; the `serverTs` flag).
   A steer landing before any renderable assistant output seals nothing — the
   empty/whitespace pre-steer segment is dropped symmetrically on the live path
   (`streamPromotion.streamItemsHaveRenderableContent`) and the persisted path
@@ -472,6 +488,63 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   seals, correctly placed before it (card 166). Keep the two predicates aligned.
 - **Regression guards (owner-observed prod bugs):** an at-bottom send must not land
   mid-viewport; a steered row must not render after the agent's reply.
+
+### Tool output rendering
+
+Tool runs are **grouped** so the reader sees at a glance what is running vs finished
+(`ToolActivityGroup` folds adjacent runs into one collapsed-by-default card; per-tool
+status only ever goes `running → done`, with failure derived from a nonzero exit
+code, never a block status). Output is **lazy**: the chat-load payload ships a reduced
+form (outputs over ~4KB are dropped to a length marker in the `routes/chats.py`
+serializer), and the FULL output is fetched only when the block is expanded (`GET
+/api/chats/{id}/tool-output`). Small outputs stay inline; live streaming is unchanged.
+
+### Chat summary + continuity contract
+
+Each chat maintains a **growing per-chat note** at
+`/data/shared/memory/chats/<chat-id>/index.md` — durable facts + the partner's intent
++ a running summary, plus a one-line **gist that IS the chat title**
+(`backend/scripts/chat_note.py` summarizer subagent: transcript in the prompt, no
+tools). This note is **core continuity** — it exists and is useful even when the
+Memory app is not installed. Its consumers:
+
+- **Short-term memory into new chats.** A fresh chat opens with the full summaries of
+  the ~10 most-recently-modified chats, injected as continuity (`backend/app/memory.py`
+  core mode); the one-line gist lets the agent decide whether to open the fuller note.
+- **Knowledge graph (Memory-app extension).** If the Memory app is installed and set
+  up, its scheduled runner grows the wider graph (`mocs/`, `notes/`, `graph.json`,
+  `.ready`) FROM these per-chat notes. The graph is an extension, not core; boot only
+  provisions the per-chat surface (`backend/scripts/init_memory_store.py`).
+- **Reflection.** Without the Memory app, the per-chat summaries are what Reflection
+  reads.
+- **Compaction + provider switch.** The running summary is the source for compacting a
+  long chat and for the provider-switch handoff below — preferred over a from-scratch
+  default compaction.
+
+(Actively being built — keep this section in step with `chat_note.py`, `memory.py`,
+and `init_memory_store.py` as that lands.)
+
+### Provider switch (compaction handoff)
+
+Sessions are not portable across providers, so switching provider mid-chat
+**summarizes first**: the composer confirms, POSTs `/chats/{id}/compact`
+(`backend/app/compaction.py` runs a tool-free summarize turn → a portable brief),
+then PATCHes provider+model+effort; the brief is replayed into the NEW provider's
+first turn as a `<compacted_chat>` block, so the new agent continues from the summary
+rather than a cold start. Same-provider model swaps skip compaction (context is
+preserved in-session). Cross-provider models are locked out of the picker after the
+first assistant turn.
+
+### Staying aligned (enforcement)
+
+This section is the **owner-authoritative source of truth** for chat UX; the
+gitignored `CLAUDE.md` / `docs/*` copies must not diverge from it (when they do, this
+wins — see the `CLAUDE.md` "fresh send always pins" note under R2). Alignment is held
+by the lock-in Playwright specs above **plus** three harnesses tracked in `.pm/` that
+exist specifically to keep prod matching this contract: a runtime chat-contract
+monitor on the live shell (`208`), a deterministic chat-states gallery with geometry
+goldens (`209`), and an SSE event-replay harness (`210`). Changing a rule here means
+updating those specs in the same change.
 
 ## Stop-chat contract
 

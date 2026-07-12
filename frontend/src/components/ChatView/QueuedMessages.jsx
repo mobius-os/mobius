@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { stripAugmentation } from './msgText.js'
+import { cidOf } from './chatRuntimeState.js'
 
 const TRUNCATE_AT = 80
 
@@ -24,13 +25,12 @@ export default function QueuedMessages({ items, onCancel }) {
 
   if (!items || items.length === 0) return null
 
-  // Stable key: prefer `cid` (assigned by ChatView either fresh-uuid
-  // for optimistic entries or `s-<ts>` for server-hydrated). Fall back
-  // to ts for any legacy entry that lacks one. Using ts alone breaks
-  // when the optimistic ts is replaced by the server ts — React
-  // re-mounts the row under the new key and loses the expanded state.
+  // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
+  // derivation for pre-cid rows). cid is minted once at compose time and
+  // never changes across the optimistic→confirm ts update, so the row keeps
+  // its expanded state instead of remounting under a new key.
   function keyOf(msg) {
-    return msg.cid ?? `t-${msg.ts}`
+    return cidOf(msg)
   }
 
   function toggle(key) {
@@ -132,7 +132,7 @@ export default function QueuedMessages({ items, onCancel }) {
                   type="button"
                   className="queued__cancel"
                   onPointerDown={(e) => e.preventDefault()}
-                  onClick={() => onCancel?.(msg.ts)}
+                  onClick={() => onCancel?.(cidOf(msg))}
                   aria-label="Cancel queued message"
                   title="Cancel"
                 >

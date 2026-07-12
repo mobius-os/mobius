@@ -156,8 +156,8 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   connectionError: string | null,
  *   reconnecting: boolean,
  *   sendMessage: (text: string, attachments?: Array<object>,
- *                 opts?: {hidden?: boolean, queueOnly?: boolean,
- *                         forceSteer?: boolean, consumePendingTs?: number[],
+ *                 opts?: {hidden?: boolean, queueOnly?: boolean, cid?: string,
+ *                         forceSteer?: boolean, consumePendingCids?: string[],
  *                         answers?: object}) => Promise<object>,
  *   connectToStream: () => void,
  *   retry: () => void,
@@ -1080,7 +1080,8 @@ export default function useStreamConnection(chatId, {
       hidden = false,
       queueOnly = false,
       forceSteer = false,
-      consumePendingTs = undefined,
+      cid = undefined,
+      consumePendingCids = undefined,
       steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
@@ -1120,9 +1121,10 @@ export default function useStreamConnection(chatId, {
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
+      if (cid) body.cid = cid
       if (forceSteer) body.force_steer = true
-      if (consumePendingTs && consumePendingTs.length > 0) {
-        body.consume_pending_ts = consumePendingTs
+      if (consumePendingCids && consumePendingCids.length > 0) {
+        body.consume_pending_cids = consumePendingCids
       }
       if (forceSteer && Array.isArray(steeredMessages) && steeredMessages.length > 0) {
         body.steered_messages = steeredMessages

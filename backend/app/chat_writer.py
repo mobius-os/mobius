@@ -289,7 +289,7 @@ class AppendSteeredUserMessage(_Command):
   run_token: str = ""
   user_msg: dict = field(default_factory=dict)
   user_msgs: list[dict] = field(default_factory=list)
-  consume_pending_ts: list[int] = field(default_factory=list)
+  consume_pending_cids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -317,16 +317,16 @@ class PromotePending(_Command):
 
 @dataclass
 class CancelPending(_Command):
-  """Remove a queued (not-yet-started) message by its `ts`.
+  """Remove a queued (not-yet-started) message by its stable `cid`.
 
-  Replicates the `DELETE /pending/{ts}` route: drops the entry whose `ts`
-  matches, stamps `updated_at` only when something changed, commits.
+  Replicates the `DELETE /pending/{cid}` route: drops the entry whose
+  `cid_of` matches, stamps `updated_at` only when something changed, commits.
   Returns `{"pending"}` — the remaining queue.
   """
 
   chat_id: str = ""
   run_token: str = ""
-  ts: int = 0
+  cid: str = ""
 
 
 @dataclass
@@ -1340,6 +1340,11 @@ class ChatWriterActor:
         content=cmd.user_msg.get("content", "") or "",
       )
     )
+    # Same monotonic-display-ts guarantee as every other append path: the
+    # client's batch insert/dedup still key ORDERING on ts, so a same-ms
+    # collision with the last transcript row must bump, never collide
+    # (identity is the cid and is untouched by the bump).
+    _ensure_unique_ts(cmd.user_msg, existing)
     existing.append(cmd.user_msg)
     chat.messages = existing
     if len(existing) == 1:
@@ -1393,6 +1398,26 @@ class ChatWriterActor:
     new_msg = dict(cmd.user_msg)
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    # Idempotent append: `cid` is untrusted client input, and a retried POST
+    # (flaky network, double-tap) carries the SAME cid. If that cid already
+    # names a durable row — queued OR already promoted into the transcript —
+    # treat this as a duplicate POST retry and return the existing row without
+    # appending a twin. The answer merge above still ran (harmless if already
+    # applied). cid is never an auth boundary — this only de-dups retries.
+    #
+    # Gate on an EXPLICIT client cid, not the legacy-<ts> derivation: two
+    # distinct pre-cid sends can share an optimistic ts (Date.now() collision),
+    # and their derived ids would collide — deduping them would drop a real
+    # message. A legacy client's retries can't be deduped by cid anyway (it
+    # sends none), so this only ever fires for a genuine cid-carrying retry.
+    incoming_cid = new_msg.get("cid")
+    if incoming_cid is not None:
+      for existing in pending:
+        if cid_of(existing) == incoming_cid:
+          return {"stored": existing, "pending": pending}
+      for existing in list(chat.messages or []):
+        if existing.get("role") == "user" and cid_of(existing) == incoming_cid:
+          return {"stored": existing, "pending": pending}
     _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
     if cmd.front:
       pending.insert(0, new_msg)
@@ -1434,12 +1459,12 @@ class ChatWriterActor:
       raise _PersistFailed("AppendSteeredUserMessage had no user messages")
 
     pending = list(chat.pending_messages or [])
-    if cmd.consume_pending_ts:
-      pending_ts = {m.get("ts") for m in pending}
-      missing_ts = [
-        ts for ts in cmd.consume_pending_ts if ts not in pending_ts
+    if cmd.consume_pending_cids:
+      pending_cids = {cid_of(m) for m in pending}
+      missing_cids = [
+        cid for cid in cmd.consume_pending_cids if cid not in pending_cids
       ]
-      if missing_ts:
+      if missing_cids:
         # A row named for consumption is no longer in pending — a concurrent
         # Stop cleared the queue between the fast-forward's acceptance and this
         # (now runner-deferred) write. Do NOT raise: the steered rows were
@@ -1447,49 +1472,48 @@ class ChatWriterActor:
         # transcript, or the fast-forwarded message silently vanishes. Append
         # them anyway and consume whatever is still present. (Double-consume of
         # the SAME row is prevented upstream: the frontend guards against two
-        # fast-forwards of one ts, and the route validates against live
+        # fast-forwards of one cid, and the route validates against live
         # pending.)
         log.warning(
           "AppendSteeredUserMessage pending rows already gone chat_id=%s "
-          "ts=%s; appending steered rows anyway",
-          cmd.chat_id, ",".join(str(ts) for ts in missing_ts),
+          "cid=%s; appending steered rows anyway",
+          cmd.chat_id, ",".join(str(c) for c in missing_cids),
         )
     used_messages = msgs + pending
-
-    def _steer_dedup_key(m: dict):
-      content = m.get("content")
-      return (m.get("ts"), content if isinstance(content, str) else repr(content))
 
     # Authoritative idempotency (defense-in-depth behind the runner-side dedup).
     # A queued row must never become two durable transcript entries. A repeated
     # force-steer of the same still-live pending row can deliver the same message
-    # more than once in a single drain; key on the ORIGINAL (pre-bump) ts +
-    # content so only a true re-delivery of one queued row is dropped. Genuinely
-    # distinct sends always carry a distinct pending ts, so this can't drop a
-    # real message. Runs on the single-writer thread — no lost-update risk.
-    seen_keys = {
-      _steer_dedup_key(m) for m in msgs if m.get("role") == "user"
+    # more than once in a single drain; key on the stable `cid` so only a true
+    # re-delivery of one queued row is dropped. Genuinely distinct sends always
+    # carry a distinct cid — even two sends with identical text — so this can't
+    # drop a real message (the old (ts,content) key relied on the +1ms ts bump
+    # to keep them distinct, which is exactly how a real duplicate once got
+    # disguised as distinct). Runs on the single-writer thread — no lost-update.
+    seen_cids = {
+      cid_of(m) for m in msgs if m.get("role") == "user"
     }
     stored_messages: list[dict] = []
     for raw_msg in raw_user_msgs:
-      key = _steer_dedup_key(raw_msg)
-      if raw_msg.get("ts") is not None and key in seen_keys:
+      key = cid_of(raw_msg)
+      if key is not None and key in seen_cids:
         log.warning(
           "AppendSteeredUserMessage dropping duplicate steered row "
-          "chat_id=%s ts=%s", cmd.chat_id, raw_msg.get("ts"),
+          "chat_id=%s cid=%s", cmd.chat_id, key,
         )
         continue
-      seen_keys.add(key)
+      if key is not None:
+        seen_cids.add(key)
       new_msg = dict(raw_msg)
       _ensure_unique_ts(new_msg, used_messages)
       msgs.append(new_msg)
       used_messages.append(new_msg)
       stored_messages.append(new_msg)
     chat.messages = msgs
-    if cmd.consume_pending_ts:
-      consumed = set(cmd.consume_pending_ts)
+    if cmd.consume_pending_cids:
+      consumed = set(cmd.consume_pending_cids)
       chat.pending_messages = [
-        m for m in pending if m.get("ts") not in consumed
+        m for m in pending if cid_of(m) not in consumed
       ]
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)
@@ -1562,14 +1586,14 @@ class ChatWriterActor:
     promoted_group = pending[:promote_count]
     remaining_pending = pending[promote_count:]
     agent_pending = _combine_pending_messages(promoted_group)
-    consumed_ts = agent_pending.pop("_consumed_ts", [])
+    consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
     stored_messages = _pending_messages_for_transcript(
       promoted_group, existing,
     )
     returned_promoted = {
       **agent_pending,
-      "_consumed_ts": consumed_ts,
+      "_consumed_cids": consumed_cids,
       "_messages": stored_messages,
     }
     # Build the next-turn history as schemas.ChatMessage objects BEFORE
@@ -1638,10 +1662,11 @@ class ChatWriterActor:
     }
 
   def _cancel_pending(self, db, cmd: CancelPending) -> dict:
-    """Remove the queued message whose `ts` matches; return the remainder.
+    """Remove the queued message whose `cid` matches; return the remainder.
 
-    Replicates the `DELETE /pending/{ts}` route: stamps `updated_at` and
-    commits only when something was removed.
+    Replicates the `DELETE /pending/{cid}` route: stamps `updated_at` and
+    commits only when something was removed. Matching on `cid_of` covers
+    both a client-minted cid and a legacy `legacy-<ts>` derivation.
     """
     from datetime import UTC, datetime
 
@@ -1651,7 +1676,14 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("CancelPending: chat not found")
     pending = list(chat.pending_messages or [])
-    remaining = [m for m in pending if m.get("ts") != cmd.ts]
+    remaining = [m for m in pending if cid_of(m) != cmd.cid]
+    # Deploy-window bridge (lenient read): a stale service-worker bundle still
+    # cancels by raw ts (`DELETE /pending/<ts>`). A bare-digits key that
+    # matched no cid is treated as that legacy form and matched against the
+    # row's display ts, so the old client's X-button keeps working for the one
+    # session it survives. New clients always send the cid.
+    if len(remaining) == len(pending) and cmd.cid.isdigit():
+      remaining = [m for m in pending if str(m.get("ts")) != cmd.cid]
     if len(remaining) != len(pending):
       chat.pending_messages = remaining
       chat.updated_at = datetime.now(UTC)
@@ -1660,14 +1692,15 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
-    """Empty the pending queue; return the count + the cleared timestamps.
+    """Empty the pending queue; return the count + the cleared cids.
 
     Commits only when the queue was non-empty — clearing an already-empty
-    queue is a no-op and skips the commit. `cleared_ts` is the ts of every
-    message actually removed (empty when the queue was already empty), which
-    is how Stop tells apart a message it truly cleared from one the turn-end
-    drain already promoted into a continuation — see stop_chat_for and the
-    natural-finish-races-Stop guard in ChatView.handleStop.
+    queue is a no-op and skips the commit. `cleared_cids` is the stable `cid`
+    of every message actually removed (empty when the queue was already
+    empty), which is how Stop tells apart a message it truly cleared from one
+    the turn-end drain already promoted into a continuation — see
+    stop_chat_for and the natural-finish-races-Stop guard in
+    ChatView.handleStop.
     """
     from app.models import Chat
 
@@ -1675,13 +1708,18 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("ClearPending: chat not found")
     pending = list(chat.pending_messages or [])
+    cleared_cids = [cid_of(m) for m in pending if cid_of(m) is not None]
+    # Deploy-window bridge: a stale service-worker bundle (old client) reads
+    # only `cleared_pending_ts` from the Stop response. Surface the ts list
+    # alongside the cids so that client keeps its PM-115 narrowing instead of
+    # silently falling back to a full-snapshot resend.
     cleared_ts = [m.get("ts") for m in pending if m.get("ts") is not None]
     cleared = len(pending)
     if cleared:
       chat.pending_messages = []
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearPending did not persist")
-    return {"cleared": cleared, "cleared_ts": cleared_ts}
+    return {"cleared": cleared, "cleared_cids": cleared_cids, "cleared_ts": cleared_ts}
 
   def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
     """Replace the whole `messages` blob (and optional title); commit.
@@ -2001,14 +2039,36 @@ class _PersistFailed(Exception):
 # dependency runs one way (chat.py -> chat_writer).
 
 
+def cid_of(msg: dict) -> str | None:
+  """The stable identity of a user message.
+
+  A client-minted `cid` (see schemas.SendMessage.cid) is the canonical
+  identity — React key, DOM pin target, queue cancel key, steer dedup key.
+  A pre-cid (legacy) row derives `legacy-<ts>` at read time so the same
+  value is produced on both sides of every comparison (the frontend read
+  normalizer and this backend echo / selection). `ts` is unique within a
+  chat, so the derived id is stable and collision-free for the life of the
+  row. Returns None for a row with neither cid nor ts.
+  """
+  if not isinstance(msg, dict):
+    return None
+  cid = msg.get("cid")
+  if cid:
+    return cid
+  ts = msg.get("ts")
+  return f"legacy-{ts}" if ts is not None else None
+
+
 def _ensure_unique_ts(new_msg: dict, others: list) -> None:
   """Bump `new_msg['ts']` so it's strictly greater than every ts in `others`.
 
-  Used by the `AppendPending` command — two sends in the same millisecond
-  would otherwise collide, producing duplicate React keys client-side and
-  ambiguous DELETE-by-ts.  Callers pass the union of pending + persisted
-  messages (so a queued ts can't equal a persisted assistant ts once it
-  promotes).
+  DEMOTED: `ts` is display/ordering metadata only — message identity is now
+  `cid` (React keys, DELETE-by-cid, steer dedup all key on it). This bump no
+  longer serves identity; it keeps the display `ts` strictly monotonic within
+  a chat so the timestamp tooltip stays sane and the ts-ordered transcript
+  batch inserts (`insertMessageBatchByTs`, `appendMessageBatch` seenTs) sort
+  deterministically. Callers pass the union of pending + persisted messages so
+  a queued ts stays past every persisted/assistant ts once it promotes.
   """
   if not others:
     return
@@ -2057,8 +2117,8 @@ def _combine_pending_messages(pending: list[dict]) -> dict:
     "role": "user",
     "content": "\n".join(contents),
     "ts": first.get("ts"),
-    "_consumed_ts": [
-      msg.get("ts") for msg in pending if msg.get("ts") is not None
+    "_consumed_cids": [
+      cid_of(msg) for msg in pending if cid_of(msg) is not None
     ],
   }
   if attachments:
@@ -2087,6 +2147,12 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
+    # Materialize the identity BEFORE the ts bump. A legacy (cid-less) row's
+    # derived identity is legacy-<ts>; if _ensure_unique_ts bumps the ts first,
+    # the stored row would derive a DIFFERENT legacy cid than the one the
+    # consume/steer paths recorded from the queue snapshot, and cid-keyed
+    # dedup would let the same message persist twice.
+    msg["cid"] = cid_of(msg)
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)

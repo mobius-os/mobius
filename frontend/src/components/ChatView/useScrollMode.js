@@ -9,7 +9,8 @@
  *
  * Modes:
  *   { kind: 'INITIAL' }           — pre-restore default; no-op
- *   { kind: 'PIN_USER_MSG', ts }  — user msg at top (post-send)
+ *   { kind: 'PIN_USER_MSG', cid }  — user msg at top (post-send), keyed
+ *                                    on the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
  *   { kind: 'ANCHOR_AT', key, offset }  — anchored at a specific msg
  *
@@ -32,6 +33,7 @@
  */
 
 import { useState, useRef, useLayoutEffect } from 'react'
+import { cidOf } from './chatRuntimeState.js'
 
 
 // Hide-then-reveal safety cap. Code-block-heavy chats with KaTeX and
@@ -97,27 +99,27 @@ export function anchorModeFromScroll(scrollEl) {
 }
 
 
-/** Resolve the DOM row a PIN_USER_MSG targets.
+/** Resolve the DOM row a PIN_USER_MSG targets: the user row whose
+ *  `data-cid` equals the mode's cid.
  *
- *  Primary: the user row whose data-ts equals the mode's ts.
- *
- *  Fallback: the LAST user row. A fresh (non-queued) send renders its row with
- *  the OPTIMISTIC client ts and — unlike the queue path — never reconciles that
- *  data-ts to the canonical server ts the backend assigns (the divergence
- *  survives reload). resolveFreshPinRetarget re-points the pin at that canonical
- *  ts, so an exact-ts lookup finds nothing and the pin silently no-ops on every
- *  subsequent send: the first message hides it (it already sits at content top),
- *  later ones get stranded mid-viewport ("the message doesn't reach the top /
- *  doesn't get enough space"). A live PIN_USER_MSG always means "the message I
- *  just sent" == the last user row, so falling back to it lands the message at
- *  the top no matter which ts the row happens to carry. */
-function _pinnedUserEl(scrollEl, ts) {
+ *  A strict exact match with NO last-row fallback. The pinned row carries its
+ *  final `cid` from mint (the same value the optimistic row and the confirmed
+ *  server row share), so the exact selector always resolves the just-sent row —
+ *  the ts-swap that once broke the exact lookup (and forced a last-row
+ *  fallback) cannot happen anymore. */
+function _pinnedUserEl(scrollEl, cid) {
+  if (!scrollEl || cid == null) return null
+  const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(cid) : cid
+  return scrollEl.querySelector(`.chat__msg--user[data-cid="${esc}"]`)
+}
+
+/** The LAST user row in the DOM — for the one spacer-geometry caller that
+ *  legitimately wants "the newest user row" independent of pin identity (a
+ *  transiently-null lastUserMsgRef during a render swap). Kept separate from
+ *  `_pinnedUserEl` so the pin selector stays strict. */
+function _lastUserRowEl(scrollEl) {
   if (!scrollEl) return null
-  if (ts != null) {
-    const exact = scrollEl.querySelector(`.chat__msg--user[data-ts="${ts}"]`)
-    if (exact) return exact
-  }
-  const rows = scrollEl.querySelectorAll('.chat__msg--user[data-ts]')
+  const rows = scrollEl.querySelectorAll('.chat__msg--user[data-cid]')
   return rows.length ? rows[rows.length - 1] : null
 }
 
@@ -129,7 +131,7 @@ export function applyMode(scrollEl, mode) {
     case 'INITIAL':
       return
     case 'PIN_USER_MSG': {
-      const el = _pinnedUserEl(scrollEl, mode.ts)
+      const el = _pinnedUserEl(scrollEl, mode.cid)
       if (el) scrollEl.scrollTop = Math.max(0, el.offsetTop - PIN_OFFSET)
       return
     }
@@ -152,7 +154,7 @@ export function applyMode(scrollEl, mode) {
 
 export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
   if (!scrollEl || mode?.kind !== 'PIN_USER_MSG') return false
-  const el = _pinnedUserEl(scrollEl, mode.ts)
+  const el = _pinnedUserEl(scrollEl, mode.cid)
   if (!el) return false
   const target = Math.max(0, el.offsetTop - PIN_OFFSET)
   const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
@@ -171,9 +173,15 @@ function _validateSavedMode(saved, messages, scrollEl) {
   if (!saved || !saved.kind) return { kind: 'FOLLOW_BOTTOM' }
   if (saved.kind === 'FOLLOW_BOTTOM') return saved
   if (saved.kind === 'PIN_USER_MSG') {
+    // A legacy save carrying only {ts} (no cid, from a pre-cid session)
+    // degrades to FOLLOW_BOTTOM: chat-mode lives in sessionStorage (per
+    // tab), so such a save can only exist for one already-open tab spanning
+    // the deploy, and the cost is one chat opening at the bottom instead of
+    // restoring a pin — negligible, and it self-heals on the next send.
+    if (saved.cid == null) return { kind: 'FOLLOW_BOTTOM' }
     const lastUserMsg = [...messages].reverse()
       .find(m => m.role === 'user' && !m.hidden)
-    return lastUserMsg?.ts === saved.ts ? saved : { kind: 'FOLLOW_BOTTOM' }
+    return cidOf(lastUserMsg) === saved.cid ? saved : { kind: 'FOLLOW_BOTTOM' }
   }
   if (saved.kind === 'ANCHOR_AT') {
     const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
@@ -367,10 +375,11 @@ export function modeForChatExit(scrollEl) {
  *     sessionStorage. Also re-entered when the layout effect sees
  *     a new chatId (defensive — key={chatId} normally remounts).
  *
- *   {kind: 'PIN_USER_MSG', ts: number}
- *     Pin the user message with the given ts to the top of the
- *     viewport (PIN_OFFSET=4 px of breathing room). Set on user
- *     send; applyMode scrolls to `userMsgEl.offsetTop - PIN_OFFSET`.
+ *   {kind: 'PIN_USER_MSG', cid: string}
+ *     Pin the user message with the given stable `cid` (matched via
+ *     `data-cid`) to the top of the viewport (PIN_OFFSET=4 px of
+ *     breathing room). Set on user send; applyMode scrolls to
+ *     `userMsgEl.offsetTop - PIN_OFFSET`.
  *
  *   {kind: 'FOLLOW_BOTTOM'}
  *     Sticky-bottom for streaming. applyMode sets scrollTop =
@@ -386,7 +395,7 @@ export function modeForChatExit(scrollEl) {
  *
  * The caller is expected to:
  *   - Mutate `modeRef.current = {...}` on lifecycle events:
- *     * PIN_USER_MSG{ts} when the user sends a new visible message
+ *     * PIN_USER_MSG{cid} when the user sends a new visible message
  *     * Reset to INITIAL / FOLLOW_BOTTOM as needed
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
@@ -414,7 +423,7 @@ export function modeForChatExit(scrollEl) {
  * @returns {{
  *   modeRef: React.MutableRefObject<
  *     | {kind: 'INITIAL'}
- *     | {kind: 'PIN_USER_MSG', ts: number}
+ *     | {kind: 'PIN_USER_MSG', cid: string}
  *     | {kind: 'FOLLOW_BOTTOM'}
  *     | {kind: 'ANCHOR_AT', key: string, offset: number}
  *   >,
@@ -580,7 +589,7 @@ export default function useScrollMode({
       }
       // Fall back to the last user row in the DOM when the React ref is
       // transiently null. On a fresh send the just-sent row's optimistic node
-      // is unmounted and its canonical node mounted (the data-ts key changes),
+      // is unmounted and its canonical node mounted (during a render swap),
       // and _computeSpacerH returns 0 for a null lastUserMsgEl — collapsing the
       // spacer to 0 mid-swap. Without a re-sizing ResizeObserver tick (there is
       // none until the assistant reply streams in), the spacer stays 0, the pin
@@ -589,7 +598,7 @@ export default function useScrollMode({
       // last user row is the same element the ref points at once it re-attaches,
       // so reserving from it keeps the pin target reachable the instant the row
       // exists. Null only when there is genuinely no user message → spacer 0.
-      const lastUserEl = lastUserMsgRef.current || _pinnedUserEl(scrollEl, null)
+      const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
       const h = reservedSpacerH(
         scrollEl, listEl, lastUserEl, fullViewHRef.current,
         { active: spacerActive },
@@ -604,7 +613,7 @@ export default function useScrollMode({
         // Record the pin baseline (or clear it) so the RO's re-pin-on-shift
         // check below has a reference offsetTop for this pin.
         if (modeRef.current.kind === 'PIN_USER_MSG') {
-          const el = _pinnedUserEl(scrollEl, modeRef.current.ts)
+          const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
           lastPinTopRef.current = el ? el.offsetTop : null
         } else {
           lastPinTopRef.current = null
@@ -617,7 +626,7 @@ export default function useScrollMode({
         return
       }
       applyMode(scrollEl, modeRef.current)
-      const el = _pinnedUserEl(scrollEl, modeRef.current.ts)
+      const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
       lastPinTopRef.current = el ? el.offsetTop : null
       lastAppliedModeRef.current = modeRef.current
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
@@ -640,7 +649,7 @@ export default function useScrollMode({
         applyMode(scrollEl, modeRef.current)
         lastAppliedModeRef.current = modeRef.current
         if (modeRef.current.kind === 'PIN_USER_MSG') {
-          const el = _pinnedUserEl(scrollEl, modeRef.current.ts)
+          const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
           lastPinTopRef.current = el ? el.offsetTop : null
         } else {
           lastPinTopRef.current = null
