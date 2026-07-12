@@ -170,15 +170,33 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  The spacer's only job is reserving bottom room — it does NOT touch
  *  scrollTop and it does NOT decide whether a send pins.
  *
- *  Formula:
- *    max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH
- *           + PIN_BOTTOM_ROOM).
+ *  Formula: max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH).
  *
- *  The (− PIN_OFFSET) must match applyMode's PIN_USER_MSG target so
- *  the target is reachable. PIN_BOTTOM_ROOM deliberately leaves real
- *  scroll room under the pinned message instead of stranding the new
- *  send exactly at maxScrollTop; without it, the row can technically be at
- *  the top while still feeling cramped / end-stopped.
+ *  The (− PIN_OFFSET) must match applyMode's PIN_USER_MSG target so the
+ *  target is reachable: with the spacer active, maxScrollTop lands
+ *  exactly on the pin target.
+ *
+ *  The spacer reserves only the DEFICIT — the room the content below
+ *  the pinned message still needs to fill one keyboard-closed viewport.
+ *  It never adds artificial scroll room past the true content bottom.
+ *  A flat PIN_BOTTOM_ROOM cushion (added unconditionally to the
+ *  formula) was tried and reverted: on a chat that fits the viewport it
+ *  left the pinned row ~ROOM px above the true scroll bottom, so
+ *  isNearContentBottom read the reader as away from the tail and the
+ *  NEXT send refused to pin (the send-rule "second send still pins"
+ *  regression); the reserved spacer could exceed a full viewport; and
+ *  the spacer no longer reached 0 once streamed content outgrew the
+ *  viewport. Those three behaviors are the lock-in contract
+ *  (send-rule.spec.mjs, spacer.spec.mjs cases 1-3/5/8/10): any cushion
+ *  big enough to feel is big enough to break them. Real scroll room
+ *  below the pin appears the honest way — from content: once the reply
+ *  outgrows the viewport, maxScrollTop moves past the pin target by
+ *  exactly the overflow.
+ *
+ *  PIN_BOTTOM_ROOM stays declared (not applied) because
+ *  chatContract.js mirrors it and the constants-drift guard pins the
+ *  declaration text; the contract-side meaning of the cushion is
+ *  adjudicated there, not here.
  *
  *  Reservation is intentionally independent from pinning. The send rule
  *  decides whether to move scrollTop (first message / already at bottom).
@@ -193,7 +211,7 @@ export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
   if (!lastUserMsgEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
   const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
-  return Math.max(0, viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM)
+  return Math.max(0, viewH + pinTarget - listEl.offsetHeight)
 }
 
 
