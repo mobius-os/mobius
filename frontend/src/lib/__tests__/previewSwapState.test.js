@@ -166,6 +166,56 @@ test('two successive swaps increment the swap counter', () => {
   assert.equal(s.swaps, 2)
 })
 
+// live-reload: a real reload of the visible frame's document (same version)
+// must bring the overlay back — the rendered app is gone. This is the
+// transition that restores the old "reload shows loading state" behaviour the
+// double-buffer would otherwise have lost.
+test('live-reload of the visible frame brings the loading overlay back', () => {
+  const s = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'live-reload', version: '100' },     // crash refresh / forced reload
+  ])
+  assert.equal(s.liveLoaded, false, 'overlay must return over the blank document')
+  assert.equal(s.liveVersion, '100', 'still the same version — no swap')
+  assert.equal(s.swaps, 0)
+})
+
+test('live-reload then frame-mounted settles again without counting a swap', () => {
+  const s = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'live-reload', version: '100' },
+    { type: 'frame-mounted', version: '100' },   // fresh document re-mounted
+  ])
+  assert.equal(s.liveLoaded, true)
+  assert.equal(s.swaps, 0, 'a reload settle is not a promotion — no shimmer')
+})
+
+test('live-reload preserves an in-flight incoming swap', () => {
+  const s = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'version', version: '101' },         // incoming loading
+    { type: 'live-reload', version: '100' },     // live frame reloads meanwhile
+  ])
+  assert.equal(s.incomingVersion, '101', 'the swap resolves independently')
+  assert.equal(s.liveLoaded, false)
+})
+
+test('live-reload of the INCOMING frame is a no-op (not what is on screen)', () => {
+  const s = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'version', version: '101' },
+    { type: 'live-reload', version: '101' },
+  ])
+  assert.equal(s.liveLoaded, true, 'visible frame untouched')
+  assert.equal(s.incomingVersion, '101')
+})
+
+test('live-reload before first settle is a no-op (overlay already up)', () => {
+  const s = run('100', [{ type: 'live-reload', version: '100' }])
+  assert.equal(s.liveLoaded, false)
+  assert.equal(s.swaps, 0)
+})
+
 test('reset returns a fresh first-load state', () => {
   const s = run('100', [
     { type: 'frame-mounted', version: '100' },
