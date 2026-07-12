@@ -160,6 +160,26 @@ def _fake_sdk(async_codex_cls):
   }
 
 
+def test_stamp_tool_use_id_uses_stable_item_id():
+  # Every Codex ThreadItem carries a stable `id` (same id on ItemStarted /
+  # ItemCompleted for one tool call); _stamp_tool_use_id threads it onto the
+  # tool event so a large output can be reduced + fetched by id (contract rule
+  # 6). A fake without an id is left unstamped, so event shape is unchanged.
+  from types import SimpleNamespace
+
+  event = {"type": "tool_output", "content": "x"}
+  codex_sdk_runner._stamp_tool_use_id(event, SimpleNamespace(id="item_42"))
+  assert event["tool_use_id"] == "item_42"
+
+  untagged = {"type": "tool_output", "content": "x"}
+  codex_sdk_runner._stamp_tool_use_id(untagged, SimpleNamespace())
+  assert "tool_use_id" not in untagged
+
+  null_id = {"type": "tool_output", "content": "x"}
+  codex_sdk_runner._stamp_tool_use_id(null_id, SimpleNamespace(id=None))
+  assert "tool_use_id" not in null_id
+
+
 def test_tool_completed_events_emit_output_before_end():
   class CommandExecutionThreadItem:
     def __init__(self, output: str):

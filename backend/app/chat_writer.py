@@ -203,6 +203,27 @@ class PersistSessionId(_Command):
   session_id: str = ""
 
 
+@dataclass
+class StashToolOutput(_Command):
+  """Fire-and-forget stash of a large tool output's FULL text (contract rule 6).
+
+  Writes the `tool_outputs` side table keyed by `(chat_id, tool_use_id)` as an
+  insert/upsert on the composite PK — NOT a read-modify-write of the shared
+  `Chat.messages` JSON blob — so it is IMMUNE to the lost-update race the actor
+  guardrail exists to close (two readers of the same snapshot clobbering each
+  other). It is routed through the actor anyway to keep a single DB writer, but
+  it is deliberately NOT a `_FENCE_COMMANDS` member and NOT coalescible: it
+  touches neither `messages` nor `pending_messages`, so it needs no snapshot
+  fence and takes the plain-enqueue path in `submit`.
+
+  Fire-and-forget like `PersistTranscript`: a dropped stash just 404s on expand
+  and the UI keeps showing the inline excerpt — no correctness loss."""
+
+  chat_id: str = ""
+  tool_use_id: str = ""
+  output: str = ""
+
+
 # -- queue + turn commands (the JSON-blob RMW the actor owns) ------------
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
@@ -1174,6 +1195,8 @@ class ChatWriterActor:
       return self._answer_question(db, cmd)
     if isinstance(cmd, PersistSessionId):
       return self._persist_session_id(db, cmd)
+    if isinstance(cmd, StashToolOutput):
+      return self._stash_tool_output(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
     if isinstance(cmd, AppendPending):
@@ -1303,6 +1326,35 @@ class ChatWriterActor:
     chat.session_id = cmd.session_id
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistSessionId did not persist")
+    return True
+
+  def _stash_tool_output(self, db, cmd: "StashToolOutput") -> bool:
+    """Insert/upsert a large tool output's full text into `tool_outputs`.
+
+    Keyed by the composite PK `(chat_id, tool_use_id)`, so a repeated stash for
+    the same tool (e.g. a streamed intermediate then the final aggregate)
+    overwrites in place — last write wins, which is correct (the final output is
+    authoritative). Does not touch `Chat.messages`, so it is outside the
+    lost-update guardrail. Fire-and-forget: raising on a dropped commit only
+    logs via the caller's done-callback; the UI keeps the inline excerpt."""
+    if not cmd.chat_id or not cmd.tool_use_id:
+      return False
+    from app.models import ToolOutput
+
+    row = db.query(ToolOutput).filter(
+      ToolOutput.chat_id == cmd.chat_id,
+      ToolOutput.tool_use_id == cmd.tool_use_id,
+    ).first()
+    if row is None:
+      db.add(ToolOutput(
+        chat_id=cmd.chat_id,
+        tool_use_id=cmd.tool_use_id,
+        output=cmd.output or "",
+      ))
+    else:
+      row.output = cmd.output or ""
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StashToolOutput did not persist")
     return True
 
   def _start_turn(self, db, cmd: StartTurn) -> dict:
