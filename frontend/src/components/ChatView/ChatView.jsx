@@ -41,6 +41,13 @@ import {
   startedMessagesFromResponse,
   systemEventForChat,
 } from './chatRuntimeState.js'
+import {
+  EMPTY_BUILD_PHASE_RAIL,
+  accumulateBuildPhase,
+  buildPhaseRailViewModel,
+  latestBuildPhaseAnnouncement,
+  railAtRunStart,
+} from './buildPhaseRail.js'
 import './ChatView.css'
 
 
@@ -366,6 +373,15 @@ export default function ChatView({
   // change, not just a fresh pulse).
   const builtAppsRef = useRef(builtApps)
   useEffect(() => { builtAppsRef.current = builtApps }, [builtApps])
+  // Build-milestone rail: phases accumulated from chat-scoped `build_phase`
+  // stream events (deduped by ts so catch-up replay rebuilds it), reset ONLY
+  // when a new run starts for this chat (see buildPhaseRail.js for why a
+  // mid-run reset is replay-incoherent). Rendered as a slim rail in the foot
+  // near the open-app CTA; the announcement mirrors previewReadyStatus for
+  // the polite live region.
+  const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
+  const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
+  const lastAnnouncedPhaseRef = useRef(null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -890,9 +906,25 @@ export default function ChatView({
       }
       onStreamEnd?.({ continues })
     },
-    onSystemEvent: event => onSystemEvent?.(systemEventForChat(event, chatId)),
+    onSystemEvent: event => {
+      // A build_phase is chat-local: it only feeds this chat's milestone rail,
+      // so accumulate it here (deduped by ts) instead of forwarding it to the
+      // Shell, which has no handler for it.
+      if (event?.type === 'build_phase') {
+        setBuildPhases(prev => accumulateBuildPhase(prev, event))
+        return
+      }
+      onSystemEvent?.(systemEventForChat(event, chatId))
+    },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      // A queued message is being promoted into its OWN run — the rail's
+      // run-start boundary for queue drains. useStreamConnection fires this
+      // callback during catch-up replay too, in event order, so a reconnect
+      // that replays the old run's log applies this reset at the same
+      // position the live stream did (old-run phases, then reset) and the
+      // rail always lands on the run being displayed.
+      setBuildPhases(railAtRunStart())
       const consumedTs = message?._consumed_ts
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
@@ -1204,7 +1236,21 @@ export default function ChatView({
     measureComposerHeight()
     const raf = requestAnimationFrame(measureComposerHeight)
     return () => cancelAnimationFrame(raf)
-  }, [builtApps, sending, measureComposerHeight])
+  }, [builtApps, sending, buildPhases, measureComposerHeight])
+
+  useEffect(() => {
+    const latest = buildPhases[buildPhases.length - 1]
+    if (!latest) {
+      lastAnnouncedPhaseRef.current = null
+      setBuildPhaseStatus('')
+      return
+    }
+    // Announce a phase once, keyed on its ts — an aria-live re-fire on every
+    // rail change (e.g. an unrelated re-render) would re-read the same phrase.
+    if (lastAnnouncedPhaseRef.current === latest.ts) return
+    lastAnnouncedPhaseRef.current = latest.ts
+    setBuildPhaseStatus(latestBuildPhaseAnnouncement(buildPhases))
+  }, [buildPhases])
 
   // Announce the most recent built app (the newest CTA row) when it appears.
   useEffect(() => {
@@ -1594,6 +1640,11 @@ export default function ChatView({
             }
             onMessageStartRef.current?.()
             promotedRef.current = false
+            // started=true means this send began a NEW run (stale-pending
+            // self-heal) rather than queueing behind one — a run start, so
+            // the rail resets. A plain enqueue (started falsy) must NOT
+            // touch the in-flight build's rail.
+            setBuildPhases(railAtRunStart())
             setSending(true)
             setServerRunningState(true)
             // The queued send was promoted straight into the active turn,
@@ -1639,6 +1690,9 @@ export default function ChatView({
           pendingQueue.cancelByCid(queuedMsg.cid)
           onMessageStartRef.current?.()
           promotedRef.current = false
+          // Same run-start semantics as the branch above: this send became
+          // the first message of a NEW run, so the rail resets here too.
+          setBuildPhases(railAtRunStart())
           // Apply the send rule before appending — see shouldPinSend and
           // the fresh-send path. A message that raced into a started turn
           // is still a new send becoming the active turn, so it pins only
@@ -1719,6 +1773,11 @@ export default function ChatView({
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
+    // A fresh send starts a NEW run — the rail's only reset seam besides
+    // queued_turn_starting. Resetting on ENQUEUE instead (the queue path
+    // above) wiped the in-flight build's rail, which the next catch-up
+    // replay then silently repopulated (see buildPhaseRail.js).
+    setBuildPhases(railAtRunStart())
 
     // The send rule (see shouldPinSend): pin the new message to the top
     // only when it is the first message OR the user is at the bottom.
@@ -2762,6 +2821,7 @@ export default function ChatView({
   const openAppCtas = builtApps
     .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
     .filter(entry => entry.vm)
+  const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
 
   return (
     <div
@@ -2785,6 +2845,14 @@ export default function ChatView({
         aria-relevant="text"
       >
         {previewReadyStatus}
+      </div>
+      <div
+        className="chat__sr-status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-relevant="text"
+      >
+        {buildPhaseStatus}
       </div>
       {showInspector && (
         <AgentContextInspector
@@ -2982,6 +3050,21 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
+        {buildPhaseRail.length > 0 && (
+          <div className="chat__build-rail" role="group" aria-label="Build progress">
+            {buildPhaseRail.map(phase => (
+              <span
+                key={phase.ts}
+                className={`chat__build-phase${
+                  phase.current ? ' chat__build-phase--current' : ''
+                }`}
+              >
+                <span className="chat__build-phase-dot" aria-hidden="true" />
+                <span className="chat__build-phase-label">{phase.label}</span>
+              </span>
+            ))}
+          </div>
+        )}
         {openAppCtas.length > 0 && (
           <div className="chat__open-app">
             {openAppCtas.map(({ app, vm }) => {
