@@ -696,6 +696,16 @@ registerRoute(new NavigationRoute(
       /^\/app-assets\//,
       /^\/apps\//,
       /^\/recover(\/|$)/,
+      // `/tandoor/*` is a real Tandoor (Django) app reverse-proxied by the
+      // backend (routes/tandoor_proxy.py) and embedded in the Tandoor wrapper
+      // app's iframe. Like /recover and /sites it is server-served, NOT the SPA
+      // shell, and it is a MULTI-PAGE app: only the bare `/tandoor/` root was
+      // covered by the single-segment catch-all below, so every deep navigation
+      // (/tandoor/setup/, /tandoor/accounts/login/, recipe pages, form-POST
+      // redirects) was served the cached Möbius index.html instead of reaching
+      // the proxy — you'd land back on the shell the moment you moved past the
+      // landing redirect. Deny the whole subtree so all of them hit the network.
+      /^\/tandoor(\/|$)/,
       /^\/shell\/embed(\/|$)/,
       // Published Web Studio sites (/sites/<token>/...) are served by the
       // backend, NOT the SPA shell. Without this the root-scoped SW served the
