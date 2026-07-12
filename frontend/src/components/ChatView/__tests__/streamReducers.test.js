@@ -22,6 +22,7 @@ import {
   isQuestionTool,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
+  thinkingElapsedMs,
   attachToolSources,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
@@ -404,6 +405,7 @@ test('appendThinkingChunk coalesces consecutive deltas into one item', () => {
     content: 'Let me think about this.',
     startedAt: 1000,
     firstTs: 10000,
+    lastAt: 2600,
     duration_ms: 1600,
   })
 })
@@ -414,9 +416,34 @@ test('appendThinkingChunk keeps replay duration from runner timestamps', () => {
   items = appendThinkingChunk(items, 'catch-up ', 1001, 55000)
   items = appendThinkingChunk(items, 'think.', 1002, 100000)
   assert.equal(items.length, 1)
-  assert.equal(items[0].startedAt, 1000, 'live ticker starts at client receipt')
+  assert.equal(items[0].lastAt, 1002, 'lastAt tracks the most recent delta')
   assert.equal(items[0].duration_ms, 90000,
     'frozen label uses runner span, not bursty client replay delta')
+})
+
+test('thinkingElapsedMs anchors live elapsed to runner time across a replay', () => {
+  // LIVE: block opens at client 1000 / runner 10000, latest delta at client
+  // 4000 / runner 13000 → 3s runner span. now=5000 (1s after) → 3s + 1s tail.
+  let live = []
+  live = appendThinkingChunk(live, 'a', 1000, 10000)
+  live = appendThinkingChunk(live, 'b', 4000, 13000)
+  assert.equal(thinkingElapsedMs(live[0], 5000), 4000)
+
+  // RECONNECT: the SAME block replays as a burst — client clock jumps to ~90000
+  // but the replayed events carry their ORIGINAL runner ts (10000, 13000).
+  // Elapsed must stay runner-anchored (3s span + 0.5s tail), NOT restart at ~0.
+  let replay = []
+  replay = appendThinkingChunk(replay, 'a', 90000, 10000)
+  replay = appendThinkingChunk(replay, 'b', 90000, 13000)
+  assert.equal(thinkingElapsedMs(replay[0], 90500), 3500)
+  // The old formula (now - startedAt) would give 90500 - 90000 = 500ms → "1s".
+  assert.ok(thinkingElapsedMs(replay[0], 90500) > 3000,
+    'replayed block reports its true elapsed, not a reset-to-1s')
+})
+
+test('thinkingElapsedMs falls back to startedAt for legacy items without lastAt', () => {
+  const legacy = { type: 'thinking', content: 'x', startedAt: 1000 }
+  assert.equal(thinkingElapsedMs(legacy, 4000), 3000)
 })
 
 test('appendThinkingChunk falls back to client delta without runner timestamps', () => {
@@ -441,6 +468,7 @@ test('appendThinkingChunk opens a fresh item after a non-thinking item', () => {
     content: 'reconsidering...',
     startedAt: 5000,
     firstTs: null,
+    lastAt: 5000,
     duration_ms: 0,
   })
 })

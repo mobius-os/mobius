@@ -162,7 +162,7 @@ function BackgroundProviderRow({
         pointerId: press.pointerId,
         node: press.node,
       })
-    }, 240)
+    }, 200)
   }
   const handleRowPointerMove = (event) => {
     if (draggedRef.current) return
@@ -423,6 +423,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const backgroundDragRef = useRef(null)
   const backgroundCommitRafRef = useRef(null)
   const backgroundRowRefs = useRef([])
+  // Latest finger Y during a drag. Updated imperatively on every
+  // pointermove so the held row can follow the pointer 1:1 without a
+  // React re-render per frame; render reads it for the same transform.
+  const backgroundPointerYRef = useRef(0)
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   // Auto-resume-after-limit-reset toggle (design §2.4). The rendered value is
   // derived from the settings query (invalidated after save) — no optimistic
@@ -587,8 +591,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       })
       .filter(Boolean)
     if (!rows.length) return 0
-    for (let index = 0; index < rows.length; index++) {
-      if (clientY < rows[index].center) return index
+    // Partition by the MIDPOINT between adjacent slot centers, not the
+    // centers themselves: the dragged row's projected center starts on its
+    // own slot center, so a center-based test would flip to the next slot
+    // on the very first pixel of travel (and snap a full row on release).
+    // Midpoints mean "drag past halfway to swap" — a tiny nudge eases back.
+    for (let index = 0; index < rows.length - 1; index++) {
+      const boundary = (rows[index].center + rows[index + 1].center) / 2
+      if (clientY < boundary) return index
     }
     return rows.length - 1
   }, [])
@@ -612,6 +622,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }).filter(Boolean)
     try { node.setPointerCapture?.(pointer?.pointerId) } catch { /* best-effort */ }
     const grabY = typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top
+    backgroundPointerYRef.current = grabY
     const next = {
       fromIndex: index,
       toIndex: index,
@@ -625,25 +636,50 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const activeBackgroundDragFromIndex = backgroundDrag?.fromIndex ?? null
   useEffect(() => {
     if (activeBackgroundDragFromIndex === null) return undefined
-    const fromIndex = activeBackgroundDragFromIndex
+    // Constant for the life of one drag — captured once so pointer
+    // handlers never read stale React state.
+    const start = backgroundDragRef.current
+    if (!start) return undefined
+    const { fromIndex, grabOffsetY, rowHeight, slots } = start
+    const originTop = slots[fromIndex]?.top ?? 0
+    const minOffset = slots.length ? slots[0].top - originTop : 0
+    const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
+    const followOffset = (clientY) => {
+      const raw = clientY - grabOffsetY - originTop
+      return Math.max(minOffset, Math.min(maxOffset, raw))
+    }
 
     const onPointerMove = (event) => {
       event.preventDefault()
-      setBackgroundDrag((current) => {
-        if (!current) return current
-        const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
-        const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
-        if (current.toIndex === toIndex) return current
-        return { ...current, toIndex }
-      })
+      const current = backgroundDragRef.current
+      if (!current) return
+      backgroundPointerYRef.current = event.clientY
+      // Move the held row imperatively so it tracks the finger 1:1
+      // without re-rendering the whole panel every frame.
+      const node = backgroundRowRefs.current[fromIndex]
+      if (node) {
+        node.style.transform = `translateY(${followOffset(event.clientY)}px) scale(1.02)`
+      }
+      // Only re-render (to slide the other rows aside) when the target
+      // slot actually changes.
+      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const toIndex = backgroundIndexFromY(dragCenterY, slots)
+      setBackgroundDrag((c) => (
+        c && c.toIndex !== toIndex ? { ...c, toIndex } : c
+      ))
     }
 
     const finish = (event) => {
       event.preventDefault()
       const current = backgroundDragRef.current
       if (!current) return
-      const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
-      const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
+      backgroundPointerYRef.current = event.clientY
+      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const toIndex = backgroundIndexFromY(dragCenterY, slots)
+      // Commit synchronously on release. If the row didn't change slots,
+      // just drop the drag and let the base CSS transition ease it back
+      // into place; otherwise reorder under the no-transition "committing"
+      // guard so the displaced rows don't flip-flash.
       if (toIndex === fromIndex) {
         setBackgroundDrag(null)
         return
@@ -1111,11 +1147,18 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     const slots = backgroundDrag.slots || []
     if (index === backgroundDrag.fromIndex) {
       const originSlot = slots[backgroundDrag.fromIndex]
-      const targetSlot = slots[backgroundDrag.toIndex]
-      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
+      // The held row follows the finger 1:1. `transition:none` keeps it
+      // pinned under the pointer with no easing lag; on release the style
+      // is dropped and the base CSS transition eases it into its slot.
+      const originTop = originSlot ? originSlot.top : 0
+      const raw = (backgroundPointerYRef.current - backgroundDrag.grabOffsetY) - originTop
+      const minOffset = slots.length ? slots[0].top - originTop : 0
+      const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
+      const offset = Math.max(minOffset, Math.min(maxOffset, raw))
       return {
-        transform: `translateY(${offset}px) scale(1.01)`,
-        zIndex: 2,
+        transform: `translateY(${offset}px) scale(1.02)`,
+        zIndex: 3,
+        transition: 'none',
       }
     }
     if (
@@ -1254,7 +1297,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                         model: model || defaultModel(row.provider),
                       })}
                       onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
-                      onMove={(delta) => moveBackgroundProvider(index, index + delta)}
+                      onMove={(delta) => {
+                        // Keyboard reorder is disabled while a pointer drag
+                        // is live, so the two reorder paths can't interleave
+                        // and mutate the list from under each other.
+                        if (backgroundDrag) return
+                        moveBackgroundProvider(index, index + delta)
+                      }}
                       onReorderStart={startBackgroundReorder}
                     />
                   ))}
@@ -1319,7 +1368,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               name="Gemini API key"
               showRadio={false}
               connected={configured}
-              subtitle="Used for image generation in chat."
+              subtitle="Used for image generation."
               statusNode={
                 <StatusDot color={configured ? '--green' : '--muted'}>
                   {configured ? 'Configured' : 'Not configured'}

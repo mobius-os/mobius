@@ -3,6 +3,7 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ToolBlock from './ToolBlock.jsx'
 import ToolActivityGroup from './ToolActivityGroup.jsx'
 import { groupToolRuns } from './groupBlocks.js'
+import { thinkingElapsedMs } from './streamReducers.js'
 import QuestionCard from './QuestionCard.jsx'
 import ErrorCard from './ErrorCard.jsx'
 
@@ -28,8 +29,10 @@ function ThinkingDisclosure({ item, isActive }) {
     return () => window.clearInterval(id)
   }, [isActive])
 
-  const startedAt = Number.isFinite(item.startedAt) ? item.startedAt : now
-  const activeSeconds = durationSeconds(Math.max(0, now - startedAt))
+  // Anchored to the runner's clock (duration_ms + tail since the last delta),
+  // NOT the client mount time — so navigating back to a still-thinking block
+  // shows its true elapsed instead of restarting at 1s. See thinkingElapsedMs.
+  const activeSeconds = durationSeconds(thinkingElapsedMs(item, now))
   const frozenSeconds = durationSeconds(item.duration_ms)
   const seconds = isActive ? (activeSeconds || 1) : frozenSeconds
   const secondsText = formatSeconds(seconds)

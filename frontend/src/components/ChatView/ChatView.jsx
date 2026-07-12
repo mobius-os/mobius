@@ -1926,7 +1926,17 @@ export default function ChatView({
         if (freshPin.shouldPin) {
           setSpacerActive(true)
           if (spacerRef.current) spacerRef.current.style.height = '0px'
-          modeRef.current = { kind: 'PIN_USER_MSG', ts: freshPin.pinTargetTs }
+          // Pin to the OPTIMISTIC ts, not freshPin.pinTargetTs (the canonical
+          // server ts). On a fresh send the rendered row keeps its optimistic
+          // client ts and never reconciles to the canonical ts (verified: the
+          // divergence survives reload), so a canonical-ts pin matches no
+          // data-ts and applyMode has to fall back to the last user row — which
+          // during the render swap is briefly the PREVIOUS message, causing a
+          // visible overshoot before it self-corrects. The optimistic ts matches
+          // the row immediately, so the pin lands the just-sent message on the
+          // first apply. _pinnedUserEl's last-row fallback still covers the case
+          // where a future change does swap the row to the canonical ts.
+          modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
         } else if (freshPin.intentStillCurrent) {
           settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
         }

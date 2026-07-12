@@ -183,12 +183,19 @@ function CanvasLoadingBrand({ appName }) {
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
   immersive = false,
-  // Is this canvas the one the user is looking at (canvas view + active app)?
-  // Shell's immersive holder is GLOBAL last-writer-wins, so immersive intent
-  // may only be forwarded/replayed while this canvas is active — otherwise a
-  // hidden cached app (or its freshly-promoted rebuild) steals chrome/insets
-  // from the app actually on screen.
-  isActive = false,
+  // Whether this app is the currently-visible canvas (canvas view + active
+  // app). One prop, two consumers:
+  //   - `moebius:frame-visibility` — the shell keeps recently-used apps
+  //     MOUNTED and merely toggles `visibility:hidden` on the inactive ones
+  //     (Shell.css .shell__view), which does NOT change a nested iframe's
+  //     Page Visibility state, so the verdict is forwarded to the frame and
+  //     an app can pause background work (audio, rAF, timers) on navigate-away.
+  //   - Immersive gating — Shell's immersive holder is GLOBAL
+  //     last-writer-wins, so immersive intent may only be forwarded/replayed
+  //     while this canvas is active; otherwise a hidden cached app (or its
+  //     freshly-promoted rebuild) steals chrome/insets from the app on screen.
+  // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
+  active = true,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered,
 }) {
@@ -306,8 +313,8 @@ export default function AppCanvas({
   // idempotent, no side effect.
   const liveVersionRef = useRef(swap.liveVersion)
   liveVersionRef.current = swap.liveVersion
-  const isActiveRef = useRef(isActive)
-  isActiveRef.current = isActive
+  const activeRef = useRef(active)
+  activeRef.current = active
 
   function postToFrame(v, message) {
     framesRef.current.get(v)?.contentWindow?.postMessage(message, window.location.origin)
@@ -470,7 +477,7 @@ export default function AppCanvas({
       if (msg.type === 'moebius:immersive') {
         const value = msg.value === true
         frameImmersiveRef.current.set(srcVersion, value)
-        if (srcVersion === liveVersionRef.current && isActiveRef.current) {
+        if (srcVersion === liveVersionRef.current && activeRef.current) {
           onImmersive?.(appId, value)
         }
         return
@@ -549,7 +556,7 @@ export default function AppCanvas({
   // but ONLY while this canvas is the active one. Replays fire on promotion
   // (swap.liveVersion changes — the promoted frame's real-time post was
   // withheld while it was hidden, so an immersive game stays immersive across
-  // a rebuild) and on this canvas becoming active (isActive flips true — a
+  // a rebuild) and on this canvas becoming active (`active` flips true — a
   // hidden frame's post was withheld too, so returning to the game re-enters
   // immersive). A hidden canvas never calls with value:true: Shell's holder is
   // global last-writer-wins and a hidden promotion must not steal chrome from
@@ -562,11 +569,11 @@ export default function AppCanvas({
   // live frame).
   useEffect(() => {
     if (!appId) return
-    if (isActive) {
+    if (active) {
       onImmersive?.(appId, frameImmersiveRef.current.get(swap.liveVersion) === true)
     }
     return () => { onImmersive?.(appId, false) }
-  }, [appId, swap.liveVersion, isActive, onImmersive])
+  }, [appId, swap.liveVersion, active, onImmersive])
 
   // Broadcast theme updates to every loaded frame (live + any incoming) so each
   // refreshes its theme without remounting (and losing app state).
@@ -649,6 +656,36 @@ export default function AppCanvas({
     const insets = (v === liveVersionRef.current && immersive) ? readDeviceInsets() : zeroInsets()
     postToFrame(v, { type: 'moebius:frame-insets', insets })
   }
+
+  // ── In-shell foreground/background signal ────────────────────────
+  // Forward whether THIS app is the visible canvas. The shell keeps recently-
+  // used apps mounted and hides the inactive ones with `visibility:hidden` on a
+  // shell ancestor — which does NOT change the nested iframe's
+  // document.visibilityState (no visibilitychange/blur/pagehide fires). So an
+  // app that plays audio or animates keeps running after you navigate away
+  // (the reported "music keeps playing after exiting" bug). Posting the verdict
+  // lets an app pause on `visible:false` and resume on `visible:true`. The
+  // native Page Visibility API still covers real tab-hide (it propagates to
+  // same-origin child frames), so the two compose: an app is foreground only
+  // when it's the active canvas AND the tab is visible.
+  //
+  // Double-buffer routing: only the LIVE frame ever receives the real verdict.
+  // A buffered incoming frame is invisible by construction, so it gets an
+  // explicit `visible:false` at load (handleFrameLoad) — a rebuild that boots
+  // in the hidden buffer must not start audio/rAF work before promotion. The
+  // effect below re-sends on every `active` flip AND on promotion
+  // (swap.liveVersion change), so a freshly-promoted frame immediately learns
+  // whether it is foreground.
+  function sendVisibility(v, visible) {
+    postToFrame(v, { type: 'moebius:frame-visibility', visible })
+  }
+
+  useEffect(() => {
+    if (loadedDocsRef.current.has(swap.liveVersion)) {
+      sendVisibility(swap.liveVersion, active)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, swap.liveVersion])
 
   useEffect(() => {
     for (const v of framesRef.current.keys()) {
@@ -736,6 +773,11 @@ export default function AppCanvas({
     sendInit(v)
     sendOnlineStatus(v)
     sendInsets(v)
+    // A booting incoming frame is invisible by construction and must not
+    // start audio/rAF work before promotion, so it learns `visible:false`
+    // here; the live frame gets the real active verdict. Promotion re-sends
+    // via the [active, swap.liveVersion] effect above.
+    sendVisibility(v, v === liveVersionRef.current ? activeRef.current : false)
   }
 
   // The frames to render: the live (visible) frame, plus a hidden incoming frame
