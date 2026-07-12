@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   hasActiveChatTurn,
+  hasActiveVoiceDictation,
   hasProtectedEditingContent,
   isTextEditingElement,
   shouldDeferShellReload,
@@ -18,7 +19,7 @@ test('text-editing elements defer shell reloads', () => {
   assert.equal(isTextEditingElement(el('div', { isContentEditable: true })), true)
 })
 
-test('active chat turns defer shell reloads only for the visible chat', () => {
+test('any active chat turn defers shell reloads', () => {
   assert.equal(hasActiveChatTurn({
     activeView: 'chat',
     activeChatId: 'c1',
@@ -28,11 +29,16 @@ test('active chat turns defer shell reloads only for the visible chat', () => {
     activeView: 'chat',
     activeChatId: 'c2',
     streamingChatIds: new Set(['c1']),
-  }), false)
+  }), true)
   assert.equal(hasActiveChatTurn({
     activeView: 'canvas',
     activeChatId: 'c1',
     streamingChatIds: new Set(['c1']),
+  }), true)
+  assert.equal(hasActiveChatTurn({
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(),
   }), false)
 })
 
@@ -108,6 +114,21 @@ test('a focused but empty composer is idle enough to apply at turn-end', () => {
     activeView: 'chat',
     activeChatId: 'c1',
     streamingChatIds: new Set(['c1']),
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }), true)
+})
+
+test('voice dictation defers shell reloads even with an empty composer', () => {
+  assert.equal(hasActiveVoiceDictation({
+    voiceListeningChatIds: new Set(['c1']),
+  }), true)
+  assert.equal(shouldDeferShellReload({
+    activeElement: el('textarea', { value: '' }),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(),
+    voiceListeningChatIds: new Set(['c1']),
     lastUserInteractionAt: 0,
     now: 10000,
   }), true)

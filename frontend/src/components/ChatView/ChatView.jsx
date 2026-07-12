@@ -227,7 +227,23 @@ function readInitialComposer(chatId) {
 }
 
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, onChatMissing, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null, composerFocusRequest = null, onComposerFocusHandled = null }) {
+export default function ChatView({
+  chatId,
+  onStreamEnd,
+  onFirstMessage,
+  onSystemEvent,
+  onChatMissing,
+  builtApp,
+  onOpenApp,
+  onMessageStart,
+  onVoiceListeningChange,
+  showPicker = true,
+  embedded = false,
+  quickActions = null,
+  getContext = null,
+  composerFocusRequest = null,
+  onComposerFocusHandled = null,
+}) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -987,6 +1003,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onTranscript: (text) => setInput(text),
     inputRef,
   })
+  useEffect(() => {
+    onVoiceListeningChange?.(chatId, listening)
+    return () => { onVoiceListeningChange?.(chatId, false) }
+  }, [chatId, listening, onVoiceListeningChange])
 
   // Ref mirror of stopVoice (peer of onMessageStartRef /
   // onFirstMessageRef above). useVoiceInput may not memoize its
