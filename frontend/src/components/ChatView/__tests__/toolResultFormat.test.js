@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { formatToolResult, toolResultFailed } from '../toolResultFormat.js'
+import {
+  formatToolResult,
+  toolResultFailed,
+  toolBlockFailed,
+  toolBlockExitCode,
+} from '../toolResultFormat.js'
 
 test('plain text passes through unchanged', () => {
   const r = formatToolResult('hello world\nsecond line')
@@ -157,4 +162,29 @@ test('toolResultFailed: true only for a nonzero terminal exit', () => {
   assert.equal(toolResultFailed('plain text, not a terminal'), false)
   assert.equal(toolResultFailed(JSON.stringify({ path: '/x', bytes: 1 })), false)
   assert.equal(toolResultFailed(null), false)
+})
+
+test('toolBlockExitCode: explicit output_exit_code field wins over a parse', () => {
+  // A reduced block (contract rule 6) carries output_exit_code; the inline text
+  // is only a carved excerpt, so the field is authoritative.
+  assert.equal(toolBlockExitCode({ output_exit_code: 1, output: 'carved…excerpt' }), 1)
+  assert.equal(toolBlockExitCode({ output_exit_code: 0, output: 'anything' }), 0)
+})
+
+test('toolBlockExitCode: falls back to parsing the output when no field', () => {
+  assert.equal(
+    toolBlockExitCode({ output: JSON.stringify({ stderr: 'x', exit_code: 137 }) }),
+    137,
+  )
+  assert.equal(toolBlockExitCode({ output: 'plain text' }), null)
+  assert.equal(toolBlockExitCode({}), null)
+})
+
+test('toolBlockFailed: field-or-parse failure detection survives truncation', () => {
+  // Field path: a carved excerpt that no longer parses still reads failed.
+  assert.equal(toolBlockFailed({ output_exit_code: 2, output: 'head…[X B]…tail' }), true)
+  assert.equal(toolBlockFailed({ output_exit_code: 0, output: 'head…tail' }), false)
+  // Parse path: a preserved "Exit code N" head still detects the failure.
+  assert.equal(toolBlockFailed({ output: 'Exit code 1\nboom' }), true)
+  assert.equal(toolBlockFailed({ output: 'all good' }), false)
 })

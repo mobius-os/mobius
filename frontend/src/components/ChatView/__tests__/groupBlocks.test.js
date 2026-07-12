@@ -220,3 +220,15 @@ test('coalesceThinkingEntries: groupToolRuns after coalesce yields one thinking 
   assert.equal(nodes[0].single.item.content, 'ab')
   assert.equal(nodes[1].group.map(x => x.idx).join(','), '2,3')
 })
+
+test('toolGroupState: reads output_exit_code field on a reduced block', () => {
+  // Contract rule 6: a failed tool whose output is only a carved excerpt (that
+  // may not re-parse) still resolves the group to 'error' via the explicit
+  // output_exit_code field.
+  const carved = { type: 'tool', status: 'done', output: 'head…[9 B]…tail', output_exit_code: 1 }
+  const ok = { type: 'tool', status: 'done', output: 'fine', output_exit_code: 0 }
+  assert.equal(toolGroupState([ok, carved]), 'error')
+  assert.equal(toolGroupState([ok, ok]), 'done')
+  // A still-running tool keeps the group 'running' even with a failed sibling.
+  assert.equal(toolGroupState([carved, { type: 'tool', status: 'running' }]), 'running')
+})
