@@ -797,6 +797,15 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         let controller = null;
         let backoffMs = 1000;
         let stopped = false;
+        let reconnectTimer = null;
+        // SINGLE-FLIGHT invariant: at most one connect() owns the stream.
+        // connect() and disconnect() each bump `generation`; a connect
+        // captures its value on entry and bails after any await once
+        // superseded. Without this, a hide->show during the reconnect sleep
+        // started a second stream while the first still slept - each
+        // overwrote `controller`, so disconnect() aborted only the newest
+        // and orphaned streams accumulated one per visibility flip.
+        let generation = 0;
 
         function showPill() {{
           // Re-assign the text so the aria-live region announces on reveal.
@@ -812,19 +821,48 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         // HTML whose new APP_VERSION busts the module cache key in turn - the
         // ?v= freshness scheme docs/offline.md prescribes.
         pill.addEventListener('click', function() {{
+          // Offline guard: the rotated ?v= is BY DESIGN a SW cache miss (v is
+          // part of the standalone-nav cache key), so navigating offline
+          // rejects at the network and the SW catch handler swaps a WORKING
+          // cached app for the branded offline page. Refuse the navigation,
+          // say why, and re-offer when connectivity returns (the 'online'
+          // listener below restores the actionable copy).
+          if (navigator.onLine === false) {{
+            pill.textContent =
+              'You\\u2019re offline \\u2014 refresh when back online';
+            return;
+          }}
           const u = new URL(window.location.href);
           u.searchParams.set('v', String(Date.now()));
           window.location.replace(u.pathname + u.search + u.hash);
         }});
 
+        window.addEventListener('online', function() {{
+          // A pending offer whose tap was refused offline becomes actionable
+          // again the moment connectivity returns.
+          if (pill.classList.contains('visible')) showPill();
+        }});
+
+        function clearReconnect() {{
+          if (reconnectTimer !== null) {{
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }}
+        }}
+
         async function connect() {{
           if (stopped || document.hidden) return;
+          // Adopt a fresh generation and cancel any pending reconnect wakeup:
+          // from here on this call is the sole owner of the stream.
+          const gen = ++generation;
+          clearReconnect();
           controller = new AbortController();
           try {{
             const res = await fetch('/api/apps/' + APP_ID + '/events', {{
               headers: {{ Authorization: 'Bearer ' + appToken }},
               signal: controller.signal,
             }});
+            if (gen !== generation) return;  // superseded while awaiting
             // A 401 means the app token is stale; retrying it would loop
             // forever. A genuine relaunch mints a fresh token, so stop here.
             if (res.status === 401) {{ stopped = true; return; }}
@@ -835,6 +873,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
             let buffer = '';
             while (!stopped) {{
               const chunk = await reader.read();
+              if (gen !== generation) return;  // superseded while awaiting
               if (chunk.done) break;
               buffer += decoder.decode(chunk.value, {{ stream: true }});
               let nl;
@@ -856,19 +895,34 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
               }}
             }}
           }} catch (e) {{
-            if (stopped || (e && e.name === 'AbortError')) return;
+            if (stopped || gen !== generation ||
+                (e && e.name === 'AbortError')) return;
           }} finally {{
-            controller = null;
+            // Only the CURRENT owner may clear the shared handle - a
+            // superseded connect must not null out its successor's controller.
+            if (gen === generation) controller = null;
           }}
-          // Reconnect with capped exponential backoff - no reconnect storm.
-          if (!stopped && !document.hidden) {{
-            await new Promise(function(r) {{ setTimeout(r, backoffMs); }});
+          // Reconnect via a CANCELLABLE timer, never an awaited sleep: hidden/
+          // pagehide clears the timer, and its wakeup re-enters connect()
+          // (which bumps the generation), so a hide->show during the backoff
+          // can never stack a second stream on top of this one.
+          if (!stopped && !document.hidden && gen === generation) {{
+            const delay = backoffMs;
             backoffMs = Math.min(backoffMs * 2, 30000);
-            connect();
+            reconnectTimer = setTimeout(function() {{
+              reconnectTimer = null;
+              connect();
+            }}, delay);
           }}
         }}
 
         function disconnect() {{
+          // Full teardown of the single-flight invariant: invalidate any
+          // in-flight connect (its next stale-generation check returns
+          // early), cancel the pending reconnect wakeup, then abort the
+          // socket.
+          generation++;
+          clearReconnect();
           if (controller) {{ try {{ controller.abort(); }} catch (e) {{}} }}
           controller = null;
         }}
@@ -887,6 +941,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
             connect();
           }}
         }});
+        // pagehide (BFCache freeze / navigation away) tears the stream down
+        // through the same cancellation path as backgrounding.
+        window.addEventListener('pagehide', disconnect);
 
         connect();
       }}
