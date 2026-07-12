@@ -9,6 +9,7 @@ import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
+import ErrorCard from './ErrorCard.jsx'
 
 
 function thoughtSeconds(durationMs) {
@@ -21,17 +22,6 @@ function thoughtLine(durationMs) {
   const seconds = thoughtSeconds(durationMs)
   if (!seconds) return '> Thought'
   return `> Thought for ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
-}
-
-
-// A provider-limit park block carries `parked_until` as an explicit-UTC ISO
-// string; render it as the viewer's LOCAL clock time ("1:40 AM"). Returns null
-// on a missing / unparseable value so the card degrades to just the message.
-function formatResetTime(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return null
-  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
 
@@ -178,42 +168,20 @@ function MsgContentInner({
         // branch the block rendered to null and the error
         // vanished on chat return; that was the bug.
         //
-        // Run the message through StandardMarkdown so URLs in
-        // provider error responses (quota links, billing
-        // pages) become clickable — agents' error payloads
-        // typically include "Upgrade to Pro (https://...)" and
-        // "purchase more credits at https://..." that the user
-        // wants to tap straight from the chat.
-        // A turn paused by a drain-gated restart (or interrupted by a crash)
-        // persists a `resumable` note (backend reconcile marks it). Only the
-        // TAIL note on the last message is resumable — mirrors how a question
-        // card is only answerable at the tail — so scrolled-back history and
-        // live provider errors never show a Resume button. One tap re-sends a
-        // short "continue" as a normal visible send.
+        // The card body (label, park/pause classification, reset line) is
+        // ErrorCard — the SAME renderer StreamingMessage uses for the live
+        // stream, so the two surfaces cannot diverge. Only the Resume button
+        // lives here: a turn paused by a drain-gated restart (or interrupted
+        // by a crash) persists a `resumable` note (backend reconcile marks
+        // it), and only the TAIL note on the last message is resumable —
+        // mirrors how a question card is only answerable at the tail — so
+        // scrolled-back history and live provider errors never show a Resume
+        // button. One tap re-sends a short "continue" as a normal visible
+        // send; on a park the button reads "Resume now" (design §2.4).
         const resumable = !!(block.resumable && isLastMsg && onResume)
-        // A provider-limit park (design §2.4) is a resumable error carrying
-        // `parked_until`: it renders as a live "Rate limit — resets at … ·
-        // Resume now" card instead of a bare error. Same tail-only Resume
-        // gate; the button just re-sends "continue" like the restart resume.
-        const resetLabel = block.parked_until
-          ? formatResetTime(block.parked_until)
-          : null
         const parked = !!block.parked_until
         return (
-          <div
-            key={i}
-            className={`chat__text--error${parked ? ' chat__text--parked' : ''}`}
-            role="alert"
-          >
-            <span className="chat__error-label">
-              {parked ? 'Rate limit' : 'Error'}
-            </span>
-            <StandardMarkdown
-              text={block.message || 'The agent ran into an issue.'}
-            />
-            {parked && resetLabel && (
-              <div className="chat__parked-reset">Resets at {resetLabel}</div>
-            )}
+          <ErrorCard key={i} block={block}>
             {resumable && (
               <button
                 type="button"
@@ -223,7 +191,7 @@ function MsgContentInner({
                 {parked ? 'Resume now' : 'Resume'}
               </button>
             )}
-          </div>
+          </ErrorCard>
         )
       }
       return null

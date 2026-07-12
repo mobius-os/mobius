@@ -4,6 +4,7 @@ import ToolBlock from './ToolBlock.jsx'
 import ToolActivityGroup from './ToolActivityGroup.jsx'
 import { groupToolRuns } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
+import ErrorCard from './ErrorCard.jsx'
 
 
 function durationSeconds(durationMs) {
@@ -156,20 +157,13 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
       )
     }
     if (item.type === 'error') {
-      // StandardMarkdown so URLs in provider errors
-      // (quota links, billing pages) become clickable.
-      // Same shape as the post-promote render in
-      // MsgContent so the user gets the same affordance
-      // before and after the streaming `<li>` is
-      // replaced by the persisted message.
-      return (
-        <div key={`s-${i}`} className="chat__text--error" role="alert">
-          <span className="chat__error-label">Error</span>
-          <StandardMarkdown
-            text={item.message || 'The agent ran into an issue.'}
-          />
-        </div>
-      )
+      // The SAME ErrorCard renderer MsgContent uses for persisted blocks, so
+      // a benign pause/park renders calm on the live stream and SSE catch-up
+      // too — a hardcoded red card here made a pause flash "Error" until
+      // promotion. No Resume button on the live surface: the button's
+      // tail-only gate is a persisted-transcript concept, and a terminal
+      // error promotes within the same breath.
+      return <ErrorCard key={`s-${i}`} block={item} />
     }
     return null
   }

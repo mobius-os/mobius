@@ -204,6 +204,10 @@ def test_reconcile_marks_paused_note_resumable_without_double_note():
   assert len(errors) == 1
   assert errors[0]["message"] == chat_mod.PAUSED_FOR_RESTART_MESSAGE
   assert errors[0]["resumable"] is True
+  # The upgrade also stamps the benign marker so a drain note persisted
+  # before `pause_kind` existed (or whose live event never landed) renders
+  # in the calm "Paused" family, not danger-red.
+  assert errors[0]["pause_kind"] == "restart"
 
 
 def test_reconcile_crash_note_is_resumable():
