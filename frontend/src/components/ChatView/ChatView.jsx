@@ -27,17 +27,16 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
+  builtAppPulseDecision,
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
-  previewReadyAnnouncement,
   resolveFreshPinRetarget,
   resolveSteeredPinDecision,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
-  shouldShowOpenAppCta,
   startedMessagesFromResponse,
   systemEventForChat,
 } from './chatRuntimeState.js'
@@ -90,14 +89,15 @@ function sameBlock(a, b) {
       && a.questions === b.questions && a.answers === b.answers
       && a.question_id === b.question_id
       // The error-card fields: a warm DB refresh can deliver a message that
-      // differs ONLY in these (e.g. boot reconcile stamped resumable +
-      // pause_kind onto an existing drain note, or a coalescing error event
-      // rewrote message/park fields). Skipping them froze a stale red card
-      // on screen until a remount.
+      // differs ONLY in these (e.g. boot reconcile stamped resumable + a
+      // `pause` descriptor onto an existing drain note, or a coalescing error
+      // event rewrote the message/pause). Skipping them froze a stale red card
+      // on screen until a remount. Compare the pause sub-fields (kind +
+      // resets_at) rather than the object reference, which a refetch always
+      // recreates.
       && a.message === b.message && a.resumable === b.resumable
-      && a.parked_until === b.parked_until
-      && a.park_reason === b.park_reason
-      && a.pause_kind === b.pause_kind
+      && a.pause?.kind === b.pause?.kind
+      && a.pause?.resets_at === b.pause?.resets_at
 }
 
 function sameMessageList(a, b) {
@@ -248,6 +248,44 @@ function readInitialComposer(chatId) {
 // list-keyed effects.
 const NO_BUILT_APPS = []
 
+// One offscreen-visibility observer for a sticky footer nudge, used twice (the
+// pending-question card and the resume card). Returns whether the found card is
+// currently scrolled OUT of the scroll container's viewport, so the caller can
+// show a "tap to jump to it" chip.
+//
+// `findCard` is a fresh closure every render (it reads scrollRef.current, a
+// ref, so even a stale one queries live DOM), so it is deliberately kept OUT of
+// the reactive dep array and read through a ref. The observer rebinds only on
+// `active` flips and the explicit `rebindDeps` — the rendering-surface signals
+// that can move the card's DOM node — exactly as the two hand-written effects
+// did. Listing `findCard` in the deps would recreate the observer on every
+// streaming re-render (a per-token IntersectionObserver thrash); the card's DOM
+// node is stable across those, so it must not.
+function useOffscreenNudge(scrollRef, active, findCard, rebindDeps) {
+  const [offscreen, setOffscreen] = useState(false)
+  const findCardRef = useRef(findCard)
+  findCardRef.current = findCard
+  useEffect(() => {
+    if (!active) {
+      setOffscreen(false)
+      return undefined
+    }
+    const scrollEl = scrollRef.current
+    const card = findCardRef.current()
+    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
+      setOffscreen(false)
+      return undefined
+    }
+    const io = new IntersectionObserver(entries => {
+      setOffscreen(!entries[0]?.isIntersecting)
+    }, { root: scrollEl, threshold: 0 })
+    io.observe(card)
+    return () => io.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, scrollRef, ...rebindDeps])
+  return offscreen
+}
+
 export default function ChatView({
   chatId,
   onStreamEnd,
@@ -255,7 +293,6 @@ export default function ChatView({
   onSystemEvent,
   onChatMissing,
   builtApps = NO_BUILT_APPS,
-  recompilePulse = null,
   onOpenApp,
   onMessageStart,
   onVoiceListeningChange,
@@ -353,26 +390,21 @@ export default function ChatView({
   // read is forward-compat: harmlessly null today, it would pick up a
   // persisted pending_question_id if one is ever added.)
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
-  // True while a pending (unanswered) question card exists but is scrolled
-  // out of the viewport — drives the footer "tap to answer" chip. Written
-  // only by the IntersectionObserver effect below (near hasPendingQuestion).
-  const [pendingCardOffscreen, setPendingCardOffscreen] = useState(false)
-  // True while a resumable tail pause/park card exists but is scrolled out of
-  // the viewport — drives the footer "tap to resume" chip. Written only by the
-  // IntersectionObserver effect below (near hasPendingResume), mirroring the
-  // pending-question nudge.
-  const [resumeCardOffscreen, setResumeCardOffscreen] = useState(false)
+  // The pending-question and resume "tap to jump to it" nudges each track
+  // whether their card is scrolled out of the viewport. Both use one shared
+  // observer hook (useOffscreenNudge, below); their booleans are computed near
+  // hasPendingQuestion / hasPendingResume where the card finders live.
   const [showInspector, setShowInspector] = useState(false)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
-  const lastAnnouncedPreviewRef = useRef(null)
   // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
   // updated ✓" for ~2s), or null.
   const [pulsedAppId, setPulsedAppId] = useState(null)
-  // Mirror of the built-app list so the pulse effect can look up the recompiled
-  // app without taking builtApps as a dep (which would re-fire it on any list
-  // change, not just a fresh pulse).
-  const builtAppsRef = useRef(builtApps)
-  useEffect(() => { builtAppsRef.current = builtApps }, [builtApps])
+  // Last-seen updated_at per built-app id, so the pulse/announce effect can tell
+  // a first build (a new id) from a recompile (an existing id whose updated_at
+  // advanced) without a separate app_built event — updated_at IS the monotonic
+  // re-fire key. Per-ChatView-instance (fresh on remount), which is why the
+  // pulse is naturally scoped to this chat.
+  const lastSeenUpdatedAtRef = useRef(new Map())
   // Build-milestone rail: phases accumulated from chat-scoped `build_phase`
   // stream events (deduped by ts so catch-up replay rebuilds it), reset ONLY
   // when a new run starts for this chat (see buildPhaseRail.js for why a
@@ -1069,10 +1101,12 @@ export default function ChatView({
     onTranscript: (text) => setInput(text),
     inputRef,
   })
+  // Report only WHETHER dictation is live (the shell tracks a single boolean,
+  // not which chat) — this ChatView is single-mount, so it is the sole source.
   useEffect(() => {
-    onVoiceListeningChange?.(chatId, listening)
-    return () => { onVoiceListeningChange?.(chatId, false) }
-  }, [chatId, listening, onVoiceListeningChange])
+    onVoiceListeningChange?.(listening)
+    return () => { onVoiceListeningChange?.(false) }
+  }, [listening, onVoiceListeningChange])
 
   // Ref mirror of stopVoice (peer of onMessageStartRef /
   // onFirstMessageRef above). useVoiceInput may not memoize its
@@ -1258,37 +1292,30 @@ export default function ChatView({
     setBuildPhaseStatus(latestBuildPhaseAnnouncement(buildPhases))
   }, [buildPhases])
 
-  // Announce the most recent built app (the newest CTA row) when it appears.
+  // Announce a new build and flash a recompile, both derived from updated_at
+  // deltas on the (server-derived) CTA list — no app_built event, no nonce. A
+  // brand-new CTA id is a first build (announce "Live preview ready …" without
+  // pulsing); an already-seen id whose updated_at advanced is a recompile
+  // (flash "Preview updated ✓" for 2s + announce). builtAppPulseDecision owns
+  // that pure distinction; this effect applies its verdict. Because `builtApps`
+  // is referentially stable (Shell memoizes it on a content signature) this runs
+  // only when THIS chat's derived list actually changes.
   useEffect(() => {
-    const latest = builtApps.length > 0 ? builtApps[builtApps.length - 1] : null
-    if (!shouldShowOpenAppCta(latest)) {
-      lastAnnouncedPreviewRef.current = null
+    if (builtApps.length === 0) {
+      lastSeenUpdatedAtRef.current = new Map()
       setPreviewReadyStatus('')
       return
     }
-    const key = `${latest.id}:${latest.name || ''}`
-    if (lastAnnouncedPreviewRef.current === key) return
-    lastAnnouncedPreviewRef.current = key
-    setPreviewReadyStatus(previewReadyAnnouncement(latest))
-  }, [builtApps])
-
-  // Recompile pulse: Shell signals (with a nonce so repeats re-fire) that an
-  // app just recompiled. If it's a live CTA here, flash it and announce the
-  // update; the label swaps to "Preview updated ✓" for ~2s (see render).
-  useEffect(() => {
-    const appId = recompilePulse?.appId
-    if (appId == null) return
-    // Ignore a pulse meant for another chat — recompilePulse lingers in Shell
-    // state, so a remount for a different chat could otherwise replay it.
-    if (recompilePulse.chatId != null
-        && String(recompilePulse.chatId) !== String(chatId)) return
-    const app = builtAppsRef.current.find(a => Number(a.id) === Number(appId))
-    if (!app) return
-    setPulsedAppId(Number(appId))
-    setPreviewReadyStatus(`Preview updated for ${app.name || 'app'}.`)
+    const { pulseId, announce, nextSeen } = builtAppPulseDecision(
+      builtApps, lastSeenUpdatedAtRef.current,
+    )
+    lastSeenUpdatedAtRef.current = nextSeen
+    if (announce) setPreviewReadyStatus(announce)
+    if (pulseId == null) return
+    setPulsedAppId(pulseId)
     const t = setTimeout(() => setPulsedAppId(null), 2000)
     return () => clearTimeout(t)
-  }, [recompilePulse, chatId])
+  }, [builtApps])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -2756,54 +2783,25 @@ export default function ChatView({
   // card's DOM node is stable across streaming ticks (keyed children),
   // so the observer only needs re-binding when the rendering surface
   // can change: pending-flag flips, stream↔messages promotion, or a
-  // messages commit.
+  // messages commit. Both nudges share useOffscreenNudge (above).
   // The LAST un-answered card is the pending one: it lives in the last
   // assistant message or the streaming <li>.
   const findPendingQuestionCard = () =>
     [...(scrollRef.current?.querySelectorAll('.qcard:not(.qcard--answered)') ?? [])].pop()
+  const pendingCardOffscreen = useOffscreenNudge(
+    scrollRef, hasPendingQuestion, findPendingQuestionCard,
+    [showStreamingSurface, messages],
+  )
 
-  useEffect(() => {
-    if (!hasPendingQuestion) {
-      setPendingCardOffscreen(false)
-      return undefined
-    }
-    const scrollEl = scrollRef.current
-    const card = findPendingQuestionCard()
-    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
-      setPendingCardOffscreen(false)
-      return undefined
-    }
-    const io = new IntersectionObserver(entries => {
-      setPendingCardOffscreen(!entries[0]?.isIntersecting)
-    }, { root: scrollEl, threshold: 0 })
-    io.observe(card)
-    return () => io.disconnect()
-  }, [hasPendingQuestion, showStreamingSurface, messages])
-
-  // Same offscreen-detection machinery for the resume card. Only the tail
-  // resumable note renders `.chat__resume` (MsgContent gates the button on
-  // isLastMsg), so observing that button is enough to know the card's
-  // visibility; a tap on the nudge scrolls it into view.
+  // The resume card: only the tail resumable note renders `.chat__resume`
+  // (MsgContent gates the button on isLastMsg), so observing that button is
+  // enough to know the card's visibility; a tap on the nudge scrolls it in.
   const findResumeCard = () =>
     [...(scrollRef.current?.querySelectorAll('.chat__resume') ?? [])].pop()
-
-  useEffect(() => {
-    if (!hasPendingResume) {
-      setResumeCardOffscreen(false)
-      return undefined
-    }
-    const scrollEl = scrollRef.current
-    const card = findResumeCard()
-    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
-      setResumeCardOffscreen(false)
-      return undefined
-    }
-    const io = new IntersectionObserver(entries => {
-      setResumeCardOffscreen(!entries[0]?.isIntersecting)
-    }, { root: scrollEl, threshold: 0 })
-    io.observe(card)
-    return () => io.disconnect()
-  }, [hasPendingResume, showStreamingSurface, messages])
+  const resumeCardOffscreen = useOffscreenNudge(
+    scrollRef, hasPendingResume, findResumeCard,
+    [showStreamingSurface, messages],
+  )
 
   // The streaming <li> carries a stable data-key so the scroll state machine
   // can anchor inside an in-flight answer. Without this, returning to a
@@ -2835,8 +2833,8 @@ export default function ChatView({
   // Resume card to fall back on.
   const resumeStatus = (() => {
     if (!pendingResumeBlock) return null
-    if (pendingResumeBlock.parked_until) {
-      const label = formatResetTime(pendingResumeBlock.parked_until)
+    if (pendingResumeBlock.pause?.resets_at) {
+      const label = formatResetTime(pendingResumeBlock.pause.resets_at)
       return label
         ? `Rate limit reached, resets ${label} — Resume available.`
         : 'Rate limit reached — Resume available.'
@@ -3141,7 +3139,7 @@ export default function ChatView({
               findResumeCard()?.scrollIntoView({ block: 'nearest' })
             }}
           >
-            {pendingResumeBlock?.parked_until
+            {pendingResumeBlock?.pause?.resets_at
               ? 'Rate limit reached — tap to resume'
               : 'Turn paused — tap to resume'}
           </button>

@@ -706,7 +706,7 @@ export default function useStreamConnection(chatId, {
           }
 
           if (isChatStreamSystemEvent(event.type)) {
-            if (shouldForwardChatStreamSystemEvent(event, { isCatchUp })) {
+            if (shouldForwardChatStreamSystemEvent(event)) {
               onSystemEventRef.current?.(event)
             }
             continue
@@ -873,21 +873,19 @@ export default function useStreamConnection(chatId, {
               // return).
               // Carry the whitelisted extras so the promoted block matches the
               // persisted shape: `resumable` renders the one-tap Resume, and
-              // `parked_until`/`park_reason` render the provider-limit "resets
-              // at … · Resume now" card. Accepted limitation (adjudicated
-              // 2026-07-11): while this is still a live stream item, the
-              // streaming renderer shows the generic error styling — the full
-              // parked card appears at promotion. A limit kill is terminal, so
-              // `done` (and promotion) follows within the same breath; not
-              // worth a parallel live-card path. streamItemToBlock carries the
-              // same fields on promote.
+              // the single `pause` descriptor ({kind, resets_at?}) renders the
+              // "Paused" family / the provider-limit "resets at … · Resume now"
+              // card. Accepted limitation (adjudicated 2026-07-11): while this
+              // is still a live stream item, the streaming renderer shows the
+              // generic error styling — the full parked card appears at
+              // promotion. A limit kill is terminal, so `done` (and promotion)
+              // follows within the same breath; not worth a parallel live-card
+              // path. streamItemToBlock carries the same fields on promote.
               updated.push({
                 type: 'error',
                 message: event.message,
                 ...(event.resumable ? { resumable: true } : {}),
-                ...(event.parked_until ? { parked_until: event.parked_until } : {}),
-                ...(event.park_reason ? { park_reason: event.park_reason } : {}),
-                ...(event.pause_kind ? { pause_kind: event.pause_kind } : {}),
+                ...(event.pause ? { pause: event.pause } : {}),
               })
               return updated
             })

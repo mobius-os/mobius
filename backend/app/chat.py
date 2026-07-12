@@ -605,6 +605,40 @@ DRAIN_TIMEOUT = 25.0
 PAUSED_FOR_RESTART_MESSAGE = "Paused for a platform update."
 
 
+def _pause_note(
+  message: str,
+  *,
+  kind: str | None = None,
+  resets_at: str | None = None,
+  resumable: bool = True,
+) -> dict:
+  """Build the ONE error-block/event shape every pause producer emits.
+
+  A pause folds its whole classification into a single `pause` descriptor on
+  the block: `kind` names the family ('restart' | 'stall' | 'rate_limit' |
+  'usage_limit'), and `resets_at` (an explicit-UTC ISO string, present only
+  for the limit kinds) is the reset time the card renders. Absorbing the reset
+  reason into `kind` keeps the wire at two block keys — `resumable` + `pause` —
+  no matter how many pause facts exist, so the passthrough never grows a field
+  again (events.ERROR_PASSTHROUGH_FIELDS stays `('resumable', 'pause')`).
+
+  `resumable` is a SEPARATE top-level flag on purpose: it is the orthogonal
+  Resume-button affordance, independent of whether the pause is benign — a
+  genuine error can be resumable, and a benign pause behind a still-open
+  question card is not (its answer is the affordance). A note with no `kind`
+  carries no `pause` and renders as the plain error family.
+  """
+  note: dict = {"type": "error", "message": message}
+  if resumable:
+    note["resumable"] = True
+  if kind is not None:
+    pause: dict = {"kind": kind}
+    if resets_at is not None:
+      pause["resets_at"] = resets_at
+    note["pause"] = pause
+  return note
+
+
 def begin_drain() -> None:
   """Set the process-wide drain gate. Idempotent."""
   global draining
@@ -1057,14 +1091,11 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       # note for the one-tap Resume affordance (MsgContent renders a Resume
       # button on a resumable interrupt note); every interrupted turn — crash
       # or drain-gated restart — is resumable via a fresh "continue" send.
-      # `pause_kind` marks this as a benign restart pause (not a failure) so the
-      # card renders in the calm "Paused" family rather than the danger-red
-      # error styling — a restart is a maintenance event, not something the
-      # turn did wrong.
-      err_block = {
-        "type": "error", "message": note, "resumable": True,
-        "pause_kind": "restart",
-      }
+      # `pause.kind='restart'` marks this as a benign restart pause (not a
+      # failure) so the card renders in the calm "Paused" family rather than
+      # the danger-red error styling — a restart is a maintenance event, not
+      # something the turn did wrong.
+      err_block = _pause_note(note, kind="restart")
       if msgs and msgs[-1].get("role") == "assistant":
         blocks = list(msgs[-1].get("blocks") or [])
         finalize_blocks(blocks)
@@ -1084,7 +1115,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         )
         if paused_idx is not None:
           # The drain wrote the terminal note; just make it resumable — and
-          # carry `pause_kind` so a note persisted before the field existed
+          # carry `pause` so a note persisted before the descriptor existed
           # (or one whose live event never landed) still renders in the calm
           # "Paused" family — then fall through to the shared write-back below
           # (no second note appended). Replace with a FRESH dict rather than
@@ -1094,7 +1125,8 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
           # reassigned list persists (every other reconcile branch appends a
           # fresh block for the same reason).
           blocks[paused_idx] = {
-            **blocks[paused_idx], "resumable": True, "pause_kind": "restart",
+            **blocks[paused_idx], "resumable": True,
+            "pause": {"kind": "restart"},
           }
         else:
           # Preserve a tail unanswered question. It is a durable human handoff,
@@ -1111,15 +1143,17 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
               break
             trailing_open_start -= 1
           if trailing_open_start < len(blocks):
-            wait_note = dict(err_block)
             # The tail affordance here is the QUESTION card — answering it is
             # how this turn resumes. A Resume button on the note would compete
             # with the card and send a visible "continue" instead of the
-            # answer, so this variant must not be resumable.
-            wait_note.pop("resumable", None)
-            wait_note["message"] = (
+            # answer, so this variant must not be resumable (still a benign
+            # 'restart' pause, so it keeps the calm "Paused" styling).
+            wait_note = _pause_note(
               note
-              + " Your answer is still needed; I will continue once you submit it."
+              + " Your answer is still needed; I will continue once you"
+              " submit it.",
+              kind="restart",
+              resumable=False,
             )
             blocks = (
               blocks[:trailing_open_start]
@@ -1434,19 +1468,13 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
     # the whitelisted extras onto the persisted block — the stalled note gets
     # its one-tap Resume without waiting for a boot reconcile.
     if sink is not None:
-      sink.publish({
-        "type": "error", "message": STALLED_TURN_MESSAGE, "resumable": True,
-        # A stall is a benign timeout, not a failure — `pause_kind` renders it
-        # in the calm "Paused" family rather than the danger-red error card.
-        "pause_kind": "stall",
-      })
+      # A stall is a benign timeout, not a failure — `pause.kind='stall'`
+      # renders it in the calm "Paused" family, not the danger-red error card.
+      sink.publish(_pause_note(STALLED_TURN_MESSAGE, kind="stall"))
     elif bc is not None:
       # Transport-only fallback for the rare inconsistent state where a handle
       # is live but chat.py no longer has its sink. Do not persist directly.
-      bc.publish({
-        "type": "error", "message": STALLED_TURN_MESSAGE, "resumable": True,
-        "pause_kind": "stall",
-      })
+      bc.publish(_pause_note(STALLED_TURN_MESSAGE, kind="stall"))
       log.warning(
         "stalled-live watchdog has no active sink for chat_id=%s; "
         "published transport error only",
@@ -1531,13 +1559,10 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
   # whitelisted extras onto the persisted block), so a drained turn's Resume
   # button renders immediately; boot reconcile's text-keyed marking stays as
   # the crash-path fallback for a note that never made it through the sink.
-  note = {
-    "type": "error", "message": PAUSED_FOR_RESTART_MESSAGE, "resumable": True,
-    # A drain-gated restart is a benign maintenance pause; `pause_kind` lets the
-    # card render in the calm "Paused" family instead of the danger-red error
-    # styling reserved for genuine failures.
-    "pause_kind": "restart",
-  }
+  # A drain-gated restart is a benign maintenance pause; `pause.kind='restart'`
+  # lets the card render in the calm "Paused" family instead of the danger-red
+  # error styling reserved for genuine failures.
+  note = _pause_note(PAUSED_FOR_RESTART_MESSAGE, kind="restart")
   for chat_id in sorted(registry.all_alive_chat_ids()):
     handles = registry.get_handles(chat_id)
     if not handles:
@@ -2478,19 +2503,20 @@ def _limit_error_event(
 ) -> dict:
   """The enriched error event a limit kill publishes through the sink.
 
-  Carries the park fields (whitelisted through events.process_event onto the
-  persisted block) so the transcript card renders live as "Rate limit —
-  resets at … · Resume now". `parked_until` is serialized as EXPLICIT-UTC
-  ISO — a naive isoformat would be parsed as local time by the client's
-  `new Date()` and shift the displayed reset by the viewer's UTC offset.
+  Maps the DB park fields into the block's single `pause` descriptor
+  (`kind` = `park_reason`, `resets_at` = the reset time) — whitelisted through
+  events.process_event onto the persisted block — so the transcript card
+  renders live as "Rate limit — resets at … · Resume now". `resets_at` is
+  serialized as EXPLICIT-UTC ISO: a naive isoformat would be parsed as local
+  time by the client's `new Date()` and shift the displayed reset by the
+  viewer's UTC offset. The raw (parked_until, park_reason) still flow
+  separately to the DB ChatRun row via _complete_turn/ParkRun.
   """
-  return {
-    "type": "error",
-    "message": message,
-    "resumable": True,
-    "parked_until": parked_until.replace(tzinfo=UTC).isoformat(),
-    "park_reason": park_reason,
-  }
+  return _pause_note(
+    message,
+    kind=park_reason,
+    resets_at=parked_until.replace(tzinfo=UTC).isoformat(),
+  )
 
 
 async def _park_run_strict(
@@ -2785,18 +2811,14 @@ async def _complete_turn(
       # BEFORE this park was durable. The park did NOT land, so the sweep
       # will never fire for it — degrade the card honestly: this follow-up
       # error coalesces onto the same tail block and, per the latest-wins
-      # extras contract in events.process_event, STRIPS parked_until/
-      # park_reason while keeping one-tap Resume. Persistence is the sink's
+      # extras contract in events.process_event, STRIPS the `pause` descriptor
+      # (no kind here) while keeping one-tap Resume. Persistence is the sink's
       # fire-and-forget PersistError (finalize already ran) — best-effort,
       # and boot reconcile repairs the marker either way.
-      sink.publish({
-        "type": "error",
-        "message": (
-          "Rate limited — the reset reminder could not be scheduled. "
-          "Send a message or tap Resume to continue."
-        ),
-        "resumable": True,
-      })
+      sink.publish(_pause_note(
+        "Rate limited — the reset reminder could not be scheduled. "
+        "Send a message or tap Resume to continue.",
+      ))
       bc.publish({"type": "done"})
       bc.mark_completed()
       _publish_chat_run_finished(chat_id)

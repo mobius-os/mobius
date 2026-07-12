@@ -19,7 +19,7 @@ test('buildPhaseFromEvent extracts label + ts and trims the label', () => {
 
 test('buildPhaseFromEvent rejects non-phase, empty-label, or non-finite ts', () => {
   assert.equal(buildPhaseFromEvent(null), null)
-  assert.equal(buildPhaseFromEvent({ type: 'app_built', appId: '7' }), null)
+  assert.equal(buildPhaseFromEvent({ type: 'app_updated', appId: '7' }), null)
   assert.equal(buildPhaseFromEvent({ type: 'build_phase', label: '   ', ts: 1 }), null)
   assert.equal(buildPhaseFromEvent({ type: 'build_phase', ts: 1 }), null)
   assert.equal(buildPhaseFromEvent({ type: 'build_phase', label: 'x' }), null)
@@ -82,7 +82,7 @@ test('a send that merely enqueues preserves the in-flight build rail', () => {
   const railAtEnqueue = rail
   // The enqueue itself runs no transition; incidental stream events around
   // it leave the rail untouched by reference.
-  assert.equal(accumulateBuildPhase(rail, { type: 'app_built', appId: '7' }), railAtEnqueue)
+  assert.equal(accumulateBuildPhase(rail, { type: 'app_updated', appId: '7' }), railAtEnqueue)
   rail = accumulateBuildPhase(rail, {
     type: 'build_phase', label: 'Storage wired', ts: 2,
   })

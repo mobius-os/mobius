@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 
 import {
   hasActiveChatTurn,
-  hasActiveVoiceDictation,
   hasProtectedEditingContent,
   isTextEditingElement,
   shouldDeferShellReload,
@@ -120,16 +119,23 @@ test('a focused but empty composer is idle enough to apply at turn-end', () => {
 })
 
 test('voice dictation defers shell reloads even with an empty composer', () => {
-  assert.equal(hasActiveVoiceDictation({
-    voiceListeningChatIds: new Set(['c1']),
-  }), true)
   assert.equal(shouldDeferShellReload({
     activeElement: el('textarea', { value: '' }),
     activeView: 'chat',
     activeChatId: 'c1',
     streamingChatIds: new Set(),
-    voiceListeningChatIds: new Set(['c1']),
+    voiceDictationActive: true,
     lastUserInteractionAt: 0,
     now: 10000,
   }), true)
+  // Idle mic → no deferral on that account.
+  assert.equal(shouldDeferShellReload({
+    activeElement: el('textarea', { value: '' }),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(),
+    voiceDictationActive: false,
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }), false)
 })

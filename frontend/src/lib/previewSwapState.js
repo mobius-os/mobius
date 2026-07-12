@@ -61,12 +61,6 @@ export function initSwapState(version) {
  */
 export function reduceSwap(state, event) {
   switch (event.type) {
-    case 'reset':
-      // A different app took this slot — full teardown, fresh first-mount.
-      // (In practice AppCanvas is keyed by appId in the shell so appId never
-      // changes within an instance, but the reducer stays total.)
-      return initSwapState(event.version)
-
     case 'version': {
       const v = event.version
       if (v === state.incomingVersion) return state          // already buffering it

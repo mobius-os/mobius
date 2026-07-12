@@ -57,23 +57,12 @@ export function hasActiveChatTurn({ streamingChatIds }) {
   return false
 }
 
-export function hasActiveVoiceDictation({ voiceListeningChatIds }) {
-  if (!voiceListeningChatIds) return false
-  if (typeof voiceListeningChatIds.size === 'number') {
-    return voiceListeningChatIds.size > 0
-  }
-  if (Array.isArray(voiceListeningChatIds)) {
-    return voiceListeningChatIds.length > 0
-  }
-  return false
-}
-
 export function shouldDeferShellReload({
   activeElement,
   activeView,
   activeChatId,
   streamingChatIds,
-  voiceListeningChatIds,
+  voiceDictationActive = false,
   lastUserInteractionAt = 0,
   now = Date.now(),
   visibilityState = 'visible',
@@ -81,7 +70,9 @@ export function shouldDeferShellReload({
   if (visibilityState === 'hidden') return false
   if (hasProtectedEditingContent(activeElement)) return true
   if (hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })) return true
-  if (hasActiveVoiceDictation({ voiceListeningChatIds })) return true
+  // A reload mid-dictation would drop the in-flight transcript, so hold it
+  // while the mic is live.
+  if (voiceDictationActive) return true
   if (lastUserInteractionAt && now - lastUserInteractionAt < RECENT_SHELL_INTERACTION_MS) return true
   return false
 }

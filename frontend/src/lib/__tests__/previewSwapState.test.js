@@ -216,15 +216,6 @@ test('live-reload before first settle is a no-op (overlay already up)', () => {
   assert.equal(s.swaps, 0)
 })
 
-test('reset returns a fresh first-load state', () => {
-  const s = run('100', [
-    { type: 'frame-mounted', version: '100' },
-    { type: 'version', version: '101' },
-    { type: 'reset', version: '500' },
-  ])
-  assert.deepEqual(s, { liveVersion: '500', liveLoaded: false, incomingVersion: null, swaps: 0 })
-})
-
 test('unknown event types are ignored (reducer stays total)', () => {
   const s = initSwapState('100')
   assert.equal(reduceSwap(s, { type: 'nope' }), s)

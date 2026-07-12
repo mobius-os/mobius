@@ -1,160 +1,88 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import {
-  builtAppsForChat,
-  coerceBuiltAppsByChat,
-  prunedBuiltAppsByChat,
-  withBuiltAppForChat,
-  withoutBuiltAppForChat,
-} from '../builtAppState.js'
+import { builtAppsSignature, derivedBuiltApps } from '../builtAppState.js'
 
-test('built apps are scoped to the chat that produced them', () => {
-  const state = withBuiltAppForChat({}, 'chat-a', { id: 7, name: 'Habits' })
+const app = (id, name, updated_at, chat_id) => ({ id, name, updated_at, chat_id })
 
-  assert.deepEqual(builtAppsForChat(state, 'chat-a'), [{ id: 7, name: 'Habits' }])
-  assert.deepEqual(builtAppsForChat(state, 'chat-b'), [])
+test('built apps are derived from the apps that carry this chat_id', () => {
+  const apps = [
+    app(7, 'Habits', '2026-07-12T00:00:00Z', 'chat-a'),
+    app(9, 'Other', '2026-07-12T00:00:00Z', 'chat-b'),
+  ]
+  assert.deepEqual(derivedBuiltApps(apps, 'chat-a'), [
+    { id: 7, name: 'Habits', updated_at: '2026-07-12T00:00:00Z' },
+  ])
+  assert.deepEqual(derivedBuiltApps(apps, 'chat-c'), [])
 })
 
-test('a chat can hold several built apps, most recent last', () => {
-  const state = withBuiltAppForChat(
-    withBuiltAppForChat({}, 'chat-a', { id: 7, name: 'Notes' }),
-    'chat-a',
-    { id: 8, name: 'Habits' },
-  )
-
-  assert.deepEqual(builtAppsForChat(state, 'chat-a'), [
-    { id: 7, name: 'Notes' },
-    { id: 8, name: 'Habits' },
+test('a chat can own several built apps, oldest updated first', () => {
+  const apps = [
+    app(8, 'Habits', '2026-07-12T02:00:00Z', 'chat-a'),
+    app(7, 'Notes', '2026-07-12T01:00:00Z', 'chat-a'),
+  ]
+  assert.deepEqual(derivedBuiltApps(apps, 'chat-a'), [
+    { id: 7, name: 'Notes', updated_at: '2026-07-12T01:00:00Z' },
+    { id: 8, name: 'Habits', updated_at: '2026-07-12T02:00:00Z' },
   ])
 })
 
-test('rebuilding an app dedups by id and moves it to the end', () => {
-  const state = withBuiltAppForChat(
-    withBuiltAppForChat(
-      withBuiltAppForChat({}, 'chat-a', { id: 7, name: 'Notes' }),
-      'chat-a',
-      { id: 8, name: 'Habits' },
-    ),
-    'chat-a',
-    { id: 7, name: 'Notes v2' },
-  )
-
-  assert.deepEqual(builtAppsForChat(state, 'chat-a'), [
-    { id: 8, name: 'Habits' },
-    { id: 7, name: 'Notes v2' },
-  ])
+test('only the newest three owned apps are kept', () => {
+  const apps = [1, 2, 3, 4].map(
+    i => app(i, `A${i}`, `2026-07-12T0${i}:00:00Z`, 'chat-a'))
+  assert.deepEqual(derivedBuiltApps(apps, 'chat-a').map(a => a.id), [2, 3, 4])
 })
 
-test('only the newest three built apps are kept', () => {
-  let state = {}
-  for (const app of [
-    { id: 1, name: 'A' }, { id: 2, name: 'B' },
-    { id: 3, name: 'C' }, { id: 4, name: 'D' },
-  ]) {
-    state = withBuiltAppForChat(state, 'chat-a', app)
-  }
-
-  assert.deepEqual(builtAppsForChat(state, 'chat-a').map(a => a.id), [2, 3, 4])
+test('an app tombstoned (dropped from the apps list) leaves the CTA', () => {
+  // The list is DERIVED, so an uninstalled app simply is not in `apps` and
+  // its CTA disappears with no prune step.
+  const apps = [app(7, 'Alive', '2026-07-12T00:00:00Z', 'chat-a')]
+  assert.deepEqual(derivedBuiltApps(apps, 'chat-a').map(a => a.id), [7])
+  assert.deepEqual(derivedBuiltApps([], 'chat-a'), [])
 })
 
-test('clearing one chat does not clear another chat preview', () => {
-  const state = withBuiltAppForChat(
-    withBuiltAppForChat({}, 'chat-a', { id: 7, name: 'Habits' }),
-    'chat-b',
-    { id: 8, name: 'Notes' },
-  )
-
-  const next = withoutBuiltAppForChat(state, 'chat-a')
-
-  assert.deepEqual(builtAppsForChat(next, 'chat-a'), [])
-  assert.deepEqual(builtAppsForChat(next, 'chat-b'), [{ id: 8, name: 'Notes' }])
+test('a chat that owns no apps always yields the same list reference', () => {
+  // ChatView relies on this stable identity so its list-keyed effects do not
+  // fire for chats that built nothing.
+  assert.equal(derivedBuiltApps([], 'chat-a'), derivedBuiltApps([], 'chat-b'))
 })
 
-test('empty chat ids and app ids are ignored', () => {
-  const original = { existing: [{ id: 1, name: 'One' }] }
-
-  assert.deepEqual(withBuiltAppForChat(original, null, { id: 2 }), original)
-  assert.deepEqual(withBuiltAppForChat(original, 'chat-a', {}), original)
-  assert.deepEqual(withoutBuiltAppForChat(original, null), original)
-  assert.deepEqual(builtAppsForChat(original, null), [])
+test('null/empty chat id yields the empty list', () => {
+  const apps = [app(7, 'Habits', '2026-07-12T00:00:00Z', 'chat-a')]
+  assert.deepEqual(derivedBuiltApps(apps, null), [])
+  assert.deepEqual(derivedBuiltApps(apps, ''), [])
+  assert.deepEqual(derivedBuiltApps(undefined, 'chat-a'), [])
 })
 
-test('an empty chat always yields the same list reference', () => {
-  // ChatView relies on this stable identity so its list-keyed effects do
-  // not fire on every render for chats that built nothing.
-  assert.equal(builtAppsForChat({}, 'chat-a'), builtAppsForChat({}, 'chat-b'))
+test('chat_id is matched string-normalized', () => {
+  const apps = [app(7, 'Habits', '2026-07-12T00:00:00Z', 7)]
+  assert.deepEqual(derivedBuiltApps(apps, '7').map(a => a.id), [7])
 })
 
-test('coerceBuiltAppsByChat restores the list shape from persistence', () => {
-  assert.deepEqual(
-    coerceBuiltAppsByChat({ 'chat-a': [{ id: 7, name: 'Habits' }] }),
-    { 'chat-a': [{ id: 7, name: 'Habits' }] },
-  )
+test('signature is stable across an unrelated app_updated refetch', () => {
+  // The load-bearing invariant: a fresh `apps` array whose relevant content is
+  // unchanged (e.g. another chat's app bumped) must yield the SAME signature,
+  // so Shell's memo returns the same reference and ChatView effects don't fire.
+  const a1 = [
+    app(7, 'Habits', '2026-07-12T01:00:00Z', 'chat-a'),
+    app(9, 'Other', '2026-07-12T01:00:00Z', 'chat-b'),
+  ]
+  const a2 = [
+    app(7, 'Habits', '2026-07-12T01:00:00Z', 'chat-a'),
+    app(9, 'Other', '2026-07-12T09:00:00Z', 'chat-b'), // bumped, other chat
+  ]
+  assert.equal(builtAppsSignature(a1, 'chat-a'), builtAppsSignature(a2, 'chat-a'))
 })
 
-test('coerceBuiltAppsByChat tolerates a legacy one-app scalar', () => {
-  assert.deepEqual(
-    coerceBuiltAppsByChat({ 'chat-a': { id: 7, name: 'Habits' } }),
-    { 'chat-a': [{ id: 7, name: 'Habits' }] },
-  )
-})
-
-test('coerceBuiltAppsByChat drops malformed entries and non-objects', () => {
-  assert.deepEqual(coerceBuiltAppsByChat(null), {})
-  assert.deepEqual(coerceBuiltAppsByChat('nope'), {})
-  assert.deepEqual(
-    coerceBuiltAppsByChat({
-      'chat-a': [{ id: 1 }, { name: 'no id' }, null],
-      'chat-b': [],
-      'chat-c': { name: 'no id' },
-    }),
-    { 'chat-a': [{ id: 1 }] },
-  )
-})
-
-test('coerceBuiltAppsByChat enforces the writer invariant on restored arrays', () => {
-  // A tampered/legacy persisted array must come back id-deduped (last
-  // occurrence wins) and capped at the newest three, exactly as if the
-  // writer had produced it.
-  assert.deepEqual(
-    coerceBuiltAppsByChat({
-      'chat-a': [
-        { id: 7, name: 'old' }, { id: 8, name: 'B' }, { id: 7, name: 'new' },
-      ],
-    }),
-    { 'chat-a': [{ id: 8, name: 'B' }, { id: 7, name: 'new' }] },
-  )
-  assert.deepEqual(
-    coerceBuiltAppsByChat({
-      'chat-a': [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }],
-    })['chat-a'].map(a => a.id),
-    [3, 4, 5],
-  )
-})
-
-test('prunedBuiltAppsByChat drops entries for apps that no longer exist', () => {
-  const state = {
-    'chat-a': [{ id: 7, name: 'Alive' }, { id: 8, name: 'Deleted' }],
-    'chat-b': [{ id: 9, name: 'Gone' }],
-  }
-
-  const next = prunedBuiltAppsByChat(state, new Set([7]))
-
-  assert.deepEqual(next, { 'chat-a': [{ id: 7, name: 'Alive' }] })
-})
-
-test('prunedBuiltAppsByChat matches string-id entries against numeric live ids', () => {
-  // A restored legacy scalar can carry a string id; it must still count as
-  // live when the apps list holds the numeric form.
-  const state = { 'chat-a': [{ id: '7', name: 'Alive' }] }
-  assert.equal(prunedBuiltAppsByChat(state, new Set([7])), state)
-})
-
-test('prunedBuiltAppsByChat is a same-reference no-op when everything is live', () => {
-  // Shell setState-s with the result on every apps refetch; an unchanged
-  // reference lets React bail out of the re-render.
-  const state = { 'chat-a': [{ id: 7, name: 'Alive' }] }
-  assert.equal(prunedBuiltAppsByChat(state, new Set([7, 8])), state)
-  assert.deepEqual(prunedBuiltAppsByChat(null, new Set([7])), {})
+test('signature changes when this chat owns a new app or a recompile', () => {
+  const base = [app(7, 'Habits', '2026-07-12T01:00:00Z', 'chat-a')]
+  const recompiled = [app(7, 'Habits', '2026-07-12T02:00:00Z', 'chat-a')]
+  const added = [
+    app(7, 'Habits', '2026-07-12T01:00:00Z', 'chat-a'),
+    app(8, 'Notes', '2026-07-12T03:00:00Z', 'chat-a'),
+  ]
+  assert.notEqual(
+    builtAppsSignature(base, 'chat-a'), builtAppsSignature(recompiled, 'chat-a'))
+  assert.notEqual(
+    builtAppsSignature(base, 'chat-a'), builtAppsSignature(added, 'chat-a'))
 })

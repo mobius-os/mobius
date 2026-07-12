@@ -368,118 +368,65 @@ def test_notify_body_type_validator_rejects_unknown():
     raise AssertionError("Expected ValidationError for bogus event type")
 
 
-# --- Chat-scoped app_built CTA (feature 094) --------------------------
+# --- Single-bus routing: catch-up-safe fan-out vs system-bus-only -------
+#
+# The built-app "Open app" CTA is DERIVED on the frontend from the apps query's
+# chat_id + updated_at, so there is no app_built event to route — an
+# app_updated refetch surfaces the CTA in the owning chat. What still matters
+# here is which events fan out to per-chat broadcasts (catch-up-safe) and which
+# ride the system bus ALONE (catch-up-unsafe).
 
 
 @pytest.mark.asyncio
-async def test_notify_app_updated_fires_app_built_on_owning_chat(
-  client, auth, db
-):
-  """POST /api/notify {app_updated, appId} ALSO publishes a chat-scoped
-  `app_built` onto the broadcast of the chat that built the app — and ONLY
-  that chat's broadcast. This is what scopes the "Open app" CTA to the
-  building chat instead of leaking it globally via app_updated."""
-  app = models.App(
-    name="builttoy", description="t", jsx_source="export default () => null",
-    chat_id="builder-chat",
-  )
-  db.add(app)
-  db.commit()
-  db.refresh(app)
-
-  building = bc_mod.create_broadcast("builder-chat")
-  other = bc_mod.create_broadcast("bystander-chat")
-  q_build = building.subscribe()[1]
+async def test_notify_app_updated_fans_out_to_live_chat_broadcast(client, auth):
+  """A catch-up-SAFE event (app_updated) fans out to a running per-chat
+  broadcast AND the system broadcast, so a chat reconnect's replay is a real
+  backstop for a dropped system stream."""
+  chat = bc_mod.create_broadcast("live-chat")
+  q_chat = chat.subscribe()[1]
+  sb = get_system_broadcast()
+  q_sys = sb.subscribe()
   try:
     r = client.post(
-      "/api/notify",
-      headers=auth,
-      json={"type": "app_updated", "appId": str(app.id)},
+      "/api/notify", headers=auth,
+      json={"type": "app_updated", "appId": "42"},
     )
     assert r.status_code == 204, r.text
+    ev_sys = await asyncio.wait_for(q_sys.get(), timeout=1.0)
+    assert ev_sys["type"] == "app_updated"
+    ev_chat = await asyncio.wait_for(q_chat.get(), timeout=1.0)
+    assert ev_chat["type"] == "app_updated"
+  finally:
+    sb.unsubscribe(q_sys)
+    bc_mod.remove_broadcast("live-chat")
 
-    # The building chat sees BOTH the (catch-up) app_updated and the
-    # chat-scoped app_built. Drain until we observe app_built.
-    seen = []
-    for _ in range(4):
-      ev = await asyncio.wait_for(q_build.get(), timeout=1.0)
-      seen.append(ev["type"])
-      if ev["type"] == "app_built":
-        assert ev["appId"] == str(app.id)
-        break
-    assert "app_built" in seen, seen
-    # The bystander chat must NOT have received app_built.
+
+@pytest.mark.asyncio
+async def test_notify_shell_rebuilt_is_system_bus_only(client, auth):
+  """A catch-up-UNSAFE event (shell_rebuilt) rides the system broadcast ALONE
+  — never a per-chat broadcast — so a chat reconnect can't replay a stale
+  rebuilt from its event log and fire a spurious apply. SystemBroadcast has no
+  replay, so one delivery per client and no frontend dedup."""
+  chat = bc_mod.create_broadcast("live-chat-2")
+  q_chat = chat.subscribe()[1]
+  sb = get_system_broadcast()
+  q_sys = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify", headers=auth, json={"type": "shell_rebuilt"},
+    )
+    assert r.status_code == 204, r.text
+    ev_sys = await asyncio.wait_for(q_sys.get(), timeout=1.0)
+    assert ev_sys["type"] == "shell_rebuilt"
+    # The per-chat broadcast must NOT have received it (no fan-out, no replay).
     assert all(
-      e.get("type") != "app_built" for e in other.event_log
-    ), other.event_log
+      e.get("type") != "shell_rebuilt" for e in chat.event_log
+    ), chat.event_log
+    with pytest.raises(asyncio.TimeoutError):
+      await asyncio.wait_for(q_chat.get(), timeout=0.2)
   finally:
-    bc_mod.remove_broadcast("builder-chat")
-    bc_mod.remove_broadcast("bystander-chat")
-
-
-@pytest.mark.asyncio
-async def test_notify_app_updated_no_app_built_without_owning_chat(
-  client, auth, db
-):
-  """An app with no chat_id (App Store install, manual create) produces NO
-  app_built — there is no building chat to scope a CTA to. The global
-  app_updated still fires on the SystemBroadcast as before."""
-  app = models.App(
-    name="orphantoy", description="t", jsx_source="export default () => null",
-    chat_id=None,
-  )
-  db.add(app)
-  db.commit()
-  db.refresh(app)
-
-  sb = get_system_broadcast()
-  sq = sb.subscribe()
-  try:
-    r = client.post(
-      "/api/notify",
-      headers=auth,
-      json={"type": "app_updated", "appId": str(app.id)},
-    )
-    assert r.status_code == 204, r.text
-    ev = await asyncio.wait_for(sq.get(), timeout=1.0)
-    assert ev["type"] == "app_updated"
-    assert ev["appId"] == str(app.id)
-  finally:
-    sb.unsubscribe(sq)
-
-
-@pytest.mark.asyncio
-async def test_notify_app_built_only_when_owning_chat_streaming(
-  client, auth, db
-):
-  """If the building chat's turn already ended (no live broadcast), no
-  app_built is emitted — the CTA only makes sense while the chat is the
-  active streaming turn."""
-  app = models.App(
-    name="finishedtoy", description="t",
-    jsx_source="export default () => null",
-    chat_id="finished-chat",
-  )
-  db.add(app)
-  db.commit()
-  db.refresh(app)
-
-  # No broadcast registered for "finished-chat" → the turn ended.
-  sb = get_system_broadcast()
-  sq = sb.subscribe()
-  try:
-    r = client.post(
-      "/api/notify",
-      headers=auth,
-      json={"type": "app_updated", "appId": str(app.id)},
-    )
-    assert r.status_code == 204, r.text
-    # Only the global app_updated lands; nothing raises trying to publish
-    # app_built to a missing broadcast.
-    ev = await asyncio.wait_for(sq.get(), timeout=1.0)
-    assert ev["type"] == "app_updated"
-  finally:
-    sb.unsubscribe(sq)
+    sb.unsubscribe(q_sys)
+    bc_mod.remove_broadcast("live-chat-2")
 
 
 # --- Chat-scoped build_phase milestone rail (feature 212) --------------

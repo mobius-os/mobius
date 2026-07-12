@@ -4,55 +4,35 @@
 // These are published by agent scripts / watchers alongside normal chat
 // events, so useStreamConnection forwards them to Shell.jsx instead of
 // reducing them into assistant text/tool blocks.
+//
+// This set is deliberately catch-up-SAFE only. The shell-rebuild lifecycle
+// events (shell_rebuilding/rebuilt/apply_now/rebuild_failed) and
+// app_build_failed are catch-up-UNSAFE — a chat reconnect replaying an old
+// copy would fire a spurious shell apply or a stale failure toast — so the
+// backend keeps them on the system broadcast alone (no per-chat fan-out, no
+// replay) and they never reach a chat stream at all.
 export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
   'theme_updated',
   'app_updated',
-  // app_built is the chat-SCOPED CTA signal: the backend publishes it onto
-  // only the building chat's broadcast (see routes/notify.py), so it arrives
-  // exclusively on the stream of the chat that built the app. The handler sets
-  // the "Open app" CTA. (app_updated stays list-refresh-only.)
-  'app_built',
-  'app_build_failed',
   // build_phase is the chat-SCOPED milestone signal: the backend publishes it
   // onto only the building chat's broadcast (see routes/notify.py), so it
   // arrives exclusively on the stream of the chat that is building. ChatView
-  // accumulates it into the live phase rail. It is REPLAY-SAFE on purpose (not
-  // in the catch-up-unsafe set below) so a reconnect's catch-up burst rebuilds
-  // the rail; the rail state dedupes by ts, so replaying a phase never
-  // double-counts it.
+  // accumulates it into the live phase rail. It is REPLAY-SAFE on purpose so a
+  // reconnect's catch-up burst rebuilds the rail; the rail state dedupes by ts,
+  // so replaying a phase never double-counts it.
   'build_phase',
-  'shell_rebuilding',
-  'shell_rebuilt',
-  'shell_apply_now',
-  'shell_rebuild_failed',
   'chat_run_started',
   'chat_run_finished',
-])
-
-const CATCH_UP_UNSAFE_SYSTEM_EVENTS = new Set([
-  'shell_rebuilding',
-  'shell_rebuilt',
-  'shell_apply_now',
-  'shell_rebuild_failed',
-  'app_build_failed',
 ])
 
 export function isChatStreamSystemEvent(type) {
   return CHAT_STREAM_SYSTEM_EVENTS.has(type)
 }
 
-export function shouldForwardChatStreamSystemEvent(event, { isCatchUp = false } = {}) {
+// Every event in CHAT_STREAM_SYSTEM_EVENTS is catch-up-safe, so forwarding is
+// unconditional. (The old catch-up gate existed only for the shell-rebuild
+// events, which no longer ride the chat stream — they are system-bus-only.)
+export function shouldForwardChatStreamSystemEvent(event) {
   const type = typeof event === 'string' ? event : event?.type
-  if (!isChatStreamSystemEvent(type)) return false
-
-  // Chat broadcasts replay their event_log whenever ChatView mounts or
-  // reconnects. Most chat-scoped system events are harmless or useful during
-  // that replay, but shell rebuild events are live lifecycle notifications.
-  // Replaying an old `shell_rebuilt` after the owner switches chats makes the
-  // Shell believe a fresh build just landed and re-shows "Update ready" (or
-  // auto-refreshes if the page looks idle). The persistent /api/events/system
-  // stream already delivers the live rebuild event, so catch-up copies should
-  // be ignored.
-  if (isCatchUp && CATCH_UP_UNSAFE_SYSTEM_EVENTS.has(type)) return false
-  return true
+  return isChatStreamSystemEvent(type)
 }

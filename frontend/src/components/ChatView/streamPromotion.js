@@ -26,17 +26,15 @@ export function streamItemToBlock(item) {
     }
   }
   if (item.type === 'error') {
-    // Carry the whitelisted extras (resumable drives the one-tap Resume;
-    // parked_until/park_reason drive the live provider-limit card; pause_kind
-    // drives the calm "Paused" family for a benign restart/stall) so a promoted
+    // Carry the whitelisted extras (resumable drives the one-tap Resume; the
+    // single `pause` descriptor — {kind, resets_at?} — drives the calm "Paused"
+    // family and the live provider-limit "resets at …" card) so a promoted
     // stream error renders identically to its persisted DB twin.
     return {
       type: 'error',
       message: item.message,
       ...(item.resumable ? { resumable: true } : {}),
-      ...(item.parked_until ? { parked_until: item.parked_until } : {}),
-      ...(item.park_reason ? { park_reason: item.park_reason } : {}),
-      ...(item.pause_kind ? { pause_kind: item.pause_kind } : {}),
+      ...(item.pause ? { pause: item.pause } : {}),
     }
   }
   const status = item.status === 'running' ? 'done' : item.status

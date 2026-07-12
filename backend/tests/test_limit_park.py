@@ -230,9 +230,10 @@ def test_limit_exit_publishes_enriched_event_and_kwargs():
   event = sink.events[-1]
   assert event["type"] == "error"
   assert event["resumable"] is True
+  # The block carries ONE pause descriptor; the DB kwargs keep the raw fields.
   # Explicit-UTC ISO so the client's Date() renders the right local time.
-  assert event["parked_until"].endswith("+00:00")
-  assert event["park_reason"] == kwargs["park_reason"]
+  assert event["pause"]["resets_at"].endswith("+00:00")
+  assert event["pause"]["kind"] == kwargs["park_reason"]
 
 
 def test_limit_exit_non_limit_error_stays_plain():
@@ -716,8 +717,9 @@ def test_park_failure_degrades_card_and_keeps_resume(monkeypatch):
   tail = errors[0]
   assert "could not be scheduled" in tail["message"]
   assert tail["resumable"] is True
-  assert "parked_until" not in tail
-  assert "park_reason" not in tail
+  # The degraded follow-up carries no pause descriptor, so the coalesced block
+  # stops rendering the "resets at …" card.
+  assert "pause" not in tail
 
 
 def test_limit_park_releases_starting_claim_before_returning():
