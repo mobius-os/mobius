@@ -1768,15 +1768,20 @@ export default function Shell() {
           >
             <AppCanvas
               appId={id}
+              // True only while this app is the visible canvas. Mirrors the
+              // .shell__view--active class above (which toggles visibility).
+              // Two consumers inside AppCanvas: the frame-visibility signal
+              // (apps pause background work — audio, rAF — when hidden) and
+              // the immersive gate (the immersive holder is global
+              // last-writer-wins, so a hidden cached app — or its rebuilt
+              // frame promoting in the background — must not steal
+              // chrome/insets from the active app). String-normalized: the
+              // LRU holds whatever id type planted it, activeAppId whatever
+              // navigation set.
+              active={activeView === 'canvas' && String(activeAppId) === String(id)}
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
-              // Whether this canvas is the one on screen. AppCanvas gates
-              // immersive forwarding/replay on it — the immersive holder is
-              // global last-writer-wins, so a hidden cached app (or its
-              // rebuilt frame promoting in the background) must not steal
-              // chrome/insets from the active app.
-              isActive={activeView === 'canvas' && String(activeAppId) === String(id)}
               pendingIntent={appIntents[String(id)] || null}
               // Immersive is APPLIED only while this app is the active holder
               // (immersiveActive already requires the canvas view + active

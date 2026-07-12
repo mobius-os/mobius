@@ -37,7 +37,10 @@
 
 // Mirror of the load-bearing constants in ChatView/useScrollMode.js.
 export const PIN_OFFSET = 4
-export const PIN_BOTTOM_ROOM = 180
+// Extra reservable room below the pin, ON TOP of what's needed to reach it.
+// 0 => the spacer reserves exactly enough to pin the message at the top
+// (maxScrollTop == pinTarget), with no extra blank below the last content.
+export const PIN_BOTTOM_ROOM = 0
 
 /**
  * The geometry-checkable subset of the CLAUDE.md constraints. Each id is the
@@ -57,8 +60,8 @@ export const CHAT_CONTRACT = [
     id: 'pin-holds-streaming',
     title: 'Pinned row holds while streaming grows',
     summary:
-      'Once pinned, the message stays at the top with a bottom cushion as '
-      + 'content streams in above or below it — no drift without a user gesture.',
+      'Once pinned, the message stays at the top as content streams in above '
+      + 'or below it — no drift without a user gesture.',
   },
   {
     id: 'no-scroll-on-read-send',
@@ -69,11 +72,12 @@ export const CHAT_CONTRACT = [
   },
   {
     id: 'spacer-reserves-room',
-    title: 'Spacer reserves reachable room with bottom cushion',
+    title: 'Spacer reserves exactly enough to reach the pin',
     summary:
       'The dynamic spacer, sized from fullViewH not clientHeight, reserves '
-      + 'enough that the pin target is reachable and leaves real room below it, '
-      + 'so the message lands at the top instead of stranded mid-viewport.',
+      + 'exactly enough that the pin target is reachable (cushion >= 0), so the '
+      + 'message lands flush at the top instead of stranded mid-viewport — and '
+      + 'no extra blank the reader can scroll into below the last content.',
   },
   {
     id: 'reanchor-on-promote',
@@ -194,7 +198,9 @@ export function scrollUnmoved(before, after, { tolerance = 8 } = {}) {
   }
 }
 
-/** C4 spacer-reserves-room: reserved room below the pin >= the cushion. */
+/** C4 spacer-reserves-room: reserved room below the pin >= the cushion
+ *  (default cushion PIN_BOTTOM_ROOM = 0, i.e. the pin is exactly reachable;
+ *  a negative measured cushion means the pin is stranded below the top). */
 export function cushionPresent(snap, { min = PIN_BOTTOM_ROOM, pinOffset = PIN_OFFSET } = {}) {
   const id = 'spacer-reserves-room'
   const expected = `cushion >= ${min}`

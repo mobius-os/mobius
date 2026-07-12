@@ -24,10 +24,13 @@ const listEl = offsetHeight => ({ offsetHeight })
 const userEl = offsetTop => ({ offsetTop })
 
 // A clean pinned frame: pin target 996, scrollTop sits there, and the spacer
-// reserved exactly PIN_BOTTOM_ROOM below it (fullViewH == clientHeight == 700,
-// listHeight 1040, so scrollHeight = 1040 + spacer(836) = 1876).
+// reserved EXACTLY enough to reach it — no extra cushion (PIN_BOTTOM_ROOM 0).
+// fullViewH == clientHeight == 700, listHeight 1040, so spacer =
+// max(0, 700 + 996 - 1040) = 656 and scrollHeight = 1040 + 656 = 1696.
+// maxScrollTop = 1696 - 700 = 996 == pinTarget: the pin rests flush at the
+// scroll ceiling, with no reservable blank below.
 const pinnedEnv = {
-  scrollEl: scrollEl({ scrollTop: 996, scrollHeight: 1876, clientHeight: 700 }),
+  scrollEl: scrollEl({ scrollTop: 996, scrollHeight: 1696, clientHeight: 700 }),
   listEl: listEl(1040),
   lastUserMsgEl: userEl(1000),
   fullViewH: 700,
@@ -36,12 +39,12 @@ const pinnedEnv = {
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {
   const s = snapshotChatUX(pinnedEnv)
   assert.equal(s.scrollTop, 996)
-  assert.equal(s.scrollHeight, 1876)
+  assert.equal(s.scrollHeight, 1696)
   assert.equal(s.clientHeight, 700)
   assert.equal(s.listHeight, 1040)
   assert.equal(s.lastUserTop, 1000)
   assert.equal(s.pinGap, 4) // lastUserTop - scrollTop == PIN_OFFSET
-  assert.equal(s.distanceToBottom, 180) // reserved cushion still below
+  assert.equal(s.distanceToBottom, 0) // pin rests flush at the scroll ceiling
   assert.equal(s.spacerReachable, true)
   assert.equal(s.fullViewH, 700)
 })
@@ -180,20 +183,20 @@ test('scrollUnmoved is indeterminate when scrollTop is missing', () => {
   assert.match(r.reason, /scrollTop/)
 })
 
-test('cushionPresent passes when the spacer reserves PIN_BOTTOM_ROOM below the pin', () => {
+test('cushionPresent passes when the spacer reaches the pin (cushion 0)', () => {
   const r = cushionPresent(snapshotChatUX(pinnedEnv))
   assert.equal(r.ok, true)
   assert.equal(r.id, 'spacer-reserves-room')
-  assert.equal(r.measured, PIN_BOTTOM_ROOM) // exactly 180 reserved
+  assert.equal(r.measured, PIN_BOTTOM_ROOM) // exactly 0: pin exactly reachable
 })
 
 test('cushionPresent fails on the R5 bug: an undersized spacer leaves no keyboard-closed room', () => {
   // The hook's stale-small fullViewH (400, the keyboard-open height) sized the
-  // spacer: max(0, 400 + 996 - 1040 + 180) = 536, so scrollHeight = 1576. The
+  // spacer: max(0, 400 + 996 - 1040) = 356, so scrollHeight = 1396. The
   // SNAPSHOT carries the true full view height (700 — clientHeight has grown
-  // back), so the cushion reads (1576 - 700) - 996 = -120: pin stranded.
+  // back), so the cushion reads (1396 - 700) - 996 = -300: pin stranded.
   const buggy = {
-    scrollEl: scrollEl({ scrollTop: 876, scrollHeight: 1576, clientHeight: 700 }),
+    scrollEl: scrollEl({ scrollTop: 696, scrollHeight: 1396, clientHeight: 700 }),
     listEl: listEl(1040),
     lastUserMsgEl: userEl(1000),
     fullViewH: 700,
@@ -207,19 +210,19 @@ test('cushionPresent fails on the R5 bug: an undersized spacer leaves no keyboar
 
 test('cushionPresent fails on a keyboard-open snapshot with an undersized spacer', () => {
   // Keyboard open: clientHeight shrank to 400; the full viewport is 700 and
-  // the spacer only produced scrollHeight 1576. clientHeight-based math would
-  // read (1576 - 400) - 996 = 180 — a false green. Keyboard-closed terms
-  // (fullViewH) read (1576 - 700) - 996 = -120: no room once the keyboard
+  // the spacer only produced scrollHeight 1396. clientHeight-based math would
+  // read (1396 - 400) - 996 = 0 — a false green. Keyboard-closed terms
+  // (fullViewH) read (1396 - 700) - 996 = -300: no room once the keyboard
   // closes.
   const snap = snapshotChatUX({
-    scrollEl: scrollEl({ scrollTop: 876, scrollHeight: 1576, clientHeight: 400 }),
+    scrollEl: scrollEl({ scrollTop: 696, scrollHeight: 1396, clientHeight: 400 }),
     listEl: listEl(1040),
     lastUserMsgEl: userEl(1000),
     fullViewH: 700,
   })
   const r = cushionPresent(snap)
   assert.equal(r.ok, false)
-  assert.equal(r.measured, -120)
+  assert.equal(r.measured, -300)
 })
 
 test('cushionPresent is indeterminate when geometry is missing', () => {
