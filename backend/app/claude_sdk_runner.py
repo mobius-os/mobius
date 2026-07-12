@@ -770,10 +770,14 @@ def dispatch_sdk_message(
     server_tools: dict[str, str] = {}
     for block in sdk_msg.content:
       if isinstance(block, ToolUseBlock):
+        # block.id is the canonical tool_use_id; the matching ToolResultBlock
+        # carries it as .tool_use_id. Thread it through so a large tool output
+        # can be reduced on the wire and fetched lazily by id (contract rule 6).
         bc.publish({
           "type": "tool_start",
           "tool": block.name,
           "input": "",
+          "tool_use_id": block.id,
         })
         summary = summarize_tool_input(block.name, block.input)
         if summary:
@@ -857,15 +861,18 @@ def dispatch_sdk_message(
     for block in content:
       if isinstance(block, ToolResultBlock):
         output = _format_tool_output(block.content)
+        # Carry the tool_use_id (matches the ToolUseBlock's .id) so the sink can
+        # key a stash of the full output and the block can fetch it by id.
         bc.publish({
           "type": "tool_output",
           "content": output,
+          "tool_use_id": block.tool_use_id,
         })
         if output.startswith("Web search results for query"):
           sources = sources_from_websearch_text(output)
           if sources:
             bc.publish({"type": "tool_sources", "sources": sources})
-        bc.publish({"type": "tool_end"})
+        bc.publish({"type": "tool_end", "tool_use_id": block.tool_use_id})
         continue
       _emit_unknown(bc, f"user_block:{type(block).__name__}", block)
     return current_session_id, None

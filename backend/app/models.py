@@ -418,3 +418,33 @@ class Notification(Base):
   actions = Column(JSON, nullable=True)
   sent_at = Column(DateTime, default=lambda: datetime.now(UTC))
   clicked_at = Column(DateTime, nullable=True)
+
+
+class ToolOutput(Base):
+  """Full text of a large tool result, stored out-of-band (contract rule 6).
+
+  The chat transcript blob (`Chat.messages`) and the live / catch-up event
+  stream carry only a bounded head+tail excerpt of a big tool output; the full
+  text lives here, keyed by the tool's stable identity, and `ToolBlock` fetches
+  it lazily on expand via GET /api/chats/{chat_id}/tool-output/{tool_use_id}.
+
+  Why a table, not a file: `db/` (ultimate.db) is gitignored, so these blobs
+  are correctly EXCLUDED from the nightly `/data` git safety-net (we do not want
+  megabytes of tool output versioned every night), and the rows ride the chat
+  lifecycle for free — soft-delete keeps them (a recovered chat re-shows its
+  outputs), the hard-purge sweep drops them with their chat. Written via the
+  single-writer actor's `StashToolOutput` command as an insert/upsert on the
+  composite PK (race-immune; see chat_writer.py). `create_all` builds this table
+  on the next boot — a new table needs no ALTER migration (see run_migrations,
+  which only ALTERs existing tables)."""
+
+  __tablename__ = "tool_outputs"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), primary_key=True, index=True
+  )
+  # The tool_use_id (Claude) / ThreadItem id (Codex) — stable emit→read and
+  # unique within the chat, which is all the composite PK needs.
+  tool_use_id = Column(String(128), primary_key=True)
+  output = Column(Text, nullable=False, default="")
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))

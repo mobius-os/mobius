@@ -176,3 +176,21 @@ export function toolResultFailed(output) {
   const r = formatToolResult(output)
   return r.kind === 'terminal' && r.exitCode != null && r.exitCode !== 0
 }
+
+// Did this tool BLOCK report a failure? Field-or-parse (contract rule 6): a
+// block reduced at the funnel carries an explicit `output_exit_code`, so read
+// that when present rather than re-parsing a possibly-carved excerpt (a JSON
+// envelope truncated inside its stdout, or a bash head+tail). Absent the field
+// (a small un-reduced output, or a live streaming item) fall back to parsing
+// the output — the excerpt preserves the failure head, so the parse still
+// works. Shared by ToolBlock's header chip and groupBlocks' Failed state.
+export function toolBlockExitCode(t) {
+  if (t && t.output_exit_code != null) return t.output_exit_code
+  const r = formatToolResult(t?.output)
+  return r.kind === 'terminal' ? r.exitCode : null
+}
+
+export function toolBlockFailed(t) {
+  const code = toolBlockExitCode(t)
+  return code != null && code !== 0
+}
