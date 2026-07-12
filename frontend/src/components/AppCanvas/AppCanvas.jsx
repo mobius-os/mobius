@@ -9,6 +9,9 @@ import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
+import {
+  markIncomingFrameWindow, clearIncomingFrameWindow,
+} from '../../lib/incomingFrames.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
@@ -33,9 +36,14 @@ import './AppCanvas.css'
 //      the iframe sits at its 10s loading-timeout.
 //
 //   2. {type: 'moebius:frame-mounted', appId}              frame → parent
-//      Fired by the frame AFTER `createRoot.render()` returns. Parent
-//      hides the loading overlay only on this signal — `iframe.onLoad`
-//      is too early (document loaded ≠ React rendered).
+//      Fired by the frame AFTER its first render COMMITS (MountSignal's
+//      passive effect in app-frame.html — NOT right after
+//      `createRoot.render()` returns, which only schedules the render).
+//      Parent hides the loading overlay / promotes a buffered version swap
+//      only on this signal — `iframe.onLoad` is too early (document loaded
+//      ≠ React rendered), and a render()-returned post would be too early
+//      for the swap (a first-render throw aborts the commit; promoting on
+//      that lie would unmount the working frame for a dead one).
 //
 //   2b. {type: 'moebius:frame-error', appId}               frame → parent
 //      Fired by the frame on a TERMINAL load failure (bad import, no
@@ -156,6 +164,12 @@ function readDeviceInsets() {
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
   immersive = false,
+  // Is this canvas the one the user is looking at (canvas view + active app)?
+  // Shell's immersive holder is GLOBAL last-writer-wins, so immersive intent
+  // may only be forwarded/replayed while this canvas is active — otherwise a
+  // hidden cached app (or its freshly-promoted rebuild) steals chrome/insets
+  // from the app actually on screen.
+  isActive = false,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered,
 }) {
@@ -266,12 +280,15 @@ export default function AppCanvas({
     return cb
   }
 
-  // The VISIBLE frame's version, mirrored into a ref so the long-lived message
-  // listener (registered once, deliberately minimal deps) can gate
-  // visible-frame-only concerns — nav sentinels and immersive — without going
-  // stale. Assigned during render: idempotent, no side effect.
+  // The VISIBLE frame's version (and this canvas's active verdict), mirrored
+  // into refs so the long-lived message listener (registered once,
+  // deliberately minimal deps) can gate visible-frame-only concerns — nav
+  // sentinels and immersive — without going stale. Assigned during render:
+  // idempotent, no side effect.
   const liveVersionRef = useRef(swap.liveVersion)
   liveVersionRef.current = swap.liveVersion
+  const isActiveRef = useRef(isActive)
+  isActiveRef.current = isActive
 
   function postToFrame(v, message) {
     framesRef.current.get(v)?.contentWindow?.postMessage(message, window.location.origin)
@@ -350,6 +367,25 @@ export default function AppCanvas({
     return () => clearTimeout(id)
   }, [swap.incomingVersion])
 
+  // Mirror the swap roles into the shared incoming-frame registry so Shell's
+  // app-error handler can ignore crash reports from a hidden, not-yet-promoted
+  // frame (see lib/incomingFrames.js for why that message class is harmful).
+  // Timing is safe on both edges: a newly-mounted incoming iframe gets its
+  // browsing context synchronously at DOM insertion (same commit that set
+  // incomingVersion), so this effect registers its window before its document
+  // has fetched — let alone posted — anything; and on promotion the effect
+  // clears the window in the same flush that processed frame-mounted, before
+  // any later message task from that frame is handled. A DISCARDED incoming is
+  // deliberately never cleared — see the module comment.
+  useEffect(() => {
+    if (swap.incomingVersion != null) {
+      markIncomingFrameWindow(
+        framesRef.current.get(swap.incomingVersion)?.contentWindow)
+    }
+    clearIncomingFrameWindow(
+      framesRef.current.get(swap.liveVersion)?.contentWindow)
+  }, [swap.incomingVersion, swap.liveVersion])
+
   // Single message listener for BOTH buffered frames. Registered once per appId
   // mount (deliberately minimal deps: it reads live state through refs +
   // dispatch, never through render-scope closures, so it never needs
@@ -401,18 +437,23 @@ export default function AppCanvas({
       }
 
       // Immersive intent. Record it for EVERY frame — including a hidden
-      // incoming one — so a swap can replay the promoted frame's intent the
-      // instant it becomes visible (an immersive game stays immersive across a
-      // rebuild, no chrome flash, no dependence on message ordering vs the
-      // promotion re-render). Only the VISIBLE frame drives the chrome in real
-      // time. Forward with THIS canvas's appId, not msg.appId — the source check
-      // already proved identity, and trusting the payload would let any frame
-      // toggle immersive for a different app. `=== true` keeps the wire contract
-      // strictly boolean (truthy garbage reads as a release, the safe direction).
+      // incoming one — so the replay effect can apply the visible frame's
+      // intent whenever it becomes the one on screen (promotion, or this
+      // canvas becoming active). Forward LIVE only when this frame is both
+      // the visible frame AND this canvas is the active one: Shell's
+      // immersive holder is global last-writer-wins, so a hidden cached
+      // app's post would otherwise steal chrome/insets from the app the
+      // user is actually looking at. Forward with THIS canvas's appId, not
+      // msg.appId — the source check already proved identity, and trusting
+      // the payload would let any frame toggle immersive for a different
+      // app. `=== true` keeps the wire contract strictly boolean (truthy
+      // garbage reads as a release, the safe direction).
       if (msg.type === 'moebius:immersive') {
         const value = msg.value === true
         frameImmersiveRef.current.set(srcVersion, value)
-        if (srcVersion === liveVersionRef.current) onImmersive?.(appId, value)
+        if (srcVersion === liveVersionRef.current && isActiveRef.current) {
+          onImmersive?.(appId, value)
+        }
         return
       }
 
@@ -485,21 +526,28 @@ export default function AppCanvas({
     return () => { onNavReset?.(appId) }
   }, [appId, swap.liveVersion, onNavReset])
 
-  // Drive the shell chrome from the VISIBLE frame's immersive intent. On a swap
-  // (swap.liveVersion changes) replay the promoted frame's recorded intent the
-  // instant it becomes visible — its real-time immersive post was withheld while
-  // it was the hidden incoming frame, so without this an immersive game would
-  // lose immersive after a rebuild (or, if the new version dropped immersive, we
-  // correctly fall back to false). On unmount, release: a torn-down iframe can't
-  // run its own cleanup-post, so without this the shell could stay chrome-less
-  // with the app gone. Releasing an app that doesn't hold the slot is a no-op
-  // (lib/immersive.js). Keyed on swap.liveVersion, not the prop, for the same
-  // reason as the nav reset above (a bump alone must not touch the live frame).
+  // Drive the shell chrome from the VISIBLE frame's recorded immersive intent,
+  // but ONLY while this canvas is the active one. Replays fire on promotion
+  // (swap.liveVersion changes — the promoted frame's real-time post was
+  // withheld while it was hidden, so an immersive game stays immersive across
+  // a rebuild) and on this canvas becoming active (isActive flips true — a
+  // hidden frame's post was withheld too, so returning to the game re-enters
+  // immersive). A hidden canvas never calls with value:true: Shell's holder is
+  // global last-writer-wins and a hidden promotion must not steal chrome from
+  // the app on screen. The cleanup release covers deactivation, swap, and
+  // unmount alike (a torn-down iframe can't run its own cleanup-post; the
+  // recorded intent survives in frameImmersiveRef, so reactivation restores
+  // it). Releasing an app that doesn't hold the slot is a no-op
+  // (lib/immersive.js). Keyed on swap.liveVersion, not the version prop, for
+  // the same reason as the nav reset above (a bump alone must not touch the
+  // live frame).
   useEffect(() => {
     if (!appId) return
-    onImmersive?.(appId, frameImmersiveRef.current.get(swap.liveVersion) === true)
+    if (isActive) {
+      onImmersive?.(appId, frameImmersiveRef.current.get(swap.liveVersion) === true)
+    }
     return () => { onImmersive?.(appId, false) }
-  }, [appId, swap.liveVersion, onImmersive])
+  }, [appId, swap.liveVersion, isActive, onImmersive])
 
   // Broadcast theme updates to every loaded frame (live + any incoming) so each
   // refreshes its theme without remounting (and losing app state).
@@ -652,8 +700,20 @@ export default function AppCanvas({
     // <script type="module"> has executed, so the frame's message listener is
     // live by now — a single init postMessage reaches it, no race, no retry. We
     // do NOT mark the swap "loaded" here: the loading overlay hides only when the
-    // frame posts `frame-mounted` (after React renders inside it); onLoad is too
+    // frame posts `frame-mounted` (after React commits inside it); onLoad is too
     // early (document loaded ≠ app rendered).
+    //
+    // A SECOND load event for a version already marked loaded means this
+    // frame's document genuinely RELOADED (crash refresh, browser-forced
+    // reload — never a swap, which mounts a new version in its own iframe).
+    // The old document and its rendered app are gone; if this is the visible
+    // frame the owner is looking at a blank document, so tell the reducer to
+    // bring the loading overlay back until the fresh document settles. The
+    // re-init below then runs the fresh document's handshake (this is exactly
+    // why the parent never dedups frame-init).
+    if (loadedDocsRef.current.has(v)) {
+      dispatchSwap({ type: 'live-reload', version: v })
+    }
     loadedDocsRef.current.add(v)
     sendInit(v)
     sendOnlineStatus(v)
@@ -699,12 +759,14 @@ export default function AppCanvas({
           />
         )
       })}
-      {/* One-shot "updated" shimmer on a successful swap. Keyed on the live
-          version so it remounts and replays each time; suppressed on first load
-          (swaps === 0). Opacity-only + pointer-events:none, so it never blocks
-          input or reflows — it just confirms the preview refreshed in place. */}
-      {swap.liveLoaded && swap.swaps > 0 && (
-        <div className="canvas-swap-flash" key={`flash-${swap.liveVersion}`} aria-hidden="true" />
+      {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
+          COUNT — not the live version and not gated on liveLoaded — so it
+          remounts (replays) exactly when a promotion lands, and a live-frame
+          reload (which drops liveLoaded without a swap) neither replays nor
+          interrupts it. Suppressed on first load (swaps === 0). Opacity-only +
+          pointer-events:none, so it never blocks input or reflows. */}
+      {swap.swaps > 0 && (
+        <div className="canvas-swap-flash" key={`flash-${swap.swaps}`} aria-hidden="true" />
       )}
       {!swap.liveLoaded && (
         <div className="canvas-loading" aria-live="polite">

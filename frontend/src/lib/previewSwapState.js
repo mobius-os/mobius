@@ -132,6 +132,20 @@ export function reduceSwap(state, event) {
       if (event.version === state.incomingVersion) return { ...state, incomingVersion: null }
       return state
 
+    case 'live-reload':
+      // The visible frame's DOCUMENT re-loaded at an unchanged version (crash
+      // refresh, browser-forced reload — detected as a second onLoad for an
+      // already-loaded frame; never a swap, which mounts a NEW version). Its
+      // rendered app is gone, so bring the loading overlay back until the
+      // fresh document settles via frame-mounted / frame-error — otherwise
+      // the owner stares at a blank frame with no loading state. Any in-flight
+      // incoming is untouched (its swap resolves independently). A reloading
+      // INCOMING frame needs no state change — it is not what's on screen.
+      if (event.version === state.liveVersion && state.liveLoaded) {
+        return { ...state, liveLoaded: false }
+      }
+      return state
+
     default:
       return state
   }
