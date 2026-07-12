@@ -644,6 +644,17 @@ app.include_router(self_reminders_router)
 app.include_router(standalone_router)
 app.include_router(published_router)  # /sites/<token>/ — before the SPA catch-all
 
+# Tandoor reverse proxy: /tandoor/* -> local Tandoor gunicorn (see /data/tandoor).
+# Registered here (before the SPA catch-all) so /tandoor wins. Wrapped in
+# try/except so an import failure can never brick boot — it lives outside the
+# crash-tolerant _load registry, so it carries its own guard.
+try:
+  from app.routes.tandoor_proxy import router as tandoor_router
+  app.include_router(tandoor_router)
+except Exception:
+  import logging as _tandoor_logging
+  _tandoor_logging.getLogger(__name__).exception("tandoor proxy router failed to load")
+
 
 @app.get("/api/health")
 def health(response: Response):
