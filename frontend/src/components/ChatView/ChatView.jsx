@@ -1749,19 +1749,25 @@ export default function ChatView({
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
 
-    // A fresh send is a deliberate new turn, so it ALWAYS lifts the new message
-    // to the top of the viewport (its reply streams in below) — the partner's
-    // single most important chat behavior. The previous rule ("pin only when
-    // it's the first message OR the reader is already at the bottom") silently
-    // skipped the lift whenever you sent after reading a long reply from the
-    // top, which is exactly the "messages don't go to the top" report: after a
-    // tall reply you are almost never within NEAR_BOTTOM_PX of the content tail,
-    // so shouldPinSend returned false and the send stayed put mid-conversation.
-    // The at-bottom heuristic still governs the QUEUE and STEER paths (their own
-    // shouldPinSend calls above), so sending MID-TURN while scrolled up to read
-    // is not yanked. `pin` stays the caller opt-out (handleStop's queue-collapse
-    // passes pin:false).
-    const willPin = pin
+    // The send rule is R2 of the committed chat-UX contract
+    // (ARCHITECTURE.md "Chat scroll + steer contract", owner decision
+    // 2026-07-12): the pin gates on MODE, not on send-kind. Lift the new
+    // message to the top iff it is the chat's first message OR the reader is
+    // in auto-scroll (at the bottom) at submit time; a fresh send made while
+    // reading earlier history reserves spacer room but must NOT yank the
+    // reader. This supersedes the brief "every fresh send lifts" revision
+    // (9b9ab86b) — the load-bearing guarantee is "don't move a reading user".
+    // `pin` stays the caller opt-out (handleStop's queue-collapse passes
+    // pin:false).
+    const freshIsFirstUser = !messagesRef.current.some(
+      m => m.role === 'user' && !m.hidden,
+    )
+    const willPin = pin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg: freshIsFirstUser,
+      wasNearScrollBottom: wasNearContentBottomAtSubmit,
+    })
     // The send-time pin intent, carried across the async POST so a user scroll
     // that lands during it can still win. The pinned row's identity is the
     // minted `cid`, which the optimistic row and the confirmed server row
@@ -1781,8 +1787,7 @@ export default function ChatView({
     }
     setSending(true)
     setServerRunningState(true)
-    // Pin the new message to the top when the rule allows (a fresh send always
-    // does unless the caller opted out). The funnel arms the reservation spacer
+    // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
     // cid from mint, so the pin lands on the first apply.
