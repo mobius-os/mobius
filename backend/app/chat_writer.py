@@ -1455,8 +1455,31 @@ class ChatWriterActor:
           cmd.chat_id, ",".join(str(ts) for ts in missing_ts),
         )
     used_messages = msgs + pending
+
+    def _steer_dedup_key(m: dict):
+      content = m.get("content")
+      return (m.get("ts"), content if isinstance(content, str) else repr(content))
+
+    # Authoritative idempotency (defense-in-depth behind the runner-side dedup).
+    # A queued row must never become two durable transcript entries. A repeated
+    # force-steer of the same still-live pending row can deliver the same message
+    # more than once in a single drain; key on the ORIGINAL (pre-bump) ts +
+    # content so only a true re-delivery of one queued row is dropped. Genuinely
+    # distinct sends always carry a distinct pending ts, so this can't drop a
+    # real message. Runs on the single-writer thread — no lost-update risk.
+    seen_keys = {
+      _steer_dedup_key(m) for m in msgs if m.get("role") == "user"
+    }
     stored_messages: list[dict] = []
     for raw_msg in raw_user_msgs:
+      key = _steer_dedup_key(raw_msg)
+      if raw_msg.get("ts") is not None and key in seen_keys:
+        log.warning(
+          "AppendSteeredUserMessage dropping duplicate steered row "
+          "chat_id=%s ts=%s", cmd.chat_id, raw_msg.get("ts"),
+        )
+        continue
+      seen_keys.add(key)
       new_msg = dict(raw_msg)
       _ensure_unique_ts(new_msg, used_messages)
       msgs.append(new_msg)
@@ -1473,7 +1496,7 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendSteeredUserMessage did not persist")
     return {
-      "stored": stored_messages[-1],
+      "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
       "pending": list(chat.pending_messages or []),
     }
