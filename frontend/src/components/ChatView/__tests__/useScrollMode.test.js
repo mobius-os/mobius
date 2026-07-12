@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   _computeSpacerH,
   _pinReapplyNeeded,
+  applyMode,
   isNearContentBottom,
   isNearScrollBottom,
   modeForChatExit,
@@ -275,6 +276,64 @@ test('chat exit falls back to follow mode only when no message anchor exists', (
   }
 
   assert.deepEqual(modeForChatExit(scrollEl), { kind: 'FOLLOW_BOTTOM' })
+})
+
+test('applyMode PIN falls back to the last user row when the mode ts matches no data-ts', () => {
+  // Regression: a fresh (non-queued) send renders its row with the OPTIMISTIC
+  // client ts and never reconciles that data-ts to the CANONICAL server ts the
+  // pin was retargeted to. The exact-ts lookup then misses. Before the fix the
+  // pin silently no-opped and the just-sent message hung mid-viewport ("doesn't
+  // get enough space"). It must fall back to the last user row and land it.
+  const lastUserRow = { offsetTop: 1000 }
+  const scrollEl = {
+    scrollHeight: 3000,
+    clientHeight: 800,
+    scrollTop: 0,
+    querySelector() { return null }, // canonical ts absent from the DOM
+    querySelectorAll(sel) {
+      return sel === '.chat__msg--user[data-ts]'
+        ? [{ offsetTop: 200 }, lastUserRow]
+        : []
+    },
+  }
+  applyMode(scrollEl, { kind: 'PIN_USER_MSG', ts: 999 })
+  assert.equal(scrollEl.scrollTop, 996) // 1000 - PIN_OFFSET(4)
+})
+
+test('applyMode PIN uses the exact data-ts match when present (no fallback)', () => {
+  const scrollEl = {
+    scrollHeight: 3000,
+    clientHeight: 800,
+    scrollTop: 0,
+    querySelector(sel) {
+      return sel === '.chat__msg--user[data-ts="123"]' ? { offsetTop: 500 } : null
+    },
+    querySelectorAll() {
+      throw new Error('exact match present — must not fall back to last user row')
+    },
+  }
+  applyMode(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 })
+  assert.equal(scrollEl.scrollTop, 496)
+})
+
+test('_pinReapplyNeeded re-pins a diverged-ts pin via the last-user-row fallback', () => {
+  // scrollTop clamped below a reachable target ⇒ re-pin needed, even though the
+  // mode ts (canonical) is absent from the DOM (optimistic ts rendered). Without
+  // the fallback the element lookup missed and re-pin never fired, leaving the
+  // message stranded after the spacer settled.
+  const scrollEl = {
+    scrollHeight: 3000,
+    clientHeight: 800, // maxScrollTop = 2200
+    scrollTop: 0,      // clamped short of the 996 target
+    querySelector() { return null },
+    querySelectorAll(sel) {
+      return sel === '.chat__msg--user[data-ts]' ? [{ offsetTop: 1000 }] : []
+    },
+  }
+  assert.equal(
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 999 }, 1000),
+    true,
+  )
 })
 
 function makeSpacerScrollEl({ clientHeight, queuedTray = null }) {
