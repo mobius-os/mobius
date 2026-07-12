@@ -6,8 +6,9 @@
  * mid-turn flush, and it HARD-interrupts. This feature adds a
  * fast-forward button that STEERS the queued messages into the LIVE turn
  * at the next natural boundary via POST /messages with
- * `force_steer:true` + `consume_pending_ts` (backend contract in
- * routes/chats_stream.py `_force_steer_matches_pending`).
+ * `force_steer:true` + `consume_pending_cids` (backend contract in
+ * routes/chats_stream.py `_selected_force_steer_pending` — cid selection,
+ * no content byte-match).
  *
  * This spec mocks the network (no live backend), mirroring the
  * route-mock style of second-send-pin.spec.mjs + handleStop-sync-
@@ -15,7 +16,7 @@
  *   (a) the fast-forward button appears (replacing Stop) once a message
  *       is queued AND server-confirmed during streaming,
  *   (b) pressing it POSTs force_steer:true with the right
- *       consume_pending_ts + the exact "\n\n"-joined content,
+ *       consume_pending_cids + the exact "\n\n"-joined content,
  *   (c) the queued tray clears on a {status:"steered"} response.
  *
  * Run: npx playwright test tests/steer-queued.spec.mjs
@@ -67,7 +68,7 @@ async function sendMessage(page, text) {
 test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('fast-forward button appears, POSTs force_steer with the right payload, and clears the tray', async ({ page }) => {
     // The server-assigned ts the queueOnly POST hands back. The steer's
-    // consume_pending_ts must equal [QUEUE_TS] and its content must equal
+    // consume_pending_cids must equal [queued cid] and its content must equal
     // the queued message's trimmed content (single message → no join).
     const QUEUE_TS = 777001
     const QUEUED_TEXT = 'queued message to steer'
@@ -103,7 +104,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
 
       // Second send while streaming: the queue path. Return a SERVER ts so
-      // swapOptimisticTs clears the in-flight flag — only then is the entry
+      // confirmQueued clears the in-flight flag — only then is the entry
       // steer-eligible (canSteer requires a confirmed server ts).
       return route.fulfill({
         status: 202,
@@ -143,7 +144,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     )
 
     // (a) Once the queue entry is server-confirmed (the queueOnly POST
-    // returned a server ts → swapOptimisticTs cleared the in-flight flag),
+    // returned a server ts → confirmQueued cleared the in-flight flag),
     // the Stop square is swapped for the fast-forward (steer) button.
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
@@ -159,8 +160,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     const steerPost = messagePosts.find(b => b.force_steer)
     expect(steerPost.force_steer).toBe(true)
-    // consume_pending_ts is exactly the queued entry's server ts.
-    expect(steerPost.consume_pending_ts).toEqual([QUEUE_TS])
+    // consume_pending_cids is exactly the queued row's stable cid (minted
+    // client-side and echoed on the queue POST body).
+    const queuePost = messagePosts.find(b => !b.force_steer && b.content === QUEUED_TEXT)
+    expect(typeof queuePost.cid).toBe('string')
+    expect(steerPost.consume_pending_cids).toEqual([queuePost.cid])
     // content is the queued message's trimmed content (single msg, no join).
     expect(steerPost.content).toBe(QUEUED_TEXT)
 
@@ -174,9 +178,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   })
 
   test('two queued messages steer with the exact "\\n\\n"-joined content', async ({ page }) => {
-    // Verifies the content-join contract the backend enforces byte-for-byte
-    // in _force_steer_matches_pending: the non-empty trimmed contents joined
-    // by "\n\n", in pending order, with consume_pending_ts = both ts.
+    // Verifies the frontend content join sent to the provider steer: the
+    // non-empty trimmed contents joined
+    // by "\n\n", in pending order, with consume_pending_cids = both cids.
     const TS1 = 880001
     const TS2 = 880002
     const TEXT1 = 'first queued'
@@ -243,7 +247,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     ).toBe(1)
 
     const steerPost = messagePosts.find(b => b.force_steer)
-    expect(steerPost.consume_pending_ts).toEqual([TS1, TS2])
+    // consume_pending_cids is the two queued rows' cids, in pending order.
+    const cid1 = messagePosts.find(b => !b.force_steer && b.content === TEXT1).cid
+    const cid2 = messagePosts.find(b => !b.force_steer && b.content === TEXT2).cid
+    expect(steerPost.consume_pending_cids).toEqual([cid1, cid2])
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
 

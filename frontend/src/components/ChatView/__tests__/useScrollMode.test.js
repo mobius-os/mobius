@@ -91,7 +91,7 @@ test('shouldPinSend treats the bottom of real content as at-bottom, ignoring dyn
   })
   assert.equal(shouldPinSend({
     scrollEl,
-    mode: { kind: 'PIN_USER_MSG', ts: 123 },
+    mode: { kind: 'PIN_USER_MSG', cid: 'c-123' },
     isFirstUserMsg: false,
   }), true)
 })
@@ -105,7 +105,7 @@ test('shouldPinSend still refuses to pin when real content gap is large', () => 
   })
   assert.equal(shouldPinSend({
     scrollEl,
-    mode: { kind: 'PIN_USER_MSG', ts: 123 },
+    mode: { kind: 'PIN_USER_MSG', cid: 'c-123' },
     isFirstUserMsg: false,
   }), false)
 })
@@ -128,7 +128,7 @@ test('pin reapply is needed when the first pin was clamped but spacer now makes 
     scrollTop: 500,
     clientHeight: 700,
     querySelector(selector) {
-      if (selector === '.chat__msg--user[data-ts="123"]') {
+      if (selector === '.chat__msg--user[data-cid="c-123"]') {
         return { offsetTop: 1000 }
       }
       return null
@@ -136,7 +136,7 @@ test('pin reapply is needed when the first pin was clamped but spacer now makes 
   }
 
   assert.equal(
-    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' }, 1000),
     true,
   )
 })
@@ -147,7 +147,7 @@ test('pin reapply waits until the target is reachable to avoid stepwise pin jitt
     scrollTop: 500,
     clientHeight: 700,
     querySelector(selector) {
-      if (selector === '.chat__msg--user[data-ts="123"]') {
+      if (selector === '.chat__msg--user[data-cid="c-123"]') {
         return { offsetTop: 1000 }
       }
       return null
@@ -155,7 +155,7 @@ test('pin reapply waits until the target is reachable to avoid stepwise pin jitt
   }
 
   assert.equal(
-    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' }, 1000),
     false,
   )
 })
@@ -168,7 +168,7 @@ test('pin reapply holds a pinned send when streaming drags the viewport toward b
     scrollTop: 1200,
     clientHeight: 700,
     querySelector(selector) {
-      if (selector === '.chat__msg--user[data-ts="123"]') {
+      if (selector === '.chat__msg--user[data-cid="c-123"]') {
         return { offsetTop: 1000 }
       }
       return null
@@ -176,7 +176,7 @@ test('pin reapply holds a pinned send when streaming drags the viewport toward b
   }
 
   assert.equal(
-    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' }, 1000),
     true,
   )
 })
@@ -187,7 +187,7 @@ test('pin reapply is idle when the pinned send is still at its target', () => {
     scrollTop: 996,
     clientHeight: 700,
     querySelector(selector) {
-      if (selector === '.chat__msg--user[data-ts="123"]') {
+      if (selector === '.chat__msg--user[data-cid="c-123"]') {
         return { offsetTop: 1000 }
       }
       return null
@@ -195,13 +195,13 @@ test('pin reapply is idle when the pinned send is still at its target', () => {
   }
 
   assert.equal(
-    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' }, 1000),
     false,
   )
 })
 
 test('viewport resize at physical bottom retires stale pin mode', () => {
-  const stalePin = { kind: 'PIN_USER_MSG', ts: 123 }
+  const stalePin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
   assert.deepEqual(
     modeForViewportChange(stalePin, true),
     { kind: 'FOLLOW_BOTTOM' },
@@ -286,62 +286,37 @@ test('chat exit falls back to follow mode only when no message anchor exists', (
   assert.deepEqual(modeForChatExit(scrollEl), { kind: 'FOLLOW_BOTTOM' })
 })
 
-test('applyMode PIN falls back to the last user row when the mode ts matches no data-ts', () => {
-  // Regression: a fresh (non-queued) send renders its row with the OPTIMISTIC
-  // client ts and never reconciles that data-ts to the CANONICAL server ts the
-  // pin was retargeted to. The exact-ts lookup then misses. Before the fix the
-  // pin silently no-opped and the just-sent message hung mid-viewport ("doesn't
-  // get enough space"). It must fall back to the last user row and land it.
-  const lastUserRow = { offsetTop: 1000 }
+test('applyMode PIN is a no-op when the cid resolves no row (strict, no fallback)', () => {
+  // The ts-swap that once forced a last-row fallback cannot happen: the row
+  // carries its final cid from mint. An unresolved cid pins nothing (the
+  // fallback limb + its diverged-ts _pinReapplyNeeded twin are deleted).
   const scrollEl = {
     scrollHeight: 3000,
     clientHeight: 800,
-    scrollTop: 0,
-    querySelector() { return null }, // canonical ts absent from the DOM
-    querySelectorAll(sel) {
-      return sel === '.chat__msg--user[data-ts]'
-        ? [{ offsetTop: 200 }, lastUserRow]
-        : []
+    scrollTop: 42,
+    querySelector() { return null },
+    querySelectorAll() {
+      throw new Error('cid selector is strict — must never call querySelectorAll')
     },
   }
-  applyMode(scrollEl, { kind: 'PIN_USER_MSG', ts: 999 })
-  assert.equal(scrollEl.scrollTop, 996) // 1000 - PIN_OFFSET(4)
+  applyMode(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-missing' })
+  assert.equal(scrollEl.scrollTop, 42, 'scrollTop untouched when cid unresolved')
 })
 
-test('applyMode PIN uses the exact data-ts match when present (no fallback)', () => {
+test('applyMode PIN resolves the row by its exact data-cid', () => {
   const scrollEl = {
     scrollHeight: 3000,
     clientHeight: 800,
     scrollTop: 0,
     querySelector(sel) {
-      return sel === '.chat__msg--user[data-ts="123"]' ? { offsetTop: 500 } : null
+      return sel === '.chat__msg--user[data-cid="c-123"]' ? { offsetTop: 500 } : null
     },
     querySelectorAll() {
       throw new Error('exact match present — must not fall back to last user row')
     },
   }
-  applyMode(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 })
+  applyMode(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' })
   assert.equal(scrollEl.scrollTop, 496)
-})
-
-test('_pinReapplyNeeded re-pins a diverged-ts pin via the last-user-row fallback', () => {
-  // scrollTop clamped below a reachable target ⇒ re-pin needed, even though the
-  // mode ts (canonical) is absent from the DOM (optimistic ts rendered). Without
-  // the fallback the element lookup missed and re-pin never fired, leaving the
-  // message stranded after the spacer settled.
-  const scrollEl = {
-    scrollHeight: 3000,
-    clientHeight: 800, // maxScrollTop = 2200
-    scrollTop: 0,      // clamped short of the 996 target
-    querySelector() { return null },
-    querySelectorAll(sel) {
-      return sel === '.chat__msg--user[data-ts]' ? [{ offsetTop: 1000 }] : []
-    },
-  }
-  assert.equal(
-    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 999 }, 1000),
-    true,
-  )
 })
 
 function makeSpacerScrollEl({ clientHeight, queuedTray = null }) {
@@ -448,7 +423,7 @@ test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-
 /** A minimal mutable scroll element: scrollHeight tracks listH + spacer, and
  *  scrollTop writes clamp to [0, maxScrollTop] exactly as a browser does when
  *  the spacer shrinks. Enough to drive applyMode + _pinReapplyNeeded. */
-function makePinnableScrollEl({ listH, spacerH, clientHeight, userTop, ts }) {
+function makePinnableScrollEl({ listH, spacerH, clientHeight, userTop, cid }) {
   return {
     clientHeight,
     _spacer: spacerH,
@@ -467,7 +442,7 @@ function makePinnableScrollEl({ listH, spacerH, clientHeight, userTop, ts }) {
     },
     querySelector(sel) {
       if (sel === '.spacer-dynamic') return { offsetHeight: this._spacer }
-      if (sel === `.chat__msg--user[data-ts="${ts}"]`) return { offsetTop: userTop }
+      if (sel === `.chat__msg--user[data-cid="${cid}"]`) return { offsetTop: userTop }
       return null
     },
   }
@@ -479,8 +454,8 @@ function snapOf(el, userTop) {
 
 test('F1: a settled pin HOLDS through the thinking pause when the retarget leaves the spacer alone', () => {
   const userTop = 133
-  const el = makePinnableScrollEl({ listH: 400, spacerH: 824, clientHeight: 915, userTop, ts: 111 })
-  applyMode(el, { kind: 'PIN_USER_MSG', ts: 111 })
+  const el = makePinnableScrollEl({ listH: 400, spacerH: 824, clientHeight: 915, userTop, cid: 'c-111' })
+  applyMode(el, { kind: 'PIN_USER_MSG', cid: 'c-111' })
   const before = snapOf(el, userTop)
   assert.ok(pinLanded(before).ok, 'optimistic pin lands flush at the top')
   assert.equal(before.pinGap, PIN_OFFSET)
@@ -494,8 +469,8 @@ test('F1: a settled pin HOLDS through the thinking pause when the retarget leave
 
 test('F1: a collapse-clamped pin is recovered by the settle once the spacer restores reachability', () => {
   const userTop = 133
-  const el = makePinnableScrollEl({ listH: 400, spacerH: 824, clientHeight: 915, userTop, ts: 111 })
-  const mode = { kind: 'PIN_USER_MSG', ts: 111 }
+  const el = makePinnableScrollEl({ listH: 400, spacerH: 824, clientHeight: 915, userTop, cid: 'c-111' })
+  const mode = { kind: 'PIN_USER_MSG', cid: 'c-111' }
   applyMode(el, mode)
   const lastPinTop = userTop
   assert.equal(el.scrollTop, userTop - PIN_OFFSET)
@@ -546,7 +521,7 @@ test('F2: with no spacer FOLLOW_BOTTOM leaves a short completed chat on-screen (
   const clientHeight = 915
 
   // Fix: idle mount reserves 0 -> content does not overflow -> FOLLOW is a no-op.
-  const fixed = makePinnableScrollEl({ listH: shortList, spacerH: 0, clientHeight, userTop, ts: 1 })
+  const fixed = makePinnableScrollEl({ listH: shortList, spacerH: 0, clientHeight, userTop, cid: 'c-1' })
   applyMode(fixed, { kind: 'FOLLOW_BOTTOM' })
   assert.equal(fixed.scrollTop, 0, 'no overflow -> no scroll -> messages at the top')
   assert.ok(userTop - fixed.scrollTop >= 0, 'the message is on-screen')
@@ -559,7 +534,7 @@ test('F2: with no spacer FOLLOW_BOTTOM leaves a short completed chat on-screen (
   const buggySpacer = _computeSpacerH(
     { clientHeight }, { offsetHeight: shortList }, { offsetTop: lowUserTop }, clientHeight,
   )
-  const buggy = makePinnableScrollEl({ listH: shortList, spacerH: buggySpacer, clientHeight, userTop: lowUserTop, ts: 1 })
+  const buggy = makePinnableScrollEl({ listH: shortList, spacerH: buggySpacer, clientHeight, userTop: lowUserTop, cid: 'c-1' })
   applyMode(buggy, { kind: 'FOLLOW_BOTTOM' })
   const firstMsgTop = 8
   assert.ok(firstMsgTop - buggy.scrollTop < 0, 'the un-gated spacer scrolls earlier messages above the fold')
