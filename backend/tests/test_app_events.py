@@ -17,6 +17,7 @@ import pytest
 from app import models
 from app.broadcast import get_system_broadcast
 from app.deps import Principal
+from app.events import SYSTEM_EVENT_TYPES
 from app.routes.apps import _app_stream_should_forward, stream_app_events
 
 
@@ -82,19 +83,23 @@ def test_drop_other_apps_update():
     {"type": "app_updated", "appId": "6"}, 5) is False
 
 
-@pytest.mark.parametrize("etype", [
-  "theme_updated",
-  "shell_rebuilding",
-  "shell_rebuilt",
-  "shell_apply_now",
-  "shell_rebuild_failed",
-  "chat_run_started",
-  "chat_run_finished",
-])
+# Computed from the LIVE vocabulary (not a hard-coded copy) so any type a
+# sibling branch adds to SYSTEM_EVENT_TYPES is exercised here automatically —
+# the allowlist filter must drop every system type except app_updated, forever.
+@pytest.mark.parametrize(
+  "etype", sorted(SYSTEM_EVENT_TYPES - {"app_updated"}),
+)
 def test_drop_owner_only_event_types(etype):
   # Even carrying this app's id, a non-app_updated (owner-scoped) type is
   # never forwarded onto an app's stream.
   assert _app_stream_should_forward({"type": etype, "appId": "5"}, 5) is False
+
+
+def test_drop_unknown_future_event_type():
+  """Allowlist (not denylist) semantics: a type that does not exist in the
+  vocabulary yet — carrying this app's own id — is still dropped."""
+  assert _app_stream_should_forward(
+    {"type": "app_build_failed_someday", "appId": "5"}, 5) is False
 
 
 # --- Auth boundary (endpoint) -----------------------------------------
