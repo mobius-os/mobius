@@ -321,6 +321,33 @@ def _web_search_sources(item: Any) -> list[dict[str, str]]:
   return collected
 
 
+def _stamp_tool_use_id(event: dict[str, Any], item: Any) -> None:
+  """Stamp the ThreadItem's stable id onto a tool event as `tool_use_id`
+  (contract rule 6), so a large tool output can be reduced on the wire and
+  fetched lazily by id.
+
+  Verified stable: every Codex ThreadItem carries an `id`, the SAME id rides
+  the `ItemStarted` (tool_start) and `ItemCompleted` (tool_output/tool_end)
+  notifications for one tool call, and the streaming output-delta / file-change
+  notifications reference it as `itemId` — so it is stable emit->read and unique
+  within the chat, which is all the stash key needs. A test fake without an
+  `id` (or a null id) is left unstamped, so the event shape is unchanged."""
+  tid = getattr(item, "id", None)
+  if tid:
+    event["tool_use_id"] = tid
+
+
+def _stamp_notification_item_id(event: dict[str, Any], payload: Any) -> None:
+  """Stamp `tool_use_id` from a notification's `item_id` (the streaming
+  output-delta / file-change-patch notifications reference their ThreadItem by
+  `itemId`, the same id the completed item carries). getattr-guarded so SDK
+  shape drift or a test fake without the field degrades to an untagged event
+  (which the sink leaves inline) rather than raising."""
+  item_id = getattr(payload, "item_id", None) or getattr(payload, "itemId", None)
+  if item_id:
+    event["tool_use_id"] = item_id
+
+
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
@@ -1068,7 +1095,9 @@ async def run_codex_sdk_turn(
           sdk["CommandExecutionOutputDeltaNotification"],
         ):
           if payload.delta:
-            bc.publish({"type": "tool_output", "content": payload.delta})
+            event = {"type": "tool_output", "content": payload.delta}
+            _stamp_notification_item_id(event, payload)
+            bc.publish(event)
           continue
 
         if isinstance(payload, sdk["ItemStartedNotification"]):
@@ -1078,6 +1107,7 @@ async def run_codex_sdk_turn(
             continue
           event = _tool_start_event(item, sdk)
           if event is not None:
+            _stamp_tool_use_id(event, item)
             bc.publish(event)
           _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)
           continue
@@ -1085,12 +1115,15 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
           summary = _file_change_patch_summary(payload.changes)
           if summary:
-            bc.publish({"type": "tool_output", "content": summary})
+            event = {"type": "tool_output", "content": summary}
+            _stamp_notification_item_id(event, payload)
+            bc.publish(event)
           continue
 
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           for event in _tool_completed_events(item, sdk):
+            _stamp_tool_use_id(event, item)
             bc.publish(event)
           continue
 
