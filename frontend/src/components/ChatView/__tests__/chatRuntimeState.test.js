@@ -2,10 +2,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  builtAppPulseDecision,
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
   previewReadyAnnouncement,
+  previewUpdatedAnnouncement,
   resolveFreshPinRetarget,
   resolveSteeredPinDecision,
   serverSnapshotBehindLocal,
@@ -82,17 +84,56 @@ test('previewReadyAnnouncement announces when a preview becomes available', () =
 })
 
 test('systemEventForChat annotates forwarded stream events with their chat id', () => {
-  assert.deepEqual(systemEventForChat({ type: 'app_built', appId: '7' }, 'chat-a'), {
-    type: 'app_built',
+  assert.deepEqual(systemEventForChat({ type: 'app_updated', appId: '7' }, 'chat-a'), {
+    type: 'app_updated',
     appId: '7',
     chatId: 'chat-a',
   })
-  assert.deepEqual(systemEventForChat({ type: 'app_built', chatId: 'old' }, 'chat-a'), {
-    type: 'app_built',
+  assert.deepEqual(systemEventForChat({ type: 'app_updated', chatId: 'old' }, 'chat-a'), {
+    type: 'app_updated',
     chatId: 'chat-a',
   })
   assert.equal(systemEventForChat(null, 'chat-a'), null)
-  assert.deepEqual(systemEventForChat({ type: 'app_built' }, null), { type: 'app_built' })
+  assert.deepEqual(systemEventForChat({ type: 'app_updated' }, null), { type: 'app_updated' })
+})
+
+test('previewUpdatedAnnouncement names the recompiled app', () => {
+  assert.equal(previewUpdatedAnnouncement({ id: 7, name: 'Habits' }), 'Preview updated for Habits.')
+  assert.equal(previewUpdatedAnnouncement({ id: 7 }), 'Preview updated for app.')
+})
+
+test('builtAppPulseDecision: a first-seen app announces but does not pulse', () => {
+  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
+  const d = builtAppPulseDecision(list, new Map())
+  assert.equal(d.pulseId, null)
+  assert.equal(d.announce, 'Live preview ready for Habits.')
+  assert.equal(d.nextSeen.get(7), 't1')
+})
+
+test('builtAppPulseDecision: an already-seen app whose updated_at advanced pulses', () => {
+  const list = [{ id: 7, name: 'Habits', updated_at: 't2' }]
+  const seen = new Map([[7, 't1']])
+  const d = builtAppPulseDecision(list, seen)
+  assert.equal(d.pulseId, 7)
+  assert.equal(d.announce, 'Preview updated for Habits.')
+  assert.equal(d.nextSeen.get(7), 't2')
+})
+
+test('builtAppPulseDecision: an already-seen app at the same updated_at neither pulses nor announces', () => {
+  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
+  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
+  assert.equal(d.pulseId, null)
+  assert.equal(d.announce, '')
+})
+
+test('builtAppPulseDecision: a recompile wins the announce over a co-arriving new app', () => {
+  const list = [
+    { id: 7, name: 'Habits', updated_at: 't2' }, // seen at t1 → recompile
+    { id: 8, name: 'Notes', updated_at: 't1' },  // brand new
+  ]
+  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
+  assert.equal(d.pulseId, 7)
+  assert.equal(d.announce, 'Preview updated for Habits.')
 })
 
 test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () => {

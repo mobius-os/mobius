@@ -506,13 +506,13 @@ def test_process_error_event_carries_whitelisted_extras_on_append():
     "type": "error",
     "message": "rate limited",
     "resumable": True,
-    "parked_until": "2026-07-11T01:40:00+00:00",
-    "park_reason": "usage_limit",
+    "pause": {"kind": "usage_limit", "resets_at": "2026-07-11T01:40:00+00:00"},
   }, blocks)
   err = next(b for b in blocks if b.get("type") == "error")
   assert err["resumable"] is True
-  assert err["parked_until"] == "2026-07-11T01:40:00+00:00"
-  assert err["park_reason"] == "usage_limit"
+  assert err["pause"] == {
+    "kind": "usage_limit", "resets_at": "2026-07-11T01:40:00+00:00",
+  }
 
 
 def test_process_error_event_extras_are_whitelist_only():
@@ -540,8 +540,7 @@ def test_process_error_event_coalesce_latest_event_wins():
     "type": "error",
     "message": "rate limited",
     "resumable": True,
-    "parked_until": "2026-07-11T01:40:00+00:00",
-    "park_reason": "usage_limit",
+    "pause": {"kind": "usage_limit", "resets_at": "2026-07-11T01:40:00+00:00"},
   }, blocks)
   process_event({
     "type": "error", "message": "final text", "resumable": True,
@@ -549,18 +548,17 @@ def test_process_error_event_coalesce_latest_event_wins():
   error_blocks = [b for b in blocks if b.get("type") == "error"]
   assert len(error_blocks) == 1
   assert error_blocks[0]["message"] == "final text"
-  # The follow-up carried `resumable` and nothing else: park fields gone.
+  # The follow-up carried `resumable` and nothing else: pause descriptor gone.
   assert error_blocks[0]["resumable"] is True
-  assert "parked_until" not in error_blocks[0]
-  assert "park_reason" not in error_blocks[0]
+  assert "pause" not in error_blocks[0]
   # A fully bare error strips everything whitelisted.
   process_event({"type": "error", "message": "bare"}, blocks)
   assert "resumable" not in error_blocks[0]
   # And a later event can re-establish extras it explicitly carries.
   process_event({
-    "type": "error", "message": "again", "park_reason": "rate_limit",
+    "type": "error", "message": "again", "pause": {"kind": "rate_limit"},
   }, blocks)
-  assert error_blocks[0]["park_reason"] == "rate_limit"
+  assert error_blocks[0]["pause"] == {"kind": "rate_limit"}
   assert "resumable" not in error_blocks[0]
 
 

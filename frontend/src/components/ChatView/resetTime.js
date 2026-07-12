@@ -1,5 +1,5 @@
-// A provider-limit park (design §2.4) carries `parked_until` as an explicit-UTC
-// ISO string. Render it as the viewer's LOCAL clock, qualified by day: a park
+// A provider-limit park (design §2.4) carries `pause.resets_at` as an
+// explicit-UTC ISO string. Render it as the viewer's LOCAL clock, by day: a park
 // clamps up to 7 days out (chat.py _PARK_MAX_DELAY), so a bare time reads
 // ambiguously across a day boundary ("Resets at 1:40 AM" — today or Tuesday?).
 //

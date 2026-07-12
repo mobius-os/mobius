@@ -9,9 +9,6 @@ import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
-import {
-  markIncomingFrameWindow, clearIncomingFrameWindow,
-} from '../../lib/incomingFrames.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
@@ -197,7 +194,7 @@ export default function AppCanvas({
   // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
   active = true,
   pendingIntent = null,
-  onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered,
+  onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered, onAppError,
 }) {
   const queryClient = useQueryClient()
   // The app-scoped token is fetched from the server and isn't available
@@ -393,25 +390,6 @@ export default function AppCanvas({
     return () => clearTimeout(id)
   }, [swap.incomingVersion])
 
-  // Mirror the swap roles into the shared incoming-frame registry so Shell's
-  // app-error handler can ignore crash reports from a hidden, not-yet-promoted
-  // frame (see lib/incomingFrames.js for why that message class is harmful).
-  // Timing is safe on both edges: a newly-mounted incoming iframe gets its
-  // browsing context synchronously at DOM insertion (same commit that set
-  // incomingVersion), so this effect registers its window before its document
-  // has fetched — let alone posted — anything; and on promotion the effect
-  // clears the window in the same flush that processed frame-mounted, before
-  // any later message task from that frame is handled. A DISCARDED incoming is
-  // deliberately never cleared — see the module comment.
-  useEffect(() => {
-    if (swap.incomingVersion != null) {
-      markIncomingFrameWindow(
-        framesRef.current.get(swap.incomingVersion)?.contentWindow)
-    }
-    clearIncomingFrameWindow(
-      framesRef.current.get(swap.liveVersion)?.contentWindow)
-  }, [swap.incomingVersion, swap.liveVersion])
-
   // Single message listener for BOTH buffered frames. Registered once per appId
   // mount (deliberately minimal deps: it reads live state through refs +
   // dispatch, never through render-scope closures, so it never needs
@@ -459,6 +437,23 @@ export default function AppCanvas({
       // its own `initialized` flag before posting, so it accepts the follow-up.
       if (msg.type === 'moebius:token-expired' && String(msg.appId) === String(appId)) {
         appQueries.token.invalidate(queryClient, appId)
+        return
+      }
+
+      // App-runtime crash report. Source attribution decides its fate right
+      // here — the single, local place that knows which frame is hidden.
+      // Forward ONLY the LIVE frame's crash up to the shell (onAppError);
+      // SWALLOW a hidden, not-yet-promoted incoming frame's. A failed
+      // double-buffer swap is usually a broken build (that is WHY it failed),
+      // and the swap state machine already keeps the old working frame live —
+      // so a hidden frame must not plant a crash-report draft or yank the view
+      // to a chat while the owner's visible preview still works. This replaces
+      // the module-global incomingFrames WeakSet that coupled AppCanvas and
+      // Shell for exactly this guard.
+      if (msg.type === 'moebius:app-error' && String(msg.appId) === String(appId)) {
+        if (srcVersion === liveVersionRef.current) {
+          onAppError?.(appId, msg.error, msg.chatId)
+        }
         return
       }
 
@@ -527,7 +522,7 @@ export default function AppCanvas({
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId, onNavPush, onNavPop, onImmersive, queryClient])
+  }, [appId, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
 
   // Clear this app's pending nav-sentinels when the VISIBLE frame stops
   // representing the same browsing context. That happens on:

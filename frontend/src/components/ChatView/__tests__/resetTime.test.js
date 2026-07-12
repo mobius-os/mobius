@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { formatResetTime } from '../resetTime.js'
 
-// formatResetTime turns an explicit-UTC parked_until into a viewer-local,
+// formatResetTime turns an explicit-UTC pause.resets_at into a viewer-local,
 // day-qualified label that splices naturally after "Resets" / "resets".
 
 // A local Date at noon on a given day offset. Noon is always the same calendar

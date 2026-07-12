@@ -60,20 +60,18 @@ class _StagingChangedDuringPublish(RuntimeError):
 
 
 def _publish_system_event(event: dict) -> None:
-  """Publish the same system rebuild events that ``/api/notify`` emits."""
+  """Publish a shell-rebuild lifecycle event to the system broadcast ONLY.
+
+  These events (shell_rebuilding/rebuilt/rebuild_failed) are catch-up-unsafe:
+  a chat reconnect that replayed an old `shell_rebuilt` from its event log
+  would tell the Shell a fresh build just landed and trigger a spurious apply.
+  The system broadcast has no replay, so single-bus delivery is exactly one
+  hit per client and needs no frontend dedup. Do NOT fan out to per-chat
+  broadcasts.
+  """
   try:
-    from app.broadcast import (
-      get_active_broadcast,
-      get_all_active_broadcasts,
-      get_system_broadcast,
-    )
+    from app.broadcast import get_system_broadcast
     get_system_broadcast().publish(event)
-    targets = get_all_active_broadcasts()
-    if not targets:
-      active = get_active_broadcast()
-      targets = [active] if active is not None else []
-    for bc in targets:
-      bc.publish(event)
   except Exception:
     log.exception("frontend rebuild notify failed: %s", event.get("type"))
 

@@ -18,18 +18,11 @@ import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
-import { isIncomingFrameWindow } from '../../lib/incomingFrames.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
-import {
-  builtAppsForChat,
-  coerceBuiltAppsByChat,
-  prunedBuiltAppsByChat,
-  withBuiltAppForChat,
-  withoutBuiltAppForChat,
-} from './builtAppState.js'
+import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
 import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import {
@@ -60,23 +53,6 @@ function _warmTargetSw() {
 }
 
 const SHELL_RELOAD_RECHECK_MS = 6000
-
-// The per-chat built-app CTAs are session-scoped UI, not server state, so
-// they persist to sessionStorage: a reload or a platform-apply that remounts
-// the shell would otherwise wipe the CTA that just planted a route back to a
-// freshly built app. Restored defensively — any legacy scalar value (from a
-// mid-deploy reload of the older one-app-per-chat shape) is coerced to a list
-// so ChatView can always map over it.
-const BUILT_APPS_STORAGE_KEY = 'mobius-built-apps-by-chat'
-
-function readBuiltAppsByChat() {
-  try {
-    const raw = sessionStorage.getItem(BUILT_APPS_STORAGE_KEY)
-    return raw ? coerceBuiltAppsByChat(JSON.parse(raw)) : {}
-  } catch {
-    return {}
-  }
-}
 
 export default function Shell() {
   const {
@@ -262,7 +238,7 @@ export default function Shell() {
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
       streamingChatIds: streamingChatIdsRef.current,
-      voiceListeningChatIds: voiceListeningChatIdsRef.current,
+      voiceDictationActive: voiceDictationActiveRef.current,
       lastUserInteractionAt: lastShellInteractionAtRef.current,
       visibilityState: document.visibilityState,
     })
@@ -325,6 +301,18 @@ export default function Shell() {
   // instead so we always demote to the current most-recent chat.
   const chatsRef = useRef(chats)
   useEffect(() => { chatsRef.current = chats }, [chats])
+  // Always-current apps, read by the STABLE handleAppError callback (below) so
+  // it can stay `useCallback([])` — required to keep AppCanvas's message
+  // listener registered once per appId mount (it lists onAppError in its deps).
+  // `apps` itself is `appsQuery.data ?? []`, a fresh array every render, so a
+  // ref mirror is the only way a []-dep callback can see the live list.
+  const appsRef = useRef(apps)
+  useEffect(() => { appsRef.current = apps }, [apps])
+  // Latest-`newChat` ref so the stable handleAppError can start a fresh chat
+  // for a crash report without depending on newChat's identity (newChat is a
+  // per-render function declaration with volatile inputs — chats, streaming,
+  // online — that would churn any callback listing it as a dep).
+  const newChatRef = useRef(null)
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
@@ -339,23 +327,18 @@ export default function Shell() {
   // guarantees the has_messages flag is now true and the reuse guard
   // (which reads has_messages from the chats query) is reliable again.
   const recoveredChatIdsRef = useRef(new Set())
-  const [builtAppsByChatId, setBuiltAppsByChatId] = useState(readBuiltAppsByChat)
-  const builtApps = builtAppsForChat(builtAppsByChatId, activeChatId)
-  // Event handlers read the live map through a ref so they don't have to be in
-  // handleSystemEvent's dep list; the effect also mirrors the map to
-  // sessionStorage so a reload restores the planted CTAs.
-  const builtAppsByChatIdRef = useRef(builtAppsByChatId)
-  useEffect(() => {
-    builtAppsByChatIdRef.current = builtAppsByChatId
-    try {
-      sessionStorage.setItem(
-        BUILT_APPS_STORAGE_KEY, JSON.stringify(builtAppsByChatId))
-    } catch { /* private mode / quota — CTAs stay in memory only */ }
-  }, [builtAppsByChatId])
-  // Transient signal to the active chat's CTA that its app just recompiled.
-  // Carries a nonce so a repeat recompile of the same app still fires the
-  // effect in ChatView (identity changes each time).
-  const [recompilePulse, setRecompilePulse] = useState(null)
+  // The built-app CTA list is DERIVED from the apps query's `chat_id` column —
+  // no client mirror, no sessionStorage, no app_built round-trip. Memoize on a
+  // primitive signature (id:updated_at joined) rather than on `apps` identity:
+  // every app_updated returns a fresh `apps` array, but ChatView's
+  // builtApps-keyed effects must NOT re-fire unless THIS chat's derived content
+  // actually changed. When the signature is unchanged the memo returns the same
+  // reference, so an unrelated app's refetch is a no-op for the CTA effects.
+  const builtApps = useMemo(
+    () => derivedBuiltApps(apps, activeChatId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [builtAppsSignature(apps, activeChatId)],
+  )
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -377,7 +360,11 @@ export default function Shell() {
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
-  const [voiceListeningChatIds, setVoiceListeningChatIds] = useState(() => new Set())
+  // Voice dictation is a single boolean — is the (single-mount) ChatView's mic
+  // active right now — not a per-chat Set: nothing ever read which chat was
+  // dictating, only whether any dictation is live, so the shell-reload policy
+  // just needs "hold the reload while the mic is on."
+  const [voiceDictationActive, setVoiceDictationActive] = useState(false)
   const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
   const streamingChatIds = useMemo(() => {
     const next = new Set(localStreamingChatIds)
@@ -388,10 +375,13 @@ export default function Shell() {
   }, [localStreamingChatIds, chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
-  const voiceListeningChatIdsRef = useRef(voiceListeningChatIds)
+  // The reload check runs inside a setTimeout (scheduleShellReloadCheck), which
+  // reads render-time state through a ref, so the boolean still needs a ref
+  // mirror even though it is no longer a Set.
+  const voiceDictationActiveRef = useRef(voiceDictationActive)
   useEffect(() => {
-    voiceListeningChatIdsRef.current = voiceListeningChatIds
-  }, [voiceListeningChatIds])
+    voiceDictationActiveRef.current = voiceDictationActive
+  }, [voiceDictationActive])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -421,17 +411,8 @@ export default function Shell() {
     })
   }, [])
 
-  const markVoiceListening = useCallback((chatId, listening) => {
-    if (!chatId) return
-    setVoiceListeningChatIds(prev => {
-      const hasChat = prev.has(chatId)
-      if (listening && hasChat) return prev
-      if (!listening && !hasChat) return prev
-      const next = new Set(prev)
-      if (listening) next.add(chatId)
-      else next.delete(chatId)
-      return next
-    })
+  const markVoiceListening = useCallback((listening) => {
+    setVoiceDictationActive(!!listening)
   }, [])
 
   const clearChatAttention = useCallback((chatId) => {
@@ -673,21 +654,6 @@ export default function Shell() {
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
   }, [apps, appsLiveFetched])
 
-  // Retire CTAs whose app is gone. A sessionStorage-restored CTA can point at
-  // an app deleted since it was persisted; tapping it would navTo a dead
-  // canvas (onOpenApp trusts the id — it skips the moebius:open-app guard).
-  // Reconciling against every live-fetched list also covers in-session
-  // deletes (deleteApp → refreshApps → this effect). A just-built app is
-  // never falsely pruned: its CTA is planted inside refreshApps().then, so
-  // the query cache already holds the row by the time this effect sees the
-  // new state. prunedBuiltAppsByChat is a same-reference no-op when every
-  // entry is live.
-  useEffect(() => {
-    if (!appsLiveFetched) return
-    const liveIds = new Set(apps.map(a => Number(a.id)))
-    setBuiltAppsByChatId(prev => prunedBuiltAppsByChat(prev, liveIds))
-  }, [apps, appsLiveFetched])
-
   // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
   // useNavigation can't see the apps list. Once the live list lands, if the
   // restored app is gone (uninstalled since), demote the canvas to chat.
@@ -768,6 +734,39 @@ export default function Shell() {
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
       .catch(() => [])
   }, [queryClient])
+
+  // Route a mini-app crash report to the chat that built the app (its
+  // `chat_id`), falling back to a new chat when that chat was deleted. The
+  // report is set as a DRAFT (not auto-sent) so the owner reviews before
+  // sending. AppCanvas forwards ONLY its LIVE frame's app-error here (it
+  // swallows a hidden incoming preview frame's), so there is no window-level
+  // e.source guard to make — source attribution now lives entirely in
+  // AppCanvas. STABLE `useCallback([])`: it reads the live apps/chats through
+  // refs and calls the current newChat through `newChatRef`, so its identity
+  // never changes and AppCanvas's message listener (which deps on it) never
+  // re-registers.
+  const handleAppError = useCallback((appId, error, chatId) => {
+    const appEntry = appsRef.current.find(a => String(a.id) === String(appId))
+    const appName = appEntry?.name || `app ${appId}`
+    const report = `The app "${appName}" crashed with this error:\n\`\`\`\n${error}\n\`\`\`\nPlease investigate and fix.`
+    const buildingChatId = appEntry?.chat_id || chatId || null
+    const buildingChat = buildingChatId
+      && chatsRef.current.find(c => c.id === buildingChatId)
+    if (buildingChat) {
+      try {
+        sessionStorage.setItem('pending-draft', report)
+        sessionStorage.setItem(`draft:${buildingChatId}`, report)
+        sessionStorage.removeItem('pending-draft-autosend')
+        sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
+      } catch {}
+      // Set view and chatId together to avoid flashing the previous chat.
+      setActiveView('chat')
+      setActiveChatId(buildingChatId)
+      refreshChats()
+    } else {
+      newChatRef.current?.({ draft: report, forceNew: true })
+    }
+  }, [refreshChats, setActiveView, setActiveChatId])
 
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated
@@ -956,11 +955,10 @@ export default function Shell() {
       // LIST-REFRESH ONLY. Refetch the apps list so the affected app's
       // `updated_at` reflects the server's new state. versionForApp reads
       // from that field, so the iframe URL automatically picks up the new
-      // cache-buster on the next render — no separate version counter to
-      // keep in sync. This event reaches every view (it's on the global
-      // SystemBroadcast), so it must NOT plant the "Open app" CTA — that's
-      // the chat-scoped `app_built` event's job (below). Doing the CTA here
-      // is what leaked it into unrelated chats.
+      // cache-buster on the next render — no separate version counter to keep
+      // in sync. The refetch also updates the derived built-app CTA list (which
+      // reads the apps query's chat_id + updated_at), so a fresh build or
+      // recompile surfaces the CTA in exactly the chat that owns the app.
       refreshApps().then(updatedApps => {
         // Warm the SW cache for the updated app immediately — the edit
         // rotated the `?v=` cache key, so without this the next open pays
@@ -971,55 +969,9 @@ export default function Shell() {
           if (app) warmAppCode(app)
         }
       })
-    } else if (ev.type === 'app_built') {
-      // CHAT-SCOPED CTA. The backend publishes `app_built` onto ONLY the
-      // broadcast of the chat that built the app (routes/notify.py), so it
-      // arrives exclusively via that chat's own SSE stream — ChatView
-      // forwards it here through onSystemEvent. Because the event never
-      // touches the global SystemBroadcast or any other chat's stream, the
-      // CTA is naturally scoped to the building chat and cannot leak. Still
-      // refresh the apps list so the name lookup below resolves the fresh
-      // row (app_built and app_updated arrive close together but order
-      // isn't guaranteed).
-      if (ev.appId) {
-        const sourceChatId = ev.chatId || activeChatIdRef.current
-        // Recompile pulse: the watcher re-fires `app_built` on EVERY source
-        // compile, so a re-plant of an app already in this chat's CTA list is a
-        // recompile (not a first build — that's a brand-new id) and gets zero
-        // signal otherwise. Keying off the re-plant rather than `app_updated`
-        // (which also fires on the FIRST build) avoids flashing "Preview
-        // updated" on an app that was just created, and is order-independent.
-        const alreadyShown = builtAppsForChat(
-          builtAppsByChatIdRef.current, sourceChatId,
-        ).some(a => Number(a.id) === Number(ev.appId))
-        refreshApps().then(updatedApps => {
-          const app = updatedApps.find(a => String(a.id) === String(ev.appId))
-          const name = app?.name || null
-          setBuiltAppsByChatId(prev => withBuiltAppForChat(
-            prev,
-            sourceChatId,
-            { id: Number(ev.appId), name },
-          ))
-          // Warm the SW cache immediately after a build lands so the
-          // "Open app" CTA tap is served from cache.
-          if (app) warmAppCode(app)
-        })
-        if (alreadyShown
-            && String(sourceChatId) === String(activeChatIdRef.current)) {
-          // Scope to its chat + carry a nonce: recompilePulse lingers in state
-          // after firing, so ChatView gates on chatId (a remount for another
-          // chat ignores it) and re-fires on a fresh nonce for the same app.
-          setRecompilePulse({
-            appId: Number(ev.appId), nonce: Date.now(), chatId: sourceChatId,
-          })
-        }
-      }
     } else if (ev.type === 'app_build_failed') {
-      const now = Date.now()
-      const dedupKey = `app-build-failed-at:${ev.appId || ev.appName || ''}`
-      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
-      if (now - lastSignal < 5000) return
-      sessionStorage.setItem(dedupKey, String(now))
+      // System-bus-only (app_watcher publishes it there alone), so it arrives
+      // exactly once — no dedup stamp needed.
       showToast(appBuildFailureMessage(ev), {
         variant: 'error',
         duration: 10000,
@@ -1047,22 +999,13 @@ export default function Shell() {
     } else if (ev.type === 'shell_rebuilt' || ev.type === 'shell_apply_now') {
       // A new shell generation is available. `shell_rebuilt` fires automatically
       // when the frontend rebuilds; `shell_apply_now` is the agent's EXPLICIT
-      // "look now" signal (design §1.5, whitelisted in backend/app/events.py).
-      // Both carry identical client policy — apply if idle, else hold — so they
-      // share this branch.
+      // "look now" signal (design §1.5). Both carry identical client policy —
+      // apply if idle, else hold — so they share this branch.
       //
-      // Deduplicate against the SSE catch-up burst (both the global system
-      // stream and the per-chat stream can deliver these) to avoid reload loops.
-      // The two event types use SEPARATE dedup windows so an early
-      // shell_apply_now cannot swallow the subsequent automatic shell_rebuilt,
-      // nor vice versa.
-      const now = Date.now()
-      const dedupKey = ev.type === 'shell_apply_now'
-        ? 'shell-apply-now-at'
-        : 'shell-rebuilt-at'
-      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
-      if (now - lastSignal < 5000) return
-      sessionStorage.setItem(dedupKey, String(now))
+      // These are system-bus-only (frontend_watcher / notify skip the per-chat
+      // fan-out) and SystemBroadcast has no replay, so each reaches the Shell
+      // exactly once — no dedup stamp needed to avoid reload loops.
+      //
       // Apply-on-idle: the streaming view is sacred. requestShellReload reads
       // view + streaming state from refs (not closure-captured scalars, which
       // can lag concurrent updates by a render) and applies immediately when
@@ -1074,11 +1017,7 @@ export default function Shell() {
       // reloads.
       requestShellReload()
     } else if (ev.type === 'shell_rebuild_failed') {
-      const now = Date.now()
-      const dedupKey = 'shell-rebuild-failed-at'
-      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
-      if (now - lastSignal < 5000) return
-      sessionStorage.setItem(dedupKey, String(now))
+      // System-bus-only, delivered once — no dedup stamp.
       showToast(shellRebuildFailureMessage(ev), {
         variant: 'error',
         duration: 10000,
@@ -1132,29 +1071,6 @@ export default function Shell() {
         String(a.id) === String(target) || a.slug === target) || null
     }
 
-    async function handleAppError(e) {
-      const appEntry = apps.find(a => String(a.id) === String(e.data.appId))
-      const appName = appEntry?.name || `app ${e.data.appId}`
-      const report = `The app "${appName}" crashed with this error:\n\`\`\`\n${e.data.error}\n\`\`\`\nPlease investigate and fix.`
-
-      const buildingChatId = appEntry?.chat_id || e.data.chatId || null
-      const buildingChat = buildingChatId && chats.find(c => c.id === buildingChatId)
-      if (buildingChat) {
-        try {
-          sessionStorage.setItem('pending-draft', report)
-          sessionStorage.setItem(`draft:${buildingChatId}`, report)
-          sessionStorage.removeItem('pending-draft-autosend')
-          sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
-        } catch {}
-        // Set view and chatId together to avoid flashing the previous chat.
-        setActiveView('chat')
-        setActiveChatId(buildingChatId)
-        refreshChats()
-      } else {
-        newChat({ draft: report, forceNew: true })
-      }
-    }
-
     async function onMessage(e) {
       // window 'message' events are for cross-frame postMessage from
       // same-origin sibling frames. NOT service-worker messages —
@@ -1164,21 +1080,13 @@ export default function Shell() {
       // The iframes mount with allow-same-origin so e.origin is always
       // window.location.origin, never the string 'null'. The 'null'-origin
       // branch was dead (sandboxed-without-allow-same-origin iframes).
-      // e.source is intentionally NOT checked (Möbius is single-owner and
-      // every iframe on this origin is owned by the shell) — with ONE narrow
-      // exception below: app-error from a hidden incoming preview frame.
+      // e.source is NOT checked here (Möbius is single-owner and every iframe
+      // on this origin is owned by the shell). app-error is the one message
+      // that DID need source attribution (to swallow a hidden preview frame's
+      // crash); that now lives in AppCanvas, which forwards only its live
+      // frame's app-error up via onAppError — so no branch for it here.
       if (e.origin !== window.location.origin) return
-      if (e.data?.type === 'moebius:app-error') {
-        // Ignore crash reports from a HIDDEN incoming frame of AppCanvas's
-        // double-buffered version swap. A failed swap usually IS a broken
-        // build; the swap machinery already handles it (the old working
-        // frame stays live, the next rebuild retries), and a hidden frame
-        // must not plant a crash-report draft or yank the view to a chat
-        // while the owner's visible preview works fine. See
-        // lib/incomingFrames.js for the registry contract.
-        if (isIncomingFrameWindow(e.source)) return
-        handleAppError(e)
-      } else if (e.data?.type === 'moebius:new-chat') {
+      if (e.data?.type === 'moebius:new-chat') {
         newChat({
           draft: e.data.draft,
           forceNew: true,
@@ -1282,7 +1190,7 @@ export default function Shell() {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [apps, chats, navTo, refreshApps, refreshChats])
+  }, [apps, navTo, refreshApps, refreshChats])
 
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only
@@ -1416,6 +1324,9 @@ export default function Shell() {
     setActiveChatId(chatId)
     if (focusComposer) requestComposerFocus(chatId)
   }
+  // Keep the latest-newChat ref current so handleAppError's crash-report
+  // fallback starts a chat with this render's live closure.
+  newChatRef.current = newChat
 
   function selectChat(id) {
     clearChatAttention(id)
@@ -1727,21 +1638,19 @@ export default function Shell() {
               }
             }}
             builtApps={builtApps}
-            recompilePulse={recompilePulse}
             onOpenApp={(appId) => {
-              // Opening no longer clears the CTA — it stays planted (its label
-              // flips to "Open {name}" when the turn ends) so the owner can
-              // return to it. It clears when a NEW message is sent (below).
+              // The CTA is DERIVED from the apps this chat owns, so it is
+              // durable: opening it, sending a new message, or reloading never
+              // retires it. It flips its label to "Open {name}" when the turn
+              // ends, and stays as a route back to the app the chat built.
               navTo('canvas', { appId })
             }}
             onMessageStart={() => {
               // User just sent a message — the agent is about to
               // stream a response. Mark this chat as streaming so the
               // drawer's pulse dot picks it up immediately (no
-              // round-trip wait for the first SSE event). A new turn also
-              // retires this chat's built-app CTAs.
+              // round-trip wait for the first SSE event).
               markStreamingStart(activeChatId)
-              setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}
             onVoiceListeningChange={markVoiceListening}
             composerFocusRequest={composerFocusRequest}
@@ -1794,6 +1703,7 @@ export default function Shell() {
               onNavReset={appNavReset}
               onImmersive={handleImmersive}
               onIntentDelivered={handleAppIntentDelivered}
+              onAppError={handleAppError}
             />
           </div>
         ))}

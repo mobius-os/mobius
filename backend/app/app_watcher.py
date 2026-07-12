@@ -102,30 +102,24 @@ def _summarize_app_build_failure(error: object) -> str:
 
 
 def _publish_app_build_failed(
-  *, app_id: int, app_name: str, chat_id: str | None, summary: str,
+  *, app_id: int, app_name: str, summary: str,
 ) -> None:
-  """Emit an app build failure to the system bus and the building chat."""
-  from app.broadcast import get_broadcast, get_system_broadcast
-  event = {
+  """Emit an app build failure to the system bus ONLY.
+
+  The system broadcast reaches Shell.handleSystemEvent in every view — which
+  is exactly the posture for a build failure, since "the previous version is
+  still running" describes an owner who navigated to look at the app. It is
+  catch-up-unsafe (a chat reconnect must not replay a stale failure toast), so
+  it rides the system bus alone; SystemBroadcast has no replay, so one
+  delivery per client and no frontend dedup.
+  """
+  from app.broadcast import get_system_broadcast
+  get_system_broadcast().publish({
     "type": "app_build_failed",
     "appId": str(app_id),
     "appName": app_name,
     "summary": summary,
-  }
-  # The system broadcast reaches Shell.handleSystemEvent in every view;
-  # without it the failure toast is dropped the moment the owner
-  # navigates away from the building chat — the most likely posture,
-  # since "the previous version is still running" describes an owner
-  # who went to look at the app. SystemBroadcast subscribers get no
-  # backlog replay, and the Shell's per-app dedup window collapses the
-  # double delivery when the chat stream also forwards the copy below.
-  get_system_broadcast().publish(event)
-  if not chat_id:
-    return
-  bc = get_broadcast(str(chat_id))
-  if bc is None or not bc.running:
-    return
-  bc.publish(event)
+  })
 
 
 def _source_roots() -> list[Path]:
@@ -341,7 +335,6 @@ class _JsxHandler(FileSystemEventHandler):
             failure = {
               "app_id": app.id,
               "app_name": app.name,
-              "chat_id": app.chat_id,
               "summary": summary,
             }
             log.warning(
@@ -364,19 +357,13 @@ class _JsxHandler(FileSystemEventHandler):
         # same callback) — so an extra fan-out to every active
         # ChatBroadcast (the v1 design preserved this as "intentional")
         # was redundant, not load-bearing. Ticket 033 removed it.
-        from app.broadcast import get_broadcast, get_system_broadcast
+        from app.broadcast import get_system_broadcast
         event = {"type": "app_updated", "appId": str(app.id)}
         get_system_broadcast().publish(event)
-        # Chat-scoped CTA: if this edit landed during the building chat's
-        # turn, fire `app_built` onto only that chat's stream so the
-        # "Open app" CTA shows in the right chat (and nowhere else). The
-        # global `app_updated` above stays list-refresh-only. No-op when
-        # the app has no owning chat or that chat isn't streaming. See
-        # routes/notify.publish_app_built_to_owning_chat for the rationale.
-        if app.chat_id:
-          bc = get_broadcast(str(app.chat_id))
-          if bc is not None and bc.running:
-            bc.publish({"type": "app_built", "appId": str(app.id)})
+        # The built-app "Open app" CTA is now DERIVED on the frontend from the
+        # apps query's chat_id + updated_at (Shell.builtAppState), so a bumped
+        # updated_at + this app_updated refetch surface the CTA in the owning
+        # chat with no separate app_built event to publish here.
       except Exception:
         # Watcher must keep running across any single-event failure.
         log.exception("auto-recompile unexpected error for %s", path)

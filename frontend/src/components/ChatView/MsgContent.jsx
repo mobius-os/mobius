@@ -179,7 +179,7 @@ function MsgContentInner({
         // button. One tap re-sends a short "continue" as a normal visible
         // send; on a park the button reads "Resume now" (design §2.4).
         const resumable = !!(block.resumable && isLastMsg && onResume)
-        const parked = !!block.parked_until
+        const parked = !!block.pause?.resets_at
         return (
           <ErrorCard key={i} block={block}>
             {resumable && (

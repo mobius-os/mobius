@@ -9,21 +9,21 @@ import { formatResetTime } from './resetTime.js'
 // red until promotion. Any future field that changes how the card reads must
 // land here, not in one surface.
 //
-// Classification: a provider-limit park carries `parked_until` and reads
-// "Rate limit" — the honest, specific name a park deserves. A drain-gated
-// restart or stall carries `pause_kind` ('restart' | 'stall') and reads
-// "Paused". Both are WAIT states and get the soft `.chat__text--parked`
-// treatment; the danger-red "Error" card is reserved for genuine failures.
-// Old persisted blocks predate `pause_kind` and, absent a `parked_until`,
-// fall back to the error rendering.
+// Classification, all from the single `pause` descriptor: a provider-limit
+// park carries `pause.resets_at` and reads "Rate limit" — the honest, specific
+// name a park deserves. A drain-gated restart or stall carries `pause.kind`
+// ('restart' | 'stall') without a reset time and reads "Paused". Both are WAIT
+// states (any `pause`) and get the soft `.chat__text--parked` treatment; the
+// danger-red "Error" card is reserved for genuine failures (no `pause`). Old
+// persisted blocks predate `pause` and fall back to the error rendering.
 export function errorCardViewModel(block) {
-  const parked = !!block.parked_until
-  const benign = parked || !!block.pause_kind
+  const parked = !!block.pause?.resets_at
+  const benign = !!block.pause
   return {
     parked,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: parked ? 'Rate limit' : (block.pause_kind ? 'Paused' : 'Error'),
-    resetLabel: parked ? formatResetTime(block.parked_until) : null,
+    label: parked ? 'Rate limit' : (block.pause ? 'Paused' : 'Error'),
+    resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }
 

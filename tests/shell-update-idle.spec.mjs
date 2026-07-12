@@ -21,10 +21,13 @@
  *      case pins generation identity (the gap that let 207 ship).
  *
  * SYNTHESIS NOTES — why these differ from a naive mock:
- *   - The per-chat stream forwards shell_rebuilt ONLY when live, not during the
- *     catch-up replay (chatSystemEvents.shouldForwardChatStreamSystemEvent). A
- *     fresh send's stream starts in catch-up, so the mock emits `catch_up_done`
- *     BEFORE shell_rebuilt to make it a LIVE signal that reaches Shell.
+ *   - shell_rebuilt is SYSTEM-BUS-ONLY: the backend never fans it out to
+ *     per-chat broadcasts (a chat reconnect replaying a stale rebuilt would
+ *     fire a spurious apply), so the mock delivers it over /api/events/system.
+ *     The mocked system route mirrors the REAL SystemBroadcast contract — live
+ *     delivery, NO replay on reconnect (oneShotRebuiltSystemRoute) — which is
+ *     exactly why the client needs no dedup stamps, and why a mock that
+ *     redelivered on every reconnect would (rightly) reload-loop.
  *   - The reload is HELD via a recheck timer, not an event-driven boundary, so
  *     the idle apply in case 2 lands a few seconds after `done` — the waits
  *     account for that.
@@ -61,6 +64,40 @@ function fulfillStream(body) {
   }
 }
 
+// One-shot system-stream mock, faithful to the real SystemBroadcast contract:
+// hold the connection until `armed` resolves, then deliver shell_rebuilt on
+// exactly ONE successful connection — every other connection (before the arm,
+// after delivery, or the post-reload reconnect) gets only the hello. No
+// replay on reconnect is the load-bearing property: with the sessionStorage
+// dedup stamps gone, single delivery is what prevents a reload loop, so a
+// mock that redelivered would fail these cases for the right reason.
+function oneShotRebuiltSystemRoute(armed) {
+  let delivered = false
+  return async (route) => {
+    try {
+      if (!delivered) {
+        await armed
+        // Re-check after waking: a connection that a test-page navigation
+        // aborted may have woken first and thrown on fulfill, leaving
+        // delivery to this (live) one.
+        if (!delivered) {
+          await route.fulfill(fulfillStream(sse([
+            { type: 'system_stream_open' },
+            { type: 'shell_rebuilt' },
+          ])))
+          delivered = true
+          return
+        }
+      }
+      await route.fulfill(fulfillStream(sse([{ type: 'system_stream_open' }])))
+    } catch {
+      // The connection died while held (navigation aborts in-flight
+      // requests). `delivered` is still false, so the next connection
+      // gets the event.
+    }
+  }
+}
+
 // Count page loads (initial + every reload) so a shell-update reload is
 // observable. addInitScript runs before page scripts on each load.
 async function trackLoads(page) {
@@ -76,7 +113,7 @@ const loadCount = (page) =>
 const resetLoadCount = (page) =>
   page.evaluate(() => sessionStorage.setItem('__load_count', '0'))
 
-async function setup(page, { streamRoute, systemBody } = {}) {
+async function setup(page, { streamRoute, systemBody, systemRoute } = {}) {
   await page.setViewportSize({ width: 412, height: 915 })
   await trackLoads(page)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, fulfillStartedPost)
@@ -84,7 +121,9 @@ async function setup(page, { streamRoute, systemBody } = {}) {
   if (streamRoute) {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, streamRoute)
   }
-  if (systemBody) {
+  if (systemRoute) {
+    await page.route('**/api/events/system', systemRoute)
+  } else if (systemBody) {
     await page.route('**/api/events/system', route => route.fulfill(fulfillStream(systemBody)))
   }
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -112,22 +151,29 @@ async function sendMessage(page, text) {
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
   test('shell_rebuilt during a streaming turn does not reload; holds quietly', async ({ page }) => {
-    // catch_up_done makes the shell_rebuilt a LIVE signal (past the catch-up
-    // filter); the stream never sends `done`, so the turn stays live and the
-    // chat stays in the streaming set. The gate must DEFER (quiet hold).
+    // The chat stream never sends `done`, so the turn stays live and the chat
+    // stays in the streaming set. shell_rebuilt arrives on the GLOBAL system
+    // stream — its only channel — while the turn is streaming; the gate must
+    // DEFER (quiet hold). The arm resolves only after the turn is visibly
+    // streaming, so the delivery is deterministically mid-turn.
+    let armRebuilt
+    const armed = new Promise(resolve => { armRebuilt = resolve })
     const streamingBody = sse([
       { type: 'catch_up_done' },
       { type: 'text', content: 'building the shell...' },
-      { type: 'shell_rebuilt' },
     ])
-    await setup(page, { streamRoute: route => route.fulfill(fulfillStream(streamingBody)) })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(streamingBody)),
+      systemRoute: oneShotRebuiltSystemRoute(armed),
+    })
     await gotoEmptyChat(page)
     await resetLoadCount(page)
 
     await sendMessage(page, 'rebuild the shell')
 
-    // The live turn keeps rendering — the reload did not blank it.
+    // The live turn is rendering — NOW deliver shell_rebuilt mid-turn.
     await expect(page.getByText('building the shell...')).toBeVisible({ timeout: 8000 })
+    armRebuilt()
 
     // Wait PAST the hold-until-idle recheck interval (6s): the recheck fires,
     // sees a still-streaming turn, and reschedules — it must NOT reload. This is
@@ -137,64 +183,72 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
   })
 
   test('a mid-turn shell_rebuilt applies exactly once at the turn-end idle boundary', async ({ page }) => {
-    // shell_rebuilt arrives live (after catch_up_done) while streaming → defer,
-    // then `done` empties the streaming set → the hold-until-idle recheck
-    // applies → exactly one reload, no loop.
-    //
-    // Stateful route: on RECONNECT after the reload, deliver shell_rebuilt as
-    // CATCH-UP (before catch_up_done) so the live-only forwarding filters it —
-    // mirroring how a real broadcast replays a finished turn. This prevents a
-    // re-apply loop and exercises the catch-up filter.
+    // shell_rebuilt arrives on the system stream while the turn streams →
+    // defer; the chat stream's `done` (held back so the rebuilt lands
+    // genuinely mid-turn) then empties the streaming set → the hold-until-idle
+    // recheck applies → exactly one reload. No loop: the post-reload system
+    // reconnect carries NO replay (SystemBroadcast has none) — the property
+    // that lets single-bus delivery need no client dedup.
+    let armRebuilt
+    const armed = new Promise(resolve => { armRebuilt = resolve })
     let streamConnects = 0
-    const firstConnect = sse([
-      { type: 'catch_up_done' },
-      { type: 'text', content: 'shell rebuilt' },
-      { type: 'shell_rebuilt' },
-      { type: 'done' },
-    ])
-    const reconnectReplay = sse([
-      // shell_rebuilt in the catch-up portion (before catch_up_done) → filtered.
-      { type: 'text', content: 'shell rebuilt' },
-      { type: 'shell_rebuilt' },
-      { type: 'catch_up_done' },
-      { type: 'done' },
-    ])
     await setup(page, {
-      streamRoute: route => {
+      streamRoute: async route => {
         streamConnects += 1
-        return route.fulfill(fulfillStream(streamConnects === 1 ? firstConnect : reconnectReplay))
+        if (streamConnects === 1) {
+          // Hold `done` back a beat: the send marks the chat streaming
+          // synchronously, the armed system stream delivers shell_rebuilt
+          // within that window (defer), and `done` lands after.
+          await new Promise(resolve => setTimeout(resolve, 2500))
+          try {
+            await route.fulfill(fulfillStream(sse([
+              { type: 'catch_up_done' },
+              { type: 'text', content: 'shell rebuilt' },
+              { type: 'done' },
+            ])))
+          } catch { /* aborted by the apply-reload — nothing to deliver */ }
+          return
+        }
+        // Reconnect replay of the finished turn: content, boundary, done.
+        return route.fulfill(fulfillStream(sse([
+          { type: 'text', content: 'shell rebuilt' },
+          { type: 'catch_up_done' },
+          { type: 'done' },
+        ])))
       },
+      systemRoute: oneShotRebuiltSystemRoute(armed),
     })
     await gotoEmptyChat(page)
     await resetLoadCount(page)
 
     await sendMessage(page, 'rebuild the shell')
+    // The send marks the chat streaming synchronously (onMessageStart), so
+    // arming here delivers the rebuilt while the turn is live.
+    armRebuilt()
 
     // Reloads once when the turn goes idle. The recheck interval (6s) + reload
     // delay put this a few seconds after `done`; allow generous headroom.
     await page.waitForFunction(
       () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
-      { timeout: 15000 },
+      { timeout: 20000 },
     )
-    // And does NOT loop: the reconnect's shell_rebuilt is a catch-up replay and
-    // is filtered, so the reloaded page does not re-apply.
+    // And does NOT loop: the reloaded page's system reconnect gets only the
+    // hello (no replay), so nothing re-applies.
     await page.waitForTimeout(2000)
     expect(await loadCount(page)).toBe(1)
   })
 
   test('shell_rebuilt on the global system stream while idle applies immediately', async ({ page }) => {
     // No turn is streaming; the global system stream delivers shell_rebuilt at
-    // load. Idle → immediate apply → one reload (the 5s dedup, which survives
-    // the reload in sessionStorage, prevents a loop).
-    const systemBody = sse([
-      { type: 'system_stream_open' },
-      { type: 'shell_rebuilt' },
-    ])
+    // load. Idle → immediate apply → one reload. Loop prevention is single
+    // delivery itself: the post-reload reconnect gets no replay, exactly like
+    // the real SystemBroadcast (the old sessionStorage dedup is gone).
+    //
     // The initial goto in `setup` is load #1; the idle-immediate apply reload
     // makes it #2. No pre-reset — the base is the initial load.
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
-      systemBody,
+      systemRoute: oneShotRebuiltSystemRoute(Promise.resolve()),
     })
 
     await page.waitForFunction(

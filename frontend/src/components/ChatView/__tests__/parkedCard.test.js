@@ -3,11 +3,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
-// block carrying `parked_until` + `park_reason`, which renders as a live
-// "Rate limit — resets at … · Resume now" card. The extras must survive all
-// three client seams: the live stream reducer, promote-to-block, and the
-// shared ErrorCard renderer (consumed by BOTH MsgContent and
-// StreamingMessage, so the persisted and live surfaces cannot diverge).
+// block carrying a single `pause` descriptor ({kind, resets_at?}), which
+// renders as a live "Rate limit — resets at … · Resume now" card. That one
+// field must survive all three client seams: the live stream reducer,
+// promote-to-block, and the shared ErrorCard renderer (consumed by BOTH
+// MsgContent and StreamingMessage, so the persisted and live surfaces cannot
+// diverge).
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
@@ -16,9 +17,9 @@ const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url)
 const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
-test('ErrorCard renders a parked card for a parked_until error block', () => {
-  assert.match(errorCard, /block\.parked_until/,
-    'the card must key the parked classification on block.parked_until')
+test('ErrorCard renders a parked card for a block whose pause has a reset time', () => {
+  assert.match(errorCard, /block\.pause\?\.resets_at/,
+    'the card must key the parked classification on block.pause.resets_at')
   assert.match(errorCard, /Rate limit/,
     'a parked block must be labeled as a rate limit, not a generic error')
   assert.match(errorCard, /Resets \{vm\.resetLabel\}/,
@@ -54,29 +55,26 @@ test('the reset formatter is a defensive, viewer-local, day-aware helper', () =>
     'ErrorCard must consume the shared formatter, not a private copy')
 })
 
-test('streamItemToBlock carries the park extras through promote', () => {
+test('streamItemToBlock carries the pause descriptor through promote', () => {
   assert.match(
     promotion,
-    /item\.parked_until \? \{ parked_until: item\.parked_until \}/,
-    'promote must not strip parked_until — the card would vanish on promote',
-  )
-  assert.match(
-    promotion,
-    /item\.park_reason \? \{ park_reason: item\.park_reason \}/,
-    'promote must carry park_reason',
+    /item\.pause \? \{ pause: item\.pause \}/,
+    'promote must carry the whole pause descriptor — the card would vanish otherwise',
   )
   assert.match(
     promotion,
     /item\.resumable \? \{ resumable: true \}/,
     'promote must carry resumable (the one-tap Resume gate)',
   )
+  assert.doesNotMatch(promotion, /parked_until|park_reason|pause_kind/,
+    'the old flat park fields must be gone from the promote seam')
 })
 
-test('the live stream reducer carries the park extras', () => {
+test('the live stream reducer carries the pause descriptor', () => {
   assert.match(
     stream,
-    /event\.parked_until \? \{ parked_until: event\.parked_until \}/,
-    'a live limit error must render as the parked card before promote too',
+    /event\.pause \? \{ pause: event\.pause \}/,
+    'a live limit/restart/stall note must render as the pause card before promote too',
   )
   assert.match(
     stream,
@@ -92,15 +90,13 @@ test('the parked card has styling distinct from a plain error', () => {
     'the reset line has its own style')
 })
 
-test('a benign pause_kind renders the calm "Paused" family, not red Error', () => {
-  // A drain-restart or stall carries pause_kind; it must get the soft
-  // .chat__text--parked treatment and a "Paused" label. Red "Error" is
-  // reserved for genuine failures (no parked_until, no pause_kind).
-  assert.match(errorCard, /block\.pause_kind/,
-    'the card must read block.pause_kind')
-  assert.match(errorCard, /parked \|\| !!block\.pause_kind/,
-    'a park OR a pause_kind gets the soft treatment')
-  assert.match(errorCard, /block\.pause_kind \? 'Paused' : 'Error'/,
+test('a benign pause (no reset time) renders the calm "Paused" family, not red Error', () => {
+  // A drain-restart or stall carries pause.kind but no resets_at; it must get
+  // the soft .chat__text--parked treatment and a "Paused" label. Red "Error"
+  // is reserved for genuine failures (no pause at all).
+  assert.match(errorCard, /benign = !!block\.pause/,
+    'ANY pause gets the soft treatment')
+  assert.match(errorCard, /block\.pause \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
 })
 
@@ -111,13 +107,4 @@ test('the park card reassures that a reset push is coming', () => {
     'the note names the incoming reset push')
   assert.match(css, /\.chat__parked-note\s*\{/,
     'the reassurance line has its own muted style')
-})
-
-test('pause_kind rides both stream seams onto the block', () => {
-  assert.match(promotion,
-    /item\.pause_kind \? \{ pause_kind: item\.pause_kind \}/,
-    'promote must carry pause_kind so a promoted note stays calm')
-  assert.match(stream,
-    /event\.pause_kind \? \{ pause_kind: event\.pause_kind \}/,
-    'the live reducer must carry pause_kind')
 })

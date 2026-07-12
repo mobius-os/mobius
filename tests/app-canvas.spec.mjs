@@ -377,4 +377,163 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
     expect(routes.getAppsFetches()).toBeGreaterThanOrEqual(2)
   })
+
+  test('app-error from a hidden incoming frame is swallowed; the live frame forwards a crash draft', async ({ page }) => {
+    // The double-buffered version swap runs the app's NEW module in a hidden
+    // incoming frame. A failed swap is usually a broken build, and the swap
+    // machinery already keeps the old working frame live — so a hidden frame's
+    // moebius:app-error must NOT plant a crash-report draft or yank the view
+    // to a chat, while the LIVE frame's crash must. AppCanvas makes that call
+    // by source attribution (which frame sent the message) and forwards only
+    // the live frame's error up via onAppError — this replaced the old
+    // module-global incomingFrames WeakSet, whose unit tests died with it.
+    const appId = 77
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.addInitScript(() => {
+      localStorage.setItem('token', 'mock-owner-token')
+    })
+    await setupShellBasics(page)
+
+    // Digit-string updated_at values double as the frame version keys
+    // (appVersionKey passes them through): the first apps fetch serves the
+    // version the live frame mounts at; every later fetch serves a NEWER one,
+    // so a refetch triggers the double-buffer swap and mounts a hidden
+    // incoming frame.
+    let appsFetches = 0
+    const appRow = (updatedAt) => ({
+      id: appId,
+      name: 'CrashToy',
+      slug: 'crashtoy',
+      description: 'test',
+      compiled_path: `/data/compiled/app-${appId}.js`,
+      chat_id: null,
+      source_dir: null,
+      created_at: '1000',
+      updated_at: updatedAt,
+    })
+    await page.route(/\/api\/apps\/$/, route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      appsFetches += 1
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([appRow(appsFetches === 1 ? '1000' : '2000')]),
+      })
+    })
+    await page.route(/\/api\/auth\/app-token$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: 'mock-app-token' }),
+      })
+    )
+    // First frame fetch (the live frame) auto-mounts so the swap machinery
+    // sees a settled live frame; later fetches (the incoming frame) NEVER
+    // post frame-mounted, so the incoming frame stays hidden and unpromoted
+    // for the whole test window (until the 10s incoming-timeout).
+    let frameFetches = 0
+    await page.route(new RegExp(`/api/apps/${appId}/frame`), route => {
+      frameFetches += 1
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        },
+        body: mockFrameHTML(appId, { sendMounted: frameFetches === 1 }),
+      })
+    })
+    // The forwarded crash routes to a NEW chat (the app has no chat_id):
+    // Shell's handleAppError calls newChat({draft, forceNew}) → POST /api/chats.
+    // Count the creates — the swallow assertion is that this never fires.
+    let chatsCreated = 0
+    await page.route(/\/api\/chats(\?.*)?$/, route => {
+      if (route.request().method() === 'POST') {
+        chatsCreated += 1
+        return route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: 'crash-chat',
+            title: 'New chat',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            has_messages: false,
+            running: false,
+            run_status: null,
+          }),
+        })
+      }
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: '[]',
+      })
+    })
+    await page.route(/\/api\/chats\/crash-chat(\?.*)?$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: 'crash-chat',
+          title: 'New chat',
+          messages: [],
+          has_messages: false,
+          running: false,
+          run_status: null,
+          provider: 'claude',
+        }),
+      })
+    )
+    await page.route(/\/api\/chats\/[^/]+\/stream$/, route =>
+      route.fulfill({ status: 204, body: '' })
+    )
+
+    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    // The live frame has mounted (spinner gated on frame-mounted).
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+
+    // Trigger an apps refetch (an unknown open-app target refetches once
+    // before giving up) — the bumped updated_at starts the swap and mounts
+    // the hidden incoming frame.
+    await page.evaluate(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'moebius:open-app', appId: 'no-such-app' },
+      }))
+    })
+    // state:'attached', not 'visible' — the incoming frame is visibility:hidden.
+    const incomingEl = await page.waitForSelector('iframe.canvas--incoming', {
+      state: 'attached', timeout: 8000,
+    })
+
+    // Crash report from the HIDDEN incoming frame → swallowed: no chat
+    // create, no navigation away from the canvas.
+    const incomingFrame = await incomingEl.contentFrame()
+    await incomingFrame.evaluate((id) => {
+      window.parent.postMessage(
+        { type: 'moebius:app-error', appId: String(id), error: 'hidden-frame crash' },
+        window.location.origin,
+      )
+    }, appId)
+    await page.waitForTimeout(800)
+    expect(chatsCreated).toBe(0)
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible()
+
+    // Crash report from the LIVE frame → forwarded: Shell routes it to a new
+    // chat with the report as a reviewable draft (not auto-sent).
+    const liveEl = await page.waitForSelector('iframe.canvas--live', {
+      state: 'attached', timeout: 4000,
+    })
+    const liveFrame = await liveEl.contentFrame()
+    await liveFrame.evaluate((id) => {
+      window.parent.postMessage(
+        { type: 'moebius:app-error', appId: String(id), error: 'live-frame crash' },
+        window.location.origin,
+      )
+    }, appId)
+    await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
+      .toHaveValue(/crashed with this error/, { timeout: 8000 })
+    expect(chatsCreated).toBe(1)
+  })
 })

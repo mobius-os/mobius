@@ -44,6 +44,23 @@ _KEEPALIVE_INTERVAL = 30
 # unbounded string.
 _LABEL_MAX = 80
 
+# Catch-up-unsafe events: they ride the system broadcast alone and are NEVER
+# fanned out to per-chat broadcasts, because a chat reconnect replaying an old
+# copy from its event log would fire a spurious shell apply (or a stale
+# failure toast). SystemBroadcast has no replay, so one delivery per client —
+# no frontend dedup needed. app_build_failed's live producer
+# (app_watcher._publish_app_build_failed) already publishes system-bus-only and
+# never hits this route, but it is listed here so a hypothetical POST stays
+# consistent with that classification (the frontend also no longer recognizes
+# it on a chat stream).
+_SYSTEM_BUS_ONLY_EVENTS = frozenset({
+  "shell_rebuilding",
+  "shell_rebuilt",
+  "shell_apply_now",
+  "shell_rebuild_failed",
+  "app_build_failed",
+})
+
 
 class NotifyBody(BaseModel):
   type: str
@@ -81,38 +98,6 @@ class NotifyBody(BaseModel):
     if self.label is not None:
       self.label = self.label[:_LABEL_MAX]
     return self
-
-
-def publish_app_built_to_owning_chat(db: Session, app_id_str: str) -> None:
-  """Emit a chat-scoped `app_built` on the broadcast of the chat that
-  built this app, if that chat is still streaming.
-
-  The "Open app" CTA must appear ONLY in the chat whose turn built (or
-  updated) the app — never in an unrelated chat the user happens to have
-  open. The naturally-scoped signal is the app row's `chat_id`, which
-  `register_app.py` stamps from the `CHAT_ID` env of the running turn.
-  We look it up and, when a broadcast for that chat is live, publish
-  `app_built` onto only that chat's stream. ChatView (keyed by chat id)
-  reads `app_built` off its OWN stream and sets the CTA — so the CTA
-  cannot leak across chats. The global `app_updated` stays list-refresh-
-  only on the frontend.
-
-  Silently no-ops when the app has no `chat_id` (e.g. App Store install
-  or a manual create outside a turn) or that chat has no live broadcast
-  (the turn already ended) — in those cases there is no chat whose turn
-  owns the build, so no CTA is appropriate.
-  """
-  try:
-    app_id = int(app_id_str)
-  except (TypeError, ValueError):
-    return
-  app = db.query(models.App).filter(models.App.id == app_id).first()
-  if app is None or not app.chat_id:
-    return
-  bc = get_broadcast(str(app.chat_id))
-  if bc is None or not bc.running:
-    return
-  bc.publish({"type": "app_built", "appId": app_id_str})
 
 
 def publish_build_phase_to_chat(chat_id: str | None, label: str) -> None:
@@ -154,7 +139,6 @@ def publish_build_phase_to_chat(chat_id: str | None, label: str) -> None:
 def notify(
   body: NotifyBody,
   _owner: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
 ):
   """Publish a system event to the active chat broadcast.
 
@@ -183,26 +167,22 @@ def notify(
   # turn ends, and the canvas view never had a subscription.
   get_system_broadcast().publish(event)
 
-  # Also publish to running per-chat broadcasts so any currently
-  # active chat catch-up replay includes the event in order. New
-  # subscribers connecting to a stale event log get the event too,
-  # which keeps existing chat-level UI invariants.
-  targets = get_all_active_broadcasts()
-  if not targets:
-    bc = get_active_broadcast()
-    if bc is not None:
-      targets = [bc]
-  for bc in targets:
-    bc.publish(event)
-
-  # Chat-scoped CTA signal: when an app was built/updated, fire a
-  # separate `app_built` event onto ONLY the broadcast of the chat that
-  # owns the app. This is what plants the "Open app" CTA; the global
-  # `app_updated` above is list-refresh-only on the frontend, so the CTA
-  # can no longer leak into an unrelated chat (the activeView-gate stopgap
-  # is no longer the load-bearing scoping mechanism — this is).
-  if body.type == "app_updated" and body.appId is not None:
-    publish_app_built_to_owning_chat(db, body.appId)
+  # Fan out to running per-chat broadcasts ONLY for catch-up-SAFE list/theme
+  # refreshes (theme_updated, app_updated), where a chat reconnect's replay is
+  # a genuine backstop for a dropped system stream. The shell-rebuild lifecycle
+  # events (shell_rebuilding/rebuilt/apply_now/rebuild_failed) are
+  # catch-up-UNSAFE: a replayed `shell_rebuilt` tells the Shell a fresh build
+  # just landed and triggers a spurious apply. They ride the system broadcast
+  # alone (no replay), so single-bus delivery is exactly one hit and the
+  # frontend needs no dedup.
+  if body.type not in _SYSTEM_BUS_ONLY_EVENTS:
+    targets = get_all_active_broadcasts()
+    if not targets:
+      bc = get_active_broadcast()
+      if bc is not None:
+        targets = [bc]
+    for bc in targets:
+      bc.publish(event)
 
   # Agent affordance from design §1.5: the event still reaches clients through
   # the normal broadcast path above, and the watcher also publishes any dirty

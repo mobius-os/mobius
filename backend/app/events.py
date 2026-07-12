@@ -15,19 +15,19 @@ from typing import Literal
 
 
 # Extra fields an "error" event may carry through onto its persisted block.
-# process_event otherwise reduces an error to {type, message}, which stripped
-# item 4's boot-set `resumable` flag and would strip the provider-limit park
-# fields too. Whitelisted (not a blanket passthrough) so an unexpected event
-# key can't silently pollute the durable transcript: `resumable` drives the
-# one-tap Resume affordance (MsgContent), `parked_until` + `park_reason` make
-# a provider-limit error render as a live "resets at … · Resume now" card, and
-# `pause_kind` ('restart' | 'stall') marks a benign maintenance pause so the
-# card renders in the calm "Paused" family instead of the danger-red error.
+# process_event otherwise reduces an error to {type, message}, which would
+# strip the boot-set `resumable` flag and the pause descriptor. Whitelisted
+# (not a blanket passthrough) so an unexpected event key can't silently pollute
+# the durable transcript: `resumable` drives the one-tap Resume affordance
+# (MsgContent), and `pause` is the single descriptor `chat._pause_note` builds
+# — {kind: 'restart'|'stall'|'rate_limit'|'usage_limit', resets_at?} — that
+# ErrorCard reads to render the calm "Paused" family or the live "resets at …"
+# limit card. Folding the whole classification into `pause` keeps this
+# whitelist at TWO keys no matter how many pause facts exist, so it never grows
+# a field again.
 ERROR_PASSTHROUGH_FIELDS: tuple[str, ...] = (
   "resumable",
-  "parked_until",
-  "park_reason",
-  "pause_kind",
+  "pause",
 )
 
 
