@@ -39,6 +39,12 @@ export default function Drawer({
   // user was elsewhere. Rendered as a steady attention dot, distinct
   // from the animated streaming dot above.
   attentionChatIds,
+  // Set of app ids that first appeared in the fetched list this session
+  // (freshly built or App-Store-installed). Rendered as the same steady
+  // accent dot as chat attention, cleared by Shell when the app is opened —
+  // an arrival cue for an app that otherwise lands silently at the bottom
+  // of the oldest-first list.
+  newAppIds,
   // Truthy when any registered provider's refresh token is no longer
   // valid. Drives a small warning dot on the Settings row — passive
   // nudge toward Reconnect, no modal, no banner.
@@ -46,6 +52,7 @@ export default function Drawer({
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
+  const newAppSet = newAppIds || EMPTY_SET
   // Pinned-first sort: pinned rows by pinned_at desc, then unpinned by
   // activity_at desc (owner-send), with updated_at as a fallback. Server
   // returns this order already (see routes/chats.py list_chats), but we
@@ -484,6 +491,7 @@ export default function Drawer({
                     label={app.name}
                     slug={app.slug}
                     pinned={!!app.pinned_at}
+                    attention={newAppSet.has(Number(app.id))}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
                     onSelect={() => onApp(app.id)}
                     menuOpen={!!(openMenu && openMenu.kind === 'app' && openMenu.id === app.id)}

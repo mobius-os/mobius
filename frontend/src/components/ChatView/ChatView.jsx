@@ -236,6 +236,10 @@ function readInitialComposer(chatId) {
   }
 }
 
+// Stable empty default so callers that pass no built apps (the embedded
+// composer) don't hand ChatView a fresh array each render and re-fire its
+// list-keyed effects.
+const NO_BUILT_APPS = []
 
 export default function ChatView({
   chatId,
@@ -243,7 +247,8 @@ export default function ChatView({
   onFirstMessage,
   onSystemEvent,
   onChatMissing,
-  builtApp,
+  builtApps = NO_BUILT_APPS,
+  recompilePulse = null,
   onOpenApp,
   onMessageStart,
   onVoiceListeningChange,
@@ -353,6 +358,14 @@ export default function ChatView({
   const [showInspector, setShowInspector] = useState(false)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   const lastAnnouncedPreviewRef = useRef(null)
+  // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
+  // updated ✓" for ~2s), or null.
+  const [pulsedAppId, setPulsedAppId] = useState(null)
+  // Mirror of the built-app list so the pulse effect can look up the recompiled
+  // app without taking builtApps as a dep (which would re-fire it on any list
+  // change, not just a fresh pulse).
+  const builtAppsRef = useRef(builtApps)
+  useEffect(() => { builtAppsRef.current = builtApps }, [builtApps])
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -1191,19 +1204,39 @@ export default function ChatView({
     measureComposerHeight()
     const raf = requestAnimationFrame(measureComposerHeight)
     return () => cancelAnimationFrame(raf)
-  }, [builtApp, sending, measureComposerHeight])
+  }, [builtApps, sending, measureComposerHeight])
 
+  // Announce the most recent built app (the newest CTA row) when it appears.
   useEffect(() => {
-    if (!shouldShowOpenAppCta(builtApp)) {
+    const latest = builtApps.length > 0 ? builtApps[builtApps.length - 1] : null
+    if (!shouldShowOpenAppCta(latest)) {
       lastAnnouncedPreviewRef.current = null
       setPreviewReadyStatus('')
       return
     }
-    const key = `${builtApp.id}:${builtApp.name || ''}`
+    const key = `${latest.id}:${latest.name || ''}`
     if (lastAnnouncedPreviewRef.current === key) return
     lastAnnouncedPreviewRef.current = key
-    setPreviewReadyStatus(previewReadyAnnouncement(builtApp))
-  }, [builtApp])
+    setPreviewReadyStatus(previewReadyAnnouncement(latest))
+  }, [builtApps])
+
+  // Recompile pulse: Shell signals (with a nonce so repeats re-fire) that an
+  // app just recompiled. If it's a live CTA here, flash it and announce the
+  // update; the label swaps to "Preview updated ✓" for ~2s (see render).
+  useEffect(() => {
+    const appId = recompilePulse?.appId
+    if (appId == null) return
+    // Ignore a pulse meant for another chat — recompilePulse lingers in Shell
+    // state, so a remount for a different chat could otherwise replay it.
+    if (recompilePulse.chatId != null
+        && String(recompilePulse.chatId) !== String(chatId)) return
+    const app = builtAppsRef.current.find(a => Number(a.id) === Number(appId))
+    if (!app) return
+    setPulsedAppId(Number(appId))
+    setPreviewReadyStatus(`Preview updated for ${app.name || 'app'}.`)
+    const t = setTimeout(() => setPulsedAppId(null), 2000)
+    return () => clearTimeout(t)
+  }, [recompilePulse, chatId])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -2724,7 +2757,11 @@ export default function ChatView({
             && messages[messages.length - 1]?.role === 'assistant'
               ? 'Response ready.'
               : ''))
-  const openAppCta = openAppCtaViewModel(builtApp, turnActive)
+  // One CTA row per built app (most recent last). The view-model stays pure
+  // and per-app; the pulse/label-swap is layered on in the render below.
+  const openAppCtas = builtApps
+    .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
+    .filter(entry => entry.vm)
 
   return (
     <div
@@ -2945,15 +2982,21 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
-        {openAppCta && (
+        {openAppCtas.length > 0 && (
           <div className="chat__open-app">
-            <button
-              className="chat__open-app-btn"
-              aria-label={openAppCta.ariaLabel}
-              onClick={() => onOpenApp?.(builtApp.id)}
-            >
-              {openAppCta.label} →
-            </button>
+            {openAppCtas.map(({ app, vm }) => {
+              const pulsing = pulsedAppId === Number(app.id)
+              return (
+                <button
+                  key={app.id}
+                  className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
+                  aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
+                  onClick={() => onOpenApp?.(app.id)}
+                >
+                  {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
+                </button>
+              )
+            })}
           </div>
         )}
         {hasPendingQuestion && pendingCardOffscreen && (
