@@ -146,6 +146,25 @@ def test_build_transcript_text_drops_empty_and_tail_caps():
   assert len(capped) == compaction._MAX_TRANSCRIPT_CHARS
 
 
+def test_cumulative_chat_summary_is_unbounded_compaction_source(tmp_path):
+  note = tmp_path / "shared" / "memory" / "chats" / "c1" / "index.md"
+  note.parent.mkdir(parents=True)
+  early = "EARLY DECISION " + ("x" * 70_000)
+  late = "LATE NEXT STEP"
+  note.write_text(
+    "---\ntype: chat\ndescription: work\n---\n"
+    "## Digest\nshort paragraph\n\n"
+    f"## Summary\n{early}\n{late}\n\n"
+    "## Facts & intent\n- private fact\n",
+    encoding="utf-8",
+  )
+  summary = compaction.load_cumulative_summary(str(tmp_path), "c1")
+  assert summary is not None
+  assert early in summary
+  assert late in summary
+  assert "private fact" not in summary
+
+
 def test_latest_compaction_brief_reads_newest_portable_seed():
   row = SimpleNamespace(messages=[
     {"role": "assistant", "kind": "compaction", "content": "old"},

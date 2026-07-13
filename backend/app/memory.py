@@ -1,42 +1,14 @@
-"""Assembles the agent's injected memory block from the knowledge graph.
+"""Assemble the always-on recent-chat continuity block.
 
-Möbius gives the agent its long-term memory by prepending a block to the
-FIRST user message of a session (see `chat.py`). This module builds the block:
-the router index (the root "Home" MOC) + the full summaries of the ~10
-most-recently-modified per-chat notes. The deeper graph (mocs/, notes/) is NOT
-injected — it is read on demand by the memory-search subagent (and by the agent
-following `[[wikilinks]]`).
+The platform owns only per-chat summaries under
+``<data_dir>/shared/memory/chats/<id>/index.md``. A new session receives the
+bounded Digest from the most recently touched notes, never their cumulative
+Summary/facts and never knowledge-graph files. Optional installed apps may use
+the sibling directory for richer data, but they activate and retrieve that data
+through their own system-prompt contribution and reader.
 
-Layout under `<data_dir>/shared/memory/` (the "graph"):
-
-  index.md              root MOC-of-MOCs. Always injected in full.
-  chats/<id>/index.md   per-chat note (type: chat): the agent's GROWING summary
-                        of one chat — durable facts + intent + a running summary
-                        (+ the gist that IS the chat name). The most-recently-
-                        modified ~10 are injected in full after the index. This
-                        is the PRIMARY day-time memory carrier (there is no
-                        shared inbox); the nightly pass consolidates them into
-                        notes/.
-  mocs/<topic>.md       topic hubs (curated [[links]]); read on demand.
-  notes/<slug>.md       atomic notes (one fact each) with OKF frontmatter
-                        (type, title, description=scent line); read on demand.
-  read-trace/<id>.json  per-chat record of which nodes were injected/read,
-                        written by chat.py + the SDK runner (memory_trace.py);
-                        the reflection pass diffs it against the graph.
-  .ready                sentinel: present iff a validated graph is published.
-
-The `.ready` sentinel — not the mere existence of `index.md` — gates graph
-mode. A consolidation builds into a staging tree, lints, publishes atomically,
-and only then writes `.ready`; a partial or failed publish therefore leaves the
-previously published graph in place rather than exposing a half-built one.
-
-`build_memory_block` is a PURE function (no writes, no logging) so it is
-trivially unit-testable; the caller in `chat.py` owns the activity emit and
-the surrounding `<agent_experience>` envelope.
-
-Prompt-cache stability: the block is the index + the recent chat summaries in a
-fixed (newest-first) order and injects no mocs/notes, so a nightly consolidation
-can't reorder the cached first-message prefix and bust prompt-cache reuse.
+``build_memory_block`` is pure; ``chat.py`` owns the surrounding private-context
+envelope and observability event.
 """
 
 from __future__ import annotations
@@ -47,17 +19,12 @@ from pathlib import Path
 
 log = logging.getLogger("mobius.memory")
 
-# Budget for the always-injected portion. ~25 KB / 400 lines mirrors Claude
-# Code's MEMORY.md index budget (research B1). The cap is enforced here so a
-# runaway graph can never blow the context window; overflow detail stays on
-# disk for on-demand Read.
+# Budget for the always-injected recent-chat digest portion.
 DEFAULT_BUDGET_BYTES = 25_000
 DEFAULT_MAX_NOTES = 12
 # How many recent per-chat notes to inject at session start. Each is the
-# agent's bounded high-level summary of one chat (durable facts + intent + a
-# concise running summary); the most-recently-modified ones open a fresh
-# session with recent conversational context. Replaces the old recent-chats
-# queue + inbox tail.
+# agent's one-paragraph Digest; the most-recently-modified ones open a fresh
+# session with recent conversational context.
 RECENT_CHAT_NOTES = 10
 # Per-note byte cap on the injected chat digest. The daytime agent is
 # instructed to keep each chat's summary bounded and high-level (the full
@@ -73,9 +40,9 @@ class MemoryBlock:
 
   `text` is the bare context (no `<agent_experience>` envelope — the caller
   adds that plus the dynamic provider/timezone/viewport tail). `loaded` is the
-  list of graph-relative paths that made it into the block, so the caller can
-  credit their access (the `memory_load` activity event). `mode` is
-  "graph" | "recent_chats" | "empty" for observability.
+  list of chat-note paths that made it into the block. `mode` is
+  "recent_chats" | "empty" for observability. Knowledge-graph material is
+  deliberately never assembled here; installed apps recall it explicitly.
   """
 
   text: str
@@ -257,28 +224,17 @@ def build_memory_block(
 ) -> MemoryBlock:
   """Assembles the injected memory context.
 
-  Two independent layers, budget-guarded, each fenced with a `<<< path >>>`
-  marker so the agent knows what it is reading and what a `[[link]]` resolves
-  to:
+  Only recent-chat digests are injected, always and without a graph/app gate.
+  Each chunk is the note's one-line ``description`` plus bounded ``## Digest``
+  paragraph, fenced with the full-note path. The cumulative ``## Summary``,
+  facts, graph router, MOCs, and atomic notes are never pulled into a new chat.
+  An installed system app may teach the agent to request graph recall through
+  a separate prompt-scoped reader.
 
-  - **Recent-chat digests — always injected**, with no `.ready` gate. Each
-    `chats/<id>/index.md` is the bounded high-level summary the daytime agent
-    maintains for one chat; we inject its `description` + summary (capped per
-    note via `_chat_digest`), newest first. The full note is one `Read` away
-    (the fenced path); the full narrative is the chat transcript. This layer
-    needs no published graph, so a fresh instance still opens with recent
-    conversational context.
-  - **Router index — injected only when a validated graph is published**
-    (`.ready`). `index.md` is a lightweight map into the consolidated graph;
-    the deeper graph (`mocs/`, `notes/`) is never injected — the memory-search
-    subagent reads it on demand. `.ready` is written atomically after the
-    graph lints, so a partial/failed publish keeps the previous graph rather
-    than handing over a half-built one.
-
-  Returns an empty block only when there is nothing to inject (no chat notes
-  and no published router). `max_notes` is retained for signature stability
-  but the recent-chat cap is `RECENT_CHAT_NOTES`. Pure: never writes, never
-  raises on a missing/garbled file.
+  Returns an empty block only when there are no usable chat notes. `max_notes`
+  is retained for signature stability; the recent-chat cap is
+  `RECENT_CHAT_NOTES`. Pure: never writes and never raises on missing/garbled
+  files.
   """
   # Clamp at 0 so a stray negative budget can't reach the byte-slicing below,
   # where a negative limit returns a SUFFIX of the text instead of empty.
@@ -287,22 +243,8 @@ def build_memory_block(
   parts: list[str] = []
   loaded: list[str] = []
   used = 0
-  mode = "empty"
-
-  # Router index first (only when a graph is published) — it earns priority
-  # placement as the map into the deeper graph, and may use the full budget
-  # since nothing precedes it.
-  if is_graph_ready(data_dir):
-    index = _read(root / "index.md").strip()
-    if index:
-      index = _cap_index(index, budget_bytes)
-      parts.append(index)
-      loaded.append("index.md")
-      used += len(index.encode("utf-8"))
-      mode = "graph"
-
-  # Recent-chat digests — ALWAYS injected. A budget guard stops before the
-  # block exceeds budget_bytes; each digest is already per-note capped.
+  # Each note is independently capped. Continue past one that does not fit so
+  # an unusually long newest note cannot hide every older short digest.
   for note in _recent_chat_notes(root, RECENT_CHAT_NOTES):
     digest = _chat_digest(note)
     if not digest:
@@ -310,21 +252,21 @@ def build_memory_block(
     rel = f"chats/{note.parent.name}/index.md"
     chunk = f"<<< {rel} (recent chat — Read this file for the full note) >>>\n{digest}"
     if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
-      break
+      continue
     parts.append(chunk)
     loaded.append(rel)
     used += len(chunk.encode("utf-8")) + 2
-    if mode == "empty":
-      mode = "recent_chats"
 
   if not parts:
     return MemoryBlock(text="", loaded=[], mode="empty")
-  return MemoryBlock(text="\n\n".join(parts), loaded=loaded, mode=mode)
+  return MemoryBlock(
+    text="\n\n".join(parts), loaded=loaded, mode="recent_chats"
+  )
 
 
 def _recent_chat_notes(root: Path, limit: int) -> list[Path]:
   """The per-chat note files (`chats/<id>/index.md`), most-recently-modified
-  first, capped at `limit`. These are the growing chat summaries injected at
+  first, capped at `limit`. Their bounded digests are injected at
   session start. Tolerates a missing `chats/` dir (returns [])."""
   chats = root / "chats"
   if not chats.is_dir():
@@ -332,23 +274,6 @@ def _recent_chat_notes(root: Path, limit: int) -> list[Path]:
   notes = [p for p in chats.glob("*/index.md") if p.is_file()]
   notes.sort(key=lambda p: p.stat().st_mtime, reverse=True)
   return notes[:limit]
-
-
-def _cap_index(index: str, budget_bytes: int) -> str:
-  """Caps the router index to the byte budget, appending a truncation marker
-  when there is room for it."""
-  if len(index.encode("utf-8")) <= budget_bytes:
-    return index
-  # Reserve room for the marker so index + marker stays within budget —
-  # truncating to the full budget and THEN appending overran it by the marker's
-  # length. If the budget is smaller than the marker itself (pathological/tiny),
-  # drop the marker and hard-truncate rather than passing a NEGATIVE limit to
-  # _truncate_bytes (which would slice from the END and still overflow).
-  marker = "\n\n[index truncated to fit the memory budget]"
-  marker_len = len(marker.encode("utf-8"))
-  if budget_bytes <= marker_len:
-    return _truncate_bytes(index, budget_bytes)
-  return _truncate_bytes(index, budget_bytes - marker_len) + marker
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -386,23 +311,20 @@ def _extract_section(text: str, heading: str) -> str | None:
 
 
 def _chat_digest(note: Path) -> str:
-  """The bounded, injectable slice of a chat note: its `description` gist plus
-  its body (the high-level `## Summary` + the durable `## Facts & intent`),
-  capped at DIGEST_MAX_BYTES.
+  """Return one bounded cross-chat paragraph plus its one-line gist.
 
-  A note may declare an explicit `## Digest` section to control exactly what is
-  injected; absent that, the whole note body is used — so existing notes (which
-  carry `## Summary` + `## Facts & intent`, never `## Digest`) inject their
-  durable signal instead of collapsing to nothing on the deploy that ships
-  this, and the durable facts stay in recall rather than being demoted to a
-  `Read`. The full note is still one `Read` away via the fenced path when the
-  cap truncates it; the full narrative is the chat transcript.
+  New notes carry an explicit ``## Digest``. Legacy notes fall back to their
+  ``## Summary`` (not the whole body, so facts never enter automatic startup
+  context); a heading-less legacy note falls back to its loose body.
   """
   text = _read(note)
   if not text.strip():
     return ""
   desc = str(parse_frontmatter(text).get("description", "")).strip()
   digest = _extract_section(text, "Digest")
-  core = digest if digest is not None else _strip_frontmatter(text).strip()
-  core = _truncate_bytes(core.strip(), DIGEST_MAX_BYTES).strip()
-  return "\n".join(p for p in (desc, core) if p).strip()
+  if digest is None:
+    digest = _extract_section(text, "Summary")
+  if digest is None:
+    digest = _strip_frontmatter(text).strip()
+  combined = "\n".join(p for p in (desc, digest.strip()) if p).strip()
+  return _truncate_bytes(combined, DIGEST_MAX_BYTES).strip()

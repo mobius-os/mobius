@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Ensure a chat's memory note exists + is current — the platform backstop.
+"""Ensure a chat's three-tier summary note exists + is current.
 
 The agent is instructed (core.md) to maintain `chats/<id>/index.md` every turn —
-a growing summary + the partner's facts & intent + the one-line gist that IS the
-chat name. But it does so VARIABLY: on some turns it jumps straight to answering
+a one-line name, bounded Digest, cumulative Summary, and facts/intent. But it
+does so variably: on some turns it jumps straight to answering
 and skips the note. This runner is the turn-end guarantee the platform fires when
 the agent left the note missing or stale, so EVERY substantive chat ends up with
 a current note regardless of agent compliance.
@@ -49,7 +49,7 @@ TIMEOUT_SECS = int(os.environ.get("CHAT_NOTE_TIMEOUT", "120"))
 MAX_TRANSCRIPT_BYTES = 12000
 
 SYSTEM_PROMPT = """\
-You write the MEMORY NOTE for one Möbius chat. You are given the chat transcript
+You write the SUMMARY NOTE for one Möbius chat. You are given the chat transcript
 and (if it already exists) the current note. Produce the UPDATED note and NOTHING
 else — no preamble, no code fences, no commentary.
 
@@ -60,10 +60,14 @@ type: chat
 description: <one-line gist of the chat in the partner's own words — this IS the
 chat's name, e.g. "dialing in a sour espresso shot", not "chat 12">
 ---
+## Digest
+<ONE short paragraph: what the chat is about, what it produced, and its current
+state. Re-distill on every update and keep it under 600 characters.>
+
 ## Summary
-<what this chat is about and what it has produced (an app built, a decision made,
-a preference learned) — starts as a couple of paragraphs and grows with the chat;
-recency-biased means organized for usefulness, never capped for length>
+<the complete cumulative handoff: goals, constraints, decisions, work done,
+files/artifacts, important findings, open loops, and the next step. Preserve all
+substantive early and late detail; this grows without a length cap.>
 
 ## Facts & intent
 - <each durable fact the partner gave — a preference, constraint, identity,
@@ -71,17 +75,18 @@ recency-biased means organized for usefulness, never capped for length>
 - intent: <what the partner is ultimately trying to do>
 
 Rules:
-- A GROWING summary, lightly curated: if a current note is given, fold the new
+- Re-write Digest as one bounded paragraph. Never put Facts & intent or the full
+  Summary into it; it is automatic cross-chat context and must stay shallow.
+- Grow Summary as the complete compaction-ready handoff: if a current note is
+  given, fold the new
   transcript content INTO it and reorganize for coherence. The note grows by
   default — every informative part stays. Curate lightly as you fold: if the
   transcript revisits something the note already captures, add only what is
   genuinely new; merge duplicate lines; drop lines that carry no future-useful
   signal ("asked about X again" with nothing new is noise, not memory). Never
   compress the note for length alone — noise is what you trim, never substance.
-- PRESERVE connections: if the current note has any `[[wiki-links]]`, `see also
-  [[chats/<id>]]` lines, or a `## Related` section, keep them VERBATIM — they are
-  this chat's links into the graph. You have no tools and can't see the graph, so
-  never invent new links, but never drop the ones already there.
+- Preserve any existing `[[wiki-links]]`, `see also [[chats/<id>]]` lines, or a
+  `## Related` section verbatim. You have no tools, so never invent new links.
 - Only durable, future-useful, partner-specific content. Skip transient chatter.
 - Output ONLY the note markdown, starting with the `---` frontmatter line.
 """
@@ -166,7 +171,7 @@ def _atomic_write_text(note: Path, text: str) -> None:
 
 def _looks_like_note(text: str) -> bool:
   t = text.lstrip()
-  return t.startswith("---") and "## Summary" in t
+  return t.startswith("---") and "## Digest" in t and "## Summary" in t
 
 
 def _clean_note_output(text: str) -> str:
@@ -206,12 +211,12 @@ def _build_prompt(transcript: str, existing: str) -> str:
   parts = ["The chat transcript:\n\n", transcript or "(empty)"]
   if existing.strip():
     parts += [
-      "\n\nThe CURRENT note (grow it — fold in the new, dedupe the old, keep "
-      "everything informative):\n\n",
+      "\n\nThe CURRENT note (re-distill its Digest; grow its complete Summary; "
+      "dedupe without losing informative detail):\n\n",
       existing,
     ]
   parts.append(
-    "\n\nProduce the updated memory note now, in the exact format, and nothing else."
+    "\n\nProduce the updated summary note now, in the exact format, and nothing else."
   )
   return "".join(parts)
 
@@ -303,6 +308,11 @@ def run() -> int:
   except (subprocess.TimeoutExpired, OSError) as e:
     sys.stderr.write(f"summarizer subprocess failed: {e!r}\n")
     return 3
+  # Check optimistic concurrency before inspecting our output. A newer writer
+  # already published the authoritative note while this subprocess ran; even a
+  # malformed stale response must not turn that healthy race into a failure.
+  if _note_mtime(note) > existing_mtime:
+    return 0
   out = _clean_note_output(proc.stdout or "")
   if not _looks_like_note(out):
     # The model didn't return a well-formed note — leave any existing note
@@ -318,9 +328,6 @@ def run() -> int:
   # (chat.py), so a fresh turn — or its own backstop — can write the note while
   # this (slower) subprocess is still running its LLM call. If the note advanced
   # since we read it, a newer writer won; don't clobber it with our stale output.
-  if _note_mtime(note) > existing_mtime:
-    return 0
-
   # Privileged write happens HERE (the subagent had no tools). Atomic so a
   # concurrent reader never sees a torn note (see _atomic_write_text).
   try:
