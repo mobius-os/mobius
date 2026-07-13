@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 
 from app import activity, auth, models, providers, questions
 from app.config import get_settings
+from app.events import (
+  TOOL_OUTPUT_INLINE_THRESHOLD as _TOOL_OUTPUT_INLINE_THRESHOLD,
+  excerpt_tool_output,
+)
 from app.chat import (
   _clear_run_status,
   bump_run_generation,
@@ -185,6 +189,13 @@ def list_chats(
     # unbounded over the instance's life.
     db.query(models.ChatRun).filter(
       models.ChatRun.chat_id == c.id
+    ).delete(synchronize_session=False)
+    # Drop the chat's stashed large tool outputs (contract rule 6) with it —
+    # same lifecycle, same no-FK-cascade reasoning as chat_runs above. The
+    # rows rode the soft-delete window (a recovered chat re-showed its
+    # outputs); at hard-purge time the chat is gone for good, so are they.
+    db.query(models.ToolOutput).filter(
+      models.ToolOutput.chat_id == c.id
     ).delete(synchronize_session=False)
     db.delete(c)
   # Hard-delete abandoned empties — chats that were created, never had
@@ -560,18 +571,21 @@ async def patch_chat(
     }
 
 
-_TOOL_OUTPUT_INLINE_THRESHOLD = 4096
-
-
 def _truncate_large_tool_outputs(messages: list) -> list:
-  """Returns a copy of ``messages`` with large tool outputs dropped to an
-  ``output_truncated`` marker, so loading a chat does not ship the full output
-  (a Read of a 2000-line file, a long bash run) for every tool block — including
-  the ones the user never expands. The collapsed block already shows its
-  top-line summary (the tool + its ``input``, e.g. the bash command), so a
-  preview of the output adds nothing on load; the client fetches the full output
-  on expand via ``GET /api/chats/{id}/tool-output?ts=&i=``. Outputs at or below
-  the threshold stay inline, since a round-trip would cost more than the bytes."""
+  """LEGACY-ROW reducer (contract rule 6). New turns are reduced at the event
+  funnel (``chat.py`` ``_ChatEventSink._reduce_tool_output`` -> ``excerpt_tool_output``),
+  so their persisted blocks already carry a bounded head+tail excerpt plus
+  ``output_truncated`` / ``output_full_len`` / ``tool_use_id`` and the full text
+  is stashed in ``tool_outputs``. This only trims the FEW pre-migration
+  transcripts whose tool blocks still hold the full output inline, so loading
+  such a chat does not ship a 2000-line Read for blocks the user never expands.
+
+  A block already marked ``output_truncated`` (a new-funnel excerpt) is left
+  UNTOUCHED. Legacy blocks (no ``tool_use_id``, full output still in
+  ``Chat.messages``) are reduced to the same head+tail excerpt and the client
+  fetches the full text via the legacy ``?ts=&i=`` endpoint; new blocks carry a
+  ``tool_use_id`` and use the ``/tool-output/{tool_use_id}`` endpoint instead
+  (dual-read). Returns a copy — never mutates the stored message dicts."""
   out = []
   for m in messages:
     blocks = m.get("blocks") if isinstance(m, dict) else None
@@ -586,18 +600,33 @@ def _truncate_large_tool_outputs(messages: list) -> list:
     for i, blk in enumerate(blocks):
       if not isinstance(blk, dict) or blk.get("type") != "tool":
         continue
+      # Already reduced at the funnel — leave the excerpt inline; the client
+      # fetches the full text by tool_use_id.
+      if blk.get("output_truncated"):
+        continue
       output = blk.get("output")
       if (not isinstance(output, str)
           or len(output) <= _TOOL_OUTPUT_INLINE_THRESHOLD):
         continue
+      excerpt, full_len, exit_code = excerpt_tool_output(output)
       if new_blocks is None:
         new_blocks = list(blocks)
-      new_blocks[i] = {
+      reduced = {
         **blk,
-        "output": "",
+        "output": excerpt,
         "output_truncated": True,
-        "output_full_len": len(output),
+        "output_full_len": full_len,
       }
+      if exit_code is not None:
+        reduced["output_exit_code"] = exit_code
+      # This block's full text lives INLINE in Chat.messages, not the
+      # `tool_outputs` side table (the sink already reduced + stashed every
+      # tagged block, so anything reaching here is un-stashed). Drop any stray
+      # tool_use_id so the frontend fetches the full via the legacy ?ts=&i=
+      # endpoint (this reducer's contract) instead of the by-id endpoint, which
+      # would 404 with no stash row.
+      reduced.pop("tool_use_id", None)
+      new_blocks[i] = reduced
     out.append({**m, "blocks": new_blocks} if new_blocks is not None else m)
   return out
 
@@ -664,6 +693,33 @@ def get_chat(
   }
 
 
+@router.get("/{chat_id}/tool-output/{tool_use_id}", response_class=PlainTextResponse)
+def get_tool_output_by_id(
+  chat_id: str,
+  tool_use_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+) -> PlainTextResponse:
+  """Returns the FULL text of a large tool block, fetched lazily on expand
+  (contract rule 6). New blocks ship only a bounded excerpt in the chat-load
+  payload and the live stream; the full output is stashed in ``tool_outputs``
+  keyed by the tool's stable id. A 404 (a dropped/absent stash) tells the client
+  to keep showing the inline excerpt.
+
+  This is the NEW path for blocks that carry a ``tool_use_id``. Legacy blocks
+  (no id, full output still inline in ``Chat.messages``) use the ``?ts=&i=``
+  sibling endpoint below instead — the frontend branches on ``tool_use_id``
+  (dual-read migration, no backfill)."""
+  get_active_chat_or_404(db, chat_id)
+  row = db.query(models.ToolOutput).filter(
+    models.ToolOutput.chat_id == chat_id,
+    models.ToolOutput.tool_use_id == tool_use_id,
+  ).first()
+  if row is None:
+    raise HTTPException(status_code=404, detail="tool output not found")
+  return PlainTextResponse(row.output or "")
+
+
 @router.get("/{chat_id}/tool-output", response_class=PlainTextResponse)
 def get_tool_output(
   chat_id: str,
@@ -672,10 +728,11 @@ def get_tool_output(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ) -> PlainTextResponse:
-  """Returns the FULL output of a single tool block, fetched lazily when the
-  user expands it — the chat-load payload ships only a preview (see
-  ``_truncate_large_tool_outputs``). The block is located by its message ``ts``
-  plus its index ``i`` within that message's blocks."""
+  """LEGACY lazy fetch for a tool block whose full output still lives inline in
+  ``Chat.messages`` (pre-contract-rule-6 rows, or any block with no
+  ``tool_use_id``). The block is located by its message ``ts`` plus its index
+  ``i`` within that message's blocks. Kept as the dual-read fallback; new blocks
+  carry a ``tool_use_id`` and use ``/tool-output/{tool_use_id}`` instead."""
   chat = get_active_chat_or_404(db, chat_id)
   for m in (chat.messages or []):
     if m.get("role") != "assistant" or m.get("ts") != ts:
@@ -753,7 +810,7 @@ async def delete_chat(
   # to protect against (orphan runner writing to a soft-deleted row).
   if is_chat_running(chat_id):
     try:
-      stopped, _ = await stop_chat_for(chat_id, db=db)
+      stopped, _, _ = await stop_chat_for(chat_id, db=db)
     except Exception:
       log.warning("Failed to stop agent for chat %s during delete", chat_id)
       stopped = False

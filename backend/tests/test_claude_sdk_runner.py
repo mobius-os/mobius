@@ -895,6 +895,23 @@ def test_dispatch_user_tool_result():
   assert "tool_end" in types
 
 
+def test_dispatch_user_tool_result_threads_tool_use_id():
+  # The ToolResultBlock's tool_use_id (contract rule 6) rides both the
+  # tool_output and tool_end events so the sink can key a stash of a large
+  # output and the block can fetch it by id.
+  bus = _Bus()
+  dispatch_sdk_message(
+    UserMessage(
+      content=[ToolResultBlock(tool_use_id="tu_abc", content="output text")],
+    ),
+    bus,
+    None,
+  )
+  by_type = {e["type"]: e for e in bus.events}
+  assert by_type["tool_output"]["tool_use_id"] == "tu_abc"
+  assert by_type["tool_end"]["tool_use_id"] == "tu_abc"
+
+
 def test_dispatch_server_web_search_result_emits_sources():
   bus = _Bus()
   msg = AssistantMessage(
@@ -961,9 +978,9 @@ def test_dispatch_client_web_search_tool_result_emits_sources():
   )
 
   assert bus.events == [
-    {"type": "tool_start", "tool": "WebSearch", "input": ""},
+    {"type": "tool_start", "tool": "WebSearch", "input": "", "tool_use_id": "t1"},
     {"type": "tool_input", "tool": "WebSearch", "input": "mobius docs"},
-    {"type": "tool_output", "content": result_text},
+    {"type": "tool_output", "content": result_text, "tool_use_id": "t1"},
     {"type": "tool_sources", "sources": [
       {
         "title": "Mobius",
@@ -972,7 +989,7 @@ def test_dispatch_client_web_search_tool_result_emits_sources():
       },
       {"title": "Docs", "url": "https://example.com/docs"},
     ]},
-    {"type": "tool_end"},
+    {"type": "tool_end", "tool_use_id": "t1"},
   ]
 
 

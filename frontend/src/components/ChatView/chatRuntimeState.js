@@ -3,13 +3,29 @@
  * focused tests because mobile timing regressions repeatedly happened here.
  */
 
+/**
+ * The stable identity of a user message. A client-minted `cid` is the
+ * canonical identity (React key, DOM pin target `data-cid`, queue cancel
+ * key, force-steer selection). A pre-cid (legacy) row derives `legacy-<ts>`
+ * at read time — the SAME value the backend derives (chat_writer.cid_of) so
+ * a derived id compares equal on both sides of the wire. `ts` is demoted to
+ * display/ordering metadata only. Returns null for a row with neither.
+ */
+export function cidOf(msg) {
+  if (!msg) return null
+  if (msg.cid) return msg.cid
+  return msg.ts != null ? `legacy-${msg.ts}` : null
+}
+
 export function stripInternalUserMessageFields(raw) {
   if (!raw) return null
+  // KEEP `cid` — it is now the durable row identity and must survive the
+  // strip that prepares a server row for the transcript. Only the UI-only /
+  // envelope fields are removed.
   const {
     queued: _q,
-    cid: _c,
     position: _p,
-    _consumed_ts: _cts,
+    _consumed_cids: _ccids,
     _messages: _msgs,
     _agent_content: _agentContent,
     ...msg
@@ -133,43 +149,6 @@ export function systemEventForChat(event, chatId) {
     return event
   }
   return { ...event, chatId }
-}
-
-export function resolveSteeredPinDecision({
-  pinTargetTs,
-  pinIntent,
-  pinIntentStillCurrent,
-  fallbackWillPin,
-}) {
-  const intentStillCurrent = pinIntent
-    ? !!pinIntentStillCurrent?.(pinIntent)
-    : true
-  return {
-    intentStillCurrent,
-    shouldPin: pinTargetTs != null
-      && intentStillCurrent
-      && (pinIntent ? !!pinIntent.willPin : !!fallbackWillPin?.()),
-  }
-}
-
-export function resolveFreshPinRetarget({
-  startedMessages,
-  fallbackTs,
-  willPin,
-  pinIntent,
-  pinIntentStillCurrent,
-}) {
-  const pinTargetTs = Array.isArray(startedMessages) && startedMessages.length > 0
-    ? startedMessages[0]?.ts
-    : fallbackTs
-  const intentStillCurrent = pinIntent
-    ? !!pinIntentStillCurrent?.(pinIntent)
-    : true
-  return {
-    pinTargetTs,
-    intentStillCurrent,
-    shouldPin: pinTargetTs != null && intentStillCurrent && !!willPin,
-  }
 }
 
 export function stopRequestSucceeded({ responseOk, data = null, fetchFailed = false }) {

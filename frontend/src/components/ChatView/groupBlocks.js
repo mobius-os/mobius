@@ -1,4 +1,4 @@
-import { toolResultFailed } from './toolResultFormat.js'
+import { toolBlockFailed } from './toolResultFormat.js'
 import { toolActivityLabel } from './toolActivityLabel.js'
 
 // Fold runs of adjacent tool entries into one activity node, including a lone
@@ -88,8 +88,10 @@ export function coalesceThinkingEntries(entries) {
 //
 // "Failed" comes from the result's exit code, NOT a tool status — the stream
 // contract only sets 'running' → 'done' (streamReducers.js), so a failed bash
-// still ends 'done'. toolResultFailed reads the nonzero exit out of the parsed
-// terminal envelope, the same signal ToolBlock shows on the block header. A
+// still ends 'done'. toolBlockFailed reads the explicit output_exit_code field
+// when a reduced block carries one (contract rule 6), else the nonzero exit out
+// of the parsed terminal envelope — the same signal ToolBlock shows on the
+// block header. A
 // still-running tool has no final output yet, so it can't be "failed" here.
 //
 // `running` wins over `error`: while ANY child is still live the header reads
@@ -99,7 +101,7 @@ export function coalesceThinkingEntries(entries) {
 // every streaming frame while the run is in flight.
 export function toolGroupState(tools) {
   if (tools.some(t => t?.status === 'running')) return 'running'
-  if (tools.some(t => toolResultFailed(t?.output))) return 'error'
+  if (tools.some(t => toolBlockFailed(t))) return 'error'
   return 'done'
 }
 
