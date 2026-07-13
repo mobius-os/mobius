@@ -65,6 +65,13 @@ async function sendMessage(page, text) {
   await page.keyboard.press('Enter')
 }
 
+// The real service worker claims the page ~1s after load; from then on its
+// fetch() handler bypasses page.route, so the mocked /messages + /stream
+// contracts silently fall through to the real backend and the mock's steer
+// events never arrive (the app-canvas spec hit the identical class). These
+// tests mock the network and do not exercise SW behavior, so block it.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('fast-forward button appears, POSTs force_steer with the right payload, and clears the tray', async ({ page }) => {
     // The server-assigned ts the queueOnly POST hands back. The steer's
