@@ -24,6 +24,7 @@ import {
   appendThinkingChunk,
   thinkingElapsedMs,
   attachToolSources,
+  reconcileStreamItems,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -476,4 +477,114 @@ test('appendThinkingChunk opens a fresh item after a non-thinking item', () => {
 test('appendThinkingChunk is a no-op on empty content', () => {
   const items = [{ type: 'thinking', content: 'x' }]
   assert.equal(appendThinkingChunk(items, ''), items, 'empty chunk returns the same array')
+})
+
+// ---------------------------------------------------------------------------
+// reconcileStreamItems — the catch-up commit "return without redraw" merge
+// (contract v2 item 2, lever 2c). The core assertion is OBJECT IDENTITY: an
+// unchanged item keeps its reference across the commit, so a mid-stream return
+// re-renders nothing. tool_use_id (lever 2a) is the identity key for tools.
+// ---------------------------------------------------------------------------
+
+test('reconcile preserves object identity for an unchanged tool item (the core assertion)', () => {
+  const tool = { type: 'tool', tool: 'Bash', input: 'ls', output: 'a\nb', status: 'done', tool_use_id: 'toolu_1' }
+  const prev = [{ type: 'text', content: 'hi' }, tool]
+  // The catch-up replay rebuilds fresh objects carrying the SAME tool_use_id.
+  const next = [{ type: 'text', content: 'hi' }, { ...tool }]
+
+  const result = reconcileStreamItems(prev, next)
+
+  assert.equal(result[1], tool, 'unchanged tool item keeps its exact object reference across the commit')
+  assert.equal(result[0], prev[0], 'unchanged text item keeps its reference too')
+  assert.equal(result, prev, 'a fully-unchanged replay returns the prev array itself (React bails out entirely)')
+})
+
+test('reconcile merges a tool that changed state, keeping its key so the DOM node survives', () => {
+  const running = { type: 'tool', tool: 'Bash', input: 'ls', output: '', status: 'running', tool_use_id: 'toolu_1' }
+  const prev = [running]
+  // Same tool, now completed with output — the reconnect replays the finished form.
+  const next = [{ type: 'tool', tool: 'Bash', input: 'ls', output: 'a\nb', status: 'done', tool_use_id: 'toolu_1' }]
+
+  const result = reconcileStreamItems(prev, next)
+
+  assert.notEqual(result[0], running, 'a changed tool becomes a new object (props must update)')
+  assert.equal(result[0].tool_use_id, 'toolu_1', 'but the identity key is preserved, so React reuses the ToolBlock instance/DOM')
+  assert.equal(result[0].status, 'done')
+  assert.equal(result[0].output, 'a\nb')
+})
+
+test('reconcile matches tools by tool_use_id, not position, and never merges two different tools', () => {
+  const t1 = { type: 'tool', tool: 'Bash', input: 'ls', output: 'x', status: 'done', tool_use_id: 'toolu_1' }
+  const prev = [t1]
+  // The replay's first item is a DIFFERENT tool (different id) — a positional
+  // collision must not silently inherit t1's identity.
+  const t2 = { type: 'tool', tool: 'Grep', input: 'foo', output: 'y', status: 'done', tool_use_id: 'toolu_2' }
+  const next = [t2]
+
+  const result = reconcileStreamItems(prev, next)
+  assert.notEqual(result[0], t1, 'different tool_use_id → the replayed object wins, not a merge onto t1')
+  assert.equal(result[0].tool_use_id, 'toolu_2')
+})
+
+test('reconcile appends genuinely new replayed items without disturbing existing identity', () => {
+  const tool = { type: 'tool', tool: 'Bash', input: 'ls', output: 'a', status: 'done', tool_use_id: 'toolu_1' }
+  const prev = [tool]
+  const next = [
+    { ...tool },
+    { type: 'tool', tool: 'Read', input: 'f', output: 'z', status: 'done', tool_use_id: 'toolu_2' },
+    { type: 'text', content: 'summary' },
+  ]
+
+  const result = reconcileStreamItems(prev, next)
+  assert.equal(result.length, 3)
+  assert.equal(result[0], tool, 'existing tool keeps its reference')
+  assert.equal(result[1].tool_use_id, 'toolu_2', 'new tool is appended')
+  assert.equal(result[2].type, 'text')
+})
+
+test('reconcile drops on-screen items absent from the replay — never resurrects a steer-dropped segment', () => {
+  const prev = [
+    { type: 'text', content: 'pre-steer answer' },
+    { type: 'tool', tool: 'Bash', input: 'ls', output: 'a', status: 'done', tool_use_id: 'toolu_1' },
+  ]
+  // Post-steer replay carries only the continuation — the pre-steer segment was
+  // promoted to its own message and must not reappear.
+  const next = [{ type: 'text', content: 'post-steer continuation' }]
+
+  const result = reconcileStreamItems(prev, next)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].content, 'post-steer continuation')
+})
+
+test('reconcile keeps the legacy ordinal (tokenless) path working positionally', () => {
+  // Old chats / legacy wires carry no tool_use_id; both prev and next lack it,
+  // so identity falls back to position — an unchanged legacy tool is still reused.
+  const legacy = { type: 'tool', tool: 'Bash', input: 'ls', output: 'a', status: 'done' }
+  const prev = [legacy]
+  const result = reconcileStreamItems(prev, [{ ...legacy }])
+  assert.equal(result, prev, 'legacy tokenless tool reuses identity positionally when unchanged')
+})
+
+test('reconcile onto a snapshot-seeded stream reconciles in place (no duplicate append)', () => {
+  // Path A remount: streamSnapshotCache seeds the visible items (they carry
+  // tool_use_id, so they survive JSON round-trip). The first catch-up commit
+  // must reconcile onto them, not append a second copy.
+  const seeded = JSON.parse(JSON.stringify([
+    { type: 'text', content: 'partial' },
+    { type: 'tool', tool: 'Bash', input: 'ls', output: '', status: 'running', tool_use_id: 'toolu_1' },
+  ]))
+  const replay = [
+    { type: 'text', content: 'partial then more' },
+    { type: 'tool', tool: 'Bash', input: 'ls', output: 'done', status: 'done', tool_use_id: 'toolu_1' },
+  ]
+
+  const result = reconcileStreamItems(seeded, replay)
+  assert.equal(result.length, 2, 'no duplicate tool block appended — reconciled onto the seeded item by id')
+  assert.equal(result[1].tool_use_id, 'toolu_1')
+  assert.equal(result[1].status, 'done')
+})
+
+test('reconcile returns the fresh array when prev is empty', () => {
+  const next = [{ type: 'text', content: 'x' }]
+  assert.equal(reconcileStreamItems([], next), next)
 })
