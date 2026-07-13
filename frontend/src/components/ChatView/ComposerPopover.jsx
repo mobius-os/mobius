@@ -69,9 +69,9 @@ export default function ComposerPopover({
   onChangeChatInfo,
   // Live-derived in the parent: `chatInfo.has_assistant_turns` is
   // set once on mount and never refreshed when the running turn
-  // finishes. Without the live override, the cross-provider lock
-  // in ChatSettingsPanel would stay disengaged after the first
-  // reply lands in the same session. Parent ORs the persisted
+  // finishes. Without the live override, cross-provider picks would
+  // skip the confirmation + handoff after the first reply lands in
+  // the same session. Parent ORs the persisted
   // flag with a `messages.some(m => m.role === 'assistant')`
   // check and passes the result down.
   hasAssistantTurns,
@@ -80,6 +80,8 @@ export default function ComposerPopover({
   autoResumeError,
   onAutoResumeChange,
   onCompactionStored,
+  onProviderSwitchingChange,
+  providerSwitching = false,
   onOpenInspector,
 }) {
   const [open, setOpen] = useState(false)
@@ -90,6 +92,10 @@ export default function ComposerPopover({
   // reset between opens and break the stale-response guard. See
   // ChatSettingsPanel's `reqIdRef` prop for the rationale.
   const reqIdRef = useRef(0)
+  // Stable idempotency request retained while the popover panel unmounts.
+  // It is cleared only on success, explicit cancel, or a chat/provider change,
+  // so an ambiguous network failure retries the exact same switch_id.
+  const providerSwitchRequestRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
   // popover opened. If yes, refocus after a picker action so the
   // soft keyboard stays open. If no (user tapped + with keyboard
@@ -218,6 +224,9 @@ export default function ComposerPopover({
                 onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
                 onCompactionStored={onCompactionStored}
+                onSwitchingChange={onProviderSwitchingChange}
+                externalSwitching={providerSwitching}
+                providerSwitchRequestRef={providerSwitchRequestRef}
                 reqIdRef={reqIdRef}
                 wasInputFocusedRef={wasInputFocusedRef}
               />

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import threading
 import weakref
 
 from sqlalchemy.orm import Session
@@ -129,6 +130,41 @@ _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
 )
 
 
+class _CrossLoopTransitionLock:
+  """A cancellation-safe async facade over a loop-neutral thread lock.
+
+  Production serves a chat on one asyncio loop, but synchronous ASGI clients
+  and administrative callers may legitimately enter through different loops.
+  ``asyncio.Lock`` cannot cross that boundary. A non-blocking poll keeps every
+  loop responsive, acquires without an intervening await, and cannot leak the
+  lock when the waiter is cancelled.
+  """
+
+  def __init__(self) -> None:
+    self._lock = threading.Lock()
+
+  async def acquire(self) -> bool:
+    while not self._lock.acquire(blocking=False):
+      await asyncio.sleep(0.01)
+    return True
+
+  def release(self) -> None:
+    self._lock.release()
+
+  async def __aenter__(self):
+    await self.acquire()
+    return self
+
+  async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+    self.release()
+
+
+_transition_locks: (
+  weakref.WeakValueDictionary[str, _CrossLoopTransitionLock]
+) = weakref.WeakValueDictionary()
+_transition_locks_guard = threading.Lock()
+
+
 def get_lock(chat_id: str) -> asyncio.Lock:
   """Returns the per-chat queue lock, creating it if needed.
 
@@ -143,12 +179,22 @@ def get_lock(chat_id: str) -> asyncio.Lock:
   return lock
 
 
+def get_transition_lock(chat_id: str) -> _CrossLoopTransitionLock:
+  """Serialize settings, provider handoffs, and sends across event loops."""
+  with _transition_locks_guard:
+    lock = _transition_locks.get(chat_id)
+    if lock is None:
+      lock = _CrossLoopTransitionLock()
+      _transition_locks[chat_id] = lock
+    return lock
+
+
 def reset_for_tests() -> None:
-  """Drops the lock registry. Test fixtures call this so a lock
-  held by a leaked task from a prior test can't be returned to
-  the next test's caller."""
-  global _locks
+  """Drop both lock registries between tests."""
+  global _locks, _transition_locks
   _locks = weakref.WeakValueDictionary()
+  with _transition_locks_guard:
+    _transition_locks = weakref.WeakValueDictionary()
 
 
 async def promote_pending_messages_locked(

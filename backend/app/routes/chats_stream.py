@@ -630,6 +630,26 @@ async def send_message(
         content={"status": "started", "message": started_message},
       )
 
+  # Serialize an ordinary send with the provider-switch synthesis/commit.
+  # Whichever request owns the lock first establishes the state the other
+  # observes: a send first makes the switch see a busy chat; a switch first
+  # makes the send reload and start on the newly committed provider. This
+  # removes the actor-order race where a message could begin on the outgoing
+  # provider while its handoff was still being synthesized.
+  async with chat_queue.get_transition_lock(chat_id):
+    db.expire(chat)
+    return await _send_message_locked(body, chat_id, principal, db, chat)
+
+
+async def _send_message_locked(
+  body: schemas.SendMessage,
+  chat_id: str,
+  principal: Principal,
+  db: Session,
+  chat: models.Chat,
+):
+  """Handle a normal send while holding the per-chat transition lock."""
+
   # One choke point for every genuine user send (initial / queued / steered all
   # pass here, after the answer-delivery returns above). Skip force_steer —
   # Stop's queue-collapse re-send of already-counted messages. Counts a turn
@@ -824,7 +844,7 @@ async def send_message(
           # its run marker under it, and the spawned runner reuses it.
           drain_token = alloc_run_token()
           next_messages, next_user, next_session_id = (
-            await chat_queue.promote_pending_messages(
+            await chat_queue.promote_pending_messages_locked(
               db, chat_id, drain_token,
             )
           )

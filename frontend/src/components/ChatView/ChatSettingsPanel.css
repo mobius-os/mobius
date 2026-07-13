@@ -246,6 +246,13 @@
   50% { opacity: 0.7; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .csp__loading-spinner,
+  .csp__skeleton-row {
+    animation: none;
+  }
+}
+
 .csp__foot {
   display: flex;
   flex-direction: column;

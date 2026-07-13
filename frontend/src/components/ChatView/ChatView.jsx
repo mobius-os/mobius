@@ -417,6 +417,16 @@ export default function ChatView({
   const autoResumeSavingRef = useRef(false)
   const autoResumeRequestRef = useRef(0)
   const armedEmbeddedResetRef = useRef(null)
+  // A cross-provider handoff owns the chat transition until synthesis and the
+  // atomic commit finish. Keep a synchronous ref beside render state so a send
+  // click in the same frame cannot slip through before disabled props paint.
+  const [providerSwitching, setProviderSwitching] = useState(false)
+  const providerSwitchingRef = useRef(false)
+  const handleProviderSwitchingChange = useCallback((value) => {
+    const switching = !!value
+    providerSwitchingRef.current = switching
+    setProviderSwitching(switching)
+  }, [])
   // The question_id of the AskUserQuestion the runner is currently parked
   // on, set from the live SSE `question` event (onLiveQuestion). It is a
   // FAST-PATH HINT only, never the sole gate: the backend does not persist
@@ -1695,6 +1705,7 @@ export default function ChatView({
   //     pushed above the viewport. Keep their current scroll mode
   //     instead — the new turn streams into view from where they were.
   const doSend = useCallback(async (text, opts = {}) => {
+    if (providerSwitchingRef.current) return
     const pin = opts.pin !== false  // default true
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
@@ -2266,6 +2277,7 @@ export default function ChatView({
 
   function handleSubmit(e) {
     e.preventDefault()
+    if (providerSwitchingRef.current) return
     doSend(input.trim())
   }
 
@@ -3408,6 +3420,7 @@ export default function ChatView({
           canSteer={canSteer}
           canRequestSteer={canRequestSteer}
           offline={!online}
+          submissionBlocked={providerSwitching}
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
           onRemoveFile={removeFile}
@@ -3422,9 +3435,9 @@ export default function ChatView({
                    once on mount via the API and never refreshed when
                    the running turn finishes. Without this OR, sending
                    a message and getting a reply in the same session
-                   leaves the cross-provider lock disengaged: the user
-                   can flip Claude ↔ Codex mid-chat and lose the
-                   session, which neither SDK can recover from. */
+                   would skip the cross-provider handoff confirmation:
+                   the user could flip Claude ↔ Codex mid-chat without
+                   preparing the incoming provider's context. */
                 hasAssistantTurns={
                   (chatInfo?.has_assistant_turns ?? false)
                   || messages.some(m => m.role === 'assistant')
@@ -3452,6 +3465,8 @@ export default function ChatView({
                   }) : prev)
                 }}
                 onCompactionStored={handleCompactionStored}
+                onProviderSwitchingChange={handleProviderSwitchingChange}
+                providerSwitching={providerSwitching}
                 onOpenInspector={() => setShowInspector(true)}
               />
             </>

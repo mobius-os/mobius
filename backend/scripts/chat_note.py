@@ -111,6 +111,10 @@ def _read_transcript(chat_id: str) -> str:
     return raw[-MAX_TRANSCRIPT_BYTES:]
   lines: list[str] = []
   for m in msgs if isinstance(msgs, list) else []:
+    # Provider handoffs are derived from this note. Re-ingesting them would
+    # recursively duplicate the same context on every later re-switch.
+    if isinstance(m, dict) and m.get("kind") == "compaction":
+      continue
     role = m.get("role", "?") if isinstance(m, dict) else "?"
     content = m.get("content") if isinstance(m, dict) else None
     if isinstance(content, list):

@@ -1,5 +1,6 @@
 """Routes for chat CRUD operations."""
 
+import hashlib
 import json
 import logging
 import re
@@ -29,7 +30,7 @@ from app.deps import (
   Principal, get_current_owner, get_principal, reject_cross_site,
 )
 from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
-from app.schemas import ChatPatch
+from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 log = logging.getLogger(__name__)
@@ -119,6 +120,38 @@ def _coerce_agent_settings(raw) -> dict:
     except (ValueError, TypeError):
       return {}
   return {}
+
+
+def _mirror_agent_defaults(
+  db: Session,
+  *,
+  data_dir: str,
+  provider_id: str,
+  settings_obj: dict,
+) -> None:
+  """Repair the best-effort defaults mirrored from a committed chat choice."""
+  mirror = providers._load_agent_settings(data_dir) or {}
+  for key in ("model", "effort", "effort_by_provider"):
+    value = settings_obj.get(key)
+    if value is not None:
+      mirror[key] = value
+  if mirror:
+    providers.write_agent_settings(data_dir, mirror)
+  owner = db.query(models.Owner).first()
+  if owner is not None and owner.provider != provider_id:
+    owner.provider = provider_id
+    db.commit()
+
+
+def _switch_request_fingerprint(provider_id: str, settings_patch: dict) -> str:
+  """Bind an idempotency key to the provider/settings it represents."""
+  payload = json.dumps(
+    {"provider": provider_id, "settings": settings_patch},
+    ensure_ascii=True,
+    sort_keys=True,
+    separators=(",", ":"),
+  ).encode("utf-8")
+  return hashlib.sha256(payload).hexdigest()
 
 
 def _visible_in_owner_drawer(chat: models.Chat) -> bool:
@@ -302,9 +335,8 @@ def create_chat(
   Either path freezes the chat's settings so subsequent global
   changes from OTHER chats don't bleed in. Provider is still
   inherited from owner.provider — the implicit "default = last
-  picked" — because the provider lock kicks in after the first
-  assistant turn and we want the new chat to start on the user's
-  current provider.
+  picked" — because later provider changes require a handoff and we
+  want the new chat to start on the user's current provider.
   """
   import uuid
 
@@ -410,17 +442,17 @@ async def patch_chat(
   default. The `effective` field in the response is what the next
   turn will actually use (override merged onto global default).
 
-  Serialized per-chat via the same lock that guards pending_messages
-  RMW — two PATCHes racing on the same chat would otherwise both
-  read the same snapshot and the later commit would clobber keys
-  from the earlier one.
+  Serialized per-chat via the provider transition lock — two PATCHes racing
+  on the same chat would otherwise both read the same snapshot and the later
+  commit would clobber keys from the earlier one. The same gate excludes sends
+  while a provider handoff is being synthesized and committed.
   """
   from sqlalchemy.orm.attributes import flag_modified
   from app.config import get_settings as get_app_settings
   from app.providers import effective_agent_settings
-  from app.chat_queue import get_lock as get_queue_lock
+  from app.chat_queue import get_transition_lock
 
-  async with get_queue_lock(chat_id):
+  async with get_transition_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
     agent_settings_patch = (
       body.agent_settings_json.model_dump(exclude_unset=True)
@@ -480,22 +512,39 @@ async def patch_chat(
     # Infer the provider from the model whenever the user didn't
     # state one explicitly so the chat row stays self-consistent.
     target_provider = body.provider
-    if (
-      target_provider is None
-      and body.agent_settings_json is not None
-    ):
-      new_model = agent_settings_patch.get("model")
-      if new_model:
-        from app.providers import _model_belongs_to_other_provider
-        current_provider = chat.provider or "claude"
-        if _model_belongs_to_other_provider(new_model, current_provider):
-          target_provider = (
-            "codex" if current_provider == "claude" else "claude"
-          )
+    new_model = agent_settings_patch.get("model")
+    if target_provider is None and new_model:
+      from app.providers import _model_belongs_to_other_provider
+      current_provider = chat.provider or "claude"
+      if _model_belongs_to_other_provider(new_model, current_provider):
+        target_provider = (
+          "codex" if current_provider == "claude" else "claude"
+        )
+
+    if new_model:
+      from app.providers import _model_belongs_to_other_provider
+      model_provider = target_provider or chat.provider or "claude"
+      if _model_belongs_to_other_provider(new_model, model_provider):
+        raise HTTPException(
+          status_code=422,
+          detail="The selected model does not belong to that provider.",
+        )
 
     # Capture the provider BEFORE any mutation so provider_switch logs the
     # real transition, and only when it actually changes (see after the commit).
     prev_provider = chat.provider
+    if (
+      target_provider is not None
+      and target_provider != (chat.provider or "claude")
+      and _has_real_assistant_turn(chat)
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "This chat already has assistant turns. Use the provider-switch "
+          "handoff so the incoming provider can continue its context."
+        ),
+      )
     if target_provider is not None and target_provider in ("claude", "codex"):
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
@@ -518,11 +567,9 @@ async def patch_chat(
         # Sessions aren't cross-provider portable: a Claude session id
         # is not a valid Codex thread id and vice versa. Wipe the
         # session id when the provider actually changes so the next
-        # turn starts a fresh session for the new provider. The
-        # frontend lock (has_assistant_turns → only same-provider
-        # picks visible) prevents this from happening mid-thread in
-        # the UI, but a direct API caller or a recovery scenario can
-        # still hit it.
+        # turn starts a fresh session for the new provider. This direct
+        # PATCH path is limited to chats without assistant turns; populated
+        # chats use the atomic handoff endpoint below.
         chat.session_id = None
       chat.provider = target_provider
 
@@ -812,81 +859,216 @@ def recover_chat(
   "/{chat_id}/compact", dependencies=[Depends(reject_cross_site)],
 )
 async def compact_chat(
+  body: ChatProviderSwitch,
   chat_id: str,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Compacts the chat into a portable plain-text briefing block.
+  """Have the incoming provider prepare and atomically commit a handoff.
 
-  Feature 091's provider-switch groundwork: switching the chat's PROVIDER
-  loses the session (sessions aren't cross-provider portable), so this runs
-  a one-shot summarize turn over the current transcript and stores the
-  result as a recognizable `kind="compaction"` assistant message via the
-  writer actor. It does NOT switch provider here — the frontend owns the
-  confirmation and follow-up provider/model PATCH. This endpoint only
-  produces + stores + returns the summary so the client can display it.
-
-  A failed summarize (empty chat, disconnected provider, no text produced)
-  returns a non-2xx and stores NOTHING — a failed compaction must never
-  silently drop the user's context. The route through the actor (rather
-  than a direct `chat.messages` write) keeps the single-writer invariant:
-  the compaction block can't clobber, or be clobbered by, a streaming
-  snapshot for the same chat.
+  The selected provider reads the detailed per-chat ``## Summary`` plus the
+  complete visible transcript and synthesizes its own compact starting context
+  in bounded disposable sessions. The writer then appends that context, changes
+  provider/settings, and clears the outgoing session in one transaction. Any
+  synthesis or contention failure leaves every durable field unchanged.
   """
+  from app.chat_queue import get_transition_lock
+
+  async with get_transition_lock(chat_id):
+    return await _compact_chat_locked(body, chat_id, db)
+
+
+async def _compact_chat_locked(
+  body: ChatProviderSwitch,
+  chat_id: str,
+  db: Session,
+):
+  """Run one provider switch while settings PATCHes are excluded."""
   from app.chat_writer import (
-    PersistCompaction, alloc_run_token, await_ack, get_writer,
+    SwitchProviderWithCompaction, await_ack, get_writer,
+    messages_fingerprint,
   )
   from app.compaction import (
     CompactionError, load_cumulative_summary, summarize_chat,
   )
 
   chat = get_active_chat_or_404(db, chat_id)
-  if is_chat_running(chat_id):
-    # A live turn's streaming snapshots target the trailing assistant row;
-    # appending a compaction block mid-turn would race/clobber it. Compaction
-    # is a between-turns operation (e.g. before a provider switch) — refuse
-    # while a turn is active rather than risk the lost-update the docstring
-    # promises against.
+  if chat.created_by_app_id is not None:
     raise HTTPException(
       status_code=409,
-      detail="Chat is busy — finish or stop the current turn before compacting.",
+      detail="App chats cannot change provider after they are created.",
     )
-  messages = list(chat.messages or [])
+  source_provider = chat.provider or "claude"
+  settings_patch = body.agent_settings_json.model_dump(exclude_unset=True)
+  request_fingerprint = _switch_request_fingerprint(
+    body.provider, settings_patch,
+  )
+  existing_switch = next((
+    message
+    for message in reversed(list(chat.messages or []))
+    if isinstance(message, dict)
+    and message.get("kind") == "compaction"
+    and message.get("switch_id") == body.switch_id
+  ), None)
+  if existing_switch is not None:
+    if existing_switch.get("to_provider") != body.provider:
+      raise HTTPException(
+        status_code=409,
+        detail="That provider-switch request id is already used.",
+      )
+    if (
+      existing_switch.get("request_fingerprint")
+      and existing_switch.get("request_fingerprint") != request_fingerprint
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="That provider-switch request id has different settings.",
+      )
+    if (chat.provider or "claude") != body.provider:
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "That provider switch completed, but the chat has since changed."
+        ),
+      )
+    data_dir = get_settings().data_dir
+    settings_obj = _coerce_agent_settings(chat.agent_settings_json)
+    # The chat commit is authoritative. A prior request can lose its response
+    # (or fail while mirroring these secondary defaults) after that commit, so
+    # an idempotent retry also repairs the new-chat defaults before returning.
+    _mirror_agent_defaults(
+      db,
+      data_dir=data_dir,
+      provider_id=body.provider,
+      settings_obj=settings_obj,
+    )
+    return {
+      "ok": True,
+      "summary": existing_switch.get("content", ""),
+      "stored": existing_switch,
+      "provider": chat.provider or body.provider,
+      "agent_settings_json": settings_obj or None,
+      "effective": providers.effective_agent_settings(
+        data_dir, settings_obj or None, provider=chat.provider or body.provider,
+      ),
+    }
+  if body.provider == source_provider:
+    raise HTTPException(
+      status_code=409, detail="This chat already uses that provider."
+    )
+  if is_chat_running(chat_id) or chat.run_status or chat.pending_messages:
+    raise HTTPException(
+      status_code=409,
+      detail="Chat is busy — finish or stop the current turn before switching.",
+    )
   data_dir = get_settings().data_dir
+  candidate = providers.get_provider(body.provider)
+  auth_error = candidate.check_auth(data_dir)
+  if auth_error is not None:
+    raise HTTPException(status_code=409, detail=auth_error)
+
+  messages = list(chat.messages or [])
+  source_messages_hash = messages_fingerprint(messages)
+  source_summary = load_cumulative_summary(data_dir, chat_id)
+  source_summary_hash = (
+    hashlib.sha256(source_summary.encode("utf-8")).hexdigest()
+    if source_summary is not None
+    else None
+  )
   try:
-    # Each chat maintains its own complete, uncapped handoff. Legacy chats may
-    # not have one yet, so retain the tool-free provider summarizer as fallback.
-    summary = load_cumulative_summary(data_dir, chat_id)
-    if summary is None:
-      summary = await summarize_chat(messages, data_dir=data_dir)
+    summary = await summarize_chat(
+      messages,
+      data_dir=data_dir,
+      provider_id=body.provider,
+      source_summary=source_summary,
+      model=settings_patch.get("model"),
+      effort=settings_patch.get("effort"),
+    )
   except CompactionError as exc:
-    # The summarize step is the one allowed-to-fail step. Surface it as a
-    # 422 so the client can show the reason and keep the chat unchanged
-    # (no block stored, no provider switched).
     raise HTTPException(status_code=422, detail=str(exc))
   except Exception as exc:
-    log.warning("compaction summarize failed for chat %s: %s", chat_id, exc)
+    log.warning(
+      "provider-switch synthesis failed for chat %s: %s", chat_id, exc,
+    )
     raise HTTPException(
-      status_code=502, detail="The summarize turn failed; not compacting."
+      status_code=502,
+      detail="The incoming provider could not prepare the chat.",
+    )
+
+  # The note is a separate file maintained after each settled turn. If it was
+  # rewritten while synthesis ran, retry from the fresh detailed source rather
+  # than committing a handoff the incoming provider derived from stale data.
+  latest_summary = load_cumulative_summary(data_dir, chat_id)
+  latest_hash = (
+    hashlib.sha256(latest_summary.encode("utf-8")).hexdigest()
+    if latest_summary is not None
+    else None
+  )
+  if latest_hash != source_summary_hash:
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "The chat summary changed while preparing the switch. Try again."
+      ),
     )
 
   ack = get_writer().submit(
-    PersistCompaction(
-      chat_id=chat_id, run_token=alloc_run_token(), summary=summary
+    SwitchProviderWithCompaction(
+      chat_id=chat_id,
+      switch_id=body.switch_id,
+      expected_provider=source_provider,
+      provider=body.provider,
+      settings_patch=settings_patch,
+      summary=summary,
+      source_messages_hash=source_messages_hash,
+      source_summary_hash=source_summary_hash,
+      data_dir=data_dir,
+      request_fingerprint=request_fingerprint,
     )
   )
   try:
     result = await await_ack(ack)
   except Exception:
     raise HTTPException(
-      status_code=503, detail="Could not store the compaction; try again."
+      status_code=503, detail="Could not save the provider switch; try again."
     )
-  command = f"POST /api/chats/{chat_id}/compact"
+  if result.get("status") == "conflict":
+    reason = result.get("reason")
+    if reason == "busy":
+      detail = "Chat is busy — finish or stop the turn before switching."
+    elif reason == "request_mismatch":
+      detail = "That provider-switch request id has different settings."
+    else:
+      detail = "The chat changed while preparing the switch. Try again."
+    raise HTTPException(status_code=409, detail=detail)
+
+  # The actor used its own session. Refresh this request's identity map before
+  # mirroring the committed choice to new-chat defaults.
+  db.expire_all()
+  settings_obj = _coerce_agent_settings(result.get("agent_settings_json"))
+  _mirror_agent_defaults(
+    db,
+    data_dir=data_dir,
+    provider_id=body.provider,
+    settings_obj=settings_obj,
+  )
+  if result.get("status") == "committed":
+    activity.log_event(
+      "provider_switch",
+      chat_id=chat_id,
+      provider=body.provider,
+      from_provider=source_provider,
+    )
+
   return {
     "ok": True,
-    "summary": summary,
-    "command": command,
+    "summary": (result.get("stored") or {}).get("content", ""),
     "stored": result.get("stored"),
+    "provider": body.provider,
+    "agent_settings_json": settings_obj or None,
+    "effective": providers.effective_agent_settings(
+      data_dir, settings_obj or None, provider=body.provider,
+    ),
   }
 
 
@@ -1220,6 +1402,15 @@ def patch_app_chat(
       detail="App chat metadata may only be changed by an app token.",
     )
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  target_provider = body.provider or chat.provider or "claude"
+  if (
+    body.model
+    and providers._model_belongs_to_other_provider(body.model, target_provider)
+  ):
+    raise HTTPException(
+      status_code=422,
+      detail="The selected model does not belong to that provider.",
+    )
   if body.provider is not None:
     if body.provider not in ("claude", "codex"):
       raise HTTPException(

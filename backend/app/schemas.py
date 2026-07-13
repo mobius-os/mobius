@@ -3,9 +3,11 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+  BaseModel, ConfigDict, Field, field_validator, model_validator,
+)
 
-from app.providers import PROVIDER_NAMES
+from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
 
 
 class SetupRequest(BaseModel):
@@ -317,6 +319,34 @@ class ChatPatch(BaseModel):
     if value is not None and value not in PROVIDER_NAMES:
       raise ValueError(f"unknown provider: {value}")
     return value
+
+
+class ChatProviderSwitch(BaseModel):
+  """Atomic cross-provider switch prepared by the incoming provider."""
+
+  provider: Literal["claude", "codex"]
+  agent_settings_json: AgentSettingsOverride
+  # Stable across a network retry so the writer can return the already-stored
+  # switch instead of appending a duplicate compaction marker.
+  switch_id: str = Field(min_length=1, max_length=128)
+
+  @model_validator(mode="after")
+  def validate_target_settings(self):
+    """Require a coherent target runtime instead of preserving old settings."""
+    model = (self.agent_settings_json.model or "").strip()
+    effort = self.agent_settings_json.effort
+    if not model or len(model) > 200:
+      raise ValueError("provider switches require a valid target model")
+    if _model_belongs_to_other_provider(model, self.provider):
+      raise ValueError("target model does not belong to target provider")
+    self.agent_settings_json.model = model
+    allowed_efforts = {
+      "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
+      "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
+    }
+    if effort not in allowed_efforts[self.provider]:
+      raise ValueError("target effort does not belong to target provider")
+    return self
 
 
 class SendMessage(BaseModel):

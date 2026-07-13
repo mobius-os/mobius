@@ -99,6 +99,7 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *  base keeps geometry and box model stable across Send / Stop / Steer / Mic. */
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, canSteer,
+  submissionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
   if (sending && !hasInput && canSteer) {
@@ -151,7 +152,7 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
         aria-label="Send"
-        disabled={hasUploading || offline}
+        disabled={hasUploading || offline || submissionBlocked}
       >
         <ArrowUp width={22} height={22} />
       </button>
@@ -165,6 +166,7 @@ function PrimaryAction({
       onTouchEnd={(e) => { e.preventDefault(); onToggleVoice() }}
       onClick={onToggleVoice}
       aria-label={listening ? 'Stop recording' : 'Voice input'}
+      disabled={submissionBlocked && !listening}
     >
       <Mic width={24} height={24} />
     </button>
@@ -303,6 +305,9 @@ function FileChips({ files, onRemove }) {
  *                        effect, so the parent (e.g. ComposerPopover)
  *                        can trigger the hidden <input type="file">
  *                        without the bar shipping a paperclip button.
+ *   submissionBlocked  — true while an atomic provider handoff owns the
+ *                        chat; drafting stays available but send/mic-start do
+ *                        not race the transition.
  *
  * The bar does NOT own send state — ChatView's doSend handles that.
  * The bar's only job: composition + the Send/Stop/Mic resolution.
@@ -321,6 +326,7 @@ export default function ChatInputBar({
   canSteer,
   canRequestSteer = canSteer,
   offline,
+  submissionBlocked = false,
   pendingFiles,
   onAddFiles,
   onRemoveFile,
@@ -408,7 +414,7 @@ export default function ChatInputBar({
       return
     }
     if (action === 'submit') {
-      onSubmit(e)
+      if (!submissionBlocked) onSubmit(e)
     }
   }
 
@@ -453,6 +459,7 @@ export default function ChatInputBar({
               hasUploading={hasUploading}
               offline={offline}
               canSteer={canSteer}
+              submissionBlocked={submissionBlocked}
               onSubmit={onSubmit}
               onStop={onStop}
               onSteer={onSteer}

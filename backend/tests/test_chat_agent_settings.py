@@ -272,7 +272,9 @@ def test_patch_chat_provider_mirrors_to_owner_immediately(
   """
   from app import models, providers
 
-  monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, d: None)
+  monkeypatch.setattr(
+    providers.CodexProvider, "check_auth", lambda self, d: None,
+  )
 
   owner_before = db.query(models.Owner).first()
   assert owner_before.provider == "claude"
@@ -339,7 +341,9 @@ def test_patch_chat_provider_and_model_in_same_request(
   — the slash picker uses this when switching providers (it clears
   the stale per-chat model override at the same time)."""
   from app import providers
-  monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, d: None)
+  monkeypatch.setattr(
+    providers.CodexProvider, "check_auth", lambda self, d: None,
+  )
 
   r = client.patch(
     f"/api/chats/{chat.id}",
@@ -464,6 +468,53 @@ def test_patch_model_only_with_cross_provider_model_switches_provider(
   refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert refreshed.session_id is None
   assert refreshed.provider == "codex"
+
+
+def test_patch_cannot_bypass_handoff_after_assistant_turn(
+  client, auth, chat, db, monkeypatch,
+):
+  """A populated chat must use the atomic incoming-provider handoff route."""
+  from app import models, providers
+
+  monkeypatch.setattr(
+    providers.CodexProvider, "check_auth", lambda self, d: None,
+  )
+  chat.session_id = "claude-session"
+  chat.agent_settings_json = {"model": "claude-sonnet-4-6"}
+  chat.messages = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  db.commit()
+
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={
+      "provider": "codex",
+      "agent_settings_json": {"model": "gpt-5.4"},
+    },
+  )
+  assert response.status_code == 409
+  assert "handoff" in response.json()["detail"].lower()
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  assert row.provider == "claude"
+  assert row.session_id == "claude-session"
+  assert row.agent_settings_json == {"model": "claude-sonnet-4-6"}
+
+
+def test_patch_rejects_explicit_provider_model_mismatch(client, auth, chat):
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={
+      "provider": "claude",
+      "agent_settings_json": {"model": "gpt-5.4"},
+    },
+  )
+  assert response.status_code == 422
+  assert "does not belong" in response.json()["detail"].lower()
 
 
 def test_patch_model_only_cross_provider_409s_if_target_disconnected(

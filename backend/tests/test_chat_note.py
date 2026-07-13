@@ -3,6 +3,8 @@ writes a chat's memory note when the agent skipped it (chat.py), plus the
 tool-free summarizer's parse helpers (scripts/chat_note.py)."""
 
 import importlib.util
+import json
+import sqlite3
 import types
 from pathlib import Path
 
@@ -123,6 +125,32 @@ def test_build_prompt_includes_existing_note_to_grow():
   assert "grow it" in p.lower()
   assert "dedupe" in p.lower()
   assert "old" in p
+
+
+def test_read_transcript_excludes_derived_provider_handoffs(tmp_path):
+  cn = _load_chat_note()
+  database = tmp_path / "chat.db"
+  con = sqlite3.connect(database)
+  con.execute("create table chats (id text primary key, messages text)")
+  con.execute(
+    "insert into chats (id, messages) values (?, ?)",
+    ("c1", json.dumps([
+      {"role": "user", "content": "original request"},
+      {
+        "role": "assistant", "kind": "compaction",
+        "content": "derived handoff must not recurse",
+      },
+      {"role": "assistant", "content": "real response"},
+    ])),
+  )
+  con.commit()
+  con.close()
+  cn.DB = database
+
+  transcript = cn._read_transcript("c1")
+  assert "original request" in transcript
+  assert "real response" in transcript
+  assert "derived handoff" not in transcript
 
 
 def test_clean_note_output_keeps_a_clean_note_intact():

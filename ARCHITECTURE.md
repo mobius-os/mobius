@@ -541,13 +541,18 @@ Memory app is not installed. Its consumers:
 ### Provider switch (compaction handoff)
 
 Sessions are not portable across providers, so switching provider mid-chat
-**summarizes first**: the composer confirms, POSTs `/chats/{id}/compact`
-(`backend/app/compaction.py` runs a tool-free summarize turn → a portable brief),
-then PATCHes provider+model+effort; the brief is replayed into the NEW provider's
-first turn as a `<compacted_chat>` block, so the new agent continues from the summary
-rather than a cold start. Same-provider model swaps skip compaction (context is
-preserved in-session). Cross-provider models are locked out of the picker after the
-first assistant turn.
+with an **incoming-provider handoff**: the composer confirms and POSTs the target
+provider, model, effort, and a stable switch id to `/chats/{id}/compact`. The
+incoming provider runs a disposable, tool-free synthesis turn over the complete
+running `## Summary` plus the complete current transcript. Large sources are folded
+through bounded progressive synthesis turns so no middle interval is silently
+omitted. The writer actor then stores that portable brief, changes
+provider/settings, and clears the outgoing session in one conditional transaction;
+sends share the same per-chat transition lock, while a Summary or transcript change
+invalidates the commit. The brief is replayed into the incoming provider's first
+real turn as a `<compacted_chat>` block, so the new agent continues rather than
+starting cold. Same-provider model swaps skip the handoff because their session
+context is preserved.
 
 ### Staying aligned (enforcement)
 

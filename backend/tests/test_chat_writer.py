@@ -21,6 +21,7 @@ from app.chat_writer import (
   Finalize,
   PersistError,
   PersistTranscript,
+  SwitchProviderWithCompaction,
   alloc_run_token,
 )
 
@@ -89,6 +90,28 @@ def test_persist_transcript_coalesces_per_run_token():
     actor.submit(Barrier()).result(timeout=5)
     # Only the LATEST snapshot for (c1,t1) must commit; earlier ones drop.
     assert commits == [{"n": 9}]
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_conditional_provider_switch_does_not_preemptively_fence_snapshot():
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  try:
+    actor.pause_for_test()
+    snapshot = actor.submit(
+      PersistTranscript(chat_id="c1", run_token="live", snapshot={"n": 1})
+    )
+    switch = actor.submit(SwitchProviderWithCompaction(chat_id="c1"))
+    assert not snapshot.done(), (
+      "a conditional switch must not drop live snapshots at submit time"
+    )
+    actor.resume_for_test()
+    assert snapshot.result(timeout=5) is True
+    with pytest.raises(Exception):
+      switch.result(timeout=5)
+    assert commits == [{"n": 1}]
   finally:
     actor.stop(timeout=5)
 

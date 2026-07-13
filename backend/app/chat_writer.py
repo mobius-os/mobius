@@ -38,6 +38,7 @@ import asyncio
 import copy
 import enum
 import hashlib
+import json
 import logging
 import queue
 import secrets
@@ -412,26 +413,20 @@ class ClearPending(_Command):
 
 
 @dataclass
-class PersistCompaction(_Command):
-  """Append a compaction-summary block to the transcript as its own message.
-
-  Used by `POST /api/chats/{id}/compact` (feature 091's provider-switch
-  groundwork): a cross-provider switch loses the session, so a one-shot
-  summarize turn produces a portable plain-text briefing. That briefing is
-  stored here as a NEW assistant message — distinct from the streaming
-  snapshot path, which REPLACES the in-progress assistant message — so it
-  never clobbers a live turn's transcript and renders as its own block.
-
-  The stored message carries `kind="compaction"` and `content` set to the
-  briefing text (so provider seeding and any plain renderer still see it).
-  Its visible block is a tool-style record containing the endpoint command
-  plus the briefing output. Returns `{"stored"}` — the message as appended,
-  with its final ts.
-  """
+class SwitchProviderWithCompaction(_Command):
+  """Atomically append the incoming handoff and change provider/session."""
 
   chat_id: str = ""
   run_token: str = ""
+  switch_id: str = ""
+  expected_provider: str = ""
+  provider: str = ""
+  settings_patch: dict = field(default_factory=dict)
   summary: str = ""
+  source_messages_hash: str = ""
+  source_summary_hash: str | None = None
+  data_dir: str = ""
+  request_fingerprint: str = ""
 
 
 @dataclass
@@ -585,6 +580,12 @@ class _TestPersist(_Command):
 # (reclaim the key's fence epoch once the unit of work for that
 # (chat_id, run_token) is done).  PersistTranscript is the ONLY
 # coalescible command and is deliberately absent.
+#
+# SwitchProviderWithCompaction is also deliberately absent: it is conditional.
+# Fencing at submit time would discard a live turn's pending snapshot before
+# the actor can discover that the switch must return a busy/content conflict.
+# Its idle-state and source-hash checks make a successful commit safe without a
+# pre-emptive fence.
 _FENCE_COMMANDS = (
   Finalize,
   PersistError,
@@ -593,7 +594,6 @@ _FENCE_COMMANDS = (
   StartTurn,
   AppendPending,
   AppendSteeredUserMessage,
-  PersistCompaction,
   PromotePending,
   CancelPending,
   ClearPending,
@@ -1287,8 +1287,8 @@ class ChatWriterActor:
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
       return self._append_steered_user_message(db, cmd)
-    if isinstance(cmd, PersistCompaction):
-      return self._persist_compaction(db, cmd)
+    if isinstance(cmd, SwitchProviderWithCompaction):
+      return self._switch_provider_with_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
@@ -1787,37 +1787,96 @@ class ChatWriterActor:
       "pending": list(chat.pending_messages or []),
     }
 
-  def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
-    """Append the compaction briefing as a new assistant message; commit.
-
-    The briefing is its OWN message (appended, not a replace) so it can't
-    clobber a streaming snapshot, and it carries `kind="compaction"` so the
-    frontend renders it via the CompactionCard, which reads `content` first.
-    `content` is plain text — the sole field the card and the backend replay
-    (`_latest_compaction_brief`) read, and what provider seeding /
-    backward-compatible renderers consume. The `ts` is set strictly past
-    every message in the transcript and the pending queue (via
-    `next_message_ts`, so even an empty transcript gets a wall-clock ts)
-    so it can't collide with a sibling's React key.
-    """
+  def _switch_provider_with_compaction(
+    self, db, cmd: SwitchProviderWithCompaction,
+  ) -> dict:
+    """Commit a provider handoff if its source chat is still idle/current."""
     from datetime import UTC, datetime
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("PersistCompaction: chat not found or deleted")
-    msgs = list(chat.messages or [])
+      raise _PersistFailed(
+        "SwitchProviderWithCompaction: chat not found or deleted"
+      )
+    messages = list(chat.messages or [])
+    for message in reversed(messages):
+      if (
+        isinstance(message, dict)
+        and message.get("kind") == "compaction"
+        and message.get("switch_id") == cmd.switch_id
+      ):
+        if (
+          message.get("request_fingerprint")
+          and message.get("request_fingerprint") != cmd.request_fingerprint
+        ):
+          return {"status": "conflict", "reason": "request_mismatch"}
+        if (chat.provider or "claude") != cmd.provider:
+          return {"status": "conflict", "reason": "provider_changed"}
+        return {
+          "status": "already_committed",
+          "stored": message,
+          "provider": chat.provider,
+          "agent_settings_json": chat.agent_settings_json,
+        }
+
+    if chat.run_status is not None or chat.pending_messages:
+      return {"status": "conflict", "reason": "busy"}
+    if (chat.provider or "claude") != cmd.expected_provider:
+      return {"status": "conflict", "reason": "provider_changed"}
+    if messages_fingerprint(messages) != cmd.source_messages_hash:
+      return {"status": "conflict", "reason": "chat_changed"}
+    from app.compaction import load_cumulative_summary
+
+    latest_summary = load_cumulative_summary(cmd.data_dir, cmd.chat_id)
+    latest_summary_hash = (
+      hashlib.sha256(latest_summary.encode("utf-8")).hexdigest()
+      if latest_summary is not None
+      else None
+    )
+    if latest_summary_hash != cmd.source_summary_hash:
+      return {"status": "conflict", "reason": "summary_changed"}
+
     new_msg = {
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
-      "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
+      "switch_id": cmd.switch_id,
+      "request_fingerprint": cmd.request_fingerprint,
+      "from_provider": cmd.expected_provider,
+      "to_provider": cmd.provider,
+      "ts": next_message_ts(messages),
     }
-    msgs.append(new_msg)
-    chat.messages = msgs
+    messages.append(new_msg)
+    raw_settings = chat.agent_settings_json
+    if isinstance(raw_settings, dict):
+      settings = dict(raw_settings)
+    elif isinstance(raw_settings, str):
+      try:
+        parsed = json.loads(raw_settings)
+        settings = dict(parsed) if isinstance(parsed, dict) else {}
+      except (TypeError, ValueError):
+        settings = {}
+    else:
+      settings = {}
+    for key, value in cmd.settings_patch.items():
+      if value is None:
+        settings.pop(key, None)
+      else:
+        settings[key] = value
+
+    chat.messages = messages
+    chat.provider = cmd.provider
+    chat.session_id = None
+    chat.agent_settings_json = settings or None
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
-      raise _PersistFailed("PersistCompaction did not persist")
-    return {"stored": new_msg}
+      raise _PersistFailed("SwitchProviderWithCompaction did not persist")
+    return {
+      "status": "committed",
+      "stored": new_msg,
+      "provider": chat.provider,
+      "agent_settings_json": chat.agent_settings_json,
+    }
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
@@ -2684,6 +2743,15 @@ def _commit_or_rollback(db) -> bool:
     except Exception:
       pass
     return False
+
+
+def messages_fingerprint(messages: list) -> str:
+  """Stable source identity for a synthesized provider handoff."""
+  encoded = json.dumps(
+    messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    default=str,
+  ).encode("utf-8")
+  return hashlib.sha256(encoded).hexdigest()
 
 
 def next_message_ts(existing: list) -> int:
