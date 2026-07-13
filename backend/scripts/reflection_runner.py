@@ -147,19 +147,6 @@ DEFAULT_MAX_TURNS = 60
 # override per-instance via /data/apps/reflection/settings.json without
 # touching code.
 DEFAULT_PROVIDER = "claude"
-KNOWN_MODELS_BY_PROVIDER = {
-  "claude": (
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-opus-4-5-20251001",
-    "claude-sonnet-4-7-20251215",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-5-20251001",
-    "claude-haiku-4-5-20251001",
-  ),
-  "codex": ("gpt-5.5", "gpt-5.4"),
-}
 
 # Turn budget for the guaranteed-brief rescue session. Small on
 # purpose: read the cut-off run's leavings, write a minimal brief,
@@ -559,178 +546,21 @@ def load_settings() -> dict:
   return data if isinstance(data, dict) else {}
 
 
-def load_global_agent_settings() -> dict:
-  """Reads /data/shared/agent-settings.json, tolerating absence/corruption."""
-  path = DATA_DIR / "shared" / "agent-settings.json"
-  if not path.is_file():
-    return {}
-  try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-  except (json.JSONDecodeError, OSError):
-    return {}
-  return data if isinstance(data, dict) else {}
-
-
-def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  """True when a known model id clearly belongs to another provider."""
-  for known_provider, models in KNOWN_MODELS_BY_PROVIDER.items():
-    if known_provider != provider and model in models:
-      return True
-  return False
-
-
-def _clean_agent_choice(
-  raw: dict | None,
-  *,
-  fallback_provider: str | None = None,
-  label: str = "settings",
-) -> dict | None:
-  """Normalize one provider/model/effort choice.
-
-  The runner avoids importing app.providers so cron importability stays
-  stdlib-only. This mirrors the backend's defensive shape: unknown providers
-  are dropped, empty strings become None, and a known cross-provider model id
-  is ignored instead of being handed to the wrong CLI.
-  """
-  if not isinstance(raw, dict):
-    return None
-  if raw.get("enabled") is False:
-    return None
-  provider = raw.get("provider")
-  if provider not in ("claude", "codex"):
-    provider = fallback_provider if fallback_provider in ("claude", "codex") else None
-  if provider not in ("claude", "codex"):
-    return None
-  model = raw.get("model")
-  model = model.strip() if isinstance(model, str) and model.strip() else None
-  if model and _model_belongs_to_other_provider(model, provider):
-    _log(f"{label} model {model!r} mismatches provider {provider!r}; dropping")
-    model = None
-  effort = raw.get("effort")
-  effort = effort.strip() if isinstance(effort, str) and effort.strip() else None
-  return {"provider": provider, "model": model, "effort": effort}
-
-
-def _same_agent_choice(a: dict | None, b: dict | None) -> bool:
-  if not a or not b:
-    return False
-  return (
-    a.get("provider") == b.get("provider")
-    and (a.get("model") or None) == (b.get("model") or None)
-    and (a.get("effort") or None) == (b.get("effort") or None)
-  )
-
-
-def _has_app_primary_override(settings: dict) -> bool:
-  """Whether settings.json intentionally overrides the system primary agent.
-
-  Reflection versions before the system background-agent picker seeded
-  `provider: "claude"` even when the owner had never chosen a per-app model.
-  Treat that exact legacy default (Claude provider only, no model/effort, no
-  explicit mode marker) as inherited so existing installs can follow the new
-  system primary/fallback settings.
-  """
-  mode = settings.get("primary_agent_mode")
-  if mode == "system":
-    return False
-  if mode == "app":
-    return True
-  provider = settings.get("provider")
-  provider = provider.strip() if isinstance(provider, str) else None
-  model = settings.get("model")
-  model = model.strip() if isinstance(model, str) else None
-  effort = settings.get("effort")
-  effort = effort.strip() if isinstance(effort, str) else None
-  if model or effort:
-    return True
-  if provider and provider != DEFAULT_PROVIDER:
-    return True
-  return False
-
-
 def _resolve_agents(settings: dict) -> dict:
-  """Returns primary/fallback provider choices for the nightly run.
+  """Resolve primary/fallback provider choices for the nightly run.
 
-  Per-app settings.json remains authoritative when it names a provider/model.
-  Otherwise Reflection inherits the system-level background agent defaults
-  from /data/shared/agent-settings.json. That lets the owner set "Claude first,
-  Codex fallback" once in Settings while still allowing Reflection to opt into
-  its own choices later.
+  Delegates to the platform's ONE canonical resolver so every background agent
+  (Reflection, Memory, News) shares the same resolution and can never drift —
+  see :func:`app.background_agents.resolve_background_agents`. The per-app
+  ``settings.json`` layers its primary override + ``secondary_agent_mode``
+  fallback gate on top of the owner's system-level Settings.
+
+  Deferred import: this runner must stay importable under a bare cron
+  environment, so ``app`` is reached only after the sys.path bootstrap at the
+  top of this file, inside this function.
   """
-  global_settings = load_global_agent_settings()
-  raw_background = global_settings.get("background_agents")
-  background = raw_background if isinstance(raw_background, dict) else {}
-  global_choices: list[dict] = []
-  raw_choices = background.get("providers")
-  if isinstance(raw_choices, list):
-    for index, raw_choice in enumerate(raw_choices):
-      choice = _clean_agent_choice(
-        raw_choice,
-        label=f"global background provider {index + 1}",
-      )
-      if choice and not any(_same_agent_choice(choice, existing) for existing in global_choices):
-        global_choices.append(choice)
-
-  if not global_choices:
-    global_primary = _clean_agent_choice(
-      background.get("primary"),
-      fallback_provider=DEFAULT_PROVIDER,
-      label="global background primary",
-    )
-    global_fallback = _clean_agent_choice(
-      background.get("fallback"),
-      label="global background fallback",
-    )
-    if global_primary:
-      global_choices.append(global_primary)
-    if global_fallback and not _same_agent_choice(global_primary, global_fallback):
-      global_choices.append(global_fallback)
-
-  if not global_choices:
-    global_primary = _clean_agent_choice(
-      {
-        "provider": DEFAULT_PROVIDER,
-        "model": global_settings.get("model"),
-        "effort": global_settings.get("effort"),
-      },
-      fallback_provider=DEFAULT_PROVIDER,
-      label="global primary",
-    )
-    if global_primary:
-      global_choices.append(global_primary)
-
-  global_primary = global_choices[0]
-  global_fallback = global_choices[1] if len(global_choices) > 1 else None
-  primary_provider = global_primary.get("provider") or DEFAULT_PROVIDER
-  has_app_primary = _has_app_primary_override(settings)
-  primary = None
-  if has_app_primary:
-    primary = _clean_agent_choice(
-      {
-        "provider": settings.get("provider"),
-        "model": settings.get("model"),
-        "effort": settings.get("effort"),
-      },
-      fallback_provider=primary_provider,
-      label="reflection primary",
-    )
-  if primary is None:
-    primary = global_primary
-
-  raw_fallback = None
-  if any(settings.get(k) for k in ("fallback_provider", "fallback_model", "fallback_effort")):
-    raw_fallback = {
-      "provider": settings.get("fallback_provider"),
-      "model": settings.get("fallback_model"),
-      "effort": settings.get("fallback_effort"),
-    }
-  fallback = (
-    _clean_agent_choice(raw_fallback, label="reflection fallback")
-    if raw_fallback is not None else global_fallback
-  )
-  if _same_agent_choice(primary, fallback):
-    fallback = None
-  return {"primary": primary, "fallback": fallback}
+  from app.background_agents import resolve_background_agents
+  return resolve_background_agents(str(DATA_DIR), settings)
 
 
 def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
