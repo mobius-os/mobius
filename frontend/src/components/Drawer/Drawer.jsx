@@ -406,6 +406,7 @@ export default function Drawer({
           applied and focus/clicks still reached the off-screen drawer. */}
       <nav
         ref={drawerRef}
+        id="navigation-drawer"
         className={`drawer ${open ? 'drawer--open' : ''}`}
         aria-hidden={!open}
         inert={!open}

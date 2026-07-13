@@ -58,8 +58,16 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1;
+  /* The brand is the drawer control. Keep its hit area to the logo and
+     wordmark instead of letting flex fill the otherwise empty toolbar. */
+  flex: none;
+  min-height: 44px;
+  padding: 5px 0;
   min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
