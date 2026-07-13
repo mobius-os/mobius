@@ -201,6 +201,48 @@ def test_publish_failure_restores_dirty_flag(monkeypatch):
     loop.close()
 
 
+def test_incomplete_watched_build_retries_before_warning(monkeypatch):
+  """A slow Vite build must not look broken during a quiet transform gap."""
+  events = []
+  retries = []
+  monkeypatch.setattr(fw, "_publish_system_event", events.append)
+  monkeypatch.setattr(fw, "_INCOMPLETE_GRACE_SECS", 60.0)
+
+  def incomplete(source, reason):
+    raise fw._IncompleteBuild("index.html and sw.js are not ready")
+
+  monkeypatch.setattr(fw, "_publish_built_dir", incomplete)
+  loop = asyncio.new_event_loop()
+  try:
+    handler = fw._FrontendHandler(loop, start_threads=False)
+    handler._schedule_publish_from_thread = retries.append
+    with handler._state_lock:
+      handler._staging_dirty = True
+
+    assert handler._publish_dirty_sync("settle:initial build") is False
+    assert handler._staging_dirty is True
+    assert events == []
+    assert retries == ["incomplete staging"]
+
+    # A genuinely stuck generation eventually warns once, while retaining the
+    # dirty flag so a later completed Vite output can still publish.
+    monkeypatch.setattr(fw, "_INCOMPLETE_GRACE_SECS", 0.0)
+    assert handler._publish_dirty_sync("settle:retry") is False
+    assert events == [{
+      "type": "shell_rebuild_failed",
+      "error": "index.html and sw.js are not ready",
+    }]
+    assert handler._publish_dirty_sync("settle:retry again") is False
+    assert len(events) == 1
+
+    monkeypatch.setattr(fw, "_publish_built_dir", lambda source, reason: True)
+    assert handler._publish_dirty_sync("settle:complete") is True
+    assert handler._incomplete_since is None
+    assert handler._incomplete_notified is False
+  finally:
+    loop.close()
+
+
 def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):
   monkeypatch.setenv("CHOKIDAR_USEPOLLING", "0")
   env = fw._vite_env()

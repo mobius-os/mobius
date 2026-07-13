@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.75
 _STAGING_POLL_SECS = 0.5
+_INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _FRONTEND_DIR = Path("/data/platform/frontend")
 _DIST_DIR = _FRONTEND_DIR / "dist"
@@ -57,6 +58,10 @@ _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 
 class _StagingChangedDuringPublish(RuntimeError):
   """Raised when Vite mutates staging while publication is copying it."""
+
+
+class _IncompleteBuild(RuntimeError):
+  """Raised when the watched staging tree is not a full Vite generation yet."""
 
 
 def _publish_system_event(event: dict) -> None:
@@ -273,7 +278,7 @@ def _prepare_next_from(source_dir: Path) -> None:
   _copy_vendor(_NEXT_DIST_DIR)
   if not _complete_build(_NEXT_DIST_DIR):
     shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
-    raise RuntimeError(
+    raise _IncompleteBuild(
       "vite build did not produce index.html, assets/, sw.js, and "
       "manifest.webmanifest"
     )
@@ -420,6 +425,8 @@ class _FrontendHandler:
     self._proc_lock = threading.Lock()
     self._watch_proc: subprocess.Popen | None = None
     self._staging_dirty = False
+    self._incomplete_since: float | None = None
+    self._incomplete_notified = False
     self._last_staging_signature = _tree_signature(_STAGING_DIST_DIR)
     self._watch_thread: threading.Thread | None = None
     self._stage_thread: threading.Thread | None = None
@@ -599,6 +606,28 @@ class _FrontendHandler:
         self._staging_dirty = True
       self._schedule_publish_from_thread("staging changed during publish")
       return False
+    except _IncompleteBuild as exc:
+      # The staging poller can observe a quiet gap while a slow Vite build is
+      # still transforming modules, before index.html/PWA output is complete.
+      # That is normal build progress, not a broken shell. Keep serving dist,
+      # retry the same dirty generation, and only notify if it remains
+      # incomplete long enough to represent a genuine stuck/failed build.
+      now = time.monotonic()
+      if self._incomplete_since is None:
+        self._incomplete_since = now
+      with self._state_lock:
+        self._staging_dirty = True
+      if (
+        not self._incomplete_notified
+        and now - self._incomplete_since >= _INCOMPLETE_GRACE_SECS
+      ):
+        self._incomplete_notified = True
+        _publish_system_event({
+          "type": "shell_rebuild_failed",
+          "error": str(exc),
+        })
+      self._schedule_publish_from_thread("incomplete staging")
+      return False
     except Exception as exc:
       log.warning("frontend publish failed: %s", exc)
       # Restore the dirty flag: it was cleared above, and the staging
@@ -613,7 +642,11 @@ class _FrontendHandler:
         "type": "shell_rebuild_failed",
         "error": str(exc),
       })
+      self._incomplete_since = None
+      self._incomplete_notified = False
       return False
+    self._incomplete_since = None
+    self._incomplete_notified = False
     if not published:
       # Byte-identical to the served dist (e.g. the watch process's initial
       # build after a restart): nothing changed for clients, so no event.

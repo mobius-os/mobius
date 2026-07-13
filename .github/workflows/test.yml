@@ -140,7 +140,10 @@ jobs:
           load: true
           tags: mobius-test:ci
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A transient GHA cache-service miss must not turn a successfully
+          # built and loaded image into a red build. The image itself remains
+          # authoritative; cache export is only a performance optimization.
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Start test container
         run: |
@@ -201,7 +204,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: Report e2e result
-        if: always()
+        # If setup or image construction failed, preserve that real failure
+        # instead of adding a misleading "playwright exit" error with an
+        # empty output from a step that never ran.
+        if: always() && steps.pw.outcome != 'skipped'
         env:
           PW_EXIT: ${{ steps.pw.outputs.exit }}
         run: |
