@@ -35,7 +35,9 @@ resolution back inside a `with` block.
 from __future__ import annotations
 
 import asyncio
+import copy
 import enum
+import hashlib
 import logging
 import queue
 import secrets
@@ -45,11 +47,17 @@ import time
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import schemas
-from app.events import build_assistant_message, finalize_blocks, question_block_key
+from app.events import (
+  TOOL_OUTPUT_INLINE_THRESHOLD,
+  build_assistant_message,
+  excerpt_tool_output,
+  finalize_blocks,
+  question_block_key,
+)
 
 # Child of `moebius.chat` (NOT a sibling `moebius.chat_writer`) so the actor's
 # records PROPAGATE to the RotatingFileHandler that `chat._get_logger` attaches
@@ -222,6 +230,46 @@ class StashToolOutput(_Command):
   chat_id: str = ""
   tool_use_id: str = ""
   output: str = ""
+
+
+@dataclass
+class MigrateChat(_Command):
+  """One-shot forward-migration of ONE chat's transcript (card-221, B1+B2).
+
+  Owns the whole per-chat read-modify-write on the actor thread so it is
+  serialized with any live turn's commands. Two mutations in a single
+  transaction:
+
+  - B2: backfill `cid` on legacy user rows (in `messages` and
+    `pending_messages`) lacking one, to EXACTLY `legacy-<ts>` — byte-identical
+    to `cid_of` / the frontend `cidOf`, so a warm client and the migrated row
+    derive the same identity.
+  - B1: extract each fat inline tool output (`output` > the inline threshold,
+    not already reduced, no `tool_use_id`) into the `tool_outputs` side table
+    under a minted `legacy-<ts>-<i>` id and rewrite the block to a bounded
+    excerpt via `excerpt_tool_output` — the write-side twin of the read-side
+    `_truncate_large_tool_outputs`, so the legacy dual-read shims can be
+    deleted once every chat is migrated.
+
+  CROSS-PROCESS SAFETY: this command is invoked from a standalone migration
+  script that starts its OWN writer, so a second writer thread exists while the
+  live server's writer runs. The plain `_active_chat` re-read + commit the other
+  commands use is NOT cross-process safe (the lost-update race the guardrail
+  closes only holds WITHIN a single-actor process). So the write is an
+  optimistic compare-and-swap: `UPDATE ... WHERE run_status IS NULL AND
+  updated_at = <snapshot>`. Any concurrent live write (StartTurn sets
+  run_status; every row write bumps updated_at) makes the UPDATE match 0 rows,
+  so this command defers the chat instead of clobbering the turn. Idle-gating
+  keeps deferrals rare; the deferred chats are reported for a re-run.
+
+  Idempotent + dry-run: an already-migrated row/block is a no-op (a cid is
+  present, or a block already carries `output_truncated`); `dry_run` reports the
+  plan without any DB write. NOT a `_FENCE_COMMANDS` member — like
+  `StashToolOutput` it takes the plain-enqueue path (the migration process has
+  no coalescible transcript snapshots to fence)."""
+
+  chat_id: str = ""
+  dry_run: bool = False
 
 
 # -- queue + turn commands (the JSON-blob RMW the actor owns) ------------
@@ -1197,6 +1245,8 @@ class ChatWriterActor:
       return self._persist_session_id(db, cmd)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, MigrateChat):
+      return self._migrate_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
     if isinstance(cmd, AppendPending):
@@ -1356,6 +1406,116 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("StashToolOutput did not persist")
     return True
+
+  def _migrate_chat(self, db, cmd: "MigrateChat") -> dict:
+    """Forward-migrate one chat (card-221 B1+B2). See `MigrateChat`.
+
+    Returns a per-chat report dict the migration script aggregates. Raises
+    `_PersistFailed` only on a round-trip verification failure (a botched
+    extraction) so that ONE chat fails loudly and rolls back rather than
+    committing a block whose full text the side table can't reproduce — the
+    actor's `except` rolls the transaction back and keeps serving other chats.
+    """
+    from app.models import Chat, ToolOutput
+
+    cid = cmd.chat_id
+    row = db.execute(
+      select(
+        Chat.messages, Chat.pending_messages, Chat.run_status, Chat.updated_at
+      ).where(Chat.id == cid)
+    ).first()
+    if row is None:
+      return {"chat_id": cid, "status": "missing"}
+    messages, pending, run_status, snap_updated_at = row
+
+    # Never touch a chat with a live turn in flight: the durable run marker is
+    # set atomically with the turn's first write, so a "running" row is one a
+    # live actor owns right now. Defer + re-check after (the script re-runs the
+    # skipped set once).
+    if run_status is not None:
+      return {"chat_id": cid, "status": "skipped_active"}
+
+    plan = plan_chat_migration(messages or [], pending or [])
+
+    base = {
+      "chat_id": cid,
+      "backfilled": plan.backfilled,
+      "extracted": plan.extracted,
+      "bytes_moved": plan.bytes_moved,
+      "unfixable": plan.unfixable,
+    }
+    if cmd.dry_run:
+      return {**base, "status": "dry_run"}
+    if not plan.changed:
+      # Idempotent no-op: nothing to backfill or extract (already migrated, or
+      # only-unfixable rows). Do NOT write, so updated_at is left untouched.
+      return {**base, "status": "noop"}
+
+    # Stash the full text of every extracted block FIRST, then prove each row
+    # round-trips through the side table BEFORE the block rewrite is committed.
+    # The stash inserts and the blob rewrite share ONE transaction, so a
+    # verification failure (or a raced CAS) rolls BOTH back — a block is never
+    # left pointing at a stash that isn't there.
+    for tool_use_id, full in plan.stashes:
+      existing = db.query(ToolOutput).filter(
+        ToolOutput.chat_id == cid,
+        ToolOutput.tool_use_id == tool_use_id,
+      ).first()
+      if existing is None:
+        db.add(ToolOutput(chat_id=cid, tool_use_id=tool_use_id, output=full))
+      else:
+        existing.output = full
+    db.flush()
+    self._verify_round_trip(db, cid, plan.stashes)
+
+    # Optimistic CAS: commit the rewritten blobs only while the chat is still
+    # idle AND unchanged since the snapshot. A concurrent live turn (another
+    # process's actor) sets run_status and/or bumps updated_at, matching 0 rows
+    # here — we roll back (dropping the flushed stashes too) and defer the chat.
+    result = db.execute(
+      update(Chat)
+      .where(
+        Chat.id == cid,
+        Chat.run_status.is_(None),
+        Chat.updated_at == snap_updated_at,
+      )
+      .values(messages=plan.new_messages, pending_messages=plan.new_pending)
+    )
+    if result.rowcount != 1:
+      db.rollback()
+      return {**base, "status": "skipped_active"}
+    if not _commit_or_rollback(db):
+      # A transient SQLite lock dropped the commit. Report as deferred (a
+      # re-run migrates it) rather than raising — nothing was corrupted.
+      return {**base, "status": "deferred_locked"}
+    return {**base, "status": "migrated"}
+
+  def _verify_round_trip(self, db, chat_id: str, stashes: list) -> None:
+    """Prove every stashed full text reads back byte-identically from the side
+    table (length + SHA-256) BEFORE the block rewrite commits.
+
+    Runs after the inserts are flushed but before commit, so a mismatch (a
+    botched extraction) raises `_PersistFailed` and the whole per-chat
+    transaction rolls back — a block is never left excerpted with a stash that
+    can't reproduce its full text. A read-your-writes SELECT on the actor's own
+    connection sees the flushed-but-uncommitted rows.
+    """
+    from app.models import ToolOutput
+
+    for tool_use_id, full in stashes:
+      got = db.execute(
+        select(ToolOutput.output).where(
+          ToolOutput.chat_id == chat_id,
+          ToolOutput.tool_use_id == tool_use_id,
+        )
+      ).scalar_one_or_none()
+      if (got is None or len(got) != len(full)
+          or hashlib.sha256(got.encode("utf-8")).digest()
+          != hashlib.sha256(full.encode("utf-8")).digest()):
+        raise _PersistFailed(
+          f"tool-output round-trip verify failed chat={chat_id} "
+          f"tool_use_id={tool_use_id}"
+        )
 
   def _start_turn(self, db, cmd: StartTurn) -> dict:
     """Append the initial user message, set title/provider, mark the run.
@@ -2097,6 +2257,166 @@ def cid_of(msg: dict) -> str | None:
     return cid
   ts = msg.get("ts")
   return f"legacy-{ts}" if ts is not None else None
+
+
+@dataclass
+class _MigrationPlan:
+  """The computed forward-migration for one chat's two JSON blobs (card-221).
+
+  Pure data: `new_messages` / `new_pending` are the rewritten blobs, `stashes`
+  the `(tool_use_id, full_text)` rows to insert into `tool_outputs`, and the
+  counters + `unfixable` list feed the run summary. `changed` is False for an
+  already-migrated (or only-unfixable) chat so the actor can skip the write.
+  """
+
+  new_messages: list
+  new_pending: list
+  stashes: list  # list[tuple[str, str]]
+  backfilled: int
+  extracted: int
+  bytes_moved: int
+  unfixable: list  # list[dict]
+  changed: bool
+
+
+def _collect_existing_tool_ids(*blob_lists) -> set[str]:
+  """Every `tool_use_id` already present on any tool block across the blobs.
+
+  Seeds the mint's uniqueness set so a synthetic `legacy-<ts>-<i>` id can never
+  collide with a real (runner-assigned) id already keying a `tool_outputs` row.
+  """
+  ids: set[str] = set()
+  for blob in blob_lists:
+    for m in blob:
+      if not isinstance(m, dict):
+        continue
+      for blk in m.get("blocks") or []:
+        if isinstance(blk, dict) and blk.get("tool_use_id"):
+          ids.add(blk["tool_use_id"])
+  return ids
+
+
+def _mint_unique_tool_id(base: str, used: set[str]) -> str:
+  """`base`, or `base-2`/`base-3`/… — the first not already in `used`.
+
+  Guarantees uniqueness within the chat even for ts-less blocks (whose base
+  discriminates on message index, not ts) or a base that collides with a real
+  id. Records the winner in `used` so the next mint sees it.
+  """
+  candidate = base
+  suffix = 2
+  while candidate in used:
+    candidate = f"{base}-{suffix}"
+    suffix += 1
+  used.add(candidate)
+  return candidate
+
+
+def _backfill_cids(msg_list: list, unfixable: list) -> int:
+  """B2: stamp `cid = legacy-<ts>` on every user row lacking one, in place.
+
+  Mirrors `cid_of` exactly: a row with a truthy `cid` is left alone (already
+  identified); a row with no cid but a `ts` (0 counts — `ts is not None`) gets
+  `legacy-<ts>`; a row with neither is UNFIXABLE (recorded, never guessed).
+  Returns the count backfilled.
+  """
+  backfilled = 0
+  for idx, m in enumerate(msg_list):
+    if not isinstance(m, dict) or m.get("role") != "user":
+      continue
+    if m.get("cid"):
+      continue
+    ts = m.get("ts")
+    if ts is not None:
+      m["cid"] = f"legacy-{ts}"
+      backfilled += 1
+    else:
+      unfixable.append({"kind": "user_no_cid_no_ts", "index": idx})
+  return backfilled
+
+
+def _extract_tool_outputs(
+  msg_list: list, used_ids: set[str],
+) -> tuple[int, int, list]:
+  """B1: extract fat inline tool outputs into stashes + rewrite blocks in place.
+
+  A block qualifies when its `output` is a string over
+  `TOOL_OUTPUT_INLINE_THRESHOLD`, it is NOT already reduced
+  (`output_truncated`), and it carries NO `tool_use_id` (a tagged block was
+  already stashed by the live funnel). The rewrite mirrors the read-side
+  `_truncate_large_tool_outputs` / the live `_reduce_tool_output` exactly —
+  bounded excerpt via `excerpt_tool_output`, plus `output_truncated`,
+  `output_full_len`, `output_exit_code` (only when non-None), and the minted
+  `tool_use_id` (this is what makes the block fetch via the by-id endpoint
+  instead of the legacy `?ts=&i=` path). Returns
+  `(extracted, bytes_moved, stashes)`.
+  """
+  extracted = 0
+  bytes_moved = 0
+  stashes: list = []
+  for mi, m in enumerate(msg_list):
+    if not isinstance(m, dict):
+      continue
+    blocks = m.get("blocks")
+    if not isinstance(blocks, list):
+      continue
+    ts = m.get("ts")
+    for i, blk in enumerate(blocks):
+      if not isinstance(blk, dict) or blk.get("type") != "tool":
+        continue
+      if blk.get("output_truncated") or blk.get("tool_use_id"):
+        continue
+      output = blk.get("output")
+      if (not isinstance(output, str)
+          or len(output) <= TOOL_OUTPUT_INLINE_THRESHOLD):
+        continue
+      base = f"legacy-{ts}-{i}" if ts is not None else f"legacy-m{mi}-{i}"
+      tool_use_id = _mint_unique_tool_id(base, used_ids)
+      excerpt, full_len, exit_code = excerpt_tool_output(output)
+      blk["output"] = excerpt
+      blk["output_truncated"] = True
+      blk["output_full_len"] = full_len
+      if exit_code is not None:
+        blk["output_exit_code"] = exit_code
+      blk["tool_use_id"] = tool_use_id
+      stashes.append((tool_use_id, output))
+      extracted += 1
+      bytes_moved += full_len
+  return extracted, bytes_moved, stashes
+
+
+def plan_chat_migration(messages: list, pending_messages: list) -> _MigrationPlan:
+  """Compute the forward-migration for one chat (card-221 B1+B2), purely.
+
+  Deep-copies the inputs, so it never mutates the caller's lists and is safe to
+  call on a dry-run. Idempotent: an already-migrated chat plans no changes
+  (`changed == False`). The actor handler applies the plan under a CAS guard;
+  tests exercise this planner directly, no DB needed.
+  """
+  new_messages = copy.deepcopy(messages) if messages else []
+  new_pending = copy.deepcopy(pending_messages) if pending_messages else []
+  unfixable: list = []
+  backfilled = _backfill_cids(new_messages, unfixable)
+  backfilled += _backfill_cids(new_pending, unfixable)
+  # Seed the mint's collision set with every real id already in the chat.
+  used_ids = _collect_existing_tool_ids(new_messages, new_pending)
+  extracted, bytes_moved, stashes = _extract_tool_outputs(new_messages, used_ids)
+  # pending_messages hold queued USER rows (no blocks) in practice; scan anyway
+  # so a stray tool block there is not silently stranded fat.
+  p_extracted, p_bytes, p_stashes = _extract_tool_outputs(new_pending, used_ids)
+  extracted += p_extracted
+  bytes_moved += p_bytes
+  stashes.extend(p_stashes)
+  return _MigrationPlan(
+    new_messages=new_messages,
+    new_pending=new_pending,
+    stashes=stashes,
+    backfilled=backfilled,
+    extracted=extracted,
+    bytes_moved=bytes_moved,
+    unfixable=unfixable,
+    changed=bool(backfilled or extracted),
+  )
 
 
 def _ensure_unique_ts(new_msg: dict, others: list) -> None:
