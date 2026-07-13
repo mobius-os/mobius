@@ -14,6 +14,9 @@ import {
   findTrailingAssistantPartialIndex,
   streamItemsHaveRenderableContent,
   streamItemToBlock,
+  assistantBlockKey,
+  chooseActiveAssistantMirrorIndex,
+  chooseActiveAssistantDataKey,
 } from '../streamPromotion.js'
 
 // Lever 2a: the live tool item carries tool_use_id, and streamItemToBlock
@@ -48,6 +51,41 @@ test('streamItemsToAssistantPayload preserves text boundaries in legacy content'
   assert.equal(payload.content, 'first\n\nsecond')
   assert.deepEqual(payload.blocks.map(b => b.type), ['text', 'tool', 'text'])
   assert.equal(payload.blocks[1].status, 'done')
+})
+
+test('source switch preserves the active answer block key namespace', () => {
+  const dbBlocks = [
+    { type: 'text', content: 'Inspecting' },
+    { type: 'tool', tool: 'Bash', status: 'running', tool_use_id: 'toolu_same' },
+    { type: 'text', content: 'Done' },
+    { type: 'tool', tool: 'Read', status: 'running' },
+  ]
+  const liveBlocks = streamItemsToAssistantPayload(dbBlocks, { finalize: false }).blocks
+
+  assert.deepEqual(
+    liveBlocks.map(assistantBlockKey),
+    dbBlocks.map(assistantBlockKey),
+    'DB partial → live SSE must retain tool ids and ordinal text/tool fallbacks so React reuses every block slot',
+  )
+  assert.deepEqual(
+    liveBlocks.map(assistantBlockKey),
+    [0, 'toolu_same', 2, 't-3'],
+    'tools use tool_use_id ?? ordinal while text stays ordinal',
+  )
+})
+
+test('live payload conversion preserves running tools and thinking clock anchors', () => {
+  const payload = streamItemsToAssistantPayload([
+    { type: 'tool', tool: 'Bash', status: 'running', tool_use_id: 'toolu_live' },
+    {
+      type: 'thinking', content: 'checking', duration_ms: 1200,
+      startedAt: 100, lastAt: 200,
+    },
+  ], { finalize: false })
+
+  assert.equal(payload.blocks[0].status, 'running', 'the unified live renderer keeps its spinner')
+  assert.equal(payload.blocks[1].startedAt, 100)
+  assert.equal(payload.blocks[1].lastAt, 200, 'the unified live renderer keeps its timer anchor')
 })
 
 test('promoteAssistantStream appends when there is no bridge partial', () => {
@@ -219,6 +257,76 @@ test('chooseActiveAssistantSurface does not collapse unrelated assistant and str
     hideMessage: false,
     suppressStream: false,
   })
+})
+
+test('active trailing DB row stays mirrored across an empty to related-live source switch', () => {
+  const emptyStreamIdx = chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx: -1,
+    trailingAssistantPartialIdx: 4,
+    hasLivePayload: false,
+    surface: { hideMessage: false, suppressStream: false },
+  })
+  const liveStreamIdx = chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx: -1,
+    trailingAssistantPartialIdx: 4,
+    hasLivePayload: true,
+    surface: { hideMessage: true, suppressStream: false },
+  })
+
+  assert.equal(emptyStreamIdx, 4)
+  assert.equal(liveStreamIdx, 4,
+    'the same row index keeps the active shell mounted when reconnect/question catch-up resumes')
+  assert.equal(chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx: -1,
+    trailingAssistantPartialIdx: 4,
+    hasLivePayload: true,
+    surface: { hideMessage: false, suppressStream: false },
+  }), -1, 'an unrelated prior assistant remains ordinary history')
+})
+
+test('active row data-key is latched for both live-first and DB-first source switches', () => {
+  const synthetic = chooseActiveAssistantDataKey({
+    latched: null,
+    mirroredMsg: null,
+    mirrorIndex: -1,
+    hasLivePayload: true,
+    chatId: 'chat-1',
+  })
+  assert.equal(synthetic, 'streaming-chat-1')
+  assert.equal(chooseActiveAssistantDataKey({
+    latched: { key: synthetic, mirrorKey: null },
+    mirroredMsg: { role: 'assistant', ts: 9 },
+    mirrorIndex: 2,
+    hasLivePayload: true,
+    chatId: 'chat-1',
+  }), synthetic, 'live-first DB adoption must keep the mounted synthetic anchor')
+
+  const dbFirst = chooseActiveAssistantDataKey({
+    latched: null,
+    mirroredMsg: { role: 'assistant', ts: 9 },
+    mirrorIndex: 2,
+    hasLivePayload: false,
+    chatId: 'chat-1',
+  })
+  assert.equal(dbFirst, 'assistant-9')
+  assert.equal(chooseActiveAssistantDataKey({
+    latched: { key: dbFirst, mirrorKey: dbFirst },
+    mirroredMsg: { role: 'assistant', ts: 9 },
+    mirrorIndex: 2,
+    hasLivePayload: true,
+    chatId: 'chat-1',
+  }), dbFirst, 'DB-first bridge must keep its durable anchor when live data wins')
+
+  const released = chooseActiveAssistantDataKey({
+    latched: { key: dbFirst, mirrorKey: dbFirst },
+    mirroredMsg: null,
+    mirrorIndex: -1,
+    hasLivePayload: true,
+    chatId: 'chat-1',
+  })
+  assert.equal(released, synthetic)
+  assert.notEqual(released, dbFirst,
+    'an unrelated live answer must not duplicate the restored history row data-key')
 })
 
 test('text prefix does not hide a persisted tool block when stream lacks it', () => {
