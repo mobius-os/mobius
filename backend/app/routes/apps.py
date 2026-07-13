@@ -638,6 +638,7 @@ async def install_app(
     background_color=app.background_color,
     display=app.display,
     offline_contract=app.offline_contract,
+    system_prompt_file=app.system_prompt_file,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,
