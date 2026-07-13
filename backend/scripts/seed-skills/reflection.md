@@ -128,11 +128,12 @@ Memory alone.
 
 Read, in this order:
 
-1. `/data/shared/memory/update-log/*.jsonl` — Memory's recent scheduled
+1. `/data/shared/memory/app-state/update-log/*.jsonl` — Memory's recent scheduled
    consolidation records. Prefer the latest few files.
-2. `/data/cron-logs/memory.log` and recent `cron_outcome` activity for the
-   Memory job — only enough to see whether Memory ran, failed, timed out, or
-   repeatedly reported the same followup.
+2. `/data/apps/<memory-app-id>/job-state/memory.log` (using the live app id
+   returned by the API) and the installed app's schedule state — only enough to
+   see whether Memory ran, failed, timed out, or repeatedly reported the same
+   followup.
 3. The interviews' Memory answers from phase 1 — complaints about missing,
    stale, misleading, or over-broad recall.
 
@@ -148,9 +149,9 @@ Then act on the **system** signal:
   partner, carry at most one or two high-value questions into the brief. The
   partner's answer becomes next-run input; Memory can then resolve the graph.
 - If several agents wished they had remembered the same thing but Memory's log
-  did not catch it, improve `/data/shared/skills/memory.md` surgically or note a
-  Memory-runner/platform improvement. Do not edit the graph itself unless the
-  fix is a trivial repair required to unblock the viewer.
+  did not catch it, propose a change to the Memory app's runner or app-owned
+  skill. Do not edit the installed skill or graph from Reflection; app update
+  and recovery must remain the only owners of those bytes.
 - If Memory is healthy and no interview raised a memory-system issue, write one
   sentence in your run notes and move on. Empty phase 3 is fine.
 

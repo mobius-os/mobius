@@ -41,7 +41,7 @@ def _make_app(client, auth, source_dir):
 
 
 def test_run_job_spawns_fetch_sh(client, auth, tmp_path):
-  """Happy path: source_dir contains fetch.sh → spawns bash <path> <app_id>."""
+  """Happy path enters the supervised wrapper with app id + fetch.sh."""
   source_dir = _app_source("news")
   fetch = source_dir / "fetch.sh"
   fetch.write_text("#!/bin/bash\necho ok\n")
@@ -59,7 +59,8 @@ def test_run_job_spawns_fetch_sh(client, auth, tmp_path):
     mock_popen.assert_called_once()
     args, kwargs = mock_popen.call_args
     argv = args[0]
-    assert argv == ["bash", str(fetch), str(app_id)]
+    assert argv[-2:] == [str(app_id), str(fetch)]
+    assert argv[1].endswith("app-job-runner.py")
     assert kwargs.get("cwd") == str(source_dir)
 
 
@@ -77,7 +78,7 @@ def test_run_job_falls_back_to_job_sh(client, auth, tmp_path):
     r = client.post(f"/api/apps/{app_id}/run-job", headers=auth)
     assert r.status_code == 202
     argv = mock_popen.call_args[0][0]
-    assert argv[1] == str(job)
+    assert argv[-2:] == [str(app_id), str(job)]
 
 
 def test_run_job_404_for_unknown_app(client, auth):

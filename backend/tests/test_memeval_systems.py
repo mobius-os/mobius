@@ -62,7 +62,6 @@ def test_production_injection_exercises_the_real_build_memory_block(tmp_path: Pa
     "## Summary\nUser wants cake recipes in grams.\n",
     encoding="utf-8",
   )
-  (mem / ".ready").write_text("", encoding="utf-8")
   res = ProductionInjectionSystem(tmp_path).retrieve("cups or grams?")
   # Query-independent continuity must not pull graph state into a new chat.
   assert res.selected_node_ids == ["chat:c1"]
@@ -70,9 +69,9 @@ def test_production_injection_exercises_the_real_build_memory_block(tmp_path: Pa
   assert "cake recipes in grams" in res.context
 
 
-def test_production_injection_empty_without_ready_sentinel(tmp_path: Path):
-  # No `.ready` -> graph mode is gated off -> an empty block (the agent reads
-  # the graph on demand instead). Lock in the gate the live model relies on.
+def test_production_injection_empty_without_chat_summaries(tmp_path: Path):
+  # Graph files are irrelevant to core startup context. With no chat summaries,
+  # the block is empty regardless of optional app-owned graph state.
   mem = tmp_path / "shared" / "memory"
   mem.mkdir(parents=True)
   (mem / "index.md").write_text("# Home\n", encoding="utf-8")

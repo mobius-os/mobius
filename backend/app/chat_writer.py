@@ -46,6 +46,7 @@ import threading
 import time
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -432,6 +433,9 @@ class PersistCompaction(_Command):
   chat_id: str = ""
   run_token: str = ""
   summary: str = ""
+  # Snapshot captured before the potentially-slow summarizer.  Publication is
+  # a compare-and-swap against this exact durable chat revision.
+  expected_updated_at: datetime | None = None
 
 
 @dataclass
@@ -631,6 +635,8 @@ def _needs_broad_chat_fence(cmd: _Command) -> bool:
   if isinstance(cmd, ReplaceTranscript):
     return True
   if isinstance(cmd, AppendSteeredUserMessage):
+    return True
+  if isinstance(cmd, PersistCompaction):
     return True
   if isinstance(cmd, AnswerQuestion):
     return not cmd.run_token
@@ -1802,22 +1808,53 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    chat = _active_chat(db, cmd.chat_id)
-    if chat is None:
+    from app.models import Chat
+
+    row = db.execute(
+      select(
+        Chat.messages,
+        Chat.pending_messages,
+        Chat.run_status,
+        Chat.updated_at,
+      ).where(
+        Chat.id == cmd.chat_id,
+        Chat.deleted_at.is_(None),
+      )
+    ).first()
+    if row is None:
       raise _PersistFailed("PersistCompaction: chat not found or deleted")
-    msgs = list(chat.messages or [])
+    messages, pending, run_status, updated_at = row
+    if (
+      run_status is not None
+      or cmd.expected_updated_at is None
+      or updated_at != cmd.expected_updated_at
+    ):
+      return {"stale": True, "stored": None}
+    msgs = list(messages or [])
     new_msg = {
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
-      "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
+      "ts": next_message_ts(msgs + list(pending or [])),
     }
     msgs.append(new_msg)
-    chat.messages = msgs
-    chat.updated_at = datetime.now(UTC)
+    result = db.execute(
+      update(Chat)
+      .where(
+        Chat.id == cmd.chat_id,
+        Chat.deleted_at.is_(None),
+        Chat.run_status.is_(None),
+        Chat.updated_at == cmd.expected_updated_at,
+      )
+      .values(messages=msgs, updated_at=datetime.now(UTC))
+      .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+      db.rollback()
+      return {"stale": True, "stored": None}
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistCompaction did not persist")
-    return {"stored": new_msg}
+    return {"stale": False, "stored": new_msg}
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.

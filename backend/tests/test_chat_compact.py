@@ -12,6 +12,8 @@ import pytest
 from types import SimpleNamespace
 
 from app import chat as chat_mod, compaction
+from app import models
+from app.database import SessionLocal
 
 
 def _make_chat_with_messages(client, auth, messages):
@@ -126,6 +128,59 @@ def test_compact_unknown_chat_404(client, auth, monkeypatch):
   monkeypatch.setattr(compaction, "summarize_chat", _stub)
   r = client.post("/api/chats/does-not-exist/compact", headers=auth)
   assert r.status_code == 404
+
+
+def test_compact_rejects_if_chat_changes_during_summarize(
+  client, auth, monkeypatch,
+):
+  chat_id = _make_chat_with_messages(
+    client, auth, [{"role": "user", "content": "snapshot me"}],
+  )
+
+  async def _stub(messages, *, data_dir):
+    with SessionLocal() as db:
+      row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+      row.messages = list(row.messages or []) + [
+        {"role": "user", "content": "arrived during compaction"},
+      ]
+      db.commit()
+    return "stale summary"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  response = client.post(f"/api/chats/{chat_id}/compact", headers=auth)
+
+  assert response.status_code == 409, response.text
+  chat = client.get(f"/api/chats/{chat_id}?limit=50", headers=auth).json()
+  assert any(
+    msg.get("content") == "arrived during compaction"
+    for msg in chat["messages"]
+  )
+  assert not any(msg.get("kind") == "compaction" for msg in chat["messages"])
+
+
+def test_compact_honors_durable_busy_marker_without_live_registry(
+  client, auth, monkeypatch,
+):
+  chat_id = _make_chat_with_messages(
+    client, auth, [{"role": "user", "content": "busy"}],
+  )
+  with SessionLocal() as db:
+    row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    row.run_status = "running"
+    db.commit()
+
+  called = False
+
+  async def _stub(messages, *, data_dir):
+    nonlocal called
+    called = True
+    return "must not run"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  response = client.post(f"/api/chats/{chat_id}/compact", headers=auth)
+
+  assert response.status_code == 409
+  assert called is False
 
 
 def test_build_transcript_text_drops_empty_and_tail_caps():

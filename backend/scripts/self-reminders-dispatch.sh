@@ -4,8 +4,9 @@
 # The agent schedules relational check-ins ("check in on the user in
 # three days") via POST /api/self-reminders; this script is the cron
 # half that wakes them. It runs every few minutes from a single OS cron
-# entry (installed via init-cron-scaffold.sh, replayed on boot from
-# /data/apps/_self-reminders/init-cron.sh) and asks the backend to fire
+# entry. Boot invokes the trusted platform scaffold for this reserved job;
+# unlike app-owned declarations, its init file is not executed. The job asks
+# the backend to fire
 # every reminder whose due time has passed.
 #
 # The heavy lifting lives in POST /api/self-reminders/dispatch (server-

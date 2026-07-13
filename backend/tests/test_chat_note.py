@@ -1,10 +1,13 @@
-"""The turn-end chat-note guarantee: the gate that decides whether the platform
-writes a chat's memory note when the agent skipped it (chat.py), plus the
-tool-free summarizer's parse helpers (scripts/chat_note.py)."""
+"""The platform-owned turn-end chat-summary publisher and parse helpers."""
 
 import importlib.util
+import json
+import os
+import sqlite3
 import types
 from pathlib import Path
+
+import pytest
 
 from app import chat, chat_queue
 
@@ -59,28 +62,53 @@ def test_fires_on_stop_handoff(tmp_path):
 
 
 def test_skips_on_non_settled_dispositions(tmp_path):
-  # LIMIT_PARKED is deliberately skipped: the summarizer would spawn the same
-  # CLI that just hit the usage limit, and the parked continuation's own
-  # terminal transition ensures the note once it completes.
   for d in (
     chat_queue.TerminalDisposition.CONTINUATION_PROMOTED,
     chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER,
     chat_queue.TerminalDisposition.STALE_NO_ACTION,
-    chat_queue.TerminalDisposition.LIMIT_PARKED,
   ):
     assert not chat._should_ensure_chat_note(
       _settings(on=True), "c1", d, str(tmp_path), 0.0
     ), d
 
 
-def test_skips_when_agent_wrote_the_note_this_turn(tmp_path):
-  # The note did not exist at turn START (before=0); the agent created it
-  # during the turn → its mtime now advances past `before` → the platform must
-  # NOT also write it.
+def test_fires_on_limit_parked(tmp_path):
+  # The parked response is the chat's final durable state until a later
+  # resume. It must be summarized immediately, without retrying the exhausted
+  # provider.
+  assert chat._should_ensure_chat_note(
+    _settings(on=True), "c1",
+    chat_queue.TerminalDisposition.LIMIT_PARKED,
+    str(tmp_path), 0.0,
+  )
+
+
+@pytest.mark.asyncio
+async def test_limit_publisher_forces_provider_free_summary(monkeypatch):
+  captured = {}
+
+  class Proc:
+    returncode = 0
+
+    async def communicate(self):
+      return b"", b""
+
+  async def spawn(*args, **kwargs):
+    captured.update(kwargs)
+    return Proc()
+
+  monkeypatch.setattr(chat.asyncio, "create_subprocess_exec", spawn)
+  await chat._ensure_chat_note("/tmp/data", "c1", deterministic=True)
+  assert captured["env"]["CHAT_NOTE_PROVIDER"] == "deterministic"
+
+
+def test_still_fires_if_a_legacy_writer_touched_the_note(tmp_path):
+  # A legacy agent/tool write cannot take ownership away from the platform.
+  # chat_note.py snapshots that content and publishes with its durable CAS.
   before = chat._chat_note_mtime(str(tmp_path), "c1")  # 0.0 — absent at start
-  _note(tmp_path, "c1")  # the agent writes it this turn
+  _note(tmp_path, "c1")
   assert chat._chat_note_mtime(str(tmp_path), "c1") > before
-  assert not chat._should_ensure_chat_note(
+  assert chat._should_ensure_chat_note(
     _settings(on=True), "c1",
     chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
     str(tmp_path), note_mtime_before=before,
@@ -123,6 +151,58 @@ def test_build_prompt_includes_existing_note_to_grow():
   assert "grow it" in p.lower()
   assert "dedupe" in p.lower()
   assert "old" in p
+
+
+def test_render_transcript_keeps_visible_blocks_and_excludes_tool_secrets():
+  cn = _load_chat_note()
+  raw = json.dumps([
+    {"role": "user", "content": "Keep the early requirement"},
+    {
+      "role": "assistant",
+      "content": "",
+      "blocks": [
+        {
+          "type": "question",
+          "questions": [{"question": "Which color?"}],
+          "answers": {"Which color?": "Blue"},
+        },
+        {"type": "error", "message": "The preview failed"},
+        {"type": "tool", "input": "token=SECRET", "output": "SECRET"},
+        {"type": "thinking", "content": "SECRET"},
+      ],
+    },
+  ])
+
+  rendered = cn._render_transcript(raw)
+
+  assert "Keep the early requirement" in rendered
+  assert "Question: Which color?" in rendered
+  assert "Answer to Which color?: Blue" in rendered
+  assert "Error: The preview failed" in rendered
+  assert "SECRET" not in rendered
+
+
+def test_claude_summary_prompt_receives_complete_transcript(monkeypatch):
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "_configured_provider", lambda: "claude")
+  captured = {}
+  valid = (
+    "---\ntype: chat\ndescription: long chat\n---\n"
+    "## Digest\ncomplete\n\n## Summary\ncomplete\n\n"
+    "## Facts & intent\n- intent: test"
+  )
+
+  def fake_run(cmd, **_kwargs):
+    captured["prompt"] = cmd[cmd.index("-p") + 1]
+    return types.SimpleNamespace(stdout=valid, stderr="", returncode=0)
+
+  monkeypatch.setattr(cn.subprocess, "run", fake_run)
+  early = "EARLY-CONTEXT-MARKER"
+  transcript = early + ("x" * 20_000) + "LATE-CONTEXT-MARKER"
+
+  assert cn._looks_like_note(cn._summarize(transcript, ""))
+  assert early in captured["prompt"]
+  assert "LATE-CONTEXT-MARKER" in captured["prompt"]
 
 
 def test_clean_note_output_keeps_a_clean_note_intact():
@@ -197,48 +277,145 @@ def test_sync_title_only_noop_when_note_absent(tmp_path, monkeypatch):
   assert called == []
 
 
-def test_run_exits_3_with_reason_when_cli_returns_junk(tmp_path, monkeypatch, capsys):
-  # A dead CLI (auth/credit failure) produces junk stdout + an error on its
-  # stderr. run() must exit 3 with the returncode + stderr tail in the reason
-  # (the caller's WARN line) instead of silently exiting 0.
+def test_dead_claude_falls_back_to_complete_local_note(tmp_path, monkeypatch):
   cn = _load_chat_note()
-  monkeypatch.setattr(cn, "MEMORY_DIR", tmp_path / "shared" / "memory")
-  monkeypatch.setattr(cn, "_read_transcript", lambda cid: "user: hi")
+  monkeypatch.setattr(cn, "_configured_provider", lambda: "claude")
   junk = types.SimpleNamespace(
     stdout="no note here", stderr="Credit balance is too low", returncode=1
   )
   monkeypatch.setattr(cn.subprocess, "run", lambda *a, **k: junk)
-  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c1"])
-  assert cn.run() == 3
-  err = capsys.readouterr().err
-  assert "rc=1" in err
-  assert "Credit balance is too low" in err
+  note = cn._summarize("user: hi\n\nassistant: hello", "")
+  assert cn._looks_like_note(note)
+  assert "user: hi" in note
+  assert "assistant: hello" in note
 
 
-def test_run_returns_0_when_a_newer_writer_won_the_race(tmp_path, monkeypatch):
-  # A fresh turn's backstop writing the note while our (slower) LLM call runs
-  # is healthy concurrency, not failure — exit 0 and don't clobber the newer
-  # note with our stale output.
+def _snapshot_db(cn, tmp_path):
+  db_path = tmp_path / "ultimate.db"
+  con = sqlite3.connect(db_path)
+  con.execute(
+    "create table chats ("
+    "id text primary key, messages text, updated_at text, "
+    "run_status text, deleted_at text)"
+  )
+  con.execute("create table owner (provider text)")
+  con.execute("insert into owner values ('codex')")
+  con.execute(
+    "insert into chats values (?, ?, ?, null, null)",
+    (
+      "c1",
+      json.dumps([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+      ]),
+      "2026-07-13 10:00:00.000000",
+    ),
+  )
+  con.commit()
+  con.close()
+  cn.DB = db_path
+  cn.MEMORY_DIR = tmp_path / "memory"
+  return db_path
+
+
+def _valid_note(description="ours", summary="current"):
+  return (
+    f"---\ntype: chat\ndescription: {description}\n---\n"
+    f"## Digest\n{summary}\n\n## Summary\n{summary}\n\n"
+    "## Facts & intent\n- intent: test"
+  )
+
+
+def test_two_backstops_publish_only_one_revision(tmp_path):
   cn = _load_chat_note()
-  mem = tmp_path / "shared" / "memory"
-  monkeypatch.setattr(cn, "MEMORY_DIR", mem)
-  monkeypatch.setattr(cn, "_read_transcript", lambda cid: "user: hi")
-  monkeypatch.setattr(cn, "_patch_title", lambda *a: None)
-  note = mem / "chats" / "c1" / "index.md"
+  _snapshot_db(cn, tmp_path)
+  transcript, revision = cn._read_chat_snapshot("c1")
+  note = cn._note_path("c1")
+  _existing, note_revision = cn._read_note_snapshot(note)
 
-  def racer_wins(*a, **k):
-    note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text("---\ntype: chat\ndescription: racer\n---\n## Summary\nnewer")
-    return types.SimpleNamespace(
-      stdout=("---\ntype: chat\ndescription: ours\n---\n"
-              "## Digest\nstale\n\n## Summary\nstale"),
-      stderr="", returncode=0,
+  assert cn._publish_if_current(
+    "c1", revision, note_revision, note, _valid_note("first"),
+  )
+  assert not cn._publish_if_current(
+    "c1", revision, note_revision, note, _valid_note("stale second"),
+  )
+  assert "description: first" in note.read_text()
+
+
+def test_new_turn_or_delete_makes_summary_publication_stale(tmp_path):
+  cn = _load_chat_note()
+  db_path = _snapshot_db(cn, tmp_path)
+  _transcript, revision = cn._read_chat_snapshot("c1")
+  note = cn._note_path("c1")
+  _existing, note_revision = cn._read_note_snapshot(note)
+  con = sqlite3.connect(db_path)
+  con.execute(
+    "update chats set run_status='running', updated_at=? where id='c1'",
+    ("2026-07-13 10:00:01.000000",),
+  )
+  con.commit()
+  con.close()
+
+  assert not cn._publish_if_current(
+    "c1", revision, note_revision, note, _valid_note("stale"),
+  )
+  assert not note.exists()
+
+  con = sqlite3.connect(db_path)
+  con.execute(
+    "update chats set run_status=null, deleted_at='2026-07-13', "
+    "updated_at=? where id='c1'",
+    (revision,),
+  )
+  con.commit()
+  con.close()
+  assert not cn._publish_if_current(
+    "c1", revision, note_revision, note, _valid_note("deleted"),
+  )
+  assert not note.exists()
+
+
+def test_note_hash_cas_detects_same_mtime_replacement(tmp_path):
+  cn = _load_chat_note()
+  _snapshot_db(cn, tmp_path)
+  _transcript, revision = cn._read_chat_snapshot("c1")
+  note = cn._note_path("c1")
+  note.parent.mkdir(parents=True)
+  note.write_text(_valid_note("old"))
+  timestamp = note.stat().st_mtime
+  _old, note_revision = cn._read_note_snapshot(note)
+  note.write_text(_valid_note("racer"))
+  os.utime(note, (timestamp, timestamp))
+
+  assert not cn._publish_if_current(
+    "c1", revision, note_revision, note, _valid_note("stale"),
+  )
+  assert "description: racer" in note.read_text()
+
+
+def test_note_write_failure_does_not_advance_chat_revision(
+  tmp_path, monkeypatch,
+):
+  cn = _load_chat_note()
+  db_path = _snapshot_db(cn, tmp_path)
+  _transcript, revision = cn._read_chat_snapshot("c1")
+  note = cn._note_path("c1")
+  _old, note_revision = cn._read_note_snapshot(note)
+
+  def fail_write(*args, **kwargs):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(cn, "_atomic_write_text", fail_write)
+  with pytest.raises(OSError, match="disk full"):
+    cn._publish_if_current(
+      "c1", revision, note_revision, note, _valid_note("never"),
     )
-
-  monkeypatch.setattr(cn.subprocess, "run", racer_wins)
-  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c1"])
-  assert cn.run() == 0
-  assert "newer" in note.read_text()
+  con = sqlite3.connect(db_path)
+  current = con.execute(
+    "select updated_at from chats where id='c1'",
+  ).fetchone()[0]
+  con.close()
+  assert current == revision
 
 
 def test_clean_note_output_preserves_horizontal_rule_in_body():

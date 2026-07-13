@@ -13,11 +13,9 @@ envelope and observability event.
 
 from __future__ import annotations
 
-import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
-
-log = logging.getLogger("mobius.memory")
 
 # Budget for the always-injected recent-chat digest portion.
 DEFAULT_BUDGET_BYTES = 25_000
@@ -52,119 +50,6 @@ class MemoryBlock:
 
 def memory_dir(data_dir: str | Path) -> Path:
   return Path(data_dir) / "shared" / "memory"
-
-
-def is_graph_ready(data_dir: str | Path) -> bool:
-  """Graph mode is active iff the atomic `.ready` sentinel is present."""
-  return (memory_dir(data_dir) / ".ready").is_file()
-
-
-# ─── Usage tracking (the "access_count" / Memory "Used" signal) ───────────
-#
-# access_count is "how often a note was loaded" — a usage signal for the Memory
-# app's "Used" column. v2 retrieval no longer RANKS by it (injection is
-# router->traverse); it survives only as viewer/analytics signal. We track
-# it in a sidecar counter (`usage.json`) rather than rewriting note
-# frontmatter on the hot path: a counter bump is cheap and churns no git
-# history. usage.json is the SELECTION signal: a node accrues a count when
-# retrieval RETURNS it as relevant — the memory-search subagent's cited
-# SOURCES (`record_usage_ids`) — NOT when it is merely injected into the prompt
-# for free or traversed during a search. `load_usage` feeds the graph builder,
-# so the effective access_count = frontmatter baseline + live usage; the Memory
-# viewer's "Used" column reads it. Keyed by node id (a note's slug), matching
-# graph.json.
-def _usage_path(data_dir: str | Path) -> Path:
-  return memory_dir(data_dir) / "usage.json"
-
-
-def _loaded_path_to_id(rel: str) -> str | None:
-  """Maps a `loaded` entry (e.g. 'notes/foo.md', 'index.md') to its graph
-  node id. inbox.md, recent-chats.md, and anything unrecognised return None
-  (rolling buffers aren't graph nodes — counting them would invent phantom
-  ids in usage.json and the read-trace)."""
-  import os
-  # Per-chat note: chats/<id>/index.md is keyed by the chat, not the basename
-  # (which is "index.md" and would collide with the root router index).
-  if rel.startswith("chats/") and rel.endswith("/index.md"):
-    return "chat:" + rel.split("/")[1]
-  name = os.path.basename(rel)
-  if name in ("inbox.md", "recent-chats.md"):
-    return None
-  if name == "index.md":
-    return "index"
-  if name.endswith(".md"):
-    return name[:-3]
-  return None
-
-
-def _read_usage_file(path: Path) -> dict[str, int]:
-  """Reads a usage.json by absolute path, tolerating absence/corruption."""
-  import json
-  try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
-    return {}
-  if not isinstance(data, dict):
-    return {}
-  return {k: v for k, v in data.items() if isinstance(v, int)}
-
-
-def load_usage(data_dir: str | Path) -> dict[str, int]:
-  """Reads the usage counter for an instance, tolerating absence (→ {})."""
-  return _read_usage_file(_usage_path(data_dir))
-
-
-def _bump_usage(data_dir: str | Path, ids: list[str]) -> None:
-  """Increments the usage counter for each graph node id. Best-effort and
-  side-effecting. Atomic temp-write + rename so a concurrent chat start can't
-  read a half-written counter."""
-  import json
-  import os
-  import tempfile
-  ids = [i for i in ids if i]
-  if not ids:
-    return
-  counts = load_usage(data_dir)
-  for nid in ids:
-    counts[nid] = counts.get(nid, 0) + 1
-  path = _usage_path(data_dir)
-  try:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Write to a UNIQUE temp file (not a shared "usage.json.tmp"): two
-    # concurrent chat starts would otherwise both write the same temp path and
-    # one could os.replace a file the other is still writing — corrupting it.
-    # mkstemp gives each writer its own temp; os.replace is atomic. (Increments
-    # can still race across processes, but Mobius runs a single worker where
-    # this sync write is atomic, and the counter is best-effort regardless.)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".usage-", suffix=".tmp")
-    try:
-      with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(counts, fh)
-      os.replace(tmp, path)
-    except BaseException:
-      try:
-        os.unlink(tmp)
-      except OSError:
-        pass
-      raise
-  except OSError as exc:
-    log.warning("memory.record_usage: could not persist usage.json: %r", exc)
-
-
-def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
-  """Increments the usage counter for every loaded note PATH's id. Best-effort
-  and side-effecting; never called from `build_memory_block` (which stays
-  pure). Path variant of `record_usage_ids` for callers that hold graph-
-  relative paths rather than node ids."""
-  _bump_usage(data_dir, [_loaded_path_to_id(p) for p in loaded])
-
-
-def record_usage_ids(data_dir: str | Path, ids: list[str]) -> None:
-  """Increments the usage counter for graph node ids directly — the SELECTION
-  signal. A node accrues access_count when retrieval RETURNS it as relevant
-  (the memory-search subagent's cited SOURCES), not when it is merely injected
-  into the prompt for free or traversed during a search."""
-  _bump_usage(data_dir, ids)
 
 
 def parse_frontmatter(text: str) -> dict[str, object]:
@@ -221,6 +106,7 @@ def build_memory_block(
   *,
   budget_bytes: int = DEFAULT_BUDGET_BYTES,
   max_notes: int = DEFAULT_MAX_NOTES,
+  eligible_chat_ids: Collection[str] | None = None,
 ) -> MemoryBlock:
   """Assembles the injected memory context.
 
@@ -231,9 +117,9 @@ def build_memory_block(
   An installed system app may teach the agent to request graph recall through
   a separate prompt-scoped reader.
 
-  Returns an empty block only when there are no usable chat notes. `max_notes`
-  is retained for signature stability; the recent-chat cap is
-  `RECENT_CHAT_NOTES`. Pure: never writes and never raises on missing/garbled
+  Returns an empty block only when there are no usable chat notes. ``max_notes``
+  can narrow the platform default but cannot expand it past
+  ``RECENT_CHAT_NOTES``. Pure: never writes and never raises on missing/garbled
   files.
   """
   # Clamp at 0 so a stray negative budget can't reach the byte-slicing below,
@@ -245,7 +131,10 @@ def build_memory_block(
   used = 0
   # Each note is independently capped. Continue past one that does not fit so
   # an unusually long newest note cannot hide every older short digest.
-  for note in _recent_chat_notes(root, RECENT_CHAT_NOTES):
+  note_limit = min(RECENT_CHAT_NOTES, max(0, max_notes))
+  for note in _recent_chat_notes(
+    root, note_limit, eligible_chat_ids=eligible_chat_ids,
+  ):
     digest = _chat_digest(note)
     if not digest:
       continue
@@ -264,16 +153,36 @@ def build_memory_block(
   )
 
 
-def _recent_chat_notes(root: Path, limit: int) -> list[Path]:
+def _recent_chat_notes(
+  root: Path,
+  limit: int,
+  *,
+  eligible_chat_ids: Collection[str] | None = None,
+) -> list[Path]:
   """The per-chat note files (`chats/<id>/index.md`), most-recently-modified
   first, capped at `limit`. Their bounded digests are injected at
   session start. Tolerates a missing `chats/` dir (returns [])."""
   chats = root / "chats"
   if not chats.is_dir():
     return []
-  notes = [p for p in chats.glob("*/index.md") if p.is_file()]
-  notes.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-  return notes[:limit]
+  eligible = set(eligible_chat_ids) if eligible_chat_ids is not None else None
+  candidates: list[tuple[float, Path]] = []
+  try:
+    paths = chats.glob("*/index.md")
+    for path in paths:
+      if eligible is not None and path.parent.name not in eligible:
+        continue
+      try:
+        if path.is_file():
+          candidates.append((path.stat().st_mtime, path))
+      except OSError:
+        # A hard-purge may remove a note between glob and stat.  It was already
+        # ineligible for durable continuity, so treat the race as a miss.
+        continue
+  except OSError:
+    return []
+  candidates.sort(key=lambda item: item[0], reverse=True)
+  return [path for _mtime, path in candidates[:limit]]
 
 
 def _strip_frontmatter(text: str) -> str:

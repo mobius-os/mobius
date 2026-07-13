@@ -182,14 +182,14 @@ def validate_manifest_contract(manifest) -> None:
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")
 
-  for field in ("offline_capable", "embeds_agent"):
+  for field in ("offline_capable", "embeds_agent", "system_app"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
 
   permissions = manifest.get("permissions", {})
   if not isinstance(permissions, Mapping):
     _fail("Manifest `permissions` must be an object.")
-  for field in ("cross_app_access", "share_with_apps"):
+  for field in ("cross_app_access", "share_with_apps", "shared_memory"):
     if permissions.get(field, "none") not in ("none", "read", "write"):
       _fail(f"Manifest `permissions.{field}` must be one of none/read/write.")
   if permissions.get("chat_log_access", "none") not in ("none", "summary", "full"):
@@ -197,7 +197,9 @@ def validate_manifest_contract(manifest) -> None:
       "Manifest `permissions.chat_log_access` must be one of "
       "none/summary/full."
     )
-  for field in ("manage_apps", "github_access", "filesystem_access"):
+  for field in (
+    "manage_apps", "github_access", "filesystem_access", "background_agent",
+  ):
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
 
@@ -272,6 +274,11 @@ def validate_manifest_contract(manifest) -> None:
 
   system_prompt = manifest.get("system_prompt")
   if system_prompt is not None:
+    if manifest.get("system_app") is not True:
+      _fail(
+        "Manifest `system_prompt` requires `system_app: true` so global "
+        "agent-prompt authority is explicit and owner-reviewable."
+      )
     if (
       not isinstance(system_prompt, str)
       or not system_prompt.endswith(".md")
@@ -314,3 +321,17 @@ def validate_manifest_contract(manifest) -> None:
       )
     if job is not None:
       validate_repo_relative_path(job, "schedule.job")
+    for field in ("user_configurable", "initialize_on_install"):
+      if field in schedule and not isinstance(schedule[field], bool):
+        _fail(f"Manifest `schedule.{field}` must be a boolean.")
+    if schedule.get("initialize_on_install") is True and job is None:
+      _fail(
+        "Manifest `schedule.initialize_on_install` requires `schedule.job`."
+      )
+
+  if permissions.get("background_agent") is True and not (
+    isinstance(schedule, Mapping) and schedule.get("job")
+  ):
+    _fail(
+      "Manifest `permissions.background_agent: true` requires `schedule.job`."
+    )

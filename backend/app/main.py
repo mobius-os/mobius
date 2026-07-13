@@ -263,6 +263,31 @@ async def lifespan(app):
       _db.close()
   except Exception as exc:
     _log.error("source_dir backfill failed: %s", exc, exc_info=True)
+  # Rewrite schedules created by older releases through the revocable common
+  # job runner. The entrypoint does not start cron until lifespan completes,
+  # so replayed legacy direct entries cannot fire in the migration window.
+  # Best-effort and per-app isolated: one malformed legacy source must not
+  # prevent the server (or unrelated schedules) from starting.
+  try:
+    from app.routes.apps import reconcile_app_cron_supervision
+    from app.database import SessionLocal as _CronSession
+    _cron_db = _CronSession()
+    try:
+      _cron_count, _cron_warnings = reconcile_app_cron_supervision(_cron_db)
+    finally:
+      _cron_db.close()
+    if _cron_count:
+      _log.info("supervised %d app cron schedule(s)", _cron_count)
+    for _warning in _cron_warnings:
+      _log.warning("app cron supervision skipped: %s", _warning)
+    if not _cron_warnings:
+      _cron_ready = (
+        Path(settings.data_dir) / "run" / "app-cron-supervision-ready"
+      )
+      _cron_ready.parent.mkdir(parents=True, exist_ok=True)
+      _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
+  except Exception as exc:
+    _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
   # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
   # auto-recompile and refresh the served bundle — agents don't need to
   # re-run register_app.py just to push a code change.

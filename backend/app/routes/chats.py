@@ -690,12 +690,12 @@ def get_chat_agent_context(
   Exposes exactly what the agent is told, reconstructed the way run_chat
   assembles it but WITHOUT running a turn: the static system prompt (the
   core.md/skill constitution, or this chat's custom override) plus the
-  first-turn injected blocks — the knowledge-graph memory block, the embedded
+  first-turn injected blocks — recent chat Digests, the embedded
   <app_context>, the <app_report> brief, and any compaction summary. Lets the
   owner answer "what does the agent actually know here?", most useful for
   embedded-app chats (Latex/News/Reflection) where the app context + report
   data travel in the prompt rather than the visible message. Owner-only; the
-  prompt holds instructions + memory, no secrets, but it is still the owner's
+  prompt holds instructions + continuity context, but it is still the owner's
   instance. All the underlying builders are pure/read-only.
   """
   from app import memory
@@ -717,7 +717,16 @@ def get_chat_agent_context(
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
-  memory_block = memory.build_memory_block(data_dir).text or None
+  eligible_chat_ids = {
+    row[0]
+    for row in db.query(models.Chat.id).filter(
+      models.Chat.deleted_at.is_(None),
+    ).all()
+  }
+  memory_block = memory.build_memory_block(
+    data_dir,
+    eligible_chat_ids=eligible_chat_ids,
+  ).text or None
   return {
     "system_prompt": system_prompt,
     "system_prompt_source": "custom" if custom else "skill",
@@ -841,7 +850,7 @@ async def compact_chat(
   )
 
   chat = get_active_chat_or_404(db, chat_id)
-  if is_chat_running(chat_id):
+  if is_chat_running(chat_id) or chat.run_status is not None:
     # A live turn's streaming snapshots target the trailing assistant row;
     # appending a compaction block mid-turn would race/clobber it. Compaction
     # is a between-turns operation (e.g. before a provider switch) — refuse
@@ -872,7 +881,10 @@ async def compact_chat(
 
   ack = get_writer().submit(
     PersistCompaction(
-      chat_id=chat_id, run_token=alloc_run_token(), summary=summary
+      chat_id=chat_id,
+      run_token=alloc_run_token(),
+      summary=summary,
+      expected_updated_at=chat.updated_at,
     )
   )
   try:
@@ -880,6 +892,14 @@ async def compact_chat(
   except Exception:
     raise HTTPException(
       status_code=503, detail="Could not store the compaction; try again."
+    )
+  if result.get("stale"):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "Chat changed while it was being compacted. Nothing was stored; "
+        "finish the current turn and try again."
+      ),
     )
   command = f"POST /api/chats/{chat_id}/compact"
   return {
