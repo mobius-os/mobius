@@ -81,6 +81,11 @@ OFFLINE_FLAG = Path("/data/.platform-offline")
 # can show "rolled back — needs repair" rather than silently staying "up to
 # date".
 ROLLED_BACK_FLAG = Path("/data/.platform-rolled-back")
+# Transient crash-safety marker written immediately before reconcile mutates the
+# served tree. If the boot subprocess is SIGKILLed mid-rebase/probe/rollback, the
+# post-timeout boot guard uses this sha to restore the last committed served tip
+# before uvicorn imports anything.
+RECONCILE_PRE_FLAG = Path("/data/.platform-reconcile-pre")
 # A filesystem lock shared by the boot reconcile subprocess and the running
 # uvicorn's Apply path. It MUST be a real flock (not an asyncio.Lock): the boot
 # reconcile runs in a throwaway ``python3 -c`` process, so an in-process lock
@@ -285,6 +290,21 @@ def _local_branch(repo: Path = PLATFORM_REPO) -> str:
   return name if name and name != "HEAD" else LOCAL_BRANCH
 
 
+def _head_detached(repo: Path = PLATFORM_REPO) -> bool:
+  name = _git(
+    "rev-parse", "--abbrev-ref", "HEAD", repo=repo, check=False,
+  ).stdout.strip()
+  return name == "HEAD"
+
+
+def _reattach_detached_head(repo: Path, local: str) -> None:
+  """Move the working branch to the current detached HEAD, preserving the
+  worktree. This makes the subsequent ``commit_local`` land on the branch the
+  reconcile will actually fast-forward/rebase."""
+  if _head_detached(repo):
+    _git("checkout", "-B", local, "HEAD", repo=repo)
+
+
 def _has_origin(repo: Path = PLATFORM_REPO) -> bool:
   return _git("remote", "get-url", "origin", repo=repo, check=False).returncode == 0
 
@@ -321,6 +341,51 @@ def _abort_interrupted(repo: Path = PLATFORM_REPO) -> None:
     _git("rebase", "--abort", repo=repo, check=False)
   if (repo / ".git" / "MERGE_HEAD").exists():
     _git("merge", "--abort", repo=repo, check=False)
+
+
+def _write_reconcile_pre(sha: str) -> None:
+  tmp = RECONCILE_PRE_FLAG.with_name(
+    RECONCILE_PRE_FLAG.name + f".tmp-{os.getpid()}")
+  tmp.write_text(sha + "\n")
+  os.replace(tmp, RECONCILE_PRE_FLAG)
+
+
+def _clear_reconcile_pre() -> None:
+  RECONCILE_PRE_FLAG.unlink(missing_ok=True)
+
+
+def _read_reconcile_pre() -> str | None:
+  if not RECONCILE_PRE_FLAG.exists():
+    return None
+  sha = RECONCILE_PRE_FLAG.read_text().strip()
+  return sha or None
+
+
+def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
+  """Post-timeout boot guard: never let uvicorn import a half-applied tree.
+
+  The normal reconcile path cleans up after itself. This guard is for the harder
+  case where the outer shell timeout SIGKILLed that process before Python could
+  abort/reset. If the transient pre-mutation marker remains, restore that exact
+  committed tip. Otherwise still abort any sequencer state and hard-reset the
+  working branch to its current committed tip so conflict markers cannot be
+  served.
+  """
+  if not (repo / ".git").exists():
+    return "boot_guard[skipped] no_git"
+  local = _local_branch(repo)
+  pre = _read_reconcile_pre()
+  interrupted = _rebase_in_progress(repo) or (repo / ".git" / "MERGE_HEAD").exists()
+  _abort_interrupted(repo)
+  if pre and _rev(repo, pre):
+    _reset_hard_to(repo, local, pre)
+    _clear_reconcile_pre()
+    return f"boot_guard[reset] pre={_short(pre)}"
+  if interrupted:
+    _git("checkout", "-q", local, repo=repo, check=False)
+    _git("reset", "--hard", local, repo=repo, check=False)
+  _clear_reconcile_pre()
+  return "boot_guard[clean]"
 
 
 def _fetch(repo: Path = PLATFORM_REPO) -> bool:
@@ -669,8 +734,11 @@ def reconcile_clone(
 
   # A deploy advanced origin beyond committed main. Commit any uncommitted edits
   # FIRST so neither the fast-forward reset nor the rebase can discard them.
+  _reattach_detached_head(repo, local)
   app_git.commit_local(repo, "platform: local edits before reconcile")
   pre = _rev(repo, local)  # now includes the just-committed edits
+  if pre:
+    _write_reconcile_pre(pre)
 
   # From here on the working tree is mutated. The served tree MUST end at either
   # the update or exactly PRE — never a half-applied state — so any UNEXPECTED
@@ -702,6 +770,7 @@ def reconcile_clone(
         _reset_hard_to(repo, local, pre)  # belt-and-braces: ensure main == PRE
         _write_conflict_flag(target, paths)
         ROLLED_BACK_FLAG.unlink(missing_ok=True)
+        _clear_reconcile_pre()
         return ReconcileResult("conflict", pre, pre, target, conflict_paths=paths)
 
     # Post-reconcile import probe: a text-clean ff/rebase can still produce a
@@ -713,10 +782,12 @@ def reconcile_clone(
       _reset_hard_to(repo, local, pre)
       _write_rolled_back_flag(target, err)
       CONFLICT_FLAG.unlink(missing_ok=True)
+      _clear_reconcile_pre()
       return ReconcileResult("rolled_back", pre, pre, target, error=err)
   except Exception as exc:  # unexpected git failure — never serve a half-tree
     _abort_interrupted(repo)
     _reset_hard_to(repo, local, pre)
+    _clear_reconcile_pre()
     return ReconcileResult("error", pre, pre, target, error=repr(exc))
 
   # Success: main now carries the update plus any replayed local edits. Advance
@@ -730,6 +801,7 @@ def reconcile_clone(
   ROLLED_BACK_FLAG.unlink(missing_ok=True)
   if at_boot:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+  _clear_reconcile_pre()
   return ReconcileResult("updated", pre, new_sha, target, error=None)
 
 
@@ -762,6 +834,15 @@ def reconcile_clone_sync() -> str:
     return summary
   except Exception as exc:  # never propagate to the boot shell
     return f"reconcile[error] {exc!r}"
+
+
+def boot_guard_sync() -> str:
+  """Shell entry point run after the bounded boot reconcile and before uvicorn."""
+  try:
+    with _reconcile_flock():
+      return boot_guard_clean_served_tree(PLATFORM_REPO)
+  except Exception as exc:  # never propagate to the boot shell
+    return f"boot_guard[error] {exc!r}"
 
 
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:

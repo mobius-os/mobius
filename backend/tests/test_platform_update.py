@@ -118,6 +118,7 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setattr(pu, "SERVING_SHA_FILE", tmp_path / ".serving-sha")
   monkeypatch.setattr(pu, "CONFLICT_FLAG", tmp_path / ".conflict")
   monkeypatch.setattr(pu, "ROLLED_BACK_FLAG", tmp_path / ".rolled-back")
+  monkeypatch.setattr(pu, "RECONCILE_PRE_FLAG", tmp_path / ".reconcile-pre")
   monkeypatch.setattr(pu, "OFFLINE_FLAG", tmp_path / ".offline")
   monkeypatch.setattr(pu, "RECONCILE_LOCK", tmp_path / ".reconcile.lock")
   monkeypatch.setenv("BUILD_SHA", "test-sha")
@@ -282,6 +283,23 @@ def test_uncommitted_edits_committed_before_reconcile(clone_env):
   assert "LINE_C = 999" in served
 
 
+def test_detached_head_uncommitted_edit_survives_reconcile(clone_env):
+  origin, platform = clone_env
+  _git(platform, "checkout", "-q", "--detach", "HEAD")
+  (platform / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'DETACHED_DIRTY'"))
+  _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 1001")})
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "updated"
+  assert _git(platform, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+  served = (platform / "backend/app/main.py").read_text()
+  assert "LINE_A = 'DETACHED_DIRTY'" in served
+  assert "LINE_C = 1001" in served
+
+
 # --- crash-safety: a stale in-progress rebase is aborted --------------------
 
 def test_stale_rebase_aborted_on_next_pass(clone_env):
@@ -302,6 +320,29 @@ def test_stale_rebase_aborted_on_next_pass(clone_env):
   assert res.status == "conflict"
   assert _served_sha(platform) == pre
   assert not pu._rebase_in_progress(platform)
+
+
+def test_boot_guard_aborts_interrupted_rebase_before_serving(clone_env):
+  origin, platform = clone_env
+  pre = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+  _git(platform, "fetch", "-q", "origin")
+  pu._write_reconcile_pre(pre)
+  rc = _git(platform, "rebase", new, "main", check=False).returncode
+  assert rc != 0 and pu._rebase_in_progress(platform)
+  assert "<<<<<<<" in (platform / "backend/app/main.py").read_text()
+
+  summary = pu.boot_guard_clean_served_tree(platform)
+
+  assert summary.startswith("boot_guard[reset]")
+  assert _served_sha(platform) == pre
+  assert not pu._rebase_in_progress(platform)
+  assert "<<<<<<<" not in (platform / "backend/app/main.py").read_text()
+  ok, err = pu._import_probe(platform)
+  assert ok, err
+  assert not pu.RECONCILE_PRE_FLAG.exists()
 
 
 # --- status availability + up-to-date ---------------------------------------
