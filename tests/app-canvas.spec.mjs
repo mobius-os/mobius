@@ -281,6 +281,23 @@ async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
   return { getAppsFetches: () => appsFetches }
 }
 
+async function postFromOpaqueCanvasFrame(page, data) {
+  const handle = await page.evaluateHandle(() => {
+    const frame = document.createElement('iframe')
+    frame.className = 'canvas canvas--test-sender'
+    frame.setAttribute('sandbox', 'allow-scripts')
+    frame.srcdoc = '<!doctype html><script>window.__ready = true<\/script>'
+    document.body.appendChild(frame)
+    return frame
+  })
+  const element = handle.asElement()
+  const frame = await element.contentFrame()
+  await frame.waitForFunction(() => window.__ready === true)
+  await frame.evaluate((message) => {
+    window.parent.postMessage(message, '*')
+  }, data)
+}
+
 
 test.describe('AppCanvas: iframe-mount contract', () => {
   // Block the service worker for this whole file. Every test here relies on
@@ -316,30 +333,19 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // 10s covers CI's cold-container first-app mount; it won't hide on us.
     await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 10000 })
 
-    // Wait for the iframe to be load-ready before posting the mount
-    // signal. Posting too early raced ~50% of runs: `contentWindow`
-    // could still be null, or the iframe's inline `message` listener
-    // wasn't attached yet so the signal was dropped, the overlay never
-    // hid, and the `toBeHidden` below timed out. Gate on the frame
-    // document reaching `readyState === 'complete'` (the inline script
-    // — and thus its listener — has run by then). The try/catch guards
-    // the brief window where cross-frame access throws during load.
-    await page.waitForFunction(() => {
-      const f = document.querySelector('iframe')
-      try {
-        return !!(f && f.contentWindow && f.contentWindow.document?.readyState === 'complete')
-      } catch {
-        return false
-      }
-    }, { timeout: 6000 })
-
-    // Trigger mount from inside the iframe (correct source + origin, so it
-    // passes the parent's source/origin checks like a real frame would).
-    await page.evaluate(() => {
-      document.querySelector('iframe').contentWindow.postMessage(
-        { type: 'moebius-test:mount' },
-        window.location.origin,
-      )
+    // Opaque sandbox frames cannot be inspected through contentWindow.document
+    // and a concrete targetOrigin cannot address them. Playwright can still
+    // execute inside the frame, so wait for its own load state and dispatch the
+    // deterministic test signal there. postMounted then reaches the parent with
+    // the real frame as event.source and the opaque `null` event.origin.
+    const frameElement = await page.waitForSelector('iframe.canvas')
+    const frame = await frameElement.contentFrame()
+    await frame.waitForLoadState('load')
+    await frame.evaluate(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'moebius-test:mount' },
+      }))
     })
 
     // Now it must hide. If this fails the listener genuinely never matched
@@ -382,12 +388,9 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await page.goto(`${BASE}/shell/?chat=open-app-chat`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => window.location.pathname === '/shell/')
 
-    await page.evaluate((targetAppId) => {
-      window.dispatchEvent(new MessageEvent('message', {
-        origin: window.location.origin,
-        data: { type: 'moebius:open-app', appId: targetAppId },
-      }))
-    }, appId)
+    await postFromOpaqueCanvasFrame(page, {
+      type: 'moebius:open-app', appId,
+    })
 
     await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible({ timeout: 8000 })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
@@ -537,11 +540,15 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // open-app target refetches once before giving up) — the bumped updated_at
     // starts the swap and mounts the hidden incoming frame.
     swapArmed = true
-    await page.evaluate(() => {
-      window.dispatchEvent(new MessageEvent('message', {
-        origin: window.location.origin,
-        data: { type: 'moebius:open-app', appId: 'no-such-app' },
-      }))
+    const settledLiveEl = await page.waitForSelector(
+      'iframe.canvas--live[data-frame-version="1000"]',
+    )
+    const settledLiveFrame = await settledLiveEl.contentFrame()
+    await settledLiveFrame.evaluate(() => {
+      window.parent.postMessage(
+        { type: 'moebius:open-app', appId: 'no-such-app' },
+        window.location.origin,
+      )
     })
     // state:'attached', not 'visible' — the incoming frame is visibility:hidden.
     const incomingEl = await page.waitForSelector('iframe.canvas--incoming', {
