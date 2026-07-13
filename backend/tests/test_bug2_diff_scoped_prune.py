@@ -307,11 +307,16 @@ def test_missing_import_compile_failure_returns_friendly_422(
     {"index.jsx": bad_index},
   )
 
+  # The source-completeness check now intercepts this synthetic-fetch case
+  # BEFORE esbuild — the entry imports a sibling that is neither declared in
+  # source_files nor fetched, so the install would ship an incomplete tree.
+  # The 422 stays friendly (names the app + the file, no raw compiler/ANSI
+  # noise) and is more specific than the old "Could not resolve".
   assert r2.status_code == 422, r2.text
   detail = r2.json()["detail"]
   assert "Bug2 Compile" in detail
-  assert "failed to compile" in detail
-  assert "Could not resolve" in detail
+  assert "source_files" in detail
+  assert "missing.js" in detail
   assert "CompileError" not in detail
   assert "Traceback" not in detail
   assert "\x1b[" not in detail

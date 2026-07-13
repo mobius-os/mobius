@@ -22,7 +22,7 @@ def test_stop_chat_for_uses_registry_and_clears_handle():
   handle = _ClaudeHandle("chat-claude-stop")
   registry.register(handle)
 
-  stopped, _, _ = asyncio.run(chat_mod.stop_chat_for("chat-claude-stop"))
+  stopped, _ = asyncio.run(chat_mod.stop_chat_for("chat-claude-stop"))
 
   assert stopped is True
   assert handle.stop_calls == 1

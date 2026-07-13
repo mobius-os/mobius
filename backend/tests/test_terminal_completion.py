@@ -1338,7 +1338,7 @@ def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
     return {"session_id": "sess", "cost_usd": 0.0}
 
   async def stopping_ensure_auth(self, data_dir):
-    stopped, _, _ = await chat_mod.stop_chat_for(cid)
+    stopped, _ = await chat_mod.stop_chat_for(cid)
     assert stopped is True
 
   monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)

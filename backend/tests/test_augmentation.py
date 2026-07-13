@@ -152,8 +152,8 @@ def test_send_while_running_queues_message(client, db, auth, chat):
     data = resp.json()
     assert data["status"] == "queued"
     assert data["position"] == 1
-    # The server must return the assigned ts so the frontend can
-    # replace its optimistic ts and DELETE-by-ts works.
+    # The server returns the assigned ts as display/ordering metadata;
+    # row identity (and DELETE /pending/{cid}) is the client-minted cid.
     assert "ts" in data and isinstance(data["ts"], int)
 
     # Verify message saved to pending_messages in DB with the same ts.
@@ -787,7 +787,7 @@ def test_stop_chat_for_clears_pending_queue(db):
   db.commit()
 
   try:
-    stopped, cleared_cids, _ = asyncio.run(stop_chat_for("stop-for-clears", db=db))
+    stopped, cleared_cids = asyncio.run(stop_chat_for("stop-for-clears", db=db))
     db.refresh(chat)
     assert chat.pending_messages == []
     assert cleared_cids == ["c-q1", "c-q2"]
@@ -813,7 +813,7 @@ def test_stop_chat_for_empty_pending_reports_no_cleared_cids(db):
   db.commit()
 
   try:
-    stopped, cleared_cids, _ = asyncio.run(stop_chat_for("stop-for-empty", db=db))
+    stopped, cleared_cids = asyncio.run(stop_chat_for("stop-for-empty", db=db))
     assert cleared_cids == []
   finally:
     registry.forget("stop-for-empty")

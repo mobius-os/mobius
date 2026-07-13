@@ -173,11 +173,8 @@ function _validateSavedMode(saved, messages, scrollEl) {
   if (!saved || !saved.kind) return { kind: 'FOLLOW_BOTTOM' }
   if (saved.kind === 'FOLLOW_BOTTOM') return saved
   if (saved.kind === 'PIN_USER_MSG') {
-    // A legacy save carrying only {ts} (no cid, from a pre-cid session)
-    // degrades to FOLLOW_BOTTOM: chat-mode lives in sessionStorage (per
-    // tab), so such a save can only exist for one already-open tab spanning
-    // the deploy, and the cost is one chat opening at the bottom instead of
-    // restoring a pin — negligible, and it self-heals on the next send.
+    // A save without a cid (malformed, or written by pre-cid code) can't
+    // resolve a pin target — degrade instead of pinning nothing.
     if (saved.cid == null) return { kind: 'FOLLOW_BOTTOM' }
     const lastUserMsg = [...messages].reverse()
       .find(m => m.role === 'user' && !m.hidden)

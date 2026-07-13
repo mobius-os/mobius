@@ -361,7 +361,7 @@ def test_stop_during_drain_preserves_pending():
   try:
     db = SessionLocal()
     try:
-      _, cleared, _ = asyncio.run(chat_mod.stop_chat_for("stop-in-drain", db=db))
+      _, cleared = asyncio.run(chat_mod.stop_chat_for("stop-in-drain", db=db))
     finally:
       db.close()
   finally:

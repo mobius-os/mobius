@@ -468,7 +468,22 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   treated like a mid-turn send — reserve, but don't yank you down. The only
   unconditional pins are the first message and an at-bottom (auto-scroll) send. Owner
   decision 2026-07-12; `CLAUDE.md`/`AGENTS.md` constraint #1 has been updated to
-  match.
+  match. **Do not re-flip without a new owner decision** — this rule has already
+  ping-ponged (now its 4th revision). `9b9ab86b` was itself a fix for a "messages
+  don't go to the top" report (a new turn started after a tall reply is never near
+  the tail, so the mode-gate didn't lift it); the owner has weighed that and accepts
+  the tradeoff — a fresh send while scrolled up won't auto-lift; the reader scrolls
+  down to follow. Lock-in: `tests/send-rule.spec.mjs` + `spacer.spec.mjs` #26 both
+  assert "no pin when scrolled up," and `ChatView.jsx`'s fresh-send `willPin` gates
+  on `shouldPinSend` (same call the queue/steer paths use).
+  **At-bottom is geometric, not gesture-gated (owner ruling 2026-07-13):** a chat
+  whose content fits the viewport counts as at-bottom, so a second send in a short
+  chat pins even though the user never scrolled ("if the chat is short and we sent
+  a new message, the message should pin, even if we didn't enter auto scroll
+  mode"). This resolves the question that had parked the strict pure-state engine
+  (`session-scroll-v2`, gesture-only AUTO): that reading is rejected. Lock-in:
+  `send-rule.spec.mjs` "Short chat (content fits viewport): second send still pins
+  to top".
 - **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
 - **R4** Leave-and-return restores the same scroll position, even mid-stream
   (hide-then-reveal + the versioned snapshot cache).
@@ -548,11 +563,11 @@ updating those specs in the same change.
 
 ## Stop-chat contract
 
-Stop is a two-layer contract: the backend interrupts and clears, while `frontend/src/components/ChatView/ChatView.jsx:handleStop` owns the user-visible collapse-and-resend behavior. On entry, `handleStop` synchronously guards against double clicks, snapshots `pendingQueue.pendingMessagesRef.current`, joins queued text with a single `\n`, dedupes attachments by `name`, bumps `fetchGenRef`, and clears the pending queue before awaiting `/api/chat/stop`. The endpoint `backend/app/routes/chat.py:chat_stop` returns `{"stopped": bool, "cleared_pending_ts": [...]}` from `chat.py:stop_chat`, and the frontend runs that through `resolveStopResend()` for both clean-stop and timeout branches: `null`/missing `cleared_pending_ts` falls back to the whole snapshot, `[]` resends nothing, exact matches resend only those queued rows, and unmatched optimistic timestamps fall back to the whole snapshot rather than dropping work.
+Stop is a two-layer contract: the backend interrupts and clears, while `frontend/src/components/ChatView/ChatView.jsx:handleStop` owns the user-visible collapse-and-resend behavior. On entry, `handleStop` synchronously guards against double clicks, snapshots `pendingQueue.pendingMessagesRef.current`, joins queued text with a single `\n`, dedupes attachments by `name`, bumps `fetchGenRef`, and clears the pending queue before awaiting `/api/chat/stop`. The endpoint `backend/app/routes/chat.py:chat_stop` returns `{"stopped": bool, "cleared_pending_cids": [...]}` from `chat.py:stop_chat` (cleared-set identity is the stable `cid`; `ts` is display metadata), and the frontend runs that through `resolveStopResend()` for both clean-stop and timeout branches: `null`/missing `cleared_pending_cids` falls back to the whole snapshot, `[]` resends nothing, exact matches resend only those queued rows, and an unmatched cleared cid falls back to the whole snapshot rather than dropping work.
 
 `backend/app/chat.py:stop_chat_for` is an interrupt primitive, not a queue-drain primitive. It snapshots the generation, calls `bump_run_generation(chat_id)` before killing handles, registers `_clear_after_terminal_generation` when handles exist, clears pending under `chat_queue.get_lock()`, cancels any live `app.questions` pending question, then calls each runner handle's `stop(timeout=2.0)`. If every handle stops it unregisters them and finalizes the broadcast (discarding `_starting`); the stuck run-marker is cleared via the actor only on the no-handles path — active handles hand that clear to `run_chat`'s finally block. If any handle times out it leaves the registry entry and broadcast intact for runner-side teardown and returns `stopped=False` — in that branch the frontend must NOT disconnect or start a second run. Instead, if `resolveStopResend()` returns text, `handleStop` calls `doSend(..., { pin:false })` while `isStreamingRef` is still true, so the message follows the queue path and is re-persisted as pending.
 
-The generation bump is the key invariant. A dying `_run_chat_impl` rechecks ownership in its terminal path; after Stop it must resolve to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promote pending or schedule a backend continuation behind the frontend's resend. Do not refetch pending from the server after Stop to rebuild the resend — Stop already cleared the durable queue, so the local snapshot is the only source that preserves text + attachments; and do not resend the full snapshot unconditionally on `stopped:false` — the natural turn-end drain may already have consumed some rows, and `cleared_pending_ts` is the only guard against duplicate follow-up work.
+The generation bump is the key invariant. A dying `_run_chat_impl` rechecks ownership in its terminal path; after Stop it must resolve to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promote pending or schedule a backend continuation behind the frontend's resend. Do not refetch pending from the server after Stop to rebuild the resend — Stop already cleared the durable queue, so the local snapshot is the only source that preserves text + attachments; and do not resend the full snapshot unconditionally on `stopped:false` — the natural turn-end drain may already have consumed some rows, and `cleared_pending_cids` is the only guard against duplicate follow-up work.
 
 ## AskUserQuestion interception
 

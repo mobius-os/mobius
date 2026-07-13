@@ -283,6 +283,22 @@ async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
 
 
 test.describe('AppCanvas: iframe-mount contract', () => {
+  // Block the service worker for this whole file. Every test here relies on
+  // Playwright's page.route intercepting the /api calls the shell makes — but
+  // sw.js serves /api/chats and /api/apps/ NetworkFirst and /api/theme
+  // StaleWhileRevalidate, and once the SW activates + claims the page (~1s into
+  // the first load) its own fetch()es go straight to the network, BYPASSING
+  // page.route. A test that outlives that claim window then leaks a mount-time
+  // GET to the real container, which 401s the fake owner token; the api
+  // client's global 401 handler clears the token and reloads, and the reload
+  // loop tears the page down mid-assertion. (The app-error swap test below is
+  // the one long enough to trip it — its live-frame crash forwards correctly
+  // and POSTs /api/chats, but the follow-up refreshApps/refreshChats GETs ride
+  // the SW to a real 401 and the new chat's composer never survives the
+  // reload.) Blocking the SW keeps every request on the page-route path — the
+  // same reason auth.setup.mjs blocks it. None of these tests exercise SW
+  // behavior, so nothing is lost.
+  test.use({ serviceWorkers: 'block' })
 
   test('loading spinner hides as soon as frame posts moebius:frame-mounted', async ({ page }) => {
     const appId = 99
@@ -395,11 +411,22 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await setupShellBasics(page)
 
     // Digit-string updated_at values double as the frame version keys
-    // (appVersionKey passes them through): the first apps fetch serves the
-    // version the live frame mounts at; every later fetch serves a NEWER one,
-    // so a refetch triggers the double-buffer swap and mounts a hidden
-    // incoming frame.
-    let appsFetches = 0
+    // (appVersionKey passes them through): while the app sits at '1000' the
+    // live frame mounts at that version; once the test ARMS the swap the app
+    // reports '2000', so the next refetch triggers the double-buffer swap and
+    // mounts a hidden incoming frame.
+    //
+    // A flag — not a fetch counter — gates the version. React Query issues an
+    // unpredictable number of mount-time apps fetches (a refetchOnMount or a
+    // re-render can fire a second one milliseconds after the first), so keying
+    // the '1000'→'2000' bump on "fetch #1 vs later" raced: an extra mount-time
+    // fetch consumed the bump before the test's deliberate open-app trigger,
+    // the live frame settled at '2000', and the swap never happened (the exact
+    // "don't rely on request ordinal" anti-pattern the E2E triage checklist
+    // in CLAUDE.md warns against). With the flag, every mount-time fetch —
+    // however many — returns '1000', and only the post-arm refetch returns
+    // '2000'.
+    let swapArmed = false
     const appRow = (updatedAt) => ({
       id: appId,
       name: 'CrashToy',
@@ -413,11 +440,10 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     })
     await page.route(/\/api\/apps\/$/, route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      appsFetches += 1
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([appRow(appsFetches === 1 ? '1000' : '2000')]),
+        body: JSON.stringify([appRow(swapArmed ? '2000' : '1000')]),
       })
     })
     await page.route(/\/api\/auth\/app-token$/, route =>
@@ -427,20 +453,24 @@ test.describe('AppCanvas: iframe-mount contract', () => {
         body: JSON.stringify({ token: 'mock-app-token' }),
       })
     )
-    // First frame fetch (the live frame) auto-mounts so the swap machinery
-    // sees a settled live frame; later fetches (the incoming frame) NEVER
-    // post frame-mounted, so the incoming frame stays hidden and unpromoted
-    // for the whole test window (until the 10s incoming-timeout).
-    let frameFetches = 0
+    // Auto-mount every frame EXCEPT the '2000' incoming one, keyed on the
+    // version in the URL (?v=<version>-<frameHash>) rather than a fetch
+    // counter. The live frame (mounted at '1000', and any transient pre-load
+    // '0' frame) posts frame-mounted so the swap machinery sees a settled live
+    // frame; the incoming '2000' frame NEVER posts it, so it stays hidden and
+    // unpromoted for the whole test window (until the 10s incoming-timeout).
+    // Version-keying is robust to how many frame fetches the swap actually
+    // issues — the counter was, like the apps counter above, an ordinal
+    // assumption that a stray extra fetch broke.
     await page.route(new RegExp(`/api/apps/${appId}/frame`), route => {
-      frameFetches += 1
+      const isIncoming = /[?&]v=2000\b/.test(route.request().url())
       route.fulfill({
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-cache',
         },
-        body: mockFrameHTML(appId, { sendMounted: frameFetches === 1 }),
+        body: mockFrameHTML(appId, { sendMounted: !isIncoming }),
       })
     })
     // The forwarded crash routes to a NEW chat (the app has no chat_id):
@@ -492,10 +522,21 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
     // The live frame has mounted (spinner gated on frame-mounted).
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+    // Confirm the LIVE frame settled at '1000' before arming, so the arm can't
+    // race an apps query that hasn't resolved yet (a transient pre-load '0'
+    // frame can hide the spinner first; arming while the app is still at '0'
+    // would let the very next apps fetch jump straight to '2000' and make the
+    // live frame settle there, so the open-app refetch would be a no-op change
+    // and no swap would start).
+    await page.waitForSelector('iframe.canvas--live[data-frame-version="1000"]', {
+      state: 'attached', timeout: 8000,
+    })
 
-    // Trigger an apps refetch (an unknown open-app target refetches once
-    // before giving up) — the bumped updated_at starts the swap and mounts
-    // the hidden incoming frame.
+    // Arm the swap: the live frame has settled at '1000', so from here every
+    // apps fetch reports '2000'. Then trigger an apps refetch (an unknown
+    // open-app target refetches once before giving up) — the bumped updated_at
+    // starts the swap and mounts the hidden incoming frame.
+    swapArmed = true
     await page.evaluate(() => {
       window.dispatchEvent(new MessageEvent('message', {
         origin: window.location.origin,

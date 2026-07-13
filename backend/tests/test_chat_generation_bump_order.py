@@ -22,7 +22,7 @@ def test_stop_chat_for_bumps_generation_before_handle_stop():
   seen: list[int] = []
   registry.register(_ObservingHandle("chat-bump-order", seen))
 
-  stopped, _, _ = asyncio.run(chat_mod.stop_chat_for("chat-bump-order"))
+  stopped, _ = asyncio.run(chat_mod.stop_chat_for("chat-bump-order"))
 
   assert stopped is True
   assert seen == [1]
