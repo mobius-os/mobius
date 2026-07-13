@@ -72,12 +72,19 @@ async def _capped_response(
     await r.aclose()
 
 
-@router.get("", dependencies=[Depends(reject_cross_site)])
+@router.get("")
 async def proxy_get(
   url: str,
   _: None = Depends(authorize_current_owner_or_app_detached),
 ):
-  """Fetches a URL via GET and returns the raw response body."""
+  """Fetches a URL via GET and returns the raw response body.
+
+  Opaque-origin mini-app frames legitimately arrive with
+  ``Sec-Fetch-Site: cross-site`` even when calling this same host. This route is
+  read-only, requires a bearer token (and therefore a CORS preflight), and keeps
+  the SSRF allow/deny checks below, so the mutation-oriented CSRF dependency is
+  intentionally not applied here. The POST proxy remains guarded.
+  """
   pinned_url, host_header, sni_host = validate_url_safe(url)
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
     req = client.build_request("GET", pinned_url)
