@@ -129,13 +129,53 @@ def test_validate_url_preserves_https_scheme():
   assert "93.184.216.34" in pinned
 
 
-def test_proxy_get_rejects_cross_site_request(client, owner_token):
-  """GET /api/proxy must reject cross-site requests (Task 1b CSRF fix)."""
-  auth = {"Authorization": f"Bearer {owner_token}"}
+def test_proxy_get_allows_opaque_app_frame_request(
+  client, owner_token, monkeypatch
+):
+  """Opaque app frames may use the authenticated, read-only GET proxy."""
+  created = client.post("/api/apps/", json={
+    "name": "proxy-frame",
+    "description": "test",
+    "jsx_source": "export default function App() { return null }",
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert created.status_code == 201, created.text
+  token_response = client.post("/api/auth/app-token", json={
+    "app_id": created.json()["id"],
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert token_response.status_code == 200, token_response.text
+
+  def fake_validate_url_safe(url):
+    assert url == "https://example.com/manifest.json"
+    return "https://93.184.216.34/manifest.json", "example.com", "example.com"
+
+  async def fake_capped_response(_client, _req):
+    return Response(content=b'{"id":"test"}', media_type="application/json")
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
   r = client.get(
     "/api/proxy",
-    params={"url": "http://example.com/"},
-    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+    params={"url": "https://example.com/manifest.json"},
+    headers={
+      "Authorization": f"Bearer {token_response.json()['token']}",
+      "Origin": "null",
+      "Sec-Fetch-Site": "cross-site",
+    },
+  )
+  assert r.status_code == 200
+  assert r.json() == {"id": "test"}
+  assert r.headers["access-control-allow-origin"] == "null"
+
+
+def test_proxy_post_rejects_cross_site_request(client, owner_token):
+  """The mutation-capable POST proxy keeps the cross-site CSRF guard."""
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/", "body": "value=1"},
+    headers={
+      "Authorization": f"Bearer {owner_token}",
+      "Sec-Fetch-Site": "cross-site",
+    },
   )
   assert r.status_code == 403
 
