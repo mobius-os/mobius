@@ -563,12 +563,6 @@ def _resolve_agents(settings: dict) -> dict:
   return resolve_background_agents(str(DATA_DIR), settings)
 
 
-def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
-  """Backward-compatible helper returning the resolved primary choice."""
-  primary = _resolve_agents(settings)["primary"]
-  return primary["provider"], primary.get("model"), primary.get("effort")
-
-
 def build_goal(settings: dict) -> str:
   """Builds the first user message — the 'reflection goal' that kicks off the loop.
 
