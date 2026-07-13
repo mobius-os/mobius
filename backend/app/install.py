@@ -2446,11 +2446,44 @@ async def install_from_manifest(
                 merge_applied = True
                 entry_key = "index.jsx"
               else:
-                # Never rebase local. The app stays served with its current
-                # bundle + source; the new upstream is recorded for a later
-                # agent-resolution pass. Switch to conflict mode below.
-                mode = "conflict"
-                conflict_paths = merge.conflict_paths
+                # Before routing to the owner, auto-resolve a conflict CONFINED
+                # to the version identifier: a version label is never a semantic
+                # merge, so take-upstream is always right. This kills the most
+                # common update-conflict class — a prior local "agent edit"
+                # bumped the version and the release bumps the same line. Any
+                # conflict beyond the version line returns None and falls through
+                # to the owner-resolver flow. Fail-safe: a genuine local edit is
+                # never dropped (a residual conflict aborts the whole attempt).
+                version_only = await asyncio.to_thread(
+                  app_git.resolve_version_only_conflict,
+                  git_source_dir, merge.conflict_paths,
+                )
+                resolved_source = None
+                if version_only is not None:
+                  resolved_source = {
+                    rel: data for rel, data in version_only.tree.items()
+                    if rel not in _MERGED_NON_SOURCE
+                  }
+                if resolved_source is not None and entry_key in resolved_source:
+                  source_tree = resolved_source
+                  divergence = "clean_merge"
+                  merge_applied = True
+                  warnings.append(
+                    "auto-resolved a version-only update conflict "
+                    "(took the upstream version)"
+                  )
+                  # Exec bits come from the same merged tree the resolution was
+                  # built on, mirroring the clean-merge branch above.
+                  git_exec_paths = await asyncio.to_thread(
+                    app_git.read_tree_exec_paths,
+                    git_source_dir, version_only.tree_oid,
+                  )
+                else:
+                  # Never rebase local. The app stays served with its current
+                  # bundle + source; the new upstream is recorded for a later
+                  # agent-resolution pass. Switch to conflict mode below.
+                  mode = "conflict"
+                  conflict_paths = merge.conflict_paths
             else:
               # Clean merge: the WHOLE merged tree is what we write + compile.
               # Read it in full (one path for one and many files) and drop the

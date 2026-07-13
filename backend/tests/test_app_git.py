@@ -1543,3 +1543,265 @@ def test_commit_local_refuses_during_in_progress_cherry_pick(tmp_path):
   assert (repo / ".git" / "CHERRY_PICK_HEAD").exists()
   assert app_git._run(repo, "ls-files", "-u").stdout.strip()
   assert (repo / "index.jsx").read_text() == body_before
+
+
+# ---------------------------------------------------------------------------
+# resolve_version_only_conflict — a conflict CONFINED to the version identifier
+# auto-resolves to upstream (take-upstream is always right for a version label);
+# any real code conflict falls through to None so the owner resolves it.
+# ---------------------------------------------------------------------------
+
+_MANIFEST = (
+  '{\n'
+  '  "id": "demo",\n'
+  '  "name": "Demo",\n'
+  '  "version": "%s",\n'
+  '  "entry": "index.jsx"\n'
+  '}\n'
+)
+
+
+def _manifest(version: str) -> bytes:
+  return (_MANIFEST % version).encode()
+
+
+def _diverge(repo, local_files, upstream_files, *, base_files):
+  """Set up base → local edit + upstream v2 so a merge can be verdicted.
+
+  Records `base_files` as the shared ancestor, commits `local_files` on main,
+  then records `upstream_files` as the new upstream. Returns nothing; the caller
+  runs `merge_upstream` / `resolve_version_only_conflict`.
+  """
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(repo, base_files, "https://x/mobius.json", "1.0.0")
+  app_git.align_local_to_upstream(repo)
+  for name, data in local_files.items():
+    (repo / name).write_bytes(data)
+  app_git.commit_local(repo, "local edit")
+  app_git.record_upstream(repo, upstream_files, "https://x/mobius.json", "2.0.0")
+
+
+def test_version_only_conflict_resolves_to_upstream(tmp_path):
+  """Both sides bumped only mobius.json's version: auto-resolve, take upstream."""
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  _diverge(
+    repo,
+    local_files={"index.jsx": jsx, "mobius.json": _manifest("1.0.1")},
+    upstream_files={"index.jsx": jsx, "mobius.json": _manifest("2.0.0")},
+    base_files={"index.jsx": jsx, "mobius.json": _manifest("1.0.0")},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert "mobius.json" in merge.conflict_paths
+
+  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  assert res is not None
+  tree = res.tree
+  assert b'"version": "2.0.0"' in tree["mobius.json"]  # upstream won
+  assert b'"version": "1.0.1"' not in tree["mobius.json"]
+  assert tree["index.jsx"] == jsx
+
+
+def test_version_only_conflict_preserves_disjoint_local_edit(tmp_path):
+  """A version bump AND a disjoint local code edit: resolve to upstream version
+  while carrying the unrelated local edit forward (never silently dropped)."""
+  repo = tmp_path / "app"
+  base_jsx = b"export default function App() {\n  return one\n}\n"
+  local_jsx = b"export default function App() {\n  return LOCAL\n}\n"
+  _diverge(
+    repo,
+    # local bumped version AND edited a line upstream leaves alone
+    local_files={"index.jsx": local_jsx, "mobius.json": _manifest("1.0.1")},
+    upstream_files={"index.jsx": base_jsx, "mobius.json": _manifest("2.0.0")},
+    base_files={"index.jsx": base_jsx, "mobius.json": _manifest("1.0.0")},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+
+  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  assert res is not None
+  tree = res.tree
+  assert b'"version": "2.0.0"' in tree["mobius.json"]
+  assert tree["index.jsx"] == local_jsx  # disjoint local edit carried forward
+
+
+def test_in_code_app_version_conflict_resolves(tmp_path):
+  """An in-code APP_VERSION const clash resolves the same way as the manifest."""
+  repo = tmp_path / "app"
+  base = b"const APP_VERSION = '1.0.0'\nexport default () => null\n"
+  local = b"const APP_VERSION = '1.0.1'\nexport default () => null\n"
+  upstream = b"const APP_VERSION = '2.0.0'\nexport default () => null\n"
+  _diverge(
+    repo,
+    local_files={"index.jsx": local},
+    upstream_files={"index.jsx": upstream},
+    base_files={"index.jsx": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+
+  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  assert res is not None
+  tree = res.tree
+  assert b"APP_VERSION = '2.0.0'" in tree["index.jsx"]
+
+
+def test_real_code_conflict_is_not_auto_resolved(tmp_path):
+  """A version bump alongside a genuine code conflict must NOT auto-resolve —
+  the code clash is the owner's call, so return None (fall through to resolver)."""
+  repo = tmp_path / "app"
+  base_jsx = b"export default function App() {\n  return BASE\n}\n"
+  _diverge(
+    repo,
+    local_files={
+      "index.jsx": b"export default function App() {\n  return LOCAL\n}\n",
+      "mobius.json": _manifest("1.0.1"),
+    },
+    upstream_files={
+      "index.jsx": b"export default function App() {\n  return UPSTREAM\n}\n",
+      "mobius.json": _manifest("2.0.0"),
+    },
+    base_files={"index.jsx": base_jsx, "mobius.json": _manifest("1.0.0")},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  # index.jsx has a real both-edited-same-line conflict → not version-only.
+  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+def test_conflict_touching_a_non_version_line_is_not_resolved(tmp_path):
+  """A single file whose conflict includes a NON-version line must not resolve:
+  normalising the version line still leaves a residual conflict → None."""
+  repo = tmp_path / "app"
+  base = (
+    '{\n  "name": "Demo",\n  "version": "1.0.0",\n  "note": "base"\n}\n'
+  ).encode()
+  local = (
+    '{\n  "name": "Demo",\n  "version": "1.0.1",\n  "note": "LOCAL"\n}\n'
+  ).encode()
+  upstream = (
+    '{\n  "name": "Demo",\n  "version": "2.0.0",\n  "note": "UPSTREAM"\n}\n'
+  ).encode()
+  _diverge(
+    repo,
+    local_files={"index.jsx": b"x\n", "mobius.json": local},
+    upstream_files={"index.jsx": b"x\n", "mobius.json": upstream},
+    base_files={"index.jsx": b"x\n", "mobius.json": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+# Adversarial regressions (Codex review 2026-07-13) — a version bump that SHARES
+# its line or file with a real edit must never be auto-resolved (data loss).
+
+def test_same_line_code_edit_is_not_dropped(tmp_path):
+  """APP_VERSION and a real const on the SAME line: the whole line conflicts, so
+  resolving it would drop the local const. Must bail to owner-resolution."""
+  repo = tmp_path / "app"
+  _diverge(
+    repo,
+    local_files={"index.jsx": b'const APP_VERSION = "1.0.1"; const FEATURE = true\n'},
+    upstream_files={"index.jsx": b'const APP_VERSION = "2.0.0"; const FEATURE = false\n'},
+    base_files={"index.jsx": b'const APP_VERSION = "1.0.0"; const FEATURE = false\n'},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  # Local FEATURE=true must NOT be silently dropped to upstream's line.
+  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+def test_nested_dependency_version_is_not_resolved(tmp_path):
+  """A conflict on a NESTED `version` (a dependency pin), with no top-level
+  version, is a real local edit — must not be taken-upstream."""
+  repo = tmp_path / "app"
+  base = b'{\n  "dependencies": {\n    "version": "1.0.0"\n  }\n}\n'
+  local = b'{\n  "dependencies": {\n    "version": "1.0.1"\n  }\n}\n'
+  upstream = b'{\n  "dependencies": {\n    "version": "2.0.0"\n  }\n}\n'
+  _diverge(
+    repo,
+    local_files={"index.jsx": b"x\n", "package.json": local},
+    upstream_files={"index.jsx": b"x\n", "package.json": upstream},
+    base_files={"index.jsx": b"x\n", "package.json": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+def test_bare_const_version_is_not_matched(tmp_path):
+  """A generic `const VERSION` (not APP_VERSION) is not a recognised app-version
+  identifier — a conflict on it must not be auto-resolved."""
+  repo = tmp_path / "app"
+  _diverge(
+    repo,
+    local_files={"index.jsx": b'const VERSION = "1.0.1"\nexport default () => null\n'},
+    upstream_files={"index.jsx": b'const VERSION = "2.0.0"\nexport default () => null\n'},
+    base_files={"index.jsx": b'const VERSION = "1.0.0"\nexport default () => null\n'},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+def test_minified_manifest_version_resolves(tmp_path):
+  """A single-line (minified) mobius.json whose only difference is the top-level
+  version still auto-resolves via the structured JSON check."""
+  repo = tmp_path / "app"
+  base = b'{"id":"demo","version":"1.0.0","entry":"index.jsx"}\n'
+  local = b'{"id":"demo","version":"1.0.1","entry":"index.jsx"}\n'
+  upstream = b'{"id":"demo","version":"2.0.0","entry":"index.jsx"}\n'
+  _diverge(
+    repo,
+    local_files={"index.jsx": b"x\n", "mobius.json": local},
+    upstream_files={"index.jsx": b"x\n", "mobius.json": upstream},
+    base_files={"index.jsx": b"x\n", "mobius.json": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  assert res is not None
+  assert b'"version":"2.0.0"' in res.tree["mobius.json"]
+
+
+def test_disjoint_same_file_source_edit_preserved(tmp_path):
+  """APP_VERSION bump conflicts while a DISTANT line of the same source file
+  carries a local-only edit: resolve to upstream version AND keep the edit.
+  (The re-merge cleanly separates the two hunks when they don't touch.)"""
+  repo = tmp_path / "app"
+  base = b'const APP_VERSION = "1.0.0"\n// a\n// b\n// c\nexport default () => "base"\n'
+  local = b'const APP_VERSION = "1.0.1"\n// a\n// b\n// c\nexport default () => "LOCAL"\n'
+  upstream = b'const APP_VERSION = "2.0.0"\n// a\n// b\n// c\nexport default () => "base"\n'
+  _diverge(
+    repo,
+    local_files={"index.jsx": local},
+    upstream_files={"index.jsx": upstream},
+    base_files={"index.jsx": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  assert res is not None
+  assert b'APP_VERSION = "2.0.0"' in res.tree["index.jsx"]  # upstream version
+  assert b'"LOCAL"' in res.tree["index.jsx"]                # local edit kept
+
+
+def test_adjacent_disjoint_source_edit_bails_safely(tmp_path):
+  """A local edit on the line ADJACENT to the version bump groups into the same
+  merge hunk, so the re-merge conflicts. That must bail (None) — the edit is
+  never dropped; the owner resolves it. Fail-safe over cleverness."""
+  repo = tmp_path / "app"
+  base = b'const APP_VERSION = "1.0.0"\nexport default () => "base"\n'
+  local = b'const APP_VERSION = "1.0.1"\nexport default () => "LOCAL"\n'
+  upstream = b'const APP_VERSION = "2.0.0"\nexport default () => "base"\n'
+  _diverge(
+    repo,
+    local_files={"index.jsx": local},
+    upstream_files={"index.jsx": upstream},
+    base_files={"index.jsx": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
