@@ -153,6 +153,99 @@ def test_chat_note_skipped_when_no_room(tmp_path):
   assert len(block.text.encode("utf-8")) <= 600
 
 
+def _chat_note(root, cid, *, ready=False, **sections):
+  """Writes a chat note with the given `## Heading: body` sections and returns
+  its dir. `sections` keys are heading names (Digest/Summary/...); a leading
+  `desc` key becomes the frontmatter description."""
+  d = root / "chats" / cid
+  d.mkdir(parents=True, exist_ok=True)
+  desc = sections.pop("desc", cid)
+  body = f"---\ntype: chat\ndescription: {desc}\n---\n"
+  for h, txt in sections.items():
+    body += f"## {h}\n{txt}\n\n"
+  (d / "index.md").write_text(body)
+  if ready:
+    (root / ".ready").write_text("")
+  return d
+
+
+# --- always-on recent-chat injection (no .ready gate) --------------------
+
+
+def test_recent_chats_injected_without_ready(tmp_path):
+  # The recent-chat digests are injected even when no graph is published — a
+  # fresh instance (no `.ready`) still opens with recent conversational context.
+  root = tmp_path / "shared" / "memory"
+  root.mkdir(parents=True)
+  _chat_note(root, "c1", desc="cake chat", Summary="User wants cake in grams.")
+  block = memory.build_memory_block(tmp_path)
+  assert block.mode == "recent_chats"
+  assert "chats/c1/index.md" in block.loaded
+  assert "cake in grams" in block.text
+  assert "index.md" not in block.loaded  # no router without .ready
+
+
+def test_digest_prefers_digest_section_over_summary(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  root.mkdir(parents=True)
+  _chat_note(
+    root, "c1", desc="d", Digest="THE DIGEST LINE",
+    Summary="the long summary body that should not be injected",
+  )
+  block = memory.build_memory_block(tmp_path)
+  assert "THE DIGEST LINE" in block.text
+  assert "long summary body" not in block.text
+
+
+def test_digest_injects_body_incl_facts_when_no_digest(tmp_path):
+  # Existing prod notes carry `## Summary` + `## Facts & intent`, not
+  # `## Digest`; absent an explicit digest the whole body is injected, so the
+  # durable facts stay in recall (not demoted to a Read) and the note is never
+  # blanked out on the deploy.
+  root = tmp_path / "shared" / "memory"
+  root.mkdir(parents=True)
+  d = root / "chats" / "c1"
+  d.mkdir(parents=True)
+  (d / "index.md").write_text(
+    "---\ntype: chat\ndescription: d\n---\n"
+    "## Summary\nfallback summary body\n\n"
+    "## Facts & intent\n- partner prefers grams\n"
+  )
+  block = memory.build_memory_block(tmp_path)
+  assert "fallback summary body" in block.text
+  assert "partner prefers grams" in block.text  # durable facts stay injected
+
+
+def test_digest_includes_description_and_is_capped(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  root.mkdir(parents=True)
+  _chat_note(root, "c1", desc="THE GIST", Summary="x" * 5000)
+  block = memory.build_memory_block(tmp_path)
+  assert "THE GIST" in block.text  # the description gist is always carried
+  # The per-note digest (description + summary) is bounded near DIGEST_MAX_BYTES,
+  # not the whole 5000-byte summary.
+  assert len(block.text.encode("utf-8")) < memory.DIGEST_MAX_BYTES + 200
+
+
+def test_digest_falls_back_to_body_when_no_known_section(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  root.mkdir(parents=True)
+  d = root / "chats" / "c1"
+  d.mkdir(parents=True)
+  (d / "index.md").write_text(
+    "---\ntype: chat\ndescription: d\n---\nloose body with no headings"
+  )
+  block = memory.build_memory_block(tmp_path)
+  assert "loose body with no headings" in block.text
+
+
+def test_record_usage_ids_increments_selection(tmp_path):
+  # The selection signal: node ids the memory-search subagent RETURNED accrue
+  # access_count directly (no path mapping).
+  memory.record_usage_ids(tmp_path, ["coffee", "chat:xy", "coffee"])
+  assert memory.load_usage(tmp_path) == {"coffee": 2, "chat:xy": 1}
+
+
 def test_recent_chats_not_counted_as_usage(tmp_path):
   memory.record_usage(tmp_path, ["recent-chats.md", "notes/a.md"])
   # The queue is a buffer, not a graph node — no phantom id accrues.

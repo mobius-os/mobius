@@ -637,6 +637,16 @@ def run() -> int:
   read_ids = list(final.read_ids)
   final_text = final.text
 
+  if read_ids:
+    # access_count reflects SELECTION: credit each node the search RETURNED as
+    # relevant (its cited SOURCES — batched `cat` means there are no separate
+    # traversal Read events to over-count) into the usage counter that feeds
+    # graph.json's access_count. Instance-global, so it stands apart from the
+    # per-chat read-trace below and accrues even for a search with no chat_id.
+    from app.memory import record_usage_ids
+
+    record_usage_ids(DATA_DIR, read_ids)
+
   if chat_id and read_ids:
     from app.memory_trace import record_note_read
 

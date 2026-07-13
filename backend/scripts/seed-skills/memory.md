@@ -69,8 +69,10 @@ legacy` only for a seed/non-chat note with genuinely no chat to cite).
 
 ## Reading — descend until you have enough
 
-Each session opens with the router index plus the full summaries of the ~10
-most-recently-updated chat notes already injected. When that's not enough, prefer
+Each session opens with the router index plus a bounded digest of each of the
+~10 most-recently-updated chat notes already injected (each fenced with its
+`chats/<id>/index.md` path — `Read` that for the full note, or fetch the chat's
+full transcript on demand; `core.md` has the one-liner). When that's not enough, prefer
 the **memory-search subagent** (`core.md` runs it) over a manual sweep — it reads
 more thoroughly than a busy main agent tends to. You can also read **iteratively,
 by depth** yourself — navigate, don't grep:
@@ -126,9 +128,10 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
 
 - `type: chat`, with a one-line `description:` that IS the chat's name — the gist
   in the partner's words ("dialing in a sour espresso shot", not "chat 12").
-- `## Summary` — a **growing** summary (starts as a few paragraphs, grows as needed) of what the chat is about
-  and what it has produced (an app built, a decision made, a preference learned),
-  recency-biased for long chats.
+- `## Summary` — a **bounded, high-level** summary (a few sentences, kept concise) of what the chat is about
+  and what it has produced (an app built, a decision made, a preference learned).
+  It is a distillation, not a transcript: the full turn-by-turn detail lives in
+  the chat transcript (read on demand), so keep this short and high-signal.
 - `## Facts & intent` — the durable facts this chat surfaced about the partner
   or the instance, plus the partner's underlying intent (the bullet list the
   inclusion bar above would have you keep).
@@ -147,17 +150,18 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
   reader would actually follow, not every passing mention; replacing a stale `## Related`
   pointer with a better one loses nothing (it is an index of pointers, not facts).
 
-**A growing summary, lightly curated.** Each turn, `Read` the note and then
-`Write` the updated version — usually larger: fold in the new turn's information
-and reorganize for coherence. The note grows by default, and every informative
-part of the chat stays. Curate lightly as you go: if the partner revisits a
-topic the note already captures, add only what's genuinely new — re-recording
-"asked about A again" with nothing new is noise, not memory. Merging duplicate
-lines and dropping lines with no future signal is normal editing; what you never
-do is compress the note for length alone — noise is what you trim, never
-substance. (The scheduled Memory pass does the deep consolidation later.) This
-is still the opposite of an atomic note's one-claim discipline — the chat note is
-*meant* to accumulate the chat's informative content.
+**A bounded summary, re-distilled each turn.** Each turn, `Read` the note and then
+`Write` the updated version: fold in the new turn's information and **re-distill so
+the summary stays short and high-level** — a reader should get the gist of the whole
+chat in a few sentences. Prefer rewriting the summary tighter over appending to it.
+Keep the durable facts + intent complete, but the summary itself is a distillation:
+capture what matters and let the turn-by-turn detail live in the chat transcript
+(read on demand). If the partner revisits a topic the note already captures, add
+only what's genuinely new — re-recording "asked about A again" with nothing new is
+noise, not memory. Merge duplicate lines and drop lines with no future signal. (The
+scheduled Memory pass does the deep consolidation later.) Unlike an atomic note's
+one-claim discipline, the chat note carries the chat's whole gist — but *distilled*,
+not accumulated verbatim.
 
 **Re-propose the name each turn**, so the partner sees the gist evolve. Sync the
 displayed title to the `description`:

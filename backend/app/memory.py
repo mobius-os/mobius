@@ -54,10 +54,17 @@ log = logging.getLogger("mobius.memory")
 DEFAULT_BUDGET_BYTES = 25_000
 DEFAULT_MAX_NOTES = 12
 # How many recent per-chat notes to inject at session start. Each is the
-# agent's growing summary of one chat (durable facts + intent + a running
-# summary); the most-recently-modified ones open a fresh session with recent
-# conversational context. Replaces the old recent-chats queue + inbox tail.
+# agent's bounded high-level summary of one chat (durable facts + intent + a
+# concise running summary); the most-recently-modified ones open a fresh
+# session with recent conversational context. Replaces the old recent-chats
+# queue + inbox tail.
 RECENT_CHAT_NOTES = 10
+# Per-note byte cap on the injected chat digest. The daytime agent is
+# instructed to keep each chat's summary bounded and high-level (the full
+# detail lives in the transcript, read on demand), but this is a defensive
+# cap so a note that grew past its intended size still injects a bounded
+# head rather than crowding out the other recent chats or blowing the budget.
+DIGEST_MAX_BYTES = 800
 
 
 @dataclass
@@ -68,7 +75,7 @@ class MemoryBlock:
   adds that plus the dynamic provider/timezone/viewport tail). `loaded` is the
   list of graph-relative paths that made it into the block, so the caller can
   credit their access (the `memory_load` activity event). `mode` is
-  "graph" | "empty" for observability.
+  "graph" | "recent_chats" | "empty" for observability.
   """
 
   text: str
@@ -92,10 +99,13 @@ def is_graph_ready(data_dir: str | Path) -> bool:
 # router->traverse); it survives only as viewer/analytics signal. We track
 # it in a sidecar counter (`usage.json`) rather than rewriting note
 # frontmatter on the hot path: a counter bump is cheap and churns no git
-# history. `build_memory_block` returns `loaded`; the injection site calls
-# `record_usage(loaded)`. `load_usage` feeds the graph builder (the Memory
-# viewer's "Used" column), so the effective access_count = frontmatter baseline
-# + live usage. Keyed by node id (a note's slug), matching graph.json.
+# history. usage.json is the SELECTION signal: a node accrues a count when
+# retrieval RETURNS it as relevant — the memory-search subagent's cited
+# SOURCES (`record_usage_ids`) — NOT when it is merely injected into the prompt
+# for free or traversed during a search. `load_usage` feeds the graph builder,
+# so the effective access_count = frontmatter baseline + live usage; the Memory
+# viewer's "Used" column reads it. Keyed by node id (a note's slug), matching
+# graph.json.
 def _usage_path(data_dir: str | Path) -> Path:
   return memory_dir(data_dir) / "usage.json"
 
@@ -137,15 +147,14 @@ def load_usage(data_dir: str | Path) -> dict[str, int]:
   return _read_usage_file(_usage_path(data_dir))
 
 
-def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
-  """Increments the usage counter for every loaded note id. Best-effort and
-  side-effecting — call it from the injection site, NOT from
-  `build_memory_block` (which stays pure). Atomic temp-write + rename so a
-  concurrent chat start can't read a half-written counter."""
+def _bump_usage(data_dir: str | Path, ids: list[str]) -> None:
+  """Increments the usage counter for each graph node id. Best-effort and
+  side-effecting. Atomic temp-write + rename so a concurrent chat start can't
+  read a half-written counter."""
   import json
   import os
   import tempfile
-  ids = [i for i in (_loaded_path_to_id(p) for p in loaded) if i]
+  ids = [i for i in ids if i]
   if not ids:
     return
   counts = load_usage(data_dir)
@@ -173,6 +182,22 @@ def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
       raise
   except OSError as exc:
     log.warning("memory.record_usage: could not persist usage.json: %r", exc)
+
+
+def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
+  """Increments the usage counter for every loaded note PATH's id. Best-effort
+  and side-effecting; never called from `build_memory_block` (which stays
+  pure). Path variant of `record_usage_ids` for callers that hold graph-
+  relative paths rather than node ids."""
+  _bump_usage(data_dir, [_loaded_path_to_id(p) for p in loaded])
+
+
+def record_usage_ids(data_dir: str | Path, ids: list[str]) -> None:
+  """Increments the usage counter for graph node ids directly — the SELECTION
+  signal. A node accrues access_count when retrieval RETURNS it as relevant
+  (the memory-search subagent's cited SOURCES), not when it is merely injected
+  into the prompt for free or traversed during a search."""
+  _bump_usage(data_dir, ids)
 
 
 def parse_frontmatter(text: str) -> dict[str, object]:
@@ -230,29 +255,71 @@ def build_memory_block(
   budget_bytes: int = DEFAULT_BUDGET_BYTES,
   max_notes: int = DEFAULT_MAX_NOTES,
 ) -> MemoryBlock:
-  """Assembles the injected memory context from the knowledge graph.
+  """Assembles the injected memory context.
 
-  `index.md` (the router, full, capped to the budget) + the full summaries of
-  the ~10 most-recently-modified `chats/<id>/index.md` notes (newest first,
-  budget-guarded). NO mocs/notes are injected — the deeper graph is read on
-  demand by the memory-search subagent. Each included file is fenced with a
-  `<<< path >>>` marker so the agent knows what a `[[link]]` resolves to.
+  Two independent layers, budget-guarded, each fenced with a `<<< path >>>`
+  marker so the agent knows what it is reading and what a `[[link]]` resolves
+  to:
 
-  Returns an empty block when the graph is not yet published (`.ready` absent)
-  or is empty — the agent then has no injected memory for this turn but can
-  still `Read` the graph on demand. `.ready` is written atomically after the
-  graph lints, so a partial/failed publish leaves the previous graph in place
-  rather than handing over a half-built one.
+  - **Recent-chat digests — always injected**, with no `.ready` gate. Each
+    `chats/<id>/index.md` is the bounded high-level summary the daytime agent
+    maintains for one chat; we inject its `description` + summary (capped per
+    note via `_chat_digest`), newest first. The full note is one `Read` away
+    (the fenced path); the full narrative is the chat transcript. This layer
+    needs no published graph, so a fresh instance still opens with recent
+    conversational context.
+  - **Router index — injected only when a validated graph is published**
+    (`.ready`). `index.md` is a lightweight map into the consolidated graph;
+    the deeper graph (`mocs/`, `notes/`) is never injected — the memory-search
+    subagent reads it on demand. `.ready` is written atomically after the
+    graph lints, so a partial/failed publish keeps the previous graph rather
+    than handing over a half-built one.
 
-  Pure: never writes, never raises on a missing/garbled file.
+  Returns an empty block only when there is nothing to inject (no chat notes
+  and no published router). `max_notes` is retained for signature stability
+  but the recent-chat cap is `RECENT_CHAT_NOTES`. Pure: never writes, never
+  raises on a missing/garbled file.
   """
   # Clamp at 0 so a stray negative budget can't reach the byte-slicing below,
   # where a negative limit returns a SUFFIX of the text instead of empty.
   budget_bytes = max(0, budget_bytes)
   root = memory_dir(data_dir)
+  parts: list[str] = []
+  loaded: list[str] = []
+  used = 0
+  mode = "empty"
+
+  # Router index first (only when a graph is published) — it earns priority
+  # placement as the map into the deeper graph, and may use the full budget
+  # since nothing precedes it.
   if is_graph_ready(data_dir):
-    return _build_graph_block(root, budget_bytes, max_notes)
-  return MemoryBlock(text="", loaded=[], mode="empty")
+    index = _read(root / "index.md").strip()
+    if index:
+      index = _cap_index(index, budget_bytes)
+      parts.append(index)
+      loaded.append("index.md")
+      used += len(index.encode("utf-8"))
+      mode = "graph"
+
+  # Recent-chat digests — ALWAYS injected. A budget guard stops before the
+  # block exceeds budget_bytes; each digest is already per-note capped.
+  for note in _recent_chat_notes(root, RECENT_CHAT_NOTES):
+    digest = _chat_digest(note)
+    if not digest:
+      continue
+    rel = f"chats/{note.parent.name}/index.md"
+    chunk = f"<<< {rel} (recent chat — Read this file for the full note) >>>\n{digest}"
+    if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
+      break
+    parts.append(chunk)
+    loaded.append(rel)
+    used += len(chunk.encode("utf-8")) + 2
+    if mode == "empty":
+      mode = "recent_chats"
+
+  if not parts:
+    return MemoryBlock(text="", loaded=[], mode="empty")
+  return MemoryBlock(text="\n\n".join(parts), loaded=loaded, mode=mode)
 
 
 def _recent_chat_notes(root: Path, limit: int) -> list[Path]:
@@ -267,52 +334,75 @@ def _recent_chat_notes(root: Path, limit: int) -> list[Path]:
   return notes[:limit]
 
 
-def _build_graph_block(
-  root: Path, budget_bytes: int, max_notes: int
-) -> MemoryBlock:
-  parts: list[str] = []
-  loaded: list[str] = []
-  used = 0
+def _cap_index(index: str, budget_bytes: int) -> str:
+  """Caps the router index to the byte budget, appending a truncation marker
+  when there is room for it."""
+  if len(index.encode("utf-8")) <= budget_bytes:
+    return index
+  # Reserve room for the marker so index + marker stays within budget —
+  # truncating to the full budget and THEN appending overran it by the marker's
+  # length. If the budget is smaller than the marker itself (pathological/tiny),
+  # drop the marker and hard-truncate rather than passing a NEGATIVE limit to
+  # _truncate_bytes (which would slice from the END and still overflow).
+  marker = "\n\n[index truncated to fit the memory budget]"
+  marker_len = len(marker.encode("utf-8"))
+  if budget_bytes <= marker_len:
+    return _truncate_bytes(index, budget_bytes)
+  return _truncate_bytes(index, budget_bytes - marker_len) + marker
 
-  index = _read(root / "index.md").strip()
-  if index:
-    if len(index.encode("utf-8")) > budget_bytes:
-      # Reserve room for the marker so index + marker stays within budget —
-      # truncating to the full budget and THEN appending overran it by the
-      # marker's length. If the budget is smaller than the marker itself
-      # (pathological/tiny), drop the marker and hard-truncate to the budget
-      # rather than passing a NEGATIVE limit to _truncate_bytes (which would
-      # slice from the END and still overflow).
-      marker = "\n\n[index truncated to fit the memory budget]"
-      marker_len = len(marker.encode("utf-8"))
-      if budget_bytes <= marker_len:
-        index = _truncate_bytes(index, budget_bytes)
-      else:
-        index = _truncate_bytes(index, budget_bytes - marker_len) + marker
-    parts.append(index)
-    loaded.append("index.md")
-    used += len(index.encode("utf-8"))
 
-  # Recent chat NOTES — the growing per-chat summaries that ARE the day's
-  # memory (there is no shared inbox). The most-recently-modified chats are
-  # injected in full, newest first, so a new session opens with recent
-  # conversational context: the durable facts + intent + the running summary
-  # the agent maintains in each chat's `chats/<id>/index.md`. The nightly pass
-  # consolidates these into the graph. The deeper graph (notes/, mocs/) is NOT
-  # injected — it is read on demand by the memory-search subagent. A budget
-  # guard stops injection before the block exceeds budget_bytes.
-  for note in _recent_chat_notes(root, RECENT_CHAT_NOTES):
-    body = _read(note).strip()
-    if not body:
-      continue
-    rel = f"chats/{note.parent.name}/index.md"
-    chunk = f"<<< {rel} (recent chat summary) >>>\n{body}"
-    if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
+def _strip_frontmatter(text: str) -> str:
+  """The note body after any leading `---` frontmatter block (the whole text
+  when there is no closing fence)."""
+  if not text.startswith("---"):
+    return text
+  end = text.find("\n---", 3)
+  if end == -1:
+    return text
+  rest = text[end + 1:]
+  nl = rest.find("\n")
+  return rest[nl + 1:] if nl != -1 else ""
+
+
+def _extract_section(text: str, heading: str) -> str | None:
+  """Body under a level-2 `## <heading>` section, up to the next level-2
+  heading or EOF. Case-insensitive on the heading; None when it is absent."""
+  lines = _strip_frontmatter(text).splitlines()
+  target = heading.strip().lower()
+  start = None
+  for i, line in enumerate(lines):
+    s = line.strip()
+    if s.startswith("## ") and s[3:].strip().lower() == target:
+      start = i + 1
       break
-    parts.append(chunk)
-    loaded.append(rel)
-    used += len(chunk.encode("utf-8")) + 2
+  if start is None:
+    return None
+  collected: list[str] = []
+  for line in lines[start:]:
+    if line.strip().startswith("## "):
+      break
+    collected.append(line)
+  return "\n".join(collected).strip()
 
-  if not parts:
-    return MemoryBlock(text="", loaded=[], mode="empty")
-  return MemoryBlock(text="\n\n".join(parts), loaded=loaded, mode="graph")
+
+def _chat_digest(note: Path) -> str:
+  """The bounded, injectable slice of a chat note: its `description` gist plus
+  its body (the high-level `## Summary` + the durable `## Facts & intent`),
+  capped at DIGEST_MAX_BYTES.
+
+  A note may declare an explicit `## Digest` section to control exactly what is
+  injected; absent that, the whole note body is used — so existing notes (which
+  carry `## Summary` + `## Facts & intent`, never `## Digest`) inject their
+  durable signal instead of collapsing to nothing on the deploy that ships
+  this, and the durable facts stay in recall rather than being demoted to a
+  `Read`. The full note is still one `Read` away via the fenced path when the
+  cap truncates it; the full narrative is the chat transcript.
+  """
+  text = _read(note)
+  if not text.strip():
+    return ""
+  desc = str(parse_frontmatter(text).get("description", "")).strip()
+  digest = _extract_section(text, "Digest")
+  core = digest if digest is not None else _strip_frontmatter(text).strip()
+  core = _truncate_bytes(core.strip(), DIGEST_MAX_BYTES).strip()
+  return "\n".join(p for p in (desc, core) if p).strip()
