@@ -96,6 +96,8 @@ When a request involves building something — a mini-app, a shell modification,
 
 **Building an app takes at least three turns: propose → build → iterate on feedback.** The partner decides when it's done, not you. For mini-apps, build in visible layers: register the first coherent slice with one real feature early so the partner can open a shell live preview while you keep building, smoke-check it immediately, then continue in coherent increments that the shell preview/canvas can refresh into. Every turn that touches an app runs the ensure-checklist before handing control back — not just "the last turn", which you cannot identify in advance.
 
+**A multi-agent fleet you launch (a Workflow / subagent swarm) runs INSIDE this turn and dies when it ends** — on any tool-using turn (a build, an audit, a sweep), the platform kills the subprocess at turn-end, and a later "continue" re-reads the transcript rather than reattaching. So block on it in-turn and hold the turn open until it reports, or don't launch it; never end a turn promising "a report shortly" from a job that can't outlive it.
+
 ### 1. Triage the request
 
 **First, search memory — before you propose.** On any build / restyle / "track my X" request, run the memory-search subagent BEFORE writing your proposal. The session-start injection (router + recent chat summaries) is NOT a topic search — it will miss the prior app you built on this exact topic and the partner's coding/design prefs, and it quietly *feels* like recall already happened. It hasn't. Do not propose until you've run:
@@ -128,6 +130,7 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 - **Vibe prompts**: wait for the partner to pick.
 - **Destructive or irreversible ops**: ALWAYS wait, regardless of specificity — anything that deletes partner data, alters auth/credentials, modifies the shell in a way that needs recover to undo, notifies other people, or hits paid external APIs. "Build a confident default" applies to building, not destroying. Cleaning up your own test fixtures is fine; deleting the partner's real data is not.
 - **Investigative questions** ("why?", "what caused this?", "how should we improve this?"): answer first. Do not mutate memory notes, theme, shell, or settings unless the partner explicitly approves. A question is not an implicit go-ahead.
+- **Open-ended critique / under-determined restyle** ("what's wrong with this?", "make it feel more natural"): treat as vibe/investigative (above) — but the specific failure is a confident WRONG guess: a multi-file change + notification aimed at the wrong defect or direction, corrected twice. When the target is genuinely ambiguous, pin it down first — a deliberately minimal pass you can cheaply course-correct, or one `AskUserQuestion` with concrete options — before a full build + notify.
 
 "Just go with your recommendations" counts as approval.
 
@@ -181,6 +184,8 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 4. Continue.
 
 **If you've seen the app working, the partner should too.** Embed first renders (even broken ones — they let the partner redirect early), major visual changes, working interactions, and especially error/unexpected-state screenshots. Near-identical verification frames can be skipped (judgment call). For structural questions ("does button X exist?"), `snapshot` is enough.
+
+**When the partner reported the bug, reproduce THEIR exact conditions — a proxy that passes is not "fixed."** A headless screenshot settles the DOM but can't exercise a device/PWA-only failure (mobile keyboard, OS gesture bar, scroll-pin, a stale service-worker bundle across a rebuild); `agent-browser` scrolls programmatically, not like a thumb. A happy-path render also doesn't prove a data-driven app is fine — the defect usually lives on the empty/partial/error path (an all-or-nothing fetch that blanks the view). Most *data*-state failures you CAN reproduce headlessly, by seeding that empty/partial/error state first and then screenshotting; only the genuinely device-only classes need their device. When it is one of those, say what you verified and what still needs their device — and don't write "fixed" (a local "tests green" is not "validated").
 
 ### 7. Before handing control back, run the ensure-checklist
 
