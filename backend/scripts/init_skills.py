@@ -15,24 +15,35 @@ automatic content migration of existing skills: an updated baked seed (e.g. a
 fix to reflection.md) does NOT reach an instance that already has that file. Such
 an update must be propagated explicitly (copy the new seed over the live
 /data/shared/skills/<name>.md), because a blind overwrite can't tell an owner
-improvement from an agent edit. `.seed-version`/`SEED_VERSION` are kept as a
+improvement from an agent edit. App-owned skills (currently `memory.md`) are
+excluded from base seeding and arrive through their app manifest. Existing
+copies are deliberately preserved. `.seed-version`/`SEED_VERSION` are kept as a
 record of the baked seed generation for that future, merge-aware migration; the
 sentinel is written but not yet read.
 
 Seed source: /app/scripts/seed-skills/ (baked), falling back to the in-repo
 backend/scripts/seed-skills/ for dev. Run from entrypoint after
-init_memory_graph.py.
+init_chat_summaries.py.
 """
 
 import os
 import pwd
 import shutil
+import hashlib
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "10"  # bump when the baked seed skills change (v2: added reflection.md; v3: const-CSS styling standard in building-apps.md + new app-component-shapes.md; v4: added embedded-app-agent.md; v5: SyncPill v2 silent-when-healthy; v6: recovery.md matches the actual /recover dashboard — four real actions, restore via recovery_restore.sh not a button; v7: rename dreaming.md->reflection.md + mind.md->memory.md + chat-centric memory model — existing instances get the rename via migrate-app-rename.sh, NOT a reseed; v8: contributing.md retired from the seed — the Contribute app ships it via the manifest `skills` field, and live copies on existing instances are untouched; v9: Memory owns scheduled consolidation, Reflection reviews Memory's update log for system-improvement signals; v10: app-component-shapes.md gains the mobius-ui:Page reading-column shape — cap CONTENT at a centered column on wide viewports, full-bleed below ~760px)
+SEED_VERSION = "11"  # v11: memory.md is app-owned and no longer base-seeded
+_APP_OWNED_SKILLS = frozenset({"memory.md"})
+# These three base skills used to contain unconditional graph behavior. Update
+# only byte-for-byte baked copies; an owner/agent-edited file is never touched.
+_UNMODIFIED_MIGRATIONS = {
+  "reflection.md": "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
+  "cron.md": "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
+  "recovery.md": "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
+}
 
 _SEED_CANDIDATES = [
   Path("/app/scripts/seed-skills"),
@@ -65,7 +76,10 @@ def init() -> None:
     return
   SKILLS.parent.mkdir(parents=True, exist_ok=True)
   if not SKILLS.exists():
-    shutil.copytree(seed, SKILLS)
+    SKILLS.mkdir(parents=True)
+    for src in seed.glob("*.md"):
+      if src.name not in _APP_OWNED_SKILLS:
+        shutil.copy2(src, SKILLS / src.name)
     VERSION_FILE.write_text(SEED_VERSION + "\n", encoding="utf-8")
     n = len(list(SKILLS.glob("*.md")))
     print(f"init_skills: seeded {n} skills (v{SEED_VERSION})")
@@ -74,13 +88,28 @@ def init() -> None:
   # Present already — preserve the agent's edits. Only add NEW seed skills the
   # instance doesn't have yet (never overwrite an existing one).
   added = 0
+  migrated = 0
   for src in seed.glob("*.md"):
+    if src.name in _APP_OWNED_SKILLS:
+      continue
     dst = SKILLS / src.name
+    old_digest = _UNMODIFIED_MIGRATIONS.get(src.name)
+    if dst.is_file() and old_digest:
+      try:
+        digest = hashlib.sha256(dst.read_bytes()).hexdigest()
+      except OSError:
+        digest = ""
+      if digest == old_digest:
+        shutil.copy2(src, dst)
+        migrated += 1
+        continue
     if not dst.exists():
       shutil.copy2(src, dst)
       added += 1
   if added:
     print(f"init_skills: added {added} new seed skill(s) (existing kept)")
+  if migrated:
+    print(f"init_skills: migrated {migrated} unmodified base skill(s)")
   _chown_mobius(SKILLS)
 
 

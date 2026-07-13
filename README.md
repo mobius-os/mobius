@@ -111,9 +111,9 @@ The whole starter catalog under [github.com/mobius-os](https://github.com/mobius
 
 ## It improves itself for you
 
-The agent keeps a **Memory** — a knowledge graph of everything it has learned, separate from your chat transcripts. Notes link to related notes, the important ones are indexed, and the whole thing loads into the agent's context at the start of each session. Instead of re-reading ten old conversations to remember a gotcha, it reads one note.
+Every chat maintains its own name, one-paragraph Digest, and complete cumulative Summary. New chats receive only the recent Digests. The optional **Memory** system app adds an Obsidian-style graph of durable facts: when prior context matters, the chat agent sends a focused question to a read-only recall agent and gets back relevant text with file pointers. The graph is never loaded wholesale, and uninstalling Memory removes its instructions while leaving ordinary chat continuity intact.
 
-Every night the **Reflection** agent wakes up and tends it. It merges duplicate notes, drops stale ones, surfaces patterns that span multiple builds, and looks for things worth suggesting to you in the morning. It also audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast. It commits its changes to the same git history everything else uses, so a bad night's reorganization is recoverable.
+When Memory is installed, its own scheduled agent merges duplicate graph notes, drops stale ones, repairs links, and preserves provenance. Separately, the **Reflection** agent audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast — and looks for things worth suggesting in the morning. Both commit their changes to the same git history, so a bad reorganization is recoverable.
 
 The nightly loop is the same reflect-and-refactor cycle the developers run by hand when improving the agent. Reflection is that loop, scheduled, on your instance.
 
