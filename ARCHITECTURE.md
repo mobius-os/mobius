@@ -600,6 +600,98 @@ All chat-domain mutations — transcript writes, run-markers, question rows, ans
 
 **GUARDRAIL — never write `Chat.messages` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); `recovery_chat_runner.py` is actor-independent by design and appends to its own `/data/recovery/chats/<chat_id>.jsonl`, not the `Chat.messages` column.
 
+## Multi-pane workspace (design only)
+
+The shipped feature is a single tab strip that swaps one on-screen view. The
+target is a workspace where tabs can move between tiled panes: a build chat on
+the left and its app preview on the right, or several agent chats side by side.
+Phones degrade to swap-only tabs; tiling is a web/desktop capability.
+
+### Existing pane seams
+
+`frontend/src/components/Shell/tabModel.js` is the openable-item primitive. A
+tab is `{ kind: 'chat' | 'app', id: string }`; the module owns construction,
+identity (`tabKey`, `sameTab`), deduplication, capacity, persistence, navigation
+mapping, and current single-view active state. Construction, identity,
+deduplication, capacity, and `tabNavTarget` carry into panes unchanged. Today
+`isTabActive(tab, view)` maps the global `{ view, chatId, appId }` focus to a
+tab. A pane will instead store `activeTabKey` and compare it with `tabKey(tab)`.
+
+`Shell.jsx` currently keeps one `openTabs` set, one active-view triple, and the
+hidden app-iframe LRU. This is the degenerate one-pane form of the target model.
+
+`frontend/src/components/Shell/workspacePlacement.js` is the placement seam.
+Producers issue an `open-item` request with `placement: 'beside-source'` and
+`activation: 'background'`; they never name a tab strip, pane id, split
+direction, or breakpoint. The flat resolver inserts a built app after its
+source chat. A pane resolver should interpret the same request as: use the next
+pane when one exists, create one when the viewport supports it, and fall back
+to an adjacent background tab on narrow screens.
+
+| Input | Confirmation | Current action |
+| --- | --- | --- |
+| `app_created {appId, chatId}` | Refetched row matches both ids | Apply one background `beside-source` request |
+| `app_created` missing/mismatched ids | No matching live row | Ignore the placement request |
+| Fresh app-list row with `chat_id` | App absent from the session baseline | Apply the same request as reconnect/load fallback |
+| `app_updated` | Live row exists | Refresh CTA/code and warm cache; never place again |
+| Store install or app without `chat_id` | No source-chat relationship | Drawer arrival only |
+| Replayed/duplicate placement | Target app already open | Strict same-reference no-op |
+
+Every automatic built-preview path passes through
+`applyWorkspaceRequestsToFlatTabs`. Direct drawer/user tab opens remain
+explicit foreground navigation and bypass automatic placement by design.
+
+### Target pane model
+
+- **Workspace** = a `layout` tree plus a set of `panes`.
+- **Pane** = `{ id, tabs: Tab[], activeTabKey }`, with its own open set and
+  focused tab. The current shell is `panes: [pane0]` with
+  `pane0.tabs = openTabs`.
+- **Layout** = a binary split tree: `{ dir: 'row' | 'col', a, b, ratio }`, with
+  pane leaves. A single pane is the trivial leaf.
+- **Focus** = the pane receiving keyboard input and serving as the current back
+  target.
+
+`paneModel.js`, beside `tabModel.js`, should own pure layout operations: split
+a pane, move a tab, close a pane, and resize a split. Rendering walks the tree
+and renders each leaf pane's active tab.
+
+### Localized migration path
+
+1. Introduce `paneModel.js` and a workspace reducer. Seed one pane from today's
+   `openTabs`; do not change the UI yet.
+2. Render the layout tree instead of one `<main>`. The single-pane output must
+   remain identical; this step unlocks two panes.
+3. Add drag-to-tile: dropping a tab on a pane edge splits it and moves the tab.
+   The strip's drag source already has `tabKey`.
+4. Add per-pane chat/app rendering. Today only the active ChatView mounts; a
+   workspace mounts one ChatView per visible chat pane and must obey the
+   constraints below.
+
+### Hard pane constraints
+
+1. **Never remount ChatView to re-measure.** Pane resizing must imperatively
+   reset its grow-only `fullViewHRef` in `useScrollMode` while preserving
+   `spacerActive` and `FOLLOW_BOTTOM`. Folding pane size into a React key
+   collapses send reservation and freezes live follow behavior. Each pane owns
+   its own height ref; keyboard resizing is pane-local.
+2. **Never reparent keyed app iframes, and keep the global cap.** Visible app
+   panes count against `APP_CACHE_MAX` (currently four). Preserve id-sorted
+   render order across the workspace; reparenting a sandboxed iframe reloads it
+   and can hit the ten-second loading timeout.
+3. **App ids remain numeric for navigation.** Route every pane open through
+   `tabModel.tabNavTarget`; string/number divergence double-mounts the iframe.
+4. **Design Back and pane focus together.** Multiple panes need per-pane
+   history or explicitly tagged tab/pane history entries dispatched by type.
+   A priority-list guess desynchronizes the Navigation API and sentinel model.
+5. **Test positive behavior.** Assert that a message stays pinned and a pane
+   continues following its stream across resize/toggle. A bound such as
+   `spacer <= client` is insufficient because a broken zero spacer passes it.
+
+`paneModel`, the layout reducer, multi-pane rendering, resizing, and drag/drop
+remain deferred until panes are the explicit task. The tab and placement seams
+above are useful in the shipped one-pane experience today.
+
 ## Navigation back-stack + drawer model
 
 The drawer is modeled as a *virtual route*: opening it pushes one history entry but keeps the URL at `/` (`openDrawer` → `pushNavEntry('drawer')` + `drawerPushedRef = true`). The design satisfies a few hard desiderata — no "two drawers" artifact during Chrome-Android swipe-back, the 250ms slide stays visible, one back-press exits the PWA from home, and closing the drawer (overlay tap / X) must never navigate. Three load-bearing invariants in `useNavigation.js` enforce this: (1) **`navTo` consumes the existing drawer-sentinel rather than pushing** when the drawer is open (it pushes one `'nav'` entry only if the drawer was closed), so an in-app nav reuses the drawer's history slot instead of growing the stack — keeping history pinned to a pre-drawer snapshot and killing the BFCache artifact; (2) **every close path funnels through `history.back()` → `handleBack`**, whose drawer-first guard (`if (drawerOpenRef && drawerPushedRef) { close; return }`) prevents over-popping `navStackRef`; (3) **`drawerPushedRef` is a ref, not state** (mutated synchronously in the same task as the history call) and is the single source of truth for "is a drawer-sentinel above the current entry." Every shell-pushed entry is tagged `{__mobiusNav:true, kind}` via `navHistory.js` and written to *both* the classic History store and the Navigation API entry (`updateCurrentEntry`); both back handlers ignore untagged pops so sandboxed-iframe phantom entries can't over-pop — do not drop the tag from any push site or genuine sentinels read as phantoms and back-nav dies. Mini-apps install their own back-targets via the `moebius:nav-push` postMessage protocol (per-app counts in `appSentinelCountsRef`, capped at 20), consumed before navStack pops; `Shell.deleteChat` must scrub `navStackRef` of the deleted chat's entries or back lands on a 404'd chat. Three architectures were tried and rejected (per-nav pushState, `flushSync`-before-pushState, perpetual single-sentinel) — read `tests/navigation.spec.mjs` (22 invariants) before changing anything.
