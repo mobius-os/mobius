@@ -506,12 +506,11 @@ class _BodySizeLimitMiddleware:
 # Setting them here means they hold regardless of what fronts the app. These are
 # resource-load-agnostic — they protect against clickjacking, MIME-sniffing, TLS
 # downgrade, and referrer leakage WITHOUT restricting what apps may load, so web
-# images / external embeds keep working. There is deliberately NO Content-Security-
-# Policy here: a same-origin mini-app can read the owner JWT (the documented
-# same-origin trade-off) and exfiltrate it via /api/proxy regardless of any CSP,
-# so a CSP wouldn't close that and a strict one would just break apps — the real
-# fix is an HttpOnly-cookie session (.pm/172). Clickjacking is covered by
-# X-Frame-Options without a CSP.
+# images / external embeds keep working. There is deliberately no global
+# Content-Security-Policy here yet: mini-apps intentionally support user-chosen
+# external resources and a strict shell-wide policy would break that contract.
+# App isolation instead comes from opaque-origin sandboxed frames plus scoped
+# tokens. Clickjacking is covered by X-Frame-Options without a CSP.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),

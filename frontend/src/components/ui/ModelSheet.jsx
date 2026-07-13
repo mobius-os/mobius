@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import EffortStepper from './EffortStepper.jsx'
+import { modelEfforts } from './modelEfforts.js'
 import './ModelSheet.css'
 
 /**
@@ -42,25 +44,67 @@ export default function ModelSheet({
   effort,
   onEffortChange,
 }) {
-  const hasEfforts = Array.isArray(efforts) && efforts.length > 0
+  const supportsEffort = (
+    Array.isArray(efforts)
+    && efforts.length > 0
+    && typeof onEffortChange === 'function'
+  )
   const closeRef = useRef(null)
+  const dialogRef = useRef(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return undefined
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    const previousFocus = document.activeElement
+    const previousOverflow = document.body.style.overflow
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        onCloseRef.current()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const focusable = Array.from(
+        dialogRef.current?.querySelectorAll('button:not(:disabled)') || [],
+      )
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
     document.addEventListener('keydown', onKey)
+    document.body.style.overflow = 'hidden'
     // Land focus inside the dialog so Escape works and keyboard users
     // aren't stranded on the trigger behind the backdrop.
     closeRef.current?.focus?.()
-    return () => document.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = previousOverflow
+      if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
+        previousFocus.focus({ preventScroll: true })
+      }
+    }
+  }, [open])
 
   if (!open) return null
 
   const noneSelected = !provider
-  return (
-    <div className="model-sheet__backdrop" role="presentation" onClick={onClose}>
+  return createPortal(
+    <div
+      className="model-sheet__backdrop"
+      role="presentation"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
       <div
+        ref={dialogRef}
         className="model-sheet"
         role="dialog"
         aria-modal="true"
@@ -108,13 +152,17 @@ export default function ModelSheet({
                 {group.models.map((m) => {
                   const on = provider === group.key && model === m.id
                   const disabled = !connected && !on
+                  const rowEfforts = supportsEffort ? modelEfforts(efforts, m) : []
                   return (
                     <div key={`${group.key}-${m.id}`}>
                       <button
                         type="button"
                         className={`model-sheet__row${on ? ' model-sheet__row--sel' : ''}`}
                         disabled={disabled}
-                        onClick={() => { onPick(group.key, m.id); if (!hasEfforts) onClose() }}
+                        onClick={() => {
+                          onPick(group.key, m.id, m)
+                          if (rowEfforts.length === 0) onClose()
+                        }}
                       >
                         <span className="model-sheet__row-icon">{Logo && <Logo />}</span>
                         <span className="model-sheet__row-main">
@@ -123,10 +171,10 @@ export default function ModelSheet({
                         </span>
                         {on && <span className="model-sheet__check" aria-hidden="true" />}
                       </button>
-                      {on && hasEfforts && (
+                      {on && rowEfforts.length > 0 && (
                         <div className="model-sheet__effort">
                           <EffortStepper
-                            efforts={efforts}
+                            efforts={rowEfforts}
                             value={effort}
                             onChange={onEffortChange}
                             ariaLabel="Reasoning effort"
@@ -141,6 +189,7 @@ export default function ModelSheet({
           })}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

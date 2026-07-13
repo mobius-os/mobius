@@ -259,3 +259,24 @@
     border: 1px solid color-mix(in srgb, var(--danger, #f87171) 35%, transparent);
     white-space: nowrap;
   }
+.shell__settings-loading {
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.shell__settings-loading-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: shell-settings-pulse 800ms ease-in-out infinite alternate;
+}
+
+@keyframes shell-settings-pulse {
+  to { opacity: 0.35; transform: scale(0.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell__settings-loading-dot { animation: none; }
+}

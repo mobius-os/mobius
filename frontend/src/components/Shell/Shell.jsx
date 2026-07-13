@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Minimize2, X, MessageSquare, AppWindow } from 'lucide-react'
 import Drawer from '../Drawer/Drawer.jsx'
@@ -6,7 +6,6 @@ import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
-import SettingsView from '../SettingsView/SettingsView.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, apiFetch, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
@@ -54,6 +53,7 @@ function _warmTargetSw() {
 }
 
 const SHELL_RELOAD_RECHECK_MS = 6000
+const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
   const {
@@ -1092,20 +1092,19 @@ export default function Shell() {
     }
 
     async function onMessage(e) {
-      // window 'message' events are for cross-frame postMessage from
-      // same-origin sibling frames. NOT service-worker messages —
+      // window 'message' events are for cross-frame postMessage from app
+      // frames. NOT service-worker messages —
       // those arrive on navigator.serviceWorker, handled separately
       // below.
       //
-      // The iframes mount with allow-same-origin so e.origin is always
-      // window.location.origin, never the string 'null'. The 'null'-origin
-      // branch was dead (sandboxed-without-allow-same-origin iframes).
-      // e.source is NOT checked here (Möbius is single-owner and every iframe
-      // on this origin is owned by the shell). app-error is the one message
-      // that DID need source attribution (to swallow a hidden preview frame's
-      // crash); that now lives in AppCanvas, which forwards only its live
-      // frame's app-error up via onAppError — so no branch for it here.
-      if (e.origin !== window.location.origin) return
+      // Sandboxed app frames intentionally have the opaque `null` origin. A
+      // null origin alone is not identity, so require the event source to be
+      // one of the AppCanvas windows currently mounted by this shell. This also
+      // keeps same-origin popups or stale frames from driving navigation.
+      if (e.origin !== 'null' && e.origin !== window.location.origin) return
+      const fromMountedApp = [...document.querySelectorAll('iframe.canvas')]
+        .some((frame) => frame.contentWindow === e.source)
+      if (!fromMountedApp) return
       if (e.data?.type === 'moebius:new-chat') {
         newChat({
           draft: e.data.draft,
@@ -1788,11 +1787,17 @@ export default function Shell() {
           </div>
         ))}
         {activeView === 'settings' && (
-          <SettingsView
-            onThemeChange={loadTheme}
-            onOpenChat={selectChat}
-            focusTarget={settingsFocusTarget}
-          />
+          <Suspense fallback={(
+            <div className="shell__settings-loading" role="status" aria-label="Loading settings">
+              <span className="shell__settings-loading-dot" aria-hidden="true" />
+            </div>
+          )}>
+            <SettingsView
+              onThemeChange={loadTheme}
+              onOpenChat={selectChat}
+              focusTarget={settingsFocusTarget}
+            />
+          </Suspense>
         )}
       </main>
       {/* SHELL-provided immersive exit. With the top bar gone the drawer

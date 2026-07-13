@@ -413,7 +413,7 @@ export default function useNavigation() {
           if (iframe?.contentWindow) {
             iframe.contentWindow.postMessage(
               { type: 'moebius:nav-back' },
-              window.location.origin,
+              '*',
             )
           }
           return

@@ -88,6 +88,8 @@ class AppOut(BaseModel):
   manage_apps: bool = False
   # GitHub connection access — see models.App.github_access.
   github_access: bool = False
+  # Guarded owner-filesystem access — see models.App.filesystem_access.
+  filesystem_access: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
   # only for legacy rows from before the slug column existed; lazy-
   # backfilled on first access via standalone routes (see
@@ -449,6 +451,11 @@ class ModelEntry(BaseModel):
   # fallback registry. Kept in the response shape for compatibility
   # with older clients that already read this field.
   available: bool = True
+  # Optional per-model capability metadata. Absent means "use the provider's
+  # default scale" so older registry producers and newly-discovered models keep
+  # working. A future model with a narrower/different scale can declare it here
+  # without teaching every picker about that model id.
+  effort_levels: list[str] | None = None
 
 
 class ModelRegistryResponse(BaseModel):
