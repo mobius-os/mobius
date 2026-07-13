@@ -263,6 +263,33 @@ def create_app_token_endpoint(
   return {"token": token}
 
 
+@router.post("/app-job-token", dependencies=[Depends(reject_cross_site)])
+def create_app_job_token_endpoint(
+  body: schemas.AppTokenRequest,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Mint a narrower-lifetime app token for one supervised job run."""
+  from datetime import timedelta
+
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == body.app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  return {
+    "token": auth.create_app_token(
+      body.app_id,
+      owner.username,
+      owner.token_epoch,
+      app_nonce=app.token_nonce,
+      expires_delta=timedelta(hours=2),
+    )
+  }
+
+
 # -- Provider discovery ---------------------------------------------------
 
 @router.get("/providers")

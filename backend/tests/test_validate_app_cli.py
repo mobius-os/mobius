@@ -81,9 +81,14 @@ def test_validator_rejects_manifest_type_holes_and_missing_package_files(tmp_pat
 @pytest.mark.parametrize("update", [
   {"id": "Bad/Slug"},
   {"permissions": {"cross_app_access": "admin"}},
+  {"permissions": {"shared_memory": "all"}},
+  {"permissions": {"background_agent": "yes"}},
   {"offline": {"writes": "eventually"}},
   {"schedule": {"default": "@daily"}},
   {"schedule": {"default": "0 0 * * * *"}},
+  {"schedule": {"initialize_on_install": True}},
+  {"schedule": {"job": "job.sh", "user_configurable": "yes"}},
+  {"system_app": "yes"},
   {"system_prompt": "prompt.md"},
   {"entry": "src/index.jsx"},
   {"entry": "main.jsx"},
@@ -97,6 +102,36 @@ def test_shared_contract_and_installer_reject_the_same_manifest(update, tmp_path
   with pytest.raises(HTTPException) as exc:
     _validate_manifest(manifest)
   assert exc.value.status_code == 400
+
+
+def test_system_prompt_requires_explicit_system_app_identity(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest.update({
+    "source_files": ["prompt.md"],
+    "system_prompt": "prompt.md",
+  })
+  (tmp_path / "prompt.md").write_text("System contribution")
+  (tmp_path / "mobius.json").write_text(json.dumps(manifest))
+
+  result = _run(tmp_path)
+  assert result.returncode == 1
+  assert "system_app: true" in result.stderr
+  with pytest.raises(HTTPException, match="system_app: true"):
+    _validate_manifest(manifest)
+
+
+def test_background_agent_requires_declared_job(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["permissions"] = {"background_agent": True}
+  (tmp_path / "mobius.json").write_text(json.dumps(manifest))
+
+  result = _run(tmp_path)
+  assert result.returncode == 1
+  assert "requires `schedule.job`" in result.stderr
+  with pytest.raises(HTTPException, match="requires `schedule.job`"):
+    _validate_manifest(manifest)
 
 
 def test_validator_materializes_declared_static_asset_destinations(tmp_path):

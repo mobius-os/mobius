@@ -355,6 +355,25 @@ def run_migrations(eng) -> None:
         "ALTER TABLE apps ADD COLUMN system_prompt_file VARCHAR(255) NULL"
       ))
       conn.commit()
+  if "system_app" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN system_app BOOLEAN "
+        "NOT NULL DEFAULT 0"
+      ))
+      # The system-prompt mechanism predates the explicit identity by one
+      # release. Preserve those already-reviewed live capabilities.
+      conn.execute(text(
+        "UPDATE apps SET system_app = 1 "
+        "WHERE system_prompt_file IS NOT NULL"
+      ))
+      conn.commit()
+  if "capability_contract" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN capability_contract JSON NULL"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

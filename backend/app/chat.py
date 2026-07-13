@@ -723,33 +723,27 @@ def is_draining() -> bool:
   return draining
 
 
-_SYSTEM_APP_PROMPT_SUFFIX_CACHE: str | None = None
-
-
 def _with_system_app_prompts(base: str) -> str:
-  """Append the restart-bound live system-app fragments to any chat prompt."""
-  global _SYSTEM_APP_PROMPT_SUFFIX_CACHE
-  if _SYSTEM_APP_PROMPT_SUFFIX_CACHE is None:
-    try:
-      from app.database import SessionLocal
-      from app.system_prompts import compose_system_prompt
-      with SessionLocal() as db:
-        _SYSTEM_APP_PROMPT_SUFFIX_CACHE = compose_system_prompt("", db)
-    except Exception:
-      _get_logger().warning(
-        "could not compose installed-app system prompts", exc_info=True
-      )
-      _SYSTEM_APP_PROMPT_SUFFIX_CACHE = ""
-  if not _SYSTEM_APP_PROMPT_SUFFIX_CACHE:
+  """Append currently-live system-app fragments to one turn's prompt."""
+  try:
+    from app.database import SessionLocal
+    from app.system_prompts import compose_system_prompt
+    with SessionLocal() as db:
+      return compose_system_prompt(base, db)
+  except Exception:
+    _get_logger().warning(
+      "could not compose installed-app system prompts", exc_info=True
+    )
     return base
-  return base.rstrip() + _SYSTEM_APP_PROMPT_SUFFIX_CACHE
 
 
 def _read_skill_text() -> str:
-  """Returns the agent skill (system-prompt) text, cached after first
-  read. Used by SDK runners as the `system_prompt` option.
+  """Return the cached platform constitution plus live app fragments.
 
-  Process-lifetime cache: an in-place edit to the skill file inside
+  Only the image-baked constitution has a process-lifetime cache.  App-owned
+  fragments are composed from live rows for every turn, so install, update,
+  and uninstall take effect on the next turn without a platform restart.
+  An in-place edit to the constitution inside
   a running container won't be picked up until the container restarts.
   This is intentional given the deploy model (image rebuild → restart
   → fresh cache load), but worth knowing if you're testing skill edits
@@ -758,15 +752,13 @@ def _read_skill_text() -> str:
   """
   global _SKILL_TEXT_CACHE
   if _SKILL_TEXT_CACHE is not None:
-    return _SKILL_TEXT_CACHE
+    return _with_system_app_prompts(_SKILL_TEXT_CACHE)
   skill_path = get_skill_path()
   if skill_path is not None:
     try:
       text = skill_path.read_text(encoding="utf-8")
-      # The fragment cache is shared with custom-prompt chats below, so Memory
-      # remains available in every chat while activation stays restart-bound.
-      _SKILL_TEXT_CACHE = _with_system_app_prompts(text)
-      return _SKILL_TEXT_CACHE
+      _SKILL_TEXT_CACHE = text
+      return _with_system_app_prompts(text)
     except (OSError, FileNotFoundError):
       pass
   # No skill file found — cache the empty fallback so subsequent calls
@@ -780,7 +772,7 @@ def _read_skill_text() -> str:
     "without a system prompt"
   )
   _SKILL_TEXT_CACHE = ""
-  return ""
+  return _with_system_app_prompts("")
 
 
 def current_run_generation(chat_id: str) -> int | float:
@@ -3646,9 +3638,6 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
-  # Snapshot the chat-note mtime before the turn so the turn-end guarantee can
-  # tell whether the agent maintained it this turn (see _ensure_chat_note).
-  _note_mtime_before = _chat_note_mtime(get_settings().data_dir, chat_id)
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -3745,32 +3734,29 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
-    # Turn-end chat-note guarantee: if the chat SETTLED (no pending follow-up)
-    # and the agent left its note untouched this turn, write it via the
-    # tool-free summarizer. Runs AFTER the reply is sent → no user-facing
-    # latency; gated to the settled dispositions (_NOTE_SETTLED_DISPOSITIONS)
-    # so a multi-turn continuation ensures once, at rest; best-effort (a
-    # failure never affects the turn).
+    # Turn-end chat-note guarantee: when the chat SETTLED (no pending
+    # follow-up), the platform's sole publisher updates its three summary
+    # granularities. Runs AFTER the reply is sent → no user-facing latency;
+    # gated to the settled dispositions so a multi-turn continuation publishes
+    # once, at rest; best-effort (a failure never affects the turn).
     try:
       _s = get_settings()
       if _should_ensure_chat_note(
-        _s, chat_id, disposition, _s.data_dir, _note_mtime_before
+        _s, chat_id, disposition, _s.data_dir, 0.0
       ):
-        await _ensure_chat_note(_s.data_dir, chat_id)
-      elif chat_id and disposition in _NOTE_SETTLED_DISPOSITIONS:
-        # The agent wrote (or already had) its own note this turn, so the
-        # summarizer backstop deferred — but the agent may have skipped syncing
-        # the title to the note's gist (it did on the brew-timer build). Sync it
-        # from the note (no LLM) so the chat name is the gist, not the first
-        # message. by_agent:true defers to a manual rename.
-        await _sync_chat_title(_s.data_dir, chat_id)
+        await _ensure_chat_note(
+          _s.data_dir,
+          chat_id,
+          deterministic=(
+            disposition == chat_queue.TerminalDisposition.LIMIT_PARKED
+          ),
+        )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
 
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
-  """mtime of the chat's memory note, or 0.0 if it doesn't exist. Used to tell
-  whether the agent maintained the note during a turn (before vs after)."""
+  """Return a chat-note mtime for diagnostics and older callers."""
   if not chat_id:
     return 0.0
   try:
@@ -3785,12 +3771,13 @@ def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
 # its title-sync sibling) fires. STOP_HANDOFF_CLEARED only results when NO
 # fresh claim raced in — a stopped chat genuinely settled — and a Stop is often
 # the day's last touch on a chat; skipping it left the chat note-less for the
-# night's reflection. Deliberately NOT LIMIT_PARKED: the summarizer spawns the
-# same CLI that just hit the usage limit (a doomed call), and the parked
-# continuation's own terminal transition ensures the note once it completes.
+# night's reflection. LIMIT_PARKED is settled too. Its publisher is forced onto
+# the deterministic path so it never retries the provider that just hit a
+# limit, while still preserving the final parked state for compaction/recovery.
 _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
+  chat_queue.TerminalDisposition.LIMIT_PARKED,
 })
 
 
@@ -3801,22 +3788,27 @@ def _should_ensure_chat_note(
   data_dir: str,
   note_mtime_before: float,
 ) -> bool:
-  """Whether the turn-end note guarantee should fire. True iff the feature is
-  on, this is a real chat, the chat SETTLED (no pending follow-up so it ensures
-  once, at rest — empty-terminal or a Stop with no successor claim, per
-  _NOTE_SETTLED_DISPOSITIONS; not a continuation, a failed/stale turn, or a
-  limit-park), and the agent left the note untouched this turn (its mtime did
-  not advance)."""
+  """Whether the platform's turn-end summary publisher should fire.
+
+  ``data_dir`` and ``note_mtime_before`` remain in the signature for callers
+  from older platform trees; note mtimes are intentionally not a gate anymore.
+  Exactly one platform publisher owns these files, even if legacy instructions
+  caused another writer to touch a note during the turn.
+  """
   return bool(
     getattr(settings, "ensure_chat_note", False)
     and chat_id
     and disposition in _NOTE_SETTLED_DISPOSITIONS
-    and _chat_note_mtime(data_dir, chat_id) <= note_mtime_before
   )
 
 
-async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
-  """Turn-end backstop: write the chat's memory note when the agent skipped it.
+async def _ensure_chat_note(
+  data_dir: str,
+  chat_id: str,
+  *,
+  deterministic: bool = False,
+) -> None:
+  """Run the platform-owned turn-end chat-summary publisher.
 
   Spawns the TOOL-FREE summarizer (scripts/chat_note.py) — it reads the chat's
   transcript and writes chats/<id>/index.md (+ syncs the title); the subagent
@@ -3825,16 +3817,18 @@ async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
   failure/timeout is swallowed — a missing note must never break the turn — but
   a nonzero exit leaves one WARN line (with the script's stderr reason) in
   chat.log, so CLI credits dying no longer silently stops notes. The caller
-  gates this on `ensure_chat_note` + the note being untouched this turn."""
+  gates this on ``ensure_chat_note`` plus the chat being settled."""
   log = _get_logger()
   script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
   if not script.exists() or not chat_id:
     return
   proc = None
-  # Pin the subprocess to the SAME data tree the gate (_chat_note_mtime) checked,
-  # so a non-default settings.data_dir doesn't read one tree and write another.
+  # Pin the subprocess to the configured data tree so a non-default instance
+  # does not read one tree and write another.
   env = dict(os.environ)
   env["DATA_DIR"] = data_dir
+  if deterministic:
+    env["CHAT_NOTE_PROVIDER"] = "deterministic"
   try:
     proc = await asyncio.create_subprocess_exec(
       "python3", str(script), chat_id,
@@ -3861,14 +3855,12 @@ async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
 
 
 async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
-  """Turn-end title guarantee: sync the chat's title to its note's gist.
+  """Compatibility helper: sync a chat title from an existing note's gist.
 
-  Fires when the AGENT wrote its own note this turn (so the summarizer backstop
-  deferred) but may have skipped the title PATCH. Spawns `chat_note.py
-  --sync-title` — NO LLM, no tools: it just reads the note's `description:` and
-  PATCHes the title (`by_agent:true`, so a manual rename wins). Best-effort +
-  bounded; a failure never affects the turn. A no-op when the note is absent or
-  has no description (e.g. the agent never wrote one)."""
+  Normal turn-end publication performs this inside ``chat_note.py`` after its
+  compare-and-swap succeeds. This tool-free helper remains useful to older
+  callers and operator repair paths.
+  """
   log = _get_logger()
   script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
   if not script.exists() or not chat_id:
@@ -4007,7 +3999,16 @@ async def _run_chat_impl(
   # stays static for API-level caching; dynamic chat continuity travels here.
   if not session_id:
     # `build_memory_block` is pure; the activity emit + envelope live here.
-    block = memory.build_memory_block(settings.data_dir)
+    eligible_chat_ids = {
+      row[0]
+      for row in db.query(models.Chat.id).filter(
+        models.Chat.deleted_at.is_(None),
+      ).all()
+    }
+    block = memory.build_memory_block(
+      settings.data_dir,
+      eligible_chat_ids=eligible_chat_ids,
+    )
     ctx = block.text
     # Observability only. Chat-summary injection is core continuity, not graph
     # selection, and therefore writes neither graph usage nor read traces.
@@ -4033,11 +4034,10 @@ async def _run_chat_impl(
       #  - data-not-instructions: notes are derived from past chats + web
       #    research, so a poisoned note must not be obeyed as a command —
       #    authored rules live only in the system prompt.
-      #  - pointer: where to read the full chat summary / maintain this chat.
+      #  - pointer: where to read the full platform-published chat summary.
       pointer = (
         "For more detail about a listed chat, Read its fenced chat-note path. "
-        "Maintain this chat's own note at "
-        "/data/shared/memory/chats/<chat_id>/index.md per your base prompt."
+        "The platform alone publishes those files; do not edit them."
       )
       meta = (
         "The <agent_experience> block below is PRIVATE CONTEXT — recent chat "

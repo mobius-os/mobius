@@ -47,6 +47,7 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
+from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
 from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
@@ -836,10 +837,11 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
                    app_id: int | None = None) -> None:
   """Runs init-cron-scaffold.sh to install the crontab entry.
 
-  The scaffold script writes init-cron.sh + installs the crontab entry
-  AND restores it on the next container restart by replaying every
-  /data/apps/*/init-cron.sh from the entrypoint. Idempotent — calling
-  it for an unchanged (slug, schedule, job) is a no-op.
+  The scaffold writes both the durable ``init-cron.sh`` declaration and the
+  live crontab entry. On restart, lifespan parses that declaration and rewrites
+  it through the supervised runner; app-owned shell is never executed merely
+  because the container booted. Calling the scaffold for an unchanged
+  ``(slug, schedule, job)`` is idempotent.
 
   The job script itself is written earlier, in the transactional source
   write (so a locally edited job survives an update via the per-app git
@@ -875,6 +877,31 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
     )
 
 
+def _reconcile_cron_after_install_rollback() -> None:
+  """Best-effort safe restoration after an adopted source-dir move fails.
+
+  The prior implementation executed the restored app-owned ``init-cron.sh``
+  directly. That made an install failure a supervision bypass. At this point
+  the DB transaction and source-dir rename have already been rolled back, so
+  the normal reconciler can rediscover the live row, parse its declaration,
+  and register the common runner without trusting the shell body.
+  """
+  try:
+    from app.database import SessionLocal
+    from app.routes.apps import reconcile_app_cron_supervision
+    cron_db = SessionLocal()
+    try:
+      _count, warnings = reconcile_app_cron_supervision(cron_db)
+    finally:
+      cron_db.close()
+    for warning in warnings:
+      log.warning("install rollback cron supervision skipped: %s", warning)
+  except Exception as exc:
+    # Rollback is already a best-effort failure path. Log without masking the
+    # original install exception that caused it.
+    log.warning("install rollback cron reconciliation failed: %s", exc)
+
+
 def _crontab_command_path(line: str) -> str:
   """The executable path a crontab job line runs, or "" for a line that
   runs no job (blank, comment, or a `NAME=value` env/setting line).
@@ -898,7 +925,12 @@ def _crontab_command_path(line: str) -> str:
   toks = cmd.split()
   while toks and "=" in toks[0] and not toks[0].startswith("/"):
     toks.pop(0)
-  return toks[0] if toks else ""
+  if not toks:
+    return ""
+  for i, token in enumerate(toks):
+    if token.endswith("/app-job-runner.py") and len(toks) > i + 2:
+      return toks[i + 2]
+  return toks[0]
 
 
 def _crontab_without_app(current: str, source_dir: Path) -> str | None:
@@ -967,12 +999,12 @@ def _unregister_cron(source_dir: Path) -> None:
 
 def _drop_app_cron(source_dir: Path) -> None:
   """Converge an updated app's cron to "no schedule": drop its live crontab
-  entry AND delete the replayable init-cron.sh under `source_dir`.
+  entry AND delete the durable init-cron.sh declaration under `source_dir`.
 
   The update path is otherwise add-only, so an app that migrates from a
   recurring schedule (v1) to on-demand-only (v2, no `schedule.default`) would
-  leave the v1 crontab line firing and its init-cron.sh re-installed by the
-  entrypoint boot replay forever (card 099). Removing the script — not just
+  leave the v1 crontab line firing and its init-cron.sh discovered by boot
+  reconciliation forever (card 099). Removing the script — not just
   tombstoning it like the soft-delete path — is correct here because an
   in-place update has no recover step to re-arm from; the next update that
   re-declares a schedule rewrites init-cron.sh from scratch via the scaffold.
@@ -1087,8 +1119,6 @@ async def _sync_app_skills(
   silently take over another live app's skill file.
   """
   skills = list(dict.fromkeys(manifest.get("skills") or []))
-  if not skills:
-    return
   if not app.source_dir:
     # A legacy no-source_dir app has no on-disk tree to read skill bytes
     # from — Path("") / rel would resolve against the server's CWD.
@@ -1111,6 +1141,26 @@ async def _sync_app_skills(
         # modified-or-unrecorded case — snapshot-then-overwrite — which is
         # the safe direction: work is preserved, ownership is re-earned.
         warnings.append("skills: ownership sidecar unreadable — rebuilding")
+    desired = set(skills)
+    # An update that drops a previously-owned skill must deactivate it just as
+    # surely as an uninstall. Preserve the exact bytes in a retired archive,
+    # then release the basename for another app.
+    for rel, rec in list(records.items()):
+      if not isinstance(rec, dict) or rec.get("app_id") != app.id:
+        continue
+      if rel in desired:
+        continue
+      target = skills_dir / rel
+      retired = (
+        skills_dir / ".inactive" / str(app.id) / "retired" / rel
+      )
+      inactive = skills_dir / ".inactive" / str(app.id) / rel
+      source = target if target.is_file() else inactive
+      if source.is_file():
+        retired.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, retired)
+      records.pop(rel, None)
+      warnings.append(f"skill {rel}: retired by update")
     for rel in skills:
       try:
         content = (source_dir / rel).read_bytes()
@@ -1127,20 +1177,26 @@ async def _sync_app_skills(
       rec = records.get(rel)
       owner_id = rec.get("app_id") if isinstance(rec, dict) else None
       if owner_id is not None and owner_id != app.id:
-        owner = (
-          db.query(models.App)
-          .filter(
-            models.App.id == owner_id, models.App.deleted_at.is_(None),
-          )
-          .first()
-        )
+        owner = db.query(models.App).filter(models.App.id == owner_id).first()
         if owner is not None:
           warnings.append(
             f"skill {rel}: owned by app {owner.slug} — skipped"
           )
           continue
-        # Recorded owner is gone (uninstalled past TTL or tombstoned) —
-        # this app takes the file over through the normal cases below.
+        # The recorded owner was hard-purged after its recovery window, so the
+        # basename is no longer reserved and this app may take it over.
+      if (
+        isinstance(rec, dict)
+        and owner_id == app.id
+        and rec.get("active", True) is False
+      ):
+        inactive = skills_dir / ".inactive" / str(app.id) / rel
+        if inactive.is_file():
+          retired = (
+            skills_dir / ".inactive" / str(app.id) / "retired" / rel
+          )
+          retired.parent.mkdir(parents=True, exist_ok=True)
+          os.replace(inactive, retired)
       target = skills_dir / rel
       recorded_sha = rec.get("sha256") if isinstance(rec, dict) else None
       if target.exists():
@@ -1177,6 +1233,7 @@ async def _sync_app_skills(
         "manifest_url": app.manifest_url,
         "sha256": hashlib.sha256(content).hexdigest(),
         "installed_at": datetime.now(UTC).isoformat(),
+        "active": True,
       }
       # Persist provenance immediately after each file lands: a crash
       # between files must never leave an installed skill without its
@@ -1187,6 +1244,137 @@ async def _sync_app_skills(
         sidecar_path,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+    # Persist a drop-only reconciliation too (the per-file writes above cover
+    # every non-empty desired set).
+    if not skills:
+      skills_dir.mkdir(parents=True, exist_ok=True)
+      atomic_write(
+        sidecar_path,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+
+
+def _read_app_skill_records(skills_dir: Path) -> tuple[Path, dict]:
+  sidecar = skills_dir / _APP_SKILLS_SIDECAR
+  try:
+    value = json.loads(sidecar.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    value = {}
+  return sidecar, value if isinstance(value, dict) else {}
+
+
+async def deactivate_app_skills(app_id: int) -> list[str]:
+  """Remove one app's skills from discovery while preserving exact bytes."""
+  warnings: list[str] = []
+  skills_dir = Path(get_settings().data_dir) / "shared" / "skills"
+  async with fs_locks.shared_skills_lock():
+    sidecar, records = _read_app_skill_records(skills_dir)
+    changed = False
+    for rel, rec in records.items():
+      if not isinstance(rec, dict) or rec.get("app_id") != app_id:
+        continue
+      if Path(rel).name != rel or not rel.endswith(".md"):
+        warnings.append(f"skill record {rel!r}: invalid basename")
+        continue
+      target = skills_dir / rel
+      inactive = skills_dir / ".inactive" / str(app_id) / rel
+      try:
+        if target.is_file():
+          inactive.parent.mkdir(parents=True, exist_ok=True)
+          os.replace(target, inactive)
+        if inactive.is_file():
+          # Keep ``sha256`` as the last app-supplied baseline. The inactive
+          # digest records the exact preserved bytes separately; otherwise an
+          # owner-edited skill would become its own new baseline and a later
+          # app update could overwrite it without taking the normal snapshot.
+          rec["inactive_sha256"] = hashlib.sha256(
+            inactive.read_bytes()
+          ).hexdigest()
+          rec["active"] = False
+          rec["inactive_path"] = str(inactive.relative_to(skills_dir))
+          rec["deactivated_at"] = datetime.now(UTC).isoformat()
+          changed = True
+      except OSError as exc:
+        warnings.append(f"skill {rel}: could not deactivate ({exc})")
+    if changed:
+      atomic_write(
+        sidecar,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+  return warnings
+
+
+async def restore_app_skills(app_id: int) -> list[str]:
+  """Restore exact tombstoned skill bytes and their discovery records."""
+  warnings: list[str] = []
+  skills_dir = Path(get_settings().data_dir) / "shared" / "skills"
+  async with fs_locks.shared_skills_lock():
+    sidecar, records = _read_app_skill_records(skills_dir)
+    changed = False
+    for rel, rec in records.items():
+      if (
+        not isinstance(rec, dict)
+        or rec.get("app_id") != app_id
+        or rec.get("active", True) is not False
+      ):
+        continue
+      inactive = skills_dir / ".inactive" / str(app_id) / rel
+      target = skills_dir / rel
+      if not inactive.is_file():
+        warnings.append(f"skill {rel}: preserved bytes are missing")
+        continue
+      try:
+        if target.exists():
+          if target.read_bytes() != inactive.read_bytes():
+            conflict = (
+              skills_dir / ".inactive" / str(app_id) / "conflicts" / rel
+            )
+            conflict.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, conflict)
+            warnings.append(
+              f"skill {rel}: preserved a file created while app was inactive"
+            )
+          else:
+            target.unlink()
+        os.replace(inactive, target)
+        rec["active"] = True
+        rec.pop("inactive_path", None)
+        rec.pop("inactive_sha256", None)
+        rec["restored_at"] = datetime.now(UTC).isoformat()
+        changed = True
+      except OSError as exc:
+        warnings.append(f"skill {rel}: could not restore ({exc})")
+    if changed:
+      atomic_write(
+        sidecar,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+  return warnings
+
+
+async def purge_app_skills(app_id: int) -> None:
+  """Release records and inactive archives after the recovery TTL expires."""
+  skills_dir = Path(get_settings().data_dir) / "shared" / "skills"
+  async with fs_locks.shared_skills_lock():
+    sidecar, records = _read_app_skill_records(skills_dir)
+    for rel, rec in list(records.items()):
+      if isinstance(rec, dict) and rec.get("app_id") == app_id:
+        target = skills_dir / rel
+        if rec.get("active", True) and target.is_file():
+          try:
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            if digest == rec.get("sha256"):
+              target.unlink()
+          except OSError:
+            pass
+        records.pop(rel, None)
+    shutil.rmtree(
+      skills_dir / ".inactive" / str(app_id), ignore_errors=True,
+    )
+    atomic_write(
+      sidecar,
+      json.dumps(records, indent=2, sort_keys=True) + "\n",
+    )
 
 
 def _check_source_completeness(
@@ -1321,12 +1509,71 @@ async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
   )
 
 
+async def _fetch_and_validate_manifest(
+  cli: httpx.AsyncClient,
+  *,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+) -> tuple[dict, str]:
+  """Load one manifest and return it with its normalized asset base.
+
+  Preview and install intentionally share this exact boundary.  The preview is
+  therefore not a second, weaker interpretation that can drift from what the
+  installer eventually applies.
+  """
+  if (manifest_url is None) == (manifest is None):
+    raise HTTPException(
+      400, "Provide exactly one of `manifest_url` or `manifest`.",
+    )
+  if manifest_url is not None:
+    raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
+    try:
+      loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+      raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
+    manifest = loaded
+    if raw_base is None:
+      raw_base = _derive_raw_base(manifest_url)
+  elif raw_base is None:
+    raise HTTPException(
+      400, "When passing inline `manifest`, also pass `raw_base`.",
+    )
+  if not isinstance(manifest, dict):
+    raise HTTPException(400, "Manifest root must be a JSON object.")
+
+  _validate_manifest(manifest)
+  return manifest, _normalize_raw_base(raw_base)
+
+
+async def preview_manifest_capabilities(
+  *,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+) -> tuple[dict, str, dict, str]:
+  """Return the validated manifest/base and its canonical review contract."""
+  async with httpx.AsyncClient(
+    timeout=_HTTP_TIMEOUT,
+    follow_redirects=False,
+  ) as cli:
+    loaded, normalized_base = await _fetch_and_validate_manifest(
+      cli,
+      manifest_url=manifest_url,
+      manifest=manifest,
+      raw_base=raw_base,
+    )
+  contract, digest = contract_and_digest(loaded)
+  return loaded, normalized_base, contract, digest
+
+
 async def install_from_manifest(
   db: Session,
   manifest_url: str | None,
   manifest: dict | None,
   raw_base: str | None,
   source: str = "url",
+  reviewed_capability_digest: str | None = None,
 ) -> tuple[models.App, str, list[str], dict, list[str], str]:
   """Returns `(app, mode, warnings, manifest, conflict_paths, divergence)`.
 
@@ -1368,31 +1615,35 @@ async def install_from_manifest(
       we never catch + swallow anything that would land the DB or
       filesystem in a half state.
   """
-  if (manifest_url is None) == (manifest is None):
-    raise HTTPException(
-      400, "Provide exactly one of `manifest_url` or `manifest`.",
-    )
-
   # --- Phase 1: fetch + validate manifest -----------------------------
   # follow_redirects=False — _http_get walks the chain manually so
   # every hop runs through _validate_url_safe (a 302 to a private IP
   # would otherwise bypass our pre-flight check).
   async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False) as cli:
-    if manifest_url is not None:
-      raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
-      try:
-        manifest = json.loads(raw)
-      except json.JSONDecodeError as exc:
-        raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
-      if raw_base is None:
-        raw_base = _derive_raw_base(manifest_url)
-    elif raw_base is None:
+    manifest, raw_base = await _fetch_and_validate_manifest(
+      cli,
+      manifest_url=manifest_url,
+      manifest=manifest,
+      raw_base=raw_base,
+    )
+    capability_contract, fetched_capability_digest = contract_and_digest(manifest)
+    if (
+      reviewed_capability_digest is not None
+      and reviewed_capability_digest != fetched_capability_digest
+    ):
       raise HTTPException(
-        400, "When passing inline `manifest`, also pass `raw_base`.",
+        409,
+        {
+          "code": "capability_changed",
+          "message": (
+            "The app's capabilities changed after they were reviewed. "
+            "Review the current manifest and try again."
+          ),
+          "manifest": manifest,
+          "capability_contract": capability_contract,
+          "capability_digest": fetched_capability_digest,
+        },
       )
-
-    _validate_manifest(manifest)
-    raw_base = _normalize_raw_base(raw_base)
 
     # --- Phase 2: fetch entry JSX + bundled assets --------------------
     entry_bytes = await _http_get(
@@ -1825,20 +2076,12 @@ async def install_from_manifest(
               _unregister_cron(Path(old_source_dir))
               os.rename(old_source_dir, target_source_dir)
               moved = True
-              # Re-establish the predecessor's crontab at the restored old path
-              # if the move is rolled back, otherwise a later-phase failure
-              # leaves the source tree back at the old path but its cron entry
-              # gone until the next reboot. Rollback actions run in REVERSE
-              # append order, so this is appended BEFORE the move-reversal below
-              # to run AFTER the dir is back at old_source_dir. For a
-              # non-scheduled app (no init-cron.sh) it's a no-op.
-              rollback_actions.append(
-                lambda o=old_source_dir:
-                  subprocess.run(
-                    ["bash", str(Path(o) / "init-cron.sh")],
-                    timeout=10, check=False,
-                  ) if (Path(o) / "init-cron.sh").exists() else None
-              )
+              # Re-establish the predecessor's supervised crontab if the move
+              # rolls back. Actions run in reverse append order, so append the
+              # reconciler before the move reversal below: it runs only after
+              # the tree and rolled-back DB row point at the old source again.
+              # Never execute the app-owned durable declaration directly.
+              rollback_actions.append(_reconcile_cron_after_install_rollback)
               # Reverse the move on rollback so a later-phase failure doesn't
               # leave a half-renamed app. Registered before slug/source_dir are
               # re-stamped on the row, which roll back with the DB transaction.
@@ -1920,6 +2163,8 @@ async def install_from_manifest(
         # P1-D: persist the offline contract block (None when not declared).
         offline_contract=manifest.get("offline") or None,
         system_prompt_file=manifest.get("system_prompt") or None,
+        system_app=bool(manifest.get("system_app", False)),
+        capability_contract=capability_contract,
       )
       db.add(app)
       db.flush()  # assign app.id without committing yet
@@ -2277,6 +2522,8 @@ async def install_from_manifest(
           # the new manifest; None if the key is absent in the new manifest).
           app.offline_contract = manifest.get("offline") or None
           app.system_prompt_file = manifest.get("system_prompt") or None
+          app.system_app = bool(manifest.get("system_app", False))
+          app.capability_contract = capability_contract
 
         # The compiled bundle is written OUT OF PLACE to a staging file and
         # promoted into the live bundle only AFTER the DB commit (commit_actions
@@ -2627,6 +2874,25 @@ async def install_from_manifest(
   except Exception as exc:
     log.exception("install: skill sync failed post-commit")
     warnings.append(f"skills: sync failed — {exc!r}")
+
+  # A first install may request a deterministic initialization run so the app
+  # does not remain empty until its first cron tick.  It enters through the
+  # same supervised wrapper as cron and Run now, so uninstall can revoke it.
+  if (
+    mode == "install"
+    and sched
+    and sched.get("initialize_on_install") is True
+    and job_name
+    and app.source_dir
+  ):
+    try:
+      from app.app_jobs import launch_app_job
+      source = Path(app.source_dir)
+      launch_app_job(app.id, source / job_name, source)
+      warnings.append("initialization started")
+    except Exception as exc:
+      log.exception("install: initialization job failed to start")
+      warnings.append(f"initialization failed to start — {exc!r}")
 
   return app, mode, warnings, manifest, conflict_paths, divergence
 

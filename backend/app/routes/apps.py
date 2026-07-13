@@ -22,10 +22,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, app_git, fs_locks, icon_cache, legacy_platform_apps, models, providers, schemas,
+  activity, app_git, app_jobs, fs_locks, icon_cache, legacy_platform_apps,
+  models, providers, schemas,
   source_dirs, theme,
 )
 from app.storage_io import delete_content_type_tree, read_capped_body
+from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
 from app.config import get_settings
@@ -201,14 +203,12 @@ def _drop_cron_and_rmtree(resolved: Path) -> None:
 
 
 def _disable_init_cron_replay(resolved: Path) -> None:
-  """Move a source tree's ``init-cron.sh`` aside so boot replay skips it.
+  """Move a source tree's durable cron declaration aside while tombstoned.
 
-  ``entrypoint.sh`` re-runs EVERY ``/data/apps/*/init-cron.sh`` on boot, which
-  would resurrect a tombstoned scheduled app's crontab entry that
-  ``_drop_cron_only`` just removed. Renaming the script to
-  ``init-cron.sh.tombstoned`` puts it outside the entrypoint's
-  ``*/init-cron.sh`` glob while keeping it on disk so ``recover`` can rename it
-  back and reinstall the schedule. Swallows ``OSError`` like its siblings.
+  The boot reconciler never executes app-owned scripts and excludes tombstoned
+  rows, but preserving the declaration under ``init-cron.sh.tombstoned`` makes
+  the disabled state explicit and lets ``recover`` restore the exact cadence.
+  Swallows ``OSError`` like its siblings.
   """
   try:
     os.replace(
@@ -219,23 +219,18 @@ def _disable_init_cron_replay(resolved: Path) -> None:
 
 
 def _reenable_init_cron_replay(resolved: Path) -> None:
-  """Re-arm a recovered app's cron: undo ``_disable_init_cron_replay``.
+  """Restore a recovered app's durable cron declaration without running it.
 
   Renames ``init-cron.sh.tombstoned`` back to ``init-cron.sh`` (so the next
-  boot replays it too) and runs it once now to reinstall the crontab entry the
-  tombstone dropped — recovery must re-establish every side-effect the delete
-  tore down. Swallows ``OSError``; the ``init-cron.sh`` run is best-effort
-  (``check=False``) and bounded.
+  boot can discover it too). The caller subsequently invokes
+  ``reconcile_app_cron_supervision`` to parse the effective schedule and write
+  a fresh supervised entry. Executing this preserved script directly would
+  let an app installed by an older release bypass the lease/sandbox gate at
+  recovery time while cron is already running.
   """
   try:
     os.replace(
       resolved / "init-cron.sh.tombstoned", resolved / "init-cron.sh"
-    )
-  except OSError:
-    return
-  try:
-    subprocess.run(
-      ["bash", str(resolved / "init-cron.sh")], timeout=10, check=False
     )
   except OSError:
     pass
@@ -247,8 +242,8 @@ def _drop_cron_only(resolved: Path) -> None:
   The soft-delete (tombstone) path: a tombstoned app must stop running its
   scheduled jobs, but its source — including the job.sh — has to survive so a
   reinstall/recover can re-register the schedule. Drops the live crontab entry
-  AND moves ``init-cron.sh`` aside (``_disable_init_cron_replay``) so the boot
-  replay in ``entrypoint.sh`` can't resurrect the schedule. Pure-filesystem so
+  AND moves ``init-cron.sh`` aside (``_disable_init_cron_replay``) so recovery
+  alone can reactivate the durable declaration. Pure-filesystem so
   it runs via ``asyncio.to_thread`` (``_unregister_cron`` shells out to
   crontab). Swallows errors like ``_drop_cron_and_rmtree``.
   """
@@ -329,6 +324,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(deleted_app_id)}
   )
+  from app.install import purge_app_skills
+  await purge_app_skills(deleted_app_id)
 
   if compiled_path:
     try:
@@ -453,6 +450,8 @@ def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
 def _schedule_from_crontab_text(
   source_dir: Path, text: str,
 ) -> tuple[str, str] | None:
+  from app.install import _crontab_command_path
+
   needle = f"{str(source_dir).rstrip('/')}/"
   for line in text.splitlines():
     entry_match = re.search(r"""^\s*ENTRY=(?:"([^"]+)"|'([^']+)')""", line)
@@ -461,7 +460,12 @@ def _schedule_from_crontab_text(
     parsed = _parse_cron_job_line(line)
     if parsed is None:
       continue
-    cron, command_path = parsed
+    cron, _ = parsed
+    # Managed entries launch Python first, then the common runner, then the
+    # real app job.  Resolve that indirection so schedule discovery remains
+    # stable after an entry is supervised (and can still migrate old direct
+    # entries on the next boot).
+    command_path = _crontab_command_path(line)
     if command_path.startswith(needle):
       return cron, Path(command_path).name
   return None
@@ -481,6 +485,58 @@ def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
     if schedule is not None:
       return schedule
   return _manifest_schedule(source_dir)
+
+
+def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
+  """Converge every live managed schedule through the common job runner.
+
+  Older ``init-cron.sh`` files wrote ``<source>/fetch.sh`` directly. Boot never
+  executes those files; cron is deliberately started only after FastAPI
+  lifespan completes. This reconciliation therefore gets a race-free window
+  to parse and preserve each effective cadence while rewriting both the live
+  crontab entry and its durable declaration via the current
+  scaffold. Tombstoned apps are excluded and source trees must be ordinary,
+  non-symlink direct children of ``/data/apps``.
+  """
+  from app.install import _register_cron
+
+  settings = get_settings()
+  apps_root = Path(settings.data_dir) / "apps"
+  try:
+    resolved_root = apps_root.resolve(strict=True)
+  except OSError:
+    return 0, [f"apps root unavailable: {apps_root}"]
+  live_crontab = _read_live_crontab()
+  reconciled = 0
+  warnings: list[str] = []
+  apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
+  for app in apps:
+    schedule = _app_schedule(app, live_crontab)
+    if schedule is None or not app.source_dir:
+      continue
+    source_dir = Path(app.source_dir)
+    try:
+      if source_dir.is_symlink():
+        raise ValueError("source directory is a symlink")
+      resolved_source = source_dir.resolve(strict=True)
+      if resolved_source.parent != resolved_root:
+        raise ValueError("source directory is not a direct app child")
+    except (OSError, RuntimeError, ValueError) as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    cron, job_name = schedule
+    job_path = resolved_source / job_name
+    try:
+      if job_path.is_symlink() or not job_path.is_file():
+        raise ValueError(f"job is missing or a symlink: {job_name}")
+      _register_cron(
+        resolved_source.name, cron, job_path, app.id,
+      )
+    except Exception as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    reconciled += 1
+  return reconciled, warnings
 
 
 @router.get("/", response_model=list[schemas.AppOut])
@@ -562,6 +618,51 @@ def list_app_schedules(
 
 
 @router.post(
+  "/preview",
+  response_model=schemas.AppPreviewOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def preview_app_install(
+  body: schemas.AppInstall,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Validate and normalize the capabilities an install would apply.
+
+  This intentionally fetches only the manifest.  The install endpoint repeats
+  the fetch and binds it to ``reviewed_capability_digest`` before fetching app
+  code or mutating durable state, closing the catalog-preview/install race.
+  """
+  from app import install
+
+  manifest, raw_base, contract, digest = (
+    await install.preview_manifest_capabilities(
+      manifest_url=body.manifest_url,
+      manifest=body.manifest,
+      raw_base=body.raw_base,
+    )
+  )
+  source = body.manifest_url if body.manifest_url is not None else raw_base
+  canonical = install._canonical_identity_key(source, manifest["id"])
+  existing = (
+    db.query(models.App)
+    .filter(
+      models.App.manifest_url == canonical,
+      models.App.deleted_at.is_(None),
+    )
+    .first()
+  )
+  installed_contract = existing.capability_contract if existing else None
+  return schemas.AppPreviewOut(
+    manifest=manifest,
+    capability_contract=contract,
+    capability_digest=digest,
+    installed_contract=installed_contract,
+    capability_diff=diff_contracts(installed_contract, contract),
+  )
+
+
+@router.post(
   "/install",
   response_model=schemas.AppInstallOut,
   status_code=201,
@@ -598,6 +699,7 @@ async def install_app(
         manifest=body.manifest,
         raw_base=body.raw_base,
         source="store",
+        reviewed_capability_digest=body.reviewed_capability_digest,
       )
     )
   # Notify the Shell to refetch its app list so a new install (or an
@@ -641,6 +743,9 @@ async def install_app(
     display=app.display,
     offline_contract=app.offline_contract,
     system_prompt_file=app.system_prompt_file,
+    system_app=app.system_app,
+    chat_log_access=app.chat_log_access,
+    capability_contract=app.capability_contract,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,
@@ -1119,7 +1224,7 @@ async def stream_app_events(
   # 404 a missing/tombstoned app so an owner token can't open a stream for a
   # nonexistent app (an app token already fails this in get_principal's
   # scope check, which rejects a token whose app row is gone).
-  live_app_or_404(db, app_id)
+  app = live_app_or_404(db, app_id)
   # Release the pooled DB connection BEFORE the (possibly hours-long) stream
   # loop, exactly as /api/events/system does — auth already ran against this
   # session, so holding it open for the stream's lifetime would pin one
@@ -1629,6 +1734,13 @@ async def delete_app(
     app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
+    # A job wrapper publishes its lease before checking the live row.  Now that
+    # the tombstone is durable, terminate every verified group; a wrapper that
+    # races in afterward observes the tombstone and exits before spawning work.
+    await asyncio.to_thread(app_jobs.terminate_app_jobs, app_id)
+    from app.install import deactivate_app_skills
+    for warning in await deactivate_app_skills(app_id):
+      log.warning("uninstall: %s", warning)
     # Logical uninstall — pairs with the app_install event so churn analysis
     # (and the nightly digest) sees removals, not just installs. Best-effort,
     # after the tombstone commit.
@@ -1737,9 +1849,9 @@ async def recover_app(
   also be revived by reinstalling — the install reattaches by manifest_url. The
   id-keyed storage tree was never removed, so the revived app keeps its data.
   Cron IS re-registered on recover for any app that had a scheduled
-  ``init-cron.sh`` (the tombstoned replay script is restored and re-run under the
-  source-dir lock); reinstalling a store app also re-registers it. See feature
-  110.
+  ``init-cron.sh``: the tombstoned replay script is restored under the
+  source-dir lock, then its cadence is converged through the common supervised
+  runner. Reinstalling a store app also re-registers it. See feature 110.
 
   Held under install_uninstall_lock — the same lock the TTL purge takes — so a
   recover near the TTL boundary can't race the purge into reviving a row the
@@ -1766,10 +1878,10 @@ async def recover_app(
     app_source_dir = app.source_dir
     db.commit()
 
-    # Re-arm the schedule the tombstone dropped: rename init-cron.sh back into
-    # the entrypoint's replay glob and run it once to reinstall the crontab
-    # entry. Recovery must re-establish every side-effect delete tore down.
-    # Off the loop under the per-source-dir lock (bash run can block).
+    # Restore the durable declaration the tombstone moved aside. Do not execute
+    # preserved scripts here: an older one may run the job directly. Once all
+    # replay locations are restored, the common reconciler below preserves the
+    # cadence while rewriting/installing the supervised command.
     settings = get_settings()
     resolved_source = _resolve_app_source_dir(
       app_source_dir, app_name, settings
@@ -1783,6 +1895,26 @@ async def recover_app(
     ):
       async with fs_locks.source_dir_lock(str(runtime_dir)):
         await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
+    def _reconcile_recovered_cron():
+      # The request Session belongs to FastAPI's dependency worker. Give the
+      # blocking subprocess reconciliation its own Session in its own thread.
+      from app.database import SessionLocal
+      cron_db = SessionLocal()
+      try:
+        return reconcile_app_cron_supervision(cron_db)
+      finally:
+        cron_db.close()
+
+    _cron_count, _cron_warnings = await asyncio.to_thread(
+      _reconcile_recovered_cron,
+    )
+    if _cron_count:
+      log.info("recover supervised %d app cron schedule(s)", _cron_count)
+    for warning in _cron_warnings:
+      log.warning("recover cron supervision skipped: %s", warning)
+    from app.install import restore_app_skills
+    for warning in await restore_app_skills(app_id):
+      log.warning("recover: %s", warning)
   # Refetch the drawer (app reappears) and bust any cached iframe for it.
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app_id)}
@@ -1895,14 +2027,39 @@ def run_app_job(
   # Non-blocking. stdout/stderr go to /dev/null so the subprocess
   # doesn't inherit the FastAPI worker's pipes; the job script itself
   # is expected to log to /data/cron-logs/.
-  subprocess.Popen(
-    ["bash", str(job_path), str(app_id)],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    cwd=str(source_dir),
-    close_fds=True,
-  )
+  app_jobs.launch_app_job(app_id, job_path, source_dir)
   return {"started_at": datetime.now(UTC).isoformat()}
+
+
+@router.get("/{app_id}/job-context")
+def get_app_job_context(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Return non-secret system agent choices to this app's job token.
+
+  Jobs should not import platform internals or read owner settings files.  This
+  narrow surface lets a short-lived app token inherit the owner's configured
+  background provider ordering without receiving credentials or unrelated
+  settings.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="App token can only read its own job context.",
+    )
+  app = live_app_or_404(db, app_id)
+  from app.background_agents import resolve_background_agents
+  choices = resolve_background_agents(get_settings().data_dir, {})
+  return {
+    "app_id": app_id,
+    "primary": choices.get("primary"),
+    "fallback": choices.get("fallback"),
+    # This is the same normalized, non-secret receipt the owner reviewed.
+    # The job supervisor uses it to construct declared filesystem mounts.
+    "capability_contract": app.capability_contract,
+  }
 
 
 @router.post(

@@ -119,6 +119,9 @@ class AppOut(BaseModel):
   # Root-level manifest file composed into the agent prompt while this app is
   # live. Informational so install UIs can surface the privileged declaration.
   system_prompt_file: str | None = None
+  system_app: bool = False
+  chat_log_access: Literal["none", "summary", "full"] = "none"
+  capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
 
@@ -139,6 +142,20 @@ class AppInstall(BaseModel):
   manifest_url: str | None = None
   manifest: dict | None = None
   raw_base: str | None = None
+  # Optional review binding supplied by an install UI. Direct owner/agent
+  # installs may omit it; when present, install must apply the exact capability
+  # contract the owner just reviewed or fail with 409 before mutating state.
+  reviewed_capability_digest: str | None = Field(
+    default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
+
+
+class AppPreviewOut(BaseModel):
+  manifest: dict
+  capability_contract: dict
+  capability_digest: str
+  installed_contract: dict | None = None
+  capability_diff: dict
 
 
 class AppInstallOut(AppOut):

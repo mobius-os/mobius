@@ -320,18 +320,85 @@ def test_conflict_update_skips_skill_sync(
   assert _sidecar()["contributing.md"]["sha256"] == _sha(SKILL_V1)
 
 
-def test_uninstall_leaves_skill_and_sidecar(
+def test_uninstall_deactivates_skill_and_recover_restores_exact_bytes(
   client, auth, bypass_url_validation,
 ):
-  """Uninstall never touches /data/shared/skills or the ownership sidecar."""
   r1 = _install(client, auth, _skill_manifest(), {
     "index.jsx": JSX, "contributing.md": SKILL_V1,
   })
   assert r1.status_code == 201, r1.text
+  # Preserve owner/agent edits exactly across the inactive interval.
+  (_skills_dir() / "contributing.md").write_text(SKILL_AGENT)
   r2 = client.delete(f"/api/apps/{r1.json()['id']}", headers=auth)
   assert r2.status_code == 204
-  assert (_skills_dir() / "contributing.md").read_text() == SKILL_V1
-  assert _sidecar()["contributing.md"]["app_id"] == r1.json()["id"]
+  assert not (_skills_dir() / "contributing.md").exists()
+  inactive = (
+    _skills_dir() / ".inactive" / str(r1.json()["id"]) / "contributing.md"
+  )
+  assert inactive.read_text() == SKILL_AGENT
+  inactive_record = _sidecar()["contributing.md"]
+  assert inactive_record["active"] is False
+  assert inactive_record["sha256"] == _sha(SKILL_V1)
+  assert inactive_record["inactive_sha256"] == _sha(SKILL_AGENT)
+
+  recovered = client.post(
+    f"/api/apps/{r1.json()['id']}/recover", headers=auth,
+  )
+  assert recovered.status_code == 200, recovered.text
+  assert (_skills_dir() / "contributing.md").read_text() == SKILL_AGENT
+  assert not inactive.exists()
+  restored_record = _sidecar()["contributing.md"]
+  assert restored_record["active"] is True
+  assert restored_record["sha256"] == _sha(SKILL_V1)
+  assert "inactive_sha256" not in restored_record
+
+
+def test_tombstoned_skill_basename_remains_reserved(
+  client, auth, bypass_url_validation,
+):
+  owner = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+  assert owner.status_code == 201
+  assert client.delete(
+    f"/api/apps/{owner.json()['id']}", headers=auth,
+  ).status_code == 204
+
+  other = _install(
+    client, auth,
+    _skill_manifest(id="other", name="Other"),
+    {"index.jsx": JSX, "contributing.md": "# impostor\n"},
+    base="https://other.test/repo/",
+  )
+  assert other.status_code == 201, other.text
+  assert any(
+    "contributing.md: owned by app skilled" in warning
+    for warning in other.json()["warnings"]
+  )
+  assert not (_skills_dir() / "contributing.md").exists()
+
+
+def test_update_dropping_skill_retires_and_releases_record(
+  client, auth, bypass_url_validation,
+):
+  first = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+  assert first.status_code == 201
+  update = _install(
+    client,
+    auth,
+    _skill_manifest(version="2.0.0", skills=[], source_files=[]),
+    {"index.jsx": JSX},
+  )
+  assert update.status_code == 201, update.text
+  assert not (_skills_dir() / "contributing.md").exists()
+  assert "contributing.md" not in _sidecar()
+  retired = (
+    _skills_dir() / ".inactive" / str(first.json()["id"])
+    / "retired" / "contributing.md"
+  )
+  assert retired.read_text() == SKILL_V1
 
 
 def test_oversized_skill_is_skipped_with_warning(

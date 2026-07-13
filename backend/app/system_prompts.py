@@ -15,18 +15,24 @@ continue to make the declaration visible.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app import models
+from app.config import get_settings
 
 log = logging.getLogger("moebius.chat")
 _MAX_FRAGMENT_BYTES = 256 * 1024
 
 
-def _safe_fragment_path(source_dir: str | None, basename: str | None) -> Path | None:
-  """Return a confined root-level markdown path, tolerating legacy/corrupt rows."""
+def _read_safe_fragment(
+  source_dir: str | None,
+  basename: str | None,
+) -> str | None:
+  """Read one confined regular file through a pinned directory descriptor."""
   if not source_dir or not basename or not isinstance(basename, str):
     return None
   if (
@@ -37,7 +43,51 @@ def _safe_fragment_path(source_dir: str | None, basename: str | None) -> Path | 
     or ".." in basename
   ):
     return None
-  return Path(source_dir) / basename
+  source = Path(source_dir)
+  dir_fd = None
+  file_fd = None
+  try:
+    apps_root = (Path(get_settings().data_dir) / "apps").resolve(strict=True)
+    # Installed source trees are immediate, real directories below apps/.  A
+    # corrupt row or post-install symlink must not turn a prompt fragment into
+    # an arbitrary host-file read.
+    if source.is_symlink():
+      return None
+    resolved_source = source.resolve(strict=True)
+    if resolved_source.parent != apps_root or not resolved_source.is_dir():
+      return None
+    dir_fd = os.open(
+      resolved_source,
+      os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    file_fd = os.open(
+      basename,
+      os.O_RDONLY | os.O_NOFOLLOW,
+      dir_fd=dir_fd,
+    )
+    info = os.fstat(file_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_FRAGMENT_BYTES:
+      return None
+    chunks: list[bytes] = []
+    remaining = _MAX_FRAGMENT_BYTES + 1
+    while remaining > 0:
+      chunk = os.read(file_fd, min(65_536, remaining))
+      if not chunk:
+        break
+      chunks.append(chunk)
+      remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > _MAX_FRAGMENT_BYTES:
+      return None
+    fragment = raw.decode("utf-8").strip()
+    return fragment or None
+  except (OSError, RuntimeError, UnicodeError):
+    return None
+  finally:
+    if file_fd is not None:
+      os.close(file_fd)
+    if dir_fd is not None:
+      os.close(dir_fd)
 
 
 def compose_system_prompt(base: str, db: Session) -> str:
@@ -51,6 +101,7 @@ def compose_system_prompt(base: str, db: Session) -> str:
     db.query(models.App)
     .filter(
       models.App.deleted_at.is_(None),
+      models.App.system_app.is_(True),
       models.App.system_prompt_file.isnot(None),
     )
     .order_by(models.App.id.asc())
@@ -58,25 +109,14 @@ def compose_system_prompt(base: str, db: Session) -> str:
   )
   fragments: list[str] = []
   for app in rows:
-    path = _safe_fragment_path(app.source_dir, app.system_prompt_file)
-    if path is None:
+    fragment = _read_safe_fragment(app.source_dir, app.system_prompt_file)
+    if fragment is None:
       log.warning("invalid system-prompt fragment row for app id=%s", app.id)
       continue
-    try:
-      raw = path.read_bytes()
-      if len(raw) > _MAX_FRAGMENT_BYTES:
-        log.warning("system-prompt fragment too large for app id=%s", app.id)
-        continue
-      fragment = raw.decode("utf-8").strip()
-    except (OSError, UnicodeError) as exc:
-      log.warning(
-        "could not read system-prompt fragment for app id=%s: %r", app.id, exc
-      )
-      continue
-    if not fragment:
-      continue
+    source_label = str(Path(app.source_dir).resolve())
     fragments.append(
-      f"<!-- installed system app: {app.slug or app.id} -->\n{fragment}"
+      f"<!-- installed system app: {app.slug or app.id}; "
+      f"source_dir: {source_label} -->\n{fragment}"
     )
   if not fragments:
     return base

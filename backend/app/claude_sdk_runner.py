@@ -437,7 +437,7 @@ def _skill_file_read_name(
   The match is purely lexical (normpath, no filesystem access) and
   returns "" for anything that isn't a direct skill-file read. A
   relative path is resolved against the turn's cwd: the agent runs
-  with cwd=/data, so `shared/skills/memory.md` is the same load.
+  with cwd=/data, so `shared/skills/example.md` is the same load.
   """
   if tool_name != "Read" or not isinstance(input_data, dict):
     return ""
