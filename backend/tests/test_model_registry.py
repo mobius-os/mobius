@@ -58,9 +58,17 @@ def test_known_models_fallback_lists_current_claude_and_codex():
     assert model_id in claude, f"{model_id} missing from KNOWN_MODELS[claude]"
   assert claude[0] == "claude-opus-4-8", "Opus 4.8 must be the default"
   # Current Codex family — each canonical id present by name.
-  for model_id in ("gpt-5.5", "gpt-5.4"):
+  for model_id in (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+  ):
     assert model_id in codex, f"{model_id} missing from KNOWN_MODELS[codex]"
-  assert codex[0] == "gpt-5.5", "gpt-5.5 must be the Codex default"
+  assert codex[0] == "gpt-5.6-sol", "gpt-5.6-sol must be the Codex default"
 
 
 def test_fallback_models_shape_matches_registry_entries():
@@ -254,3 +262,28 @@ async def test_fetch_claude_models_raises_when_refresh_fails(
   # The fallback path still yields the current KNOWN_MODELS list.
   fallback = providers._fallback_models("claude")
   assert any(e["id"] == "claude-opus-4-8" for e in fallback)
+
+
+def test_codex_model_slugs_from_raw_cli_catalog():
+  """The CLI debug fallback parses raw catalog JSON without caring about
+  newer metadata fields such as max/ultra reasoning levels."""
+  payload = {
+    "models": [
+      {
+        "slug": "gpt-5.6-sol",
+        "supported_reasoning_levels": [
+          {"effort": "medium"},
+          {"effort": "max"},
+          {"effort": "ultra"},
+        ],
+      },
+      {"id": "gpt-future"},
+      {"slug": "codex-auto-review", "visibility": "hide"},
+      "gpt-string-shape",
+    ],
+  }
+  assert providers._codex_model_slugs_from_payload(payload) == [
+    "gpt-5.6-sol",
+    "gpt-future",
+    "gpt-string-shape",
+  ]

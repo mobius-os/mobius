@@ -27,11 +27,14 @@ export const CLAUDE_MODELS = [
 ]
 
 export const CODEX_MODELS = [
-  // gpt-5.5 became the default Codex model on 2026-04-24. gpt-5.4
-  // stays as fallback. -codex suffix variants (gpt-5.3-codex etc.)
-  // require API-key auth; ChatGPT-account auth (Möbius's Codex
-  // bridge) returns 400 for them — drop until per-auth model gating
-  // is in place.
+  // The live `/api/models` registry is the source of truth. These
+  // fallback rows mirror the current Codex CLI catalog for first paint
+  // and registry-failure cases.
+  { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+  { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
   { value: 'gpt-5.5', label: 'gpt-5.5' },
   { value: 'gpt-5.4', label: 'gpt-5.4' },
+  { value: 'gpt-5.4-mini', label: 'gpt-5.4 mini' },
+  { value: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
 ]
