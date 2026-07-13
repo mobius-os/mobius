@@ -6,6 +6,8 @@ from pathlib import Path
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+ENTRYPOINT = SCRIPTS / "entrypoint.sh"
+INSTALL = SCRIPTS.parent / "app" / "install.py"
 
 
 def _load(name: str):
@@ -35,7 +37,6 @@ def test_base_skill_boot_never_seeds_app_owned_memory_skill(tmp_path, monkeypatc
   seed = tmp_path / "seed"
   skills = tmp_path / "skills"
   seed.mkdir()
-  (seed / "memory.md").write_text("app owned", encoding="utf-8")
   (seed / "files.md").write_text("base owned", encoding="utf-8")
   monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
   monkeypatch.setattr(module, "SKILLS", skills)
@@ -46,6 +47,9 @@ def test_base_skill_boot_never_seeds_app_owned_memory_skill(tmp_path, monkeypatc
 
   assert (skills / "files.md").read_text(encoding="utf-8") == "base owned"
   assert not (skills / "memory.md").exists()
+
+  baked_seed = SCRIPTS / "seed-skills"
+  assert not (baked_seed / "memory.md").exists()
 
 
 def test_later_boot_preserves_existing_memory_skill_but_does_not_reseed_it(
@@ -94,3 +98,26 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
   live.write_text("owner edit", encoding="utf-8")
   module.init()
   assert live.read_text(encoding="utf-8") == "owner edit"
+
+
+def test_cron_starts_only_after_per_boot_supervision_proof():
+  text = ENTRYPOINT.read_text(encoding="utf-8")
+  remove = text.index("rm -f /data/run/app-cron-supervision-ready")
+  guard = text.index("if [ -f /data/run/app-cron-supervision-ready ]")
+  start = text.index("        cron", guard)
+
+  assert remove < guard < start
+  assert "cron remains disabled (fail closed)" in text
+
+
+def test_boot_never_executes_app_owned_cron_declarations():
+  text = ENTRYPOINT.read_text(encoding="utf-8")
+  assert "for init_script in /data/apps/*/init-cron.sh" not in text
+  assert 'su -s /bin/sh mobius -c "bash $init_script"' not in text
+  assert "Never execute app-owned init-cron.sh at boot" in text
+
+
+def test_install_rollback_never_executes_app_owned_cron_declarations():
+  text = INSTALL.read_text(encoding="utf-8")
+  assert '["bash", str(Path(o) / "init-cron.sh")]' not in text
+  assert "rollback_actions.append(_reconcile_cron_after_install_rollback)" in text

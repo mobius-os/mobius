@@ -15,9 +15,9 @@ automatic content migration of existing skills: an updated baked seed (e.g. a
 fix to reflection.md) does NOT reach an instance that already has that file. Such
 an update must be propagated explicitly (copy the new seed over the live
 /data/shared/skills/<name>.md), because a blind overwrite can't tell an owner
-improvement from an agent edit. App-owned skills (currently `memory.md`) are
-excluded from base seeding and arrive through their app manifest. Existing
-copies are deliberately preserved. `.seed-version`/`SEED_VERSION` are kept as a
+improvement from an agent edit. App-owned skills are not part of this seed
+tree; they arrive through manifests and their generic ownership sidecar.
+`.seed-version`/`SEED_VERSION` are kept as a
 record of the baked seed generation for that future, merge-aware migration; the
 sentinel is written but not yet read.
 
@@ -35,8 +35,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "11"  # v11: memory.md is app-owned and no longer base-seeded
-_APP_OWNED_SKILLS = frozenset({"memory.md"})
+SEED_VERSION = "12"  # v12: app-owned skills are absent from platform seeds
 # These three base skills used to contain unconditional graph behavior. Update
 # only byte-for-byte baked copies; an owner/agent-edited file is never touched.
 _UNMODIFIED_MIGRATIONS = {
@@ -78,8 +77,7 @@ def init() -> None:
   if not SKILLS.exists():
     SKILLS.mkdir(parents=True)
     for src in seed.glob("*.md"):
-      if src.name not in _APP_OWNED_SKILLS:
-        shutil.copy2(src, SKILLS / src.name)
+      shutil.copy2(src, SKILLS / src.name)
     VERSION_FILE.write_text(SEED_VERSION + "\n", encoding="utf-8")
     n = len(list(SKILLS.glob("*.md")))
     print(f"init_skills: seeded {n} skills (v{SEED_VERSION})")
@@ -90,8 +88,6 @@ def init() -> None:
   added = 0
   migrated = 0
   for src in seed.glob("*.md"):
-    if src.name in _APP_OWNED_SKILLS:
-      continue
     dst = SKILLS / src.name
     old_digest = _UNMODIFIED_MIGRATIONS.get(src.name)
     if dst.is_file() and old_digest:

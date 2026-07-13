@@ -90,10 +90,14 @@ class ProductionInjectionSystem:
     return type(self)(data_dir)
 
   def retrieve(self, query: str) -> RetrievalResult:
-    from app.memory import _loaded_path_to_id, build_memory_block
+    from app.memory import build_memory_block
     data_dir = _require_tree(self._data_dir)
     block = build_memory_block(data_dir)
-    ids = [i for i in (_loaded_path_to_id(p) for p in block.loaded) if i]
+    ids = [
+      "chat:" + rel.split("/")[1]
+      for rel in block.loaded
+      if rel.startswith("chats/") and rel.endswith("/index.md")
+    ]
     return RetrievalResult(context=block.text, selected_node_ids=ids)
 
 
@@ -104,8 +108,8 @@ class MemorySearchSystem:
   (short-term, injected at session start), this represents the recall arm that
   the real platform fires for facts living in `notes/`/`mocs/` or in chat notes
   that have aged past the `RECENT_CHAT_NOTES` window. The real arm is the
-  read-only `claude` subagent in `backend/scripts/memory_search.py`; that shells
-  the CLI, so it is LIVE-GATED here exactly like `run_live_eval.py`:
+  installed Memory app reader; that app-owned executable is LIVE-GATED here
+  exactly like `run_live_eval.py`:
 
   - Unit tests pass an injectable `search_fn(query) -> str` and drive it with a
     DETERMINISTIC stub — never shelling out, fully offline in `wt-pytest`.
@@ -142,7 +146,7 @@ class MemorySearchSystem:
       if os.environ.get("MEMEVAL_LIVE") != "1":
         raise RuntimeError(
           "MemorySearchSystem.live requires MEMEVAL_LIVE=1 (it shells the real "
-          "memory_search.py subagent). Unit tests must pass a deterministic "
+          "installed Memory reader). Unit tests must pass a deterministic "
           "search_fn instead."
         )
       return _run_real_memory_search(query, tree_dir=tree_dir, timeout=timeout)
@@ -171,12 +175,16 @@ class SearchResult:
 def _run_real_memory_search(
     query: str, *, tree_dir: str | Path | None, timeout: int
 ) -> SearchResult:
-  """Shell the real `backend/scripts/memory_search.py` against a tree. LIVE only
-  — gated by `MemorySearchSystem.live`. Stdout is the synthesis; the node ids
-  come from the `read N node(s): ...` stderr line the subagent prints."""
+  """Shell an installed Memory app's confined reader. LIVE only."""
   import subprocess
 
-  script = Path(__file__).resolve().parents[1] / "scripts" / "memory_search.py"
+  script = Path(os.environ.get(
+    "MEMORY_SEARCH_SCRIPT", "/data/apps/memory/memory_search.py",
+  ))
+  if not script.is_file():
+    raise RuntimeError(
+      "Memory app reader is not installed; set MEMORY_SEARCH_SCRIPT for evals."
+    )
   data_dir = Path(tree_dir).parent.parent if tree_dir is not None else Path("/data")
   env = dict(os.environ, DATA_DIR=str(data_dir))
   proc = subprocess.run(
@@ -186,14 +194,15 @@ def _run_real_memory_search(
     timeout=timeout,
     env=env,
   )
-  context = proc.stdout.strip()
+  lines = proc.stdout.strip().splitlines()
+  context = "\n".join(line for line in lines if not line.startswith("FILES: "))
   node_ids: list[str] = []
-  marker = "read "
-  for line in proc.stderr.splitlines():
-    if "node(s):" in line:
-      after = line.split("node(s):", 1)[1].strip()
-      if after and after != "(none)":
-        node_ids = [nid.strip() for nid in after.split(",") if nid.strip()]
+  for line in lines:
+    if line.startswith("FILES: "):
+      node_ids = [
+        Path(rel.strip()).stem
+        for rel in line.removeprefix("FILES: ").split(",") if rel.strip()
+      ]
   return SearchResult(context=context, node_ids=node_ids)
 
 

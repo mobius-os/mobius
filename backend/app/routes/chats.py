@@ -764,12 +764,12 @@ def get_chat_agent_context(
   Exposes exactly what the agent is told, reconstructed the way run_chat
   assembles it but WITHOUT running a turn: the static system prompt (the
   core.md/skill constitution, or this chat's custom override) plus the
-  first-turn injected blocks — the knowledge-graph memory block, the embedded
+  first-turn injected blocks — recent chat Digests, the embedded
   <app_context>, the <app_report> brief, and any compaction summary. Lets the
   owner answer "what does the agent actually know here?", most useful for
   embedded-app chats (Latex/News/Reflection) where the app context + report
   data travel in the prompt rather than the visible message. Owner-only; the
-  prompt holds instructions + memory, no secrets, but it is still the owner's
+  prompt holds instructions + continuity context, but it is still the owner's
   instance. All the underlying builders are pure/read-only.
   """
   from app import memory
@@ -791,7 +791,16 @@ def get_chat_agent_context(
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
-  memory_block = memory.build_memory_block(data_dir).text or None
+  eligible_chat_ids = {
+    row[0]
+    for row in db.query(models.Chat.id).filter(
+      models.Chat.deleted_at.is_(None),
+    ).all()
+  }
+  memory_block = memory.build_memory_block(
+    data_dir,
+    eligible_chat_ids=eligible_chat_ids,
+  ).text or None
   return {
     "system_prompt": system_prompt,
     "system_prompt_source": "custom" if custom else "skill",

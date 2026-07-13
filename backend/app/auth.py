@@ -63,6 +63,8 @@ def create_app_token(
   owner_username: str,
   token_epoch: int,
   app_nonce: str | None = None,
+  *,
+  expires_delta: timedelta = timedelta(hours=8),
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -82,7 +84,7 @@ def create_app_token(
     claims["app_nonce"] = app_nonce
   return create_access_token(
     claims,
-    expires_delta=timedelta(hours=8),
+    expires_delta=expires_delta,
     token_epoch=token_epoch,
   )
 
