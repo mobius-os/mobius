@@ -617,6 +617,53 @@ def _served_platform_sha() -> str | None:
   return sha or None
 
 
+# The served uvicorn runs with cwd ``backend/`` and imports the platform backend,
+# so a change to any backend RUNTIME source (anything under ``backend/`` EXCEPT
+# the never-imported subtrees below) can alter the running server and needs a
+# restart to load. Everything else takes effect without restarting the served
+# process: frontend/** rebuilds into dist (served per-request), top-level tests/
+# and docs never run in the server, backend/tests/** never imports, backend/
+# scripts/** are subprocess-invoked fresh each call, backend/recovery/** is the
+# separate recoveryd container, and backend/memeval/** is eval tooling. Broad
+# (any backend/ runtime path, not just backend/app/**) so a root-level module or
+# a symlinked source can't silently slip past — fail toward restarting.
+_NON_RUNTIME_BACKEND_SUBDIRS = (
+  "backend/tests/", "backend/scripts/", "backend/recovery/", "backend/memeval/",
+)
+
+
+def _paths_need_restart(paths: list[str]) -> bool:
+  """True iff any changed path is served-backend RUNTIME code (needs a restart)."""
+  for p in paths:
+    if p != "backend" and not p.startswith("backend/"):
+      continue  # not backend (frontend/tests/docs/…) — no server restart
+    if any(p.startswith(sub) for sub in _NON_RUNTIME_BACKEND_SUBDIRS):
+      continue  # backend, but a subtree the served process never imports
+    return True
+  return False
+
+
+def _tree_change_needs_restart(
+  repo: Path, before: str | None, after: str | None
+) -> bool:
+  """Does the ``before``→``after`` change require restarting the served uvicorn?
+
+  True iff it touched served backend runtime code. Fail SAFE toward restarting:
+  a missing sha or an uncomputable diff returns True, so a restart is never
+  skipped on an ambiguous change (the one thing the old blunt check got right —
+  never serve stale backend). Same commit → False; a genuinely empty diff (an
+  ``--allow-empty`` commit) → False (nothing to load).
+  """
+  if before == after:
+    return False  # same sha (or both missing) — nothing changed
+  if not before or not after:
+    return True  # one side unknown — can't prove no backend change, fail closed
+  paths = _changed_paths(repo, before, after)
+  if paths is None:
+    return True  # diff failed — fail closed
+  return _paths_need_restart(paths)  # empty list → genuine no-change → False
+
+
 def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
   served = _served_platform_sha()
   if not served:
@@ -626,25 +673,37 @@ def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
     head = _rev(repo, local)
   except Exception:
     return False
-  return bool(head and head != served)
+  # The tree advanced past what's served, but a restart is only needed if the
+  # served BACKEND package changed; a frontend/tests/docs/scripts advance is
+  # already live or irrelevant to the running server.
+  return _tree_change_needs_restart(repo, served, head)
 
 
-def _changed_paths(repo: Path, before: str | None, after: str | None) -> list[str]:
-  """Repo-relative paths changed between two commits, best-effort."""
+def _changed_paths(
+  repo: Path, before: str | None, after: str | None
+) -> list[str] | None:
+  """Repo-relative paths changed between two commits, or None if the diff failed.
+
+  ``--no-renames`` so a file moved OUT of a runtime dir (``git mv backend/app/x
+  docs/x``) shows BOTH the deleted source and the added destination — otherwise
+  rename detection reports only the destination and the classifier would miss
+  that the served backend lost a module. None (diff failed) is distinct from []
+  (a real, empty diff) so callers can fail closed on the former.
+  """
   if not before or not after or before == after:
     return []
   proc = _git(
-    "diff", "--name-only", before, after, repo=repo, check=False,
+    "diff", "--name-only", "--no-renames", before, after, repo=repo, check=False,
   )
   if proc.returncode != 0:
-    return []
+    return None
   return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def _touched_frontend(repo: Path, before: str | None, after: str | None) -> bool:
   return any(
     path == "frontend" or path.startswith("frontend/")
-    for path in _changed_paths(repo, before, after)
+    for path in (_changed_paths(repo, before, after) or [])
   )
 
 
@@ -776,14 +835,19 @@ def reconcile_clone(
     # Post-reconcile import probe: a text-clean ff/rebase can still produce a
     # tree that fails to import (upstream dropped a module a local edit imports;
     # a bad deploy). Roll back to the previous served commit rather than serve it
-    # broken.
-    ok, err = _import_probe(repo)
-    if not ok:
-      _reset_hard_to(repo, local, pre)
-      _write_rolled_back_flag(target, err)
-      CONFLICT_FLAG.unlink(missing_ok=True)
-      _clear_reconcile_pre()
-      return ReconcileResult("rolled_back", pre, pre, target, error=err)
+    # broken. Skip the ~60s throwaway boot when the reconcile touched NO served
+    # backend code (frontend/tests/docs/scripts only): the backend tree is then
+    # byte-identical, so the probe would only re-prove an unchanged import. This
+    # is the same backend-change gate that decides the restart, so the two stay
+    # consistent.
+    if _tree_change_needs_restart(repo, pre, _rev(repo, local)):
+      ok, err = _import_probe(repo)
+      if not ok:
+        _reset_hard_to(repo, local, pre)
+        _write_rolled_back_flag(target, err)
+        CONFLICT_FLAG.unlink(missing_ok=True)
+        _clear_reconcile_pre()
+        return ReconcileResult("rolled_back", pre, pre, target, error=err)
   except Exception as exc:  # unexpected git failure — never serve a half-tree
     _abort_interrupted(repo)
     _reset_hard_to(repo, local, pre)
@@ -1059,9 +1123,19 @@ async def apply_platform_update(
     chat_id: str | None = None
 
     if res.status == "updated":
-      mark_restart_needed(res.new_sha or "")
+      # Frontend changes rebuild into dist (served per-request, no restart);
+      # only a served-backend change requires restarting uvicorn. Path-aware so a
+      # test/docs/frontend-only update finishes without a spurious restart prompt.
       await _rebuild_frontend_after_update_if_needed(repo, res)
-      state = PlatformUpdateState.RESTART_NEEDED
+      # Compare the SERVED sha (what the running uvicorn imported) to the new
+      # head, not just this reconcile's delta: a backend edit committed locally
+      # while the server ran would otherwise be missed if the incoming update
+      # only touched the frontend, leaving apply and status disagreeing.
+      if _tree_change_needs_restart(repo, _served_platform_sha(), res.new_sha):
+        mark_restart_needed(res.new_sha or "")
+        state = PlatformUpdateState.RESTART_NEEDED
+      else:
+        state = PlatformUpdateState.UP_TO_DATE
     elif res.status == "conflict":
       # Keep the resolver gated behind the owner's next click. A conflict pass
       # rewrites the flag with target + paths, so preserve a previously opened
