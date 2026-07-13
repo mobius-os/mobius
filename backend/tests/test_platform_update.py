@@ -399,16 +399,20 @@ def test_check_for_updates_fetches_then_reports_available(clone_env):
   assert _served_sha(platform) == before
 
 
-def test_check_for_updates_offline_is_safe_noop(clone_env):
+def test_check_for_updates_offline_is_explicit_error(clone_env):
   origin, platform = clone_env
   before = _served_sha(platform)
   _git(platform, "remote", "set-url", "origin",
        str(platform.parent / "does-not-exist.git"))
-  # An offline check must not raise and must leave the served tree + status intact.
-  status = pu.check_for_updates(platform)
-  assert status["available"] is False
-  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  # A stale remote-tracking ref cannot authoritatively mean "no updates".
+  with pytest.raises(pu.PlatformUpdateError, match="platform_fetch_failed"):
+    pu.check_for_updates(platform)
   assert _served_sha(platform) == before
+
+
+def test_check_for_updates_requires_a_fetchable_clone(tmp_path):
+  with pytest.raises(pu.PlatformUpdateError, match="platform_repo_missing"):
+    pu.check_for_updates(tmp_path / "missing")
 
 
 def test_check_for_updates_syncs_marker_when_local_already_contains_origin(clone_env):

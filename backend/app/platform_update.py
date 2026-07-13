@@ -964,19 +964,24 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   :func:`platform_status` is deliberately fetch-free — it reads the
   remote-tracking ``origin/main`` left by the last boot/apply fetch — so this is
   the one on-demand path that refreshes that ref without waiting for a reboot.
-  The fetch is best-effort (offline simply leaves the last-known ref, so the
-  answer is "no newer update", never an error) and runs under
-  :data:`RECONCILE_LOCK` so it can never fetch mid-reconcile. The working tree and
-  ``main`` are untouched — a fetch only advances remote-tracking refs, so this is
-  safe to run anytime and never mutates the served code.
+  A missing clone/origin or failed fetch is an explicit error: returning status
+  from a stale remote-tracking ref would tell the owner "No updates found" when
+  the service never actually reached upstream. The fetch runs under
+  :data:`RECONCILE_LOCK` so it can never fetch mid-reconcile. The working tree
+  and ``main`` are untouched — a fetch only advances remote-tracking refs, so
+  this is safe to run anytime and never mutates the served code.
   """
-  if (repo / ".git").exists() and _has_origin(repo):
-    with _reconcile_flock():
-      if _fetch(repo):
-        target = _rev(repo, DEFAULT_TARGET_REF)
-        local = _local_branch(repo)
-        if target and _is_ancestor(repo, target, local):
-          _set_upstream(repo, target)
+  if not (repo / ".git").exists():
+    raise PlatformUpdateError("platform_repo_missing")
+  if not _has_origin(repo):
+    raise PlatformUpdateError("platform_origin_missing")
+  with _reconcile_flock():
+    if not _fetch(repo):
+      raise PlatformUpdateError("platform_fetch_failed")
+    target = _rev(repo, DEFAULT_TARGET_REF)
+    local = _local_branch(repo)
+    if target and _is_ancestor(repo, target, local):
+      _set_upstream(repo, target)
   return platform_status(repo)
 
 
