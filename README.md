@@ -143,13 +143,13 @@ The trust model is explicit: this is single-owner software. The agent has full w
 
 ## Get started
 
-### <a href="https://railway.com/deploy/mobius?referralCode=5TQuhr"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="28"></a>
+### <a href="https://mobius.you"><img src="https://img.shields.io/badge/Launch_M%C3%B6bius-mobius.you-5A0FC8?style=for-the-badge&logo=railway&logoColor=white" alt="Launch Möbius on mobius.you" height="40"></a>
 
-Click **Deploy Now**, log in to Railway, and deploy. New accounts get a free month, then around $5/month. Once the deploy finishes, go to **Settings → Networking → Generate Domain** to get a URL like `xxx.up.railway.app`. Open it, and the setup wizard walks you through creating your account and connecting Codex or Claude.
+Click **Launch Möbius** and [mobius.you](https://mobius.you) takes it from there. It walks you through the three steps — create a Railway account (free for the first month, then around $5/month), connect it, and deploy — and hands you a public URL with a live usage dashboard when the build finishes. There's no manual domain setup. Open your URL and the wizard helps you create your account and connect Codex or Claude.
 
-Bookmark `https://xxx.up.railway.app/recover`. On your phone, save to home screen for the best experience.
+Bookmark your instance's `/recover` page. On your phone, save it to the home screen for the best experience.
 
-To update: **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys; chats, apps, credentials, and memory all survive.
+To update, open **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys, and your chats, apps, credentials, and memory all survive.
 
 ### Deploy self-hosted
 
