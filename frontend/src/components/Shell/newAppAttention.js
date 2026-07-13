@@ -21,6 +21,20 @@ export function freshAppIds(accountedFor, currentIds) {
   return out
 }
 
+// Project fresh app ids onto the durable relationship the workspace cares
+// about: which chat produced which runnable artifact. Store installs have no
+// chat_id and remain drawer-only. Keeping this projection pure gives the future
+// pane dispatcher the same input as today's flat tab strip.
+export function freshChatBuiltApps(apps, freshIds) {
+  if (!Array.isArray(apps) || !freshIds?.length) return []
+  const fresh = new Set(freshIds.map(Number).filter(id => !Number.isNaN(id)))
+  return apps.flatMap(app => {
+    const appId = Number(app?.id)
+    if (Number.isNaN(appId) || !fresh.has(appId) || app?.chat_id == null) return []
+    return [{ appId, chatId: String(app.chat_id) }]
+  })
+}
+
 // Flag ids immutably, returning the SAME set when nothing changed so React can
 // bail out of a re-render (mirrors Shell's attentionChatIds setters).
 export function withAppsFlagged(prev, ids) {

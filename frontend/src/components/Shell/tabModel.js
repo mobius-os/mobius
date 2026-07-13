@@ -41,6 +41,48 @@ export function addTab(tabs, kind, id) {
     : [...tabs, makeTab(kind, id)].slice(-MAX_TABS)
 }
 
+// Semantic chat -> artifact placement for today's single-strip workspace.
+// The shell calls this when server truth says a chat produced a runnable app;
+// it deliberately does NOT navigate, so the owner's current view/focus stays
+// put. A future pane workspace keeps this operation at the call site and routes
+// the app to the pane beside the chat instead of changing the event contract.
+export function addBuiltAppForChat(tabs, chatId, appId) {
+  if (tabs.some(t => sameTab(t, 'app', appId))) return tabs
+
+  const next = [...tabs]
+  let chatIndex = next.findIndex(t => sameTab(t, 'chat', chatId))
+  if (chatIndex === -1) {
+    next.push(makeTab('chat', chatId), makeTab('app', appId))
+  } else {
+    next.splice(chatIndex + 1, 0, makeTab('app', appId))
+  }
+
+  // Preserve the newly-related chat/app pair at the flat strip's cap. This is
+  // intentionally local to the current projection; a pane will apply its own
+  // per-pane capacity policy later.
+  while (next.length > MAX_TABS) {
+    chatIndex = next.findIndex(t => sameTab(t, 'chat', chatId))
+    const appIndex = next.findIndex(t => sameTab(t, 'app', appId))
+    const removable = next.findIndex((_, index) => index !== chatIndex && index !== appIndex)
+    if (removable === -1) break
+    next.splice(removable, 1)
+  }
+  return next
+}
+
+// Apply every arrival from one apps refresh. Reverse traversal keeps the
+// server's order when several apps from the same chat all insert immediately
+// after their owning chat (A then B, rather than B then A).
+export function addBuiltAppsForChats(tabs, arrivals) {
+  let next = tabs
+  for (let index = (arrivals?.length || 0) - 1; index >= 0; index -= 1) {
+    const arrival = arrivals[index]
+    if (!arrival || arrival.chatId == null || arrival.appId == null) continue
+    next = addBuiltAppForChat(next, arrival.chatId, arrival.appId)
+  }
+  return next
+}
+
 // Remove a tab — used both when the owner closes one and when its chat/app is
 // deleted (so a stale tab can never navigate into a 404 / dead iframe).
 export function removeTab(tabs, kind, id) {

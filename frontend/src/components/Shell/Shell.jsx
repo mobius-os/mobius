@@ -27,6 +27,7 @@ import * as tabModel from './tabModel.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
 import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import {
+  freshChatBuiltApps,
   freshAppIds,
   withAppsFlagged,
   withoutAppFlagged,
@@ -685,6 +686,16 @@ export default function Shell() {
     if (fresh.length === 0) return
     for (const id of fresh) appBaselineRef.current.add(id)
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
+
+    // A chat-owned app is a runnable artifact, not merely a drawer arrival.
+    // Place every fresh artifact beside its owning chat without navigating:
+    // the owner stays wherever they are. The semantic arrival projection is
+    // pane-ready — a future workspace can route the same relationship to the
+    // pane beside the chat while this flat strip remains the one-pane case.
+    const builtArrivals = freshChatBuiltApps(apps, fresh)
+    if (builtArrivals.length > 0) {
+      setOpenTabs(prev => tabModel.addBuiltAppsForChats(prev, builtArrivals))
+    }
   }, [apps, appsLiveFetched])
 
   // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —

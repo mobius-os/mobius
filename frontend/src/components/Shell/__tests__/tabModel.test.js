@@ -43,6 +43,59 @@ test('addTab keeps only the most recent MAX_TABS', () => {
   assert.ok(!tabs.some(t => t.id === '0'))
 })
 
+test('addBuiltAppForChat inserts a runnable artifact immediately after its chat', () => {
+  const tabs = [
+    tabModel.makeTab('app', 1),
+    tabModel.makeTab('chat', 'building-chat'),
+    tabModel.makeTab('chat', 'other-chat'),
+  ]
+  assert.deepEqual(tabModel.addBuiltAppForChat(tabs, 'building-chat', 42), [
+    tabModel.makeTab('app', 1),
+    tabModel.makeTab('chat', 'building-chat'),
+    tabModel.makeTab('app', 42),
+    tabModel.makeTab('chat', 'other-chat'),
+  ])
+})
+
+test('addBuiltAppForChat pins the owning chat when it was not open', () => {
+  assert.deepEqual(tabModel.addBuiltAppForChat([], 'building-chat', 42), [
+    tabModel.makeTab('chat', 'building-chat'),
+    tabModel.makeTab('app', 42),
+  ])
+})
+
+test('addBuiltAppForChat is a strict no-op for recompiles', () => {
+  const tabs = [
+    tabModel.makeTab('chat', 'building-chat'),
+    tabModel.makeTab('app', 42),
+    tabModel.makeTab('chat', 'other-chat'),
+  ]
+  assert.equal(tabModel.addBuiltAppForChat(tabs, 'building-chat', 42), tabs)
+})
+
+test('addBuiltAppForChat preserves the new relationship at the flat tab cap', () => {
+  const tabs = Array.from(
+    { length: tabModel.MAX_TABS },
+    (_, index) => tabModel.makeTab('chat', `old-${index}`),
+  )
+  const after = tabModel.addBuiltAppForChat(tabs, 'building-chat', 42)
+  assert.equal(after.length, tabModel.MAX_TABS)
+  assert.ok(after.some(tab => tabModel.sameTab(tab, 'chat', 'building-chat')))
+  assert.ok(after.some(tab => tabModel.sameTab(tab, 'app', 42)))
+})
+
+test('addBuiltAppsForChats handles every app in one refresh in server order', () => {
+  const after = tabModel.addBuiltAppsForChats([], [
+    { chatId: 'building-chat', appId: 41 },
+    { chatId: 'building-chat', appId: 42 },
+  ])
+  assert.deepEqual(after, [
+    tabModel.makeTab('chat', 'building-chat'),
+    tabModel.makeTab('app', 41),
+    tabModel.makeTab('app', 42),
+  ])
+})
+
 test('removeTab drops the matching tab and nothing else', () => {
   const tabs = [tabModel.makeTab('chat', 'a'), tabModel.makeTab('app', 42)]
   const after = tabModel.removeTab(tabs, 'app', 42)
