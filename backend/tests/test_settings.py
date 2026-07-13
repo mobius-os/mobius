@@ -301,7 +301,7 @@ def test_background_agent_defaults_do_not_inherit_chat_model_defaults(tmp_path):
   background = providers.background_agent_settings(str(tmp_path), "codex")
   assert background["primary"] == {
     "provider": "codex",
-    "model": "gpt-5.5",
+    "model": providers.DEFAULT_MODELS["codex"],
     "effort": "medium",
   }
   assert background["fallback"] is None
@@ -312,6 +312,7 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(client, a
   surface Codex as the active default instead of a disconnected Claude."""
   from pathlib import Path
   from app.config import get_settings as _gs
+  from app import providers
 
   codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
   codex_auth.parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +322,7 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(client, a
     body = client.get("/api/settings", headers=auth).json()
     assert body["codex_authenticated"] is True
     assert body["provider"] == "codex"
-    assert body["agent_settings"]["model"] == "gpt-5.5"
+    assert body["agent_settings"]["model"] == providers.DEFAULT_MODELS["codex"]
     assert body["background_agents"]["primary"]["provider"] == "codex"
   finally:
     codex_auth.unlink(missing_ok=True)
@@ -633,7 +634,7 @@ def test_background_agent_settings_drops_cross_provider_models(tmp_path):
   }
   assert background["fallback"] == {
     "provider": "codex",
-    "model": "gpt-5.5",
+    "model": providers.DEFAULT_MODELS["codex"],
     "effort": "medium",
   }
 
@@ -767,6 +768,57 @@ def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
   assert "codex_home" not in captured
   assert captured["codex_bin"] == "/usr/bin/codex"
   assert captured["env"]["CODEX_HOME"] == str(codex_home)
+
+
+def test_fetch_codex_models_falls_back_to_cli_debug_catalog(
+  tmp_path, monkeypatch
+):
+  """New Codex catalog metadata can outrun the SDK's generated enums.
+
+  When `AsyncCodex.models()` rejects the catalog shape, the registry should
+  still read slugs from `codex debug models` rather than falling all the way
+  back to the static KNOWN_MODELS list.
+  """
+  from app import providers
+
+  codex_home = tmp_path / "cli-auth" / "codex"
+  codex_home.mkdir(parents=True)
+  (codex_home / "auth.json").write_text("{}")
+
+  class FakeCodexConfig:
+    def __init__(self, **_kwargs):
+      pass
+
+  class FakeCodex:
+    def __init__(self, config):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def models(self):
+      raise ValueError("unsupported enum value: max")
+
+  async def fake_cli_fetch(data_dir):
+    assert data_dir == str(tmp_path)
+    return ["gpt-5.6-sol", "gpt-5.6-terra"]
+
+  monkeypatch.setitem(
+    sys.modules, "openai_codex", SimpleNamespace(AsyncCodex=FakeCodex),
+  )
+  monkeypatch.setitem(
+    sys.modules, "openai_codex.client",
+    SimpleNamespace(CodexConfig=FakeCodexConfig),
+  )
+  monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
+  monkeypatch.setattr(providers, "_fetch_codex_models_from_cli", fake_cli_fetch)
+
+  ids = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
+
+  assert ids == ["gpt-5.6-sol", "gpt-5.6-terra"]
 
 
 def test_model_prefs_default_empty(client, auth):
