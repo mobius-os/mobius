@@ -467,17 +467,19 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   (commit `9b9ab86b`):** a fresh send made while you are reading earlier history is
   treated like a mid-turn send — reserve, but don't yank you down. The only
   unconditional pins are the first message and an at-bottom (auto-scroll) send. Owner
-  decision 2026-07-12; the `CLAUDE.md` "fresh send always pins" wording is stale
-  against this.
+  decision 2026-07-12; `CLAUDE.md`/`AGENTS.md` constraint #1 has been updated to
+  match.
 - **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
 - **R4** Leave-and-return restores the same scroll position, even mid-stream
   (hide-then-reveal + the versioned snapshot cache).
 - **Steer = separate rows, one turn.** Steered queued messages render as separate
   transcript rows in send order (`insertMessageBatchByTs`), never one stranded
   after the reply. The agent receives them joined by `\n\n` (clean paragraphs,
-  not a `\n` blob) — matched byte-for-byte FE (`handleSteer`) + BE
-  (`_selected_force_steer_pending`). The fast-forward button shows only when every
-  queued row is server-confirmed (`canFastForwardQueue`); confirm on a numeric ts.
+  not a `\n` blob). The request binds to specific queued rows by their stable
+  `cid` (`consume_pending_cids`; `_selected_force_steer_pending` selects by cid) —
+  the earlier byte-for-byte content match existed only because no shared id
+  crossed the wire, and is gone. The fast-forward button shows only when every
+  queued row is server-confirmed (`canFastForwardQueue`; the `serverTs` flag).
   A steer landing before any renderable assistant output seals nothing — the
   empty/whitespace pre-steer segment is dropped symmetrically on the live path
   (`streamPromotion.streamItemsHaveRenderableContent`) and the persisted path

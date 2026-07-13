@@ -250,15 +250,26 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
   // the re-render — no layout effect runs to restore a collapsed spacer (the
   // load-bearing detail the bug depended on).
   let serverTsCounter = 0
+  const postedCids = []
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
     const req = route.request().postDataJSON() || {}
+    // Wire regression guard: every fresh send must carry its minted cid on
+    // the POST — without it the durable row derives legacy-<ts> and the
+    // strict data-cid pin selector goes blind after the ack (the gap the
+    // adversarial review caught: the optimistic pin worked while the wire
+    // silently dropped the identity).
+    postedCids.push(req.cid ?? null)
     const serverTs = 1900000000000 + (serverTsCounter++)
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
       body: JSON.stringify({
         status: 'started',
-        message: { role: 'user', content: req.content ?? '', ts: serverTs },
+        // Echo the cid exactly as the real backend persists + returns it.
+        message: {
+          role: 'user', content: req.content ?? '', ts: serverTs,
+          ...(req.cid ? { cid: req.cid } : {}),
+        },
       }),
     })
   })
@@ -326,6 +337,10 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
   // the full offset — deep down the viewport or off the top).
   expect(duringPause.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
   expect(duringPause.lastUserVisualTop).toBeLessThanOrEqual(12)
+
+  // Every send carried its minted cid on the wire (see route guard above).
+  expect(postedCids.length).toBeGreaterThanOrEqual(2)
+  for (const c of postedCids) expect(c).toBeTruthy()
 
   // After content finally streams in, the pin still holds.
   await waitStreamDone(page)
