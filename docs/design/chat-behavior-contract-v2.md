@@ -437,3 +437,121 @@ Total ≈ one focused session (M+). Fits Ensemble+Adversarial per the risk trigg
 ---
 
 **Summary of findings for the caller:** The lazy-tool-output feature is already on `origin/main` (`ToolBlock.jsx`, `routes/chats.py:566-687`, `test_chats_tool_output.py`), but it only trims the `GET /api/chats/{id}` payload — the SSE wire, the catch-up replay burst, and the `Chat.messages` DB row all still carry full output, and the current excerpt is an empty string rather than a head+tail preview. The design above moves truncation to the single event funnel `_ChatEventSink.publish` (`chat.py:284` — confirmed to be the runner's `bc`, so it covers wire + persistence in one place), carries a head+tail excerpt inline, stores the full output in a new `tool_outputs` SQLite table keyed by `tool_use_id` (written via a race-immune actor command, swept with the chat's existing purge, correctly outside the `/data` git safety-net), and serves it via `GET /api/chats/{chat_id}/tool-output/{tool_use_id}`. The load-bearing correctness seam is failure-chip detection (`toolResultFormat.js` parses `output` for the exit code) — the excerpt must preserve the head and JSON-envelope validity, backed by an explicit `output_exit_code` field. Migration is trivial dual-read (keep the existing `?ts=&i=` endpoint for legacy fat rows). Total effort ≈ one focused M+ session.
+---
+
+Worktree removed and pruned cleanly. Here is the refreshed addendum.
+
+---
+
+# Chat Behavior Contract v2 — Rule 5 addendum, REFRESHED against current main (`46b20357`)
+
+This supersedes the original Rule-5 mapping (mapped at `ec94f5b`, before two
+landings). All file:line refs verified read-only in a detached worktree at
+`origin/main` HEAD `46b20357`. It re-runs the original inventory, redesigns
+Lever 2 on what now exists, and re-verifies Levers 1 & 3 and the five risk
+seams against cid-era code.
+
+## What changed since the original mapping (two landings)
+
+**(1) cid stable identity** (`0fb832ce`/`46d6901a`/`e7d1250e`/`7f142bab`, synthesis `docs/superpowers/specs/2026-07-12-cid-identity-SYNTHESIS.md`). Net effect on Rule 5:
+- **User rows are now identity-stable.** React key is `cidOf(msg)`, the row carries `data-cid`, and the optimistic→server-ts swap no longer remounts it (`ChatView.jsx:2958-2966`). Pin is `PIN_USER_MSG{cid}` resolved by `_pinnedUserEl(scrollEl, cid)` → `.chat__msg--user[data-cid]`, no last-row fallback (`useScrollMode.js:110-114,133-137`).
+- **The scroll anchor for the answer did NOT change.** ANCHOR_AT still resolves by `data-key` — `_topmostVisibleMsg` scans `.chat__msg[data-key]` (`useScrollMode.js:68-76`), `applyMode` ANCHOR_AT queries `[data-key]` (`:145-151`). User rows now carry BOTH `data-cid` (pin) and `data-key` (anchor). Assistant rows carry only `data-key` (they have no cid). So Lever-1/Lever-2's obligation to keep a stable answer identity is **entirely about `data-key` and the block keys — cid does nothing for the assistant answer.**
+- cid touched `useStreamConnection.js` by only +12 lines and did **not** touch `StreamingMessage.jsx`, `MsgContent.jsx`, `streamReducers.js`, `streamPromotion.js`, `InlineContent.jsx`, `blocks.jsx`, or `markdown.css`. The original addendum's claims about those files therefore still hold (line numbers drift ≤ a few).
+
+**(2) Lazy tool output** (`46b20357`, contract item 3). Net effect on Rule 5:
+- **`tool_use_id` now rides the wire and the persisted block.** Both runners emit it on `tool_start`/`tool_output`/`tool_end` (`claude_sdk_runner.py:780,869,875` = `block.id`/`block.tool_use_id`; `codex_sdk_runner.py:324-348` `_stamp_tool_use_id` from the ThreadItem id). `events.py:process_event` stamps it onto the persisted block (`tool_start` `:357-359`; `tool_output` backfill `:385-387`).
+- **But nothing correlates or keys by it yet.** `events.py` still matches `tool_output`/`tool_end` by **position** ("last non-done", `reversed(assistant_blocks)` `:375,408`), `tool_input` by "earliest without input" (`:368-371`), `tool_sources` by "last WebSearch" (`:401`). The frontend **live** `tool_start` handler does **not** read `event.tool_use_id` — it builds `{type,tool,input,output,status}` and drops the id (`useStreamConnection.js:763-771`). So a live (and client-promoted) tool block has **no** `tool_use_id`; only the DB-reloaded block does. `streamReducers.js` still position-matches (`openToolLifecycleIndex` = "last running", `:129-136,147-153,247-258`). `ToolBlock` uses `tool_use_id` only for the lazy-fetch URL (dual-read: `tool_use_id` → by-id endpoint, else legacy `?ts=&i=`; `ToolBlock.jsx:103-126`), never as a React key.
+
+**Bottom line: the redraw mechanics the original addendum named are intact.** The lazy-tool landing put a real per-tool identity *on the wire and in the DB row* — which is exactly the ingredient Lever 2's "backend-later" half asked for — but the live stream still throws it away and everything is still keyed ordinally.
+
+**(3) New since original mapping: `streamSnapshotCache.js`.** `useStreamConnection` persists visible `streamItems` to sessionStorage (`chat-stream-items:v2:<chatId>`) on every non-empty set and **restores them at init on remount** (`useStreamConnection.js:184-185,206-212,readStoredStreamSnapshot`). This means Path A remount seeds `StreamingMessage` from the snapshot *before* catch-up, softening the DB-only flash — but the snapshot items are plain ordinal objects, and the catch-up commit still `setStreamItems(catchUpItems)` replaces the whole array (`:654-670`). So it is **one more reset+replace surface, not a reconcile** — Lever 2 still applies, and now must also cover the snapshot→catch-up hand-off.
+
+## 1. Remount inventory — re-verified
+
+The **catch-up reset+replay** engine is unchanged: off-screen `catchUpItems` buffer, atomic `commitCatchUp()` → `setStreamItems(catchUpItems)` at `catch_up_done`/`done` (`useStreamConnection.js:641-670,715-721,931-933`). The commit still replaces the whole array with fresh object identities; React reconciles by **ordinal key**.
+
+What cid fixed vs what remains ordinal:
+
+| Surface | Identity today | Verdict |
+|---|---|---|
+| **User rows** | `cid` (key, `data-cid`, `PIN_USER_MSG{cid}`) | **FIXED by cid** — no remount on ts-swap |
+| **Assistant answer container (`<li>`)** | `data-key` = `streamingDataKey` (bridge partial's `id`/`role-ts`, else `streaming-<chatId>`) (`ChatView.jsx:2746-2752,2994`) | **ordinal-ish** — stable across ticks but the live↔DB *surface swap* still swaps the whole subtree |
+| **Assistant blocks (text/thinking)** | `s-${i}` / `i` (array index) | **still ordinal** (`StreamingMessage.jsx:129,150,156`; `MsgContent.jsx:97,121`) |
+| **Tool blocks** | `s-t-${i}` / `t-${i}` (array index) — id available but unused | **still ordinal** (`StreamingMessage.jsx:111,191`; `MsgContent.jsx:111,224`) |
+| History above the active turn | `msg` identity (memo) | **safe** (`MsgContent.jsx:270-288`) |
+
+**The surface swap (§1b) is unchanged and remains the dominant Path-A redraw.** Mount keeps the DB partial and connects while running (`ChatView.jsx:1361-1363`), so the answer is first painted by `MsgContent`; catch-up commit flips `chooseActiveAssistantSurface` → `hideMessage`/`liveMirrorMsgIdx` → the DB `<li>` is suppressed (`ChatView.jsx:2916-2920`) and `StreamingMessage` renders instead (`:2991-2997`). Two subtrees, two key namespaces (`i`/`t-${i}` vs `s-${i}`/`s-t-${i}`), different DOM (`ProgressiveMarkdown` + `.chat__cursor` vs `StandardMarkdown`) → full teardown/rebuild of every `ToolBlock`, `<img>`, KaTeX/highlight node in the answer.
+
+## 2. Layout-shift inventory — re-verified (Lever 3 targets)
+
+Media reserve is **unchanged** (cid didn't touch it): `.md-image-frame { aspect-ratio: var(--md-image-ratio, 4 / 3); max-height: min(60dvh, 480px) }` (`markdown.css:175-184`, exact line match to the original). Residual shifts both still present:
+1. **Late token insert.** `ExpandableImage` returns `null` until `resolvedSrc` lands (`InlineContent.jsx:152`); for media-token images that is a second async hop (`:137-150`), so the *whole frame* appears late — no box is reserved during the hop.
+2. **On-load ratio delta.** `onLoad` measures `naturalWidth/Height` → overwrites `--md-image-ratio`/`--md-image-fit-width` (`:163-179`); the delta from the 4/3 default still nudges.
+
+Hide-then-reveal cloak is unchanged: `visibility:hidden` until a 50ms-quiet window capped at `REVEAL_CAP_MS=1500` (`useScrollMode.js:45,690-699,837-844`). It still covers *mount paint* only — live streaming never goes quiet (reveals at the 1500ms cap mid-stream), the async catch-up commit lands after reveal, and **Path B (foreground return) has no cloak** — `freezeStreamingReturn` only re-anchors the mode via `modeForForegroundReturn(..., {streaming:true})` (`ChatView.jsx:2476-2495`).
+
+## 3. Levers — refreshed
+
+### Lever 1 — single renderer for the active answer *(biggest win, unchanged direction, re-verified seams)*
+
+Still the dominant fix and still structural. Make one renderer (`MsgContent`/a shared `AssistantBlocks`) render both the DB partial and the live stream; switching source becomes a prop/data change, not a subtree swap. `streamItemsToAssistantPayload` (`streamPromotion.js:253-265`) already maps stream items → the block shape `MsgContent` consumes. Fold `ProgressiveMarkdown`'s only real deltas (trailing cursor, `aria-live`) behind an `isStreaming` flag.
+
+Post-cid adjustments to the plan:
+- The surface-selection block moved slightly: consume points are `ChatView.jsx:2628-2631` (choose), `:2916-2920` (suppress DB `<li>`), `:2991-2997` (render stream). `streamingDataKey` at `:2746-2752`.
+- **Keep `data-key` identical across the source switch** — this is the scroll-machine contract (seam 5) and it is what cid did *not* touch. In the bridge case `streamingDataKey` already reuses the partial's key; the single-renderer must preserve that so `ANCHOR_AT` resolves before and after the switch.
+
+**Size: M/L.** Touches `MsgContent`, `StreamingMessage` (shrinks to a thin wrapper or is absorbed), the surface-selection block, `ProgressiveMarkdown`. Risk: regressing constraint #9 (single assistant surface) and the bridge/steer promote.
+
+### Lever 2 — stable stream-item identity (REDESIGNED on what now exists)
+
+The lazy-tool landing already put a real per-tool identity on the wire and in the DB row, so Lever 2 gets **cheaper and more robust than the original two-phase plan** — the "backend-later" ingredient is largely already there. Revised, smallest-scheme-first:
+
+**2a — Thread `tool_use_id` onto the live stream item and key tool blocks by it. `S`.**
+One line in the live `tool_start` handler to carry `event.tool_use_id` onto the item (`useStreamConnection.js:763-771`), one in `streamItemToBlock` (it already spreads `...item`, so it flows automatically once the item has it — `streamPromotion.js:43`). Then key tool blocks by `t.tool_use_id ?? \`t-${i}\`` in both `StreamingMessage.jsx` and `MsgContent.jsx` (keep the ordinal fallback for legacy/tokenless blocks). This makes tool blocks — the heaviest remount cost (expanded state, `<img>`, lazy `fullOutput`) — survive a catch-up commit and the Lever-1 surface switch **by real identity**, with no protocol change (the wire already carries it).
+
+**2b — Synthetic `iid` for text/thinking segments + the answer container. `S/M`.**
+Text/thinking segments have no natural wire id. Give each stream item a monotonic `iid` assigned at first creation (in the reducers/`appendTextChunk`/`appendThinkingChunk`), preserved across the reset+replay, and key those segments by `iid` instead of array index. The answer container `<li>` keeps `data-key = streamingDataKey` (turn-scoped, already stable) — a block-ordinal *within* that stable turn key is fine, because the turn id doesn't change across catch-up. Prefer `tool_use_id` where it exists (2a) and `iid` only for text/thinking.
+
+**2c — Reconcile-into-existing on commit. `M`.**
+The core of "return without redraw": make `commitCatchUp` **merge fields into the existing items by key** (tool_use_id / iid) instead of `setStreamItems(freshArray)` (`useStreamConnection.js:654-670`). The replay is deterministic and in-order, so `catchUpItems[k]` ↔ on-screen item `k`; merging preserves object/DOM identity through the commit. Must also cover the **snapshot→catch-up** hand-off (2 above): the snapshot-seeded items get the same keys, so the first commit reconciles onto them rather than replacing.
+
+**2d — (optional, later) switch backend + reducer correlation from position to id. `M`.**
+`events.py` and `streamReducers.js` still match by "last non-done". With `tool_use_id` now on every tool event, switch `attachToolOutput`/`closeToolLifecycle`/`tool_output`/`tool_end` to id-match. Not required for Rule 5 (serial invariant holds today, `events.py:1-10`), but it hardens 2a against any future parallel-tool interleaving and removes the last position dependence. Do it only if 2c surfaces an ordering fragility.
+
+**Do 2a + 2c first** (smallest scheme that makes catch-up reconcile-into-existing possible); 2b covers the remaining text/thinking churn; 2d is hardening.
+
+### Lever 3 — dimension-stable media + cloak the commit (unchanged direction, re-verified)
+
+- **Reserve the frame before the token resolves.** Render `.md-image-frame` immediately, swap the `<img>` in when `resolvedSrc` lands, rather than returning `null` for the whole component (`InlineContent.jsx:152`). **`S`.**
+- **Carry known screenshot dimensions.** The agent already knows the viewport it was handed (`useStreamConnection.js:1152-1160`); carry width/height in the image markup so `--md-image-ratio` is exact on first paint and the on-load delta disappears. **`S`.**
+- **Cloak the first catch-up commit.** Extend hide-then-reveal (or freeze the anchor) across the first post-reconnect commit, covering Path B (no cloak today) and the async Path-A commit after the 1500ms cap. Gate on "the socket reset and a catch-up burst is inbound" using the existing `catchUpStartedRef`/`reconnecting` signals + `QUICK_WAKE_HIDDEN_MS`/kept-socket logic (`useStreamConnection.js:44,200,1279-1360`) so a glance at the notification shade doesn't blink the chat. **`S/M`.**
+
+### Simplest thing that satisfies Rule 5
+
+**Lever 2a + 2c (reconcile tool blocks + merge-on-commit) + Lever 1 (single renderer).** With `tool_use_id` already on the wire, 2a is now a two-line change, and 2c turns the commit into an in-place merge; Lever 1 removes the surface swap. Together they make "return mid-stream" an in-place prop update of the same DOM nodes. 2b (iid) polishes text/thinking; Lever 3 handles residual pixel settle + Path B's missing cloak.
+
+## Revised implementation plan (sizes)
+
+| Piece | Size | Notes |
+|---|---|---|
+| L2a — carry `tool_use_id` onto live item + key tool blocks by it | **S** | `useStreamConnection.js:763-771`, `StreamingMessage.jsx:111,191`, `MsgContent.jsx:111,224`; wire already carries it (both runners + `events.py`), so no protocol change. Ordinal fallback stays for legacy blocks |
+| L2c — reconcile-into-existing at `commitCatchUp` (+ snapshot hand-off) | **M** | `useStreamConnection.js:654-670`; merge by key, don't replace; cover snapshot-seeded items |
+| L2b — synthetic `iid` for text/thinking + key by it | **S/M** | reducers/`appendTextChunk`/`appendThinkingChunk`; container keeps `data-key` |
+| L1 — single renderer for the active answer | **M/L** | `MsgContent`/`AssistantBlocks` fed by `streamItemsToAssistantPayload`; absorb `StreamingMessage`; `isStreaming` flag for cursor/aria-live |
+| L3 — frame-before-token + carry known dims | **S** | `InlineContent.jsx:129-189`, `markdown.css:175-184` |
+| L3 — cloak first reconnect commit | **S/M** | reuse reveal machinery gated on `catchUpStartedRef`/`reconnecting` |
+| L2d — id-match correlation (backend + reducers) | **M** | optional hardening; `events.py:368-425`, `streamReducers.js:129-153,247-258` |
+
+## Risk seams — re-verified against cid-era code
+
+1. **Dedup on reconnect.** Catch-up replays the whole run. Reconcile-by-key (2c) must map replayed item `k` onto existing item `k` and not append duplicates; verify the `text_final` repair (`useStreamConnection.js:379-389,736-745`), `upsertQuestionItem` (`streamReducers.js:97-120`), **and now the `streamSnapshotCache` restore** (the first commit reconciles onto snapshot-seeded items) and `commitCatchUp`'s empty-replay-authoritative branch (`:660-666`).
+2. **Ordering / interleaving.** Serial-tool invariant still asserted (`events.py:1-10`). Position-match survives in `events.py` (`:375,408`) and `streamReducers.js` (`openToolLifecycleIndex`). L2a keys by id but leaves correlation positional — safe under the serial invariant; L2d closes it if that ever breaks.
+3. **Stop / steer.** Steer seals the pre-steer segment (`ChatView.jsx` promote path) and catch-up **drops** the replayed pre-steer buffer (`useStreamConnection.js:912-923`, `catchUpItems=[]`). A reconcile must not resurrect dropped pre-steer items. The steered user row is now cid-minted (`ChatView.jsx:967-975`) and `insertMessageBatchByTs` still dedups by **ts** (cid adjudication #1 kept ts for display ordering) — keep that guard; identity-keying the *stream* must not disturb the *message-list* ts dedup.
+4. **Bridge boundary.** `bridgeTs`/`findBridgeIndex` decide REPLACE-vs-APPEND at promote; bridge identity is **ts-based** for the assistant row (`streamPromotion.js:304` `m.ts === bridgeTs`; assistant rows have no cid — cid did not change this). `streamingDataKey` (`ChatView.jsx:2746-2752`) is the scroll anchor. If L1 makes the live surface *be* `MsgContent` over the same `msg`, confirm the promote still replaces (not appends) and `streamingDataKey` resolves to the same node before/after the switch.
+5. **Scroll-machine coupling.** `applyMode` ANCHOR_AT queries `[data-key]`, `_topmostVisibleMsg` scans `.chat__msg[data-key]` (`useScrollMode.js:68-76,145-151`); the streaming `<li>` carries `data-key={streamingDataKey}` (`StreamingMessage.jsx:180-183`, `ChatView.jsx:2994`). **Unchanged by cid** — cid added `data-cid` for the *pin*, but the *anchor* is still `data-key`. Any change to which `<li>` renders the answer (L1) must keep a stable `data-key` across the return, or ANCHOR_AT/leave-return restore (constraint #7) regresses.
+
+## Test anchors (all present at `46b20357`)
+
+Extend, don't invent: `__tests__/streamSnapshotCache.test.js`, `streamPromotion.test.js`, `streamReducers.test.js`, `streamingRobustness.test.js`, `groupBlocks.test.js`, `imageReserveHeight.test.js`, `mediaImageEmbed.test.js`, `useScrollMode.test.js`, `chatRuntimeState.test.js`; Playwright `tests/stream-reconnect.spec.mjs`, `spacer.spec.mjs`, `second-send-pin.spec.mjs`, `pin-clamp-settle.spec.mjs`. Add: (a) a reconcile test asserting **object identity is preserved** across a catch-up commit for unchanged items (both tool_use_id-keyed and iid-keyed); (b) a surface-switch test asserting `ToolBlock.open` and `<img>` identity survive a mid-stream return; (c) a snapshot→catch-up test asserting the first commit reconciles onto snapshot-seeded items (no duplicate append); (d) a media-dimension test asserting the frame reserves before `resolvedSrc` and known-dimension markup eliminates the on-load delta.
+
+**Files of record (absolute, current main):** `/home/hmzmrzx/projects/mobius/frontend/src/components/ChatView/{useStreamConnection.js, ChatView.jsx, StreamingMessage.jsx, MsgContent.jsx, ToolBlock.jsx, streamPromotion.js, streamReducers.js, streamSnapshotCache.js, useScrollMode.js, groupBlocks.js, markdown/InlineContent.jsx, markdown/blocks.jsx, markdown.css}`, `.../backend/app/{events.py, claude_sdk_runner.py, codex_sdk_runner.py}`, `.../frontend/src/components/Shell/Shell.jsx:1696-1698`.
