@@ -71,7 +71,7 @@ function ToolResult({ r }) {
   )
 }
 
-export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
+export default function ToolBlock({ t, chatId }) {
   // Collapsed until tapped — nothing produces a pre-opened tool block anymore
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
@@ -79,11 +79,10 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   const [open, setOpen] = useState(false)
   const headerRef = useRef(null)
   // The full output of a large tool block is fetched lazily on first expand —
-  // a chat load ships only the top-line summary (the tool + its input) and an
-  // output_truncated marker, no output preview (see chats.py
-  // _truncate_large_tool_outputs), so a Read of a huge file or a long bash run
-  // doesn't bloat the payload for blocks the user never opens. Cached here so
-  // re-collapsing doesn't refetch.
+  // a chat load ships only a bounded excerpt plus an output_truncated marker
+  // (the write funnel reduced it and stashed the full text in tool_outputs), so
+  // a Read of a huge file or a long bash run doesn't bloat the payload for
+  // blocks the user never opens. Cached here so re-collapsing doesn't refetch.
   const [fullOutput, setFullOutput] = useState(null)
   const [loadingFull, setLoadingFull] = useState(false)
   // A fetch that failed (offline, or a 404 when no stash row exists) is
@@ -103,18 +102,12 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   useEffect(() => {
     if (!open || !t.output_truncated || fullOutput !== null || loadingFull || loadFailed) return
     if (!chatId) return
-    // Contract rule 6 dual-read: a block reduced at the funnel carries a stable
-    // tool_use_id and fetches its full text from the side-table endpoint; a
-    // legacy block (no id, full output still in Chat.messages) falls back to the
-    // ?ts=&i= endpoint keyed by message ts + block index.
-    let url
-    if (t.tool_use_id) {
-      url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
-    } else if (msgTs != null && blockIdx != null) {
-      url = `/chats/${chatId}/tool-output?ts=${msgTs}&i=${blockIdx}`
-    } else {
-      return
-    }
+    // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
+    // its full text from the side-table endpoint. Every large block is tagged
+    // (card-221 migrated all history), so a block without an id has no fetchable
+    // full text — leave the inline excerpt.
+    if (!t.tool_use_id) return
+    const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
     let cancelled = false
     setLoadingFull(true)
     apiFetch(url)
@@ -123,7 +116,7 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
       .catch(() => { if (!cancelled) setLoadFailed(true) })
       .finally(() => { if (!cancelled) setLoadingFull(false) })
     return () => { cancelled = true }
-  }, [open, t.output_truncated, t.tool_use_id, fullOutput, loadingFull, loadFailed, chatId, msgTs, blockIdx])
+  }, [open, t.output_truncated, t.tool_use_id, fullOutput, loadingFull, loadFailed, chatId])
 
   // Show the fetched full output once it lands; until then the inline preview.
   const shownOutput = t.output_truncated && fullOutput !== null ? fullOutput : t.output

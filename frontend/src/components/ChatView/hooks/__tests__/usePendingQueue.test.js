@@ -40,9 +40,11 @@ test('add appends and the ref updates synchronously', () => {
   assert.equal(result.current.pendingMessagesRef.current[1].position, 2)
 })
 
-test('_fromServerList derives legacy-<ts> for a cid-less initial row', () => {
+test('_fromServerList carries the server row\'s explicit cid', () => {
+  // Post-card-221 every server row carries an explicit cid (client-minted, or a
+  // backfilled `legacy-<ts>`); _fromServerList carries it through unchanged.
   const { result } = renderHook(usePendingQueue, [
-    { role: 'user', content: 'legacy', ts: 42 },
+    { role: 'user', content: 'legacy', ts: 42, cid: 'legacy-42' },
   ])
   const list = result.current.pendingMessagesRef.current
   assert.equal(list.length, 1)
@@ -162,9 +164,9 @@ test('cancelByCid removes the matching entry', () => {
   assert.equal(result.current.pendingMessagesRef.current[0].cid, 'y')
 })
 
-test('cancelByCid removes a legacy row by its derived legacy-<ts> cid', () => {
+test('cancelByCid removes a row by its explicit (backfilled legacy) cid', () => {
   const { result } = renderHook(usePendingQueue, [
-    { role: 'user', content: 'legacy', ts: 55 },
+    { role: 'user', content: 'legacy', ts: 55, cid: 'legacy-55' },
   ])
   result.current.cancelByCid('legacy-55')
   assert.deepEqual(result.current.pendingMessagesRef.current, [])

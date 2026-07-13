@@ -179,9 +179,9 @@ test('coalesceThinkingEntries: adjacent thinking merges into one, content + dura
   assert.equal(out[0].item.duration_ms, 1200)
 })
 
-test('coalesceThinkingEntries: preserves the FIRST survivor idx so tool blockIdx stays absolute', () => {
+test('coalesceThinkingEntries: preserves the FIRST survivor idx so a tokenless tool keeps a stable key', () => {
   // Persisted shape [thinking, thinking, thinking, tool] — the fragmented case.
-  // The tool MUST keep idx 3 so ToolBlock's GET /tool-output?i=3 hits the real block.
+  // The tool MUST keep idx 3 so a tokenless tool's `t-<idx>` React key is stable.
   const entries = [
     { item: think('a', 100), idx: 0 },
     { item: think('b', 100), idx: 1 },

@@ -11,8 +11,8 @@ Walks every chat's transcript once and does BOTH:
   inline threshold, not already reduced, no `tool_use_id`) has its full text
   stashed in the `tool_outputs` side table under a minted `legacy-<ts>-<i>` id
   and its block rewritten to a bounded excerpt. This is the write-side twin of
-  the read-side `_truncate_large_tool_outputs`; once every chat is migrated the
-  legacy dual-read shims can be deleted.
+  the live funnel's `_reduce_tool_output`; migrating every chat is what let the
+  legacy dual-read shims be deleted.
 
 Both mutations run through the single-writer `chat_writer` actor's `MigrateChat`
 command — the whole per-chat read-modify-write happens on the actor thread under

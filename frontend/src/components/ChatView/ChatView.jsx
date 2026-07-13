@@ -971,7 +971,7 @@ export default function ChatView({
       queuedContinuationPinIntentRef.current = takeQueuedPinIntent(pinCid)
     },
     onLiveQuestion: setLiveQuestionId,
-    onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
+    onSteeredIntoTurn: ({ ts, messages: steeredBatch }) => {
       // A send was injected mid-turn into a live turn (steering — fired for
       // both providers when Stop is pressed with a queued message). The
       // backend seals the assistant text streamed so far, persists the user
@@ -988,23 +988,20 @@ export default function ChatView({
       // could work while the message stayed low in the viewport with no
       // reserved room below it.
       //
-      const steeredMessages = Array.isArray(steeredBatch) && steeredBatch.length > 0
-        ? steeredBatch.map((m, i) => {
-            const tsv = m?.ts ?? (ts != null ? ts + i : Date.now() + i)
-            return {
-              role: 'user',
-              content: m?.content || '',
-              ts: tsv,
-              // The backend echoes each steered row's stable cid; fall back to
-              // the legacy-<ts> derivation for an older single-row payload.
-              cid: m?.cid ?? cidOf({ ts: tsv }),
-              ...(m?.attachments ? { attachments: m.attachments } : {}),
-            }
-          })
-        : [(() => {
-            const tsv = ts ?? Date.now()
-            return { role: 'user', content, ts: tsv, cid: cidOf({ ts: tsv }) }
-          })()]
+      // The backend's steered_into_turn event always carries a non-empty
+      // `messages` array, each row with its stable cid (card-221: every row
+      // carries one). Mirror those rows locally.
+      const steeredMessages = (Array.isArray(steeredBatch) ? steeredBatch : [])
+        .map((m, i) => {
+          const tsv = m?.ts ?? (ts != null ? ts + i : Date.now() + i)
+          return {
+            role: 'user',
+            content: m?.content || '',
+            ts: tsv,
+            cid: m?.cid ?? null,
+            ...(m?.attachments ? { attachments: m.attachments } : {}),
+          }
+        })
       const pinCid = cidOf(steeredMessages[0])
       const pinIntent = steerPinIntentRef.current
         || inlineSteerPinIntentRef.current

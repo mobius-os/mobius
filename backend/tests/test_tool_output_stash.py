@@ -134,17 +134,26 @@ def test_sink_passes_through_small_output(db):
     ).first() is None
 
 
-def test_sink_passes_through_untagged_large_output(db):
-    # No tool_use_id -> nothing to key a stash by; leave the full output inline
-    # so it rides the legacy ?ts=&i= path against Chat.messages.
+def test_sink_mints_id_and_stashes_untagged_large_output(db):
+    # A large tool_output with no tool_use_id is unexpected post-card-221 (both
+    # runners tag universally). Rather than strand the text inline (the retired
+    # dual-read ?ts=&i= fallback), the sink mints a stash id, stamps it on the
+    # event, reduces the wire event, and stashes the full text so it stays
+    # fetchable by id.
     sink = _sink()
     big = "y" * (TOOL_OUTPUT_INLINE_THRESHOLD + 100)
     event = {"type": "tool_output", "content": big}
     sink._reduce_tool_output(event)
-    assert event["content"] == big
-    assert "output_truncated" not in event
+    assert event["output_truncated"] is True
+    assert event["content"] != big
+    minted = event["tool_use_id"]
+    assert minted  # a synthetic id was stamped on the event
     _flush_writer()
-    assert db.query(models.ToolOutput).count() == 0
+    row = db.query(models.ToolOutput).filter(
+        models.ToolOutput.chat_id == "c-sink",
+        models.ToolOutput.tool_use_id == minted,
+    ).first()
+    assert row is not None and row.output == big
 
 
 # -- reducer carries identity + metadata onto the block -------------------

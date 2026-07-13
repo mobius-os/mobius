@@ -15,10 +15,6 @@ from sqlalchemy.orm import Session
 
 from app import activity, auth, models, providers, questions
 from app.config import get_settings
-from app.events import (
-  TOOL_OUTPUT_INLINE_THRESHOLD as _TOOL_OUTPUT_INLINE_THRESHOLD,
-  excerpt_tool_output,
-)
 from app.chat import (
   _clear_run_status,
   bump_run_generation,
@@ -571,66 +567,6 @@ async def patch_chat(
     }
 
 
-def _truncate_large_tool_outputs(messages: list) -> list:
-  """LEGACY-ROW reducer (contract rule 6). New turns are reduced at the event
-  funnel (``chat.py`` ``_ChatEventSink._reduce_tool_output`` -> ``excerpt_tool_output``),
-  so their persisted blocks already carry a bounded head+tail excerpt plus
-  ``output_truncated`` / ``output_full_len`` / ``tool_use_id`` and the full text
-  is stashed in ``tool_outputs``. This only trims the FEW pre-migration
-  transcripts whose tool blocks still hold the full output inline, so loading
-  such a chat does not ship a 2000-line Read for blocks the user never expands.
-
-  A block already marked ``output_truncated`` (a new-funnel excerpt) is left
-  UNTOUCHED. Legacy blocks (no ``tool_use_id``, full output still in
-  ``Chat.messages``) are reduced to the same head+tail excerpt and the client
-  fetches the full text via the legacy ``?ts=&i=`` endpoint; new blocks carry a
-  ``tool_use_id`` and use the ``/tool-output/{tool_use_id}`` endpoint instead
-  (dual-read). Returns a copy — never mutates the stored message dicts."""
-  out = []
-  for m in messages:
-    blocks = m.get("blocks") if isinstance(m, dict) else None
-    # A message with no ``ts`` (legacy pre-stamping rows) can't be located by
-    # the ``/tool-output?ts=`` fetch route, so truncating it would strand the
-    # block on a permanently-unfetchable "expand to load". Keep those inline.
-    if (not isinstance(blocks, list) or m.get("role") != "assistant"
-        or not m.get("ts")):
-      out.append(m)
-      continue
-    new_blocks = None
-    for i, blk in enumerate(blocks):
-      if not isinstance(blk, dict) or blk.get("type") != "tool":
-        continue
-      # Already reduced at the funnel — leave the excerpt inline; the client
-      # fetches the full text by tool_use_id.
-      if blk.get("output_truncated"):
-        continue
-      output = blk.get("output")
-      if (not isinstance(output, str)
-          or len(output) <= _TOOL_OUTPUT_INLINE_THRESHOLD):
-        continue
-      excerpt, full_len, exit_code = excerpt_tool_output(output)
-      if new_blocks is None:
-        new_blocks = list(blocks)
-      reduced = {
-        **blk,
-        "output": excerpt,
-        "output_truncated": True,
-        "output_full_len": full_len,
-      }
-      if exit_code is not None:
-        reduced["output_exit_code"] = exit_code
-      # This block's full text lives INLINE in Chat.messages, not the
-      # `tool_outputs` side table (the sink already reduced + stashed every
-      # tagged block, so anything reaching here is un-stashed). Drop any stray
-      # tool_use_id so the frontend fetches the full via the legacy ?ts=&i=
-      # endpoint (this reducer's contract) instead of the by-id endpoint, which
-      # would 404 with no stash row.
-      reduced.pop("tool_use_id", None)
-      new_blocks[i] = reduced
-    out.append({**m, "blocks": new_blocks} if new_blocks is not None else m)
-  return out
-
-
 @router.get("/{chat_id}")
 def get_chat(
   chat_id: str,
@@ -673,7 +609,14 @@ def get_chat(
   return {
     "id": chat.id,
     "title": chat.title,
-    "messages": _truncate_large_tool_outputs(page),
+    # The read path ships persisted blocks as-is: every large tool output is
+    # reduced to a bounded excerpt at the write funnel (chat.py
+    # _ChatEventSink._reduce_tool_output) and its full text stashed in
+    # tool_outputs, so there is no fat inline block left to trim on read. An
+    # instance carrying pre-card-221 transcripts must run
+    # scripts/migrate_chat_identity once to extract any remaining inline fat
+    # blocks (the old GET-boundary reducer was retired fix-forward).
+    "messages": page,
     "pending_messages": list(chat.pending_messages or []),
     "total": total,
     "offset": start,
@@ -701,15 +644,14 @@ def get_tool_output_by_id(
   db: Session = Depends(get_db),
 ) -> PlainTextResponse:
   """Returns the FULL text of a large tool block, fetched lazily on expand
-  (contract rule 6). New blocks ship only a bounded excerpt in the chat-load
+  (contract rule 6). A block ships only a bounded excerpt in the chat-load
   payload and the live stream; the full output is stashed in ``tool_outputs``
-  keyed by the tool's stable id. A 404 (a dropped/absent stash) tells the client
-  to keep showing the inline excerpt.
+  keyed by the tool's stable ``tool_use_id``. A 404 (a dropped/absent stash)
+  tells the client to keep showing the inline excerpt.
 
-  This is the NEW path for blocks that carry a ``tool_use_id``. Legacy blocks
-  (no id, full output still inline in ``Chat.messages``) use the ``?ts=&i=``
-  sibling endpoint below instead — the frontend branches on ``tool_use_id``
-  (dual-read migration, no backfill)."""
+  This is the sole tool-output fetch path: every large block carries a
+  ``tool_use_id`` (both SDK runners tag universally, and card-221 migrated all
+  history), so the retired legacy ``?ts=&i=`` sibling endpoint is gone."""
   get_active_chat_or_404(db, chat_id)
   row = db.query(models.ToolOutput).filter(
     models.ToolOutput.chat_id == chat_id,
@@ -718,30 +660,6 @@ def get_tool_output_by_id(
   if row is None:
     raise HTTPException(status_code=404, detail="tool output not found")
   return PlainTextResponse(row.output or "")
-
-
-@router.get("/{chat_id}/tool-output", response_class=PlainTextResponse)
-def get_tool_output(
-  chat_id: str,
-  ts: int,
-  i: int,
-  _: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
-) -> PlainTextResponse:
-  """LEGACY lazy fetch for a tool block whose full output still lives inline in
-  ``Chat.messages`` (pre-contract-rule-6 rows, or any block with no
-  ``tool_use_id``). The block is located by its message ``ts`` plus its index
-  ``i`` within that message's blocks. Kept as the dual-read fallback; new blocks
-  carry a ``tool_use_id`` and use ``/tool-output/{tool_use_id}`` instead."""
-  chat = get_active_chat_or_404(db, chat_id)
-  for m in (chat.messages or []):
-    if m.get("role") != "assistant" or m.get("ts") != ts:
-      continue
-    blocks = m.get("blocks") or []
-    if 0 <= i < len(blocks) and blocks[i].get("type") == "tool":
-      return PlainTextResponse(blocks[i].get("output") or "")
-    break
-  raise HTTPException(status_code=404, detail="tool output not found")
 
 
 @router.get("/{chat_id}/agent-context")
