@@ -326,16 +326,24 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
                 { type: 'catch_up_done' },
                 { type: 'text', content: preSteer },
               ]))
-              emitSteer = () => {
+              emitSteer = (steeredMessages = []) => {
+                const messages = Array.isArray(steeredMessages) && steeredMessages.length > 0
+                  ? steeredMessages
+                  : [{ role: 'user', ts: queueTs, cid: `legacy-${queueTs}`, content: queuedText }]
                 controller.enqueue(encodeSse([
-                  { type: 'steered_into_turn', ts: queueTs, content: queuedText },
+                  {
+                    type: 'steered_into_turn',
+                    ts: queueTs,
+                    content: queuedText,
+                    messages,
+                  },
                   { type: 'text', content: postSteer },
                 ]))
               }
             },
             cancel() {},
           })
-          window.__steerQueuedStreamMock.emitSteer = () => emitSteer?.()
+          window.__steerQueuedStreamMock.emitSteer = messages => emitSteer?.(messages)
           return new Response(body, {
             status: 200,
             headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -364,7 +372,17 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
     ).toBe(1)
-    await page.evaluate(() => window.__steerQueuedStreamMock?.emitSteer?.())
+    const steerPost = messagePosts.find(b => b.force_steer)
+    const steeredMessages = [{
+      role: 'user',
+      ts: QUEUE_TS,
+      cid: steerPost?.consume_pending_cids?.[0],
+      content: QUEUED_TEXT,
+    }]
+    await page.evaluate(
+      messages => window.__steerQueuedStreamMock?.emitSteer?.(messages),
+      steeredMessages,
+    )
 
     // CORE ASSERTION: the pre-steer text is STILL on screen right after the
     // steer resolved. Before the fix, sendMessage's fresh-send reset cleared

@@ -971,7 +971,7 @@ export default function ChatView({
       queuedContinuationPinIntentRef.current = takeQueuedPinIntent(pinCid)
     },
     onLiveQuestion: setLiveQuestionId,
-    onSteeredIntoTurn: ({ ts, messages: steeredBatch }) => {
+    onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
       // A send was injected mid-turn into a live turn (steering — fired for
       // both providers when Stop is pressed with a queued message). The
       // backend seals the assistant text streamed so far, persists the user
@@ -988,10 +988,14 @@ export default function ChatView({
       // could work while the message stayed low in the viewport with no
       // reserved room below it.
       //
-      // The backend's steered_into_turn event always carries a non-empty
-      // `messages` array, each row with its stable cid (card-221: every row
-      // carries one). Mirror those rows locally.
-      const steeredMessages = (Array.isArray(steeredBatch) ? steeredBatch : [])
+      // Current backends carry a non-empty `messages` array, each row with its
+      // stable cid (card-221: every row carries one). During rolling deploys an
+      // older stream may still send only the legacy single-row `{ts, content}`
+      // shape; render that too so a steered message is not dropped.
+      const steeredSource = Array.isArray(steeredBatch) && steeredBatch.length > 0
+        ? steeredBatch
+        : (content ? [{ ts, content }] : [])
+      const steeredMessages = steeredSource
         .map((m, i) => {
           const tsv = m?.ts ?? (ts != null ? ts + i : Date.now() + i)
           return {

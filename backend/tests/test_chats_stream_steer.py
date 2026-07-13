@@ -26,6 +26,7 @@ import asyncio
 
 from app import models
 from app.broadcast import create_broadcast, get_broadcast
+from app.chat_writer import cid_of
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
@@ -168,6 +169,14 @@ def test_steers_into_live_codex_turn_when_flag_on(
   ]
   assert len(steered_events) == 1
   assert steered_events[0]["content"] == "actually use blue"
+  assert steered_events[0]["messages"] == [
+    {
+      "role": "user",
+      "ts": chat.messages[-1]["ts"],
+      "cid": cid_of(chat.messages[-1]),
+      "content": "actually use blue",
+    }
+  ]
 
 
 def _register_sink_with_partial(chat_id: str, run_token: str, text: str):
@@ -605,6 +614,14 @@ def test_force_steer_consumes_existing_queued_messages(
   # Each consumed queued row is stored SEPARATELY (rebuilt from the
   # server-owned pending rows), not one combined \n\n message.
   assert [m["content"] for m in chat.messages[-2:]] == ["use blue", "also square"]
+  bc = get_broadcast(chat_id)
+  steered_events = [
+    e for e in bc.event_log if e.get("type") == "steered_into_turn"
+  ]
+  assert len(steered_events) == 1
+  assert [m["content"] for m in steered_events[0]["messages"]] == [
+    "use blue", "also square"
+  ]
 
 
 def test_force_steer_failure_does_not_append_duplicate_queue(
@@ -799,6 +816,14 @@ def test_steers_into_live_claude_turn_when_flag_on(
   ]
   assert len(steered_events) == 1
   assert steered_events[0]["content"] == "actually use blue"
+  assert steered_events[0]["messages"] == [
+    {
+      "role": "user",
+      "ts": handle._steer_user_msgs[0]["ts"],
+      "cid": cid_of(handle._steer_user_msgs[0]),
+      "content": "actually use blue",
+    }
+  ]
 
 
 def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
