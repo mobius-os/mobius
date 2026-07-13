@@ -117,6 +117,32 @@ if [ "${POLLUTION:-0}" -gt 0 ]; then
   FAIL=1
 fi
 
+# 1c. Internal docs must never reach the PUBLIC repo. `docs/` is gitignored
+#     ("internal planning — not for public release"), but gitignore only
+#     blocks UNtracked files — a `git add -f` makes a doc track forever and
+#     bypasses the rule. So decision/design docs keep creeping into origin
+#     (untracked by hand more than once: bb97fd74, 5c176b21 — and they came
+#     back). This blocks any tracked docs/ path at the tip. Decision records
+#     stay LOCAL: they live on disk under the gitignored docs/, just not in
+#     git. A doc that genuinely belongs in the repo goes in ARCHITECTURE.md.
+#     To publish a specific doc, add its path regex to DOCS_ALLOWLIST.
+DOCS_ALLOWLIST=''   # newline-separated regex(es) of docs/ paths allowed public; empty = none
+TRACKED_DOCS="$(git ls-tree -r --name-only HEAD -- docs 2>/dev/null || true)"
+if [ -n "$DOCS_ALLOWLIST" ]; then
+  TRACKED_DOCS="$(printf '%s\n' "$TRACKED_DOCS" | grep -vE "$DOCS_ALLOWLIST" || true)"
+fi
+if [ -n "$TRACKED_DOCS" ]; then
+  err "refusing to push tracked files under docs/ (internal, gitignored):"
+  printf '%s\n' "$TRACKED_DOCS" | sed 's/^/    /' >&2
+  err "docs/ is LOCAL-ONLY. Untrack (the file stays on disk):"
+  err "    git rm --cached <path>   # then commit + re-push"
+  err "A design decision that belongs in the repo goes in ARCHITECTURE.md, not docs/."
+  err "To publish one doc, add its path to DOCS_ALLOWLIST in scripts/githooks/pre-push."
+  FAIL=1
+else
+  ok "no tracked docs/ (internal docs stay local)"
+fi
+
 # 2. Python syntax on changed .py files (instant; no deps beyond python3).
 PY="$(changed_list '\.py$')"
 if [ -n "$PY" ]; then
