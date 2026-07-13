@@ -1699,9 +1699,10 @@ class ChatWriterActor:
     # more than once in a single drain; key on the stable `cid` so only a true
     # re-delivery of one queued row is dropped. Genuinely distinct sends always
     # carry a distinct cid — even two sends with identical text — so this can't
-    # drop a real message (the old (ts,content) key relied on the +1ms ts bump
-    # to keep them distinct, which is exactly how a real duplicate once got
-    # disguised as distinct). Runs on the single-writer thread — no lost-update.
+    # drop a real message. Keying on cid rather than (ts, content) is what makes
+    # that hold: a (ts, content) key leans on the +1ms ts bump to tell two
+    # identical-text sends apart, which can disguise a real duplicate as
+    # distinct. Runs on the single-writer thread — no lost-update.
     seen_cids = {
       cid_of(m) for m in msgs if m.get("role") == "user"
     }

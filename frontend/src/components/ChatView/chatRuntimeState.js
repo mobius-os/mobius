@@ -98,8 +98,8 @@ export function previewUpdatedAnnouncement(builtApp) {
 
 // Pure decision for the built-app CTA pulse + announce, given the current CTA
 // list (derived from server truth, newest last) and a Map of the last-seen
-// updated_at per app id. The two cases the old `app_built` round-trip split
-// across Shell + ChatView are recovered here from updated_at deltas alone:
+// updated_at per app id. Both cases — first build vs source recompile — are
+// derived here from updated_at deltas alone:
 //
 //   - a NEW id (absent from `lastSeen`) is a FIRST BUILD: record its updated_at
 //     WITHOUT pulsing, and the newest such app drives the first-build announce
