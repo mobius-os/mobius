@@ -327,6 +327,11 @@ class App(Base):
   # like manage_apps, not a ladder. Default False — only granted by
   # manifest declaration on install.
   github_access = Column(Boolean, nullable=False, default=False)
+  # Owner filesystem capability. This is intentionally separate from storage
+  # interop: it grants the app-scoped token access to the guarded /api/fs
+  # surface (still path-confined and secret-denied there). The Editor is the
+  # canonical holder. Default false and checked from the live row per request.
+  filesystem_access = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
@@ -355,10 +360,9 @@ class App(Base):
   #   'full'    — DEFERRED. Reserved so the column's value space is
   #               stable; the read API rejects it until a concrete
   #               consumer + louder consent lands (design §2).
-  # This is consent/attribution/audit, NOT a sandbox: a same-origin app
-  # holds the owner JWT and can hit /api/chats directly. The enforceable
-  # control is that THIS gated surface returns redacted data; the owner-
-  # only routes stay closed (design §0b).
+  # App frames receive only their scoped JWT and run in opaque-origin
+  # sandboxes, so this live-row permission is an enforceable boundary in
+  # addition to recording owner consent.
   chat_log_access = Column(
     String(16), nullable=False, default="none"
   )

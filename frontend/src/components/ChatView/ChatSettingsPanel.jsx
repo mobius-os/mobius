@@ -82,6 +82,7 @@ import {
   CODEX_MODELS,
 } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import EffortStepper from '../ui/EffortStepper.jsx'
+import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -401,36 +402,46 @@ export default function ChatSettingsPanel({
     refocusChatInput()
   }, [draftProvider, draftEffortByProvider, patchChat, refocusChatInput])
 
-  const switchProviderModel = useCallback(async (value, providerValue) => {
+  const switchProviderModel = useCallback(async (value, providerValue, allowedEfforts) => {
     if (providerSwitchInFlightRef.current) return false
     providerSwitchInFlightRef.current = true
     try {
       const prevProvider = draftProvider
       const prevModel = draftModel
       const prevEffort = draftEffort
+      const prevEffortByProvider = draftEffortByProvider
       if (!(await compactBeforeProviderSwitch())) return false
       // Cross-provider switch: restore this provider's last-known
       // effort (or fall back to the value already on screen — which
       // becomes that provider's first memory once they accept it).
-      // The effort enums don't overlap perfectly (Codex has `none`
-      // + `minimal` that Claude lacks, Claude has `max` that Codex
-      // lacks), so a fallback that's invalid for the new provider
-      // is harmless — the runner ignores unknown values at turn
-      // time. The picker also auto-defaults the slider to index 0
-      // if the persisted value doesn't appear in the provider's
-      // enum (see EffortStepper's findIndex/Math.max guard).
-      const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
+      // The provider/model effort enums do not overlap perfectly. Normalize
+      // the remembered value against the selected model's declared scale so
+      // the UI and persisted runner value cannot drift apart.
+      const nextEffort = validEffort(
+        allowedEfforts,
+        draftEffortByProvider[providerValue] ?? draftEffort,
+      )
+      const nextEffortByProvider = {
+        ...draftEffortByProvider,
+        [providerValue]: nextEffort,
+      }
       setDraftModel(value)
       setDraftProvider(providerValue)
       setDraftEffort(nextEffort)
+      setDraftEffortByProvider(nextEffortByProvider)
       const outcome = await patchChat({
         provider: providerValue,
-        agent_settings_json: { model: value, effort: nextEffort },
+        agent_settings_json: {
+          model: value,
+          effort: nextEffort,
+          effort_by_provider: nextEffortByProvider,
+        },
       })
       if (outcome === 'fail') {
         setDraftProvider(prevProvider)
         setDraftModel(prevModel)
         setDraftEffort(prevEffort)
+        setDraftEffortByProvider(prevEffortByProvider)
         return false
       }
       if (outcome === 'stale') return false
@@ -447,7 +458,7 @@ export default function ChatSettingsPanel({
     patchChat,
   ])
 
-  const handlePickModel = useCallback(async (value, providerValue) => {
+  const handlePickModel = useCallback(async (value, providerValue, allowedEfforts) => {
     refocusChatInput()
     if (providerValue !== draftProvider) {
       if (providerSwitchInFlightRef.current) return
@@ -460,10 +471,10 @@ export default function ChatSettingsPanel({
           }
         }
         setError('')
-        setPendingSwitch({ model: value, provider: providerValue })
+        setPendingSwitch({ model: value, provider: providerValue, efforts: allowedEfforts })
         return
       }
-      await switchProviderModel(value, providerValue)
+      await switchProviderModel(value, providerValue, allowedEfforts)
       return
     }
     setPendingSwitch(null)
@@ -472,16 +483,34 @@ export default function ChatSettingsPanel({
     // a stale earlier one (#7 ensemble finding).
     pendingSwitchPreviousRef.current = null
     const prevModel = draftModel
+    const prevEffort = draftEffort
+    const prevEffortByProvider = draftEffortByProvider
+    const nextEffort = validEffort(allowedEfforts, draftEffort)
+    const nextEffortByProvider = {
+      ...draftEffortByProvider,
+      [providerValue]: nextEffort,
+    }
     setDraftModel(value)
+    setDraftEffort(nextEffort)
+    setDraftEffortByProvider(nextEffortByProvider)
     const outcome = await patchChat({
-      agent_settings_json: { model: value },
+      agent_settings_json: {
+        model: value,
+        effort: nextEffort,
+        effort_by_provider: nextEffortByProvider,
+      },
     })
-    if (outcome === 'fail') setDraftModel(prevModel)
+    if (outcome === 'fail') {
+      setDraftModel(prevModel)
+      setDraftEffort(prevEffort)
+      setDraftEffortByProvider(prevEffortByProvider)
+    }
   }, [
     draftProvider,
     draftModel,
     hasAssistantTurns,
     draftEffort,
+    draftEffortByProvider,
     patchChat,
     refocusChatInput,
     switchProviderModel,
@@ -493,6 +522,7 @@ export default function ChatSettingsPanel({
     const ok = await switchProviderModel(
       pendingSwitch.model,
       pendingSwitch.provider,
+      pendingSwitch.efforts,
     )
     if (ok) {
       pendingSwitchPreviousRef.current = null
@@ -586,6 +616,7 @@ export default function ChatSettingsPanel({
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
         const models = displayedByProvider[pid] || []
         return models.map(m => {
+          const rowEfforts = modelEfforts(info.efforts, m)
           const isPendingRow = pendingSwitch?.model === m.id && pendingSwitch?.provider === pid
           const isSelected = selectedModel === m.id && selectedProvider === pid
           return (
@@ -594,7 +625,7 @@ export default function ChatSettingsPanel({
                 type="button"
                 className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
                 onPointerDown={preserveFocusUnlessTouch}
-                onClick={() => handlePickModel(m.id, pid)}
+                onClick={() => handlePickModel(m.id, pid, rowEfforts)}
                 disabled={saving || compacting}
                 title={isCrossProvider ? 'Compact this chat and switch providers' : undefined}
               >
@@ -614,7 +645,7 @@ export default function ChatSettingsPanel({
                 // not blur the chat textarea (see preserveFocusUnlessTouch).
                 <div className="csp-effort-indent">
                   <EffortStepper
-                    efforts={info.efforts}
+                    efforts={rowEfforts}
                     value={draftEffort}
                     onChange={handleEffortChange}
                     onStopPointerDown={preserveFocusUnlessTouch}

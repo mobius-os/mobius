@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app import auth as token_auth, models
 from app.config import get_settings
 
 
@@ -127,6 +128,46 @@ def test_owner_required(client, fsroot):
   assert client.get("/api/fs/read", params={"path": "fstest/x"}).status_code == 401
   assert client.put("/api/fs/write", params={"path": "fstest/x"},
                     content="x").status_code == 401
+
+
+def _app_auth(db, *, filesystem_access: bool) -> tuple[dict[str, str], models.App]:
+  owner = db.query(models.Owner).filter(models.Owner.username == "test").one()
+  app = models.App(
+    name="Filesystem test app",
+    description="",
+    jsx_source="export default function App() {}",
+    compiled_path="/tmp/filesystem-test-app.js",
+    slug="filesystem-test-app",
+    filesystem_access=filesystem_access,
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+  token = token_auth.create_app_token(
+    app.id, owner.username, owner.token_epoch, app.token_nonce,
+  )
+  return {"Authorization": f"Bearer {token}"}, app
+
+
+def test_app_token_requires_explicit_filesystem_capability(
+  client, owner_token, db, fsroot,
+):
+  denied_auth, _ = _app_auth(db, filesystem_access=False)
+  response = client.get("/api/fs/tree", headers=denied_auth)
+  assert response.status_code == 403
+  assert "permissions.filesystem_access=true" in response.json()["detail"]
+
+
+def test_app_filesystem_capability_is_live_and_revocable(
+  client, owner_token, db, fsroot,
+):
+  app_auth, app = _app_auth(db, filesystem_access=True)
+  assert client.get("/api/fs/tree", headers=app_auth).status_code == 200
+
+  # The authority comes from the live row, not a long-lived JWT claim.
+  app.filesystem_access = False
+  db.commit()
+  assert client.get("/api/fs/tree", headers=app_auth).status_code == 403
 
 
 def test_tree_pagination_offset_cursor(client, auth, fsroot):

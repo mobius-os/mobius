@@ -1,9 +1,14 @@
 import { useEffect, useReducer, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, getToken } from '../../api/client.js'
+import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
+import {
+  cacheAppToken, clearAppFrameStorage, readAppFrameStorage,
+  readCachedAppToken, removeAppFrameStorage, setAppFrameStorage,
+  isSharedVirtualStorageKey,
+} from '../../lib/appFrameStorage.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import {
@@ -21,7 +26,8 @@ import './AppCanvas.css'
 // type, renaming a field, or changing payload shape requires editing
 // both files in the same PR.
 //
-// Core message types, all gated on `e.origin === window.location.origin`:
+// Parent messages are accepted only from the shell origin. Frame messages have
+// the opaque origin `null` and are attributed to an exact mounted contentWindow.
 //
 //   1. {type: 'moebius:frame-init', token, themeCss, bg}    parent → frame
 //      Fired by `sendInit()` below — on iframe.onLoad AND whenever the
@@ -197,15 +203,9 @@ export default function AppCanvas({
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered, onAppError,
 }) {
   const queryClient = useQueryClient()
-  // The app-scoped token is fetched from the server and isn't available
-  // offline (short-lived; not persisted). Offline, fall back to the
-  // owner JWT from localStorage so an offline-capable app still renders
-  // and its /api/storage/apps/{id} calls authenticate (owner can reach
-  // any app's storage). Without this the `if (!token) return null` gate
-  // below short-circuits offline and the app shows nothing. The iframe
-  // is same-origin and can already read this JWT (documented sandbox
-  // trade-off), so passing it is not a new exposure. Online behavior is
-  // unchanged: the app-scoped token wins as soon as the query resolves.
+  // Fresh app tokens are persisted for their remaining short lifetime so a
+  // fully cached app can cold-boot offline. The cache is app-id scoped and JWT
+  // claims are checked on read; the long-lived owner token never enters a frame.
   const { data: appToken } = appQueries.token.useQuery(appId)
   // Real reachability (probes /api/health), NOT navigator.onLine — which reads
   // a stale "true" on a COLD offline reopen (close the PWA offline, reopen,
@@ -218,15 +218,17 @@ export default function AppCanvas({
   //     We deliberately do NOT fall back on the token query's error state: a
   //     transient server error while ONLINE must not leak the owner JWT, and
   //     React Query pauses the query offline so its error is unreliable there.
-  //   • offline → use the owner JWT from localStorage so a fully-cached
-  //     offline-capable app still boots. The iframe is same-origin and can
-  //     already read this JWT (documented sandbox trade-off) — not a new
-  //     exposure.
+  //   • offline → use a still-valid cached token for this exact app.
   // The old gate used navigator.onLine, which on a cold offline reopen left
   // `token` undefined → the `if (!token)` branch rendered blank below despite
   // the app being fully cached. See lib/appToken.js for the full rationale and
   // the on-device-confirmed flap bug the latch fixes.
-  const liveToken = liveAppToken(appToken, online, getToken())
+  const cachedAppToken = readCachedAppToken(appId)
+  const liveToken = liveAppToken(appToken, online, cachedAppToken)
+
+  useEffect(() => {
+    if (appToken) cacheAppToken(appId, appToken)
+  }, [appId, appToken])
 
   // Latch the token so an `online` oscillation (stale navigator.onLine on
   // Android PWAs) can't revoke a token we already resolved and unmount the live
@@ -314,7 +316,10 @@ export default function AppCanvas({
   activeRef.current = active
 
   function postToFrame(v, message) {
-    framesRef.current.get(v)?.contentWindow?.postMessage(message, window.location.origin)
+    // A sandboxed frame without allow-same-origin has an opaque origin, so the
+    // browser requires "*" here. Trust is provided by the exact contentWindow
+    // checks on replies plus the frame's parent-origin check on receipt.
+    framesRef.current.get(v)?.contentWindow?.postMessage(message, '*')
   }
 
   // Send the init handshake to ONE frame. Idempotent on the frame side — its own
@@ -352,8 +357,9 @@ export default function AppCanvas({
         token,
         themeCss: eff?.css ?? theme?.css,
         bg: eff?.bg ?? theme?.bg,
+        storage: readAppFrameStorage(appId),
       },
-      window.location.origin,
+      '*',
     )
   }
 
@@ -400,7 +406,7 @@ export default function AppCanvas({
   useEffect(() => {
     if (!appId) return
     function onMessage(e) {
-      if (e.origin !== window.location.origin) return
+      if (e.origin !== 'null' && e.origin !== window.location.origin) return
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       // ATTRIBUTE the message to the exact frame that sent it. Two frames are
@@ -411,6 +417,32 @@ export default function AppCanvas({
         if (el?.contentWindow && el.contentWindow === e.source) { srcVersion = v; break }
       }
       if (srcVersion == null) return   // not one of our frames (stale/unknown)
+
+      // Opaque frames get a synchronous in-memory localStorage facade. Persist
+      // mutations into an app-private namespace only; never write arbitrary
+      // keys into the shell's own storage.
+      if (msg.type === 'moebius:storage-set') {
+        const saved = setAppFrameStorage(appId, msg.key, msg.value)
+        if (saved && isSharedVirtualStorageKey(msg.key)) {
+          window.dispatchEvent(new CustomEvent('mobius:shared-storage', {
+            detail: { key: msg.key, value: msg.value },
+          }))
+        }
+        return
+      }
+      if (msg.type === 'moebius:storage-remove') {
+        const removed = removeAppFrameStorage(appId, msg.key)
+        if (removed && isSharedVirtualStorageKey(msg.key)) {
+          window.dispatchEvent(new CustomEvent('mobius:shared-storage', {
+            detail: { key: msg.key, value: null },
+          }))
+        }
+        return
+      }
+      if (msg.type === 'moebius:storage-clear') {
+        clearAppFrameStorage(appId)
+        return
+      }
 
       // frame-mounted: the reducer routes it — promotion if it's the incoming
       // frame, first-load settle if it's the live frame, ignored if stale.
@@ -503,7 +535,7 @@ export default function AppCanvas({
           // breaking back-nav permanently.
           e.source.postMessage(
             { type: 'moebius:nav-push-rejected', requestId },
-            window.location.origin,
+            '*',
           )
         } else {
           // Confirm the sentinel is installed so the app can defer opening its
@@ -513,7 +545,7 @@ export default function AppCanvas({
           // BFCache then snapshots the wrong background as the back preview.
           e.source.postMessage(
             { type: 'moebius:nav-push-ack', requestId },
-            window.location.origin,
+            '*',
           )
         }
       } else if (msg.type === 'moebius:nav-pop') {
@@ -523,6 +555,22 @@ export default function AppCanvas({
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [appId, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
+
+  // Two setup keys intentionally coordinate catalog apps. Fan those safe,
+  // explicit mutations across mounted opaque frames without exposing their
+  // private preference namespaces or the shell's auth storage.
+  useEffect(() => {
+    function onSharedStorage(e) {
+      const { key, value } = e.detail || {}
+      if (!isSharedVirtualStorageKey(key)) return
+      for (const v of framesRef.current.keys()) {
+        postToFrame(v, { type: 'moebius:storage-sync', key, value })
+      }
+    }
+    window.addEventListener('mobius:shared-storage', onSharedStorage)
+    return () => window.removeEventListener('mobius:shared-storage', onSharedStorage)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Clear this app's pending nav-sentinels when the VISIBLE frame stops
   // representing the same browsing context. That happens on:
@@ -807,7 +855,7 @@ export default function AppCanvas({
             // withholds it.
             data-app-id={isLive ? appId : undefined}
             data-frame-version={v}
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation"
+            sandbox="allow-scripts allow-forms allow-popups allow-top-navigation-by-user-activation"
             allow="microphone; fullscreen"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}

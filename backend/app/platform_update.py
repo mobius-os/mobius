@@ -901,12 +901,14 @@ def reconcile_clone_sync() -> str:
 
 
 def boot_guard_sync() -> str:
-  """Shell entry point run after the bounded boot reconcile and before uvicorn."""
-  try:
-    with _reconcile_flock():
-      return boot_guard_clean_served_tree(PLATFORM_REPO)
-  except Exception as exc:  # never propagate to the boot shell
-    return f"boot_guard[error] {exc!r}"
+  """Shell entry point run after reconcile and before uvicorn.
+
+  Unlike the best-effort reconcile, this deliberately propagates failures: the
+  guard is the final proof that the served tree is clean. Booting after a guard
+  error would silently bypass the safety boundary it exists to enforce.
+  """
+  with _reconcile_flock():
+    return boot_guard_clean_served_tree(PLATFORM_REPO)
 
 
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:

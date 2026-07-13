@@ -1,9 +1,66 @@
 <!doctype html>
 <html lang="en">
 <head>
+      <!-- Opaque-origin app frames cannot access the shell's localStorage. A
+           synchronous in-memory facade preserves existing app preferences;
+           AppCanvas hydrates it before module import and persists mutations in
+           an app-private namespace. No owner credential is ever included. -->
+      <script data-mobius-storage-shim>(function () {
+  try { void window.localStorage; return; } catch (e) {}
+  var values = Object.create(null);
+  var hydrating = false;
+  function keys() { return Object.keys(values); }
+  var storage = {
+    get length() { return keys().length; },
+    key: function (index) { return keys()[index] || null; },
+    getItem: function (key) {
+      key = String(key);
+      return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null;
+    },
+    setItem: function (key, value) {
+      key = String(key); value = String(value); values[key] = value;
+      if (!hydrating) window.parent.postMessage({ type: 'moebius:storage-set', key: key, value: value }, window.location.origin);
+    },
+    removeItem: function (key) {
+      key = String(key); delete values[key];
+      if (!hydrating) window.parent.postMessage({ type: 'moebius:storage-remove', key: key }, window.location.origin);
+    },
+    clear: function () {
+      values = Object.create(null);
+      if (!hydrating) window.parent.postMessage({ type: 'moebius:storage-clear' }, window.location.origin);
+    }
+  };
+  Object.defineProperty(window, 'localStorage', { value: storage, configurable: true });
+  window.__mobiusHydrateLocalStorage = function (snapshot) {
+    hydrating = true;
+    values = Object.create(null);
+    if (snapshot && typeof snapshot === 'object') {
+      Object.keys(snapshot).forEach(function (key) {
+        if (typeof snapshot[key] === 'string') values[key] = snapshot[key];
+      });
+    }
+    hydrating = false;
+  };
+  window.__mobiusSyncLocalStorage = function (key, value) {
+    key = String(key); hydrating = true;
+    if (typeof value === 'string') values[key] = value;
+    else delete values[key];
+    hydrating = false;
+    try {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: key, newValue: typeof value === 'string' ? value : null,
+      }));
+    } catch (e) {
+      var event = new Event('storage');
+      Object.defineProperty(event, 'key', { value: key });
+      Object.defineProperty(event, 'newValue', { value: value });
+      window.dispatchEvent(event);
+    }
+  };
+})();</script>
       <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
-           src/lib/applyTheme.js). The frame is SAME-ORIGIN, so it reads the
-           shell's localStorage; it also reads its own __mobius-theme__ slot
+           src/lib/applyTheme.js). The frame reads its injected theme slot and
+           may read the safe compatibility storage snapshot when available;
            when the server fills one. Resolves {css,bg,mode} (slot ->
            mobius-theme -> mobius-theme-bg -> dark default) and paints --bg /
            data-theme / color-scheme before <style> parses, so a stale/
@@ -147,8 +204,8 @@
   </script>
   <style>
     /* Fallback defaults — the frame self-themes via the pre-paint IIFE in
-       <head> (which reads the __mobius-theme__ slot + the shell's same-origin
-       localStorage and sets --bg / data-theme / color-scheme before this
+       <head> (which reads the __mobius-theme__ slot + safe virtual storage and
+       sets --bg / data-theme / color-scheme before this
        <style> parses), plus the live moebius:frame-theme postMessage. This
        :root is the no-signal floor: it shows when there is no slot, no
        persisted owner mode, and no postMessage yet (a raw file open, or a
@@ -384,8 +441,8 @@
     //   5. parent may later post {type:'moebius:frame-theme', ...}
     //      to update theme without reloading the iframe.
     //
-    // Origin check: the iframe rejects any message whose origin
-    // isn't window.location.origin (same-origin with the shell).
+    // Origin check: the opaque iframe still sees the parent shell's concrete
+    // origin on incoming postMessage events and rejects every other sender.
     // An attacker embedding this frame on their own page can read
     // the ready event but cannot inject a token — their reply has
     // the wrong origin.
@@ -716,8 +773,17 @@
         applyInsets(msg.insets);
         return;
       }
+      if (msg.type === 'moebius:storage-sync') {
+        if (typeof window.__mobiusSyncLocalStorage === 'function') {
+          window.__mobiusSyncLocalStorage(msg.key, msg.value);
+        }
+        return;
+      }
       if (msg.type === 'moebius:frame-init' && !initialized) {
         initialized = true;
+        if (typeof window.__mobiusHydrateLocalStorage === 'function') {
+          window.__mobiusHydrateLocalStorage(msg.storage);
+        }
         applyTheme(msg.themeCss, msg.bg);
         loadModule(msg.token);
       }

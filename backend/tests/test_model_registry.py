@@ -85,6 +85,21 @@ def test_fallback_models_shape_matches_registry_entries():
   assert ids == providers.KNOWN_MODELS["claude"], "order preserved"
 
 
+def test_model_specific_effort_levels_are_registry_metadata(monkeypatch):
+  """A future model can declare a different effort scale in one backend map;
+  pickers receive it without model-id conditionals in the frontend."""
+  monkeypatch.setitem(
+    providers.MODEL_EFFORT_LEVELS,
+    "claude-opus-4-8",
+    ["low", "medium", "high", "max"],
+  )
+  entry = next(
+    row for row in providers._fallback_models("claude")
+    if row["id"] == "claude-opus-4-8"
+  )
+  assert entry["effort_levels"] == ["low", "medium", "high", "max"]
+
+
 # --- Expired-token refresh (the 401 root cause) -----------------------
 
 

@@ -19,6 +19,7 @@ aborted on the next pass.
 
 import subprocess
 import textwrap
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -343,6 +344,19 @@ def test_boot_guard_aborts_interrupted_rebase_before_serving(clone_env):
   ok, err = pu._import_probe(platform)
   assert ok, err
   assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
+def test_boot_guard_sync_propagates_failure(monkeypatch):
+  """The final boot gate must fail closed; callers need a non-zero process,
+  not an error-looking success string that the shell can accidentally ignore."""
+  monkeypatch.setattr(pu, "_reconcile_flock", lambda: nullcontext())
+  monkeypatch.setattr(
+    pu,
+    "boot_guard_clean_served_tree",
+    lambda _repo: (_ for _ in ()).throw(OSError("guard failed")),
+  )
+  with pytest.raises(OSError, match="guard failed"):
+    pu.boot_guard_sync()
 
 
 # --- status availability + up-to-date ---------------------------------------
