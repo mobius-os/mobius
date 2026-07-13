@@ -122,6 +122,13 @@ async function measure(page) {
   })
 }
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test('Deep second send pins flush to top after the post-send layout settle (no halfway clamp)', async ({ page }) => {
   await setup(page)
   await newChat(page)
