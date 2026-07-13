@@ -1314,13 +1314,14 @@ async def create_app(
       db.rollback()
       raise HTTPException(status_code=422, detail=str(exc))
     db.refresh(app)
-    get_system_broadcast().publish(
-      {"type": "app_updated", "appId": str(app.id)}
-    )
+    event = {"type": "app_created", "appId": str(app.id)}
+    if app.chat_id is not None:
+      event["chatId"] = str(app.chat_id)
+    get_system_broadcast().publish(event)
     # The in-chat "Open <App>" CTA is DERIVED on the frontend from the apps
-    # query's chat_id + updated_at, so this app_updated (which triggers a
-    # refetch) surfaces the CTA in the owning chat with no separate app_built
-    # event to publish here.
+    # query's chat_id + updated_at. app_created triggers that refetch and also
+    # carries the durable relationship into the pane-neutral workspace
+    # placement path after the first successful compile.
   return app
 
 

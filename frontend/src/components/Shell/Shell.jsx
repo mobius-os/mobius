@@ -24,6 +24,11 @@ import {
 } from '../../lib/appPrecache.js'
 import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
 import * as tabModel from './tabModel.js'
+import {
+  applyWorkspaceRequestsToFlatTabs,
+  workspaceRequestFromSystemEvent,
+  workspaceRequestsForBuiltApps,
+} from './workspacePlacement.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
 import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import {
@@ -360,6 +365,12 @@ export default function Shell() {
   const closeTab = useCallback((kind, id) => {
     setOpenTabs(prev => tabModel.removeTab(prev, kind, id))
   }, [])
+  const placeInWorkspace = useCallback((requestOrRequests) => {
+    const requests = Array.isArray(requestOrRequests)
+      ? requestOrRequests
+      : [requestOrRequests]
+    setOpenTabs(prev => applyWorkspaceRequestsToFlatTabs(prev, requests))
+  }, [])
   const tabStripVisible = openTabs.length >= 1
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
@@ -687,16 +698,15 @@ export default function Shell() {
     for (const id of fresh) appBaselineRef.current.add(id)
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
 
-    // A chat-owned app is a runnable artifact, not merely a drawer arrival.
-    // Place every fresh artifact beside its owning chat without navigating:
-    // the owner stays wherever they are. The semantic arrival projection is
-    // pane-ready — a future workspace can route the same relationship to the
-    // pane beside the chat while this flat strip remains the one-pane case.
+    // Durable-list fallback for an app-created event missed during reconnect or
+    // initial load. Convert server relationships into the same pane-neutral
+    // requests used by the live event path; the flat resolver is only today's
+    // one-pane projection.
     const builtArrivals = freshChatBuiltApps(apps, fresh)
     if (builtArrivals.length > 0) {
-      setOpenTabs(prev => tabModel.addBuiltAppsForChats(prev, builtArrivals))
+      placeInWorkspace(workspaceRequestsForBuiltApps(builtArrivals))
     }
-  }, [apps, appsLiveFetched])
+  }, [apps, appsLiveFetched, placeInWorkspace])
 
   // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
   // useNavigation can't see the apps list. Once the live list lands, if the
@@ -995,14 +1005,13 @@ export default function Shell() {
       // to bump appVersions / cycle iframe keys — that would tear
       // down running apps for a CSS swap and lose their state.
       loadTheme()
-    } else if (ev.type === 'app_updated') {
-      // LIST-REFRESH ONLY. Refetch the apps list so the affected app's
-      // `updated_at` reflects the server's new state. versionForApp reads
-      // from that field, so the iframe URL automatically picks up the new
-      // cache-buster on the next render — no separate version counter to keep
-      // in sync. The refetch also updates the derived built-app CTA list (which
-      // reads the apps query's chat_id + updated_at), so a fresh build or
-      // recompile surfaces the CTA in exactly the chat that owns the app.
+    } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
+      const placementRequest = workspaceRequestFromSystemEvent(ev)
+      // Refresh server truth before warming or placing. app_updated is
+      // refresh-only; app_created may additionally issue one background
+      // workspace placement after the returned row confirms the relationship.
+      // `updated_at` drives the iframe cache-buster and the derived built-app
+      // CTA, so neither needs a separate client mirror.
       refreshApps().then(updatedApps => {
         // Warm the SW cache for the updated app immediately — the edit
         // rotated the `?v=` cache key, so without this the next open pays
@@ -1011,6 +1020,16 @@ export default function Shell() {
         if (ev.appId) {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           if (app) warmAppCode(app)
+        }
+        // `app_created` is emitted only after the first runnable compile. Check
+        // the refreshed row before honoring it, then place in the background;
+        // a malformed/spoofed event cannot open an absent or unrelated app.
+        if (placementRequest) {
+          const app = updatedApps.find(a => (
+            String(a.id) === placementRequest.item.id
+            && String(a.chat_id) === placementRequest.source.id
+          ))
+          if (app) placeInWorkspace(placementRequest)
         }
       })
     } else if (ev.type === 'app_build_failed') {
@@ -1081,7 +1100,7 @@ export default function Shell() {
     // stable objects whose .current is read at call time, not at capture time).
     loadTheme, markChatRunActivity, markChatRunFinished,
     markStreamingEnd, markStreamingStart,
-    refreshApps, refreshChats, warmAppCode,
+    placeInWorkspace, refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for

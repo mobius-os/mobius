@@ -84,18 +84,6 @@ test('addBuiltAppForChat preserves the new relationship at the flat tab cap', ()
   assert.ok(after.some(tab => tabModel.sameTab(tab, 'app', 42)))
 })
 
-test('addBuiltAppsForChats handles every app in one refresh in server order', () => {
-  const after = tabModel.addBuiltAppsForChats([], [
-    { chatId: 'building-chat', appId: 41 },
-    { chatId: 'building-chat', appId: 42 },
-  ])
-  assert.deepEqual(after, [
-    tabModel.makeTab('chat', 'building-chat'),
-    tabModel.makeTab('app', 41),
-    tabModel.makeTab('app', 42),
-  ])
-})
-
 test('removeTab drops the matching tab and nothing else', () => {
   const tabs = [tabModel.makeTab('chat', 'a'), tabModel.makeTab('app', 42)]
   const after = tabModel.removeTab(tabs, 'app', 42)

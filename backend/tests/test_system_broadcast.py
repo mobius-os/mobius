@@ -370,11 +370,11 @@ def test_notify_body_type_validator_rejects_unknown():
 
 # --- Single-bus routing: catch-up-safe fan-out vs system-bus-only -------
 #
-# The built-app "Open app" CTA is DERIVED on the frontend from the apps query's
-# chat_id + updated_at, so there is no app_built event to route — an
-# app_updated refetch surfaces the CTA in the owning chat. What still matters
-# here is which events fan out to per-chat broadcasts (catch-up-safe) and which
-# ride the system bus ALONE (catch-up-unsafe).
+# The built-app CTA remains derived from the apps query's chat_id + updated_at.
+# First placement is additionally triggered by the system-bus-only app_created
+# lifecycle event, while app_updated remains the catch-up-safe recompile signal.
+# What matters here is which events fan out to per-chat broadcasts and which
+# ride the system bus alone.
 
 
 @pytest.mark.asyncio

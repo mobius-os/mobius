@@ -54,6 +54,10 @@ EventType = Literal[
 
 SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "theme_updated",
+  # Internal lifecycle event emitted after POST /api/apps/ has committed its
+  # first runnable bundle. Shell uses chatId + appId to place the preview; it is
+  # system-bus-only so it is never replayed as a second workspace action.
+  "app_created",
   "app_updated",
   "app_build_failed",
   "shell_rebuilding",

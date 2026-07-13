@@ -70,19 +70,6 @@ export function addBuiltAppForChat(tabs, chatId, appId) {
   return next
 }
 
-// Apply every arrival from one apps refresh. Reverse traversal keeps the
-// server's order when several apps from the same chat all insert immediately
-// after their owning chat (A then B, rather than B then A).
-export function addBuiltAppsForChats(tabs, arrivals) {
-  let next = tabs
-  for (let index = (arrivals?.length || 0) - 1; index >= 0; index -= 1) {
-    const arrival = arrivals[index]
-    if (!arrival || arrival.chatId == null || arrival.appId == null) continue
-    next = addBuiltAppForChat(next, arrival.chatId, arrival.appId)
-  }
-  return next
-}
-
 // Remove a tab — used both when the owner closes one and when its chat/app is
 // deleted (so a stale tab can never navigate into a 404 / dead iframe).
 export function removeTab(tabs, kind, id) {

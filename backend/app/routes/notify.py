@@ -59,6 +59,7 @@ _SYSTEM_BUS_ONLY_EVENTS = frozenset({
   "shell_apply_now",
   "shell_rebuild_failed",
   "app_build_failed",
+  "app_created",
 })
 
 
