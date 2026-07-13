@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { freshChatBuiltApps } from '../newAppAttention.js'
 import { makeTab } from '../tabModel.js'
@@ -83,4 +84,31 @@ test('flat resolver ignores unsupported future requests', () => {
     placement: 'replace-source',
   }
   assert.equal(applyWorkspaceRequestsToFlatTabs(tabs, [unsupported]), tabs)
+})
+
+test('flat resolver carries the current-view protection through placement', () => {
+  const active = makeTab('app', 99)
+  const tabs = [
+    active,
+    ...Array.from(
+      { length: 5 },
+      (_, index) => makeTab('chat', `old-${index}`),
+    ),
+  ]
+  const request = builtAppWorkspaceRequest('building-chat', 42)
+  const after = applyWorkspaceRequestsToFlatTabs(
+    tabs,
+    [request],
+    { protectedTab: active },
+  )
+
+  assert.ok(after.some(tab => tab.kind === active.kind && tab.id === active.id))
+})
+
+test('shell reconciles the durable app list whenever the system stream reconnects', () => {
+  const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+  assert.match(
+    shellSource,
+    /useSystemEventStream\(handleSystemEvent, \{ onOpen: refreshApps \}\)/,
+  )
 })

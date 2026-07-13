@@ -15,6 +15,7 @@ test('InstallSheet uses the shared modal focus contract', () => {
   assert.match(hook, /previouslyFocused\?\.focus/)
   assert.match(hook, /bodyScrollLockCount/)
   assert.match(hook, /closeOnEscapeRef\.current/)
+  assert.match(hook, /dialogStack\.at\(-1\) !== stackEntry/)
 })
 
 test('full-screen dialogs share one focus, inerting, and Escape contract', () => {

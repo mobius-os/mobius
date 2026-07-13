@@ -354,7 +354,7 @@ export default function Shell() {
   // set + the wiring to navigation. Switching a tab is ordinary navTo, so the
   // back button rides the existing navStack — no new history sentinels. The
   // planned multi-pane workspace gives each pane its own open set from these
-  // same primitives — see docs/design/multi-pane-workspace.md.
+  // same primitives — see ARCHITECTURE.md's "Multi-pane workspace" section.
   const [openTabs, setOpenTabs] = useState(tabModel.readOpenTabs)
   useEffect(() => { tabModel.writeOpenTabs(openTabs) }, [openTabs])
   const openInTab = useCallback((kind, id) => {
@@ -369,8 +369,17 @@ export default function Shell() {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
       : [requestOrRequests]
-    setOpenTabs(prev => applyWorkspaceRequestsToFlatTabs(prev, requests))
-  }, [])
+    const protectedTab = activeViewRef.current === 'canvas' && activeAppIdRef.current != null
+      ? tabModel.makeTab('app', activeAppIdRef.current)
+      : activeViewRef.current === 'chat' && activeChatIdRef.current != null
+        ? tabModel.makeTab('chat', activeChatIdRef.current)
+        : null
+    setOpenTabs(prev => applyWorkspaceRequestsToFlatTabs(
+      prev,
+      requests,
+      { protectedTab },
+    ))
+  }, [activeAppIdRef, activeChatIdRef, activeViewRef])
   const tabStripVisible = openTabs.length >= 1
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
@@ -698,8 +707,8 @@ export default function Shell() {
     for (const id of fresh) appBaselineRef.current.add(id)
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
 
-    // Durable-list fallback for an app-created event missed during reconnect or
-    // initial load. Convert server relationships into the same pane-neutral
+    // Durable-list fallback for an app-created event missed during reconnect.
+    // Convert server relationships into the same pane-neutral
     // requests used by the live event path; the flat resolver is only today's
     // one-pane projection.
     const builtArrivals = freshChatBuiltApps(apps, fresh)
@@ -1109,7 +1118,11 @@ export default function Shell() {
   // The active chat's SSE stream still forwards the same events for
   // in-chat catch-up coherence — handlers are idempotent (theme
   // reload, refreshApps, version bump) so the duplicate is harmless.
-  useSystemEventStream(handleSystemEvent)
+  // A system-bus event can be lost while the stream is disconnected. Refetch
+  // the durable app list after every initial connection/reconnect; after the
+  // first list establishes the session baseline, fresh chat-owned rows flow
+  // through the same idempotent placement resolver as live app_created events.
+  useSystemEventStream(handleSystemEvent, { onOpen: refreshApps })
 
   // Listen for postMessage events from mini-app iframes:
   //   moebius:app-error — route crash report to the chat that built the app

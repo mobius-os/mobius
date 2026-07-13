@@ -51,12 +51,17 @@ function isBuiltAppRequest(request) {
 
 // Degenerate one-pane resolver. Reverse traversal preserves producer order
 // when several apps target the same source chat: A then B stays chat, A, B.
-export function applyWorkspaceRequestsToFlatTabs(tabs, requests) {
+export function applyWorkspaceRequestsToFlatTabs(tabs, requests, { protectedTab = null } = {}) {
   let next = tabs
   for (let index = (requests?.length || 0) - 1; index >= 0; index -= 1) {
     const request = requests[index]
     if (!isBuiltAppRequest(request)) continue
-    next = addBuiltAppForChat(next, request.source.id, request.item.id)
+    next = addBuiltAppForChat(
+      next,
+      request.source.id,
+      request.item.id,
+      protectedTab,
+    )
   }
   return next
 }

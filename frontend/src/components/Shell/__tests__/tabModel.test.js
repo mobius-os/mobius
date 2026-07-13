@@ -84,6 +84,28 @@ test('addBuiltAppForChat preserves the new relationship at the flat tab cap', ()
   assert.ok(after.some(tab => tabModel.sameTab(tab, 'app', 42)))
 })
 
+test('addBuiltAppForChat never evicts the tab currently on screen', () => {
+  const active = tabModel.makeTab('app', 99)
+  const tabs = [
+    active,
+    ...Array.from(
+      { length: tabModel.MAX_TABS - 1 },
+      (_, index) => tabModel.makeTab('chat', `old-${index}`),
+    ),
+  ]
+  const after = tabModel.addBuiltAppForChat(
+    tabs,
+    'building-chat',
+    42,
+    active,
+  )
+
+  assert.equal(after.length, tabModel.MAX_TABS)
+  assert.ok(after.some(tab => tabModel.sameTab(tab, active.kind, active.id)))
+  assert.ok(after.some(tab => tabModel.sameTab(tab, 'chat', 'building-chat')))
+  assert.ok(after.some(tab => tabModel.sameTab(tab, 'app', 42)))
+})
+
 test('removeTab drops the matching tab and nothing else', () => {
   const tabs = [tabModel.makeTab('chat', 'a'), tabModel.makeTab('app', 42)]
   const after = tabModel.removeTab(tabs, 'app', 42)

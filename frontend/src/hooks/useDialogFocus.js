@@ -11,6 +11,7 @@ const FOCUSABLE = [
 
 let bodyScrollLockCount = 0
 let bodyOverflowBeforeLock = ''
+const dialogStack = []
 
 function lockBodyScroll() {
   if (bodyScrollLockCount === 0) {
@@ -46,6 +47,8 @@ export default function useDialogFocus({
     const container = containerRef.current
     if (!container) return undefined
     let active = true
+    const stackEntry = { container }
+    dialogStack.push(stackEntry)
     const previouslyFocused = document.activeElement
     if (lockScroll) lockBodyScroll()
 
@@ -67,7 +70,11 @@ export default function useDialogFocus({
     }
 
     const focusInitial = () => {
-      if (!active || !container.isConnected) return
+      if (
+        !active
+        || !container.isConnected
+        || dialogStack.at(-1) !== stackEntry
+      ) return
       const target = initialFocusRef?.current
         || container.querySelector(FOCUSABLE)
         || container
@@ -76,6 +83,10 @@ export default function useDialogFocus({
     queueMicrotask(focusInitial)
 
     function onKeyDown(event) {
+      // Only the topmost active dialog owns Escape and Tab. Without this gate,
+      // nested/sibling dialogs can both close or both redirect focus from one
+      // keypress even though inerting correctly hides the lower surface.
+      if (dialogStack.at(-1) !== stackEntry) return
       if (event.key === 'Escape' && closeOnEscapeRef.current) {
         event.preventDefault()
         onCloseRef.current?.()
@@ -104,6 +115,8 @@ export default function useDialogFocus({
     return () => {
       active = false
       document.removeEventListener('keydown', onKeyDown, true)
+      const stackIndex = dialogStack.lastIndexOf(stackEntry)
+      if (stackIndex !== -1) dialogStack.splice(stackIndex, 1)
       siblings.forEach(({ element, inert }) => { element.inert = inert })
       if (lockScroll) unlockBodyScroll()
       previouslyFocused?.focus?.({ preventScroll: true })

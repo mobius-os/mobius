@@ -632,7 +632,7 @@ to an adjacent background tab on narrow screens.
 | --- | --- | --- |
 | `app_created {appId, chatId}` | Refetched row matches both ids | Apply one background `beside-source` request |
 | `app_created` missing/mismatched ids | No matching live row | Ignore the placement request |
-| Fresh app-list row with `chat_id` | App absent from the session baseline | Apply the same request as reconnect/load fallback |
+| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same request as reconnect fallback |
 | `app_updated` | Live row exists | Refresh CTA/code and warm cache; never place again |
 | Store install or app without `chat_id` | No source-chat relationship | Drawer arrival only |
 | Replayed/duplicate placement | Target app already open | Strict same-reference no-op |
@@ -640,6 +640,9 @@ to an adjacent background tab on narrow screens.
 Every automatic built-preview path passes through
 `applyWorkspaceRequestsToFlatTabs`. Direct drawer/user tab opens remain
 explicit foreground navigation and bypass automatic placement by design.
+When the flat strip is at capacity, automatic placement protects the currently
+visible tab as well as the new source-chat/app pair; background work must never
+make the user's on-screen tab disappear from the strip.
 
 ### Target pane model
 

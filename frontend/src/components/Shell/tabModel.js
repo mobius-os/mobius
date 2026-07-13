@@ -11,8 +11,8 @@
 // workspace (build several apps / chat with several agents in tiled panes)
 // holds a set of these tabs PER pane and computes active-ness against that
 // pane's own view — the same primitives, fed pane state instead of global
-// nav. See docs/design/multi-pane-workspace.md for the target model and the
-// scroll/nav constraints that migration must honor.
+// nav. See ARCHITECTURE.md's "Multi-pane workspace" section for the target
+// model and the scroll/nav constraints that migration must honor.
 
 // Cap the open set so the strip stays legible on a phone; the workspace can
 // raise or drop this per pane later.
@@ -46,7 +46,7 @@ export function addTab(tabs, kind, id) {
 // it deliberately does NOT navigate, so the owner's current view/focus stays
 // put. A future pane workspace keeps this operation at the call site and routes
 // the app to the pane beside the chat instead of changing the event contract.
-export function addBuiltAppForChat(tabs, chatId, appId) {
+export function addBuiltAppForChat(tabs, chatId, appId, protectedTab = null) {
   if (tabs.some(t => sameTab(t, 'app', appId))) return tabs
 
   const next = [...tabs]
@@ -63,7 +63,12 @@ export function addBuiltAppForChat(tabs, chatId, appId) {
   while (next.length > MAX_TABS) {
     chatIndex = next.findIndex(t => sameTab(t, 'chat', chatId))
     const appIndex = next.findIndex(t => sameTab(t, 'app', appId))
-    const removable = next.findIndex((_, index) => index !== chatIndex && index !== appIndex)
+    const protectedIndex = protectedTab
+      ? next.findIndex(t => sameTab(t, protectedTab.kind, protectedTab.id))
+      : -1
+    const removable = next.findIndex((_, index) => (
+      index !== chatIndex && index !== appIndex && index !== protectedIndex
+    ))
     if (removable === -1) break
     next.splice(removable, 1)
   }
@@ -87,7 +92,7 @@ export function tabNavTarget(tab) {
 
 // Is this tab the item currently shown? `view` is the { view, chatId, appId }
 // nav focus. This maps today's single global focus to a tab; a pane in the
-// workspace model instead compares by tabKey (docs/design/multi-pane-workspace.md).
+// workspace model instead compares by tabKey (see ARCHITECTURE.md).
 export function isTabActive(tab, view) {
   return tab.kind === 'app'
     ? view.view === 'canvas' && String(view.appId) === tab.id
