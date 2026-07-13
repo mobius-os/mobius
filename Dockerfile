@@ -35,8 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.204 \
-    && npm install -g @openai/codex@0.143.0 \
+    && npm install -g @anthropic-ai/claude-code@2.1.207 \
+    && npm install -g @openai/codex@0.144.3 \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -90,7 +90,7 @@ RUN ln -s /opt/agent-browser /root/.agent-browser
 # CLAUDE_CONFIG_DIR=/data/cli-auth/claude/, which is a volume and
 # can't be baked into the image). Stays root-owned + world-readable
 # (git clone's default 755/644) — install only reads from here.
-RUN git clone --depth 1 --branch v1.0.5 \
+RUN git clone --depth 1 --branch v1.0.6 \
       https://github.com/openai/codex-plugin-cc.git /opt/codex-plugin-cc
 
 WORKDIR /app
@@ -102,14 +102,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # upstream pyproject pins openai-codex-cli-bin==0.137.0a4. Install
 # --no-deps so Docker keeps the exact runtime pin below explicit.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.143.0 as of
-# 2026-07-08. The SDK exposes the request bridge as a public
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.144.3 as of
+# 2026-07-13. The SDK exposes the request bridge as a public
 # `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@c4d748f586a84a3ed5b6aceb82e9a1db4abb1cda#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@78ad6e6bfd1d3b6a209acd3ef82172a96b25179c#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.137.0a4'
 
 # Capture each installed agent CLI's npm publish date into a small JSON the
