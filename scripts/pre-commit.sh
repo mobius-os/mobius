@@ -48,6 +48,17 @@ fail() {
   FAILURES=$((FAILURES + 1))
 }
 
+# docs/ is gitignored ("internal planning — not for public release"), but a
+# `git add -f` bypasses that and the file then tracks forever. Block staged
+# docs/ paths here so a leak fails at commit time; the pre-push hook is the
+# backstop. Decision records stay local — a repo-worthy design goes in
+# ARCHITECTURE.md. Bypass once with `git commit --no-verify`.
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    docs/*) fail "refusing to commit $f — docs/ is internal & gitignored (git reset $f to unstage; decision records stay local, repo-worthy designs go in ARCHITECTURE.md)" ;;
+  esac
+done
+
 # Pre-collect by type so we run each tool at most once per language.
 PY_FILES=()
 JS_FILES=()
