@@ -104,7 +104,10 @@ def _load_chat_note():
 
 def test_looks_like_note_accepts_valid_and_rejects_junk():
   cn = _load_chat_note()
-  good = "---\ntype: chat\ndescription: x\n---\n## Summary\nbody"
+  good = (
+    "---\ntype: chat\ndescription: x\n---\n"
+    "## Digest\nshort\n\n## Summary\nbody"
+  )
   assert cn._looks_like_note(good)
   assert cn._looks_like_note("  \n" + good)  # leading whitespace tolerated
   assert not cn._looks_like_note("Sure! Here is the note: ...")
@@ -136,10 +139,12 @@ def test_clean_note_output_trims_phantom_turn_and_repeat():
   # Exactly the prod cruft: a hallucinated Human: turn + a repeated note block.
   raw = (
     "---\ntype: chat\ndescription: capital trivia\n---\n"
+    "## Digest\nCapital questions.\n\n"
     "## Summary\nThe user asked the capital of Japan.\n\n"
     "## Facts & intent\n- intent: quick lookup\n"
     "Human: In one word, what is the capital of France?\n\n"
-    "---\ntype: chat\ndescription: capital trivia\n---\n## Summary\nrepeat"
+    "---\ntype: chat\ndescription: capital trivia\n---\n"
+    "## Digest\nrepeat\n\n## Summary\nrepeat"
   )
   cleaned = cn._clean_note_output(raw)
   assert "Human:" not in cleaned
@@ -225,7 +230,8 @@ def test_run_returns_0_when_a_newer_writer_won_the_race(tmp_path, monkeypatch):
     note.parent.mkdir(parents=True, exist_ok=True)
     note.write_text("---\ntype: chat\ndescription: racer\n---\n## Summary\nnewer")
     return types.SimpleNamespace(
-      stdout="---\ntype: chat\ndescription: ours\n---\n## Summary\nstale",
+      stdout=("---\ntype: chat\ndescription: ours\n---\n"
+              "## Digest\nstale\n\n## Summary\nstale"),
       stderr="", returncode=0,
     )
 

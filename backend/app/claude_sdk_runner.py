@@ -486,70 +486,6 @@ def observe_skill_file_read(
     log.debug("skill_loaded read observability failed", exc_info=True)
 
 
-def _memory_node_read_id(
-  tool_name: str, input_data: Any, cwd: str,
-) -> str:
-  """Returns the memory-graph node id when a Read targets a note or MOC.
-
-  The agent descends the graph by Reading
-  `<data_dir>/shared/memory/{notes,mocs}/<slug>.md` — exactly the
-  explicit-read signal the per-chat read-trace wants (the injected
-  block is recorded separately at the injection site). index.md,
-  inbox.md, and recent-chats.md don't count: they arrive injected, so
-  a Read of them says nothing about what the agent dug for. Purely
-  lexical, like `_skill_file_read_name` above; returns "" for anything
-  that isn't a direct note/MOC read."""
-  if tool_name != "Read" or not isinstance(input_data, dict):
-    return ""
-  raw = input_data.get("file_path")
-  if not isinstance(raw, str) or not raw.strip():
-    return ""
-  path = raw.strip()
-  if not os.path.isabs(path):
-    path = os.path.join(cwd or "/", path)
-  path = os.path.normpath(path)
-  from app.config import get_settings
-  memory_root = os.path.normpath(
-    os.path.join(get_settings().data_dir, "shared", "memory")
-  )
-  parent, filename = os.path.split(path)
-  if os.path.dirname(parent) != memory_root:
-    return ""
-  if os.path.basename(parent) not in ("notes", "mocs"):
-    return ""
-  if not filename.endswith(".md"):
-    return ""
-  return filename[: -len(".md")]
-
-
-def observe_memory_node_read(
-  tool_name: str,
-  input_data: Any,
-  *,
-  chat_id: str,
-  cwd: str,
-) -> None:
-  """Fire-and-forget read-trace entry for memory-node Reads.
-
-  Mirrors `observe_skill_file_read`: called from `can_use_tool` on
-  every non-question tool, filters down to note/MOC reads, and merges
-  the slug into this chat's read-trace file so the nightly Reflection
-  pass can see what the agent went looking for. Never raises — a full
-  disk or broken trace file must not block or fail the Read being
-  intercepted."""
-  try:
-    node_id = _memory_node_read_id(tool_name, input_data, cwd)
-    if not node_id:
-      return
-    from app import memory_trace
-    from app.config import get_settings
-    memory_trace.record_note_read(
-      get_settings().data_dir, chat_id, node_id
-    )
-  except Exception:
-    log.debug("memory read-trace observability failed", exc_info=True)
-
-
 def _skill_name_from_input(input_data: Any) -> str:
   """Extracts the loaded skill's name from a Skill tool_use input.
 
@@ -1026,9 +962,6 @@ async def run_claude_sdk_turn(
     if tool_name != "AskUserQuestion":
       observe_skill_file_read(
         tool_name, input_data, bc=bc, chat_id=chat_id, cwd=cwd,
-      )
-      observe_memory_node_read(
-        tool_name, input_data, chat_id=chat_id, cwd=cwd,
       )
       return PermissionResultAllow(updated_input=input_data)
 

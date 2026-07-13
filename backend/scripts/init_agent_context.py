@@ -1,8 +1,8 @@
 """Writes the per-deploy upstream-diff file the agent can read after a deploy.
 
-The agent's long-term memory is the knowledge graph under
-`/data/shared/memory/` (bootstrapped by `init_memory_graph.py`); this script
-only publishes `/data/shared/upstream-diff.txt`, a standalone summary of what
+Per-chat continuity lives under `/data/shared/memory/chats/` (bootstrapped by
+`init_chat_summaries.py`); optional installed apps may add other context. This
+script only publishes `/data/shared/upstream-diff.txt`, a standalone summary of what
 changed in the current deploy, refreshed on every boot.
 """
 

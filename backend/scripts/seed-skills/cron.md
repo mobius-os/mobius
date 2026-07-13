@@ -51,7 +51,7 @@ claude -p "Fetch today's data, process it, and write the result to \
 - **Logs:** write stderr to `/data/cron-logs/`.
 - **Sub-agents start with no context** — the `--system-prompt-file` is all they get. Spell out the task fully there.
 - **Storage from a cron script** uses the raw API (`window.mobius.storage` only exists inside a running app). Enumerate, don't probe — see the storage section of `building-apps.md`.
-- After setting up a scheduled task, record it in this chat's note (`chats/$CHAT_ID/index.md`) — grow its `## Summary`; see the `memory.md` skill. (There is no inbox.)
+- After setting up a scheduled task, record it in this chat's note (`chats/$CHAT_ID/index.md`) — grow its `## Summary` according to the base system prompt.
 
 ---
 

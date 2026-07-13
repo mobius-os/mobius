@@ -51,9 +51,9 @@ def test_v2_router_abstention_query_selects_nothing(tmp_path: Path):
 
 
 def test_production_injection_exercises_the_real_build_memory_block(tmp_path: Path):
-  # The chat-centric short-term arm: the router index + the recent per-chat
-  # notes are injected by the live app.memory.build_memory_block. This drives
-  # the actual production code path, not a self-contained reimplementation.
+  # Chat continuity injects only recent per-chat notes through the live
+  # app.memory.build_memory_block. The optional graph router stays behind the
+  # Memory system app's on-demand reader.
   mem = tmp_path / "shared" / "memory"
   (mem / "chats" / "c1").mkdir(parents=True)
   (mem / "index.md").write_text("# Home\n\n- cooking router scent\n", encoding="utf-8")
@@ -64,9 +64,9 @@ def test_production_injection_exercises_the_real_build_memory_block(tmp_path: Pa
   )
   (mem / ".ready").write_text("", encoding="utf-8")
   res = ProductionInjectionSystem(tmp_path).retrieve("cups or grams?")
-  # Query-independent: it injects the index + recent chat note regardless of query.
-  assert "index" in res.selected_node_ids
-  assert "chat:c1" in res.selected_node_ids
+  # Query-independent continuity must not pull graph state into a new chat.
+  assert res.selected_node_ids == ["chat:c1"]
+  assert "cooking router scent" not in res.context
   assert "cake recipes in grams" in res.context
 
 
