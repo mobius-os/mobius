@@ -1616,6 +1616,26 @@ def test_install_rejects_decompression_bomb_icon(client, auth, bypass_url_valida
 # --- Stream byte counter aborts mid-download (fix 3) ----------------
 
 
+@pytest.mark.asyncio
+async def test_http_get_passes_sni_hostname_as_text(monkeypatch):
+  """The live httpcore/anyio stack requires str, not pre-encoded bytes."""
+  from app import install
+
+  monkeypatch.setattr(
+    install, "_validate_url_safe",
+    lambda _url: ("https://203.0.113.8/file", "example.test", "example.test"),
+  )
+
+  class _Client:
+    def stream(self, method, url, **kwargs):
+      assert method == "GET"
+      assert kwargs["extensions"]["sni_hostname"] == "example.test"
+      assert isinstance(kwargs["extensions"]["sni_hostname"], str)
+      return _StreamCtx(200, b"ok")
+
+  assert await install._http_get(_Client(), "https://example.test/file", 10) == b"ok"
+
+
 def test_install_aborts_when_stream_exceeds_cap(client, auth, bypass_url_validation):
   """Fix 3: `_http_get` now reads via `client.stream()` and tracks
   bytes per chunk, aborting once the running total crosses the cap.

@@ -832,7 +832,10 @@ async def _http_get(
     async with client.stream(
       "GET", pinned_url,
       headers={"Host": host_header},
-      extensions={"sni_hostname": sni_host.encode("ascii")},
+      # httpcore/anyio expect a hostname string here. Passing bytes worked with
+      # older httpx but now reaches idna2008_resolve(), which calls `.encode()`
+      # and crashes every real HTTPS install/update before the request is sent.
+      extensions={"sni_hostname": sni_host},
     ) as r:
       # Handle redirects + error statuses with the stream closed
       # quickly so we don't hold a connection while recursing.
