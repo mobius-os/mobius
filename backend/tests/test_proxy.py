@@ -204,7 +204,9 @@ def test_proxy_releases_db_connection_before_external_fetch(
     assert url == "https://example.com/data"
     return "https://93.184.216.34/data", "example.com", "example.com"
 
-  async def fake_capped_response(_client, _req):
+  async def fake_capped_response(_client, req):
+    assert req.extensions["sni_hostname"] == "example.com"
+    assert isinstance(req.extensions["sni_hostname"], str)
     checked_out.append(engine.pool.checkedout())
     return Response(content=b"ok", media_type="text/plain")
 
@@ -220,6 +222,32 @@ def test_proxy_releases_db_connection_before_external_fetch(
   assert r.status_code == 200
   assert r.text == "ok"
   assert checked_out == [baseline_checked_out]
+
+
+def test_proxy_post_passes_sni_hostname_as_text(
+  client, owner_token, monkeypatch
+):
+  """The POST proxy uses the same httpcore-compatible SNI representation."""
+  def fake_validate_url_safe(url):
+    assert url == "https://example.com/data"
+    return "https://93.184.216.34/data", "example.com", "example.com"
+
+  async def fake_capped_response(_client, req):
+    assert req.extensions["sni_hostname"] == "example.com"
+    assert isinstance(req.extensions["sni_hostname"], str)
+    return Response(content=b"ok", media_type="text/plain")
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/data", "body": "value=1"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert r.status_code == 200
+  assert r.text == "ok"
 
 
 def test_proxy_forwards_rate_limit_headers():

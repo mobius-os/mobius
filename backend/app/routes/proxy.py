@@ -89,7 +89,9 @@ async def proxy_get(
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
     req = client.build_request("GET", pinned_url)
     req.headers["host"] = host_header
-    req.extensions["sni_hostname"] = sni_host.encode("ascii")
+    # httpcore/anyio require text here. Bytes reach idna2008_resolve(), which
+    # calls .encode() itself and turns every real HTTPS proxy request into 502.
+    req.extensions["sni_hostname"] = sni_host
     return await _capped_response(client, req)
 
 
@@ -109,5 +111,5 @@ async def proxy_post(
       headers={"Content-Type": body.content_type},
     )
     req.headers["host"] = host_header
-    req.extensions["sni_hostname"] = sni_host.encode("ascii")
+    req.extensions["sni_hostname"] = sni_host
     return await _capped_response(client, req)
