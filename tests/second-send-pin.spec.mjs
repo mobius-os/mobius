@@ -126,6 +126,13 @@ async function measure(page) {
   })
 }
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test('Second send through full SSE flow: new user msg pins to viewport top', async ({ page }) => {
   // Mock a long streamed response so the chat has real content
   // through React's promoteStreamToMessages path (the user's actual
