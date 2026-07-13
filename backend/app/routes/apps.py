@@ -1975,7 +1975,6 @@ def _not_modified_if_match(
 def _frame_etag(
   app: models.App,
   frame_path: Path,
-  theme_token: str | None = "",
   frame_rev: str | None = None,
 ) -> str | None:
   """Validator for the `/frame` response, combining the app's
@@ -1997,14 +1996,6 @@ def _frame_etag(
   real content change that keeps its mtime) — the precise failure mode
   here. The frame file is small, so hashing per request is cheap.
 
-  `theme_token` is VESTIGIAL since theme-as-data: the frame no longer has
-  the theme server-injected (the client paints it from the __mobius-theme__
-  slot + localStorage), so the served frame bytes don't vary by theme and a
-  light/dark toggle no longer needs to bust the frame cache. get_frame now
-  passes theme_token=None; the parameter is kept (defaulting to "") only so
-  any other caller/test stays source-compatible. When non-empty it still
-  folds into the validator.
-
   `frame_rev`: the app-frame.html content hash, already computed once by
   `load_effective_theme` for the same request. Pass it so the frame file
   isn't hashed a SECOND time here — the theme bundle and this ETag share
@@ -2023,8 +2014,6 @@ def _frame_etag(
       pass
   elif frame_rev:
     parts.append(frame_rev)
-  if theme_token:
-    parts.append(theme_token)
   if not parts:
     return None
   return 'W/"' + "-".join(parts) + '"'
@@ -2094,10 +2083,10 @@ def get_frame(
   # <style>). So the validator keys only on app.updated_at + the
   # app-frame.html content hash — NOT the theme. A light/dark toggle no
   # longer needs to bust the frame cache, because the served frame bytes
-  # don't change with the theme. Compute the frame content hash directly
-  # (theme-independent) and pass theme_token=None.
+  # don't change with the theme. Compute the frame content hash and key the
+  # validator on it plus app.updated_at.
   frame_rev = theme.frame_content_rev(get_settings().data_dir)
-  etag = _frame_etag(app, frame_path, theme_token=None, frame_rev=frame_rev)
+  etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
   if etag:
     not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:
