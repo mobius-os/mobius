@@ -1,13 +1,11 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { formatResetTime } from './resetTime.js'
 
-// The single renderer for the error/pause/park card family, shared by BOTH
-// surfaces that draw an error block: MsgContent (persisted transcript) and
-// StreamingMessage (live stream + SSE catch-up). One renderer is the
-// invariant — when the classification lived only in MsgContent, the live
-// surface hardcoded the danger-red "Error" card and a benign pause flashed
-// red until promotion. Any future field that changes how the card reads must
-// land here, not in one surface.
+// The single renderer for the error/pause/park card family. MsgContent consumes
+// both persisted blocks and the converted live stream, so source selection
+// cannot change this card's classification. When the live path had a separate
+// renderer, a benign pause flashed danger-red until promotion. Any future field
+// that changes how the card reads must land here.
 //
 // Classification, all from the single `pause` descriptor: a provider-limit
 // park carries `pause.resets_at` and reads "Rate limit" — the honest, specific

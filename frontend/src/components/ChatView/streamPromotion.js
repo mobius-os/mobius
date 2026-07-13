@@ -6,9 +6,13 @@
 
 import { questionKey } from './questionKey.js'
 
-export function streamItemToBlock(item) {
+export function streamItemToBlock(item, { finalize = true } = {}) {
   if (item.type === 'text') return { type: 'text', content: item.content }
   if (item.type === 'thinking') {
+    // The active renderer needs the runner-clock anchors for its live timer.
+    // Promotion deliberately strips those client-only fields and keeps only
+    // the durable duration.
+    if (!finalize) return { ...item }
     return {
       type: 'thinking',
       content: item.content,
@@ -37,8 +41,19 @@ export function streamItemToBlock(item) {
       ...(item.pause ? { pause: item.pause } : {}),
     }
   }
-  const status = item.status === 'running' ? 'done' : item.status
+  const status = finalize && item.status === 'running' ? 'done' : item.status
   return { type: 'tool', ...item, status }
+}
+
+
+// One key namespace for the active answer, regardless of whether its blocks
+// came from the DB partial or streamItemsToAssistantPayload. Tools use their
+// protocol identity when available; every legacy/tokenless block falls back to
+// its ordinal. Keeping this helper source-agnostic is what lets React preserve
+// ToolBlock state and markdown/image DOM across the source switch.
+export function assistantBlockKey(block, index) {
+  if (block?.type === 'tool') return block.tool_use_id ?? `t-${index}`
+  return index
 }
 
 
@@ -237,6 +252,56 @@ export function chooseActiveAssistantSurface(msg, items) {
   return { hideMessage: false, suppressStream: true }
 }
 
+
+// Decide whether an existing DB assistant row belongs in the stable active
+// shell. A captured bridge always does. After that gate retires, a trailing
+// assistant stays in the shell while the active turn has no live items, then
+// remains there only if surface selection relates it to the returning stream.
+// This closes the empty→nonempty reconnect/question gap without swallowing an
+// unrelated completed assistant from the previous turn.
+export function chooseActiveAssistantMirrorIndex({
+  bridgeMsgIdx,
+  trailingAssistantPartialIdx,
+  hasLivePayload,
+  surface,
+}) {
+  if (bridgeMsgIdx >= 0) return bridgeMsgIdx
+  if (trailingAssistantPartialIdx < 0) return -1
+  if (!hasLivePayload) return trailingAssistantPartialIdx
+  return surface?.hideMessage || surface?.suppressStream
+    ? trailingAssistantPartialIdx
+    : -1
+}
+
+
+// The first mounted active row owns the scroll-anchor key for its lifetime.
+// DB-first bridge answers seed from the durable row; live-first answers seed a
+// synthetic turn key and must not adopt a later DB partial's key, because both
+// React reconciliation and ANCHOR_AT resolve through this identity.
+export function chooseActiveAssistantDataKey({
+  latched,
+  mirroredMsg,
+  mirrorIndex,
+  hasLivePayload,
+  chatId,
+}) {
+  const mirroredKey = mirroredMsg?.role === 'assistant' && !mirroredMsg.hidden
+    ? (mirroredMsg.id || `${mirroredMsg.role}-${mirroredMsg.ts ?? mirrorIndex}`)
+    : null
+  if (latched?.key) {
+    // A DB-seeded key is valid only while that row still mirrors the active
+    // answer. If surface selection releases it as unrelated, the restored
+    // history row owns the durable key and the live answer needs a distinct
+    // synthetic anchor. A live-first latch is intentionally retained when it
+    // later adopts a related DB mirror.
+    if (latched.mirrorKey && latched.mirrorKey !== mirroredKey) {
+      return mirroredKey || (hasLivePayload ? `streaming-${chatId}` : latched.key)
+    }
+    return latched.key
+  }
+  return mirroredKey || `streaming-${chatId}`
+}
+
 export function findTrailingAssistantPartialIndex(messages) {
   if (!Array.isArray(messages)) return -1
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -248,8 +313,8 @@ export function findTrailingAssistantPartialIndex(messages) {
 }
 
 
-export function streamItemsToAssistantPayload(items) {
-  const blocks = items.map(streamItemToBlock)
+export function streamItemsToAssistantPayload(items, options) {
+  const blocks = items.map(item => streamItemToBlock(item, options))
   const content = items
     .filter(i => i.type === 'text')
     .map(i => i.content)

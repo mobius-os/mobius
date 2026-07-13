@@ -1,5 +1,5 @@
-import { memo } from 'react'
-import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { memo, useEffect, useState } from 'react'
+import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import ToolActivityGroup from './ToolActivityGroup.jsx'
 import { groupToolRuns, coalesceThinkingEntries } from './groupBlocks.js'
@@ -7,9 +7,10 @@ import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
-import { suppressedQuestionToolIndices } from './streamReducers.js'
+import { suppressedQuestionToolIndices, thinkingElapsedMs } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
+import { assistantBlockKey } from './streamPromotion.js'
 
 
 function thoughtSeconds(durationMs) {
@@ -22,6 +23,55 @@ function thoughtLine(durationMs) {
   const seconds = thoughtSeconds(durationMs)
   if (!seconds) return '> Thought'
   return `> Thought for ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+}
+
+
+function formatSeconds(seconds) {
+  if (!Number.isFinite(seconds)) return null
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+}
+
+
+function ActiveThinkingDisclosure({ block, isStreaming }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!isStreaming) return undefined
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [isStreaming])
+
+  // Live items carry the runner-clock anchors used by thinkingElapsedMs.
+  // Persisted partials may only have duration_ms, so the shared renderer
+  // freezes at that durable value until live data becomes the selected source.
+  const elapsedMs = isStreaming ? thinkingElapsedMs(block, now) : block.duration_ms
+  const seconds = thoughtSeconds(elapsedMs)
+  const secondsText = formatSeconds(seconds)
+  const label = isStreaming
+    ? `> Thinking for ${secondsText || 'a moment'}`
+    : secondsText
+      ? `> Thought for ${secondsText}`
+      : '> Thought'
+
+  return (
+    <details className="chat__reasoning">
+      <summary className="chat__reasoning-summary">
+        <span className="chat__reasoning-line">
+          {label}
+          {isStreaming && (
+            <span className="chat__reasoning-ellipsis" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          )}
+        </span>
+      </summary>
+      <div className="chat__reasoning-body">
+        <StandardMarkdown text={block.content || ''} />
+      </div>
+    </details>
+  )
 }
 
 
@@ -55,6 +105,11 @@ function MsgContentInner({
   // fresh function reference every render and defeat it.
   isLastMsg,
   liveQuestionId,
+  // Active answers always use this renderer for both their DB partial and
+  // live SSE payload. isStreaming only enables the cursor, aria-live, and the
+  // active thinking timer; it never selects a different component tree.
+  isActiveAnswer = false,
+  isStreaming = false,
   // Set of questionKey strings currently live in streamItems. When
   // non-null, any question block whose key appears here is already
   // rendered by the streaming <li> and should be suppressed to prevent
@@ -94,9 +149,14 @@ function MsgContentInner({
           ? stripAugmentation(block.content) : block.content
         if (!text) return null
         return (
-          <div key={i} className={`chat__text chat__text--${msg.role}`}>
+          <div key={assistantBlockKey(block, i)} className={`chat__text chat__text--${msg.role}`}>
             {msg.role === 'assistant'
-              ? <StandardMarkdown text={text} />
+              ? (isActiveAnswer
+                  ? <ProgressiveMarkdown
+                      text={text}
+                      isStreaming={isStreaming && i === msg.blocks.length - 1}
+                    />
+                  : <StandardMarkdown text={text} />)
               : text}
           </div>
         )
@@ -111,7 +171,7 @@ function MsgContentInner({
         // delete+insert. `i` is the block's index = the group's first index, and
         // the group wrapper prefers the same tool's id, so the keys coincide.
         return (
-          <div key={block.tool_use_id ?? `t-${i}`} className="chat__tools">
+          <div key={assistantBlockKey(block, i)} className="chat__tools">
             {/* chatId + the block's tool_use_id let ToolBlock lazily fetch a
                 truncated large output on expand (GET
                 /tool-output/{tool_use_id}). */}
@@ -120,8 +180,17 @@ function MsgContentInner({
         )
       }
       if (block.type === 'thinking') {
+        if (isActiveAnswer) {
+          return (
+            <ActiveThinkingDisclosure
+              key={assistantBlockKey(block, i)}
+              block={block}
+              isStreaming={isStreaming && i === msg.blocks.length - 1}
+            />
+          )
+        }
         return (
-          <details key={i} className="chat__reasoning">
+          <details key={assistantBlockKey(block, i)} className="chat__reasoning">
             <summary className="chat__reasoning-summary">
               <span className="chat__reasoning-line">
                 {thoughtLine(block.duration_ms)}
@@ -151,7 +220,7 @@ function MsgContentInner({
           onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
         )
         return (
-          <div key={i}>
+          <div key={assistantBlockKey(block, i)}>
             <QuestionCard
               questions={block.questions || []}
               questionId={block.question_id}
@@ -172,8 +241,8 @@ function MsgContentInner({
         // vanished on chat return; that was the bug.
         //
         // The card body (label, park/pause classification, reset line) is
-        // ErrorCard — the SAME renderer StreamingMessage uses for the live
-        // stream, so the two surfaces cannot diverge. Only the Resume button
+        // ErrorCard — this SAME block renderer consumes the live payload too,
+        // so the two sources cannot diverge. Only the Resume button
         // lives here: a turn paused by a drain-gated restart (or interrupted
         // by a crash) persists a `resumable` note (backend reconcile marks
         // it), and only the TAIL note on the last message is resumable —
@@ -184,7 +253,7 @@ function MsgContentInner({
         const resumable = !!(block.resumable && isLastMsg && onResume)
         const parked = !!block.pause?.resets_at
         return (
-          <ErrorCard key={i} block={block}>
+          <ErrorCard key={assistantBlockKey(block, i)} block={block}>
             {resumable && (
               <button
                 type="button"
@@ -201,9 +270,8 @@ function MsgContentInner({
     }
 
     // Skip the AskUserQuestion tool twin, then fold runs of adjacent tool
-    // blocks into one Activity card. groupToolRuns runs on the SAME entries on
-    // the live path (StreamingMessage), so the transcript doesn't reshuffle
-    // when a streaming turn is promoted.
+    // blocks into one Activity card. Live items arrive here after conversion
+    // to the same block shape, so the transcript doesn't reshuffle on promote.
     const entries = msg.blocks
       .map((block, i) => ({ item: block, idx: i }))
       .filter(({ idx }) => !skipToolIdx.has(idx))
@@ -228,13 +296,13 @@ function MsgContentInner({
             // reconciles each block by identity within the group.
             return (
               <div
-                key={node.group[0].item.tool_use_id ?? `t-${node.group[0].idx}`}
+                key={assistantBlockKey(node.group[0].item, node.group[0].idx)}
                 className="chat__tools"
               >
                 <ToolActivityGroup tools={tools}>
                   {node.group.map(e => (
                     <ToolBlock
-                      key={e.item.tool_use_id ?? e.idx}
+                      key={assistantBlockKey(e.item, e.idx)}
                       t={e.item}
                       chatId={chatId}
                     />
@@ -256,9 +324,14 @@ function MsgContentInner({
     <>
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
-        <div className={`chat__text chat__text--${msg.role}`}>
+        <div
+          key={isActiveAnswer ? 0 : undefined}
+          className={`chat__text chat__text--${msg.role}`}
+        >
           {msg.role === 'assistant'
-            ? <StandardMarkdown text={text} />
+            ? (isActiveAnswer
+                ? <ProgressiveMarkdown text={text} isStreaming={isStreaming} />
+                : <StandardMarkdown text={text} />)
             : text}
         </div>
       ) : null}
@@ -282,6 +355,8 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onResume === next.onResume
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
+    && prev.isActiveAnswer === next.isActiveAnswer
+    && prev.isStreaming === next.isStreaming
     // suppressedQuestionKeys is a Set (new reference each render) or null.
     // Compare by size + content when both are Sets; treat null vs Set as unequal.
     // This is intentionally conservative — a false inequality triggers a

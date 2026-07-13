@@ -25,7 +25,7 @@ import { formatResetTime } from './resetTime.js'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
-import { chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
   builtAppPulseDecision,
   canFastForwardQueue,
@@ -558,6 +558,7 @@ export default function ChatView({
   const chatIdStaleRef = useRef(false)
   const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
+  const activeAssistantDataKeyRef = useRef(null)
   // Bridge-partial gating decides whether the next promote REPLACES
   // the kept DB partial (in-flight turn whose snapshot we mounted
   // on top of) or APPENDS a fresh assistant message. The captured
@@ -1143,6 +1144,9 @@ export default function ChatView({
           ? messagesRef.current[trailingIdx]?.ts
           : null)
     bridgeHook.markBridged()
+    // Promotion ends this active row. A queued/steered continuation must seed
+    // its own anchor instead of inheriting a bridged DB key.
+    activeAssistantDataKeyRef.current = null
     commitMessages(
       prev => promoteAssistantStream(prev, { items, bridgeTs }),
       undefined,
@@ -1337,14 +1341,12 @@ export default function ChatView({
           return
         }
 
-        // Keep the DB partial when the agent is still running. The
-        // user sees the most recent persisted state immediately; SSE
-        // catch-up populates streamItems and the streaming <li> takes
-        // over visually (see messages.map render — last assistant is
-        // suppressed when sending && streamItems.length > 0). On done,
-        // promoteStreamToMessages replaces this partial with the
-        // final version. Previously we stripped this and waited for
-        // SSE — caused the "message disappears on choppy return" bug.
+        // Keep the DB partial when the agent is still running. The user sees
+        // the most recent persisted state immediately; SSE catch-up makes the
+        // same active MsgContent swap to the live payload. On done,
+        // promoteStreamToMessages replaces this partial with the final version.
+        // Previously we stripped this and waited for SSE — caused the "message
+        // disappears on choppy return" bug.
 
         // Normalize stale "running" tool blocks from interrupted sessions.
         for (const msg of msgs) {
@@ -2649,28 +2651,49 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
-  const bridgeMsgIdx = (turnActive && streamItems.length > 0)
+  // The captured bridge partial enters the active row before catch-up emits a
+  // single item. That is the load-bearing part of Lever 1: when SSE becomes the
+  // selected source, React updates MsgContent props instead of replacing the
+  // DB row with a different renderer subtree.
+  const bridgeMsgIdx = turnActive
     ? bridgeHook.findBridgeIndex(messages)
     : -1
-  const trailingAssistantPartialIdx = (turnActive && streamItems.length > 0)
+  const trailingAssistantPartialIdx = turnActive
     ? findTrailingAssistantPartialIndex(messages)
     : -1
   const activePartialMsgIdx = bridgeMsgIdx >= 0 ? bridgeMsgIdx : trailingAssistantPartialIdx
   const activePartialMsg = activePartialMsgIdx >= 0 ? messages[activePartialMsgIdx] : null
-  // Single-surface invariant for active assistant partials:
-  // - if the live stream is at least as fresh as the saved DB partial, hide the
-  //   DB row and render StreamingMessage; final promotion replaces that row.
-  // - if the DB partial is richer than a stale cached stream snapshot (e.g.
-  //   stray "I" after returning to chat), keep the DB row and suppress the
-  //   stale stream until catch-up catches up.
-  // - if both surfaces clearly belong to the same active answer but tool /
-  //   thinking metadata is only partially replayed, still choose ONE surface.
-  //   Rendering both was the transient "duplicated agent output" bug: reopening
-  //   the chat fixed it because the durable transcript had only one copy.
+  // Select DATA, never a component tree. A captured bridge is authoritative;
+  // without one, the trailing assistant is folded into the active row only
+  // when chooseActiveAssistantSurface establishes that it mirrors this stream.
+  // Unrelated prior assistant history therefore remains untouched.
   const activeAssistantSurface = chooseActiveAssistantSurface(activePartialMsg, streamItems)
-  const liveMirrorMsgIdx = activeAssistantSurface.hideMessage ? activePartialMsgIdx : -1
-  const suppressStreamingSurface = !!(activePartialMsg && activeAssistantSurface.suppressStream)
-  const showStreamingSurface = turnActive && streamItems.length > 0 && !suppressStreamingSurface
+  const hasLiveAssistantPayload = turnActive && streamItems.length > 0
+  const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx,
+    trailingAssistantPartialIdx,
+    hasLivePayload: hasLiveAssistantPayload,
+    surface: activeAssistantSurface,
+  })
+  const activeMirrorMsg = activeMirrorMsgIdx >= 0 ? messages[activeMirrorMsgIdx] : null
+  const useDbActivePayload = !!(
+    activeMirrorMsg
+    && (!hasLiveAssistantPayload || activeAssistantSurface.suppressStream)
+  )
+  const activeAssistantMsg = useDbActivePayload
+    ? activeMirrorMsg
+    : (hasLiveAssistantPayload
+        ? {
+            ...(activeMirrorMsg || {}),
+            role: 'assistant',
+            // Live rendering keeps running tool state and thinking clock
+            // anchors; final promotion uses the converter's default finalize
+            // mode and still seals running tools as done.
+            ...streamItemsToAssistantPayload(streamItems, { finalize: false }),
+          }
+        : null)
+  const showActiveAssistantSurface = !!activeAssistantMsg
+  const activeAssistantIsStreaming = !!(activeAssistantMsg && !useDbActivePayload)
 
   // ── Sticky "needs your answer" affordance ──────────────────────────
   // A pending AskUserQuestion freezes the turn until the user answers,
@@ -2681,7 +2704,7 @@ export default function ChatView({
   // tail-question invariant on the last visible assistant message (the
   // same rule MsgContent's blockAnswerable enforces; recovery preserves
   // that tail question even when the original process was interrupted).
-  const pendingQuestionInStream = showStreamingSurface
+  const pendingQuestionInStream = activeAssistantIsStreaming
     && streamItems.some(it => it.type === 'question' && !it.answers)
   const pendingQuestionInMessages = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2729,7 +2752,7 @@ export default function ChatView({
     [...(scrollRef.current?.querySelectorAll('.qcard:not(.qcard--answered)') ?? [])].pop()
   const pendingCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingQuestion, findPendingQuestionCard,
-    [showStreamingSurface, messages],
+    [showActiveAssistantSurface, messages],
   )
 
   // The resume card: only the tail resumable note renders `.chat__resume`
@@ -2739,16 +2762,14 @@ export default function ChatView({
     [...(scrollRef.current?.querySelectorAll('.chat__resume') ?? [])].pop()
   const resumeCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingResume, findResumeCard,
-    [showStreamingSurface, messages],
+    [showActiveAssistantSurface, messages],
   )
 
-  // The streaming <li> carries a stable data-key so the scroll state machine
-  // can anchor inside an in-flight answer. Without this, returning to a
-  // streaming chat while scrolled into the live bubble had no anchorable row,
-  // so reconnect/catch-up could fall back to bottom-follow behavior. In the
-  // BRIDGE case (we kept a DB partial on mount and the streaming <li> is the
-  // visual replacement for that suppressed message), use the partial's key so
-  // an existing ANCHOR_AT still resolves through the catch-up window.
+  // The ONE active <li> carries this data-key for both DB and live payloads.
+  // ANCHOR_AT resolves `[data-key]`, so source selection must never change it.
+  // The first committed source owns the key: a DB-first bridge seeds the
+  // partial's durable key, while a live-first answer keeps its synthetic key
+  // even if a related DB partial arrives later.
   //
   // Fast-forward can insert a user row AFTER the mounted partial while the
   // stream remains live. Therefore bridge identity is ts-based across the
@@ -2756,13 +2777,29 @@ export default function ChatView({
   // bridge), the previous assistant is rendered alongside the streaming
   // <li> (different turns), so the streaming <li> gets its own synthetic key
   // rather than reusing a previous assistant row's key.
-  const streamingDataKey = (() => {
-    const bridged = liveMirrorMsgIdx >= 0 ? messages[liveMirrorMsgIdx] : null
-    if (!bridged || bridged.role !== 'assistant' || bridged.hidden) {
-      return `streaming-${chatId}`
+  const streamingDataKey = chooseActiveAssistantDataKey({
+    latched: activeAssistantDataKeyRef.current,
+    mirroredMsg: activeMirrorMsg,
+    mirrorIndex: activeMirrorMsgIdx,
+    hasLivePayload: hasLiveAssistantPayload,
+    chatId,
+  })
+  useLayoutEffect(() => {
+    if (!turnActive) {
+      activeAssistantDataKeyRef.current = null
+      return
     }
-    return bridged.id || `${bridged.role}-${bridged.ts ?? bridgeMsgIdx}`
-  })()
+    if (showActiveAssistantSurface
+        && activeAssistantDataKeyRef.current?.key !== streamingDataKey) {
+      activeAssistantDataKeyRef.current = {
+        key: streamingDataKey,
+        mirrorKey: activeMirrorMsg
+          ? (activeMirrorMsg.id
+              || `${activeMirrorMsg.role}-${activeMirrorMsg.ts ?? activeMirrorMsgIdx}`)
+          : null,
+      }
+    }
+  }, [turnActive, showActiveAssistantSurface, streamingDataKey, activeMirrorMsg, activeMirrorMsgIdx])
 
   // Polite aria-live status: announced once per state transition, not per
   // token. Visually hidden via the sr-only utility in ChatView.css.
@@ -2918,17 +2955,12 @@ export default function ChatView({
             if (msg.hidden) return null
             const isLastMsg = i === messages.length - 1
               || messages.slice(i + 1).every(m => m.hidden)
-            // Suppress the last assistant message ONLY when this is
-            // the BRIDGE case (we kept a DB partial on mount and the
-            // streaming <li> is about to render the same in-flight
-            // turn). For normal multi-turn flow, the existing
-            // assistant message and the streaming <li> represent
-            // DIFFERENT turns and must BOTH render — otherwise a
-            // user's answered-question card would hide whenever the
-            // next turn streams.
-            if (i === liveMirrorMsgIdx
+            // The mirrored DB row is rendered below by the SAME active
+            // MsgContent instance that consumes live payloads. Suppress only
+            // that row; unrelated assistant history remains in this map.
+            if (i === activeMirrorMsgIdx
                 && msg.role === 'assistant'
-                && showStreamingSurface) {
+                && showActiveAssistantSurface) {
               return null
             }
             // A question is answerable while the runner is parked on it,
@@ -3000,15 +3032,20 @@ export default function ChatView({
             </li>
           )})}
 
-          {showStreamingSurface && (
+          {showActiveAssistantSurface && (
             <StreamingMessage
-              streamItems={streamItems}
+              key={streamingDataKey}
+              msg={activeAssistantMsg}
               dataKey={streamingDataKey}
+              chatId={chatId}
               onAnswer={doSendSilent}
+              onResume={activeAssistantIsStreaming ? undefined : doSend}
+              liveQuestionId={liveQuestionId}
+              isStreaming={activeAssistantIsStreaming}
             />
           )}
 
-          {turnActive && streamItems.length === 0 && !loading && (
+          {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
             <li className="chat__msg chat__msg--assistant">
               <div className="chat__thinking"><span /><span /><span /></div>
             </li>

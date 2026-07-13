@@ -10,6 +10,31 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const msgContentSource = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
+const streamingMessageSource = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
+const blockRendererSource = readFileSync(new URL('../markdown/BlockRenderer.jsx', import.meta.url), 'utf8')
+
+test('active DB and live sources share one row shell and one block renderer', () => {
+  assert.match(streamingMessageSource, /<MsgContent[\s\S]*msg=\{msg\}/,
+    'the stable active <li> must always delegate its selected payload to MsgContent')
+  assert.doesNotMatch(streamingMessageSource, /ToolBlock|QuestionCard|ErrorCard|ProgressiveMarkdown/,
+    'StreamingMessage must not mount a competing assistant block tree')
+  assert.match(chatViewSource, /streamItemsToAssistantPayload\(streamItems, \{ finalize: false \}\)/,
+    'the live source must feed the same DB-shaped payload consumed by MsgContent')
+  assert.match(chatViewSource, /key=\{streamingDataKey\}[\s\S]*dataKey=\{streamingDataKey\}/,
+    'the active row key and scroll-anchor data-key must remain stable across source selection')
+})
+
+test('streaming deltas are flags on the shared active markdown tree', () => {
+  assert.match(msgContentSource, /<ProgressiveMarkdown[\s\S]*isStreaming=\{isStreaming/,
+    'active DB and live text must keep ProgressiveMarkdown mounted')
+  assert.match(blockRendererSource, /data-is-streaming=\{isStreaming \? 'true' : undefined\}/)
+  assert.match(blockRendererSource, /\{isStreaming && <span className="chat__cursor" \/>\}/,
+    'cursor insertion must toggle behind isStreaming instead of selecting another renderer')
+})
 
 // ---------------------------------------------------------------------------
 // Fix 1: lastGoodItemsRef preservation across reconnect resets
