@@ -2550,6 +2550,36 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
     db.close()
 
 
+def test_version_only_conflict_auto_resolves_to_upstream(
+  client, auth, bypass_url_validation,
+):
+  """A conflict CONFINED to the app's version identifier must NOT spawn a
+  resolver: install auto-resolves it to the upstream version and returns
+  mode='update'. This exercises the full wiring (install_from_manifest →
+  app_git.resolve_version_only_conflict), not just the git helper."""
+  base = "https://ver-only.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "ver-only"}
+  jsx_v1 = (
+    'const APP_VERSION = "1.0.0"\n'
+    "export default function App() { return <div>ok</div> }\n"
+  )
+  r1 = _install_v1(client, auth, base, m, jsx_v1)
+  assert r1.status_code == 201, r1.text
+
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "ver-only" / "index.jsx"
+  # A prior local "agent edit" bumped only the version constant.
+  jsx_file.write_text(jsx_v1.replace('"1.0.0"', '"1.0.1"'))
+
+  # The release bumps the same constant — a version-only clash.
+  jsx_v2 = jsx_v1.replace('"1.0.0"', '"2.0.0"')
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update", payload  # auto-resolved, no conflict chat
+  assert 'APP_VERSION = "2.0.0"' in jsx_file.read_text()  # upstream version won
+
+
 def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
   client, auth, bypass_url_validation, monkeypatch,
 ):

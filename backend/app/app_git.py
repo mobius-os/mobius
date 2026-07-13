@@ -55,7 +55,9 @@ app with no source_dir has no `.git`.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -987,6 +989,197 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
     return False
   _run(repo, "merge", "--abort", check=False)
   return True
+
+
+# A version identifier is never a semantic merge: when both the local edits and
+# the new release bump it, take-upstream is always correct. We recognise the two
+# forms real apps carry the label in — a JSON manifest's top-level `version` key
+# and an in-code `APP_VERSION` const — but the RECOGNITION alone never resolves:
+# the value is swapped to upstream's and the merge is re-proven, so a real edit
+# that shares the version's file (or line) can never be silently dropped.
+_JSON_MANIFESTS = frozenset({"mobius.json", "package.json"})
+
+# A top-level `const APP_VERSION = "x"` (optionally `export`ed / TS-annotated).
+# Anchored at column 0 so an indented `VERSION` inside a function, template
+# literal, or comment never matches; captures the value substring alone so only
+# the value — not the whole line — is swapped.
+_APP_VERSION_RE = re.compile(
+  rb'^((?:export\s+)?const\s+APP_VERSION\b[^=]*=\s*)(["\'])([^"\']*)(["\'])',
+)
+
+
+def _blob_at(repo: Path, ref: str, rel: str) -> bytes | None:
+  """Raw bytes of `rel` at `ref`, or None if the path is absent there."""
+  proc = subprocess.run(
+    ["git", "-C", str(repo), "cat-file", "-p", f"{ref}:{rel}"],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
+  )
+  return proc.stdout if proc.returncode == 0 else None
+
+
+def _resolve_json_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+  """Resolve a JSON-manifest conflict IFF the two sides differ ONLY in the
+  top-level `version` key — then take upstream's whole file.
+
+  Structured (not textual), so a nested `dependencies.version`, a non-version
+  local edit, or a minified layout can never be misread: any of those makes the
+  non-version content differ, which returns None → owner resolves it. `base` is
+  unused because the invariant (ours == theirs except `version`) already proves
+  no non-version local edit would be dropped.
+  """
+  try:
+    o = json.loads(ours)
+    t = json.loads(theirs)
+  except (ValueError, TypeError):
+    return None
+  if not isinstance(o, dict) or not isinstance(t, dict):
+    return None
+  if "version" not in o or "version" not in t or o["version"] == t["version"]:
+    return None
+  o_rest = {k: v for k, v in o.items() if k != "version"}
+  t_rest = {k: v for k, v in t.items() if k != "version"}
+  if o_rest != t_rest:
+    return None
+  return theirs
+
+
+def _resolve_source_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+  """Resolve a source-file conflict IFF it is confined to the `APP_VERSION`
+  value. Swaps ONLY the value substring (never the whole line) into ours, then
+  re-runs the three-way merge: if a real edit shares the version's line or file,
+  that re-merge conflicts and returns None instead of dropping the edit.
+  """
+  ours_lines = ours.splitlines(keepends=True)
+  theirs_lines = theirs.splitlines(keepends=True)
+  om = [
+    (i, m) for i, ln in enumerate(ours_lines)
+    if (m := _APP_VERSION_RE.match(ln)) and m.group(2) == m.group(4)
+  ]
+  tm = [
+    (i, m) for i, ln in enumerate(theirs_lines)
+    if (m := _APP_VERSION_RE.match(ln)) and m.group(2) == m.group(4)
+  ]
+  if len(om) != 1 or len(tm) != 1:
+    return None
+  oi, o_match = om[0]
+  _, t_match = tm[0]
+  if o_match.group(3) == t_match.group(3):
+    return None
+  line = ours_lines[oi]
+  ours_lines[oi] = line[:o_match.start(3)] + t_match.group(3) + line[o_match.end(3):]
+  return _three_way_merge_file(base, b"".join(ours_lines), theirs)
+
+
+def _resolve_version_only_file(
+  rel: str, base: bytes, ours: bytes, theirs: bytes
+) -> bytes | None:
+  """One conflicting file resolved to upstream's version, or None when the
+  conflict is not confined to the version identifier."""
+  if rel.rsplit("/", 1)[-1] in _JSON_MANIFESTS:
+    return _resolve_json_version(base, ours, theirs)
+  return _resolve_source_version(base, ours, theirs)
+
+
+def _three_way_merge_file(
+  base: bytes, ours: bytes, theirs: bytes
+) -> bytes | None:
+  """`git merge-file` on plain bytes: merged content if clean, else None.
+
+  merge-file returns 0 on a clean merge, the conflict count (>0) when markers
+  remain, and a negative code on error — every non-zero case is a real
+  (non-version) clash we refuse to auto-resolve.
+  """
+  with tempfile.TemporaryDirectory() as td:
+    d = Path(td)
+    (d / "ours").write_bytes(ours)
+    (d / "base").write_bytes(base)
+    (d / "theirs").write_bytes(theirs)
+    proc = subprocess.run(
+      ["git", "merge-file", "-p", str(d / "ours"), str(d / "base"),
+       str(d / "theirs")],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+@dataclass
+class VersionOnlyResolution:
+  """Result of auto-resolving a version-only conflict.
+
+  `tree` is the full merged source tree (repo-relative path -> bytes) with the
+  version taken from upstream; `tree_oid` is the merge-tree oid it was built
+  from, so the caller can read exec bits off the same tree the clean-merge path
+  uses (`read_tree_exec_paths`) rather than approximating from a branch.
+  """
+  tree: dict[str, bytes]
+  tree_oid: str
+
+
+def resolve_version_only_conflict(
+  source_dir: str | Path, conflict_paths: list[str]
+) -> VersionOnlyResolution | None:
+  """Full merged source tree with a VERSION-ONLY conflict resolved to upstream,
+  or None when the conflict is not confined to the version line.
+
+  Call only after `merge_upstream` verdicted a conflict. We PROVE the conflict
+  is version-only rather than assume it: for every conflicting file we normalise
+  ours's version line to upstream's and re-run the three-way FILE merge. If they
+  all merge clean, the version label was the sole conflict and we return the
+  whole merged tree (non-conflict files carry their clean three-way merge; the
+  conflicting files carry the version-normalised merge). If any file still
+  conflicts — a real code clash — we return None and the caller falls back to
+  the owner-resolver flow. Fail-safe by construction: a genuine local edit is
+  never silently dropped, because a residual conflict aborts the whole attempt.
+  """
+  repo = Path(source_dir)
+  if not conflict_paths:
+    return None
+  # merge-tree still writes a tree on conflict: non-conflict files are already
+  # cleanly three-way merged in it; only the conflict paths carry markers, which
+  # we overwrite below. rc must be 1 (conflict); 0 (clean) means the caller
+  # shouldn't be here and >1 is a real git error — bail either way. We parse the
+  # conflict paths from THIS run (not the caller's list) so the tree oid and the
+  # paths we overwrite are guaranteed to come from the same merge — a marker can
+  # never leak through a path mismatch.
+  proc = _run(
+    repo, "merge-tree", "--write-tree", "--name-only",
+    LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+  )
+  if proc.returncode != 1:
+    return None
+  lines = proc.stdout.splitlines()
+  tree_oid = lines[0].strip() if lines else ""
+  if not tree_oid:
+    return None
+  merge_conflicts: list[str] = []
+  for ln in lines[1:]:
+    if not ln.strip():
+      break  # blank line ends the path section; messages follow
+    merge_conflicts.append(ln)  # verbatim — a path may legitimately hold spaces
+  if not merge_conflicts:
+    return None
+  base_proc = _run(
+    repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+  )
+  base_ref = base_proc.stdout.strip()
+  if base_proc.returncode != 0 or not base_ref:
+    return None
+  resolved: dict[str, bytes] = {}
+  for rel in merge_conflicts:
+    ours = _blob_at(repo, LOCAL_BRANCH, rel)
+    theirs = _blob_at(repo, UPSTREAM_BRANCH, rel)
+    base_blob = _blob_at(repo, base_ref, rel)
+    # An add/add or delete conflict (a side missing the file) is not the
+    # version-bump shape; leave it to the owner.
+    if ours is None or theirs is None or base_blob is None:
+      return None
+    merged = _resolve_version_only_file(rel, base_blob, ours, theirs)
+    if merged is None:
+      return None
+    resolved[rel] = merged
+  full = read_merged_tree(repo, tree_oid)
+  full.update(resolved)
+  return VersionOnlyResolution(tree=full, tree_oid=tree_oid)
 
 
 # Smells
