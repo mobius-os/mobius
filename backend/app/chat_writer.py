@@ -1729,13 +1729,6 @@ class ChatWriterActor:
       raise _PersistFailed("CancelPending: chat not found")
     pending = list(chat.pending_messages or [])
     remaining = [m for m in pending if cid_of(m) != cmd.cid]
-    # Deploy-window bridge (lenient read): a stale service-worker bundle still
-    # cancels by raw ts (`DELETE /pending/<ts>`). A bare-digits key that
-    # matched no cid is treated as that legacy form and matched against the
-    # row's display ts, so the old client's X-button keeps working for the one
-    # session it survives. New clients always send the cid.
-    if len(remaining) == len(pending) and cmd.cid.isdigit():
-      remaining = [m for m in pending if str(m.get("ts")) != cmd.cid]
     if len(remaining) != len(pending):
       chat.pending_messages = remaining
       chat.updated_at = datetime.now(UTC)
@@ -1761,17 +1754,12 @@ class ChatWriterActor:
       raise _PersistFailed("ClearPending: chat not found")
     pending = list(chat.pending_messages or [])
     cleared_cids = [cid_of(m) for m in pending if cid_of(m) is not None]
-    # Deploy-window bridge: a stale service-worker bundle (old client) reads
-    # only `cleared_pending_ts` from the Stop response. Surface the ts list
-    # alongside the cids so that client keeps its PM-115 narrowing instead of
-    # silently falling back to a full-snapshot resend.
-    cleared_ts = [m.get("ts") for m in pending if m.get("ts") is not None]
     cleared = len(pending)
     if cleared:
       chat.pending_messages = []
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearPending did not persist")
-    return {"cleared": cleared, "cleared_cids": cleared_cids, "cleared_ts": cleared_ts}
+    return {"cleared": cleared, "cleared_cids": cleared_cids}
 
   def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
     """Replace the whole `messages` blob (and optional title); commit.

@@ -1868,7 +1868,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   return resolved
 
 
-async def _clear_pending(chat_id: str) -> tuple[list[str], list[int]]:
+async def _clear_pending(chat_id: str) -> list[str]:
   """Clears persisted queued messages for the chat via the actor.
 
   Routes through the actor's `ClearPending` (the sole runtime mutator of
@@ -1890,21 +1890,18 @@ async def _clear_pending(chat_id: str) -> tuple[list[str], list[int]]:
   list and won't be double-sent.
   """
   if not chat_id:
-    return [], []
+    return []
   try:
     ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
     result = await _await_ack(ack)
     if isinstance(result, dict):
-      return (
-        [c for c in result.get("cleared_cids", []) if c is not None],
-        [t for t in result.get("cleared_ts", []) if t is not None],
-      )
-    return [], []
+      return [c for c in result.get("cleared_cids", []) if c is not None]
+    return []
   except Exception:
     _get_logger().warning(
       "ClearPending did not persist chat_id=%s", chat_id, exc_info=True,
     )
-    return [], []
+    return []
 
 
 async def _clear_pending_strict(chat_id: str) -> None:
@@ -1981,7 +1978,7 @@ def _log_superseded_run(chat_id: str, phase: str) -> None:
 
 async def stop_chat(
   chat_id: str | None = None, db: Session = None,
-) -> tuple[bool, list[str], list[int]]:
+) -> tuple[bool, list[str]]:
   """Kills the active subprocess for a chat, bumps its generation, and
   clears its pending queue so a queued continuation cannot auto-start
   after Stop. Session_id is preserved so the next message resumes.
@@ -2003,15 +2000,15 @@ async def stop_chat(
   }
   stopped_any = False
   for cid in targets:
-    stopped_cid, _, _ = await stop_chat_for(cid, db=db)
+    stopped_cid, _ = await stop_chat_for(cid, db=db)
     if stopped_cid:
       stopped_any = True
-  return stopped_any, [], []
+  return stopped_any, []
 
 
 async def stop_chat_for(
   chat_id: str, db: Session = None,
-) -> tuple[bool, list[str], list[int]]:
+) -> tuple[bool, list[str]]:
   """Kills the agent subprocess for a specific chat.
 
   Bumps the generation counter so the dying run_chat's finally
@@ -2049,7 +2046,6 @@ async def stop_chat_for(
   # self-heals on the next interaction).
   log = _get_logger()
   cleared_pending_cids: list[str] = []
-  cleared_pending_ts: list[int] = []
   # Restart-drain invariant (design §2.2): the pending queue must survive the
   # restart untouched. A Stop landing inside the drain window would durably
   # delete queued messages here and hand them to the frontend to re-send — but
@@ -2062,7 +2058,7 @@ async def stop_chat_for(
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          cleared_pending_cids, cleared_pending_ts = await _clear_pending(chat_id)
+          cleared_pending_cids = await _clear_pending(chat_id)
     except (Exception, asyncio.TimeoutError):
       log.warning(
         "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
@@ -2103,7 +2099,7 @@ async def stop_chat_for(
   if not all_stopped:
     # At least one runner is still alive — leave run-status + broadcast for it.
     registry.discard_starting(chat_id)
-    return all_stopped, cleared_pending_cids, cleared_pending_ts
+    return all_stopped, cleared_pending_cids
   # With no active handle there is no runner-side final save left to
   # await, so clear immediately (via the actor's ClearRunStatus). This is the
   # path that resolves the orphaned-run-after-restart case (run_status stuck
@@ -2117,7 +2113,7 @@ async def stop_chat_for(
     await _clear_run_status(chat_id)
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
-  return all_stopped, cleared_pending_cids, cleared_pending_ts
+  return all_stopped, cleared_pending_cids
 
 
 def _schedule_continuation(

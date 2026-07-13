@@ -208,7 +208,7 @@ async def promote_pending_messages(
   transcript via the writer actor.
 
   Held under the per-chat queue lock so the _starting handoff doesn't
-  race append (POST /messages) or cancel (DELETE /pending/{ts}); the
+  race append (POST /messages) or cancel (DELETE /pending/{cid}); the
   JSON RMW itself is serialized by the actor. `run_token` is the
   promoted turn's persistence run identity (the scheduler allocates it
   once and threads it into both this promote and the continuation's
