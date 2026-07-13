@@ -33,7 +33,10 @@ import base64
 import datetime
 import mimetypes
 import os
+import shutil
+import stat
 import subprocess
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -57,6 +60,24 @@ _LIST_MAX_LIMIT = 1000
 _INLINE_READ_MAX = 256 * 1024
 _READ_MAX = 5 * 1024 * 1024
 _WRITE_MAX = 5 * 1024 * 1024
+
+# Upper bound on the immediate-child count reported for a directory when
+# `tree?counts=1` is requested — scandir stops here and the count clamps to
+# this value so a directory with millions of entries can't turn a cheap badge
+# into an unbounded scan. The UI renders a capped count as "10000+".
+_CHILD_COUNT_CAP = 10000
+
+# Caps on the recursive `/du` walk. `/data` holds huge trees (.git packs,
+# node_modules, compiled bundles); an unbounded walk over one pins CPU/IO and
+# blows the request budget, so the walk stops at whichever of these limits it
+# reaches first and reports `truncated: true` to say the totals are a lower
+# bound. Eight wall-clock seconds keeps the endpoint responsive; 200k entries
+# caps a pathological single directory before the wall-clock even fires. (The
+# walk is bounded two further ways it need not size: it never follows a
+# directory symlink, so it can't cycle, and it prunes the deny-listed
+# secrets.)
+_DU_TIME_BUDGET_S = 8.0
+_DU_ENTRY_CAP = 200_000
 
 _GIT_TIMEOUT = 30
 _GIT_LIST_CAP = 200  # per-category status list cap; counts stay exact
@@ -175,11 +196,146 @@ def _entry(child: Path, rel_prefix: str) -> dict | None:
   return entry
 
 
+def _child_count(subdir: Path) -> int | None:
+  """Number of immediate entries in `subdir`, bounded by `_CHILD_COUNT_CAP`.
+
+  Counting stops at the cap and returns the cap value (the UI renders it as
+  "10000+") so a huge directory can't turn a cheap badge into an unbounded
+  scan. Returns None when the directory can't be scanned (e.g. a permission
+  error) so the caller omits the field rather than failing the whole page."""
+  n = 0
+  try:
+    with os.scandir(subdir) as it:
+      for _ in it:
+        n += 1
+        if n >= _CHILD_COUNT_CAP:
+          return _CHILD_COUNT_CAP
+  except OSError:
+    return None
+  return n
+
+
+@router.get("/disk")
+def fs_disk(_owner: models.Owner = Depends(get_current_owner)):
+  """Disk usage of the HOST filesystem that backs the data dir, in bytes.
+
+  A single `statvfs` on the data-dir mount — no path parameter, no walk. This
+  reports the underlying HOST volume holding `/data` (total/used/free), NOT a
+  Möbius-imposed quota or the size of the viewable tree: everything else on
+  that mount (the OS, other containers, images) counts toward `used`. The
+  Editor surfaces it so the owner can see how much room the volume has
+  left."""
+  data_dir = get_settings().data_dir
+  usage = shutil.disk_usage(data_dir)
+  return {"total": usage.total, "used": usage.used, "free": usage.free,
+          "path": data_dir}
+
+
+@router.get("/du")
+def fs_du(
+  path: str = Query("", description="path relative to the FS root"),
+  _owner: models.Owner = Depends(get_current_owner),
+):
+  """Recursive disk usage of a directory subtree — "what is eating space".
+
+  Sums the sizes of every file under `path` (immediate + all descendants)
+  and counts files and subdirectories, so the Editor can show a folder's
+  real weight the way a file manager's "recursive size" does. A denied path
+  403s; a missing / non-directory path returns zeros (like `tree`).
+
+  The walk is BOUNDED, because `/data` holds huge trees (.git, node_modules)
+  an unbounded walk would pin CPU/IO on. It never follows a directory symlink
+  (`os.walk(..., followlinks=False)`, so it can't cycle), prunes the
+  deny-listed secret subtrees from both descent and the totals, and stops
+  after `_DU_TIME_BUDGET_S` seconds or `_DU_ENTRY_CAP` visited entries. When
+  any of those made the totals a lower bound — a cap fired or a secret was
+  pruned — `truncated` is true; it is false only when the whole subtree was
+  summed."""
+  root = _fs_root()
+  resolved = _resolve(path, root)
+  if _is_denied(resolved, root):
+    raise HTTPException(status_code=403, detail="Path not viewable.")
+  rel = _rel_to_root(resolved, root)
+  if not resolved.is_dir():
+    return {"path": rel, "bytes": 0, "files": 0, "dirs": 0, "truncated": False}
+
+  total_bytes = 0
+  files = 0
+  dirs = 0
+  visited = 0
+  truncated = False
+  deadline = time.monotonic() + _DU_TIME_BUDGET_S
+  stop = False
+
+  # `os.walk` is scandir-backed, so classifying an entry as dir-vs-file costs
+  # no extra stat; only a file's SIZE needs one. `topdown=True` lets us prune
+  # `dirnames` in place to skip descent into symlinked or denied subtrees.
+  for dirpath, dirnames, filenames in os.walk(
+    resolved, topdown=True, followlinks=False
+  ):
+    cur = Path(dirpath)
+    kept = []
+    for name in dirnames:
+      child = cur / name
+      # A directory symlink is never followed — it could point outside the
+      # root or back up the tree and cycle — and it isn't counted (a symlink
+      # holds no real data of its own here). A denied subtree is a secret we
+      # never total, and pruning it makes the totals a lower bound, so it
+      # flips `truncated`.
+      if child.is_symlink():
+        continue
+      if _is_denied(child, root):
+        truncated = True
+        continue
+      kept.append(name)
+    dirnames[:] = kept
+    dirs += len(kept)
+    visited += len(kept)
+
+    for name in filenames:
+      visited += 1
+      # The caps must bite mid-directory: a single directory can hold
+      # millions of entries, so a per-directory check alone wouldn't bound
+      # the stat cost within one huge folder.
+      if visited > _DU_ENTRY_CAP or time.monotonic() > deadline:
+        truncated = True
+        stop = True
+        break
+      f = cur / name
+      # One `lstat` per file: it never follows the link, so it both detects a
+      # symlink (skip it — its target's size lives elsewhere) and yields the
+      # size for a real file. A per-entry OSError (unreadable file, races a
+      # delete) skips just that entry rather than failing the whole request.
+      try:
+        st = f.stat(follow_symlinks=False)
+      except OSError:
+        continue
+      if stat.S_ISLNK(st.st_mode):
+        continue
+      if _is_denied(f, root):
+        truncated = True
+        continue
+      total_bytes += st.st_size
+      files += 1
+
+    if stop:
+      break
+    # Also check between directories, so a deep tree of empty (file-less)
+    # dirs can't run past the wall-clock without ever entering the file loop.
+    if visited > _DU_ENTRY_CAP or time.monotonic() > deadline:
+      truncated = True
+      break
+
+  return {"path": rel, "bytes": total_bytes, "files": files, "dirs": dirs,
+          "truncated": truncated}
+
+
 @router.get("/tree")
 def fs_tree(
   path: str = Query("", description="path relative to the FS root"),
   limit: int = Query(_LIST_DEFAULT_LIMIT),
   cursor: str | None = Query(None, description="opaque pagination cursor"),
+  counts: int = Query(0, description="1 = add child_count to dir entries"),
   _owner: models.Owner = Depends(get_current_owner),
 ):
   """List one directory level under the root (lazy, keyset-paginated).
@@ -188,7 +344,10 @@ def fs_tree(
   cursor is the opaque base64 of the last returned name; pass it back for the
   next page. A non-existent / non-directory path returns empty entries (like
   storage's "enumerating a not-yet-created dir is normal"); a denied path
-  403s."""
+  403s. `?counts=1` adds a `child_count` to each DIRECTORY entry on the
+  returned page (one bounded `scandir` per dir, only the paginated dirs), so
+  the UI can badge folder sizes; without it the response is unchanged and no
+  per-subdir scan runs."""
   root = _fs_root()
   resolved = _resolve(path, root)
   if _is_denied(resolved, root):
@@ -228,6 +387,16 @@ def fs_tree(
   # Directories first, then files; alphabetical within each, case-insensitive.
   rows.sort(key=lambda r: (r["type"] != "directory", r["name"].lower()))
   page = rows[offset:offset + limit]
+  if counts:
+    # Opt-in: badge each directory on THIS page with its immediate-child
+    # count. Bounded to the page's dirs (never the whole listing), so the cost
+    # is one bounded scandir per paginated directory; a dir that errors on
+    # scandir simply gets no child_count rather than failing the page.
+    for e in page:
+      if e["type"] == "directory":
+        c = _child_count(resolved / e["name"])
+        if c is not None:
+          e["child_count"] = c
   next_cursor = None
   if len(rows) > offset + limit:
     nxt = str(offset + limit)
@@ -262,6 +431,7 @@ def _looks_binary(file_path: Path) -> bool:
 def fs_read(
   path: str = Query(..., description="path relative to the FS root"),
   meta: int = Query(0, description="1 = return metadata only, no body"),
+  head: int = Query(0, description="1 = peek the top of an oversized text file"),
   _owner: models.Owner = Depends(get_current_owner),
 ):
   """Read a single file.
@@ -269,7 +439,11 @@ def fs_read(
   Text ≤256 KB is returned inline; larger text + binaries stream. Over the
   5 MB cap → 413. `?meta=1` returns size/mime/is_binary/writable without the
   body so the UI can avoid auto-loading a big log or a binary, and know
-  whether to offer editing."""
+  whether to offer editing. `?head=1` on a text file over the cap returns the
+  first 256 KB (utf-8, errors replaced) as text with `X-Mobius-Truncated: 1`
+  and `X-Mobius-Total-Size` headers, so the UI can peek the top of a big log
+  instead of refusing it; on a file within the cap `head` changes nothing, and
+  a binary over the cap still 413s (no partial binary)."""
   root = _fs_root()
   resolved = _resolve(path, root)
   if _is_denied(resolved, root):
@@ -288,6 +462,20 @@ def fs_read(
             ).isoformat().replace("+00:00", "Z")}
 
   if size > _READ_MAX:
+    if head and not is_binary:
+      # Peek the top of an oversized text file rather than refusing it, so the
+      # UI can show the first page of a big log. Only the inline cap is read;
+      # binaries never take this path (a partial binary is meaningless).
+      try:
+        with open(resolved, "rb") as f:
+          chunk = f.read(_INLINE_READ_MAX)
+      except OSError:
+        raise HTTPException(status_code=404, detail="Not a file.")
+      text = chunk.decode("utf-8", errors="replace")
+      return PlainTextResponse(text, headers={
+        "X-Mobius-Truncated": "1",
+        "X-Mobius-Total-Size": str(size),
+      })
     raise HTTPException(
       status_code=413,
       detail=f"File too large to preview ({size // 1024} KB > "
