@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -296,13 +297,14 @@ class _ChatEventSink:
     `output_truncated` / `output_full_len` / `output_exit_code` / `tool_use_id`,
     then stashes the FULL text via the writer actor keyed by tool_use_id.
 
-    Two pass-throughs leave the event unchanged:
-      - a small output (<= threshold) — a fetch round-trip costs more than the
-        bytes;
-      - an output with NO tool_use_id — there is nothing to key a stash by, so
-        it keeps the full text inline and rides the LEGACY `?ts=&i=` fetch path
-        against Chat.messages (dual-read migration; near-universal tagging means
-        this is rare).
+    One pass-through leaves the event unchanged: a small output (<= threshold),
+    where a fetch round-trip costs more than the bytes.
+
+    Both SDK runners tag every tool block's id now, so a large tool_output with
+    NO tool_use_id is unexpected. Rather than keep the full text inline (the
+    retired dual-read `?ts=&i=` fallback), mint a stash id, log loudly, and still
+    reduce+stash under it — the smallest behavior that can't silently ship a fat
+    block with no fetchable full text.
 
     The stash is submitted UNCONDITIONALLY — never gated on `_steering` (unlike
     the transcript save in `publish`) — so a tool that completes during a steer
@@ -311,13 +313,20 @@ class _ChatEventSink:
     if (not isinstance(content, str)
         or len(content) <= TOOL_OUTPUT_INLINE_THRESHOLD):
       return
-    tool_use_id = event.get("tool_use_id")
-    # No id or no chat = nothing to key a stash by. Do NOT reduce in that case:
-    # rewriting the wire event to an excerpt without a matching stash would
-    # strand the full text (the block would 404 the fetch). Leaving it inline
-    # keeps the legacy `?ts=&i=` path working (dual-read migration).
-    if not tool_use_id or not self.chat_id:
+    if not self.chat_id:
+      # No chat to key a stash by (a detached/synthetic sink — chat_id is always
+      # set on the live path). Can't move the text off-wire safely, so leave it.
       return
+    tool_use_id = event.get("tool_use_id")
+    if not tool_use_id:
+      # Unexpected post-card-221: mint a stash id and stamp it on the event so
+      # the block fetches the full text by id via /tool-output/{tool_use_id}.
+      tool_use_id = f"synth-{uuid.uuid4().hex}"
+      event["tool_use_id"] = tool_use_id
+      _get_logger().warning(
+        "large tool_output arrived with no tool_use_id chat_id=%s; "
+        "minted stash id %s", self.chat_id, tool_use_id,
+      )
     full = content
     excerpt, full_len, exit_code = excerpt_tool_output(full)
     event["content"] = excerpt

@@ -20,7 +20,6 @@ from app.events import (
     TOOL_OUTPUT_INLINE_THRESHOLD,
     excerpt_tool_output,
 )
-from app.routes.chats import _truncate_large_tool_outputs
 from scripts import migrate_chat_identity
 
 
@@ -60,22 +59,21 @@ def _migrate(chat_id, dry_run=False, timeout=5):
 
 
 # -- B2: cid backfill (pure planner) --------------------------------------
-def test_backfill_cid_is_byte_identical_to_cid_of():
+def test_backfill_cid_is_legacy_ts():
     row = {"role": "user", "content": "hi", "ts": 5}
     plan = plan_chat_migration([row], [])
     migrated = plan.new_messages[0]
     assert migrated["cid"] == "legacy-5"
-    # The stored cid MUST equal what cid_of derives, so a warm client (cidOf)
-    # and the migrated row agree on identity.
+    # The migrated row now carries an explicit cid, so cid_of reads it back
+    # directly (no read-time derivation from ts).
     assert cid_of(migrated) == "legacy-5"
-    assert cid_of({"role": "user", "ts": 5}) == migrated["cid"]
     assert plan.backfilled == 1
     assert plan.changed is True
 
 
 def test_backfill_ts_zero_is_legacy_zero():
-    # ts is demoted display metadata; ts==0 is valid and must derive legacy-0
-    # (cid_of guards on `ts is not None`, not truthiness).
+    # ts is demoted display metadata; ts==0 is valid and the planner must
+    # backfill legacy-0 (it guards on `ts is not None`, not truthiness).
     plan = plan_chat_migration([{"role": "user", "ts": 0}], [])
     assert plan.new_messages[0]["cid"] == "legacy-0"
     assert plan.backfilled == 1
@@ -219,10 +217,10 @@ def test_migrate_writes_backfill_extract_and_round_trips(db):
     assert row is not None
     assert row.output == full
 
-    # The read-side reducer now leaves the migrated block ALONE (already
-    # truncated), so loading the chat serves the excerpt + the by-id fetch path.
-    served = _truncate_large_tool_outputs(reread.messages)
-    assert served[1]["blocks"][0]["output"] == blk["output"]
+    # The read path serves the migrated block as-is: it already carries the
+    # bounded excerpt (< full) and the tool_use_id, so loading the chat ships the
+    # excerpt and the by-id fetch path serves the full text on expand.
+    assert len(blk["output"]) < len(full)
 
 
 def test_migrate_dry_run_reports_without_writing(db):
@@ -376,6 +374,30 @@ def test_migrate_rolls_back_on_verify_failure(db, monkeypatch):
     assert "output_truncated" not in blk
     assert "cid" not in reread.messages[0]
     assert db.query(models.ToolOutput).filter_by(chat_id="cf").count() == 0
+
+
+def test_migrate_defers_on_lock_contention(db, monkeypatch):
+    # C1: a transient SQLite lock during the first write (flush / verify / CAS)
+    # must surface as a RE-RUNNABLE deferral (deferred_locked), not a hard
+    # failure that would exit-1 the migration run — and it must leave NO partial
+    # write behind (the flushed stashes roll back with the aborted transaction).
+    from sqlalchemy.exc import OperationalError
+
+    _make_chat(db, "cl", [{"role": "user", "ts": 1}, _fat_tool_msg(ts=2)])
+    actor = get_writer()
+
+    def locked(_db, _chat_id, _stashes):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(actor, "_verify_round_trip", locked)
+    res = actor.submit(MigrateChat(chat_id="cl")).result(timeout=5)
+    assert res["status"] == "deferred_locked"
+
+    reread = _reread(db, "cl")
+    blk = reread.messages[1]["blocks"][0]
+    assert "output_truncated" not in blk           # block still fat
+    assert "cid" not in reread.messages[0]          # no backfill
+    assert db.query(models.ToolOutput).filter_by(chat_id="cl").count() == 0
 
 
 # -- script orchestration -------------------------------------------------

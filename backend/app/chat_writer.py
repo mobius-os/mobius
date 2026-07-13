@@ -247,9 +247,9 @@ class MigrateChat(_Command):
   - B1: extract each fat inline tool output (`output` > the inline threshold,
     not already reduced, no `tool_use_id`) into the `tool_outputs` side table
     under a minted `legacy-<ts>-<i>` id and rewrite the block to a bounded
-    excerpt via `excerpt_tool_output` — the write-side twin of the read-side
-    `_truncate_large_tool_outputs`, so the legacy dual-read shims can be
-    deleted once every chat is migrated.
+    excerpt via `excerpt_tool_output` — the write-side twin of the live funnel's
+    `_reduce_tool_output`, so the legacy dual-read shims could be deleted once
+    every chat was migrated.
 
   CROSS-PROCESS SAFETY: this command is invoked from a standalone migration
   script that starts its OWN writer, so a second writer thread exists while the
@@ -1451,36 +1451,49 @@ class ChatWriterActor:
       # only-unfixable rows). Do NOT write, so updated_at is left untouched.
       return {**base, "status": "noop"}
 
+    from sqlalchemy.exc import OperationalError
+
     # Stash the full text of every extracted block FIRST, then prove each row
     # round-trips through the side table BEFORE the block rewrite is committed.
     # The stash inserts and the blob rewrite share ONE transaction, so a
     # verification failure (or a raced CAS) rolls BOTH back — a block is never
     # left pointing at a stash that isn't there.
-    for tool_use_id, full in plan.stashes:
-      existing = db.query(ToolOutput).filter(
-        ToolOutput.chat_id == cid,
-        ToolOutput.tool_use_id == tool_use_id,
-      ).first()
-      if existing is None:
-        db.add(ToolOutput(chat_id=cid, tool_use_id=tool_use_id, output=full))
-      else:
-        existing.output = full
-    db.flush()
-    self._verify_round_trip(db, cid, plan.stashes)
+    #
+    # The flush + CAS write can hit a transient SQLite lock (another process's
+    # actor commits between our snapshot and our write). Treat that like the
+    # commit-lock case below: roll back (dropping the flushed stashes too) and
+    # report deferred_locked so a re-run migrates the chat, instead of letting
+    # the OperationalError propagate as a hard failure (exit 1). A round-trip
+    # mismatch still raises _PersistFailed — only lock contention is caught here.
+    try:
+      for tool_use_id, full in plan.stashes:
+        existing = db.query(ToolOutput).filter(
+          ToolOutput.chat_id == cid,
+          ToolOutput.tool_use_id == tool_use_id,
+        ).first()
+        if existing is None:
+          db.add(ToolOutput(chat_id=cid, tool_use_id=tool_use_id, output=full))
+        else:
+          existing.output = full
+      db.flush()
+      self._verify_round_trip(db, cid, plan.stashes)
 
-    # Optimistic CAS: commit the rewritten blobs only while the chat is still
-    # idle AND unchanged since the snapshot. A concurrent live turn (another
-    # process's actor) sets run_status and/or bumps updated_at, matching 0 rows
-    # here — we roll back (dropping the flushed stashes too) and defer the chat.
-    result = db.execute(
-      update(Chat)
-      .where(
-        Chat.id == cid,
-        Chat.run_status.is_(None),
-        Chat.updated_at == snap_updated_at,
+      # Optimistic CAS: commit the rewritten blobs only while the chat is still
+      # idle AND unchanged since the snapshot. A concurrent live turn (another
+      # process's actor) sets run_status and/or bumps updated_at, matching 0 rows
+      # here — we roll back (dropping the flushed stashes too) and defer the chat.
+      result = db.execute(
+        update(Chat)
+        .where(
+          Chat.id == cid,
+          Chat.run_status.is_(None),
+          Chat.updated_at == snap_updated_at,
+        )
+        .values(messages=plan.new_messages, pending_messages=plan.new_pending)
       )
-      .values(messages=plan.new_messages, pending_messages=plan.new_pending)
-    )
+    except OperationalError:
+      db.rollback()
+      return {**base, "status": "deferred_locked"}
     if result.rowcount != 1:
       db.rollback()
       return {**base, "status": "skipped_active"}
@@ -1617,11 +1630,9 @@ class ChatWriterActor:
     # appending a twin. The answer merge above still ran (harmless if already
     # applied). cid is never an auth boundary — this only de-dups retries.
     #
-    # Gate on an EXPLICIT client cid, not the legacy-<ts> derivation: two
-    # distinct pre-cid sends can share an optimistic ts (Date.now() collision),
-    # and their derived ids would collide — deduping them would drop a real
-    # message. A legacy client's retries can't be deduped by cid anyway (it
-    # sends none), so this only ever fires for a genuine cid-carrying retry.
+    # Gate on a present cid: a client that sends none can't be deduped this way
+    # (and two of its distinct sends could share an optimistic ts), so this only
+    # ever fires for a genuine cid-carrying retry.
     incoming_cid = new_msg.get("cid")
     if incoming_cid is not None:
       for existing in pending:
@@ -1878,8 +1889,8 @@ class ChatWriterActor:
     """Remove the queued message whose `cid` matches; return the remainder.
 
     Replicates the `DELETE /pending/{cid}` route: stamps `updated_at` and
-    commits only when something was removed. Matching on `cid_of` covers
-    both a client-minted cid and a legacy `legacy-<ts>` derivation.
+    commits only when something was removed. Matches on `cid_of` — the row's
+    explicit cid (client-minted, or a card-221 backfilled `legacy-<ts>`).
     """
     from datetime import UTC, datetime
 
@@ -2243,21 +2254,16 @@ class _PersistFailed(Exception):
 def cid_of(msg: dict) -> str | None:
   """The stable identity of a user message.
 
-  A client-minted `cid` (see schemas.SendMessage.cid) is the canonical
-  identity — React key, DOM pin target, queue cancel key, steer dedup key.
-  A pre-cid (legacy) row derives `legacy-<ts>` at read time so the same
-  value is produced on both sides of every comparison (the frontend read
-  normalizer and this backend echo / selection). `ts` is unique within a
-  chat, so the derived id is stable and collision-free for the life of the
-  row. Returns None for a row with neither cid nor ts.
+  A `cid` is the canonical identity — React key, DOM pin target, queue cancel
+  key, steer dedup key. Current clients mint it (see schemas.SendMessage.cid);
+  card-221 backfilled `cid=legacy-<ts>` onto every legacy user row, so post-
+  migration every user row carries an explicit cid and no read-time derivation
+  is needed. `ts` is display/ordering metadata only. Returns None for a row
+  with no cid.
   """
   if not isinstance(msg, dict):
     return None
-  cid = msg.get("cid")
-  if cid:
-    return cid
-  ts = msg.get("ts")
-  return f"legacy-{ts}" if ts is not None else None
+  return msg.get("cid") or None
 
 
 @dataclass
@@ -2344,12 +2350,11 @@ def _extract_tool_outputs(
   A block qualifies when its `output` is a string over
   `TOOL_OUTPUT_INLINE_THRESHOLD`, it is NOT already reduced
   (`output_truncated`), and it carries NO `tool_use_id` (a tagged block was
-  already stashed by the live funnel). The rewrite mirrors the read-side
-  `_truncate_large_tool_outputs` / the live `_reduce_tool_output` exactly —
-  bounded excerpt via `excerpt_tool_output`, plus `output_truncated`,
-  `output_full_len`, `output_exit_code` (only when non-None), and the minted
-  `tool_use_id` (this is what makes the block fetch via the by-id endpoint
-  instead of the legacy `?ts=&i=` path). Returns
+  already stashed by the live funnel). The rewrite mirrors the live funnel's
+  `_reduce_tool_output` exactly — bounded excerpt via `excerpt_tool_output`,
+  plus `output_truncated`, `output_full_len`, `output_exit_code` (only when
+  non-None), and the minted `tool_use_id` (this is what makes the block fetch
+  its full text via the by-id endpoint). Returns
   `(extracted, bytes_moved, stashes)`.
   """
   extracted = 0
@@ -2508,11 +2513,11 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
-    # Materialize the identity BEFORE the ts bump. A legacy (cid-less) row's
-    # derived identity is legacy-<ts>; if _ensure_unique_ts bumps the ts first,
-    # the stored row would derive a DIFFERENT legacy cid than the one the
-    # consume/steer paths recorded from the queue snapshot, and cid-keyed
-    # dedup would let the same message persist twice.
+    # Stamp the row's explicit cid onto the stored row. Post-card-221 every
+    # pending row carries a cid, so this is the identity as-is — stable across
+    # the `_ensure_unique_ts` bump below (cid never rides on ts), which keeps the
+    # stored row's identity byte-identical to the one the consume/steer paths
+    # recorded from the queue snapshot so cid-keyed dedup stays exact.
     msg["cid"] = cid_of(msg)
     _ensure_unique_ts(msg, used)
     used.append(msg)
