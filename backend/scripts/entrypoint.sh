@@ -580,15 +580,19 @@ if [ "$_use_platform" -eq 1 ]; then
   # `|| true` guards the shell, so a reconcile failure never bricks boot; a
   # conflict/rollback leaves the pre-reconcile code on disk (aborted/reset) and
   # sets a flag Settings surfaces. The outer `timeout` is a last-resort bound set
-  # ABOVE the sum of the reconcile's own per-op timeouts (fetch 120 + unshallow
-  # 120 + probe 60 = 300) so an internal timeout always fires FIRST — a clean
-  # offline/rollback return — and the outer never fires during the fast local
-  # rebase/reset mutation (which would otherwise leave a half-applied tree this
-  # boot then serves). recoveryd remains the outer floor.
+  # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + rebase
+  # 120 + probe 60 = 420, plus commit_local's own bounded git calls. Keep this
+  # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
+  # below still cleans the tree if the outer kill ever wins. recoveryd remains
+  # the outer floor.
   echo "Platform layer: reconciling /data/platform with origin (slice B deploy=rebase)..." >&2
   su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub timeout 450 python3 -c \
+    "cd /data/platform/backend && $_env_scrub timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
+    2>&1 || true
+  su -s /bin/sh mobius -c \
+    "cd /data/platform/backend && $_env_scrub python3 -c \
+     'from app import platform_update; print(platform_update.boot_guard_sync())'" \
     2>&1 || true
   # A fast-forward / rebase advanced main, so the served sha the /api/version and
   # /api/debug/serving routes report (written to /tmp/serving-sha above) must
@@ -897,6 +901,7 @@ platform.crashloop-prev.*
 .platform-apply-in-progress
 .platform-restart-requested
 .platform-rolled-back
+.platform-reconcile-pre
 .platform-reconcile.lock
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
