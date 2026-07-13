@@ -106,6 +106,7 @@ function MsgContentInner({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
+  submissionBlocked = false,
   // isLastMsg + liveQuestionId are primitive props so memo can do a stable
   // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
   // fresh function reference every render and defeat it.
@@ -279,7 +280,7 @@ function MsgContentInner({
                   id={autoResumeSwitchId}
                   checked={!!autoResumeEnabled}
                   onCheckedChange={onAutoResumeChange}
-                  disabled={!!autoResumeSaving}
+                  disabled={!!autoResumeSaving || submissionBlocked}
                 />
                 {autoResumeError && (
                   <span className="chat__limit-option-error" role="alert">
@@ -293,6 +294,10 @@ function MsgContentInner({
                 type="button"
                 className="chat__resume"
                 onClick={() => onResume('continue')}
+                disabled={submissionBlocked}
+                title={submissionBlocked
+                  ? 'Wait for the provider switch to finish.'
+                  : undefined}
               >
                 {parked ? 'Resume now' : 'Resume'}
               </button>
@@ -392,6 +397,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.autoResumeSaving === next.autoResumeSaving
     && prev.autoResumeError === next.autoResumeError
     && prev.onAutoResumeChange === next.onAutoResumeChange
+    && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
     && prev.isActiveAnswer === next.isActiveAnswer

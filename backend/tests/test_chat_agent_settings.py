@@ -309,6 +309,35 @@ def test_patch_chat_provider_rejects_unknown_value(client, auth, chat, db):
   assert owner.provider == "claude"  # untouched
 
 
+def test_first_live_turn_cannot_switch_provider_via_patch(
+  client, auth, chat, db,
+):
+  """The provider is immutable once the first run has claimed the chat."""
+  from app import models
+
+  chat.messages = [{"role": "user", "content": "first request"}]
+  chat.run_status = "running"
+  db.add(models.ChatRun(
+    id="first-live-turn",
+    chat_id=chat.id,
+    status="running",
+    provider="claude",
+  ))
+  db.commit()
+
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={
+      "provider": "codex",
+      "agent_settings_json": {"model": "gpt-5.4"},
+    },
+  )
+  assert response.status_code == 409
+  db.refresh(chat)
+  assert chat.provider == "claude"
+
+
 def test_chat_patch_provider_validator_rejects_unknown():
   """ChatPatch rejects unknown provider IDs."""
   try:

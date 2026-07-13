@@ -85,10 +85,16 @@ import {
 import EffortStepper from '../ui/EffortStepper.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import {
+  beginProviderSwitch,
+  clearProviderSwitch,
+  completeProviderSwitch,
   createProviderSwitchId,
+  failProviderSwitch,
+  isProviderSwitchBlocking,
   providerSwitchPayload,
   providerSwitchResponseData,
   restorableProviderSwitch,
+  stageProviderSwitch,
 } from './providerSwitch.js'
 import './ChatSettingsPanel.css'
 
@@ -243,26 +249,13 @@ export default function ChatSettingsPanel({
   // action so the soft keyboard stays in its previous state
   // (up if it was up, down if it was down).
   wasInputFocusedRef,
-  // Called after a successful compaction so the parent can refresh
-  // the transcript and show the persisted compaction tool block.
-  onCompactionStored,
-  // Both refs/callbacks live above this conditionally-mounted panel.
-  // The request ref preserves the idempotency key across popover close/reopen;
-  // the callback blocks sends for the full synthesis window.
-  providerSwitchRequestRef,
-  onSwitchingChange,
-  externalSwitching = false,
+  // Per-chat external state survives the popover and ChatView itself. This is
+  // what keeps navigation away/back from unlocking a live handoff or losing
+  // its retry id and error feedback.
+  providerSwitchState,
 }) {
   const [saving, setSaving] = useState(false)
-  const [compacting, setCompacting] = useState(false)
-  const [pendingSwitch, setPendingSwitch] = useState(() => (
-    restorableProviderSwitch(
-      providerSwitchRequestRef?.current,
-      chatId,
-      provider || 'claude',
-    )
-  ))
-  const [error, setError] = useState('')
+  const [localError, setLocalError] = useState('')
   const [connectedProviders, setConnectedProviders] = useState(null)
   const fallbackReqId = useRef(0)
   const latestReqId = reqIdRef || fallbackReqId
@@ -270,6 +263,13 @@ export default function ChatSettingsPanel({
   // Synchronous double-click guard: disabled={compacting || saving}
   // only takes effect after React re-renders.
   const providerSwitchInFlightRef = useRef(false)
+  const pendingSwitch = restorableProviderSwitch(
+    providerSwitchState?.request,
+    chatId,
+    provider || 'claude',
+  )
+  const compacting = providerSwitchState?.status === 'switching'
+  const error = providerSwitchState?.error || localError
 
   // Live model registry + owner prefs. Both ride 5-minute caches so
   // a popover open doesn't refetch. The deferred-render guard below
@@ -321,16 +321,22 @@ export default function ChatSettingsPanel({
     const sourceProvider = provider || 'claude'
     setDraftProvider(sourceProvider)
     const restored = restorableProviderSwitch(
-      providerSwitchRequestRef?.current,
-      chatId,
-      sourceProvider,
+      providerSwitchState?.request, chatId, sourceProvider,
     )
-    setPendingSwitch(restored)
-    if (!restored && providerSwitchRequestRef) {
-      providerSwitchRequestRef.current = null
+    if (
+      providerSwitchState?.request
+      && !restored
+      && providerSwitchState?.status !== 'success'
+    ) {
+      clearProviderSwitch(chatId)
     }
     pendingSwitchPreviousRef.current = null
-  }, [provider, chatId, providerSwitchRequestRef])
+  }, [
+    provider,
+    chatId,
+    providerSwitchState?.request,
+    providerSwitchState?.status,
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -352,7 +358,7 @@ export default function ChatSettingsPanel({
     if (!chatId) return 'fail'
     const reqId = ++latestReqId.current
     setSaving(true)
-    setError('')
+    setLocalError('')
     try {
       const res = await apiFetch(`/chats/${chatId}`, {
         method: 'PATCH',
@@ -360,7 +366,7 @@ export default function ChatSettingsPanel({
       })
       if (reqId !== latestReqId.current) return 'stale'
       if (!res.ok) {
-        setError('Could not save. Try again.')
+        setLocalError('Could not save. Try again.')
         return 'fail'
       }
       const data = await res.json()
@@ -372,7 +378,7 @@ export default function ChatSettingsPanel({
       return 'ok'
     } catch {
       if (reqId !== latestReqId.current) return 'stale'
-      setError('Network error.')
+      setLocalError('Network error.')
       return 'fail'
     } finally {
       if (reqId === latestReqId.current) setSaving(false)
@@ -387,11 +393,18 @@ export default function ChatSettingsPanel({
     switchId,
   }) => {
     if (!chatId) return false
-    setCompacting(true)
-    onSwitchingChange?.(true)
-    setError('')
+    const request = pendingSwitch || {
+      chatId,
+      sourceProvider: provider || 'claude',
+      model,
+      provider: nextProvider,
+      efforts: modelEfforts(PROVIDER_INFO[nextProvider].efforts, { id: model }),
+      switchId,
+    }
+    beginProviderSwitch(chatId, request)
+    setLocalError('')
     try {
-      const res = await apiFetch(`/chats/${chatId}/compact`, {
+      const res = await apiFetch(`/chats/${chatId}/provider-switch`, {
         method: 'POST',
         body: JSON.stringify(providerSwitchPayload({
           provider: nextProvider,
@@ -404,33 +417,36 @@ export default function ChatSettingsPanel({
       if (!res.ok) {
         let detail = ''
         try { detail = (await res.json()).detail || '' } catch {}
-        setError(detail || 'Could not prepare this chat for the new provider.')
+        failProviderSwitch(
+          chatId,
+          request,
+          detail || 'Could not prepare this chat for the new provider.',
+        )
         return false
       }
-      const data = await providerSwitchResponseData(res)
+      const data = await providerSwitchResponseData(res, {
+        provider: nextProvider,
+        switchId,
+      })
       if (!data) {
-        setError(
+        failProviderSwitch(
+          chatId,
+          request,
           'The switch response was interrupted. Retry to confirm its state.',
         )
         return false
       }
-      onChange?.({
-        agent_settings_json: data.agent_settings_json,
-        provider: data.provider,
-        effective: data.effective,
-      })
-      if (onCompactionStored) {
-        try { await onCompactionStored(data) } catch {}
-      }
+      completeProviderSwitch(chatId, request, data)
       return true
     } catch {
-      setError('Network error while preparing the provider switch.')
+      failProviderSwitch(
+        chatId,
+        request,
+        'Network error while preparing the provider switch.',
+      )
       return false
-    } finally {
-      setCompacting(false)
-      onSwitchingChange?.(false)
     }
-  }, [chatId, onChange, onCompactionStored, onSwitchingChange])
+  }, [chatId, pendingSwitch, provider])
 
   // Conditional refocus — only restores textarea focus if it was
   // ALREADY focused when the popover opened. Without this guard,
@@ -462,7 +478,10 @@ export default function ChatSettingsPanel({
   const switchProviderModel = useCallback(async (
     value, providerValue, allowedEfforts, switchId = createProviderSwitchId(),
   ) => {
-    if (providerSwitchInFlightRef.current) return false
+    if (
+      providerSwitchInFlightRef.current
+      || isProviderSwitchBlocking(chatId)
+    ) return false
     providerSwitchInFlightRef.current = true
     try {
       // Cross-provider switch: restore this provider's last-known
@@ -528,7 +547,7 @@ export default function ChatSettingsPanel({
             effort: draftEffort,
           }
         }
-        setError('')
+        setLocalError('')
         const request = {
           chatId,
           sourceProvider: provider || 'claude',
@@ -537,17 +556,13 @@ export default function ChatSettingsPanel({
           efforts: allowedEfforts,
           switchId: createProviderSwitchId(),
         }
-        if (providerSwitchRequestRef) {
-          providerSwitchRequestRef.current = request
-        }
-        setPendingSwitch(request)
+        stageProviderSwitch(chatId, request)
         return
       }
       await switchProviderModel(value, providerValue, allowedEfforts)
       return
     }
-    setPendingSwitch(null)
-    if (providerSwitchRequestRef) providerSwitchRequestRef.current = null
+    clearProviderSwitch(chatId)
     // A same-provider pick abandons any pending cross-provider switch — clear the
     // captured prior selection too, so a later Cancel reverts to THIS choice, not
     // a stale earlier one (#7 ensemble finding).
@@ -584,7 +599,6 @@ export default function ChatSettingsPanel({
     chatId,
     patchChat,
     provider,
-    providerSwitchRequestRef,
     refocusChatInput,
     switchProviderModel,
   ])
@@ -592,7 +606,7 @@ export default function ChatSettingsPanel({
   const handleConfirmProviderSwitch = useCallback(async () => {
     if (
       !pendingSwitch
-      || externalSwitching
+      || compacting
       || providerSwitchInFlightRef.current
     ) return
     refocusChatInput()
@@ -603,14 +617,11 @@ export default function ChatSettingsPanel({
       pendingSwitch.switchId,
     )
     if (ok) {
-      if (providerSwitchRequestRef) providerSwitchRequestRef.current = null
       pendingSwitchPreviousRef.current = null
-      setPendingSwitch(null)
     }
   }, [
     pendingSwitch,
-    externalSwitching,
-    providerSwitchRequestRef,
+    compacting,
     refocusChatInput,
     switchProviderModel,
   ])
@@ -622,14 +633,13 @@ export default function ChatSettingsPanel({
       setDraftModel(previous.model)
       setDraftEffort(previous.effort)
     }
-    if (providerSwitchRequestRef) providerSwitchRequestRef.current = null
+    clearProviderSwitch(chatId)
     pendingSwitchPreviousRef.current = null
-    setPendingSwitch(null)
     refocusChatInput()
-  }, [providerSwitchRequestRef, refocusChatInput])
+  }, [chatId, refocusChatInput])
 
   const isCodex = draftProvider === 'codex'
-  const switchBusy = compacting || externalSwitching
+  const switchBusy = compacting
   const codexSwitchWarning = (
     isCodex && hasAssistantTurns
     && effective?.model && draftModel
@@ -643,6 +653,7 @@ export default function ChatSettingsPanel({
   const autoResumeSwitchId = chatId
     ? `chat-settings-auto-resume-${chatId}`
     : undefined
+  const appProviderLocked = chat?.created_by_app_id != null
 
   // Build the per-provider displayed-models list once per render.
   // Falls back to the bundled CLAUDE_MODELS / CODEX_MODELS until the
@@ -704,6 +715,10 @@ export default function ChatSettingsPanel({
           return null
         }
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
+        const appCrossProvider = (
+          appProviderLocked
+          && pid !== (provider || 'claude')
+        )
         const models = displayedByProvider[pid] || []
         return models.map(m => {
           const rowEfforts = modelEfforts(info.efforts, m)
@@ -715,9 +730,14 @@ export default function ChatSettingsPanel({
                 type="button"
                 className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
                 onPointerDown={preserveFocusUnlessTouch}
-                onClick={() => handlePickModel(m.id, pid, rowEfforts)}
-                disabled={saving || switchBusy}
-                title={isCrossProvider ? 'Prepare this chat and switch providers' : undefined}
+                onClick={() => {
+                  if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
+                }}
+                disabled={saving || switchBusy || appCrossProvider}
+                aria-pressed={isSelected}
+                title={appCrossProvider
+                  ? 'App chats keep their original provider. Create a new app chat to use this provider.'
+                  : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
               >
                 <span className="csp-row__icon"><info.Logo /></span>
                 <span className="csp-row__main">
@@ -803,8 +823,14 @@ export default function ChatSettingsPanel({
           )}
         </div>
       )}
-      {(codexSwitchWarning || switchBusy || error) && (
+      {(appProviderLocked || codexSwitchWarning || switchBusy || error) && (
         <div className="csp__foot" aria-live="polite">
+          {appProviderLocked && (
+            <p className="csp__note">
+              App chats keep their original provider. Create a new app chat
+              to use another provider.
+            </p>
+          )}
           {switchBusy && (
             <p className="csp__note">
               Preparing this chat for {PROVIDER_INFO[pendingSwitch?.provider]?.label || 'the new provider'}…

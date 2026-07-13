@@ -1,4 +1,11 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import {
+  useState,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useSyncExternalStore,
+} from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
@@ -33,6 +40,12 @@ import {
   advanceChatRunSignal,
   chatRunSignalDelta,
 } from '../../lib/chatRunSignal.js'
+import {
+  clearProviderSwitch,
+  getProviderSwitchState,
+  isProviderSwitchBlocking,
+  subscribeProviderSwitch,
+} from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
@@ -417,16 +430,23 @@ export default function ChatView({
   const autoResumeSavingRef = useRef(false)
   const autoResumeRequestRef = useRef(0)
   const armedEmbeddedResetRef = useRef(null)
-  // A cross-provider handoff owns the chat transition until synthesis and the
-  // atomic commit finish. Keep a synchronous ref beside render state so a send
-  // click in the same frame cannot slip through before disabled props paint.
-  const [providerSwitching, setProviderSwitching] = useState(false)
-  const providerSwitchingRef = useRef(false)
-  const handleProviderSwitchingChange = useCallback((value) => {
-    const switching = !!value
-    providerSwitchingRef.current = switching
-    setProviderSwitching(switching)
-  }, [])
+  // This external per-chat state survives ChatView's keyed unmount/remount.
+  // Send handlers also read the store directly, closing the same-frame gap
+  // before React paints disabled controls.
+  const subscribeToProviderSwitch = useCallback(
+    listener => subscribeProviderSwitch(chatId, listener),
+    [chatId],
+  )
+  const readProviderSwitch = useCallback(
+    () => getProviderSwitchState(chatId),
+    [chatId],
+  )
+  const providerSwitchState = useSyncExternalStore(
+    subscribeToProviderSwitch,
+    readProviderSwitch,
+    readProviderSwitch,
+  )
+  const providerSwitching = providerSwitchState.status === 'switching'
   // The question_id of the AskUserQuestion the runner is currently parked
   // on, set from the live SSE `question` event (onLiveQuestion). It is a
   // FAST-PATH HINT only, never the sole gate: the backend does not persist
@@ -959,6 +979,27 @@ export default function ChatView({
     () => fetchMessages({ force: true }),
     [fetchMessages],
   )
+
+  useEffect(() => {
+    if (
+      providerSwitchState.status !== 'success'
+      || !providerSwitchState.result
+    ) return
+    const data = providerSwitchState.result
+    setChatInfo(prev => prev ? ({
+      ...prev,
+      agent_settings_json: data.agent_settings_json,
+      provider: data.provider || prev.provider,
+      effective: data.effective || prev.effective,
+    }) : prev)
+    handleCompactionStored()
+    clearProviderSwitch(chatId)
+  }, [
+    chatId,
+    handleCompactionStored,
+    providerSwitchState.result,
+    providerSwitchState.status,
+  ])
 
   const {
     streamItems,
@@ -1518,6 +1559,7 @@ export default function ChatView({
         // regardless of the messages fast-path.
         setChatInfo({
           provider: data.provider || 'claude',
+          created_by_app_id: data.created_by_app_id ?? null,
           agent_settings_json: data.agent_settings_json || null,
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
@@ -1705,7 +1747,7 @@ export default function ChatView({
   //     pushed above the viewport. Keep their current scroll mode
   //     instead — the new turn streams into view from where they were.
   const doSend = useCallback(async (text, opts = {}) => {
-    if (providerSwitchingRef.current) return
+    if (isProviderSwitchBlocking(chatId)) return
     const pin = opts.pin !== false  // default true
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
@@ -2138,6 +2180,7 @@ export default function ChatView({
     // re-creating doSend on every stream tick (and avoids the
     // stale-closure trap for callers like handleStop).
   }, [
+    chatId,
     streamSend,
     pendingFiles,
     commitMessages,
@@ -2277,7 +2320,7 @@ export default function ChatView({
 
   function handleSubmit(e) {
     e.preventDefault()
-    if (providerSwitchingRef.current) return
+    if (isProviderSwitchBlocking(chatId)) return
     doSend(input.trim())
   }
 
@@ -3286,6 +3329,7 @@ export default function ChatView({
                 onAutoResumeChange={
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
+                submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
@@ -3316,6 +3360,7 @@ export default function ChatView({
                 autoResumeErrorSource === 'card' ? autoResumeError : ''
               }
               onAutoResumeChange={handleAutoResumeChange}
+              submissionBlocked={providerSwitching}
               liveQuestionId={liveQuestionId}
               isStreaming={activeAssistantIsStreaming}
             />
@@ -3464,9 +3509,7 @@ export default function ChatView({
                     effective: effective || prev.effective,
                   }) : prev)
                 }}
-                onCompactionStored={handleCompactionStored}
-                onProviderSwitchingChange={handleProviderSwitchingChange}
-                providerSwitching={providerSwitching}
+                providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
               />
             </>

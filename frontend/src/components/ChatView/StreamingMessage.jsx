@@ -19,6 +19,7 @@ export default function StreamingMessage({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
+  submissionBlocked,
   liveQuestionId,
   isStreaming,
 }) {
@@ -37,6 +38,7 @@ export default function StreamingMessage({
         autoResumeSaving={autoResumeSaving}
         autoResumeError={autoResumeError}
         onAutoResumeChange={onAutoResumeChange}
+        submissionBlocked={submissionBlocked}
         isLastMsg
         liveQuestionId={liveQuestionId}
         isActiveAnswer

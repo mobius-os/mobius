@@ -1755,111 +1755,119 @@ async def _auto_resume_chat(
   """
   from app.database import SessionLocal
 
+  # ``provider_id`` is retained in the private signature for compatibility
+  # with tests/extensions from the first auto-resume release.  Never trust
+  # that sweep-time snapshot: a provider handoff may have committed while the
+  # sweep was preparing this retry, so the authoritative provider is re-read
+  # under the same transition gate used by sends and provider switches.
+  del provider_id
   claimed = False
   try:
-    # Share the queue lock with owner/app sends. This makes the final policy +
-    # attribution check atomic with the _starting handoff: app-attributed work
-    # that arrived while the sweep awaited its durable prepare can never be
-    # swept into the synthetic owner continuation.
+    # Lock order matches owner sends: provider transition, then queue.  The
+    # park status + provider re-read therefore cannot race an atomic handoff.
     async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
-      async with chat_queue.get_lock(chat_id):
-        # The outer sweep check can go stale while this task waits for the
-        # per-chat lock. Re-check GLOBAL liveness at the actual claim point.
-        # There is no await between this read and mark_starting below, making
-        # the global-idle check + per-chat claim atomic on the event loop.
-        if _any_chat_turn_active():
-          return False
-        with SessionLocal() as check_db:
-          chat = check_db.query(models.Chat).filter(
-            models.Chat.id == chat_id,
-          ).first()
-          pending = list(chat.pending_messages or []) if chat is not None else []
-          park = check_db.query(models.ChatRun).filter(
-            models.ChatRun.id == park_token,
-            models.ChatRun.chat_id == chat_id,
-          ).first()
-          latest = (
-            check_db.query(models.ChatRun.id)
-            .filter(models.ChatRun.chat_id == chat_id)
-            .order_by(
-              models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
-            )
-            .first()
-          )
-          latest_id = latest[0] if latest is not None else None
-          if (
-            chat is None
-            or chat.deleted_at is not None
-            or not chat.auto_resume_on_limit
-            or park is None
-            or park.status != "resume_pending"
-            or latest_id != park.id
-            or any(
-              isinstance(msg, dict)
-              and msg.get("_initiated_by_app_id") is not None
-              for msg in pending
-            )
-          ):
+      async with chat_queue.get_transition_lock(chat_id):
+        # Share the queue lock with owner/app sends. The outer sweep check can
+        # go stale while this task waits, so re-check global liveness, policy,
+        # attribution, the exact latest park, and provider ownership at the
+        # actual claim point.
+        async with chat_queue.get_lock(chat_id):
+          if _any_chat_turn_active():
             return False
-        if not mark_starting(chat_id):
-          return False
-        claimed = True
-        ack = get_writer().submit(
-          AppendPending(
-            chat_id=chat_id,
-            run_token="",
-            user_msg={
-              "role": "user",
-              "content": "continue",
-              "ts": int(time.time() * 1000),
-              # A retry after AppendPending succeeded but a later step failed
-              # must not enqueue a second synthetic continuation.
-              "cid": f"limit-resume-{park_token or chat_id}",
-            },
-          )
-        )
-        await _await_ack(ack)
-        drain_token = alloc_run_token()
-        next_messages, next_user, next_session_id = (
-          await chat_queue.promote_pending_messages_locked(
-            None, chat_id, drain_token,
-          )
-        )
-        if not next_user:
-          discard_starting(chat_id)
-          claimed = False
-          return False
-        get_system_broadcast().publish({
-          "type": "chat_run_started",
-          "chatId": chat_id,
-        })
-        scheduled = _schedule_continuation(
-          chat_id=chat_id,
-          messages=next_messages,
-          session_id=next_session_id,
-          provider_id=provider_id,
-          next_user=next_user,
-          run_token=drain_token,
-        )
-        if scheduled is False:
-          # PromotePending committed before task creation. Reverse only this
-          # exact speculative handoff while the queue lock is still held, so
-          # the original park and preserved queue remain retryable.
-          rolled_back = await _await_ack(get_writer().submit(
-            RollbackAutoResume(
-              chat_id=chat_id,
-              run_token=park_token or "",
-              promoted_run_token=drain_token,
-              promoted_pending=list(
-                next_user.get("_promoted_pending") or []
-              ),
+          with SessionLocal() as check_db:
+            chat = check_db.query(models.Chat).filter(
+              models.Chat.id == chat_id,
+            ).first()
+            pending = (
+              list(chat.pending_messages or []) if chat is not None else []
             )
-          ))
-          if rolled_back:
-            forget_chat(chat_id)
-          claimed = False
-          return False
-        return True
+            park = check_db.query(models.ChatRun).filter(
+              models.ChatRun.id == park_token,
+              models.ChatRun.chat_id == chat_id,
+            ).first()
+            latest = (
+              check_db.query(models.ChatRun.id)
+              .filter(models.ChatRun.chat_id == chat_id)
+              .order_by(
+                models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+              )
+              .first()
+            )
+            latest_id = latest[0] if latest is not None else None
+            if (
+              chat is None
+              or chat.deleted_at is not None
+              or not chat.auto_resume_on_limit
+              or park is None
+              or park.status != "resume_pending"
+              or latest_id != park.id
+              or any(
+                isinstance(msg, dict)
+                and msg.get("_initiated_by_app_id") is not None
+                for msg in pending
+              )
+            ):
+              return False
+            current_provider = chat.provider or "claude"
+          if not mark_starting(chat_id):
+            return False
+          claimed = True
+          ack = get_writer().submit(
+            AppendPending(
+              chat_id=chat_id,
+              run_token="",
+              user_msg={
+                "role": "user",
+                "content": "continue",
+                "ts": int(time.time() * 1000),
+                # A retry after AppendPending succeeded but a later step failed
+                # must not enqueue a second synthetic continuation.
+                "cid": f"limit-resume-{park_token or chat_id}",
+              },
+            )
+          )
+          await _await_ack(ack)
+          drain_token = alloc_run_token()
+          next_messages, next_user, next_session_id = (
+            await chat_queue.promote_pending_messages_locked(
+              None, chat_id, drain_token,
+            )
+          )
+          if not next_user:
+            discard_starting(chat_id)
+            claimed = False
+            return False
+          get_system_broadcast().publish({
+            "type": "chat_run_started",
+            "chatId": chat_id,
+          })
+          scheduled = _schedule_continuation(
+            chat_id=chat_id,
+            messages=next_messages,
+            session_id=next_session_id,
+            provider_id=current_provider,
+            next_user=next_user,
+            run_token=drain_token,
+          )
+          if scheduled is False:
+            # PromotePending committed before task creation. Reverse only this
+            # exact speculative handoff while the queue lock is still held, so
+            # the original park and preserved queue remain retryable.
+            rolled_back = await _await_ack(get_writer().submit(
+              RollbackAutoResume(
+                chat_id=chat_id,
+                run_token=park_token or "",
+                promoted_run_token=drain_token,
+                promoted_pending=list(
+                  next_user.get("_promoted_pending") or []
+                ),
+              )
+            ))
+            if rolled_back:
+              forget_chat(chat_id)
+            claimed = False
+            return False
+          return True
   except Exception:
     _get_logger().warning(
       "auto-resume failed chat_id=%s", chat_id, exc_info=True,

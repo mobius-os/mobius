@@ -43,6 +43,7 @@ _SYNTHESIS_TOTAL_TIMEOUT_SECS = 240.0
 # subprocess launch should fail fast rather than blocking the compaction
 # endpoint indefinitely.
 _CONNECT_TIMEOUT_SECS = 30.0
+_DISCONNECT_TIMEOUT_SECS = 10.0
 
 # Overall timeout for the entire summarize receive loop. Prevents an
 # unresponsive Claude CLI from holding the compaction endpoint open until
@@ -354,7 +355,14 @@ async def _run_claude_summarize_turn(
     # Also runs when the overall progressive-synthesis deadline cancels this
     # turn during connect/query, so a disposable CLI session is never leaked.
     try:
-      await client.disconnect()
+      await asyncio.wait_for(
+        client.disconnect(), timeout=_DISCONNECT_TIMEOUT_SECS,
+      )
+    except asyncio.TimeoutError:
+      log.warning(
+        "Claude compaction disconnect timed out after %.0fs",
+        _DISCONNECT_TIMEOUT_SECS,
+      )
     except Exception as exc:
       log.warning("Claude compaction disconnect failed: %s", exc)
   if not terminal_seen:

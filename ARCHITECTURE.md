@@ -540,16 +540,25 @@ Memory app is not installed. Its consumers:
 
 ### Provider switch (compaction handoff)
 
-Sessions are not portable across providers, so switching provider mid-chat
-with an **incoming-provider handoff**: the composer confirms and POSTs the target
-provider, model, effort, and a stable switch id to `/chats/{id}/compact`. The
-incoming provider runs a disposable, tool-free synthesis turn over the complete
+Sessions are not portable across providers, so switching provider mid-chat uses
+an **incoming-provider handoff**: the composer confirms and POSTs the target
+provider, model, effort, and a stable switch id to
+`/chats/{id}/provider-switch`. A successful response is explicitly versioned as
+`provider-switch-v1` and echoes both the switch id and target provider; a generic
+2xx response is not authoritative. The bodyless `/chats/{id}/compact` route
+remains as a rolling-upgrade bridge for older clients that compact and then
+PATCH the provider.
+
+The incoming provider runs a disposable, tool-free synthesis turn over the complete
 running `## Summary` plus the complete current transcript. Large sources are folded
 through bounded progressive synthesis turns so no middle interval is silently
 omitted. The writer actor then stores that portable brief, changes
-provider/settings, and clears the outgoing session in one conditional transaction;
-sends share the same per-chat transition lock, while a Summary or transcript change
-invalidates the commit. The brief is replayed into the incoming provider's first
+provider/settings, clears the outgoing session, and supersedes outgoing
+`parked`/`resume_pending` runs in one conditional transaction; sends, settings
+PATCHes, app-chat PATCHes, and auto-resume share the same per-chat transition lock,
+while a Summary or transcript change invalidates the commit. Provider-switch UI
+state is keyed by chat outside the keyed `ChatView`, so navigation cannot unlock a
+handoff or lose its idempotent retry id. The brief is replayed into the incoming provider's first
 real turn as a `<compacted_chat>` block, so the new agent continues rather than
 starting cold. Same-provider model swaps skip the handoff because their session
 context is preserved.

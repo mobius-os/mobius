@@ -79,9 +79,7 @@ export default function ComposerPopover({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
-  onCompactionStored,
-  onProviderSwitchingChange,
-  providerSwitching = false,
+  providerSwitchState,
   onOpenInspector,
 }) {
   const [open, setOpen] = useState(false)
@@ -92,10 +90,6 @@ export default function ComposerPopover({
   // reset between opens and break the stale-response guard. See
   // ChatSettingsPanel's `reqIdRef` prop for the rationale.
   const reqIdRef = useRef(0)
-  // Stable idempotency request retained while the popover panel unmounts.
-  // It is cleared only on success, explicit cancel, or a chat/provider change,
-  // so an ambiguous network failure retries the exact same switch_id.
-  const providerSwitchRequestRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
   // popover opened. If yes, refocus after a picker action so the
   // soft keyboard stays open. If no (user tapped + with keyboard
@@ -223,10 +217,7 @@ export default function ComposerPopover({
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
-                onCompactionStored={onCompactionStored}
-                onSwitchingChange={onProviderSwitchingChange}
-                externalSwitching={providerSwitching}
-                providerSwitchRequestRef={providerSwitchRequestRef}
+                providerSwitchState={providerSwitchState}
                 reqIdRef={reqIdRef}
                 wasInputFocusedRef={wasInputFocusedRef}
               />

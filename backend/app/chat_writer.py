@@ -413,6 +413,23 @@ class ClearPending(_Command):
 
 
 @dataclass
+class PersistCompaction(_Command):
+  """Append a legacy pre-switch briefing without changing providers.
+
+  Older frontends perform a bodyless ``POST /compact`` followed by a provider
+  ``PATCH``.  Keep that two-step protocol available during rolling upgrades,
+  but tag the marker so only the immediately following, same-source provider
+  PATCH can use it to cross an existing assistant transcript.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  summary: str = ""
+  expected_provider: str = ""
+  source_messages_hash: str = ""
+
+
+@dataclass
 class SwitchProviderWithCompaction(_Command):
   """Atomically append the incoming handoff and change provider/session."""
 
@@ -581,11 +598,11 @@ class _TestPersist(_Command):
 # (chat_id, run_token) is done).  PersistTranscript is the ONLY
 # coalescible command and is deliberately absent.
 #
-# SwitchProviderWithCompaction is also deliberately absent: it is conditional.
-# Fencing at submit time would discard a live turn's pending snapshot before
-# the actor can discover that the switch must return a busy/content conflict.
-# Its idle-state and source-hash checks make a successful commit safe without a
-# pre-emptive fence.
+# The two compaction commands are also deliberately absent: they are
+# conditional. Fencing at submit time would discard a live turn's pending
+# snapshot before the actor can discover that the operation must return a
+# busy/content conflict. Their idle-state and source-hash checks make a
+# successful commit safe without a pre-emptive fence.
 _FENCE_COMMANDS = (
   Finalize,
   PersistError,
@@ -1287,6 +1304,8 @@ class ChatWriterActor:
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
       return self._append_steered_user_message(db, cmd)
+    if isinstance(cmd, PersistCompaction):
+      return self._persist_compaction(db, cmd)
     if isinstance(cmd, SwitchProviderWithCompaction):
       return self._switch_provider_with_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
@@ -1819,7 +1838,13 @@ class ChatWriterActor:
           "agent_settings_json": chat.agent_settings_json,
         }
 
-    if chat.run_status is not None or chat.pending_messages:
+    from app.models import ChatRun
+
+    has_running_row = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status == "running",
+    ).first() is not None
+    if chat.run_status is not None or chat.pending_messages or has_running_row:
       return {"status": "conflict", "reason": "busy"}
     if (chat.provider or "claude") != cmd.expected_provider:
       return {"status": "conflict", "reason": "provider_changed"}
@@ -1869,6 +1894,16 @@ class ChatWriterActor:
     chat.session_id = None
     chat.agent_settings_json = settings or None
     chat.updated_at = datetime.now(UTC)
+    # A provider-limit park belongs to the outgoing runtime.  Retire it in
+    # the same transaction as the handoff so the reset sweep cannot later
+    # notify or auto-resume the old provider after the new provider owns the
+    # chat.  Already-resolved ``parked_notified`` rows remain historical.
+    for run in db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(("parked", "resume_pending")),
+    ).all():
+      run.status = "interrupted"
+      run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("SwitchProviderWithCompaction did not persist")
     return {
@@ -1877,6 +1912,41 @@ class ChatWriterActor:
       "provider": chat.provider,
       "agent_settings_json": chat.agent_settings_json,
     }
+
+  def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
+    """Conditionally append one marker for the legacy two-call protocol."""
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("PersistCompaction: chat not found or deleted")
+    messages = list(chat.messages or [])
+    has_active_run = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(("running", "parked", "resume_pending")),
+    ).first() is not None
+    if chat.run_status is not None or chat.pending_messages or has_active_run:
+      return {"status": "conflict", "reason": "busy"}
+    if (chat.provider or "claude") != cmd.expected_provider:
+      return {"status": "conflict", "reason": "provider_changed"}
+    if messages_fingerprint(messages) != cmd.source_messages_hash:
+      return {"status": "conflict", "reason": "chat_changed"}
+    new_msg = {
+      "role": "assistant",
+      "kind": "compaction",
+      "content": cmd.summary,
+      "legacy_switch_ready": True,
+      "from_provider": cmd.expected_provider,
+      "ts": next_message_ts(messages + list(chat.pending_messages or [])),
+    }
+    messages.append(new_msg)
+    chat.messages = messages
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PersistCompaction did not persist")
+    return {"status": "committed", "stored": new_msg}
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.

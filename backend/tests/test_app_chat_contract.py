@@ -44,6 +44,12 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   assert row is not None
   assert row.created_by_app_id == app_id
+  owner_view = client.get(
+    f"/api/chats/{chat_id}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert owner_view.status_code == 200
+  assert owner_view.json()["created_by_app_id"] == app_id
 
   # The app can send to its own chat (202 — accepted + runner spawned).
   r = client.post(
@@ -221,6 +227,18 @@ def test_app_chat_create_rejects_malformed_report_date(client, owner_token):
     assert r.status_code == 422, f"{bad!r} should be rejected: {r.text}"
 
 
+def test_app_chat_create_rejects_provider_model_mismatch(
+  client, owner_token,
+):
+  _, app_token = _make_app(client, owner_token, "mismatched-model")
+  response = client.post(
+    "/api/app-chats",
+    json={"provider": "claude", "model": "gpt-5.4"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 422
+
+
 def test_app_chat_patch_can_set_provider_before_assistant_turns(
   client, owner_token, db
 ):
@@ -274,6 +292,37 @@ def test_app_chat_patch_rejects_provider_switch_after_assistant_turn(
   db.refresh(row)
   assert row.provider == "claude"
   assert row.session_id == "claude-session"
+
+
+def test_app_chat_patch_rejects_provider_switch_after_first_user_turn(
+  client, owner_token, db,
+):
+  _, app_token = _make_app(client, owner_token, "provider-first-turn")
+  response = client.post(
+    "/api/app-chats",
+    json={"title": "App conversation", "provider": "claude"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  chat_id = response.json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.messages = [{"role": "user", "content": "first request"}]
+  row.run_status = "running"
+  db.add(models.ChatRun(
+    id="app-first-live-turn",
+    chat_id=chat_id,
+    status="running",
+    provider="claude",
+  ))
+  db.commit()
+
+  response = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"provider": "codex"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 409
+  db.refresh(row)
+  assert row.provider == "claude"
 
 
 def test_app_cannot_touch_foreign_chat(client, owner_token, db):

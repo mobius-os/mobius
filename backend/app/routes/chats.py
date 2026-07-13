@@ -533,10 +533,36 @@ async def patch_chat(
     # Capture the provider BEFORE any mutation so provider_switch logs the
     # real transition, and only when it actually changes (see after the commit).
     prev_provider = chat.provider
-    if (
+    provider_changing = (
       target_provider is not None
       and target_provider != (chat.provider or "claude")
+    )
+    latest_message = (chat.messages or [])[-1] if chat.messages else None
+    legacy_handoff_ready = (
+      isinstance(latest_message, dict)
+      and latest_message.get("kind") == "compaction"
+      and latest_message.get("legacy_switch_ready") is True
+      and latest_message.get("from_provider") == (chat.provider or "claude")
+    )
+    if provider_changing:
+      active_run = db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+      ).first()
+      if (
+        is_chat_running(chat_id)
+        or chat.run_status
+        or chat.pending_messages
+        or active_run is not None
+      ):
+        raise HTTPException(
+          status_code=409,
+          detail="Chat is busy — finish or stop the current turn before switching.",
+        )
+    if (
+      provider_changing
       and _has_real_assistant_turn(chat)
+      and not legacy_handoff_ready
     ):
       raise HTTPException(
         status_code=409,
@@ -689,6 +715,7 @@ def get_chat(
     ),
     "session_id": chat.session_id,
     "provider": provider,
+    "created_by_app_id": chat.created_by_app_id,
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
     "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
     "effective_agent_settings": effective_agent_settings(
@@ -856,9 +883,9 @@ def recover_chat(
 
 
 @router.post(
-  "/{chat_id}/compact", dependencies=[Depends(reject_cross_site)],
+  "/{chat_id}/provider-switch", dependencies=[Depends(reject_cross_site)],
 )
-async def compact_chat(
+async def switch_chat_provider(
   body: ChatProviderSwitch,
   chat_id: str,
   _: models.Owner = Depends(get_current_owner),
@@ -944,6 +971,8 @@ async def _compact_chat_locked(
     )
     return {
       "ok": True,
+      "protocol": "provider-switch-v1",
+      "switch_id": body.switch_id,
       "summary": existing_switch.get("content", ""),
       "stored": existing_switch,
       "provider": chat.provider or body.provider,
@@ -1062,6 +1091,8 @@ async def _compact_chat_locked(
 
   return {
     "ok": True,
+    "protocol": "provider-switch-v1",
+    "switch_id": body.switch_id,
     "summary": (result.get("stored") or {}).get("content", ""),
     "stored": result.get("stored"),
     "provider": body.provider,
@@ -1070,6 +1101,91 @@ async def _compact_chat_locked(
       data_dir, settings_obj or None, provider=body.provider,
     ),
   }
+
+
+@router.post(
+  "/{chat_id}/compact", dependencies=[Depends(reject_cross_site)],
+)
+async def compact_chat(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Keep the pre-PM219 bodyless compaction protocol rolling-upgrade safe.
+
+  Older clients compact first and then PATCH the provider.  The marker is
+  tagged with its source provider; ``patch_chat`` accepts it exactly once as
+  the handoff proof.  New clients use the atomic ``/provider-switch`` route.
+  """
+  from app.chat_queue import get_transition_lock
+  from app.chat_writer import (
+    PersistCompaction, alloc_run_token, await_ack, get_writer,
+    messages_fingerprint,
+  )
+  from app.compaction import (
+    CompactionError, load_cumulative_summary, summarize_chat,
+  )
+
+  async with get_transition_lock(chat_id):
+    chat = get_active_chat_or_404(db, chat_id)
+    if chat.created_by_app_id is not None:
+      raise HTTPException(
+        status_code=409,
+        detail="App chats cannot change provider after they are created.",
+      )
+    active_run = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+    ).first()
+    if (
+      is_chat_running(chat_id)
+      or chat.run_status
+      or chat.pending_messages
+      or active_run is not None
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="Chat is busy — finish or stop the current turn before compacting.",
+      )
+    source_provider = chat.provider or "claude"
+    messages = list(chat.messages or [])
+    data_dir = get_settings().data_dir
+    try:
+      summary = load_cumulative_summary(data_dir, chat_id)
+      if summary is None:
+        summary = await summarize_chat(
+          messages, data_dir=data_dir, provider_id=source_provider,
+        )
+    except CompactionError as exc:
+      raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+      log.warning("legacy compaction failed for chat %s: %s", chat_id, exc)
+      raise HTTPException(
+        status_code=502, detail="The summarize turn failed; not compacting."
+      )
+    try:
+      result = await await_ack(get_writer().submit(PersistCompaction(
+        chat_id=chat_id,
+        run_token=alloc_run_token(),
+        summary=summary,
+        expected_provider=source_provider,
+        source_messages_hash=messages_fingerprint(messages),
+      )))
+    except Exception:
+      raise HTTPException(
+        status_code=503, detail="Could not store the compaction; try again."
+      )
+    if result.get("status") == "conflict":
+      raise HTTPException(
+        status_code=409,
+        detail="The chat changed while compacting. Try again.",
+      )
+    return {
+      "ok": True,
+      "summary": summary,
+      "command": f"POST /api/chats/{chat_id}/compact",
+      "stored": result.get("stored"),
+    }
 
 
 # An app that opens a chat ABOUT one of its dated reports passes the report's
@@ -1352,6 +1468,13 @@ def create_app_chat(
   )
   if provider not in ("claude", "codex"):
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
+  if body.model and providers._model_belongs_to_other_provider(
+    body.model, provider,
+  ):
+    raise HTTPException(
+      status_code=422,
+      detail="The selected model does not belong to that provider.",
+    )
 
   chat = models.Chat(
     id=str(uuid.uuid4()),
@@ -1385,7 +1508,7 @@ def create_app_chat(
 @app_chat_router.patch(
   "/{chat_id}", dependencies=[Depends(reject_cross_site)],
 )
-def patch_app_chat(
+async def patch_app_chat(
   chat_id: str,
   body: AppChatPatch,
   principal: Principal = Depends(get_principal),
@@ -1401,48 +1524,62 @@ def patch_app_chat(
       status_code=403,
       detail="App chat metadata may only be changed by an app token.",
     )
-  chat = get_active_chat_for_principal(db, chat_id, principal)
-  target_provider = body.provider or chat.provider or "claude"
-  if (
-    body.model
-    and providers._model_belongs_to_other_provider(body.model, target_provider)
-  ):
-    raise HTTPException(
-      status_code=422,
-      detail="The selected model does not belong to that provider.",
-    )
-  if body.provider is not None:
-    if body.provider not in ("claude", "codex"):
+  from app.chat_queue import get_transition_lock
+
+  async with get_transition_lock(chat_id):
+    chat = get_active_chat_for_principal(db, chat_id, principal)
+    target_provider = body.provider or chat.provider or "claude"
+    if (
+      body.model
+      and providers._model_belongs_to_other_provider(body.model, target_provider)
+    ):
       raise HTTPException(
-        status_code=422, detail=f"unknown provider: {body.provider}"
+        status_code=422,
+        detail="The selected model does not belong to that provider.",
       )
-    if chat.provider != body.provider:
-      if _has_real_assistant_turn(chat):
+    if body.provider is not None:
+      if body.provider not in ("claude", "codex"):
         raise HTTPException(
-          status_code=409,
-          detail=(
-            "Cannot switch provider for an app chat after it has assistant "
-            "turns. Create a new app chat instead."
-          ),
+          status_code=422, detail=f"unknown provider: {body.provider}"
         )
-      chat.provider = body.provider
-      chat.session_id = None
-  _merge_app_chat_settings(
-    chat,
-    system_prompt=body.system_prompt,
-    model=body.model,
-    scope=body.scope,
-    scope_label=body.scope_label,
-  )
-  chat.updated_at = datetime.now(UTC)
-  db.commit()
-  db.refresh(chat)
-  return {
-    "ok": True,
-    "id": chat.id,
-    "provider": chat.provider or "claude",
-    "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
-  }
+      if chat.provider != body.provider:
+        active_run = db.query(models.ChatRun).filter(
+          models.ChatRun.chat_id == chat_id,
+          models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+        ).first()
+        if (
+          is_chat_running(chat_id)
+          or chat.run_status
+          or chat.pending_messages
+          or chat.messages
+          or chat.session_id
+          or active_run is not None
+        ):
+          raise HTTPException(
+            status_code=409,
+            detail=(
+              "Cannot switch provider for an app chat after it has started. "
+              "Create a new app chat instead."
+            ),
+          )
+        chat.provider = body.provider
+        chat.session_id = None
+    _merge_app_chat_settings(
+      chat,
+      system_prompt=body.system_prompt,
+      model=body.model,
+      scope=body.scope,
+      scope_label=body.scope_label,
+    )
+    chat.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(chat)
+    return {
+      "ok": True,
+      "id": chat.id,
+      "provider": chat.provider or "claude",
+      "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
+    }
 
 
 class QuestionAnswers(BaseModel):

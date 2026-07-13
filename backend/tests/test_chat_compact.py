@@ -88,10 +88,12 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   _write_summary(chat_id, source)
 
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 200, response.text
   body = response.json()
+  assert body["protocol"] == "provider-switch-v1"
+  assert body["switch_id"] == "switch-1"
   assert captured["provider_id"] == "codex"
   assert captured["model"] == "gpt-5.4"
   assert captured["effort"] == "high"
@@ -109,6 +111,169 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   assert row.messages[-1]["content"] == body["summary"]
   assert row.messages[0]["content"] == "Build me an app"
   assert chat_mod._latest_compaction_brief(row) == body["summary"]
+
+
+def test_legacy_bodyless_compact_then_patch_remains_compatible(
+  client, auth, db, monkeypatch,
+):
+  """A cached pre-PM219 frontend can finish its original two-call flow."""
+  _connect_codex(monkeypatch)
+
+  async def _stub(_messages, **_kwargs):
+    return "portable legacy handoff"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  chat_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "keep this context"},
+    {"role": "assistant", "content": "I will."},
+  ])
+
+  compact = client.post(f"/api/chats/{chat_id}/compact", headers=auth)
+  assert compact.status_code == 200, compact.text
+  assert compact.json()["stored"]["legacy_switch_ready"] is True
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.provider == "claude"
+
+  switched = client.patch(
+    f"/api/chats/{chat_id}",
+    headers=auth,
+    json={
+      "provider": "codex",
+      "agent_settings_json": {"model": "gpt-5.4", "effort": "high"},
+    },
+  )
+  assert switched.status_code == 200, switched.text
+  assert switched.json()["provider"] == "codex"
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.provider == "codex"
+  assert row.session_id is None
+
+
+def test_switch_atomically_supersedes_park_and_stale_auto_resume(
+  client, auth, db, monkeypatch,
+):
+  _connect_codex(monkeypatch)
+
+  async def _stub(_messages, **_kwargs):
+    return "incoming provider owns this continuation"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  chat_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "continue after my limit"},
+    {"role": "assistant", "content": "paused"},
+  ])
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.auto_resume_on_limit = True
+  db.add(models.ChatRun(
+    id="park-before-switch",
+    chat_id=chat_id,
+    status="resume_pending",
+    provider="claude",
+  ))
+  db.commit()
+
+  response = client.post(
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
+  )
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  parked = db.query(models.ChatRun).filter(
+    models.ChatRun.id == "park-before-switch",
+  ).one()
+  assert parked.status == "interrupted"
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  resumed = asyncio.run(chat_mod._auto_resume_chat(
+    chat_id, "claude", park_token="park-before-switch",
+  ))
+  assert resumed is False
+  assert scheduled == []
+
+
+@pytest.mark.parametrize(
+  ("source_provider", "target_provider", "target_model"),
+  [
+    ("claude", "codex", "gpt-5.4"),
+    ("codex", "claude", "claude-opus-4-8"),
+  ],
+)
+def test_next_real_runner_uses_target_fresh_session_and_handoff(
+  client, auth, db, monkeypatch,
+  source_provider, target_provider, target_model,
+):
+  """Acceptance evidence for the first real turn in both directions."""
+  from app import schemas
+  from app.broadcast import create_broadcast
+
+  _connect_codex(monkeypatch)
+  monkeypatch.setattr(
+    "app.providers.ClaudeProvider.ensure_auth",
+    lambda self, _data_dir: asyncio.sleep(0),
+  )
+  handoff = f"portable handoff for {target_provider}"
+
+  async def _synthesize(_messages, **_kwargs):
+    return handoff
+
+  monkeypatch.setattr(compaction, "summarize_chat", _synthesize)
+  chat_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "original request"},
+    {"role": "assistant", "content": "original answer"},
+  ])
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.provider = source_provider
+  row.session_id = f"{source_provider}-session"
+  row.agent_settings_json = {
+    "model": (
+      "claude-sonnet-4-6" if source_provider == "claude" else "gpt-5.4"
+    ),
+  }
+  db.commit()
+
+  response = client.post(
+    f"/api/chats/{chat_id}/provider-switch",
+    headers=auth,
+    json=_payload(
+      switch_id=f"{source_provider}-to-{target_provider}",
+      provider=target_provider,
+    ),
+  )
+  assert response.status_code == 200, response.text
+
+  captured = {}
+
+  async def _runner(**kwargs):
+    captured.update(kwargs)
+    return {"session_id": "new-session", "cost_usd": 0.0, "error": None}
+
+  runner_path = (
+    "app.codex_sdk_runner.run_codex_sdk_turn"
+    if target_provider == "codex"
+    else "app.claude_sdk_runner.run_claude_sdk_turn"
+  )
+  monkeypatch.setattr(runner_path, _runner)
+  create_broadcast(chat_id)
+  asyncio.run(chat_mod._run_chat_impl(
+    messages=[schemas.ChatMessage(role="user", content="ACTUAL NEXT REQUEST")],
+    chat_id=chat_id,
+    session_id=None,
+    provider_id=target_provider,
+    run_gen=chat_mod.current_run_generation(chat_id),
+  ))
+
+  assert captured["session_id"] is None
+  assert captured["agent_settings"]["model"] == target_model
+  assert "<compacted_chat>" in captured["user_message"]
+  assert handoff in captured["user_message"]
+  assert "ACTUAL NEXT REQUEST" in captured["user_message"]
+  assert captured["user_message"].index(handoff) < captured["user_message"].index(
+    "ACTUAL NEXT REQUEST"
+  )
 
 
 def test_synthesis_failure_leaves_provider_session_settings_and_messages(
@@ -131,7 +296,7 @@ def test_synthesis_failure_leaves_provider_session_settings_and_messages(
   db.commit()
 
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 422, response.text
   db.expire_all()
@@ -161,7 +326,7 @@ def test_chat_change_during_synthesis_rejects_without_partial_switch(
 
   monkeypatch.setattr(compaction, "summarize_chat", _stub)
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 409
   db.expire_all()
@@ -192,7 +357,7 @@ def test_turn_start_during_synthesis_wins_without_partial_switch(
 
   monkeypatch.setattr(compaction, "summarize_chat", _stub)
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 409
   db.expire_all()
@@ -230,7 +395,7 @@ def test_route_send_waits_for_handoff_then_starts_on_incoming_provider(
 
   def switch():
     responses["switch"] = client.post(
-      f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+      f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
     )
 
   def send():
@@ -279,13 +444,13 @@ def test_retry_with_same_switch_id_is_idempotent(
   ])
   payload = _payload(switch_id="stable-retry")
   first = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=payload,
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=payload,
   )
   owner = db.query(models.Owner).first()
   owner.provider = "claude"
   db.commit()
   second = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=payload,
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=payload,
   )
   assert first.status_code == second.status_code == 200
   assert calls == 1
@@ -298,7 +463,7 @@ def test_retry_with_same_switch_id_is_idempotent(
   changed = _payload(switch_id="stable-retry")
   changed["agent_settings_json"]["model"] = "gpt-5.5"
   mismatch = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=changed,
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=changed,
   )
   assert mismatch.status_code == 409
   assert calls == 1
@@ -319,7 +484,7 @@ def test_summary_created_during_synthesis_forces_retry(
 
   monkeypatch.setattr(compaction, "summarize_chat", _stub)
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 409
   db.expire_all()
@@ -346,7 +511,7 @@ def test_busy_chat_rejects_before_synthesis(client, auth, db, monkeypatch):
   row.run_status = "running"
   db.commit()
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 409
   assert called is False
@@ -372,7 +537,7 @@ def test_disconnected_target_rejects_before_synthesis(
     {"role": "assistant", "content": "hello"},
   ])
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=_payload(),
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),
   )
   assert response.status_code == 409
   assert called is False
@@ -384,7 +549,7 @@ def test_switch_requires_coherent_target_settings(client, auth):
     {"role": "assistant", "content": "hello"},
   ])
   missing = client.post(
-    f"/api/chats/{chat_id}/compact",
+    f"/api/chats/{chat_id}/provider-switch",
     headers=auth,
     json={
       "switch_id": "missing-settings",
@@ -397,7 +562,7 @@ def test_switch_requires_coherent_target_settings(client, auth):
   mismatch = _payload(switch_id="wrong-model")
   mismatch["agent_settings_json"]["model"] = "claude-sonnet-4-6"
   response = client.post(
-    f"/api/chats/{chat_id}/compact", headers=auth, json=mismatch,
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=mismatch,
   )
   assert response.status_code == 422
 
