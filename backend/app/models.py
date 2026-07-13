@@ -387,6 +387,10 @@ class App(Base):
   # for the agent and SW; no server-side enforcement. Example shape:
   #   {"reads": true, "writes": "queued", "execution": "full", "precache": []}
   offline_contract = Column(JSON, nullable=True, default=None)
+  # Optional root-level markdown file contributed to the agent system prompt.
+  # Only live installed rows are composed; soft-uninstall is therefore the
+  # activation gate even though the app's source tree remains recoverable.
+  system_prompt_file = Column(String(255), nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

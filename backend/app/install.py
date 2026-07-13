@@ -171,6 +171,10 @@ _SOURCE_FILES_MANAGED_EXACT = frozenset((
 _SKILLS_COUNT_MAX = 5
 _SKILL_MAX_BYTES = 256 * 1024
 
+# A system-prompt fragment is more privileged than a skill because it is read
+# every turn. It uses the same root-level markdown and byte-size contract.
+_SYSTEM_PROMPT_MAX_BYTES = 256 * 1024
+
 # Installer-owned ownership/provenance sidecar inside the skills dir. A
 # dotfile that is not `*.md`, so the skill loaders (the app-skills catalog
 # app, the SDK skill-load observers) never list or read it.
@@ -415,6 +419,35 @@ def _validate_manifest(m: dict) -> None:
           "bytes from the installed source tree, so a skill that is not a "
           "source file has nothing to install.",
         )
+  # A manifest may contribute one mandatory prompt fragment while the app is
+  # installed. The file stays in the app source tree; live-row DB composition
+  # is the activation/teardown mechanism, so uninstall needs no file deletion.
+  system_prompt = m.get("system_prompt")
+  if system_prompt is not None:
+    if (
+      not isinstance(system_prompt, str)
+      or not system_prompt.endswith(".md")
+      or system_prompt == ".md"
+      or "/" in system_prompt
+      or "\\" in system_prompt
+      or ".." in system_prompt
+      or system_prompt.startswith(".")
+    ):
+      raise HTTPException(
+        400,
+        "Manifest `system_prompt` must be a bare `<name>.md` filename — "
+        "no directories, traversal, or dotfiles.",
+      )
+    root_sources = {
+      rel for rel in (source_files or [])
+      if isinstance(rel, str) and "/" not in rel
+    }
+    if system_prompt not in root_sources:
+      raise HTTPException(
+        400,
+        "Manifest `system_prompt` must also be listed in `source_files` as "
+        "a root-level file.",
+      )
   sched = m.get("schedule")
   if sched is not None:
     if not isinstance(sched, dict):
@@ -2045,6 +2078,12 @@ async def install_from_manifest(
     "index.jsx": entry_bytes,
     **source_files_fetched,
   }
+  prompt_rel = manifest.get("system_prompt")
+  if prompt_rel and len(source_tree.get(prompt_rel, b"")) > _SYSTEM_PROMPT_MAX_BYTES:
+    raise HTTPException(
+      400,
+      f"Manifest system_prompt exceeds {_SYSTEM_PROMPT_MAX_BYTES} bytes.",
+    )
   if job_name and bundled_job is not None:
     source_tree[job_name] = bundled_job
   repo_ref = (
@@ -2266,6 +2305,7 @@ async def install_from_manifest(
         embeds_agent=bool(manifest.get("embeds_agent", False)),
         # P1-D: persist the offline contract block (None when not declared).
         offline_contract=manifest.get("offline") or None,
+        system_prompt_file=manifest.get("system_prompt") or None,
       )
       db.add(app)
       db.flush()  # assign app.id without committing yet
@@ -2636,6 +2676,7 @@ async def install_from_manifest(
           # P1-D: persist the offline contract block (replaces on update to match
           # the new manifest; None if the key is absent in the new manifest).
           app.offline_contract = manifest.get("offline") or None
+          app.system_prompt_file = manifest.get("system_prompt") or None
 
         # The compiled bundle is written OUT OF PLACE to a staging file and
         # promoted into the live bundle only AFTER the DB commit (commit_actions
