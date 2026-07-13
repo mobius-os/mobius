@@ -1928,10 +1928,10 @@ def _install_responses(base):
   }
 
 
-def test_install_accepts_app_token_with_manage_apps(
+def test_install_accepts_opaque_app_frame_with_manage_apps(
   client, db, owner_token, bypass_url_validation,
 ):
-  """App-scoped JWT whose App row has manage_apps=True passes the gate."""
+  """The Store's opaque frame may install with its scoped capability."""
   # owner_token is requested for its side-effect: it creates the Owner
   # row with sub='test' that the minted app-scoped JWT below resolves
   # against. Without it the dep returns 401 "Owner not found."
@@ -1947,10 +1947,15 @@ def test_install_accepts_app_token_with_manage_apps(
   ):
     r = client.post(
       "/api/apps/install",
-      headers={"Authorization": f"Bearer {token}"},
+      headers={
+        "Authorization": f"Bearer {token}",
+        "Origin": "null",
+        "Sec-Fetch-Site": "cross-site",
+      },
       json={"manifest_url": base + "mobius.json"},
     )
   assert r.status_code == 201, r.text
+  assert r.headers["access-control-allow-origin"] == "null"
 
 
 def test_install_rejects_app_token_with_cross_write_but_no_manage_apps(

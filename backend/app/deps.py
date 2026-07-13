@@ -20,11 +20,14 @@ def reject_cross_site(request: Request) -> None:
   Möbius's baseline CSRF posture is "Authorization: Bearer + CORS" —
   cross-origin JS can't read the token from localStorage without a
   preflight that fails (allow_credentials=False, allow_origins is
-  pinned). This dependency adds a second layer that doesn't require
-  token plumbing: reject any request whose `Sec-Fetch-Site` claims
-  cross-site origin. Modern browsers always send this header; on
-  ancient clients without it we fall back to a same-origin Referer
-  check before allowing the request through.
+  pinned). This dependency adds a second layer: reject requests whose
+  `Sec-Fetch-Site` claims a cross-site origin, except authenticated fetches
+  from Möbius's deliberately opaque app sandbox. Sandboxed app frames have
+  `Origin: null` and browsers label even their same-host API calls as
+  `Sec-Fetch-Site: cross-site`; requiring a valid app-scoped Bearer token
+  keeps that narrow exception on the same boundary as the app APIs themselves.
+  On ancient clients without the header we fall back to a same-origin
+  Referer check before allowing the request through.
 
   Apply to POST/PATCH/DELETE endpoints that mutate owner state. Read-
   only GETs don't need it (CORS already gates them).
@@ -39,6 +42,13 @@ def reject_cross_site(request: Request) -> None:
     # attacks. Same-origin + none + same-site are all OK; only
     # cross-site is rejected.
     if sec_fetch_site == "cross-site":
+      origin = request.headers.get("origin")
+      authorization = request.headers.get("authorization", "")
+      scheme, _, token = authorization.partition(" ")
+      if origin == "null" and scheme.lower() == "bearer" and token:
+        payload = auth.decode_access_token(token)
+        if payload and payload.get("scope") == "app":
+          return
       raise HTTPException(
         status_code=403,
         detail="Cross-site request blocked.",

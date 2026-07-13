@@ -167,8 +167,8 @@ def test_proxy_get_allows_opaque_app_frame_request(
   assert r.headers["access-control-allow-origin"] == "null"
 
 
-def test_proxy_post_rejects_cross_site_request(client, owner_token):
-  """The mutation-capable POST proxy keeps the cross-site CSRF guard."""
+def test_proxy_post_rejects_foreign_cross_site_request(client, owner_token):
+  """The mutation-capable POST proxy keeps the foreign-origin CSRF guard."""
   r = client.post(
     "/api/proxy",
     json={"url": "https://example.com/", "body": "value=1"},
@@ -178,6 +178,44 @@ def test_proxy_post_rejects_cross_site_request(client, owner_token):
     },
   )
   assert r.status_code == 403
+
+
+def test_proxy_post_allows_opaque_app_frame_request(
+  client, owner_token, monkeypatch
+):
+  """Scoped Bearer auth distinguishes a real app fetch from foreign CSRF."""
+  created = client.post("/api/apps/", json={
+    "name": "proxy-post-frame",
+    "description": "test",
+    "jsx_source": "export default function App() { return null }",
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  token_response = client.post("/api/auth/app-token", json={
+    "app_id": created.json()["id"],
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+
+  monkeypatch.setattr(
+    "app.routes.proxy.validate_url_safe",
+    lambda _url: (
+      "https://93.184.216.34/data", "example.com", "example.com",
+    ),
+  )
+
+  async def fake_capped_response(_client, _req):
+    return Response(content=b"ok", media_type="text/plain")
+
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/data", "body": "value=1"},
+    headers={
+      "Authorization": f"Bearer {token_response.json()['token']}",
+      "Origin": "null",
+      "Sec-Fetch-Site": "cross-site",
+    },
+  )
+  assert r.status_code == 200
+  assert r.text == "ok"
+  assert r.headers["access-control-allow-origin"] == "null"
 
 
 def test_proxy_get_allows_same_origin_request(client, owner_token):

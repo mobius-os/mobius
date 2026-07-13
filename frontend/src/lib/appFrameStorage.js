@@ -6,6 +6,14 @@ const SHARED_KEYS = new Set([
   'mobius:setup-complete:v1',
   'mobius:system-setup-ready:v1',
 ])
+const THEME_KEYS = new Set(['mobius-theme', 'mobius-theme-bg'])
+const LEGACY_KEYS_BY_SLUG = {
+  cuberun: new Set([
+    'highscores', 'musicEnabled',
+    'cuberun:highscores', 'cuberun:musicEnabled',
+  ]),
+  tandem: new Set(['tn-split-ratio', 'tn-split-ratio-v2']),
+}
 
 function storageOrNull(storage) {
   if (storage) return storage
@@ -35,17 +43,30 @@ export function isSharedVirtualStorageKey(key) {
   return SHARED_KEYS.has(key)
 }
 
-export function readAppFrameStorage(appId, storage) {
+export function isLegacyFrameStorageKey(appId, appSlug, key) {
+  if (!isSafeVirtualStorageKey(key)) return false
+  if (isSharedVirtualStorageKey(key) || THEME_KEYS.has(key)) return true
+  if (LEGACY_KEYS_BY_SLUG[String(appSlug || '').toLowerCase()]?.has(key)) {
+    return true
+  }
+  const escapedId = String(appId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[:/_-])${escapedId}([:/_-]|$)`).test(key)
+}
+
+export function readAppFrameStorage(appId, storage, appSlug) {
   const store = storageOrNull(storage)
   if (!store) return {}
   const snapshot = {}
   try {
     // Compatibility migration: old same-origin frames wrote app preferences
-    // directly into shell localStorage. They may read those safe values once;
-    // all future writes are isolated under this app's private prefix below.
+    // directly into shell localStorage. Copy only shared theme/setup state,
+    // keys scoped to THIS numeric app id, and a tiny catalog legacy allowlist.
+    // A broad "anything except token" copy leaked shell navigation state (for
+    // example the active chat id) and sibling preferences into every frame.
+    // All future writes are isolated under this app's private prefix below.
     for (let i = 0; i < store.length; i += 1) {
       const key = store.key(i)
-      if (!isSafeVirtualStorageKey(key)) continue
+      if (!isLegacyFrameStorageKey(appId, appSlug, key)) continue
       const value = store.getItem(key)
       if (typeof value === 'string' && value.length <= MAX_VALUE_LENGTH) snapshot[key] = value
     }

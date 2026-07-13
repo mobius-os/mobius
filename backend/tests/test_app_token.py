@@ -4,10 +4,15 @@ import io
 
 
 def test_app_token_rejects_cross_site_request(client, auth):
+  """An owner Bearer is not the opaque app-frame exception."""
   cross = client.post(
     "/api/auth/app-token",
     json={"app_id": 1},
-    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+    headers={
+      **auth,
+      "Origin": "null",
+      "Sec-Fetch-Site": "cross-site",
+    },
   )
   assert cross.status_code == 403
 
@@ -67,9 +72,14 @@ def test_app_token_can_access_storage(client, owner_token):
   r = client.put(
     f"/api/storage/apps/{app_id}/test.json",
     json={"content": '{"hello": "world"}'},
-    headers={"Authorization": f"Bearer {app_token}"},
+    headers={
+      "Authorization": f"Bearer {app_token}",
+      "Origin": "null",
+      "Sec-Fetch-Site": "cross-site",
+    },
   )
   assert r.status_code == 204
+  assert r.headers["access-control-allow-origin"] == "null"
 
 
 def test_app_token_can_list_models(client, owner_token):

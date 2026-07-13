@@ -184,7 +184,7 @@ function CanvasLoadingBrand({ appName }) {
 // well within the server-side validity window. The token is app-scoped (keyed
 // by appId server-side), so it is identical for both buffered versions.
 export default function AppCanvas({
-  appId, version = 0, appName, offlineCapable = false,
+  appId, version = 0, appName, appSlug, offlineCapable = false,
   immersive = false,
   // Whether this app is the currently-visible canvas (canvas view + active
   // app). One prop, two consumers:
@@ -357,7 +357,7 @@ export default function AppCanvas({
         token,
         themeCss: eff?.css ?? theme?.css,
         bg: eff?.bg ?? theme?.bg,
-        storage: readAppFrameStorage(appId),
+        storage: readAppFrameStorage(appId, undefined, appSlug),
       },
       '*',
     )
@@ -379,7 +379,7 @@ export default function AppCanvas({
   useEffect(() => {
     for (const v of framesRef.current.keys()) sendInit(v)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, appId, version, theme?.css, theme?.bg])
+  }, [token, appId, appSlug, version, theme?.css, theme?.bg])
 
   // Parent-side load timeout for the HIDDEN incoming frame. The frame's own 10s
   // "no init from parent" timeout cannot fire once we deliver init (its

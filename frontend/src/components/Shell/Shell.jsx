@@ -1769,6 +1769,7 @@ export default function Shell() {
               active={activeView === 'canvas' && String(activeAppId) === String(id)}
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
+              appSlug={apps.find(a => String(a.id) === String(id))?.slug}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
               pendingIntent={appIntents[String(id)] || null}
               // Immersive is APPLIED only while this app is the active holder

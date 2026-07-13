@@ -2,7 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   cacheAppToken, clearAppFrameStorage, isSafeVirtualStorageKey,
-  readAppFrameStorage, readCachedAppToken, removeAppFrameStorage,
+  isLegacyFrameStorageKey, readAppFrameStorage, readCachedAppToken,
+  removeAppFrameStorage,
   setAppFrameStorage,
 } from '../appFrameStorage.js'
 
@@ -24,6 +25,10 @@ test('frame snapshot never exposes owner auth or internal token caches', () => {
   const storage = new MemoryStorage({
     token: 'owner-secret',
     'mobius:app-token:7': 'cached-secret',
+    moebius_active_chat: 'private-chat-id',
+    moebius_active_view: 'canvas',
+    'mobius-app-lru': '[7,8]',
+    'news:8:cache': 'sibling preference',
     'news:7:cache': 'safe preference',
   })
   assert.deepEqual(readAppFrameStorage(7, storage), {
@@ -61,6 +66,13 @@ test('sensitive and malformed virtual keys are rejected', () => {
   assert.equal(isSafeVirtualStorageKey('token'), false)
   assert.equal(isSafeVirtualStorageKey('refresh_token'), false)
   assert.equal(isSafeVirtualStorageKey('ordinary-pref'), true)
+})
+
+test('legacy unscoped preferences are limited to their catalog app', () => {
+  assert.equal(isLegacyFrameStorageKey(7, 'cuberun', 'highscores'), true)
+  assert.equal(isLegacyFrameStorageKey(7, 'news', 'highscores'), false)
+  assert.equal(isLegacyFrameStorageKey(7, 'tandem', 'tn-split-ratio-v2'), true)
+  assert.equal(isLegacyFrameStorageKey(7, 'news', 'moebius_active_chat'), false)
 })
 
 test('cached app token must be unexpired and match the exact app id', () => {

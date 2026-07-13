@@ -221,6 +221,16 @@ def test_setup_rejects_cross_site_request(client):
   assert r.status_code == 403
 
 
+def test_setup_rejects_opaque_cross_site_request_without_bearer(client):
+  """Origin null alone is not the authenticated app-sandbox exception."""
+  r = client.post(
+    "/api/auth/setup",
+    json={"username": "admin", "password": "securepassword123"},
+    headers={"Origin": "null", "Sec-Fetch-Site": "cross-site"},
+  )
+  assert r.status_code == 403
+
+
 def test_setup_allows_curl_style_request(client):
   """Setup with no Sec-Fetch-Site header (e.g. curl) must still work."""
   r = client.post(
