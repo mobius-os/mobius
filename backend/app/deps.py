@@ -329,11 +329,9 @@ def require_app_permission(
   the boolean grants below (manage_apps, github_access) use their own
   small owner-or-app gates instead.
 
-  Honest scope (design §0b): a same-origin app holds the owner JWT and
-  could call owner routes directly. This gate is consent/attribution/
-  audit for honest apps plus the enforceable half — the gated surface
-  itself returns redacted/scoped data and refuses the un-consented app.
-  It is not a sandbox.
+  App frames receive only app-scoped JWTs and run in opaque-origin sandboxes.
+  This live-row gate is therefore an enforceable authorization boundary, while
+  also making the owner's consent visible and immediately revocable.
 
   Raises:
     HTTPException: 403 if the app's granted level is below `level`, or
@@ -440,5 +438,32 @@ def get_owner_or_app_with_github_access(
     detail=(
       "This app needs permissions.github_access=true in its manifest "
       "to manage and read the GitHub connection on your behalf."
+    ),
+  )
+
+
+def get_owner_or_app_with_filesystem_access(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app token with live filesystem_access authority.
+
+  The grant is deliberately narrow in identity but broad in filesystem scope:
+  /api/fs still enforces its root, secret deny-list, symlink containment, and
+  size limits. Reading the live App row makes reinstall/revocation effective on
+  the next request without waiting for the eight-hour app token to expire.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.filesystem_access):
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.filesystem_access=true in its manifest "
+      "to use the owner filesystem."
     ),
   )

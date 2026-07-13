@@ -285,8 +285,12 @@
 }
 
 .settings-agent-group__head {
+  display: block;
+}
+
+.settings-agent-group__title-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
@@ -299,9 +303,29 @@
   color: var(--text);
 }
 
-@media (max-width: 620px) {
-  .settings-agent-group__head {
-    flex-direction: column;
+.settings-agent-group__reorder {
+  min-width: 44px;
+  min-height: 44px;
+  margin: -12px -8px -8px 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-agent-group__reorder:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings-agent-group__reorder:hover {
+    background: var(--surface2);
   }
 }
 
@@ -345,10 +369,6 @@
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface) 68%, var(--bg));
-  /* The whole row is the drag handle now — press and hold to reorder.
-     Keep default touch-action so a plain swipe still scrolls the page;
-     the JS only claims the gesture once a still hold has elapsed. */
-  cursor: grab;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -358,6 +378,10 @@
     border-color 0.15s ease,
     box-shadow 0.15s ease,
     opacity 0.15s ease;
+}
+
+.settings-bg-row--reordering {
+  grid-template-columns: 44px minmax(0, 1fr);
   will-change: transform;
 }
 
@@ -370,10 +394,6 @@
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
   box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
   opacity: 0.96;
-  cursor: grabbing;
-  /* Once a hold has become a drag, stop the page from scrolling under
-     the finger so the vertical drag reorders instead. */
-  touch-action: none;
 }
 
 .settings-bg-row--drop-target {
@@ -407,9 +427,45 @@
   opacity: 0.78;
 }
 
-/* The body holds the model trigger, full width. Effort moved into the
-   model sheet (under the selected model), and the grip column is gone —
-   the whole row is the drag handle now. */
+.settings-bg-row__drag-handle {
+  align-self: stretch;
+  min-width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: grab;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.settings-bg-row__drag-handle:active,
+.settings-bg-row--dragging .settings-bg-row__drag-handle {
+  cursor: grabbing;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.settings-bg-row__drag-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings-bg-row__drag-handle:hover {
+    color: var(--text);
+    background: var(--surface2);
+  }
+}
+
+/* The body holds the full-width model trigger. */
 .settings-bg-row__body {
   min-width: 0;
   display: flex;
@@ -425,8 +481,11 @@
 
 @media (max-width: 620px) {
   .settings-bg-row {
-    grid-template-columns: minmax(0, 1fr);
     padding-inline: 6px;
+  }
+
+  .settings-bg-row--reordering {
+    grid-template-columns: 44px minmax(0, 1fr);
   }
 }
 

@@ -3050,6 +3050,7 @@ def test_install_response_includes_capability_flags(
   manifest["embeds_agent"] = True
   manifest["permissions"]["manage_apps"] = True
   manifest["permissions"]["github_access"] = True
+  manifest["permissions"]["filesystem_access"] = True
 
   r = _install_simple(client, auth, base, manifest)
 
@@ -3058,12 +3059,24 @@ def test_install_response_includes_capability_flags(
   assert payload["embeds_agent"] is True
   assert payload["manage_apps"] is True
   assert payload["github_access"] is True
+  assert payload["filesystem_access"] is True
 
   listed = client.get("/api/apps/", headers=auth).json()
   row = next(app for app in listed if app["id"] == payload["id"])
   assert row["embeds_agent"] is True
   assert row["manage_apps"] is True
   assert row["github_access"] is True
+  assert row["filesystem_access"] is True
+
+
+def test_install_rejects_non_boolean_filesystem_capability(
+  client, auth, bypass_url_validation,
+):
+  manifest = _simple_manifest("bad-filesystem-capability")
+  manifest["permissions"]["filesystem_access"] = "yes"
+  response = _install_simple(client, auth, "https://bad-fs-cap.test/repo/", manifest)
+  assert response.status_code == 400
+  assert "filesystem_access" in response.text
 
 
 def test_install_validates_previous_id_field(client, auth, bypass_url_validation):

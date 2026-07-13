@@ -8,13 +8,11 @@ owner edit files directly. Writes are bounded to what the `mobius` process can
 write — `/data` — which is exactly the surface the agent itself has; platform
 code stays root-owned and read-only.
 
-Auth is owner-only (`get_current_owner` rejects app tokens). The privileged
-surface — the whole container's structure + git state + write — is strictly
-more than any per-app scope, so it must not be reachable with a scoped app
-token. The Editor mini-app is same-origin and reads the owner JWT from
-`localStorage` for these calls (the accepted `allow-same-origin` trade-off
-documented in mobius/CLAUDE.md). A new scoped permission would be theatre here
-— the gated surface is the whole filesystem regardless — so we don't add one.
+Auth accepts the owner or an app token carrying the explicit live
+`filesystem_access` capability. The Editor is the canonical holder. The grant
+does not weaken this router's root confinement, secret deny-list, symlink
+containment, or size caps; it removes the need to expose the owner JWT to an app
+frame while keeping the privileged action auditable and revocable per app.
 
 Safety, proportional to a single-owner tool:
 - a configurable read root (default `/data`) — never the whole container; a
@@ -44,7 +42,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 
 from app import models
 from app.config import get_settings
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import get_owner_or_app_with_filesystem_access, reject_cross_site
 from app.path_utils import validate_path_within_base
 
 router = APIRouter(prefix="/api/fs", tags=["fs"])
@@ -216,7 +214,7 @@ def _child_count(subdir: Path) -> int | None:
 
 
 @router.get("/disk")
-def fs_disk(_owner: models.Owner = Depends(get_current_owner)):
+def fs_disk(_owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access)):
   """Disk usage of the HOST filesystem that backs the data dir, in bytes.
 
   A single `statvfs` on the data-dir mount — no path parameter, no walk. This
@@ -234,7 +232,7 @@ def fs_disk(_owner: models.Owner = Depends(get_current_owner)):
 @router.get("/du")
 def fs_du(
   path: str = Query("", description="path relative to the FS root"),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access),
 ):
   """Recursive disk usage of a directory subtree — "what is eating space".
 
@@ -336,7 +334,7 @@ def fs_tree(
   limit: int = Query(_LIST_DEFAULT_LIMIT),
   cursor: str | None = Query(None, description="opaque pagination cursor"),
   counts: int = Query(0, description="1 = add child_count to dir entries"),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access),
 ):
   """List one directory level under the root (lazy, keyset-paginated).
 
@@ -432,7 +430,7 @@ def fs_read(
   path: str = Query(..., description="path relative to the FS root"),
   meta: int = Query(0, description="1 = return metadata only, no body"),
   head: int = Query(0, description="1 = peek the top of an oversized text file"),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access),
 ):
   """Read a single file.
 
@@ -516,7 +514,7 @@ def _is_writable(resolved: Path) -> bool:
 def fs_write(
   path: str = Query(..., description="path relative to the data dir"),
   content: str = Body(..., media_type="text/plain"),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access),
 ):
   """Write (create or overwrite) a TEXT file under `/data`.
 
@@ -559,7 +557,7 @@ def fs_write(
 @router.delete("/delete", dependencies=[Depends(reject_cross_site)])
 def fs_delete(
   path: str = Query(..., description="path relative to the data dir"),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access),
 ):
   """Delete a single file under `/data`.
 
@@ -625,7 +623,7 @@ def _find_repo(start: Path, root: Path) -> Path | None:
 @router.get("/git")
 def fs_git(
   path: str = Query("", description="path within (or pointing at) a repo"),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access),
 ):
   """Git status/branch summary for the repo containing `path`.
 

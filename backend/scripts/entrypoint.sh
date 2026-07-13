@@ -590,10 +590,17 @@ if [ "$_use_platform" -eq 1 ]; then
     "cd /data/platform/backend && $_env_scrub timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
     2>&1 || true
-  su -s /bin/sh mobius -c \
+  # Reconcile itself is best-effort, but the post-reconcile guard is the final
+  # safety boundary: if it cannot prove/reset the tree to a clean committed
+  # state, do not import that tree. Exiting lets recoveryd/container policy use
+  # the baked recovery floor instead of serving possibly half-applied code.
+  if ! su -s /bin/sh mobius -c \
     "cd /data/platform/backend && $_env_scrub python3 -c \
      'from app import platform_update; print(platform_update.boot_guard_sync())'" \
-    2>&1 || true
+    2>&1; then
+    echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
+    exit 1
+  fi
   # A fast-forward / rebase advanced main, so the served sha the /api/version and
   # /api/debug/serving routes report (written to /tmp/serving-sha above) must
   # reflect the reconciled HEAD, not the pre-reconcile clone tip.

@@ -93,6 +93,12 @@ MODEL_LABELS: dict[str, str] = {
   "gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
 }
 
+# Optional model-specific effort capability overrides. Provider defaults remain
+# the fallback, so adding a new model normally needs no entry. Add a row only
+# when a model supports a narrower, reordered, or extended effort scale; the
+# registry carries it to every shell/app picker as data.
+MODEL_EFFORT_LEVELS: dict[str, list[str]] = {}
+
 DEFAULT_MODELS = {
   provider: models[0] for provider, models in KNOWN_MODELS.items()
 }
@@ -724,6 +730,8 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
       "label": _label_for(mid),
       "provider": provider_id,
       "available": True,
+      **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
+         if mid in MODEL_EFFORT_LEVELS else {}),
     }
     for mid in KNOWN_MODELS.get(provider_id, [])
   ]
@@ -744,6 +752,8 @@ def _live_model_entries(
       "label": _label_for(mid),
       "provider": provider_id,
       "available": True,
+      **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
+         if mid in MODEL_EFFORT_LEVELS else {}),
     }
     for mid in live_ids
   ]
