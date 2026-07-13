@@ -581,7 +581,7 @@ export default function useScrollMode({
       // so without this the spacer would be sized from a stale-small fullViewH
       // (the keyboard-open height) even though clientHeight has already grown
       // back. That undersizes the spacer, the pin clamps below its target, and
-      // the message lands mid-viewport instead of at the top — the R5 "sent
+      // the message lands mid-viewport instead of at the top — the "sent
       // while at the bottom, went to the middle not the top" bug. Grow-only: a
       // keyboard-OPEN shrink is ignored, so Chat-UX constraint #4 (keyboard
       // open/close must not resize the spacer) still holds.

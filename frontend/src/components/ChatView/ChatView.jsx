@@ -324,11 +324,10 @@ export default function ChatView({
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const [loading, setLoading] = useState(!cached)
-  // When the initial /chats/{id} fetch fails we used to silently
-  // setLoading(false) — the empty-state UI ("What's on your mind?")
-  // would then render as if the chat had no history, hiding the
-  // real problem. loadError flips on the catch so we can render a
-  // retry message instead of pretending the chat is empty.
+  // On a failed initial /chats/{id} fetch, loadError flips in the catch so
+  // the UI can render a retry message. Setting loading false alone would
+  // render the empty-state UI ("What's on your mind?") as if the chat had no
+  // history, hiding the real problem.
   const [loadError, setLoadError] = useState(false)
   // Bumped by the load-error Retry button to re-run the load effect in
   // place, instead of a hard window.location.reload (which would nuke the
@@ -1784,8 +1783,7 @@ export default function ChatView({
     // message to the top iff it is the chat's first message OR the reader is
     // in auto-scroll (at the bottom) at submit time; a fresh send made while
     // reading earlier history reserves spacer room but must NOT yank the
-    // reader. This supersedes the brief "every fresh send lifts" revision
-    // (9b9ab86b) — the load-bearing guarantee is "don't move a reading user".
+    // reader. The load-bearing guarantee is "don't move a reading user".
     // `pin` stays the caller opt-out (handleStop's queue-collapse passes
     // pin:false).
     const freshIsFirstUser = !messagesRef.current.some(
@@ -2169,8 +2167,7 @@ export default function ChatView({
       // stale DB state. Bumping fetchGen NOW makes any such in-flight
       // fetch get discarded by its gen guard; clearing the queue NOW
       // also prevents the natural handler from triggering the fetch
-      // at all. R1 in _034-design.md spells out the contract —
-      // pendingQueue.clear() updates pendingMessagesRef.current to
+      // at all. pendingQueue.clear() updates pendingMessagesRef.current to
       // [] before this line returns (synchronous).
       fetchGenRef.current += 1
       forgetAllQueuedPinIntents()
@@ -2943,13 +2940,12 @@ export default function ChatView({
             // That invariant is fully DURABLE: it reads only the persisted
             // message blocks, so it survives a reload AND Möbius's
             // kill-on-question `done` (the SSE closes the moment a question
-            // fires, but the runner keeps waiting). Gating on the live
-            // stream instead — an earlier version required `isStreaming`,
-            // which flips false on that `done` — is exactly what wedged the
-            // card disabled-forever. `liveQuestionId`, when the live stream
-            // handed it to us, is an extra precision filter; after a reload
-            // we may never have seen it, and then the tail-unanswered
-            // invariant stands on its own.
+            // fires, but the runner keeps waiting). It must NOT gate on the
+            // live stream: `isStreaming` flips false on that `done`, which
+            // would leave the card disabled forever. `liveQuestionId`, when
+            // the live stream handed it to us, is an extra precision filter;
+            // after a reload we may never have seen it, and then the
+            // tail-unanswered invariant stands on its own.
             //
             // MsgContent enforces the "tail block" half (the question is the
             // LAST block). Recovery may insert an interruption note before a

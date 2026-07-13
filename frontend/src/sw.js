@@ -492,11 +492,11 @@ function appCodeHandler(cacheName, { gated }) {
     // to a plain same-origin GET.
     //
     // DECOUPLED store-from-serve: revalidate resolves with the network
-    // response UNCONDITIONALLY and returns the store promise separately. An
-    // earlier version awaited cache.put before returning, so a QuotaExceeded
-    // put rejection discarded a perfectly good NETWORK response — the cold
-    // path's catch then missed cache.match and rethrew, hard-failing the app
-    // WHILE ONLINE. The store now runs as its own promise the caller hands to
+    // response UNCONDITIONALLY and returns the store promise separately, so the
+    // served response never depends on the cache.put. A QuotaExceeded put
+    // rejection would otherwise discard a perfectly good NETWORK response — the
+    // cold path's catch then misses cache.match and rethrows, hard-failing the
+    // app WHILE ONLINE. The store runs as its own promise the caller hands to
     // event.waitUntil with its own .catch, mirroring the background-refresh
     // branch's tolerance; storage failures never reach the served response.
     const revalidate = async () => {
@@ -614,7 +614,7 @@ registerRoute(
     // could wrongly trip Shell.jsx's auto-create-starter-chat. /api/chats does
     // NOT gate the visible shell render — the shell-nav route does (now 2s) —
     // so there's no load-speed reason to shorten this; the correctness risk
-    // wins. (Codex review Medium #2.)
+    // wins.
     networkTimeoutSeconds: 5,
   }),
 )
