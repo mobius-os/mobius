@@ -476,6 +476,14 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   down to follow. Lock-in: `tests/send-rule.spec.mjs` + `spacer.spec.mjs` #26 both
   assert "no pin when scrolled up," and `ChatView.jsx`'s fresh-send `willPin` gates
   on `shouldPinSend` (same call the queue/steer paths use).
+  **At-bottom is geometric, not gesture-gated (owner ruling 2026-07-13):** a chat
+  whose content fits the viewport counts as at-bottom, so a second send in a short
+  chat pins even though the user never scrolled ("if the chat is short and we sent
+  a new message, the message should pin, even if we didn't enter auto scroll
+  mode"). This resolves the question that had parked the strict pure-state engine
+  (`session-scroll-v2`, gesture-only AUTO): that reading is rejected. Lock-in:
+  `send-rule.spec.mjs` "Short chat (content fits viewport): second send still pins
+  to top".
 - **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
 - **R4** Leave-and-return restores the same scroll position, even mid-stream
   (hide-then-reveal + the versioned snapshot cache).
