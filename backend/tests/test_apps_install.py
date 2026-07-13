@@ -4046,6 +4046,45 @@ def test_multifile_install_writes_siblings_and_bundles(
   assert "./cards.js" not in bundle_text
 
 
+# index.jsx imports a sibling the manifest's source_files never declares. The
+# synthetic-fetch path won't fetch it, so the install ships a tree that can't
+# resolve the import — the exact shape the Editor launch bug had. The
+# source-completeness check must reject it BEFORE esbuild, with its own 422.
+JSX_IMPORTS_UNDECLARED = (
+  "import { CARD_LABEL } from './cards.js'\n"
+  "import { EXTRA } from './extra.js'\n"
+  "export default function App() {\n"
+  "  return <div>{CARD_LABEL}{EXTRA}</div>\n"
+  "}\n"
+)
+
+MANIFEST_MULTI_INCOMPLETE = {
+  **MANIFEST_MULTI,
+  "id": "multi-incomplete",
+  # ./extra.js is imported but omitted here — the defect under test.
+  "source_files": ["cards.js"],
+}
+
+
+def test_multifile_install_rejects_incomplete_source_files(
+  client, auth, bypass_url_validation,
+):
+  """A manifest whose entry imports an undeclared sibling is rejected with a
+  422 that names the completeness gap, and the source dir is not left behind
+  (the outer HTTPException handler rolls the writes back)."""
+  base = "https://multi-incomplete.test/repo/"
+  r = _install_multi(
+    client, auth, base, MANIFEST_MULTI_INCOMPLETE,
+    JSX_IMPORTS_UNDECLARED, CARDS_V1,
+  )
+  assert r.status_code == 422, r.text
+  detail = r.json()["detail"]
+  assert "source_files" in detail
+  assert "extra.js" in detail
+  data_dir = Path(get_settings().data_dir)
+  assert not (data_dir / "apps" / "multi-incomplete").exists()
+
+
 def test_multifile_update_delivers_new_sibling_bytes(
   client, auth, bypass_url_validation,
 ):
