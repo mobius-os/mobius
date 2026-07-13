@@ -894,11 +894,21 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         if (reg) await reg.update()
       }
       await versionQueries.current.invalidate(queryClient)
-      await versionQuery.refetch()
+      // refetch resolves with an error result rather than rejecting, so a
+      // failed version probe must be re-thrown for allSettled to see it —
+      // same honesty rule as the platform arm below (feature 20).
+      const versionResult = await versionQuery.refetch()
+      if (versionResult.isError) {
+        throw versionResult.error ?? new Error('version check failed')
+      }
     })()
     const platformP = (async () => {
       const res = await api.platform.check()
-      if (res.ok) setPlatform(await res.json())
+      // An HTTP failure must REJECT, not resolve: allSettled treats a
+      // resolved probe as success, so a swallowed !ok let updateCheckOutcome
+      // report "No updates found" on a real 500 (feature 20).
+      if (!res.ok) throw new Error(`platform check failed: ${res.status}`)
+      setPlatform(await res.json())
     })()
     const results = await Promise.allSettled([frontendP, platformP])
     setUpdatePhase(updateCheckOutcome(results))
