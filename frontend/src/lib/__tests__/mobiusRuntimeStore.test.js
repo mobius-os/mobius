@@ -148,6 +148,70 @@ test('the outbox coalesces to one op per path; the last write wins on drain', as
   assert.deepEqual(server.serverValue('y.json'), { n: 'c' })  // LWW
 })
 
+test('offline signal batches from separate runtimes do not coalesce', async () => {
+  const { server } = freshEnv()
+  const first = await newStorage('7')
+  const second = await newStorage('7')
+  server.setOnline(false)
+
+  await first._queueSignals([{ id: 'first', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await second._queueSignals([{ id: 'second', occurred_at: '2026-07-13T10:00:01Z', name: 'item_created', payload: {} }])
+  assert.equal(await first.pendingCount(), 0) // telemetry never changes user-data sync state
+  assert.equal(await first._pendingSignalCount(), 2)
+
+  server.setOnline(true)
+  await first._drainSignals()
+  assert.equal(await first._pendingSignalCount(), 0)
+  assert.deepEqual(server.signalEvents.map((event) => event.id), ['first', 'second'])
+})
+
+test('a failing signal endpoint cannot block or dead-letter user storage writes', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7')
+  server.setSignalStatus(503)
+
+  await storage._queueSignals([{ id: 'stuck', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await storage._drainSignals()
+  assert.equal(await storage._pendingSignalCount(), 1)
+
+  const result = await storage.set('document.json', { saved: true })
+  assert.deepEqual(result, { synced: true })
+  assert.deepEqual(server.serverValue('document.json'), { saved: true })
+  assert.equal(await storage.pendingCount(), 0)
+  assert.equal(await storage._pendingSignalCount(), 1)
+})
+
+test('the offline signal queue evicts oldest events at its per-app cap', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7')
+  server.setOnline(false)
+  const events = Array.from({ length: 600 }, (_, i) => ({
+    id: `signal-${i}`,
+    occurred_at: '2026-07-13T10:00:00Z',
+    name: 'item_created',
+    payload: {},
+  }))
+
+  await storage._queueSignals(events)
+  assert.equal(await storage._pendingSignalCount(), 500)
+})
+
+test('the offline signal queue is bounded by serialized bytes as well as count', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7')
+  server.setOnline(false)
+  const events = Array.from({ length: 300 }, (_, i) => ({
+    id: `wide-${i}`,
+    occurred_at: '2026-07-13T10:00:00Z',
+    name: 'error',
+    payload: { message: 'x'.repeat(10000) },
+  }))
+
+  await storage._queueSignals(events)
+  assert.ok(await storage._pendingSignalCount() < 300)
+  assert.ok(await storage._pendingSignalCount() > 0)
+})
+
 test('a transient failure on the head op stops the drain and preserves order', async () => {
   const { server } = freshEnv()
   const s = await newStorage()

@@ -3,42 +3,8 @@
 import re
 from pathlib import Path
 
+from app.app_compile_contract import RUNTIME_LIBS
 from app.config import get_settings
-
-RUNTIME_LIBS: tuple[str, ...] = (
-  "react",
-  "react/jsx-runtime",
-  "react-dom",
-  "react-dom/client",
-  "recharts",
-  "date-fns",
-  "three",
-  "three/addons/*",
-  "pdfjs-dist",
-  # CodeMirror 6 + KaTeX — the importmap (app-frame.html) resolves these
-  # at runtime; this list must externalize them or esbuild tries to bundle
-  # the bare specifier and the install fails ("Could not resolve
-  # 'codemirror'"). They were in the importmap (for the Notes app) but not
-  # here, which made Notes uninstallable. tests/test_runtime_libs.py locks
-  # the two lists together so the next addition can't desync.
-  "codemirror",
-  "@codemirror/state",
-  "@codemirror/view",
-  "@codemirror/commands",
-  "@codemirror/language",
-  "@codemirror/lang-markdown",
-  "@lezer/highlight",
-  "katex",
-  # d3-geo (Atlas globe), marked + dompurify (Notes markdown preview) — moved
-  # off esm.sh to /vendor so those apps are offline-deterministic. The importmap
-  # (app-frame.html) resolves them at runtime; externalizing here is what makes
-  # `import('d3-geo')` / `import('marked')` / `import('dompurify')` compile
-  # instead of esbuild trying to bundle the bare specifier. test_runtime_libs.py
-  # locks this list to the importmap.
-  "d3-geo",
-  "marked",
-  "dompurify",
-)
 
 
 def frame_path_candidates() -> list[Path]:

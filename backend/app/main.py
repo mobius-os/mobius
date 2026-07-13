@@ -37,7 +37,7 @@ from app.routes import (
   debug_router, fs_router, generate_router, github_router,
   notifications_router, notify_router, proxy_router, push_router,
   self_reminders_router, settings_router,
-  client_error_router, standalone_router, storage_router,
+  client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
 )
@@ -588,6 +588,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(client_error_router)
+app.include_router(client_signal_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)

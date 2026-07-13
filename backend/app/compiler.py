@@ -2,22 +2,22 @@
 
 import asyncio
 import os
-import re
 import tempfile
 from pathlib import Path
 
 from app import timeutil
+from app.app_compile_contract import (
+  ESBUILD_TIMEOUT_SECS,
+  EXPORT_DEFAULT_RE,
+  esbuild_command,
+)
 from app.config import get_settings
-from app.runtime_libs import RUNTIME_LIBS
 
-_ESBUILD_TIMEOUT_SECS = 30
+_ESBUILD_TIMEOUT_SECS = ESBUILD_TIMEOUT_SECS
 
 # `export default <anything>` with optional async/function/class/paren/identifier.
 # Covers: `export default function`, `export default class`, `export default App`,
 # `export default () =>`, `export default {...}`, etc.
-_EXPORT_DEFAULT_RE = re.compile(r"^\s*export\s+default\b", re.MULTILINE)
-
-
 class CompileError(RuntimeError):
   """A user-source compile failure with stderr for client-safe formatting."""
 
@@ -112,7 +112,7 @@ async def compile_jsx(
       "apps/<name>/index.jsx before registering."
     )
     raise CompileError(message, stderr=message, source_path=source_path)
-  if not _EXPORT_DEFAULT_RE.search(jsx_source):
+  if not EXPORT_DEFAULT_RE.search(jsx_source):
     message = (
       "JSX source has no `export default` — mini-apps must export a "
       "default React component. Add `export default function MyApp(...)` "
@@ -135,14 +135,7 @@ async def compile_jsx(
   try:
     try:
       proc = await asyncio.create_subprocess_exec(
-        "esbuild",
-        str(entry_path),
-        "--bundle",
-        "--format=esm",
-        "--jsx=automatic",
-        "--platform=browser",
-        *[f"--external:{lib}" for lib in RUNTIME_LIBS],
-        f"--outfile={out}",
+        *esbuild_command(entry_path, out),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
       )

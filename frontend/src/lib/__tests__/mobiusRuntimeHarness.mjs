@@ -58,6 +58,8 @@ function installGlobals() {
 //   GET    /api/storage/apps-list/{appId}/... → list() — not exercised here
 export function makeServer() {
   const files = new Map()           // path -> { value, kind, contentType, etag }
+  const signalEvents = []
+  let signalStatus = 204
   let online = true
   // path -> status to force on the NEXT matching write (poison/transient tests).
   const forcedWriteStatus = new Map()
@@ -93,10 +95,16 @@ export function makeServer() {
 
   async function fetchImpl(url, init = {}) {
     const method = init.method || 'GET'
-    log.push({ url, method, headers: (init && init.headers) || {} })
+    log.push({ url, method, headers: (init && init.headers) || {}, body: init.body })
     if (!online) {
       // A real offline fetch rejects; the runtime catches it as transient.
       throw new TypeError('Failed to fetch (offline)')
+    }
+    if (method === 'POST' && url === '/api/client-signal') {
+      if (signalStatus !== 204) return res(signalStatus)
+      const body = JSON.parse(init.body)
+      signalEvents.push(...(body.signals || []))
+      return res(204)
     }
     const m = url.match(/\/api\/storage\/apps\/[^/]+\/(.+?)(\?.*)?$/)
     const path = m ? decodeURIComponent(m[1]) : null
@@ -162,6 +170,8 @@ export function makeServer() {
     },
     serverValue(path) { return files.has(path) ? files.get(path).value : undefined },
     serverHas(path) { return files.has(path) },
+    signalEvents,
+    setSignalStatus(status) { signalStatus = status },
     // Force the NEXT write to `path` to return `status` (e.g. 422 poison, 503
     // transient). Consumed once.
     forceWrite(path, status) { forcedWriteStatus.set(path, status) },

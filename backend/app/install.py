@@ -50,6 +50,24 @@ from app import activity, app_git, fs_locks, legacy_platform_apps, models, sourc
 from app.app_source_check import check_app_source
 from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
+from app.manifest_contract import (
+  ENTRY_MAX_BYTES as _CONTRACT_ENTRY_MAX_BYTES,
+  ICON_MAX_BYTES as _CONTRACT_ICON_MAX_BYTES,
+  MANIFEST_MAX_BYTES as _CONTRACT_MANIFEST_MAX_BYTES,
+  SEED_MAX_BYTES as _CONTRACT_SEED_MAX_BYTES,
+  SEEDS_COUNT_MAX as _CONTRACT_SEEDS_COUNT_MAX,
+  SEEDS_TOTAL_MAX as _CONTRACT_SEEDS_TOTAL_MAX,
+  SKILL_MAX_BYTES as _CONTRACT_SKILL_MAX_BYTES,
+  SOURCE_FILES_COUNT_MAX as _CONTRACT_SOURCE_FILES_COUNT_MAX,
+  SOURCE_FILES_TOTAL_MAX as _CONTRACT_SOURCE_FILES_TOTAL_MAX,
+  STATIC_ASSET_MAX_BYTES as _CONTRACT_STATIC_ASSET_MAX_BYTES,
+  STATIC_ASSETS_COUNT_MAX as _CONTRACT_STATIC_ASSETS_COUNT_MAX,
+  STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
+  SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
+  ManifestContractError,
+  validate_manifest_contract,
+  validate_storage_destination,
+)
 # Keep the underscore alias: install._http_get calls _validate_url_safe, and
 # the install tests patch `app.install._validate_url_safe`. The canonical
 # validator now lives in net_utils (shared with routes/proxy.py) — see
@@ -75,15 +93,15 @@ log = logging.getLogger("mobius.install")
 
 # Manifest fetch cap. A legitimate manifest is < 4 KB. The cap is
 # the safety net against malicious URLs streaming GB of data.
-_MANIFEST_MAX_BYTES = 64 * 1024
+_MANIFEST_MAX_BYTES = _CONTRACT_MANIFEST_MAX_BYTES
 
 # Entry JSX cap. Real apps run 5-50 KB; 1 MB is enough headroom for
 # anything reasonable while bounding worst-case install cost.
-_ENTRY_MAX_BYTES = 1024 * 1024
+_ENTRY_MAX_BYTES = _CONTRACT_ENTRY_MAX_BYTES
 
 # Seed file cap (per file). Storage seeds are prompts, default
 # configs, sample images — never huge.
-_SEED_MAX_BYTES = 4 * 1024 * 1024
+_SEED_MAX_BYTES = _CONTRACT_SEED_MAX_BYTES
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -133,23 +151,23 @@ def _compile_error_detail(app_name: str, exc: CompileError) -> str:
 # leaves the total unbounded (a manifest can list many seeds), so a small
 # manifest could still force large memory growth holding them all (Codex
 # review round-10 #6). These bound the count and the summed bytes.
-_SEEDS_COUNT_MAX = 64
-_SEEDS_TOTAL_MAX = 32 * 1024 * 1024
+_SEEDS_COUNT_MAX = _CONTRACT_SEEDS_COUNT_MAX
+_SEEDS_TOTAL_MAX = _CONTRACT_SEEDS_TOTAL_MAX
 
 # Static site assets declared by a manifest. These are for prebuilt apps that
 # need durable files below /data/apps/<slug>/static (served at /app-assets/...),
 # not one-off files dropped into the platform frontend.
-_STATIC_ASSET_MAX_BYTES = 16 * 1024 * 1024
-_STATIC_ASSETS_COUNT_MAX = 256
-_STATIC_ASSETS_TOTAL_MAX = 64 * 1024 * 1024
+_STATIC_ASSET_MAX_BYTES = _CONTRACT_STATIC_ASSET_MAX_BYTES
+_STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
+_STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
 # (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. Bounds
 # mirror the static-asset guards: cap the count here, cap the summed bytes at
 # fetch time. Each module reuses the entry cap per file.
-_SOURCE_FILES_COUNT_MAX = 50
-_SOURCE_FILES_TOTAL_MAX = 8 * 1024 * 1024
+_SOURCE_FILES_COUNT_MAX = _CONTRACT_SOURCE_FILES_COUNT_MAX
+_SOURCE_FILES_TOTAL_MAX = _CONTRACT_SOURCE_FILES_TOTAL_MAX
 
 # Install-managed path prefixes a `source_files` entry must never claim. These
 # are written/owned by other phases (static_assets under static/, the cron
@@ -169,11 +187,11 @@ _SOURCE_FILES_MANAGED_EXACT = frozenset((
 # root-level `source_files` basename the post-commit sync phase copies into
 # /data/shared/skills/. Small caps — skills are instruction prose, not data.
 _SKILLS_COUNT_MAX = 5
-_SKILL_MAX_BYTES = 256 * 1024
+_SKILL_MAX_BYTES = _CONTRACT_SKILL_MAX_BYTES
 
 # A system-prompt fragment is more privileged than a skill because it is read
 # every turn. It uses the same root-level markdown and byte-size contract.
-_SYSTEM_PROMPT_MAX_BYTES = 256 * 1024
+_SYSTEM_PROMPT_MAX_BYTES = _CONTRACT_SYSTEM_PROMPT_MAX_BYTES
 
 # Installer-owned ownership/provenance sidecar inside the skills dir. A
 # dotfile that is not `*.md`, so the skill loaders (the app-skills catalog
@@ -190,7 +208,7 @@ _MERGED_NON_SOURCE = frozenset((
 ))
 
 # Icon cap matches the icon-upload route's 12 MB ceiling.
-_ICON_MAX_BYTES = 12 * 1024 * 1024
+_ICON_MAX_BYTES = _CONTRACT_ICON_MAX_BYTES
 
 _HTTP_TIMEOUT = 15.0
 
@@ -257,6 +275,14 @@ def _validate_slug_field(value, field: str) -> None:
 
 def _validate_manifest(m: dict) -> None:
   """Raises HTTPException(400) with a precise message on any issue."""
+  try:
+    validate_manifest_contract(m)
+  except ManifestContractError as exc:
+    raise HTTPException(400, str(exc)) from exc
+  # The dependency-free shared contract above is the complete shape/path
+  # contract used by both installation and pre-publication validation. Keep the
+  # adapter here limited to translating its exception into the HTTP boundary.
+  return
   missing = [k for k in _REQUIRED_FIELDS if not m.get(k)]
   if missing:
     raise HTTPException(
@@ -1378,11 +1404,10 @@ def _storage_path(app_id: int, sub: str) -> Path:
   # Path validation mirrors routes/storage.py — keep characters safe
   # against traversal. The store mini-app is the primary caller, but
   # community manifests might be careless / hostile.
-  if ".." in sub or sub.startswith("/"):
-    raise HTTPException(400, f"Invalid storage path: {sub}")
-  for ch in sub:
-    if not (ch.isalnum() or ch in "._-/"):
-      raise HTTPException(400, f"Invalid storage path char: {sub}")
+  try:
+    validate_storage_destination(sub)
+  except ManifestContractError as exc:
+    raise HTTPException(400, str(exc)) from exc
   return data_dir / "apps" / str(app_id) / sub
 
 
@@ -2766,6 +2791,17 @@ async def install_from_manifest(
                 static_dests=list(static_assets_fetched.keys()),
                 job_name=job_name,
               )
+          # Materialize declared static destinations before compilation: an app
+          # may import a generated same-origin module from `./static/...`, and
+          # the source completeness contract already treats those destinations
+          # as valid graph nodes. Rollback actions keep a failed compile atomic.
+          _write_static_assets(
+            source_dir_path,
+            static_assets_fetched,
+            created_paths,
+            rollback_actions,
+            commit_actions,
+          )
           # Compile now that the whole source tree is on disk. Passing the real
           # entry path makes esbuild resolve `./cards.js`-style sibling imports
           # from the files just written; promotion of the staged bundle into the
@@ -2784,13 +2820,6 @@ async def install_from_manifest(
           )
           commit_actions.append(
             lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
-          )
-          _write_static_assets(
-            source_dir_path,
-            static_assets_fetched,
-            created_paths,
-            rollback_actions,
-            commit_actions,
           )
           # On the git path, commit the working-tree source onto the local
           # `main` branch so the watcher's future commits build on a known base.

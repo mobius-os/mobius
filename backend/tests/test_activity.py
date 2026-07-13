@@ -50,6 +50,31 @@ def test_log_event_appends_multiple_lines_in_order():
   assert [e["ev"] for e in lines] == ["app_open", "app_install", "storage_write"]
 
 
+def test_log_event_ascii_escapes_a_lone_surrogate():
+  assert activity.log_event("app_error", message="bad-\ud800-tail") is True
+  assert _read_lines()[0]["message"] == "bad-\ud800-tail"
+
+
+def test_log_event_repairs_an_interrupted_partial_tail():
+  path = _activity_path()
+  path.parent.mkdir(parents=True, exist_ok=True)
+  current = datetime.now(timezone.utc).isoformat()
+  path.write_bytes(f'{{"ev":"old","ts":"{current}"}}\n{{"ev":'.encode())
+  assert activity.log_event("app_open", app_id=2, slug="new") is True
+  assert [event["ev"] for event in _read_lines()] == ["old", "app_open"]
+
+
+def test_only_durable_batches_fsync(monkeypatch):
+  calls = []
+  monkeypatch.setattr(activity.os, "fsync", lambda fd: calls.append(fd))
+  assert activity.log_event("app_open", app_id=1, slug="fast") is True
+  assert calls == []
+  assert activity.log_events(
+    [("app_signal", {"app_id": 1, "id": "durable"})], durable=True,
+  ) is True
+  assert len(calls) == 1
+
+
 def test_log_event_disabled_via_env(monkeypatch):
   monkeypatch.setenv("MOBIUS_ACTIVITY_LOG", "off")
   activity.log_event("app_open", app_id=99, slug="silent")

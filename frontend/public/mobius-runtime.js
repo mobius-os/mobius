@@ -41,19 +41,21 @@
 //     Embeds the real agent chat (ChatView) in a nested iframe inside
 //     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
 //     and handle.destroy(). See the "Agent-chat embed" block below.
-//   window.mobius.nav.open(label, onBack)        -> { ready, close }  (shell-mediated back target; see building-apps.md)
+//   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
+//     outcome distinguishes shell ownership from standalone fallback and
+//     request failures; see building-apps.md.
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
 // ignore it and use raw IndexedDB / OPFS / SQLite-wasm directly (same-origin
 // iframe → all browser storage works), or talk to its own backend. The
 // platform provides the on-ramp; it never gates the escape hatch.
 //
-// Conflict policy: last-write-wins at the path granularity. The newest
-// write for a path supersedes any earlier one — enforced by coalescing
-// the outbox on every write (enqueueing a newer write for a path purges the
-// older queued op for it) and by routing ALL server writes through the single
-// outbox-lock-serialized drain, so a stale queued op can never replay over a
-// newer value. An app that needs per-record LWW stores one file per record
+// Storage conflict policy: last-write-wins at the path granularity. The newest
+// PUT/DELETE for a path supersedes any earlier one — enforced by coalescing
+// those state operations in the outbox and routing all server writes through
+// the single outbox-lock-serialized drain, so a stale queued op can never replay
+// over a newer value. Signals are events rather than path state and explicitly
+// do NOT coalesce. An app that needs per-record LWW stores one file per record
 // (…/items/<uuid>.json) so concurrent edits to different records don't
 // clobber each other. CRDTs are out of scope (overkill for single-owner
 // personal apps).
@@ -61,13 +63,19 @@
 // Smells: see the block at the bottom of this file.
 
 const DB_NAME = 'mobius-outbox'
+const SIGNAL_DB_NAME = 'mobius-signals'
 const STORE = 'ops'
+const SIGNAL_STORE = 'signals'
 // Read-through mirror of last-known server values, so get() works offline.
 // Keyed by `${appId}:${path}` (one shared DB across all apps, like the outbox).
 const CACHE_STORE = 'cache'
 const OUTCOME_STORE = 'write_outcomes'
 const DB_VERSION = 3
+const SIGNAL_DB_VERSION = 1
 const MAX_WRITE_OUTCOMES = 200
+const MAX_PENDING_SIGNALS = 500
+const MAX_PENDING_SIGNAL_BYTES = 2 * 1024 * 1024
+const SIGNAL_SEND_BATCH = 100
 
 // Per-blob ceiling for setBlob: rejected BEFORE any IDB/outbox/network write, so
 // neither the local mirror nor the offline outbox ever holds an over-cap binary
@@ -156,6 +164,46 @@ function openDb() {
     // so callers don't hang; if the open later succeeds anyway, onsuccess sees
     // `settled` and closes the late handle instead of leaking it.
     req.onblocked = () => { if (!settled) { settled = true; reject(new Error('mobius-outbox open blocked')) } }
+  })
+}
+
+// Signals intentionally use their own version-1 database. Adding their store
+// to mobius-outbox would force a schema upgrade that makes still-open cached
+// runtimes unable to reopen the owner's user-data outbox during rollout.
+function openSignalDb() {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const req = indexedDB.open(SIGNAL_DB_NAME, SIGNAL_DB_VERSION)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(SIGNAL_STORE)) {
+        db.createObjectStore(SIGNAL_STORE, { keyPath: 'key' })
+      }
+    }
+    req.onsuccess = () => {
+      const db = req.result
+      if (settled) { try { db.close() } catch (e) {} return }
+      settled = true
+      db.onversionchange = () => { try { db.close() } catch (e) {} }
+      resolve(db)
+    }
+    req.onerror = () => { if (!settled) { settled = true; reject(req.error) } }
+    req.onblocked = () => {
+      if (!settled) { settled = true; reject(new Error('mobius-signals open blocked')) }
+    }
+  })
+}
+
+async function withSignalStore(mode, fn) {
+  const db = await openSignalDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SIGNAL_STORE, mode)
+    const box = {}
+    fn(tx.objectStore(SIGNAL_STORE), box)
+    const done = () => { try { db.close() } catch (e) {} }
+    tx.oncomplete = () => { done(); resolve(box.value) }
+    tx.onerror = () => { done(); reject(tx.error) }
+    tx.onabort = () => { done(); reject(tx.error) }
   })
 }
 
@@ -581,8 +629,9 @@ export function makeStorage({ appId, getToken }) {
     }
   }
 
-  // Send one queued op to the storage API. PUT and DELETE are both
-  // idempotent by path, so replaying a flushed op is safe. A DELETE
+  // Send one queued op. Storage PUT/DELETE are idempotent by path. Signal
+  // batches instead carry stable event IDs so their consumer can deduplicate a
+  // replay after a successful response is lost. A DELETE
   // that 404s means the file is already absent — the intended end state
   // — so we treat it as success. A 401 means the token is stale; we
   // throw 'AUTH' so the drain stops WITHOUT discarding the op (a fresh
@@ -730,10 +779,10 @@ export function makeStorage({ appId, getToken }) {
   }
 
   for (const ev of ['online', 'focus', 'pageshow']) {
-    window.addEventListener(ev, drain)
+    window.addEventListener(ev, () => { drain(); drainSignals() })
   }
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') drain()
+    if (document.visibilityState === 'visible') { drain(); drainSignals() }
   })
 
   // The value the caller should see for a path RIGHT NOW: a pending outbox
@@ -788,6 +837,156 @@ export function makeStorage({ appId, getToken }) {
   function remove(path) {
     return withPathLock(path, () => removeLocal(path))
       .then((op) => settle(path, op.writeId, true))
+  }
+
+  function listSignals() {
+    return withSignalStore('readonly', (store, box) => {
+      box.value = []
+      store.openCursor().onsuccess = (event) => {
+        const cursor = event.target.result
+        if (!cursor) {
+          box.value.sort((a, b) => a.queuedAt - b.queuedAt)
+          return
+        }
+        if (cursor.value.appId === appId) box.value.push(cursor.value)
+        cursor.continue()
+      }
+    })
+  }
+
+  function deleteSignals(records) {
+    return withSignalStore('readwrite', (store) => {
+      for (const record of records) store.delete(record.key)
+    })
+  }
+
+  // Signals have a separate bounded queue and drain. Telemetry can therefore
+  // never block, dead-letter, or inflate pendingCount() for user data writes.
+  let _signalRetryTimer = null
+  let _signalRetryDelay = 5000
+  let _signalNextAttemptAt = 0
+
+  function scheduleSignalRetry(response = null) {
+    if (_signalRetryTimer !== null) return
+    let delay = _signalRetryDelay
+    const retryAfter = response?.headers?.get?.('Retry-After')
+    if (retryAfter) {
+      const seconds = Number(retryAfter)
+      const dateDelay = Date.parse(retryAfter) - Date.now()
+      if (Number.isFinite(seconds)) delay = Math.max(delay, seconds * 1000)
+      else if (Number.isFinite(dateDelay)) delay = Math.max(delay, dateDelay)
+    }
+    delay = Math.min(Math.max(delay, 1000), 5 * 60 * 1000)
+    _signalRetryDelay = Math.min(delay * 2, 5 * 60 * 1000)
+    _signalNextAttemptAt = Date.now() + delay
+    _signalRetryTimer = setTimeout(() => {
+      _signalRetryTimer = null
+      drainSignals(true).catch(() => {})
+    }, delay)
+    _signalRetryTimer?.unref?.()
+  }
+
+  async function deliverSignalRecords(records) {
+    try {
+      const token = await getToken()
+      const response = await fetch('/api/client-signal', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ signals: records.map((record) => record.event) }),
+      })
+      if (response.ok) {
+        await deleteSignals(records)
+        _signalRetryDelay = 5000
+        _signalNextAttemptAt = 0
+        return true
+      }
+      if ([401, 403, 408, 429].includes(response.status) || response.status >= 500) {
+        scheduleSignalRetry(response)
+        return false
+      }
+      // Isolate a poison/future-schema record instead of dropping an otherwise
+      // valid 100-event batch. Only the irreducible rejected record is removed.
+      if (records.length === 1) {
+        await deleteSignals(records)
+        return true
+      }
+      const middle = Math.floor(records.length / 2)
+      if (!await deliverSignalRecords(records.slice(0, middle))) return false
+      return deliverSignalRecords(records.slice(middle))
+    } catch (e) {
+      scheduleSignalRetry()
+      return false
+    }
+  }
+
+  async function drainSignalsInner() {
+    if (!navigator.onLine) return
+    for (;;) {
+      const records = (await listSignals()).slice(0, SIGNAL_SEND_BATCH)
+      if (!records.length) return
+      if (!await deliverSignalRecords(records)) return
+    }
+  }
+
+  let _signalDrainChain = Promise.resolve()
+  function drainSignals(force = false) {
+    if (!force && Date.now() < _signalNextAttemptAt) return Promise.resolve()
+    if (force && _signalRetryTimer !== null) {
+      clearTimeout(_signalRetryTimer)
+      _signalRetryTimer = null
+    }
+    if (navigator.locks && navigator.locks.request) {
+      return navigator.locks.request(`mobius-signals-${appId}`, drainSignalsInner)
+        .catch(() => {})
+    }
+    _signalDrainChain = _signalDrainChain.then(drainSignalsInner, drainSignalsInner)
+    return _signalDrainChain
+  }
+
+  // Internal transport for window.mobius.signal(). The IndexedDB transaction
+  // is the durability boundary. Stable IDs make put() and server replay safe;
+  // the per-app cap prevents noisy offline telemetry from filling shared IDB.
+  async function queueSignals(signals) {
+    if (!Array.isArray(signals) || signals.length === 0) return
+    await withSignalStore('readwrite', (store) => {
+      let queuedAt = Date.now()
+      for (const event of signals) {
+        const serialized = JSON.stringify(event)
+        store.put({
+          key: `${appId}:${event.id}`,
+          appId,
+          event,
+          bytes: new Blob([serialized]).size,
+          queuedAt: queuedAt++,
+        })
+      }
+      const records = []
+      store.openCursor().onsuccess = (cursorEvent) => {
+        const cursor = cursorEvent.target.result
+        if (cursor) {
+          if (cursor.value.appId === appId) records.push(cursor.value)
+          cursor.continue()
+          return
+        }
+        records.sort((a, b) => a.queuedAt - b.queuedAt)
+        let totalBytes = records.reduce((sum, record) => sum + (record.bytes || 0), 0)
+        let removeCount = Math.max(0, records.length - MAX_PENDING_SIGNALS)
+        while (
+          removeCount < records.length
+          && totalBytes > MAX_PENDING_SIGNAL_BYTES
+        ) {
+          totalBytes -= records[removeCount].bytes || 0
+          removeCount += 1
+        }
+        for (const record of records.slice(0, removeCount)) {
+          store.delete(record.key)
+        }
+      }
+    })
+    drainSignals().catch(() => {})
   }
 
   // Page the server's authoritative listing of the immediate children under
@@ -885,8 +1084,8 @@ export function makeStorage({ appId, getToken }) {
       for (const c of await listCachePresent()) addDerived(c.path, c)
     }
 
-    // Overlay the outbox (the queue coalesces to <=1 op per path, so the last
-    // intent for a path is the only one): a PUT ensures its child shows even
+    // Overlay state-changing storage ops from the user-data outbox (those
+    // coalesce to <=1 op per path): a PUT ensures its child shows even
     // before the drain reaches the server; a DELETE drops a direct-file child
     // the server/cache still lists.
     for (const op of await listOps()) {
@@ -1205,6 +1404,9 @@ export function makeStorage({ appId, getToken }) {
       return (await listOps()).length
     },
     getWithVersion,
+    _queueSignals: queueSignals,
+    _pendingSignalCount: async () => (await listSignals()).length,
+    _drainSignals: drainSignals,
     _drain: drain,
     _notify: notify,
   }
@@ -1376,12 +1578,11 @@ export function createUseDocument(storage, reactProvider = null) {
 
 // ── App analytics: window.mobius.signal() (design §3) ──────────────
 //
-// Fire-and-forget telemetry for Reflection. Buffers events in memory and
-// debounce-flushes them to `signals.jsonl` in the app's own storage
-// path, overwriting the full file on each flush (avoids read-append
-// races). On first signal of a session the existing signals.jsonl is
-// read once and its tail (≤400 lines) seeds the in-memory buffer, so
-// entries from prior sessions are preserved across the overwrite.
+// Fire-and-forget telemetry for Reflection. Events receive stable client IDs,
+// buffer briefly in memory, then enter a dedicated bounded IndexedDB queue
+// that cannot block or upgrade the app's user-data outbox. The server appends them to the
+// platform activity stream. This preserves simultaneous-tab and offline events;
+// the old whole-file signals.jsonl overwrite lost one tab's batch.
 //
 // Placement note: this block lives adjacent to the storage machinery
 // (makeStorage above) to minimize merge conflicts with sibling agents
@@ -1396,43 +1597,77 @@ export function createUseDocument(storage, reactProvider = null) {
 //     NOT enforced); only non-string or empty names are dropped silently
 //   - payload values: primitives only (string/number/boolean); non-
 //     primitive values (objects, arrays) are dropped with no error
-//   - ring buffer cap 500; oldest entries evicted when full
+//   - pending memory cap 500; oldest unqueued entries evicted when full
 //   - debounce: at most one flush per 5 seconds; a final flush fires on
 //     pagehide and visibilitychange-hidden so no events are lost on tab close
-//   - on first signal: read existing signals.jsonl once, seed buffer
-//     with its tail ≤400 lines, then overwrite going forward
+//   - a flush removes entries only after IndexedDB durably accepts them
 //
 // Exported as makeSignal(appId, storage) → the signal() fn, so
 // init() can wire it and tests can drive it without a full init().
 
-const SIGNAL_PATH = 'signals.jsonl'
 const SIGNAL_BUF_CAP = 500
-const SIGNAL_SEED_CAP = 400
+const SIGNAL_BATCH_CAP = 100
 const SIGNAL_FLUSH_INTERVAL_MS = 5000
+const SIGNAL_NAME_MAX = 80
+const SIGNAL_PAYLOAD_KEYS_MAX = 20
+const SIGNAL_PAYLOAD_KEY_MAX = 80
+const SIGNAL_PAYLOAD_STRING_MAX = 500
+// Stay below the server's 4096-byte ceiling. The 96-byte margin covers the
+// bounded difference between JavaScript and Python number formatting across at
+// most 20 payload fields (for example 1e-7 vs 1e-07 and -0 vs -0.0).
+const SIGNAL_EVENT_BYTES_MAX = 4000
+
+// Match Python json.dumps(..., ensure_ascii=True) byte-for-byte for the signal
+// shapes we permit. JSON.stringify has already escaped ASCII controls/quotes;
+// every remaining non-ASCII UTF-16 code unit becomes one six-byte \uXXXX
+// escape server-side (a supplementary character is two code units / 12 bytes).
+function _signalServerBytes(value) {
+  const json = JSON.stringify(value)
+  let bytes = 0
+  for (let index = 0; index < json.length; index += 1) {
+    bytes += json.charCodeAt(index) <= 0x7f ? 1 : 6
+  }
+  return bytes
+}
 
 export function makeSignal(appId, storage) {
-  if (!storage || !appId) return () => {}
+  if (!storage || !appId || typeof storage._queueSignals !== 'function') return () => {}
 
-  // State for this session: whether we've seeded the buffer from the
-  // existing file, and the ring buffer of {ts, name, ...payload} lines.
-  let _seeded = false
-  let _seeding = false
-  let _buf = []      // objects not yet serialised
+  let _buf = []
   let _flushTimer = null
-  let _flushPending = false
+  let _flushInFlight = false
+  let _flushAgain = false
+
+  function _signalId() {
+    try {
+      if (crypto && crypto.randomUUID) return crypto.randomUUID()
+    } catch (e) {}
+    return `${appId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
 
   // Validate and normalise one signal call. Returns null if invalid.
   function _prepare(name, payload) {
-    if (typeof name !== 'string' || !name) return null
-    // Kebab-case is recommended but we only reject non-strings, not bad format.
-    const entry = { ts: new Date().toISOString(), name }
+    if (typeof name !== 'string' || !name.trim()) return null
+    const entry = {
+      id: _signalId(),
+      occurred_at: new Date().toISOString(),
+      name: name.trim().slice(0, SIGNAL_NAME_MAX),
+      payload: {},
+    }
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-      for (const [k, v] of Object.entries(payload)) {
-        const t = typeof v
-        if (t === 'string' || t === 'number' || t === 'boolean') {
-          entry[k] = v
+      for (const [rawKey, rawValue] of Object.entries(payload).slice(0, SIGNAL_PAYLOAD_KEYS_MAX)) {
+        const key = String(rawKey).slice(0, SIGNAL_PAYLOAD_KEY_MAX)
+        if (!key) continue
+        let value = rawValue
+        if (typeof value === 'string') value = value.slice(0, SIGNAL_PAYLOAD_STRING_MAX)
+        const t = typeof value
+        if (t === 'string' || t === 'boolean' || (t === 'number' && Number.isFinite(value))) {
+          entry.payload[key] = value
+          // Payload is optional telemetry context. Drop the field that crosses
+          // the server's total event budget so helper-produced events can never
+          // become singleton poison records and be silently discarded.
+          if (_signalServerBytes(entry) > SIGNAL_EVENT_BYTES_MAX) delete entry.payload[key]
         }
-        // non-primitives silently dropped
       }
     }
     return entry
@@ -1446,30 +1681,37 @@ export function makeSignal(appId, storage) {
     }
   }
 
-  // Flush the current buffer to storage as a full overwrite of signals.jsonl.
-  // The overwrite-not-append design avoids read-append races (two flushes
-  // from concurrent tabs would each read, append, and write back, potentially
-  // losing one batch; a full overwrite means whichever tab wins last has the
-  // authoritative snapshot of ITS buffer, which is already seeded from the
-  // prior file). Both tabs share the same seeded history so no entries are lost.
   async function _flush() {
-    _flushPending = false
+    if (_flushInFlight) { _flushAgain = true; return }
     if (_buf.length === 0) return
+    _flushInFlight = true
+    const pending = _buf
+    _buf = []
+    let queued = 0
     try {
-      const lines = _buf.map((e) => JSON.stringify(e)).join('\n') + '\n'
-      await storage.setText(SIGNAL_PATH, lines)
+      while (queued < pending.length) {
+        const batch = pending.slice(queued, queued + SIGNAL_BATCH_CAP)
+        await storage._queueSignals(batch)
+        queued += batch.length
+      }
     } catch (e) {
-      // storage unavailable (offline, token expired) — entries stay in
-      // the buffer and will be included in the next flush attempt
+      // Only batches not yet accepted by IndexedDB return to memory. Earlier
+      // batches are already durable and safe for the outbox to replay.
+      _buf = [...pending.slice(queued), ..._buf].slice(-SIGNAL_BUF_CAP)
+    } finally {
+      _flushInFlight = false
+      const runAgain = _flushAgain
+      _flushAgain = false
+      if (runAgain && _buf.length) _flushNow()
+      else if (_buf.length) _scheduleFlush()
     }
   }
 
   // Schedule a debounced flush. At most one flush every 5 seconds.
   function _scheduleFlush() {
-    if (_flushTimer !== null || _flushPending) return
+    if (_flushTimer !== null) return
     _flushTimer = setTimeout(() => {
       _flushTimer = null
-      _flushPending = true
       _flush().catch(() => {})
     }, SIGNAL_FLUSH_INTERVAL_MS)
   }
@@ -1494,49 +1736,14 @@ export function makeSignal(appId, storage) {
     } catch (e) {}
   }
 
-  // Seed the in-memory buffer from the existing signals.jsonl (≤400 tail
-  // lines) so that prior-session entries survive the next overwrite. Called
-  // once per session, before the first flush. Runs async; calls that arrive
-  // while seeding are buffered normally and included in the eventual flush.
-  async function _seed() {
-    _seeding = true
-    try {
-      const text = await storage.getText(SIGNAL_PATH)
-      if (text) {
-        const tail = text
-          .split('\n')
-          .filter((l) => l.trim())
-          .slice(-SIGNAL_SEED_CAP)
-          .map((l) => { try { return JSON.parse(l) } catch (e) { return null } })
-          .filter(Boolean)
-        // Prepend the seeded tail; then add any entries buffered while seeding;
-        // then apply the cap so the total stays within SIGNAL_BUF_CAP.
-        _buf = [...tail, ..._buf].slice(-SIGNAL_BUF_CAP)
-      }
-    } catch (e) {
-      // seed failed (file absent, storage error) — proceed with empty history
-    }
-    _seeded = true
-    _seeding = false
-  }
-
-  // The public signal() function. Fire-and-forget: starts the async seed
-  // path if needed, pushes the entry, schedules a debounced flush.
+  // The public signal() function remains fire-and-forget.
   function signal(name, payload) {
     try {
       const entry = _prepare(name, payload)
       if (!entry) return
       _ensureHooks()
       _push(entry)
-      // Kick off the one-time seed from storage. The entry was already pushed
-      // to _buf above; after seeding it gets prepended to the historical tail,
-      // so it will be included in the next flush regardless of seed timing.
-      if (!_seeded && !_seeding) {
-        _seed().then(_scheduleFlush).catch(() => { _seeded = true; _scheduleFlush() })
-        return
-      }
-      if (_seeded) _scheduleFlush()
-      // While seeding: entry is in _buf, flush will be triggered by _seed().then
+      _scheduleFlush()
     } catch (e) {
       // signal() must never propagate exceptions
     }
@@ -2383,22 +2590,42 @@ export function makeNav() {
       owned: false,
       done: false,
       settled: false,
+      cleanupTimer: null,
       readyResolve: null,
+      outcomeResolve: null,
       onBack: typeof onBack === 'function' ? onBack : null,
     }
+    const outcome = new Promise((resolve) => {
+      entry.outcomeResolve = resolve
+    })
+    // Compatibility: `ready` keeps its original boolean contract forever.
+    // New callers should inspect `outcome` because false historically folded
+    // together standalone use, shell rejection, timeout, cancellation, and a
+    // failed postMessage — states with different UI consequences.
     const ready = new Promise((resolve) => {
       entry.readyResolve = resolve
     })
-    const settleReady = (value) => {
-      if (!entry.readyResolve) return
-      entry.readyResolve(value)
-      entry.readyResolve = null
+    const settleOutcome = (status) => {
+      if (entry.outcomeResolve) {
+        entry.outcomeResolve({ status })
+        entry.outcomeResolve = null
+      }
+      if (entry.readyResolve) {
+        entry.readyResolve(status === 'owned')
+        entry.readyResolve = null
+      }
     }
     const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const timer = setTimeout(() => {
-      entry.settled = true
-      settleReady(false)
-      window.removeEventListener('message', onMessage)
+      // Ownership is unknown on timeout: the shell may have installed the
+      // sentinel but its ack may be delayed. Mark the request abandoned and
+      // retain correlation briefly so a late ack can be compensated by pop.
+      entry.done = true
+      settleOutcome('timeout')
+      entry.cleanupTimer = setTimeout(() => {
+        entry.settled = true
+        window.removeEventListener('message', onMessage)
+      }, 30000)
     }, 5000)
 
     const close = (fromShell = false) => {
@@ -2412,9 +2639,10 @@ export function makeNav() {
         } catch (e) {}
       }
       entry.owned = false
-      if (!entry.settled) settleReady(false)
+      if (!entry.settled) settleOutcome('cancelled')
       if (entry.settled || fromShell) {
         clearTimeout(timer)
+        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         window.removeEventListener('message', onMessage)
       }
     }
@@ -2433,22 +2661,26 @@ export function makeNav() {
       if (msg.type === 'moebius:nav-push-ack') {
         entry.settled = true
         clearTimeout(timer)
+        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         if (entry.done) {
           try {
             window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
           } catch (e) {}
-          settleReady(false)
+          // A close-before-ack already settled the public outcome as
+          // `cancelled`; the late ack is compensated with exactly one pop.
+          settleOutcome('owned')
           window.removeEventListener('message', onMessage)
           return
         }
         entry.owned = true
         stack.push(entry)
-        settleReady(true)
+        settleOutcome('owned')
       } else if (msg.type === 'moebius:nav-push-rejected') {
         entry.settled = true
         clearTimeout(timer)
+        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         entry.owned = false
-        settleReady(false)
+        settleOutcome('rejected')
         window.removeEventListener('message', onMessage)
       }
     }
@@ -2457,10 +2689,11 @@ export function makeNav() {
     if (window.parent === window) {
       clearTimeout(timer)
       entry.settled = true
-      settleReady(false)
+      settleOutcome('standalone')
       window.removeEventListener('message', onMessage)
       return {
         ready,
+        outcome,
         close() {
           close(false)
         },
@@ -2474,12 +2707,13 @@ export function makeNav() {
     } catch (e) {
       clearTimeout(timer)
       entry.settled = true
-      settleReady(false)
+      settleOutcome('error')
       window.removeEventListener('message', onMessage)
     }
 
     return {
       ready,
+      outcome,
       close() {
         close(false)
       },
@@ -2562,6 +2796,7 @@ export function init({ appId, getToken }) {
     split: makeSplit(),
   }
   storage._drain()    // flush anything left from a previous offline session
+  storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive
   // storage pressure. Fired here (not only in the shell's index.html) so a
   // standalone mini-app PWA opened WITHOUT the shell still gets it. Best-effort.

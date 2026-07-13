@@ -16,6 +16,7 @@ read both):
   {"ev":"skill_loaded",   "ts", "chat_id", "skill"}
   {"ev":"memory_load",    "ts", "source", "paths", "mode"}
   {"ev":"app_error",      "ts", "app_id"?, "message", "where"?, "stack"?, "url"?}
+  {"ev":"app_signal",     "ts", "app_id", "id", "occurred_at", "name", "payload"}
   {"ev":"chat_sent",      "ts", "chat_id", "provider", "app_id"?}  # one per user turn
   {"ev":"chat_created",   "ts", "chat_id"}
   {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
@@ -205,35 +206,65 @@ def _sweep_old(logs_dir: Path, now: datetime) -> None:
         log.warning("activity log sweep failed for %s: %s", fp, exc)
 
 
-def log_event(ev: str, **fields: Any) -> None:
-  """Appends one event line to /data/logs/activity.jsonl.
+def log_events(
+  events: list[tuple[str, dict[str, Any]]], *, durable: bool = False,
+) -> bool:
+  """Append an event batch under one lock/open/flush, returning success.
 
-  Always swallows its own errors — the activity log is a sidecar
-  signal, not load-bearing. A disk-full or permission failure here
-  must not propagate up into the request handler that called it.
+  Errors are still swallowed for the many best-effort call sites, but the bool
+  lets the client-signal ingest endpoint return 503 and retain its durable
+  browser queue instead of acknowledging data that never reached disk.
+  """
+  if _is_disabled() or not events:
+    return True
+  try:
+    lines = []
+    for ev, source_fields in events:
+      fields = dict(source_fields)
+      payload: dict[str, Any] = {"ev": ev}
+      payload["ts"] = fields.pop("ts", None) or _now_iso()
+      payload.update(fields)
+      # ASCII escaping is deliberate: a browser can truncate between UTF-16
+      # surrogate halves, and ensure_ascii=False would raise during UTF-8 write.
+      lines.append(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
+    encoded = ("\n".join(lines) + "\n").encode("ascii")
+    path = _activity_path()
+    now = datetime.now(timezone.utc)
+    with _write_lock:
+      path.parent.mkdir(parents=True, exist_ok=True)
+      _rotate_if_due(path, now)
+      with path.open("ab+") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size:
+          f.seek(-1, os.SEEK_END)
+          if f.read(1) != b"\n":
+            # Repair a partial tail left by a prior interrupted append so the
+            # retried first event starts on a parseable line.
+            f.seek(0)
+            content = f.read()
+            last_newline = content.rfind(b"\n")
+            f.truncate(last_newline + 1 if last_newline >= 0 else 0)
+            f.seek(0, os.SEEK_END)
+        f.write(encoded)
+        f.flush()
+        if durable:
+          os.fsync(f.fileno())
+    return True
+  except (OSError, UnicodeError, TypeError, ValueError) as exc:
+    log.warning("activity log batch write failed (%s): %s", events[0][0], exc)
+    return False
+
+
+def log_event(ev: str, **fields: Any) -> bool:
+  """Append one event; best-effort callers may ignore the success result.
 
   Fields are passed through unchanged; the caller is responsible
   for shape (see this module's docstring for the per-event schema).
   `ts` is filled in here if the caller didn't supply one, so every
   call site doesn't have to repeat the ISO formatting.
   """
-  if _is_disabled():
-    return
-  payload: dict[str, Any] = {"ev": ev}
-  payload["ts"] = fields.pop("ts", None) or _now_iso()
-  payload.update(fields)
-  line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-  path = _activity_path()
-  now = datetime.now(timezone.utc)
-  try:
-    with _write_lock:
-      path.parent.mkdir(parents=True, exist_ok=True)
-      _rotate_if_due(path, now)
-      with path.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
-        f.flush()
-  except OSError as exc:
-    log.warning("activity log write failed (%s): %s", ev, exc)
+  return log_events([(ev, fields)])
 
 
 def should_emit_storage_write(app_id: int, path: str, now: datetime | None = None) -> bool:

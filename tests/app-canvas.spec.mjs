@@ -75,7 +75,7 @@ async function setupShellBasics(page) {
   // — was added upstream). The specific mocks below still win on their paths;
   // this only catches the gaps, so a future Shell-mount query can't silently
   // reintroduce the 401-reload flake.
-  await page.route(/\/api\//, route => {
+  await page.route(url => url.pathname.startsWith('/api/'), route => {
     if (route.request().method() !== 'GET') return route.fallback()
     route.fulfill({
       status: 200,
@@ -352,6 +352,201 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // the message (origin/source mismatch or appId stringify drift) — not
     // a timing flake, since the mount is now deterministic.
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 6000 })
+  })
+
+  test('an app nav-pop consumes one sentinel without echoing nav-back', async ({ page }) => {
+    const appId = 99
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    // Cold-restore the app while loading Vite's real root document. This keeps
+    // the test valid against both the backend SPA fallback and a raw worktree
+    // Vite server without relying on a direct deep-link dev response.
+    await page.addInitScript((id) => {
+      localStorage.setItem('moebius_active_view', 'canvas')
+      localStorage.setItem('moebius_active_app', String(id))
+    }, appId)
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+
+    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
+    const frame = await frameElement.contentFrame()
+    await frame.evaluate(() => {
+      window.__navBacks = 0
+      window.__navAcks = []
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:nav-back') window.__navBacks += 1
+        if (event.data?.type === 'moebius:nav-push-ack') {
+          window.__navAcks.push(event.data.requestId)
+        }
+      })
+      window.parent.postMessage(
+        { type: 'moebius:nav-push', label: 'first', requestId: 'first' },
+        window.location.origin,
+      )
+    })
+    await frame.waitForFunction(() => window.__navAcks.includes('first'))
+    await frame.evaluate(() => {
+      window.parent.postMessage(
+        { type: 'moebius:nav-push', label: 'second', requestId: 'second' },
+        window.location.origin,
+      )
+    })
+    await frame.waitForFunction(() => window.__navAcks.includes('second'))
+
+    // The app has already closed its top nested view. The shell should only
+    // remove that sentinel; reflecting nav-back would close the first level too.
+    await frame.evaluate(() => {
+      window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+    })
+    await page.waitForTimeout(300)
+    expect(await frame.evaluate(() => window.__navBacks)).toBe(0)
+
+    // A genuine browser back still unwinds the remaining app level exactly once.
+    await page.evaluate(() => history.back())
+    await frame.waitForFunction(() => window.__navBacks === 1)
+    expect(await frame.evaluate(() => window.__navBacks)).toBe(1)
+  })
+
+  test('an app nav-pop crosses an adjacent phantom entry without swallowing the next Back', async ({ page }) => {
+    const appId = 99
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    await page.addInitScript((id) => {
+      localStorage.setItem('moebius_active_view', 'canvas')
+      localStorage.setItem('moebius_active_app', String(id))
+    }, appId)
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
+    const frame = await frameElement.contentFrame()
+    await frame.evaluate(() => {
+      window.__navBacks = 0
+      window.__navAck = false
+      // A descendant-frame history entry predates the shell sentinel. Closing
+      // the sentinel therefore lands on an untagged destination first.
+      history.pushState({}, '', '#phantom-before-shell-sentinel')
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:nav-back') window.__navBacks += 1
+        if (event.data?.type === 'moebius:nav-push-ack') window.__navAck = true
+      })
+      window.parent.postMessage(
+        { type: 'moebius:nav-push', label: 'detail', requestId: 'phantom' },
+        window.location.origin,
+      )
+    })
+    await frame.waitForFunction(() => window.__navAck)
+    await frame.evaluate(() => {
+      window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+    })
+    await page.waitForTimeout(300)
+    expect(await frame.evaluate(() => window.__navBacks)).toBe(0)
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible()
+
+    // The local-pop marker is gone. One Back may clear the descendant frame's
+    // own phantom history entry (the shell intentionally ignores that landing);
+    // the following tagged Back must reach the seeded chat root rather than be
+    // swallowed as a stale local close.
+    await page.evaluate(() => history.back())
+    await page.waitForTimeout(200)
+    await page.evaluate(() => history.back())
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeHidden({ timeout: 5000 })
+    expect(await frame.evaluate(() => window.__navBacks)).toBe(0)
+  })
+
+  test('a concurrent drawer close and app nav-pop perform exactly two traversals', async ({ page }) => {
+    const appId = 99
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    await page.addInitScript((id) => {
+      localStorage.setItem('moebius_active_view', 'canvas')
+      localStorage.setItem('moebius_active_app', String(id))
+    }, appId)
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
+    const frame = await frameElement.contentFrame()
+    await frame.evaluate(() => {
+      window.__navBacks = 0
+      window.__navAck = false
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:nav-back') window.__navBacks += 1
+        if (event.data?.type === 'moebius:nav-push-ack') window.__navAck = true
+      })
+      window.parent.postMessage(
+        { type: 'moebius:nav-push', label: 'detail', requestId: 'drawer-race' },
+        window.location.origin,
+      )
+    })
+    await frame.waitForFunction(() => window.__navAck)
+    const drawerToggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await drawerToggle.click()
+    await expect(drawerToggle).toHaveAttribute('aria-expanded', 'true')
+
+    await Promise.all([
+      frame.evaluate(() => {
+        window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+      }),
+      page.evaluate(() => {
+        document.querySelector('[aria-label="Toggle navigation"]')?.click()
+      }),
+    ])
+    await expect(drawerToggle).toHaveAttribute('aria-expanded', 'false')
+    await page.waitForTimeout(300)
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible()
+
+    // No third traversal was scheduled: the shell is still on the app until a
+    // fresh user Back, which now reaches the seeded chat root.
+    await page.evaluate(() => history.back())
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeHidden({ timeout: 5000 })
+  })
+
+  test('a drawer opened after app nav-pop starts waits for that traversal', async ({ page }) => {
+    const appId = 99
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    await page.addInitScript((id) => {
+      localStorage.setItem('moebius_active_view', 'canvas')
+      localStorage.setItem('moebius_active_app', String(id))
+    }, appId)
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
+    const frame = await frameElement.contentFrame()
+    await frame.evaluate(() => {
+      window.__navBacks = 0
+      window.__navAck = false
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:nav-back') window.__navBacks += 1
+        if (event.data?.type === 'moebius:nav-push-ack') window.__navAck = true
+      })
+      window.parent.postMessage(
+        { type: 'moebius:nav-push', label: 'detail', requestId: 'drawer-after-pop' },
+        window.location.origin,
+      )
+    })
+    await frame.waitForFunction(() => window.__navAck)
+
+    // Hold the traversal after the shell has marked it in-flight. This makes
+    // the ordering deterministic: the drawer request definitely arrives after
+    // nav-pop starts but before its history entry commits.
+    await page.evaluate(() => {
+      const originalBack = history.back.bind(history)
+      window.__localBackStarted = false
+      window.__releaseLocalBack = null
+      history.back = () => {
+        window.__localBackStarted = true
+        window.__releaseLocalBack = () => {
+          history.back = originalBack
+          originalBack()
+        }
+      }
+    })
+    await frame.evaluate(() => {
+      window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+    })
+    await page.waitForFunction(() => window.__localBackStarted)
+
+    const drawerToggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await drawerToggle.click()
+    await expect(drawerToggle).toHaveAttribute('aria-expanded', 'false')
+    await page.evaluate(() => window.__releaseLocalBack())
+
+    await expect(drawerToggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible()
+    expect(await frame.evaluate(() => window.__navBacks)).toBe(0)
   })
 
   test('spinner stays visible when frame never posts mounted', async ({ page }) => {

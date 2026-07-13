@@ -980,13 +980,28 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           }}
           if (theme.bg) document.documentElement.style.setProperty('--bg', theme.bg);
         }}
-        const appToken = (tokenRes && tokenRes.ok) ? (await tokenRes.json()).token : token;
+        let appToken = (tokenRes && tokenRes.ok) ? (await tokenRes.json()).token : token;
+        async function runtimeToken() {{
+          if (appToken !== token) return appToken;
+          try {{
+            const refreshed = await fetch('/api/auth/app-token', {{
+              method: 'POST',
+              headers: {{
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token,
+              }},
+              body: JSON.stringify({{ app_id: APP_ID }}),
+            }});
+            if (refreshed.ok) appToken = (await refreshed.json()).token;
+          }} catch (e) {{}}
+          return appToken;
+        }}
         // Expose window.mobius (offline storage queue + sync on
         // reconnect, Tier 4b) before rendering so the component sees it
         // on mount. Precached, so the import resolves offline.
         try {{
           const rt = await import('/mobius-runtime.js');
-          rt.init({{ appId: APP_ID, getToken: async function(){{ return appToken; }} }});
+          rt.init({{ appId: APP_ID, getToken: runtimeToken }});
         }} catch (e) {{}}
         const bust = cacheBust ? '&_=' + Date.now() : '';
         // &v=APP_VERSION is REQUIRED as the SW offline cache-buster: the server

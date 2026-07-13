@@ -122,6 +122,8 @@ def fresh_db():
   # show up in any later test's read_events() merged stream.
   from app import activity as activity_mod
   activity_mod._reset_for_tests()
+  from app.routes import client_signal as client_signal_mod
+  client_signal_mod._reset_for_tests()
   # The single-writer chat-persistence actor is a process singleton the
   # FastAPI lifespan starts in production. TestClient(app) (no `with`)
   # doesn't run lifespan, and the C2 live write paths now route through

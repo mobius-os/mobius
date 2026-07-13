@@ -181,8 +181,25 @@ export default function useNavigation() {
   // nav-push/nav-back protocol in
   // backend/scripts/seed-skills/building-apps.md.
   const appSentinelCountsRef = useRef(new Map())
+  // A nav-pop initiated by the app still traverses browser history, but that
+  // traversal is only acknowledging the app's own close. Keep an explicit FIFO
+  // so handleBack can consume it without echoing moebius:nav-back and closing a
+  // second nested level. Entries remain until their traversal arrives; clearing
+  // them during iframe cleanup would turn an already-scheduled local pop into a
+  // shell navigation.
+  const appLocalPopsRef = useRef([])
+  const appLocalPopInFlightRef = useRef(false)
+  const appLocalPopInFlightEntryRef = useRef(null)
+  const drawerOpenAfterLocalPopRef = useRef(false)
 
   function openDrawer() {
+    // Do not let a just-issued app history traversal consume a drawer entry
+    // pushed after it began. Preserve the user's intent and open once the
+    // serialized local-pop pump is idle.
+    if (appLocalPopInFlightRef.current) {
+      drawerOpenAfterLocalPopRef.current = true
+      return
+    }
     pushNavEntry('drawer')
     drawerPushedRef.current = true
     setDrawerOpen(true)
@@ -242,6 +259,41 @@ export default function useNavigation() {
     return true
   }, [])
 
+  const pumpLocalAppPop = useCallback(() => {
+    if (appLocalPopInFlightRef.current) return
+    if (drawerOpenRef.current) return
+    const next = appLocalPopsRef.current.find(
+      (entry) => entry.appId === activeAppIdRef.current,
+    )
+    if (!next) return
+    // Select the active app's oldest close rather than the global queue head.
+    // Hidden cached apps can legitimately enqueue, but must not block the app
+    // whose history entry is current.
+    // Descendant frames can leave untagged history entries on either side of
+    // an app sentinel. Seek through those first; only a traversal whose source
+    // is a tagged app entry consumes the app's sentinel.
+    const state = history.state
+    if (isMobiusNavState(state) && state.kind !== 'app') return
+    next.phase = isMobiusNavState(state) ? 'consume' : 'seek'
+    appLocalPopInFlightRef.current = true
+    appLocalPopInFlightEntryRef.current = next
+    history.back()
+  }, [])
+
+  const resumeLocalAppPops = useCallback(() => {
+    if (appLocalPopsRef.current.length > 0) {
+      pumpLocalAppPop()
+      // A queued pop may be waiting for its owning app to become active. That
+      // must not starve an unrelated drawer-open intent once no traversal is
+      // actually in flight.
+      if (appLocalPopInFlightRef.current) return
+    }
+    if (drawerOpenAfterLocalPopRef.current) {
+      drawerOpenAfterLocalPopRef.current = false
+      openDrawer()
+    }
+  }, [pumpLocalAppPop])
+
   /** Consume one app-sentinel (e.g. user tapped the in-app back
    *  button inside the mini-app). Funnels through history.back so
    *  the popstate handler's app-sentinel-first branch sees the same
@@ -251,8 +303,9 @@ export default function useNavigation() {
     const m = appSentinelCountsRef.current
     const n = m.get(appId) || 0
     if (n <= 0) return
-    history.back()
-  }, [])
+    appLocalPopsRef.current.push({ appId, phase: null })
+    pumpLocalAppPop()
+  }, [pumpLocalAppPop])
 
   /** Drop all pending sentinels for an app. AppCanvas calls this in
    *  its useEffect cleanup so an LRU eviction (or any iframe unmount)
@@ -269,6 +322,16 @@ export default function useNavigation() {
   const appNavReset = useCallback((appId) => {
     if (appId == null) return
     appSentinelCountsRef.current.set(appId, 0)
+    // Retire queued closes for an evicted/reset frame so they cannot trap Back
+    // or block another app. Keep a traversal that has already started: its
+    // eventual popstate still needs to be absorbed rather than reinterpreted
+    // as shell navigation.
+    const inFlight = appLocalPopInFlightRef.current
+      ? appLocalPopInFlightEntryRef.current
+      : null
+    appLocalPopsRef.current = appLocalPopsRef.current.filter(
+      (entry) => entry.appId !== appId || entry === inFlight,
+    )
   }, [])
 
   function navTo(view, opts = {}) {
@@ -394,6 +457,37 @@ export default function useNavigation() {
         drawerPushedRef.current = false
         drawerOpenRef.current = false
         closeDrawerNextFrame()
+        // Local app pops are deferred while the drawer is open. Once the one
+        // drawer traversal finishes, start exactly one serialized app traversal.
+        appLocalPopInFlightRef.current = false
+        setTimeout(resumeLocalAppPops, 0)
+        return
+      }
+      // Local-app-pop-first: the app already mutated its own state and asked us
+      // to remove the matching shell sentinel. Consume exactly that sentinel,
+      // but do not send moebius:nav-back — doing so would close two levels for
+      // one in-app close action. Use the queued app id rather than the active id
+      // so a render/app switch between request and traversal cannot decrement
+      // another app's count.
+      const localPop = appLocalPopInFlightRef.current
+        ? appLocalPopInFlightEntryRef.current
+        : null
+      if (localPop) {
+        appLocalPopInFlightRef.current = false
+        appLocalPopInFlightEntryRef.current = null
+        if (localPop.phase === 'seek') {
+          // We have reached a tagged entry but have not traversed the app
+          // sentinel yet. Re-evaluate the current entry and continue once.
+          setTimeout(resumeLocalAppPops, 0)
+          return
+        }
+        appLocalPopsRef.current = appLocalPopsRef.current.filter(
+          (entry) => entry !== localPop,
+        )
+        const m = appSentinelCountsRef.current
+        const n = m.get(localPop.appId) || 0
+        if (n > 0) m.set(localPop.appId, n - 1)
+        setTimeout(resumeLocalAppPops, 0)
         return
       }
       // App-sentinel-first: if the active mini-app has pending
@@ -459,7 +553,29 @@ export default function useNavigation() {
         // Phantom-entry guard: ignore a traversal landing on an UNTAGGED
         // entry — one a sandboxed app/preview iframe pushed onto the shared
         // session history. Treating it as our sentinel over-pops navStack.
-        if (!isMobiusNavState(e.destination.getState())) return
+        if (!isMobiusNavState(e.destination.getState())) {
+          // A serialized local pop may have traversed onto a phantom entry.
+          // Complete a consume traversal (its tagged app source is gone), or
+          // keep seeking until the sentinel itself is current. Do this after
+          // the traversal commits so history.state describes the destination.
+          if (appLocalPopInFlightRef.current) {
+            setTimeout(() => {
+              const localPop = appLocalPopInFlightEntryRef.current
+              appLocalPopInFlightRef.current = false
+              appLocalPopInFlightEntryRef.current = null
+              if (localPop?.phase === 'consume') {
+                appLocalPopsRef.current = appLocalPopsRef.current.filter(
+                  (entry) => entry !== localPop,
+                )
+                const m = appSentinelCountsRef.current
+                const n = m.get(localPop.appId) || 0
+                if (n > 0) m.set(localPop.appId, n - 1)
+              }
+              resumeLocalAppPops()
+            }, 0)
+          }
+          return
+        }
         // Nothing to go back to — let the browser handle it (exits PWA).
         // Check every back-target source: navStack (shell-level), open
         // drawer, OR any app's pending sentinels (sentinels for an
@@ -468,7 +584,8 @@ export default function useNavigation() {
         // backs unwind that app's nesting).
         if (navStackRef.current.length === 0
             && !drawerOpenRef.current
-            && !_anyAppHasSentinels(appSentinelCountsRef.current)) return
+            && !_anyAppHasSentinels(appSentinelCountsRef.current)
+            && appLocalPopsRef.current.length === 0) return
         e.intercept({ handler() { handleBack() } })
       }
       navigation.addEventListener('navigate', onNavigate)
@@ -480,10 +597,29 @@ export default function useNavigation() {
       // Phantom-entry guard: a pop landing on an UNTAGGED entry is a
       // phantom pushed onto the shared session history by a sandboxed
       // app/preview iframe, not one of our sentinels — ignore it.
-      if (!isMobiusNavState(history.state)) return
+      if (!isMobiusNavState(history.state)) {
+        if (appLocalPopInFlightRef.current) {
+          setTimeout(() => {
+            const localPop = appLocalPopInFlightEntryRef.current
+            appLocalPopInFlightRef.current = false
+            appLocalPopInFlightEntryRef.current = null
+            if (localPop?.phase === 'consume') {
+              appLocalPopsRef.current = appLocalPopsRef.current.filter(
+                (entry) => entry !== localPop,
+              )
+              const m = appSentinelCountsRef.current
+              const n = m.get(localPop.appId) || 0
+              if (n > 0) m.set(localPop.appId, n - 1)
+            }
+            resumeLocalAppPops()
+          }, 0)
+        }
+        return
+      }
       if (navStackRef.current.length === 0
             && !drawerOpenRef.current
-            && !_anyAppHasSentinels(appSentinelCountsRef.current)) return
+            && !_anyAppHasSentinels(appSentinelCountsRef.current)
+            && appLocalPopsRef.current.length === 0) return
       handleBack()
     }
     window.addEventListener('popstate', onPopState)
@@ -491,6 +627,12 @@ export default function useNavigation() {
   // initialNav is a stable useState value (no setter); all else is refs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // A queued close from a hidden cached app becomes safe once shell Back
+  // restores that app and its sentinel to the current tagged entry.
+  useEffect(() => {
+    resumeLocalAppPops()
+  }, [activeAppId, resumeLocalAppPops])
 
   // Fade back in after shell-reload.
   useEffect(() => {

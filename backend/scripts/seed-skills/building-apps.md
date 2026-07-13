@@ -188,7 +188,8 @@ When the partner asks to share a local-first app as a repo, make the existing so
 1. Keep `mobius.json` at the repo root with stable `id`, `name`, `version`, `description`, `entry`, `icon`, complete `source_files`, any `static_assets`, permissions, and offline flags.
 2. Keep runtime data, tokens, logs, generated reports, and local caches out of the repo; source plus declared static assets only.
 3. Initialize git in the app source if needed: `git init -b main`, commit, push to GitHub, and keep the package at repo root on `main` or a tag. Root packages give the installer a real `origin` clone and clean PR-friendly diffs; repo subdirs and branch names with slashes fall back to synthetic upstream tracking.
-4. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
+4. Run `python3 /data/platform/backend/scripts/validate-app.py /data/apps/<name>` before push. It checks the declared source/import closure and bundles the real entry with the installer’s exact esbuild contract, catching missing files, missing default exports, and production-only compile failures locally.
+5. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
 
 **Don't hand-bump a version constant in app source.** If an app carries its released version inline (e.g. `const APP_VERSION = '1.2.0'`), leave that line alone — the catalog/installer sets it per release, not your edits. Bumping it locally guarantees a merge conflict on the *next* update: your bump and the new release's bump land on the same line, so every update stops to ask the owner to reconcile a version number. Git already tracks your edits — you never need a version bump to record them. (This is the single most common avoidable update conflict.)
 
@@ -365,7 +366,7 @@ Use a small structured object: `app`, `kind`, `created_at`, `signal`, `text`, an
 
 ## App analytics — emit signals for Reflection
 
-`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Reflection's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers in memory and flushes at most once per 5 seconds to `signals.jsonl` in the app's own storage.
+`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Reflection's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers briefly, then enters a dedicated offline telemetry queue. Signal batches do not coalesce, so simultaneous tabs do not overwrite one another. The queue retains the newest 500 events or 2 MiB per app and drops the oldest beyond that bound, so signals are guidance for Reflection—not an audit log or application state.
 
 **Every app must emit at minimum:**
 
@@ -400,16 +401,20 @@ window.mobius.signal('cron_summary', { status: 'error', message: err.message })
 
 ```jsx
 // Minimal app_ready example — add to your top-level useEffect after loading data
+const readySignalled = useRef(false)
 useEffect(() => {
   window.mobius.storage.subscribe('items.json', (v) => {
     const items = v || []
     setItems(items)
-    window.mobius.signal('app_ready', { item_count: items.length })
+    if (!readySignalled.current) {
+      readySignalled.current = true
+      window.mobius.signal('app_ready', { item_count: items.length })
+    }
   })
 }, [])
 ```
 
-Signals land in `signals.jsonl` in the app's own storage path, readable by Reflection via the storage API. Reflection's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages (`last_5_errors`) — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
+Signals land as app-attributed `app_signal` records in the platform activity stream. Each carries a stable client ID, its original `occurred_at` time, and a server-assigned ingestion time; Reflection deduplicates replayed IDs and uses the original time for its 24-hour window. During migration Reflection also reads legacy `signals.jsonl` files written by older cached runtimes. Its nightly `per-app-digest.json` counts signal names and surfaces the last five semantic error messages (`last_5_errors`); apps do not need to read the raw stream.
 
 **You don't have to catch everything yourself.** Uncaught errors — a thrown exception your code didn't handle, an unhandled promise rejection — are captured automatically: the app frame POSTs them to the platform, which records an `app_error` event that surfaces in the SAME digest as `app_errors_24h` + `recent_app_errors`. So `signal('error', …)` is for adding *semantic* context to a failure you DID catch (which operation, what the user was doing); the automatic capture is the safety net for the ones you didn't. Both reach Reflection.
 
@@ -875,13 +880,21 @@ uses device/browser back:
 const navRef = useRef(null)
 
 async function openDetail(item) {
+  navRef.current?.close()
   const handle = window.mobius.nav.open('app-detail', () => {
     navRef.current = null
     setSelected(null)
   })
   navRef.current = handle
-  await handle.ready
-  if (navRef.current !== handle) return
+  const { status } = await handle.outcome
+  if (navRef.current !== handle) {
+    handle.close()
+    return
+  }
+  if (status !== 'owned' && status !== 'standalone') {
+    navRef.current = null
+    return
+  }
   setSelected(item)
 }
 
@@ -892,9 +905,29 @@ function closeDetail() {
 }
 ```
 
+`outcome.status` tells the app what happened to the requested **shell back
+target**:
+
+- `owned` — the shell installed it; render the nested view.
+- `standalone` — there is no shell host; render the view, but provide your own
+  visible in-app back/close control.
+- `rejected` — the shell refused the request, so no back target exists; stay on
+  the current view.
+- `timeout` — shell ownership is unknown. Stay on the current view; the helper
+  keeps the request correlation briefly and removes a late-installed target.
+- `error` — the request could not be sent, so no back target exists; stay on the
+  current view.
+- `cancelled` — your code called `close()` before the shell answered; do not
+  render the abandoned view.
+
+Unknown future statuses should be treated like failure. `handle.ready` remains
+as a compatibility promise (`true` only for `owned`), but its historical
+`false` folded all other outcomes together. New code should use `outcome` so a
+standalone app continues to work without mistaking that fallback for rejection.
+
 ### Android back-preview — shell-mediated back protocol
 
-The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the shell-mediated protocol below; use the raw postMessage form only for legacy apps or custom choreography.
+The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the shell-mediated protocol below, including timeout and standalone handling; use the raw postMessage form only for shell-only legacy apps or custom choreography.
 
 ```jsx
 function navPushAndAwaitAck(label) {
@@ -907,7 +940,7 @@ function navPushAndAwaitAck(label) {
       if (e.data.type === 'moebius:nav-push-ack') {
         window.removeEventListener('message', onMsg); resolve()
       } else if (e.data.type === 'moebius:nav-push-rejected') {
-        window.removeEventListener('message', onMsg); reject(new Error('nav-push rejected (cap hit)'))
+        window.removeEventListener('message', onMsg); reject(new Error('nav-push rejected by shell'))
       }
     }
     window.addEventListener('message', onMsg)
@@ -943,7 +976,11 @@ The shell installs a back-sentinel in its own history on `nav-push`, so the OS s
 **Rules of the protocol:**
 
 - Pick ONE model per nested-view level — combining `iframe.history.pushState` with this protocol scrambles the back stack.
-- `nav-pop` and `nav-push` are a strict pair, like push/pop on a stack. Every code path that exits a nested view (including the in-app X button) MUST call `nav-pop`; skip it and the next back-gesture is silently consumed by the host.
+- With the runtime helper, every code path that exits a nested view (including
+  the in-app X button) MUST call its own `handle.close()`. The helper sends the
+  matching `nav-pop` only when it actually owns a shell entry. Raw-protocol
+  callers must pair `nav-push` and `nav-pop` themselves; skip the pop and the
+  next back gesture is silently consumed by the host.
 - The host caps pending sentinels at 20 per app. On overflow it responds `{type:'moebius:nav-push-rejected', requestId}` — the helper above rejects its promise, so you simply don't render the nested view. If you bypass the helper, treat a rejection as a hard "stay where you are" and do NOT increment your local counter, or your count drifts above the host's permanently and the next `nav-pop` consumes the wrong sentinel.
 - The `requestId` is optional on the wire (the shell echoes whatever you send), but use a fresh id per push when multiple can be in flight — a stale ack can otherwise resolve a later promise.
 

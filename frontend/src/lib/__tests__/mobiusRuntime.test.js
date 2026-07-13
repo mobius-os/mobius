@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import {
   appChatMetadataBody,
   makeNav,
+  makeSignal,
   overlayPending,
 } from '../../../public/mobius-runtime.js'
 
@@ -133,6 +134,7 @@ test('nav helper waits for ack before owning a back entry', async () => {
     assert.equal(push.label, 'detail')
 
     window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    assert.deepEqual(await handle.outcome, { status: 'owned' })
     assert.equal(await handle.ready, true)
 
     window.emit({ type: 'moebius:nav-back' })
@@ -153,6 +155,7 @@ test('nav helper ignores same-origin messages from non-parent frames', async () 
     )
     handle.close()
     window.emit({ type: 'moebius:nav-push-rejected', requestId: push.requestId })
+    assert.deepEqual(await handle.outcome, { status: 'cancelled' })
     assert.equal(await handle.ready, false)
     assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
   })
@@ -165,9 +168,23 @@ test('nav helper handles rejected pushes without owning or popping', async () =>
     const push = parent.messages.at(-1).data
 
     window.emit({ type: 'moebius:nav-push-rejected', requestId: push.requestId })
+    assert.deepEqual(await handle.outcome, { status: 'rejected' })
     assert.equal(await handle.ready, false)
     handle.close()
     assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
+  })
+})
+
+test('nav helper close after ownership emits one pop and is idempotent', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const handle = makeNav().open('detail')
+    const push = parent.messages.at(-1).data
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    await handle.outcome
+
+    handle.close()
+    handle.close()
+    assert.equal(parent.messages.filter((msg) => msg.data.type === 'moebius:nav-pop').length, 1)
   })
 })
 
@@ -178,8 +195,165 @@ test('nav helper auto-pops a late ack after local close', async () => {
     const push = parent.messages.at(-1).data
 
     handle.close()
+    assert.deepEqual(await handle.outcome, { status: 'cancelled' })
     assert.equal(await handle.ready, false)
     window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
     assert.equal(parent.messages.at(-1).data.type, 'moebius:nav-pop')
+    assert.equal(parent.messages.filter((msg) => msg.data.type === 'moebius:nav-pop').length, 1)
+    assert.deepEqual(await handle.outcome, { status: 'cancelled' })
   })
+})
+
+test('nav helper distinguishes standalone fallback from shell failure', async () => {
+  const previousWindow = globalThis.window
+  const listeners = new Set()
+  const standalone = {
+    location: { origin: 'https://mobius.test' },
+    addEventListener(type, cb) { if (type === 'message') listeners.add(cb) },
+    removeEventListener(type, cb) { if (type === 'message') listeners.delete(cb) },
+  }
+  standalone.parent = standalone
+  globalThis.window = standalone
+  try {
+    const handle = makeNav().open('detail')
+    assert.deepEqual(await handle.outcome, { status: 'standalone' })
+    assert.equal(await handle.ready, false)
+    assert.equal(listeners.size, 0)
+  } finally {
+    globalThis.window = previousWindow
+  }
+})
+
+test('nav helper reports timeout and compensates a late acknowledgement', async () => {
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  const timers = []
+  globalThis.setTimeout = (cb, ms) => {
+    timers.push({ cb, ms })
+    return timers.length
+  }
+  globalThis.clearTimeout = () => {}
+  try {
+    await withFakeWindow(async ({ window, parent }) => {
+      const handle = makeNav().open('detail')
+      const push = parent.messages.at(-1).data
+      timers.find((timer) => timer.ms === 5000).cb()
+      assert.deepEqual(await handle.outcome, { status: 'timeout' })
+      assert.equal(await handle.ready, false)
+      window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+      assert.equal(parent.messages.at(-1).data.type, 'moebius:nav-pop')
+      assert.equal(parent.messages.filter((msg) => msg.data.type === 'moebius:nav-pop').length, 1)
+      assert.deepEqual(await handle.outcome, { status: 'timeout' })
+    })
+  } finally {
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
+  }
+})
+
+test('nav helper reports a postMessage error without rejecting either promise', async () => {
+  await withFakeWindow(async ({ parent }) => {
+    parent.postMessage = () => { throw new Error('frame detached') }
+    const handle = makeNav().open('detail')
+    assert.deepEqual(await handle.outcome, { status: 'error' })
+    assert.equal(await handle.ready, false)
+  })
+})
+
+test('nav helper sends shell back only to the most recent owned entry', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const backed = []
+    const nav = makeNav()
+    const first = nav.open('first', () => backed.push('first'))
+    const firstPush = parent.messages.at(-1).data
+    window.emit({ type: 'moebius:nav-push-ack', requestId: firstPush.requestId })
+    await first.outcome
+
+    const second = nav.open('second', () => backed.push('second'))
+    const secondPush = parent.messages.at(-1).data
+    window.emit({ type: 'moebius:nav-push-ack', requestId: secondPush.requestId })
+    await second.outcome
+
+    window.emit({ type: 'moebius:nav-back' })
+    assert.deepEqual(backed, ['second'])
+    window.emit({ type: 'moebius:nav-back' })
+    assert.deepEqual(backed, ['second', 'first'])
+  })
+})
+
+test('signal helper queues bounded structured events instead of overwriting a file', async () => {
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  let flush
+  const batches = []
+  globalThis.window = { addEventListener() {} }
+  globalThis.document = { visibilityState: 'visible', addEventListener() {} }
+  globalThis.setTimeout = (cb) => { flush = cb; return 1 }
+  globalThis.clearTimeout = () => {}
+  try {
+    const signal = makeSignal('7', {
+      async _queueSignals(batch) { batches.push(batch) },
+    })
+    signal(' item_created ', {
+      type: 'note',
+      count: 2,
+      nested: { ignored: true },
+      infinite: Infinity,
+    })
+    flush()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.equal(batches.length, 1)
+    assert.equal(batches[0].length, 1)
+    assert.equal(batches[0][0].name, 'item_created')
+    assert.match(batches[0][0].id, /\S+/)
+    assert.match(batches[0][0].occurred_at, /^\d{4}-\d{2}-\d{2}T/)
+    assert.deepEqual(batches[0][0].payload, { type: 'note', count: 2 })
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
+  }
+})
+
+test('signal helper never queues an event above the server ASCII byte budget', async () => {
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  let flush
+  const batches = []
+  globalThis.window = { addEventListener() {} }
+  globalThis.document = { visibilityState: 'visible', addEventListener() {} }
+  globalThis.setTimeout = (cb) => { flush = cb; return 1 }
+  globalThis.clearTimeout = () => {}
+  try {
+    const signal = makeSignal('7', {
+      async _queueSignals(batch) { batches.push(batch) },
+    })
+    const payload = Object.fromEntries(Array.from(
+      { length: 20 },
+      (_, index) => [
+        `field-${index}`,
+        index < 12 ? 1e-7 : '😀'.repeat(500),
+      ],
+    ))
+    signal('large_unicode_event', payload)
+    flush()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    const serialized = JSON.stringify(batches[0][0]).replace(
+      /[^\x00-\x7f]/g,
+      (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+    )
+    assert.ok(serialized.length <= 4000)
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
+  }
 })
