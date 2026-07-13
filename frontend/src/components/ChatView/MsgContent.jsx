@@ -50,9 +50,9 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
-  // isLastMsg + liveQuestionId replace the old inline isQuestionAnswerable
-  // arrow so memo can do a stable shallow comparison instead of seeing a
-  // fresh function reference every render.
+  // isLastMsg + liveQuestionId are primitive props so memo can do a stable
+  // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
+  // fresh function reference every render and defeat it.
   isLastMsg,
   liveQuestionId,
   // Set of questionKey strings currently live in streamItems. When

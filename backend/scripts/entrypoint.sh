@@ -819,11 +819,10 @@ fi
 python3 /app/scripts/init_agent_context.py
 
 # One-time idempotent app-rename migration (mind->memory, dreaming->reflection)
-# for EXISTING instances. MUST run before init_skills (it renames the
-# agent-edited skill file in place) and install-core-apps (it renames the app
-# slug in place), so neither reseeds a fresh file nor registers a duplicate.
-# Preserves each app's numeric id, so reports/storage are untouched. No-op on a
-# fresh instance or one already migrated. Runs as mobius (writes /data + the
+# for EXISTING instances. MUST run before init_skills, which renames the
+# agent-edited skill file in place, so the migration does not reseed a fresh
+# file. Preserves each app's numeric id, so reports/storage are untouched. No-op
+# on a fresh instance or one already migrated. Runs as mobius (writes /data + the
 # mobius crontab; as root it would poison /data ownership + target root's crontab).
 su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1 || true
 
@@ -1049,15 +1048,6 @@ fi
 # the mobius user at runtime, causing subprocess "permission denied"
 # failures that look like generic CLI crashes.
 umask 022
-
-# Retired app seeding compatibility hook. Kept as a non-fatal background no-op
-# so older images/platform clones still boot through the same path while app
-# installs live in the App Store and /data/apps.
-_core_installer=/app/scripts/install-core-apps.sh
-if [ "$_use_platform" -eq 1 ] && [ -f /data/platform/backend/scripts/install-core-apps.sh ]; then
-  _core_installer=/data/platform/backend/scripts/install-core-apps.sh
-fi
-su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash '$_core_installer'" &
 
 # O1: platform-restart sentinel poller (the recoveryd handshake).
 #

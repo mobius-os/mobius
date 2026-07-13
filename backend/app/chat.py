@@ -492,9 +492,10 @@ class _ChatEventSink:
     assistant message, the steered user message (Q2) is appended at the END,
     and the
     sink resets its blocks so the post-steer continuation (A2) accumulates
-    fresh and the next snapshot appends it as a NEW assistant message —
-    rather than the old behaviour of keeping A1+A2 as one message with Q2
-    inserted before it (which reloaded as Q1, Q2, A1A2).
+    fresh and the next snapshot appends it as a NEW assistant message. The
+    reset is what preserves the durable order A1, Q2, A2: without it A1+A2
+    persist as one message with Q2 inserted before them, reloading as
+    Q1, Q2, A1A2.
 
     Race-free without a lock: `_steering` is set and the blocks captured +
     reset SYNCHRONOUSLY before the first `await`, so any continuation delta
@@ -3865,7 +3866,7 @@ async def _run_chat_impl(
     block = memory.build_memory_block(settings.data_dir)
     ctx = block.text
     # Credit the loaded notes' access so the MDL hotness signal reflects
-    # auto-injected reads, not just explicit Read-tool calls (review R5).
+    # auto-injected reads, not just explicit Read-tool calls.
     # Best-effort: log_event swallows its own errors.
     if block.loaded:
       activity.log_event(
