@@ -13,6 +13,30 @@ test('InstallSheet uses the shared modal focus contract', () => {
   assert.match(hook, /event\.key !== 'Tab'/)
   assert.match(hook, /element\.inert = true/)
   assert.match(hook, /previouslyFocused\?\.focus/)
+  assert.match(hook, /bodyScrollLockCount/)
+  assert.match(hook, /closeOnEscapeRef\.current/)
+})
+
+test('full-screen dialogs share one focus, inerting, and Escape contract', () => {
+  const dialogs = [
+    read('../../ui/ModelSheet.jsx'),
+    read('../ManageModelsModal.jsx'),
+    read('../../SettingsView/UpdateReviewModal.jsx'),
+    read('../markdown/ImageLightbox.jsx'),
+    read('../../Walkthrough/WalkthroughOverlay.jsx'),
+    read('../AgentContextInspector.jsx'),
+  ]
+
+  for (const source of dialogs) {
+    assert.match(source, /useDialogFocus\(\{/)
+    assert.match(source, /role="dialog"/)
+    assert.match(source, /aria-modal="true"/)
+  }
+
+  const manageModels = dialogs[1]
+  const updateReview = dialogs[2]
+  assert.match(manageModels, /ref=\{keepEditingRef\}/)
+  assert.match(updateReview, /closeOnEscape: !applying/)
 })
 
 test('chat image preview actions use labeled buttons', () => {

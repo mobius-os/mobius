@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react'
+import { useRef } from 'react'
 import { createPortal } from 'react-dom'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 import EffortStepper from './EffortStepper.jsx'
 import { modelEfforts } from './modelEfforts.js'
 import './ModelSheet.css'
@@ -51,46 +52,12 @@ export default function ModelSheet({
   )
   const closeRef = useRef(null)
   const dialogRef = useRef(null)
-  const onCloseRef = useRef(onClose)
-  onCloseRef.current = onClose
-
-  useEffect(() => {
-    if (!open) return undefined
-    const previousFocus = document.activeElement
-    const previousOverflow = document.body.style.overflow
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        onCloseRef.current()
-        return
-      }
-      if (e.key !== 'Tab') return
-      const focusable = Array.from(
-        dialogRef.current?.querySelectorAll('button:not(:disabled)') || [],
-      )
-      if (!focusable.length) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    document.body.style.overflow = 'hidden'
-    // Land focus inside the dialog so Escape works and keyboard users
-    // aren't stranded on the trigger behind the backdrop.
-    closeRef.current?.focus?.()
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      document.body.style.overflow = previousOverflow
-      if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
-        previousFocus.focus({ preventScroll: true })
-      }
-    }
-  }, [open])
+  useDialogFocus({
+    open,
+    containerRef: dialogRef,
+    initialFocusRef: closeRef,
+    onClose,
+  })
 
   if (!open) return null
 

@@ -9,6 +9,24 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+let bodyScrollLockCount = 0
+let bodyOverflowBeforeLock = ''
+
+function lockBodyScroll() {
+  if (bodyScrollLockCount === 0) {
+    bodyOverflowBeforeLock = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+  }
+  bodyScrollLockCount += 1
+}
+
+function unlockBodyScroll() {
+  bodyScrollLockCount = Math.max(0, bodyScrollLockCount - 1)
+  if (bodyScrollLockCount === 0) {
+    document.body.style.overflow = bodyOverflowBeforeLock
+  }
+}
+
 /** Focus trap, Escape handling, restoration, and sibling inerting for dialogs. */
 export default function useDialogFocus({
   open = true,
@@ -16,15 +34,20 @@ export default function useDialogFocus({
   initialFocusRef,
   onClose,
   closeOnEscape = true,
+  lockScroll = true,
 }) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  const closeOnEscapeRef = useRef(closeOnEscape)
+  closeOnEscapeRef.current = closeOnEscape
 
   useEffect(() => {
     if (!open) return undefined
     const container = containerRef.current
     if (!container) return undefined
+    let active = true
     const previouslyFocused = document.activeElement
+    if (lockScroll) lockBodyScroll()
 
     // The dialog is rendered in place rather than through a body portal. Inert
     // sibling branches all the way to body so shell controls behind the modal
@@ -44,6 +67,7 @@ export default function useDialogFocus({
     }
 
     const focusInitial = () => {
+      if (!active || !container.isConnected) return
       const target = initialFocusRef?.current
         || container.querySelector(FOCUSABLE)
         || container
@@ -52,7 +76,7 @@ export default function useDialogFocus({
     queueMicrotask(focusInitial)
 
     function onKeyDown(event) {
-      if (event.key === 'Escape' && closeOnEscape) {
+      if (event.key === 'Escape' && closeOnEscapeRef.current) {
         event.preventDefault()
         onCloseRef.current?.()
         return
@@ -78,9 +102,11 @@ export default function useDialogFocus({
 
     document.addEventListener('keydown', onKeyDown, true)
     return () => {
+      active = false
       document.removeEventListener('keydown', onKeyDown, true)
       siblings.forEach(({ element, inert }) => { element.inert = inert })
+      if (lockScroll) unlockBodyScroll()
       previouslyFocused?.focus?.({ preventScroll: true })
     }
-  }, [open, closeOnEscape, containerRef, initialFocusRef])
+  }, [open, containerRef, initialFocusRef, lockScroll])
 }
