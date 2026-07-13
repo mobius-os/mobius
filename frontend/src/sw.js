@@ -668,6 +668,27 @@ registerRoute(
 // precached shell. Without this denylist entry the installed PWA served the
 // cached index.html for /recover, so the user landed on the shell instead of the
 // recovery page (and recovery was unreachable exactly when it's needed most).
+
+// Reverse-proxied backend apps whose subtrees must bypass the SPA nav fallback.
+//
+// A stock Möbius reverse-proxies nothing, so this ships EMPTY. It is the
+// extension point for the pattern where an instance's agent runs a real backend
+// web app (a Django/Rails/etc. server it launched locally) and mounts it under
+// the Möbius origin via a backend reverse-proxy route it added to THIS
+// instance's platform clone — mini-apps are sandboxed iframes and cannot BE a
+// server, so a browser reaches such an app only through that proxy.
+//
+// Those subtrees are server-served and MULTI-PAGE, exactly like /recover and
+// /sites: the single-segment catch-all at the end of the denylist covers only a
+// bare `/foo/` root, so without an explicit entry every DEEP navigation
+// (/foo/setup/, /foo/accounts/login/, form-POST redirects) is served the
+// precached index.html and the embedded app bounces back to the shell. Adding a
+// root regex here sends its whole subtree to the network. The agent extends this
+// list in its own clone, e.g.:  const PROXIED_APP_SUBTREES = [/^\/recipes(\/|$)/]
+//
+// Empty here on purpose: no single instance's app is baked into the shipped shell.
+const PROXIED_APP_SUBTREES = []
+
 registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
   {
@@ -681,6 +702,8 @@ registerRoute(new NavigationRoute(
       // cached index.html for a published URL, so opening it showed the Möbius
       // app instead of the built website.
       /^\/sites(\/|$)/,
+      // Instance-configured reverse-proxied app subtrees (empty in stock Möbius).
+      ...PROXIED_APP_SUBTREES,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
     ],
   },
