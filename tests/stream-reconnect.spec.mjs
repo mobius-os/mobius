@@ -807,9 +807,9 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
 
-    // Cancel-queued (DELETE /pending/{ts}) → 200 with an empty queue, so the
+    // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[0-9]+$/, route =>
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route =>
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
