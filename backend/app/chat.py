@@ -3881,10 +3881,11 @@ async def _run_chat_impl(
       activity.log_event(
         "memory_load", source="injected", paths=block.loaded, mode=block.mode
       )
-      # Persist the load into the usage counter so access_count actually
-      # accrues (it was always 0 before — the Memory app's "Used" column read
-      # a counter nothing incremented). Feeds hot-note selection + graph.json.
-      memory.record_usage(settings.data_dir, block.loaded)
+      # Injection does NOT bump access_count: being handed the router (or a
+      # recent chat note) for free is not the node earning its keep. access_count
+      # is the SELECTION signal — it accrues only when the memory-search subagent
+      # RETURNS a node as relevant (see memory_search's record_usage_ids). What
+      # was injected is still captured, separately, in the read-trace below.
       # Per-chat read-trace: record which nodes this chat's agent got for
       # free, so the nightly Reflection pass can diff "what was seen" against
       # "what a deeper search would have surfaced" and reorganize the graph
