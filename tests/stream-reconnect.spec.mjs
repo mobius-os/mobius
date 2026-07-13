@@ -762,6 +762,11 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
+          // handleStop now confirms the runtime is actually idle after the
+          // stop response before opening a fresh turn. Keep this chat-detail
+          // mock faithful to that API contract; omitting `running` leaves the
+          // state unknown, correctly preventing the resend from starting.
+          running: false,
         }),
       })
     })
