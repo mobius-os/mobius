@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
@@ -664,6 +664,7 @@ export default function ChatView({
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
+    reapplyActiveMode,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -858,6 +859,7 @@ export default function ChatView({
     isStreamingRef,
     connectionError,
     reconnecting,
+    catchUpCommitSeq,
     sendMessage: streamSend,
     connectToStream,
     retry,
@@ -2520,6 +2522,21 @@ export default function ChatView({
       window.removeEventListener('online', freezeStreamingReturn)
     }
   }, [turnActive, modeRef])
+
+  // Cloak the first post-reconnect catch-up commit (contract v2 item 2, lever
+  // 3). freezeStreamingReturn above already anchors the mode at the moment the
+  // tab returns; the atomic catch-up commit lands async AFTER that, and even the
+  // in-place reconcile (lever 2c) can re-settle heights. Re-hold the anchor the
+  // instant the commit's DOM mutation lands — in a layout effect, before paint,
+  // so a real reconnect (Path B) or a Path-A commit after the reveal cap never
+  // blinks the reader's position. reapplyActiveMode no-ops before reveal, and a
+  // quick-wake kept socket never reconnects (no commit → seq stays put), so a
+  // glance at the notification shade cannot trigger it. The seq starts at 0 and
+  // only a commit bumps it, so this skips the initial mount.
+  useLayoutEffect(() => {
+    if (catchUpCommitSeq === 0) return
+    reapplyActiveMode()
+  }, [catchUpCommitSeq, reapplyActiveMode])
 
   // Composer action state: queued work is also non-idle from the user's point
   // of view. Even if we momentarily don't have a live stream attached yet, a

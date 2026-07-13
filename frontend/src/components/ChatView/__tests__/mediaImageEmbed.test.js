@@ -28,6 +28,7 @@
  */
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
+import { parseImageDims, imageVarsFromDims } from '../markdown/imageDims.js'
 
 // ---------------------------------------------------------------------------
 // Replicate the regex and helper from InlineContent.jsx
@@ -362,4 +363,84 @@ describe('regex and extraction consistency', () => {
       assert.equal(getMediaChatId(path), null)
     })
   }
+})
+
+// ---------------------------------------------------------------------------
+// 7. Known image dimensions carried in the markup (contract v2 item 2, lever 3)
+//
+// A screenshot whose size the agent already knew can carry it as `?w=&h=` so
+// the frame reserves the exact aspect ratio on the first paint and the on-load
+// ratio delta vanishes. parseImageDims reads the query; imageVarsFromDims turns
+// dims into the same custom-property object the onLoad handler computes.
+// ---------------------------------------------------------------------------
+
+describe('parseImageDims', () => {
+  test('extracts positive integer w/h from a media href query', () => {
+    const dims = parseImageDims('/api/chats/abc/media/shot.png?w=412&h=915')
+    assert.deepEqual(dims, { width: 412, height: 915 })
+  })
+
+  test('works on an absolute URL too', () => {
+    const dims = parseImageDims('https://host.example/api/chats/abc/media/shot.png?w=800&h=600')
+    assert.deepEqual(dims, { width: 800, height: 600 })
+  })
+
+  test('returns null when no dims are present (the common case)', () => {
+    assert.equal(parseImageDims('/api/chats/abc/media/shot.png'), null)
+  })
+
+  test('returns null for zero, negative, or non-numeric dims', () => {
+    assert.equal(parseImageDims('/x.png?w=0&h=100'), null)
+    assert.equal(parseImageDims('/x.png?w=-5&h=100'), null)
+    assert.equal(parseImageDims('/x.png?w=abc&h=100'), null)
+    assert.equal(parseImageDims('/x.png?w=100'), null, 'height missing')
+  })
+
+  test('returns null for empty/invalid input', () => {
+    assert.equal(parseImageDims(''), null)
+    assert.equal(parseImageDims(null), null)
+    assert.equal(parseImageDims(undefined), null)
+  })
+})
+
+describe('imageVarsFromDims — known dims kill the on-load delta', () => {
+  // Replicate ExpandableImage's onLoad math so we can prove the first-paint
+  // vars (from known dims) EQUAL the vars onLoad would set from the same natural
+  // size — i.e. there is no delta to shift on decode.
+  function onLoadVars(naturalW, naturalH, viewportH) {
+    const ratio = naturalW / naturalH
+    const cappedH = Math.min(viewportH * 0.60, 480)
+    const fitWidth = Math.min(520, Math.max(120, Math.round(cappedH * ratio)))
+    return {
+      '--md-image-ratio': `${naturalW} / ${naturalH}`,
+      '--md-image-fit-width': `${fitWidth}px`,
+    }
+  }
+
+  test('first-paint vars from known dims equal the onLoad vars for the same size', () => {
+    const w = 412, h = 915, vh = 900
+    assert.deepEqual(
+      imageVarsFromDims(w, h, vh),
+      onLoadVars(w, h, vh),
+      'known-dimension first paint must match the eventual onLoad measurement — zero delta',
+    )
+  })
+
+  test('sets an exact aspect-ratio custom property', () => {
+    const vars = imageVarsFromDims(800, 600, 900)
+    assert.equal(vars['--md-image-ratio'], '800 / 600')
+  })
+
+  test('portrait dims produce a fit-width narrower than the 520px cap (no gray letterbox)', () => {
+    // A tall phone screenshot: cappedH * ratio is small, so fit-width shrinks.
+    const vars = imageVarsFromDims(412, 915, 900)
+    const fit = Number.parseInt(vars['--md-image-fit-width'], 10)
+    assert.ok(fit < 520, 'portrait frame width shrinks below the max so the frame hugs the image')
+    assert.ok(fit >= 120, 'but never below the min width')
+  })
+
+  test('falls back to a default viewport when none is given', () => {
+    assert.ok(imageVarsFromDims(800, 600), 'produces vars even without a viewport height')
+    assert.equal(imageVarsFromDims(0, 100), null, 'invalid dims still yield null')
+  })
 })

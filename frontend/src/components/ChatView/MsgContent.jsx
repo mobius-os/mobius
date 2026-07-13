@@ -102,13 +102,16 @@ function MsgContentInner({
         )
       }
       if (block.type === 'tool') {
-        // Key a lone tool by `t-<firstIdx>` — the SAME scheme the group wrapper
-        // below uses — so a message that renders one tool and then (on a later
-        // render carrying a second adjacent tool) folds it into a group updates
-        // the slot in place instead of delete+insert. `i` is the block's index
-        // = the group's first index, so the keys coincide.
+        // Key a lone tool by its persisted `tool_use_id` (lever 2a) so the block
+        // survives the live↔DB surface switch and a catch-up commit by identity.
+        // Fall back to `t-<firstIdx>` for a legacy/tokenless block — the SAME
+        // scheme the group wrapper below uses — so a message that renders one
+        // tool and then (on a later render carrying a second adjacent tool)
+        // folds it into a group updates the slot in place instead of
+        // delete+insert. `i` is the block's index = the group's first index, and
+        // the group wrapper prefers the same tool's id, so the keys coincide.
         return (
-          <div key={`t-${i}`} className="chat__tools">
+          <div key={block.tool_use_id ?? `t-${i}`} className="chat__tools">
             {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
                 truncated large output on expand (see chats.py
                 _truncate_large_tool_outputs + GET /tool-output). */}
@@ -217,15 +220,21 @@ function MsgContentInner({
         {nodes.map(node => {
           if (node.group) {
             const tools = node.group.map(e => e.item)
+            // Prefer the first tool's `tool_use_id` (lever 2a); fall back to
             // `t-<firstIdx>` — the SAME key a lone tool at that index uses (see
             // renderBlock), so a single→group transition updates this slot in
-            // place rather than swapping keys and forcing a delete+insert.
+            // place rather than swapping keys and forcing a delete+insert. Each
+            // grouped ToolBlock is keyed by its own id so a catch-up commit
+            // reconciles each block by identity within the group.
             return (
-              <div key={`t-${node.group[0].idx}`} className="chat__tools">
+              <div
+                key={node.group[0].item.tool_use_id ?? `t-${node.group[0].idx}`}
+                className="chat__tools"
+              >
                 <ToolActivityGroup tools={tools}>
                   {node.group.map(e => (
                     <ToolBlock
-                      key={e.idx}
+                      key={e.item.tool_use_id ?? e.idx}
                       t={e.item}
                       chatId={chatId}
                       msgTs={msg.ts}
