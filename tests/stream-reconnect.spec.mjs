@@ -762,11 +762,6 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
-          // handleStop now confirms the runtime is actually idle after the
-          // stop response before opening a fresh turn. Keep this chat-detail
-          // mock faithful to that API contract; omitting `running` leaves the
-          // state unknown, correctly preventing the resend from starting.
-          running: false,
         }),
       })
     })
@@ -883,6 +878,12 @@ test.describe('Stream reconnection', () => {
     // and zeroes justSentAtRef.
     await expect(page.locator('button[aria-label="Stop"]')).toBeVisible()
     await page.locator('button[aria-label="Stop"]').click()
+    // click() only waits for the DOM event, not handleStop's async backend
+    // confirmation. Wait for the state machine to become idle before modeling
+    // the user's next send; otherwise Enter can race the still-active Stop
+    // state and legitimately enqueue instead of opening the fresh stream this
+    // test is meant to exercise.
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
 
     // Send the follow-up as a fresh turn whose /stream (request #2) hits the
     // real route above — this is the turn the stale 204 must not clobber.
