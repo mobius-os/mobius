@@ -300,6 +300,10 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  # Per-chat opt-in to continuing a provider-limited turn at reset. This is
+  # intentionally absent from SettingsUpdate: background agents and other
+  # chats must never inherit it.
+  auto_resume_on_limit: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets
   # the name (unlock + drop to the first-message default; re-derived next turn).
@@ -429,11 +433,6 @@ class SettingsUpdate(BaseModel):
   # to the shared agent-settings.json rather than the frozen Owner
   # model. None means "leave unchanged".
   skills_enabled: bool | None = None
-  # Opt-in to automatically resuming a turn parked on a provider limit once
-  # the limit resets (design §2.4). Default-off; the default path is a push
-  # notification + one-tap Resume. Persisted to the shared agent-settings.json
-  # (see providers.auto_resume_on_limit). None means "leave unchanged".
-  auto_resume_on_limit: bool | None = None
 
   @field_validator("provider")
   @classmethod

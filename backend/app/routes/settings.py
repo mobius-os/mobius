@@ -278,7 +278,6 @@ def get_settings_view(
       data_dir, provider
     ),
     "skills_enabled": providers.skills_enabled(data_dir),
-    "auto_resume_on_limit": providers.auto_resume_on_limit(data_dir),
     "claude_version": _format_cli_version(_cli_version("claude")),
     "codex_version": _format_cli_version(_cli_version("codex")),
   }
@@ -304,7 +303,6 @@ def update_settings(
   # model/effort defaults the picker wrote there.
   if (
     body.skills_enabled is not None
-    or body.auto_resume_on_limit is not None
     or body.background_agents is not None
     or body.agent_settings is not None
   ):
@@ -312,8 +310,6 @@ def update_settings(
     current = providers._load_agent_settings(data_dir)
     if body.skills_enabled is not None:
       current["skills_enabled"] = bool(body.skills_enabled)
-    if body.auto_resume_on_limit is not None:
-      current["auto_resume_on_limit"] = bool(body.auto_resume_on_limit)
     if body.agent_settings is not None:
       current.update(_agent_settings_payload(body.agent_settings))
     if body.background_agents is not None:

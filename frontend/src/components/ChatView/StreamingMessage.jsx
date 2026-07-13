@@ -14,6 +14,11 @@ export default function StreamingMessage({
   chatId,
   onAnswer,
   onResume,
+  autoResumeEnabled,
+  autoResumeAvailable,
+  autoResumeSaving,
+  autoResumeError,
+  onAutoResumeChange,
   liveQuestionId,
   isStreaming,
 }) {
@@ -27,6 +32,11 @@ export default function StreamingMessage({
         chatId={chatId}
         onQuestionAnswer={onAnswer}
         onResume={onResume}
+        autoResumeEnabled={autoResumeEnabled}
+        autoResumeAvailable={autoResumeAvailable}
+        autoResumeSaving={autoResumeSaving}
+        autoResumeError={autoResumeError}
+        onAutoResumeChange={onAutoResumeChange}
         isLastMsg
         liveQuestionId={liveQuestionId}
         isActiveAnswer

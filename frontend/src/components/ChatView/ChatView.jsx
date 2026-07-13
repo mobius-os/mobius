@@ -302,6 +302,7 @@ export default function ChatView({
   getContext = null,
   composerFocusRequest = null,
   onComposerFocusHandled = null,
+  externallyRunning = false,
 }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
@@ -379,6 +380,11 @@ export default function ChatView({
   // (the model + effort picker inside the `+` popover). Stays null
   // until the fetch lands; the picker simply hides until then.
   const [chatInfo, setChatInfo] = useState(null)
+  const [autoResumeSaving, setAutoResumeSaving] = useState(false)
+  const [autoResumeError, setAutoResumeError] = useState('')
+  const [limitResetElapsed, setLimitResetElapsed] = useState(false)
+  const autoResumeSavingRef = useRef(false)
+  const autoResumeRequestRef = useRef(0)
   // The question_id of the AskUserQuestion the runner is currently parked
   // on, set from the live SSE `question` event (onLiveQuestion). It is a
   // FAST-PATH HINT only, never the sole gate: the backend does not persist
@@ -413,6 +419,47 @@ export default function ChatView({
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
+
+  useEffect(() => {
+    autoResumeRequestRef.current += 1
+    autoResumeSavingRef.current = false
+    setAutoResumeSaving(false)
+    setAutoResumeError('')
+  }, [chatId])
+
+  const handleAutoResumeChange = useCallback(async (next) => {
+    if (autoResumeSavingRef.current) return
+    autoResumeSavingRef.current = true
+    const requestId = ++autoResumeRequestRef.current
+    setAutoResumeSaving(true)
+    setAutoResumeError('')
+    try {
+      const res = await apiFetch(`/chats/${chatId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ auto_resume_on_limit: !!next }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch {}
+        throw new Error(detail || 'Could not save this chat setting.')
+      }
+      const data = await res.json()
+      if (requestId !== autoResumeRequestRef.current) return
+      setChatInfo(prev => prev ? ({
+        ...prev,
+        auto_resume_on_limit: !!data.auto_resume_on_limit,
+        agent_settings_json: data.agent_settings_json ?? prev.agent_settings_json,
+      }) : prev)
+    } catch (err) {
+      if (requestId !== autoResumeRequestRef.current) return
+      setAutoResumeError(err.message || 'Could not save this chat setting.')
+    } finally {
+      if (requestId === autoResumeRequestRef.current) {
+        autoResumeSavingRef.current = false
+        setAutoResumeSaving(false)
+      }
+    }
+  }, [chatId])
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -741,7 +788,11 @@ export default function ChatView({
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
   // with the current DB state.
-  const fetchMessages = useCallback(async ({ force = false, terminal204 = false } = {}) => {
+  const fetchMessages = useCallback(async ({
+    force = false,
+    terminal204 = false,
+    authoritative = false,
+  } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
     try {
@@ -761,7 +812,9 @@ export default function ChatView({
         }
       }
       const preserveLocalTurn =
-        force && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
+        !authoritative
+        && force
+        && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
       const staleSnapshot =
         !terminal204
         && !preserveLocalTurn
@@ -794,7 +847,12 @@ export default function ChatView({
       if (!preserveLocalTurn) {
         pendingQueue.hydrate(data.pending_messages || [])
       }
-    } catch { /* network error — silent, user can retry */ }
+      return !!data.running
+    } catch {
+      // Network error — silent, user can retry. Callers that need to attach
+      // to a newly announced run treat false as "wait for the next signal".
+      return false
+    }
   }, [chatId, commitMessages, pendingQueue.hydrate, queryClient])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -1036,6 +1094,35 @@ export default function ChatView({
       steerPinIntentRef.current = null
     },
   })
+
+  // The shell owns the process-wide system-event stream. When a reset sweep
+  // starts this already-mounted chat automatically, its chat_run_started
+  // event flips externallyRunning without a local send. Refresh the promoted
+  // synthetic user row, then attach to the run's SSE stream. A normal local
+  // send has already set sendingRef/isStreamingRef and is deliberately left
+  // to its existing connection path.
+  const previousExternallyRunningRef = useRef(!!externallyRunning)
+  useEffect(() => {
+    const startedExternally = (
+      !!externallyRunning && !previousExternallyRunningRef.current
+    )
+    previousExternallyRunningRef.current = !!externallyRunning
+    if (
+      !startedExternally
+      || sendingRef.current
+      || isStreamingRef.current
+    ) return undefined
+
+    let cancelled = false
+    sendingRef.current = true
+    setSending(true)
+    setServerRunningState(true)
+    fetchMessages({ force: true, authoritative: true }).then(running => {
+      if (cancelled || !running || isStreamingRef.current) return
+      Promise.resolve(connectToStream(true)).catch(() => {})
+    })
+    return () => { cancelled = true }
+  }, [connectToStream, externallyRunning, fetchMessages, isStreamingRef])
 
   const ensureRuntimeStreamConnected = useCallback(() => {
     if (connectionError === 'disconnected') return
@@ -1335,6 +1422,7 @@ export default function ChatView({
           agent_settings_json: data.agent_settings_json || null,
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
+          auto_resume_on_limit: !!data.auto_resume_on_limit,
         })
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
           setLoading(false)
@@ -2738,6 +2826,35 @@ export default function ChatView({
     return null
   })()
   const hasPendingResume = !!pendingResumeBlock
+  const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
+  const autoResumeEnabled = !!chatInfo?.auto_resume_on_limit
+  const showAutoResumeControl = !!(
+    !embedded
+    && chatInfo !== null
+    && pendingLimitResetAt
+    // Once enabled, keep the persistent policy cancellable even if the
+    // viewer's clock passes the advertised reset before the server resumes.
+    && (!limitResetElapsed || autoResumeEnabled)
+  )
+
+  useEffect(() => {
+    setAutoResumeError('')
+    if (!pendingLimitResetAt) {
+      setLimitResetElapsed(false)
+      return undefined
+    }
+    const remaining = Date.parse(pendingLimitResetAt) - Date.now()
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      setLimitResetElapsed(true)
+      return undefined
+    }
+    setLimitResetElapsed(false)
+    const timer = setTimeout(
+      () => setLimitResetElapsed(true),
+      Math.min(remaining + 250, 2_147_483_647),
+    )
+    return () => clearTimeout(timer)
+  }, [pendingLimitResetAt])
 
   // Visibility of that card is a pure viewport question — an
   // IntersectionObserver rooted at the scroll container is the signal,
@@ -3017,6 +3134,17 @@ export default function ChatView({
                 chatId={chatId}
                 onQuestionAnswer={doSendSilent}
                 onResume={doSend}
+                autoResumeEnabled={
+                  isLastMsg && autoResumeEnabled
+                }
+                autoResumeAvailable={
+                  isLastMsg && showAutoResumeControl
+                }
+                autoResumeSaving={isLastMsg && autoResumeSaving}
+                autoResumeError={isLastMsg ? autoResumeError : ''}
+                onAutoResumeChange={
+                  isLastMsg ? handleAutoResumeChange : undefined
+                }
                 isLastMsg={isLastMsg}
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
@@ -3040,6 +3168,11 @@ export default function ChatView({
               chatId={chatId}
               onAnswer={doSendSilent}
               onResume={activeAssistantIsStreaming ? undefined : doSend}
+              autoResumeEnabled={autoResumeEnabled}
+              autoResumeAvailable={showAutoResumeControl}
+              autoResumeSaving={autoResumeSaving}
+              autoResumeError={autoResumeError}
+              onAutoResumeChange={handleAutoResumeChange}
               liveQuestionId={liveQuestionId}
               isStreaming={activeAssistantIsStreaming}
             />

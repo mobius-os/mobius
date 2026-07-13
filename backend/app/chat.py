@@ -47,6 +47,7 @@ from app.chat_writer import (
   ClearRunStatus,
   Finalize,
   ParkRun,
+  PrepareAutoResume,
   PersistError,
   PersistTranscript,
   QuestionCommit,
@@ -843,7 +844,8 @@ def _parked_until_for_chat(
   """Return the provider-park reset time when the chat's LATEST run is parked.
 
   Latest-run-wins, deliberately: only the chat's most recent `chat_runs` row
-  counts, and only while it still reads ``status == "parked"``. A fresh turn
+  counts, and only while it still reads ``status`` as ``parked`` or
+  ``resume_pending``. A fresh turn
   on a previously-parked chat inserts a newer "running" row (and StartTurn /
   PromotePending close the stale park via `_close_running_runs`), so an
   orphaned park can never exempt the NEW live turn from the stall watchdog or
@@ -870,7 +872,7 @@ def _parked_until_for_chat(
     )
   except Exception:
     return None
-  if run is None or run.status != "parked":
+  if run is None or run.status not in ("parked", "resume_pending"):
     return None
   parked_until = run.parked_until
   if isinstance(parked_until, datetime):
@@ -1711,10 +1713,12 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
 # One-shot notify copy for a limit park whose reset time has arrived
 # (design §2.4 step "at parked_until, push-notify").
 LIMIT_RESET_NOTIFY_TITLE = "Your limit has reset"
-LIMIT_RESET_NOTIFY_BODY = "Your limit has reset — tap to resume."
+LIMIT_RESET_NOTIFY_BODY = "Your limit has reset."
 
 
-async def _auto_resume_chat(chat_id: str, provider_id: str | None) -> bool:
+async def _auto_resume_chat(
+  chat_id: str, provider_id: str | None, park_token: str | None = None,
+) -> bool:
   """Start ONE continue turn for a limit-parked chat whose reset arrived.
 
   The opt-in half of design §2.4 — mirrors the stale-pending drain in
@@ -1740,48 +1744,81 @@ async def _auto_resume_chat(chat_id: str, provider_id: str | None) -> bool:
   if it dies on the limit again it parks again with a fresh reset time.
   Returns True when a turn was scheduled.
   """
-  if is_chat_running(chat_id):
-    return False
-  if not mark_starting(chat_id):
-    return False
+  from app.database import SessionLocal
+
+  claimed = False
   try:
-    ack = get_writer().submit(
-      AppendPending(
-        chat_id=chat_id,
-        run_token="",
-        user_msg={
-          "role": "user",
-          "content": "continue",
-          "ts": int(time.time() * 1000),
-        },
-      )
-    )
-    await _await_ack(ack)
-    drain_token = alloc_run_token()
-    next_messages, next_user, next_session_id = (
-      await chat_queue.promote_pending_messages(None, chat_id, drain_token)
-    )
-    if not next_user:
-      discard_starting(chat_id)
-      return False
-    get_system_broadcast().publish({
-      "type": "chat_run_started",
-      "chatId": chat_id,
-    })
-    _schedule_continuation(
-      chat_id=chat_id,
-      messages=next_messages,
-      session_id=next_session_id,
-      provider_id=provider_id,
-      next_user=next_user,
-      run_token=drain_token,
-    )
-    return True
+    # Share the queue lock with owner/app sends. This makes the final policy +
+    # attribution check atomic with the _starting handoff: app-attributed work
+    # that arrived while the sweep awaited its durable prepare can never be
+    # swept into the synthetic owner continuation.
+    async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+      async with chat_queue.get_lock(chat_id):
+        if is_chat_running(chat_id):
+          return False
+        with SessionLocal() as check_db:
+          chat = check_db.query(models.Chat).filter(
+            models.Chat.id == chat_id,
+          ).first()
+          pending = list(chat.pending_messages or []) if chat is not None else []
+          if (
+            chat is None
+            or chat.deleted_at is not None
+            or not chat.auto_resume_on_limit
+            or any(
+              isinstance(msg, dict)
+              and msg.get("_initiated_by_app_id") is not None
+              for msg in pending
+            )
+          ):
+            return False
+        if not mark_starting(chat_id):
+          return False
+        claimed = True
+        ack = get_writer().submit(
+          AppendPending(
+            chat_id=chat_id,
+            run_token="",
+            user_msg={
+              "role": "user",
+              "content": "continue",
+              "ts": int(time.time() * 1000),
+              # A retry after AppendPending succeeded but a later step failed
+              # must not enqueue a second synthetic continuation.
+              "cid": f"limit-resume-{park_token or chat_id}",
+            },
+          )
+        )
+        await _await_ack(ack)
+        drain_token = alloc_run_token()
+        next_messages, next_user, next_session_id = (
+          await chat_queue.promote_pending_messages_locked(
+            None, chat_id, drain_token,
+          )
+        )
+        if not next_user:
+          discard_starting(chat_id)
+          claimed = False
+          return False
+        get_system_broadcast().publish({
+          "type": "chat_run_started",
+          "chatId": chat_id,
+        })
+        _schedule_continuation(
+          chat_id=chat_id,
+          messages=next_messages,
+          session_id=next_session_id,
+          provider_id=provider_id,
+          next_user=next_user,
+          run_token=drain_token,
+        )
+        return True
   except Exception:
     _get_logger().warning(
       "auto-resume failed chat_id=%s", chat_id, exc_info=True,
     )
-    discard_starting(chat_id)
+    if claimed:
+      discard_starting(chat_id)
     return False
 
 
@@ -1790,22 +1827,20 @@ async def sweep_reset_parks(db: Session) -> list[str]:
 
   The third lifespan sweep (same 60s loop shape as the wedged-marker and
   stalled-live sweeps). A due park is a `chat_runs` row still
-  ``status == "parked"`` whose `parked_until` has passed. For each, oldest
-  reset first:
+  ``status`` is ``parked`` or ``resume_pending`` and whose
+  `parked_until` has passed. For each, oldest reset first:
 
-    - Resolve FIRST (ResolvePark → "parked_notified", strict ack), THEN
-      notify. Resolve-before-notify means a push failure can lose one
-      notification but a crash can never re-fire it every tick (the sweep
-      only selects "parked") — one notify per park, the design's exact ask.
-      A resolve failure leaves the row parked for the next tick.
+    - Notify-only parks resolve first, then send one best-effort notification.
+    - Auto-resume parks first become ``resume_pending``. That durable
+      state suppresses duplicate notifications but remains sweepable until a
+      continuation is actually scheduled; a race or spawn failure cannot
+      silently consume the promised continuation.
     - A park whose chat was deleted resolves silently.
-    - Auto-resume (owner setting, OFF by default) is STRICTLY SERIAL: at
-      most one park is processed per tick, and none while any turn is live
-      anywhere — the resumed turn must settle before the next park is
-      touched. Remaining due parks stay "parked" (notify deferred with
-      them), so nothing is lost, just spaced. With the setting off, every
-      due park is resolved + notified in one pass; resumption stays the
-      owner's one-tap.
+    - Auto-resume is a per-chat opt-in and STRICTLY SERIAL: at most one
+      opted-in park starts per tick, and none while any turn is live anywhere.
+      A blocked opted-in chat stays pending for a later tick, while notify-only
+      chats in the same due batch still resolve normally. App-attributed runs
+      and queues never auto-resume.
 
   Stands down while draining — a restart is in progress, and the boot
   reconcile + this sweep's next tick pick everything up. Never raises.
@@ -1818,7 +1853,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   try:
     due = (
       db.query(models.ChatRun)
-      .filter(models.ChatRun.status == "parked")
+      .filter(models.ChatRun.status.in_(("parked", "resume_pending")))
       .filter(models.ChatRun.parked_until.isnot(None))
       .filter(models.ChatRun.parked_until <= now)
       .order_by(models.ChatRun.parked_until.asc())
@@ -1829,50 +1864,8 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     return resolved
   if not due:
     return resolved
-  auto_resume = False
-  try:
-    from app.providers import auto_resume_on_limit
-    auto_resume = auto_resume_on_limit(get_settings().data_dir)
-  except Exception:
-    log.warning("sweep_reset_parks: settings read failed", exc_info=True)
-  for run in due:
-    chat_id = run.chat_id
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    chat_gone = chat is None or chat.deleted_at is not None
-    if auto_resume and not chat_gone and registry.all_alive_chat_ids():
-      # Strictly-serial gate: a live turn (an earlier auto-resume, or the
-      # owner's own send) must settle before the next park is processed.
-      # Leave this park (and the rest) untouched for a later tick.
-      break
-    # Resolve BEFORE notify/auto-resume, deliberately (adjudicated M2): a
-    # crash or push failure after the resolve loses at most one notification
-    # (the card + one-tap Resume remain), while notify-before-resolve could
-    # re-fire the push every tick forever. Same order for auto-resume: a
-    # post-resolve resume failure means notified-but-not-resumed, which the
-    # owner recovers with the one tap — crash-safe notify beats a retryable
-    # auto-resume.
-    try:
-      ack = get_writer().submit(
-        ResolvePark(chat_id=chat_id, run_token=run.id)
-      )
-      was_parked = await _await_ack(ack)
-    except Exception:
-      log.warning(
-        "sweep_reset_parks: resolve failed chat_id=%s (retried next tick)",
-        chat_id, exc_info=True,
-      )
-      continue
-    if not was_parked:
-      # Superseded between this sweep's query and the resolve — an owner
-      # send's StartTurn closed the park. The owner is already driving the
-      # chat; a "limit reset" push now would be noise. Not counted resolved.
-      log.info(
-        "sweep_reset_parks: park superseded chat_id=%s (no notify)", chat_id,
-      )
-      continue
-    resolved.append(chat_id)
-    if chat_gone:
-      continue
+
+  def notify_reset(chat_id: str) -> None:
     try:
       owner = db.query(models.Owner).first()
       if owner is not None:
@@ -1890,9 +1883,117 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       log.warning(
         "limit-reset notify failed chat_id=%s", chat_id, exc_info=True,
       )
+
+  def wants_auto_resume(chat, run) -> bool:
+    pending = list(chat.pending_messages or []) if chat is not None else []
+    app_work_queued = any(
+      isinstance(msg, dict) and msg.get("_initiated_by_app_id") is not None
+      for msg in pending
+    )
+    return bool(
+      chat is not None
+      and chat.deleted_at is None
+      and run.initiated_by_app_id is None
+      and not app_work_queued
+      and chat.auto_resume_on_limit
+    )
+
+  auto_resume_started = False
+  for run in due:
+    chat_id = run.chat_id
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat_gone = chat is None or chat.deleted_at is not None
+    auto_resume = wants_auto_resume(chat, run)
+    if auto_resume and (
+      auto_resume_started or registry.all_alive_chat_ids()
+    ):
+      # Strictly-serial gate: a live turn (an earlier auto-resume, or the
+      # owner's own send) must settle before this opted-in park is processed.
+      # Leave this park untouched, but keep walking so a later notify-only
+      # chat is not held hostage by another chat's auto-resume preference.
+      continue
     if auto_resume:
-      await _auto_resume_chat(chat_id, chat.provider)
-      break
+      try:
+        prepared = await _await_ack(get_writer().submit(
+          PrepareAutoResume(chat_id=chat_id, run_token=run.id)
+        ))
+      except Exception:
+        log.warning(
+          "sweep_reset_parks: prepare failed chat_id=%s (retried next tick)",
+          chat_id, exc_info=True,
+        )
+        continue
+      if not prepared.get("active"):
+        continue
+
+      # Both the preference and the park can race the actor await. Refresh
+      # before notifying/starting: a manual send that superseded the park
+      # already owns recovery and should not receive a stale reset notice.
+      try:
+        db.refresh(chat)
+        db.refresh(run)
+      except Exception:
+        log.warning(
+          "sweep_reset_parks: refresh failed chat_id=%s",
+          chat_id, exc_info=True,
+        )
+        auto_resume = False
+      if run.status != "resume_pending":
+        continue
+      chat_gone = chat is None or chat.deleted_at is not None
+      auto_resume = auto_resume and wants_auto_resume(chat, run)
+
+      if not auto_resume:
+        try:
+          was_pending = await _await_ack(get_writer().submit(
+            ResolvePark(chat_id=chat_id, run_token=run.id)
+          ))
+        except Exception:
+          log.warning(
+            "sweep_reset_parks: cancel resolve failed chat_id=%s",
+            chat_id, exc_info=True,
+          )
+          continue
+        if not was_pending:
+          continue
+        resolved.append(chat_id)
+        if prepared.get("notify") and not chat_gone:
+          notify_reset(chat_id)
+        continue
+
+      if prepared.get("notify"):
+        notify_reset(chat_id)
+      if registry.all_alive_chat_ids():
+        # The notification or refresh window admitted another turn. Keep the
+        # durable pending state so the next sweep retries instead of silently
+        # dropping the promised continuation.
+        continue
+      auto_resume_started = await _auto_resume_chat(
+        chat_id, chat.provider, park_token=run.id,
+      )
+      if auto_resume_started:
+        resolved.append(chat_id)
+      continue
+
+    # Notify-only/app/deleted path: resolve before the best-effort push so a
+    # crash cannot send it repeatedly. A previously prepared auto-resume has
+    # already sent its notification, so only a raw `parked` row notifies here.
+    should_notify = run.status == "parked"
+    try:
+      was_parked = await _await_ack(get_writer().submit(
+        ResolvePark(chat_id=chat_id, run_token=run.id)
+      ))
+    except Exception:
+      log.warning(
+        "sweep_reset_parks: resolve failed chat_id=%s (retried next tick)",
+        chat_id, exc_info=True,
+      )
+      continue
+    if not was_parked:
+      continue
+    resolved.append(chat_id)
+    if should_notify and not chat_gone:
+      notify_reset(chat_id)
   if resolved:
     log.info(
       "limit-reset sweep resolved %d park(s): %s",

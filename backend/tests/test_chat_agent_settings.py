@@ -30,6 +30,11 @@ def _write_global_settings(payload: dict) -> None:
   (shared / "agent-settings.json").write_text(json.dumps(payload))
 
 
+def _read_global_settings() -> dict:
+  path = Path(os.environ["DATA_DIR"]) / "shared" / "agent-settings.json"
+  return json.loads(path.read_text())
+
+
 def test_effective_settings_falls_back_to_global(tmp_path):
   """No chat override → returns the global default unchanged."""
   shared = tmp_path / "shared"
@@ -142,6 +147,63 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
   body = r.json()
   assert body["agent_settings_json"] is None
   assert body["effective"]["model"] == "fallback-model"
+
+
+def test_auto_resume_is_per_chat_and_survives_runtime_clear(
+  client, auth, chat, db,
+):
+  """The limit preference is chat-local and independent of model settings."""
+  chat.agent_settings_json = {"model": "historical-model", "effort": "high"}
+  db.commit()
+  _write_global_settings({"model": "current-model", "effort": "low"})
+  other = client.post(
+    "/api/chats", headers=auth, json={"title": "other"},
+  ).json()
+
+  enabled = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+  assert enabled.status_code == 200
+  assert enabled.json()["auto_resume_on_limit"] is True
+  assert enabled.json()["agent_settings_json"] == {
+    "model": "historical-model", "effort": "high",
+  }
+  assert "auto_resume_on_limit" not in enabled.json()["effective"]
+  assert _read_global_settings() == {
+    "model": "current-model", "effort": "low",
+  }
+
+  sibling = client.get(f"/api/chats/{other['id']}", headers=auth).json()
+  assert sibling["auto_resume_on_limit"] is False
+
+  cleared = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"clear_agent_settings": True},
+  ).json()
+  assert cleared["auto_resume_on_limit"] is True
+  assert cleared["agent_settings_json"] is None
+
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert detail["auto_resume_on_limit"] is True
+
+  disabled = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"auto_resume_on_limit": False},
+  ).json()
+  assert disabled["auto_resume_on_limit"] is False
+  assert disabled["agent_settings_json"] is None
+
+
+def test_stale_global_auto_resume_setting_is_not_a_chat_default(
+  client, auth, chat,
+):
+  _write_global_settings({"auto_resume_on_limit": True})
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert detail["auto_resume_on_limit"] is False
 
 
 def test_get_chat_includes_effective_settings(client, auth, chat):

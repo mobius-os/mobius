@@ -57,3 +57,32 @@ def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
   cols = {c["name"] for c in inspector.get_columns("chat_runs")}
   assert "parked_until" in cols
   assert "park_reason" in cols
+
+
+def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
+  db_path = tmp_path / "legacy-chats.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, title VARCHAR(255), updated_at DATETIME"
+      ")"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, title) VALUES ('legacy', 'Legacy')"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  cols = {c["name"] for c in inspect(eng).get_columns("chats")}
+  assert "auto_resume_on_limit" in cols
+  with eng.connect() as conn:
+    value = conn.execute(text(
+      "SELECT auto_resume_on_limit FROM chats WHERE id = 'legacy'"
+    )).scalar_one()
+  assert value in (False, 0)

@@ -15,6 +15,11 @@ const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
 const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const settingsView = readFileSync(
+  new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
+)
 
 test('ErrorCard renders a parked card for a block whose pause has a reset time', () => {
   assert.match(errorCard, /block\.pause\?\.resets_at/,
@@ -92,6 +97,44 @@ test('the parked card has styling distinct from a plain error', () => {
     'the reset line has its own style')
 })
 
+test('auto-resume is a chat-local switch shown only on the active rate-limit card', () => {
+  assert.match(msgContent, /resumable && parked && autoResumeAvailable && onAutoResumeChange/,
+    'the switch must require the tail resumable rate-limit state')
+  assert.match(msgContent, /Always continue after limits in this chat/,
+    'the switch label makes the persistent, chat-local scope explicit')
+  assert.match(msgContent, /htmlFor=\{autoResumeSwitchId\}/,
+    'the visible switch label must also be its accessible name')
+  assert.doesNotMatch(msgContent, /This chat only/,
+    'the card keeps the control copy concise')
+  assert.match(msgContent, /onCheckedChange=\{onAutoResumeChange\}/,
+    'toggling changes the chat preference rather than sending continue')
+  assert.match(css, /\.chat__limit-option\s*\{/,
+    'the in-card control has a dedicated layout')
+  assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
+    'the removed global automatic option must not reappear in Settings')
+})
+
+test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {
+  assert.match(
+    chatView,
+    /\(!limitResetElapsed \|\| autoResumeEnabled\)/,
+    'an enabled policy must remain visible until the server starts the turn',
+  )
+  assert.match(chatView, /!embedded[\s\S]*chatInfo !== null[\s\S]*pendingLimitResetAt/,
+    'the owner-only switch waits for chat policy hydration and a real limit card')
+})
+
+test('a system-announced auto-resume reconnects the mounted chat surface', () => {
+  assert.match(shell, /externallyRunning=\{streamingChatIds\.has\(activeChatId\)\}/,
+    'Shell must forward its chat_run_started state to the mounted ChatView')
+  assert.match(chatView, /fetchMessages\(\{ force: true, authoritative: true \}\)/,
+    'the mounted chat must refresh the promoted continuation row')
+  assert.match(chatView, /Promise\.resolve\(connectToStream\(true\)\)/,
+    'the mounted chat must attach to the automatically started stream')
+  assert.match(streamingMessage, /autoResumeAvailable=\{autoResumeAvailable\}/,
+    'the active assistant surface must receive the same policy control props')
+})
+
 test('a benign pause (no reset time) renders the calm "Paused" family, not red Error', () => {
   // A drain-restart or stall carries pause.kind but no resets_at; it must get
   // the soft .chat__text--parked treatment and a "Paused" label. Red "Error"
@@ -100,6 +143,8 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'ANY pause gets the soft treatment')
   assert.match(errorCard, /block\.pause \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
+  assert.match(errorCard, /role=\{vm\.benign \? 'status' : 'alert'\}/,
+    'wait states are polite status updates, while genuine failures stay alerts')
 })
 
 test('the park card reassures that a reset push is coming', () => {
@@ -107,6 +152,8 @@ test('the park card reassures that a reset push is coming', () => {
     'a muted reassurance line renders inside the parked branch')
   assert.match(errorCard, /notification when it resets/,
     'the note names the incoming reset push')
+  assert.match(errorCard, /keep trying to continue this chat after the limit resets/,
+    'the note reflects the enabled per-chat behavior')
   assert.match(css, /\.chat__parked-note\s*\{/,
     'the reassurance line has its own muted style')
 })

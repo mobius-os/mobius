@@ -455,6 +455,31 @@
   line-height: 1.4;
   opacity: 0.7;
 }
+.chat__limit-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  min-height: 44px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
+}
+.chat__limit-option-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.chat__limit-option-label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.chat__limit-option-error {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 12px;
+}
 /* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
    Rendered only on the tail resumable interrupt note; re-sends "continue".
    This is the single most important recovery gesture, so it clears the 44px

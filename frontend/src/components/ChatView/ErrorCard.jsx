@@ -19,6 +19,7 @@ export function errorCardViewModel(block) {
   const benign = !!block.pause
   return {
     parked,
+    benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
     label: parked ? 'Rate limit' : (block.pause ? 'Paused' : 'Error'),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
@@ -29,10 +30,14 @@ export function errorCardViewModel(block) {
 // appends its tail-gated Resume button there; the live surface renders none
 // (a terminal error promotes within the same breath, and the button's
 // tail-only gate is a persisted-transcript concept).
-export default function ErrorCard({ block, children }) {
+export default function ErrorCard({ block, autoResume = false, children }) {
   const vm = errorCardViewModel(block)
   return (
-    <div className={vm.className} role="alert">
+    <div
+      className={vm.className}
+      role={vm.benign ? 'status' : 'alert'}
+      aria-live={vm.benign ? 'polite' : undefined}
+    >
       <span className="chat__error-label">{vm.label}</span>
       {/* StandardMarkdown so URLs in provider error payloads (quota links,
           billing pages) become clickable straight from the chat. */}
@@ -48,8 +53,12 @@ export default function ErrorCard({ block, children }) {
         // limit is still in force), so name that honestly rather than letting
         // the button look broken.
         <div className="chat__parked-note">
-          You'll get a notification when it resets — or tap Resume now to
-          try sooner (it may pause again).
+          {autoResume
+            ? 'Möbius will keep trying to continue this chat after the limit resets.'
+            : (
+                <>You'll get a notification when it resets — or tap Resume
+                  now to try sooner (it may pause again).</>
+              )}
         </div>
       )}
       {children}

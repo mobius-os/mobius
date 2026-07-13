@@ -33,6 +33,14 @@ def test_get_settings_unconfigured(client, auth):
   assert res.json()["gemini_configured"] is False
 
 
+def test_global_settings_do_not_expose_chat_auto_resume(client, auth):
+  """Rate-limit auto-resume is controlled per chat, not globally."""
+  res = client.get("/api/settings", headers=auth)
+  assert res.status_code == 200
+  assert "auto_resume_on_limit" not in res.json()
+  assert "auto_resume_on_limit" not in SettingsUpdate.model_fields
+
+
 def test_save_and_check_gemini_key(client, db, auth):
   """POST /api/settings saves the key encrypted; GET reflects configured."""
   res = client.post(

@@ -487,14 +487,28 @@ class ParkRun(_Command):
 
 @dataclass
 class ResolvePark(_Command):
-  """Move a parked run to ``parked_notified`` once its reset time passed.
+  """Move a parked/pending run to ``parked_notified``.
 
-  Submitted by the reset sweep AFTER `parked_until` elapses and BEFORE the
-  one-shot notify, so a notify/auto-resume failure can never re-fire the
-  push on the next tick (the sweep only selects ``status == "parked"``).
+  Submitted by the reset sweep AFTER `parked_until` elapses. Notify-only
+  parks resolve before their one-shot push; auto-resume parks first pass
+  through PrepareAutoResume so retries remain selectable without re-notifying.
   Not identity-keyed against `_run_token_owner`: the parked turn ended long
   ago and ParkRun already dropped its ownership entry. Idempotent — a row
   no longer parked is a no-op.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class PrepareAutoResume(_Command):
+  """Durably mark a due park as notified but still awaiting auto-resume.
+
+  The reset sweep must not consume its retry signal before the continuation is
+  actually scheduled. ``resume_pending`` is selected on later ticks,
+  but this command reports ``notify=False`` after the first transition so a
+  failed/raced resume retries without sending duplicate notifications.
   """
 
   chat_id: str = ""
@@ -569,6 +583,7 @@ _FENCE_COMMANDS = (
   ClearRunStatus,
   ParkRun,
   ResolvePark,
+  PrepareAutoResume,
 )
 
 
@@ -1269,6 +1284,8 @@ class ChatWriterActor:
       return self._park_run(db, cmd)
     if isinstance(cmd, ResolvePark):
       return self._resolve_park(db, cmd)
+    if isinstance(cmd, PrepareAutoResume):
+      return self._prepare_auto_resume(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
 
   # -- real DB dispatch (one method per command) -------------------------
@@ -1978,7 +1995,7 @@ class ChatWriterActor:
     # resolved and stay untouched.
     q = db.query(ChatRun).filter(
       ChatRun.chat_id == chat_id,
-      ChatRun.status.in_(("running", "parked")),
+      ChatRun.status.in_(("running", "parked", "resume_pending")),
     )
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)
@@ -2103,13 +2120,13 @@ class ChatWriterActor:
     return None
 
   def _resolve_park(self, db, cmd: ResolvePark):
-    """Move a parked row to ``parked_notified``; idempotent; commit."""
+    """Move a parked/pending row to ``parked_notified``; idempotent."""
     from datetime import UTC, datetime
 
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
-    if run is None or run.status != "parked":
+    if run is None or run.status not in ("parked", "resume_pending"):
       return False
     run.status = "parked_notified"
     if run.ended_at is None:
@@ -2117,6 +2134,20 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("ResolvePark did not persist")
     return True
+
+  def _prepare_auto_resume(self, db, cmd: PrepareAutoResume):
+    """Keep auto-resume retryable while making notification one-shot."""
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+    if run is None or run.status not in ("parked", "resume_pending"):
+      return {"active": False, "notify": False}
+    if run.status == "resume_pending":
+      return {"active": True, "notify": False}
+    run.status = "resume_pending"
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PrepareAutoResume did not persist")
+    return {"active": True, "notify": True}
 
   @staticmethod
   def _commit_snapshot(db, snapshot: dict):

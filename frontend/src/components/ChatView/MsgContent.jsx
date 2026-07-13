@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from 'react'
+import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import ToolActivityGroup from './ToolActivityGroup.jsx'
@@ -100,6 +101,11 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  autoResumeEnabled,
+  autoResumeAvailable,
+  autoResumeSaving,
+  autoResumeError,
+  onAutoResumeChange,
   // isLastMsg + liveQuestionId are primitive props so memo can do a stable
   // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
   // fresh function reference every render and defeat it.
@@ -118,6 +124,7 @@ function MsgContentInner({
   // the persisted message and streamItems.
   suppressedQuestionKeys,
 }) {
+  const autoResumeSwitchId = chatId ? `auto-resume-${chatId}` : undefined
   // Build a stable per-render answerable predicate that closes over the
   // scalar props (no function prop needed from ChatView).
   const isQuestionAnswerable = (block) =>
@@ -253,7 +260,34 @@ function MsgContentInner({
         const resumable = !!(block.resumable && isLastMsg && onResume)
         const parked = !!block.pause?.resets_at
         return (
-          <ErrorCard key={assistantBlockKey(block, i)} block={block}>
+          <ErrorCard
+            key={assistantBlockKey(block, i)}
+            block={block}
+            autoResume={resumable && parked && !!autoResumeEnabled}
+          >
+            {resumable && parked && autoResumeAvailable && onAutoResumeChange && (
+              <div className="chat__limit-option">
+                <div className="chat__limit-option-copy">
+                  <label
+                    className="chat__limit-option-label"
+                    htmlFor={autoResumeSwitchId}
+                  >
+                    Always continue after limits in this chat
+                  </label>
+                </div>
+                <Switch
+                  id={autoResumeSwitchId}
+                  checked={!!autoResumeEnabled}
+                  onCheckedChange={onAutoResumeChange}
+                  disabled={!!autoResumeSaving}
+                />
+                {autoResumeError && (
+                  <span className="chat__limit-option-error" role="alert">
+                    {autoResumeError}
+                  </span>
+                )}
+              </div>
+            )}
             {resumable && (
               <button
                 type="button"
@@ -353,6 +387,11 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.chatId === next.chatId
     && prev.onQuestionAnswer === next.onQuestionAnswer
     && prev.onResume === next.onResume
+    && prev.autoResumeEnabled === next.autoResumeEnabled
+    && prev.autoResumeAvailable === next.autoResumeAvailable
+    && prev.autoResumeSaving === next.autoResumeSaving
+    && prev.autoResumeError === next.autoResumeError
+    && prev.onAutoResumeChange === next.onAutoResumeChange
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
     && prev.isActiveAnswer === next.isActiveAnswer

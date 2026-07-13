@@ -94,6 +94,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Per-chat policy for provider-limit recovery. Kept out of
+  # agent_settings_json because that blob is snapshotted/mirrored as SDK
+  # runtime configuration; mixing this policy into it can skip first-send
+  # model snapshots or overwrite the owner's global model defaults.
+  auto_resume_on_limit = Column(Boolean, nullable=False, default=False)
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
   agent_id = Column(String(64), nullable=True, default=None)
@@ -203,7 +208,8 @@ class ChatRun(Base):
   # "usage_limit" / …). This run row IS the provider-parked signal — no
   # separate state enum. The liveness checks read it via
   # `chat._parked_until_for_chat`; the periodic reset sweep notifies once at
-  # `parked_until` and moves the row to "parked_notified". Null on every
+  # `parked_until`; auto-resume may pass through the retryable
+  # "resume_pending" state before the row becomes terminal. Null on every
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)

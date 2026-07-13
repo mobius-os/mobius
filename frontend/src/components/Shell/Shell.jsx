@@ -1687,6 +1687,7 @@ export default function Shell() {
           <ChatView
             key={activeChatId}
             chatId={activeChatId}
+            externallyRunning={streamingChatIds.has(activeChatId)}
             onStreamEnd={({ continues } = {}) => {
               // ChatView calls this when the agent turn finishes
               // streaming. Keep the running marker across queued

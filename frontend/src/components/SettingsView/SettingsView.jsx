@@ -381,11 +381,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // React re-render per frame; render reads it for the same transform.
   const backgroundPointerYRef = useRef(0)
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
-  // Auto-resume-after-limit-reset toggle (design §2.4). The rendered value is
-  // derived from the settings query (invalidated after save) — no optimistic
-  // mirror; just a saving flag to debounce double-taps and an inline error.
-  const [autoResumeSaving, setAutoResumeSaving] = useState(false)
-  const [autoResumeError, setAutoResumeError] = useState('')
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
 
@@ -685,29 +680,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     settingsQueries.owner.invalidate(queryClient)
     setExpandedAuth(null)
   }, [queryClient])
-
-  // Auto-resume after a provider rate limit (design §2.4). One boolean on
-  // the shared agent settings; the backend reset sweep reads it. The row's
-  // checked state derives from settingsQuery.data, so save → invalidate is
-  // the whole loop (no optimistic mirror to desync).
-  async function toggleAutoResume(next) {
-    if (autoResumeSaving) return
-    setAutoResumeSaving(true)
-    setAutoResumeError('')
-    try {
-      const res = await api.settings.save({ auto_resume_on_limit: !!next })
-      if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json()).detail || '' } catch {}
-        throw new Error(detail || 'Could not save the auto-resume setting.')
-      }
-      settingsQueries.owner.invalidate(queryClient)
-    } catch (err) {
-      setAutoResumeError(err.message || 'Could not save the auto-resume setting.')
-    } finally {
-      setAutoResumeSaving(false)
-    }
-  }
 
   async function toggleTheme() {
     if (themeSwitching) return
@@ -1412,34 +1384,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               color="danger"
               variant="soft"
               description={themeError}
-            />
-          )}
-        </section>
-
-        {/* Provider-limit auto-resume (design §2.4). OFF by default: a turn
-            parked on a rate limit notifies at reset with a one-tap Resume.
-            ON: the server resumes it automatically (strictly serial,
-            re-parking if the limit is hit again). */}
-        <section className="settings__section settings__section--compact">
-          <div className="settings__row">
-            <span className="settings__label">Auto-resume after rate limits</span>
-            <Switch
-              checked={!!settingsQuery.data?.auto_resume_on_limit}
-              onCheckedChange={toggleAutoResume}
-              disabled={autoResumeSaving || settingsQuery.data === undefined}
-              aria-label="Toggle auto-resume after rate limits"
-            />
-          </div>
-          <p className="settings__subtext settings__subtext--tight">
-            When a turn is paused by a provider rate limit, continue it
-            automatically once the limit resets. Off, you get a notification
-            with a one-tap Resume instead.
-          </p>
-          {autoResumeError && (
-            <Alert
-              color="danger"
-              variant="soft"
-              description={autoResumeError}
             />
           )}
         </section>

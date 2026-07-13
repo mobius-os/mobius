@@ -10,9 +10,9 @@ Locks in the six contracts of the limit-park feature:
   (c) Latest-run-wins: the park probe + stall exemption honor a park only
       while the chat's newest run row is the parked one, and a fresh
       StartTurn closes a stale park (no orphaned notify/auto-resume).
-  (d) The reset sweep notifies exactly ONCE per park (resolve-first), skips
-      future parks, stands down while draining, and resolves deleted chats
-      silently.
+  (d) The reset sweep notifies exactly ONCE per park, keeps an opted park
+      retryable until its continuation starts, skips future parks, stands down
+      while draining, and resolves deleted chats silently.
   (e) Auto-resume is opt-in (off = notify only) and strictly serial: one
       park per tick, none while any turn is live; the resumed turn combines
       the preserved queue + a "continue" into one continuation.
@@ -28,6 +28,7 @@ from app import models
 from app.chat_writer import (
   Barrier,
   ParkRun,
+  PrepareAutoResume,
   ResolvePark,
   StartTurn,
   get_writer,
@@ -62,7 +63,10 @@ def _drain_writer():
   get_writer().submit(Barrier()).result(timeout=5)
 
 
-def _seed_chat(chat_id: str, *, pending=None, run_status=None, deleted=False):
+def _seed_chat(
+  chat_id: str, *, pending=None, run_status=None, deleted=False,
+  auto_resume=False,
+):
   db = SessionLocal()
   try:
     db.add(models.Chat(
@@ -72,6 +76,7 @@ def _seed_chat(chat_id: str, *, pending=None, run_status=None, deleted=False):
       pending_messages=pending or [],
       session_id="sess",
       provider="claude",
+      auto_resume_on_limit=auto_resume,
       run_status=run_status,
       run_started_at=(
         datetime.now(UTC).replace(tzinfo=None) if run_status else None
@@ -86,7 +91,8 @@ def _seed_chat(chat_id: str, *, pending=None, run_status=None, deleted=False):
 
 
 def _seed_run(chat_id: str, token: str, *, status="running",
-              parked_until=None, park_reason=None, started_offset=0):
+              parked_until=None, park_reason=None, started_offset=0,
+              initiated_by_app_id=None):
   db = SessionLocal()
   try:
     db.add(models.ChatRun(
@@ -94,6 +100,7 @@ def _seed_run(chat_id: str, token: str, *, status="running",
       chat_id=chat_id,
       status=status,
       provider="claude",
+      initiated_by_app_id=initiated_by_app_id,
       started_at=(
         datetime.now(UTC).replace(tzinfo=None)
         + timedelta(seconds=started_offset)
@@ -318,6 +325,23 @@ def test_resolve_park_is_idempotent():
   assert _run_row("rt-resolve")["status"] == "parked_notified"
 
 
+def test_prepare_auto_resume_is_retryable_and_notification_is_one_shot():
+  cid = "park-auto-prepare"
+  _seed_chat(cid)
+  _seed_run(cid, "rt-auto-prepare", status="parked")
+
+  first = get_writer().submit(PrepareAutoResume(
+    chat_id=cid, run_token="rt-auto-prepare",
+  )).result(timeout=5)
+  second = get_writer().submit(PrepareAutoResume(
+    chat_id=cid, run_token="rt-auto-prepare",
+  )).result(timeout=5)
+
+  assert first == {"active": True, "notify": True}
+  assert second == {"active": True, "notify": False}
+  assert _run_row("rt-auto-prepare")["status"] == "resume_pending"
+
+
 # -- (c) latest-run-wins + supersession ----------------------------------------
 
 def test_parked_probe_latest_run_wins():
@@ -389,8 +413,12 @@ def test_park_run_strict_tokenless_falls_back_to_marker_clear():
 
 # -- (d) the reset sweep -------------------------------------------------------
 
-def _due_park(cid: str, token: str, *, pending=None, deleted=False):
-  _seed_chat(cid, pending=pending, deleted=deleted)
+def _due_park(
+  cid: str, token: str, *, pending=None, deleted=False, auto_resume=False,
+):
+  _seed_chat(
+    cid, pending=pending, deleted=deleted, auto_resume=auto_resume,
+  )
   _seed_run(cid, token, status="parked",
             parked_until=datetime.now(UTC).replace(tzinfo=None)
             - timedelta(minutes=1))
@@ -487,7 +515,8 @@ def test_sweep_auto_resume_off_by_default(owner_token, monkeypatch):
   )
   resumes = []
 
-  async def _fake_resume(chat_id, provider_id):
+  async def _fake_resume(chat_id, provider_id, park_token=None):
+    del provider_id, park_token
     resumes.append(chat_id)
     return True
 
@@ -507,22 +536,21 @@ def test_sweep_auto_resume_on_starts_one_serial_continue(
     "app.push.notify_owner",
     lambda db, owner_id, **kw: "notif-id",
   )
-  monkeypatch.setattr(
-    "app.providers.auto_resume_on_limit", lambda data_dir: True,
-  )
   scheduled = []
   monkeypatch.setattr(
     chat_mod, "_schedule_continuation",
     lambda **kw: scheduled.append(kw),
   )
   queued = [{"role": "user", "content": "queued ask", "ts": 5}]
-  _due_park("sweep-auto", "rt-sweep-auto", pending=list(queued))
+  _due_park(
+    "sweep-auto", "rt-sweep-auto", pending=list(queued), auto_resume=True,
+  )
 
   try:
     resolved = _run_sweep()
 
     assert resolved == ["sweep-auto"]
-    assert _run_row("rt-sweep-auto")["status"] == "parked_notified"
+    assert _run_row("rt-sweep-auto")["status"] == "completed"
     assert len(scheduled) == 1
     assert scheduled[0]["chat_id"] == "sweep-auto"
     # The preserved queue + the synthetic "continue" were promoted into ONE
@@ -548,10 +576,7 @@ def test_sweep_auto_resume_defers_while_any_turn_is_live(
     "app.push.notify_owner",
     lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
   )
-  monkeypatch.setattr(
-    "app.providers.auto_resume_on_limit", lambda data_dir: True,
-  )
-  _due_park("sweep-serial", "rt-sweep-serial")
+  _due_park("sweep-serial", "rt-sweep-serial", auto_resume=True)
   # An unrelated live turn: strictly-serial auto-resume must wait for it.
   other = f"live-{uuid.uuid4()}"
   handle = _Handle(other)
@@ -564,6 +589,169 @@ def test_sweep_auto_resume_defers_while_any_turn_is_live(
   # lost.
   assert calls == []
   assert _run_row("rt-sweep-serial")["status"] == "parked"
+
+
+def test_live_turn_defers_opted_chat_but_not_notify_only_chat(
+  owner_token, monkeypatch,
+):
+  """One chat's opt-in must not hold another chat's reset notice hostage."""
+  del owner_token
+  calls = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+  )
+  _due_park("sweep-opted", "rt-sweep-opted", auto_resume=True)
+  _due_park("sweep-notify", "rt-sweep-notify")
+  other = f"live-{uuid.uuid4()}"
+  handle = _Handle(other)
+  registry.register(handle)
+  try:
+    assert _run_sweep() == ["sweep-notify"]
+  finally:
+    registry.unregister(other, handle.kind)
+
+  assert _run_row("rt-sweep-opted")["status"] == "parked"
+  assert _run_row("rt-sweep-notify")["status"] == "parked_notified"
+  assert [call["source_id"] for call in calls] == ["sweep-notify"]
+
+
+def test_auto_resume_race_after_notify_stays_retryable(
+  owner_token, monkeypatch,
+):
+  """A turn starting during the notify window must not consume auto-resume."""
+  del owner_token
+  cid = "sweep-notify-race"
+  blocker_id = f"live-{uuid.uuid4()}"
+  blocker = _Handle(blocker_id)
+  notifications = []
+
+  def _notify(*args, **kwargs):
+    del args
+    notifications.append(kwargs)
+    registry.register(blocker)
+    return "notif-id"
+
+  monkeypatch.setattr("app.push.notify_owner", _notify)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kw: scheduled.append(kw),
+  )
+  _due_park(cid, f"rt-{cid}", auto_resume=True)
+
+  try:
+    assert _run_sweep() == []
+    assert _run_row(f"rt-{cid}")["status"] == "resume_pending"
+    assert len(notifications) == 1
+  finally:
+    registry.unregister(blocker_id, blocker.kind)
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    assert len(notifications) == 1
+    assert _run_row(f"rt-{cid}")["status"] == "completed"
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  _due_park("sweep-auto-a", "rt-sweep-auto-a", auto_resume=True)
+  _due_park("sweep-auto-b", "rt-sweep-auto-b", auto_resume=True)
+
+  try:
+    resolved = _run_sweep()
+    assert len(resolved) == 1
+    assert len(scheduled) == 1
+    untouched = ({"sweep-auto-a", "sweep-auto-b"} - set(resolved)).pop()
+    assert _run_row(f"rt-{untouched}")["status"] == "parked"
+  finally:
+    for cid in ("sweep-auto-a", "sweep-auto-b"):
+      chat_mod.discard_starting(cid)
+
+
+def test_app_initiated_park_never_auto_resumes(owner_token, monkeypatch):
+  """App-token turns are background work even though they own a ChatRun."""
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda db, owner_id, **kw: "notif-id",
+  )
+  resumes = []
+
+  async def _fake_resume(chat_id, provider_id, park_token=None):
+    del provider_id, park_token
+    resumes.append(chat_id)
+    return True
+
+  monkeypatch.setattr(chat_mod, "_auto_resume_chat", _fake_resume)
+  cid = "sweep-app-background"
+  _seed_chat(cid, auto_resume=True)
+  _seed_run(
+    cid,
+    "rt-sweep-app-background",
+    status="parked",
+    parked_until=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1),
+    initiated_by_app_id=42,
+  )
+
+  assert _run_sweep() == [cid]
+  assert resumes == []
+
+
+def test_app_attributed_pending_work_disables_auto_resume(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  resumes = []
+
+  async def _fake_resume(chat_id, provider_id, park_token=None):
+    resumes.append((chat_id, provider_id, park_token))
+    return True
+
+  monkeypatch.setattr(chat_mod, "_auto_resume_chat", _fake_resume)
+  _due_park(
+    "sweep-app-queued",
+    "rt-sweep-app-queued",
+    auto_resume=True,
+    pending=[{
+      "role": "user", "content": "app work", "ts": 3,
+      "_initiated_by_app_id": 9,
+    }],
+  )
+
+  assert _run_sweep() == ["sweep-app-queued"]
+  assert resumes == []
+  assert _run_row("rt-sweep-app-queued")["status"] == "parked_notified"
+
+
+def test_auto_resume_rechecks_app_work_inside_queue_handoff():
+  """The final locked check must reject app work that arrived after prepare."""
+  cid = "auto-final-app-check"
+  app_msg = {
+    "role": "user", "content": "late app work", "ts": 7,
+    "_initiated_by_app_id": 11,
+  }
+  _seed_chat(cid, auto_resume=True, pending=[app_msg])
+
+  assert asyncio.run(
+    chat_mod._auto_resume_chat(cid, "claude", park_token="rt-final-check")
+  ) is False
+  state = _chat_row(cid)
+  assert state["pending"] == [app_msg]
+  assert state["run_status"] is None
+  assert not chat_mod.is_chat_running(cid)
 
 
 # -- (f) observability ----------------------------------------------------------

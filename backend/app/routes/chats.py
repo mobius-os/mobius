@@ -422,6 +422,13 @@ async def patch_chat(
 
   async with get_queue_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
+    agent_settings_patch = (
+      body.agent_settings_json.model_dump(exclude_unset=True)
+      if body.agent_settings_json is not None else {}
+    )
+    picker_settings_changed = bool(
+      {"model", "effort", "effort_by_provider"} & agent_settings_patch.keys()
+    )
 
     # Naming precedence (user > agent > first-message). A clear resets the name;
     # a manual rename locks it; an agent by_agent sync only fills the name when
@@ -448,7 +455,7 @@ async def patch_chat(
       chat.agent_settings_json = None
     elif body.agent_settings_json is not None:
       existing = _coerce_agent_settings(chat.agent_settings_json)
-      for k, v in body.agent_settings_json.model_dump(exclude_unset=True).items():
+      for k, v in agent_settings_patch.items():
         if v is None:
           existing.pop(k, None)
         else:
@@ -458,6 +465,9 @@ async def patch_chat(
       # after a fresh dict assignment in older versions; flag_modified
       # is the belt-and-suspenders fix.
       flag_modified(chat, "agent_settings_json")
+
+    if body.auto_resume_on_limit is not None:
+      chat.auto_resume_on_limit = body.auto_resume_on_limit
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
@@ -474,9 +484,7 @@ async def patch_chat(
       target_provider is None
       and body.agent_settings_json is not None
     ):
-      new_model = body.agent_settings_json.model_dump(exclude_unset=True).get(
-        "model"
-      )
+      new_model = agent_settings_patch.get("model")
       if new_model:
         from app.providers import _model_belongs_to_other_provider
         current_provider = chat.provider or "claude"
@@ -540,7 +548,10 @@ async def patch_chat(
     # keys actually set on the chat are written, preserving any
     # other keys already in the global file.
     settings_obj = _coerce_agent_settings(chat.agent_settings_json) or {}
-    if settings_obj:
+    # An auto-resume/title/pin-only PATCH must not mirror this chat's old
+    # model snapshot back into the global defaults. Only an actual picker
+    # mutation owns that side effect.
+    if settings_obj and picker_settings_changed:
       from app.providers import _load_agent_settings, write_agent_settings
       mirror = _load_agent_settings(data_dir) or {}
       for key in ("model", "effort", "effort_by_provider"):
@@ -559,6 +570,7 @@ async def patch_chat(
       "ok": True,
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
+      "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
       "effective": effective_agent_settings(
         data_dir,
         _coerce_agent_settings(chat.agent_settings_json) or None,
@@ -626,6 +638,7 @@ def get_chat(
     ),
     "session_id": chat.session_id,
     "provider": provider,
+    "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
     "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
     "effective_agent_settings": effective_agent_settings(
       data_dir,
