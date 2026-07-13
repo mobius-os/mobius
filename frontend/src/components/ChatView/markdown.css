@@ -180,7 +180,21 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   max-height: min(60dvh, 480px);
   border-radius: 8px;
   background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
   overflow: hidden;
+}
+
+.md-image-frame:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.md-image-frame:disabled {
+  cursor: default;
 }
 
 .md-image {
@@ -190,7 +204,7 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   max-width: 100%;
   object-fit: contain;
   border-radius: 8px;
-  cursor: pointer;
+  cursor: inherit;
   transition: opacity 0.15s;
 }
 .md-image:hover {

@@ -168,9 +168,13 @@ function ExpandableImage({ href, alt }) {
   if (!rawSrc) return null
   return (
     <>
-      <span
+      <button
+        type="button"
         className="md-image-frame"
         style={imageVars || undefined}
+        aria-label={`Open ${alt || 'image'} preview`}
+        disabled={!resolvedSrc}
+        onClick={() => setOpen(true)}
       >
         {resolvedSrc && (
           <img
@@ -188,10 +192,9 @@ function ExpandableImage({ href, alt }) {
                 ))
               }
             }}
-            onClick={() => setOpen(true)}
           />
         )}
-      </span>
+      </button>
       {open && resolvedSrc && createPortal(
         <ImageLightbox src={resolvedSrc} alt={alt} onClose={() => setOpen(false)} />,
         document.body,

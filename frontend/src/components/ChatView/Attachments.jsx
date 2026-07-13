@@ -59,13 +59,19 @@ function AttachImage({ src, alt }) {
   if (!src.includes('?token=')) return null
   return (
     <>
-      <img
-        className="chat__attach-thumb"
-        src={src}
-        alt={alt}
-        loading="lazy"
+      <button
+        type="button"
+        className="chat__attach-thumb-button"
+        aria-label={`Open ${alt || 'attached image'} preview`}
         onClick={() => setOpen(true)}
-      />
+      >
+        <img
+          className="chat__attach-thumb"
+          src={src}
+          alt={alt}
+          loading="lazy"
+        />
+      </button>
       {open && createPortal(
         <ImageLightbox src={src} alt={alt} onClose={() => setOpen(false)} />,
         document.body,
