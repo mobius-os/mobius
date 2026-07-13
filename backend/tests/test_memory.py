@@ -48,7 +48,7 @@ def test_empty_when_nothing_present(tmp_path):
 # --- graph mode --------------------------------------------------------
 
 
-def test_budget_skips_hot_notes_when_index_fills_it(tmp_path):
+def test_published_graph_without_chat_digests_injects_nothing(tmp_path):
   root = _graph(tmp_path)
   big_index = "# Home\n" + ("x" * 5000)
   (root / "index.md").write_text(big_index)
@@ -56,17 +56,12 @@ def test_budget_skips_hot_notes_when_index_fills_it(tmp_path):
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path, budget_bytes=4000)
-  assert block.mode == "graph"
-  assert "[index truncated" in block.text
-  assert "notes/n.md" not in block.text  # no room left
-  assert "notes/n.md" not in block.loaded
+  assert block.mode == "empty"
+  assert block.text == ""
+  assert block.loaded == []
 
 
-def test_budget_skips_chat_note_when_index_fills_it(tmp_path):
-  # A large index can leave no room for a chat-note chunk. Without the budget
-  # check the chunk would push the block past budget_bytes; assert it is
-  # dropped, keeping the block within budget. (There is no inbox in v2 — the
-  # per-chat notes are what gets injected after the index.)
+def test_router_never_consumes_chat_digest_budget(tmp_path):
   root = _graph(tmp_path)
   big_index = "# Home\n" + ("x" * 3990)
   (root / "index.md").write_text(big_index)
@@ -78,23 +73,20 @@ def test_budget_skips_chat_note_when_index_fills_it(tmp_path):
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path, budget_bytes=4000)
-  assert block.mode == "graph"
-  assert "[index truncated" not in block.text  # index itself fits
-  assert "fresh observation" not in block.text  # no room left for the chat note
-  assert "chats/c1/index.md" not in block.loaded
+  assert block.mode == "recent_chats"
+  assert "# Home" not in block.text
+  assert "fresh observation" in block.text
+  assert "chats/c1/index.md" in block.loaded
   assert len(block.text.encode("utf-8")) <= 4000
 
 
-def test_truncated_index_stays_within_budget(tmp_path):
-  # A too-big index gets truncated + a marker appended. The marker must fit
-  # WITHIN budget_bytes, not overrun it by its own length.
+def test_large_router_is_never_injected(tmp_path):
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home\n" + ("x" * 8000))
   (root / ".ready").write_text("")
   block = memory.build_memory_block(tmp_path, budget_bytes=4000)
-  assert block.mode == "graph"
-  assert "[index truncated" in block.text
-  assert len(block.text.encode("utf-8")) <= 4000
+  assert block.mode == "empty"
+  assert block.text == ""
 
 
 def test_empty_published_graph_is_empty(tmp_path):
@@ -148,7 +140,7 @@ def test_chat_note_skipped_when_no_room(tmp_path):
   )
   (root / ".ready").write_text("")
 
-  block = memory.build_memory_block(tmp_path, budget_bytes=600)
+  block = memory.build_memory_block(tmp_path, budget_bytes=40)
   assert "chats/c1/index.md" not in block.loaded
   assert len(block.text.encode("utf-8")) <= 600
 
@@ -197,11 +189,7 @@ def test_digest_prefers_digest_section_over_summary(tmp_path):
   assert "long summary body" not in block.text
 
 
-def test_digest_injects_body_incl_facts_when_no_digest(tmp_path):
-  # Existing prod notes carry `## Summary` + `## Facts & intent`, not
-  # `## Digest`; absent an explicit digest the whole body is injected, so the
-  # durable facts stay in recall (not demoted to a Read) and the note is never
-  # blanked out on the deploy.
+def test_legacy_summary_fallback_excludes_facts(tmp_path):
   root = tmp_path / "shared" / "memory"
   root.mkdir(parents=True)
   d = root / "chats" / "c1"
@@ -213,7 +201,7 @@ def test_digest_injects_body_incl_facts_when_no_digest(tmp_path):
   )
   block = memory.build_memory_block(tmp_path)
   assert "fallback summary body" in block.text
-  assert "partner prefers grams" in block.text  # durable facts stay injected
+  assert "partner prefers grams" not in block.text
 
 
 def test_digest_includes_description_and_is_capped(tmp_path):
@@ -547,10 +535,7 @@ def test_seed_graph_lints_clean_under_new_warnings():
   assert not res.problems, res.problems
 
 
-def test_graph_mode_injects_router_and_chat_notes_not_inbox_or_notes(tmp_path):
-  # v2: build_memory_block injects the router (index) + the recent chat NOTES,
-  # and NOT the deeper graph (notes/) — the agent traverses on demand. There is
-  # no inbox in the chat-centric model, so a stray inbox.md is never injected.
+def test_graph_ready_still_injects_only_chat_digest(tmp_path):
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home\n\n- [[working]]\n")
   (root / "notes" / "aaa.md").write_text(_note(title="a"))
@@ -564,18 +549,18 @@ def test_graph_mode_injects_router_and_chat_notes_not_inbox_or_notes(tmp_path):
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path)
-  assert block.mode == "graph"
-  assert "# Home" in block.text
+  assert block.mode == "recent_chats"
+  assert "# Home" not in block.text
   assert "built the Habits app" in block.text  # the chat note is injected
   assert "chats/c1/index.md" in block.loaded
-  assert "index.md" in block.loaded
+  assert "index.md" not in block.loaded
   assert "inbox.md" not in block.loaded  # no inbox in v2
   assert "legacy inbox line" not in block.text
   assert not any(x.startswith("notes/") for x in block.loaded)
   assert "notes/" not in block.text
 
 
-def test_chat_notes_injected_after_index(tmp_path):
+def test_chat_digest_injection_ignores_index(tmp_path):
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home")
   d = root / "chats" / "c1"
@@ -588,5 +573,23 @@ def test_chat_notes_injected_after_index(tmp_path):
   block = memory.build_memory_block(tmp_path)
   assert "chats/c1/index.md" in block.loaded
   assert "built the Habits app" in block.text
-  # the chat note is injected after the router index
-  assert block.text.index("# Home") < block.text.index("built the Habits app")
+  assert "# Home" not in block.text
+
+
+def test_oversized_newest_digest_does_not_starve_older_short_one(tmp_path):
+  root = _graph(tmp_path)
+  newest = root / "chats" / "new"
+  older = root / "chats" / "old"
+  newest.mkdir(parents=True)
+  older.mkdir(parents=True)
+  (newest / "index.md").write_text(
+    "---\ntype: chat\ndescription: newest\n---\n## Digest\n" + "x" * 5000
+  )
+  (older / "index.md").write_text(
+    "---\ntype: chat\ndescription: older\n---\n## Digest\nshort"
+  )
+  os.utime(older / "index.md", (1000, 1000))
+  os.utime(newest / "index.md", (2000, 2000))
+  block = memory.build_memory_block(tmp_path, budget_bytes=200)
+  assert "newest" not in block.text
+  assert "older\nshort" in block.text

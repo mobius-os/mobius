@@ -14,17 +14,17 @@ a frontend follow-up). Keeping the summarize call here, behind one async
 function, means the compaction endpoint can be tested hermetically by
 monkeypatching `summarize_chat` — no live provider, no SDK subprocess.
 
-The summarize turn deliberately reuses the Claude SDK (the chat's own
-provider is irrelevant: the summary is plain text either way, and Claude
-is always the platform's baseline provider). It is a fresh, tool-free,
-non-streaming query — NOT the live chat session — so it never touches the
-chat's `session_id`, run markers, or broadcast.
+The preferred source is the chat's own cumulative ``## Summary`` note: that is
+maintained every turn, is provider-neutral, and has no platform length cap. The
+one-shot Claude summarizer below remains a compatibility fallback for legacy
+chats that do not yet have a summary note.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 log = logging.getLogger("moebius.chat")
 
@@ -61,6 +61,29 @@ _SUMMARIZE_PROMPT = (
   "ONLY the briefing prose — no preamble, no markdown headers, no fences.\n\n"
   "--- TRANSCRIPT ---\n"
 )
+
+
+def load_cumulative_summary(data_dir: str, chat_id: str) -> str | None:
+  """Read the chat-maintained unbounded ``## Summary`` section, if present."""
+  path = Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
+  try:
+    lines = path.read_text(encoding="utf-8").splitlines()
+  except OSError:
+    return None
+  start: int | None = None
+  for index, line in enumerate(lines):
+    if line.strip().lower() == "## summary":
+      start = index + 1
+      break
+  if start is None:
+    return None
+  body: list[str] = []
+  for line in lines[start:]:
+    if line.strip().startswith("## "):
+      break
+    body.append(line)
+  summary = "\n".join(body).strip()
+  return summary or None
 
 
 def build_transcript_text(messages: list[dict]) -> str:

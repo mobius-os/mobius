@@ -819,7 +819,9 @@ async def compact_chat(
   from app.chat_writer import (
     PersistCompaction, alloc_run_token, await_ack, get_writer,
   )
-  from app.compaction import CompactionError, summarize_chat
+  from app.compaction import (
+    CompactionError, load_cumulative_summary, summarize_chat,
+  )
 
   chat = get_active_chat_or_404(db, chat_id)
   if is_chat_running(chat_id):
@@ -835,7 +837,11 @@ async def compact_chat(
   messages = list(chat.messages or [])
   data_dir = get_settings().data_dir
   try:
-    summary = await summarize_chat(messages, data_dir=data_dir)
+    # Each chat maintains its own complete, uncapped handoff. Legacy chats may
+    # not have one yet, so retain the tool-free provider summarizer as fallback.
+    summary = load_cumulative_summary(data_dir, chat_id)
+    if summary is None:
+      summary = await summarize_chat(messages, data_dir=data_dir)
   except CompactionError as exc:
     # The summarize step is the one allowed-to-fail step. Surface it as a
     # 422 so the client can show the reason and keep the chat unchanged
