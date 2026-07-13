@@ -28,7 +28,6 @@ from app.storage_io import delete_content_type_tree, read_capped_body
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
 from app.config import get_settings
-from app import core_app_suppress
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
@@ -609,9 +608,6 @@ async def install_app(
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app.id)}
   )
-  # Clean up any retired suppression marker left by older builds. Catalog apps
-  # are ordinary installs now, so this is compatibility cleanup only.
-  core_app_suppress.clear_suppressed(get_settings().data_dir, app.slug)
   # A conflicting update leaves the app on its current version with its source
   # files untouched. Whether to involve the agent is the owner's call, not ours:
   # the store surfaces the conflict (mode + conflict_paths, below) and the owner
@@ -1762,12 +1758,8 @@ async def recover_app(
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
     app.deleted_at = None
     app_name = app.name
-    app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
-    # The owner brought this app back. Clear any retired suppression marker left
-    # by older builds so compatibility files do not linger forever.
-    core_app_suppress.clear_suppressed(get_settings().data_dir, app_slug)
 
     # Re-arm the schedule the tombstone dropped: rename init-cron.sh back into
     # the entrypoint's replay glob and run it once to reinstall the crontab
