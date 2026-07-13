@@ -447,7 +447,9 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
       agent_settings_json={},  # auto-steer OFF — force_steer overrides.
     )
-    chat.pending_messages = [{"role": "user", "content": "use blue", "ts": 10}]
+    chat.pending_messages = [
+      {"role": "user", "content": "use blue", "ts": 10, "cid": "legacy-10"}
+    ]
     db.add(chat)
     db.commit()
   finally:
@@ -564,9 +566,9 @@ def test_force_steer_consumes_existing_queued_messages(
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     chat.pending_messages = [
-      {"role": "user", "content": "use blue", "ts": 10},
-      {"role": "user", "content": "also square", "ts": 11},
-      {"role": "user", "content": "later", "ts": 12},
+      {"role": "user", "content": "use blue", "ts": 10, "cid": "legacy-10"},
+      {"role": "user", "content": "also square", "ts": 11, "cid": "legacy-11"},
+      {"role": "user", "content": "later", "ts": 12, "cid": "legacy-12"},
     ]
     db.commit()
   finally:

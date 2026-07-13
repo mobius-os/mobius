@@ -112,10 +112,10 @@ function MsgContentInner({
         // the group wrapper prefers the same tool's id, so the keys coincide.
         return (
           <div key={block.tool_use_id ?? `t-${i}`} className="chat__tools">
-            {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
-                truncated large output on expand (see chats.py
-                _truncate_large_tool_outputs + GET /tool-output). */}
-            <ToolBlock t={block} chatId={chatId} msgTs={msg.ts} blockIdx={i} />
+            {/* chatId + the block's tool_use_id let ToolBlock lazily fetch a
+                truncated large output on expand (GET
+                /tool-output/{tool_use_id}). */}
+            <ToolBlock t={block} chatId={chatId} />
           </div>
         )
       }
@@ -209,9 +209,9 @@ function MsgContentInner({
       .filter(({ idx }) => !skipToolIdx.has(idx))
     // Repair already-persisted transcripts where a continuous reasoning pass was
     // fragmented into many thinking blocks: coalesce runs of adjacent thinking
-    // AFTER idx assignment (each survivor keeps its original persisted idx) so
-    // ToolBlock's blockIdx stays a correct absolute index into msg.blocks and the
-    // lazy tool-output fetch keeps working. See groupBlocks.coalesceThinkingEntries.
+    // AFTER idx assignment (each survivor keeps its original persisted idx) so a
+    // tokenless tool block's `t-<idx>` React key stays stable across renders.
+    // See groupBlocks.coalesceThinkingEntries.
     const nodes = groupToolRuns(coalesceThinkingEntries(entries))
 
     return (
@@ -237,8 +237,6 @@ function MsgContentInner({
                       key={e.item.tool_use_id ?? e.idx}
                       t={e.item}
                       chatId={chatId}
-                      msgTs={msg.ts}
-                      blockIdx={e.idx}
                     />
                   ))}
                 </ToolActivityGroup>

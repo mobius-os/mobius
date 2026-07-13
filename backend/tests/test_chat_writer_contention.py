@@ -457,7 +457,8 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
         AppendPending(
           chat_id="c1",
           run_token="rt1",
-          user_msg={"role": "user", "content": f"m{i}", "ts": 1000 + i},
+          user_msg={"role": "user", "content": f"m{i}", "ts": 1000 + i,
+                    "cid": f"c-m{i}"},
         )
       )
     )
@@ -470,9 +471,8 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   # Cancel one and promote the queued follow-ups concurrently — neither loses
   # the cancellation nor a queued send.
   cancel_ts = stored_ts[3]
-  # These sends carried no cid, so the cancel targets the legacy-<ts> id.
   cf = actor.submit(
-    CancelPending(chat_id="c1", run_token="rt1", cid=f"legacy-{cancel_ts}")
+    CancelPending(chat_id="c1", run_token="rt1", cid=results[3]["stored"]["cid"])
   )
   pf = actor.submit(PromotePending(chat_id="c1", run_token="rt1"))
   _await(cf)
@@ -614,9 +614,10 @@ def test_promote_pending_stops_collapse_at_hidden_boundary(actor):
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "visible", "ts": 10},
-      {"role": "user", "content": "secret reminder", "ts": 11, "hidden": True},
-      {"role": "user", "content": "next visible", "ts": 12},
+      {"role": "user", "content": "visible", "ts": 10, "cid": "legacy-10"},
+      {"role": "user", "content": "secret reminder", "ts": 11, "hidden": True,
+       "cid": "legacy-11"},
+      {"role": "user", "content": "next visible", "ts": 12, "cid": "legacy-12"},
     ],
   )
 
@@ -648,8 +649,9 @@ def test_promote_pending_hidden_head_does_not_hide_visible_followup(actor):
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
-      {"role": "user", "content": "secret reminder", "ts": 10, "hidden": True},
-      {"role": "user", "content": "visible", "ts": 11},
+      {"role": "user", "content": "secret reminder", "ts": 10, "hidden": True,
+       "cid": "legacy-10"},
+      {"role": "user", "content": "visible", "ts": 11, "cid": "legacy-11"},
     ],
   )
 
@@ -661,7 +663,7 @@ def test_promote_pending_hidden_head_does_not_hide_visible_followup(actor):
   chat = _load_chat()
   assert chat["messages"][-1]["hidden"] is True
   assert chat["pending_messages"] == [
-    {"role": "user", "content": "visible", "ts": 11},
+    {"role": "user", "content": "visible", "ts": 11, "cid": "legacy-11"},
   ]
 
 
@@ -680,9 +682,10 @@ def test_promote_pending_uses_first_queued_actor_for_run_attribution(actor):
         "role": "user",
         "content": "from app",
         "ts": 10,
+        "cid": "legacy-10",
         "_initiated_by_app_id": app_id,
       },
-      {"role": "user", "content": "also queued", "ts": 11},
+      {"role": "user", "content": "also queued", "ts": 11, "cid": "legacy-11"},
     ],
   )
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))

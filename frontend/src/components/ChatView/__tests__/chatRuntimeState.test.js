@@ -19,19 +19,15 @@ import {
   systemEventForChat,
 } from '../chatRuntimeState.js'
 
-test('cidOf returns the client cid, else derives legacy-<ts>, else null', () => {
+test('cidOf returns the row cid, else null (no read-time derivation)', () => {
+  // Post-card-221 every user row carries an explicit cid (client-minted, or a
+  // backfilled `legacy-<ts>`); cidOf returns it as-is and no longer derives one
+  // from `ts`. `ts` is display/ordering metadata only.
   assert.equal(cidOf({ cid: 'abc', ts: 5 }), 'abc')
-  assert.equal(cidOf({ ts: 5 }), 'legacy-5')
-  assert.equal(cidOf({ ts: 0 }), 'legacy-0')
+  assert.equal(cidOf({ cid: 'legacy-5', ts: 5 }), 'legacy-5')
+  assert.equal(cidOf({ ts: 5 }), null)
   assert.equal(cidOf({}), null)
   assert.equal(cidOf(null), null)
-})
-
-test('legacy derivation matches on both wire sides for a cid-less row', () => {
-  // The backend cid_of derives the same value for a pre-cid row, so a derived
-  // id compares equal across the wire (e.g. cancel/consume by legacy-<ts>).
-  const row = { role: 'user', content: 'x', ts: 1720000000000 }
-  assert.equal(cidOf(row), 'legacy-1720000000000')
 })
 
 test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {

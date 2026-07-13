@@ -145,7 +145,7 @@ def test_send_while_running_queues_message(client, db, auth, chat):
   try:
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "second message"},
+      json={"content": "second message", "cid": "c-second"},
       headers=auth,
     )
     assert resp.status_code == 202
@@ -162,10 +162,9 @@ def test_send_while_running_queues_message(client, db, auth, chat):
     assert chat.pending_messages[0]["content"] == "second message"
     assert chat.pending_messages[0]["ts"] == data["ts"]
 
-    # Cancel by the row's stable cid must actually remove the message. This
-    # send carried no cid, so it cancels via the legacy-<ts> derivation.
+    # Cancel by the row's stable cid must actually remove the message.
     cancel = client.delete(
-      f"/api/chats/{chat.id}/pending/legacy-{data['ts']}", headers=auth,
+      f"/api/chats/{chat.id}/pending/c-second", headers=auth,
     )
     assert cancel.status_code == 200
     assert cancel.json()["pending_messages"] == []
@@ -210,10 +209,10 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   with the new message."""
   from app.runner_registry import registry
 
-  # Seed stale pending (simulating crash recovery).
+  # Seed stale pending (simulating crash recovery) with backfilled legacy cids.
   chat.pending_messages = [
-    {"role": "user", "content": "stale 1", "ts": 100},
-    {"role": "user", "content": "stale 2", "ts": 200},
+    {"role": "user", "content": "stale 1", "ts": 100, "cid": "legacy-100"},
+    {"role": "user", "content": "stale 2", "ts": 200, "cid": "legacy-200"},
   ]
   db.commit()
 
@@ -223,7 +222,7 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   with patch("app.chat.run_chat", new=fake_run_chat):
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "new send"},
+      json={"content": "new send", "cid": "c-new"},
       headers=auth,
     )
 
@@ -253,7 +252,8 @@ def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
   from app.runner_registry import registry
 
   chat.pending_messages = [
-    {"role": "user", "content": "secret reminder", "ts": 100, "hidden": True},
+    {"role": "user", "content": "secret reminder", "ts": 100, "hidden": True,
+     "cid": "legacy-100"},
   ]
   db.commit()
 
@@ -263,7 +263,7 @@ def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
   with patch("app.chat.run_chat", new=fake_run_chat):
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "new visible send"},
+      json={"content": "new visible send", "cid": "c-visible"},
       headers=auth,
     )
 
@@ -445,7 +445,7 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
   ts is DEMOTED to display/ordering metadata (identity is cid now), but
   `_ensure_unique_ts` is kept so the display ts stays strictly monotonic and
   the ts-ordered transcript batch inserts sort deterministically. The cancel
-  below targets exactly one entry by its (legacy-derived) cid."""
+  below targets exactly one entry by its cid."""
   from unittest.mock import MagicMock, patch
 
   mock_proc = MagicMock()
@@ -458,11 +458,11 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
     with patch("app.routes.chats_stream.time.time", return_value=1.234):
       r1 = client.post(
         f"/api/chats/{chat.id}/messages",
-        json={"content": "a"}, headers=auth,
+        json={"content": "a", "cid": "c-a"}, headers=auth,
       )
       r2 = client.post(
         f"/api/chats/{chat.id}/messages",
-        json={"content": "b"}, headers=auth,
+        json={"content": "b", "cid": "c-b"}, headers=auth,
       )
     assert r1.status_code == 202 and r2.status_code == 202
     ts1 = r1.json()["ts"]
@@ -471,8 +471,8 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
     db.refresh(chat)
     assert {m["ts"] for m in chat.pending_messages} == {ts1, ts2}
 
-    # Cancel the first row (by its legacy-derived cid) removes only that one.
-    client.delete(f"/api/chats/{chat.id}/pending/legacy-{ts1}", headers=auth)
+    # Cancel the first row by its cid removes only that one.
+    client.delete(f"/api/chats/{chat.id}/pending/c-a", headers=auth)
     db.refresh(chat)
     assert [m["ts"] for m in chat.pending_messages] == [ts2]
   finally:
@@ -874,9 +874,9 @@ def test_cancel_pending_message_by_cid(client, db, auth):
   assert [m["ts"] for m in c.pending_messages] == [100, 300]
 
 
-def test_cancel_pending_legacy_row_by_derived_cid(client, db, auth):
-  """A pre-cid pending row (no cid) cancels via its `legacy-<ts>` derivation,
-  the same value cid_of produces on both wire sides."""
+def test_cancel_pending_row_by_backfilled_legacy_cid(client, db, auth):
+  """A card-221-backfilled row carries an explicit `legacy-<ts>` cid; cancelling
+  by that value removes it (the value is stored now, not derived at read time)."""
   from app import models
 
   c = models.Chat(
@@ -884,8 +884,8 @@ def test_cancel_pending_legacy_row_by_derived_cid(client, db, auth):
     title="t",
     messages=[],
     pending_messages=[
-      {"role": "user", "content": "keep", "ts": 100},
-      {"role": "user", "content": "cancel me", "ts": 200},
+      {"role": "user", "content": "keep", "ts": 100, "cid": "legacy-100"},
+      {"role": "user", "content": "cancel me", "ts": 200, "cid": "legacy-200"},
     ],
   )
   db.add(c)
