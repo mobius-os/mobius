@@ -142,9 +142,9 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `memory.py` | `build_memory_block()` — assembles the agent's injected memory block from the knowledge graph (graph mode, ~25KB budget) |
+| `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
 | `memory_graph.py` | Builds + lints the knowledge-graph index (`graph.json`) for the Memory viewer |
-| `memory_trace.py` | Persists per-chat read traces of the memory graph for the nightly reflection pass |
+| `memory_trace.py` | Utility used by an installed Memory reader to persist explicit graph-read traces for its scheduled consolidation pass; it is not part of startup injection |
 | `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
@@ -316,7 +316,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior is governed by three layers, not one. (1) **Constitution** — `skill/core.md`, the owner-curated system prompt, baked to `/app/skill/core.md`; `chat.py` reads it into `system_prompt` (the Claude SDK receives it on every turn; the Codex SDK uses it as base instructions only when starting a new thread, i.e. `session_id is None`). `providers.get_skill_path()` resolves `core.md` only (there is no `agent-skill.md` fallback). (2) **Skills** — `/data/shared/skills/*.md` (building-apps, theming, cron, notifications, recovery, memory, reflection, …), seeded create-if-absent by `backend/scripts/init_skills.py` from `backend/scripts/seed-skills/`; the agent `Read`s the relevant one on demand and may edit them. (3) **Memory** — the knowledge graph under `/data/shared/memory/` (`index.md` + per-chat notes `chats/<id>/index.md` — the primary day-time memory carrier — + `mocs/` + `notes/` + `graph.json` + `read-trace/` + `.ready`), injected progressive-disclosure by `backend/app/memory.py` into the first user message as an `<agent_experience>` block (not the system prompt, so static content caches), indexed by `memory_graph.py`, and viewed through the Memory mini-app. The injected block is `index.md` plus the ~10 most-recently-modified chat notes; the deeper graph (`mocs/`, `notes/`) is read on demand. Two platform scripts maintain/retrieve it: `backend/scripts/chat_note.py` (tool-free turn-end summarizer `chat.py` runs when a settled chat's note is missing or stale; it also syncs the chat title from the note's gist) and `backend/scripts/memory_search.py` (the memory-search recall subagent, auto-run on substantive first messages when `auto_memory_search` is enabled). To change agent behavior, edit `skill/core.md` and the seeds — not code-level validators (see the design philosophy above).
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — baked `skill/core.md`; `chat._read_skill_text()` caches it for the process lifetime. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file. The installer stores its basename, and prompt composition appends fragments only from live (`deleted_at IS NULL`) app rows in stable id order. Install/uninstall activation is restart-bound so an in-flight chat's system prompt never shifts. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills such as `memory.md` arrive through app manifests. Independently of optional apps, every chat maintains `description` (name), a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free turn-end backstop, and compaction prefers the chat's cumulative Summary. The optional Memory app contributes graph instructions, its graph skill, scheduled consolidator, seeds, and a prompt-scoped reader; no router/fact note is injected and uninstall removes the instructions after restart while preserving user data.
 
 ## Data layout (`/data/` volume)
 
@@ -517,27 +517,26 @@ serializer), and the FULL output is fetched only when the block is expanded (`GE
 ### Chat summary + continuity contract
 
 Each chat maintains a **growing per-chat note** at
-`/data/shared/memory/chats/<chat-id>/index.md` — durable facts + the partner's intent
-+ a running summary, plus a one-line **gist that IS the chat title**
+`/data/shared/memory/chats/<chat-id>/index.md` — a bounded `## Digest`, durable
+facts + the partner's intent, an uncapped cumulative `## Summary`, and a one-line
+**gist that IS the chat title**
 (`backend/scripts/chat_note.py` summarizer subagent: transcript in the prompt, no
 tools). This note is **core continuity** — it exists and is useful even when the
 Memory app is not installed. Its consumers:
 
-- **Short-term memory into new chats.** A fresh chat opens with the full summaries of
-  the ~10 most-recently-modified chats, injected as continuity (`backend/app/memory.py`
-  core mode); the one-line gist lets the agent decide whether to open the fuller note.
+- **Short-term continuity into new chats.** A fresh chat opens with only the gist and
+  bounded Digest from the ~10 most-recently-modified chats
+  (`backend/app/memory.py`); the fenced path lets the agent deliberately open a
+  relevant full note. Facts and cumulative Summaries are not injected.
 - **Knowledge graph (Memory-app extension).** If the Memory app is installed and set
   up, its scheduled runner grows the wider graph (`mocs/`, `notes/`, `graph.json`,
   `.ready`) FROM these per-chat notes. The graph is an extension, not core; boot only
-  provisions the per-chat surface (`backend/scripts/init_memory_store.py`).
+  provisions the per-chat surface (`backend/scripts/init_chat_summaries.py`).
 - **Reflection.** Without the Memory app, the per-chat summaries are what Reflection
   reads.
-- **Compaction + provider switch.** The running summary is the source for compacting a
+- **Compaction + provider switch.** The cumulative Summary is the source for compacting a
   long chat and for the provider-switch handoff below — preferred over a from-scratch
   default compaction.
-
-(Actively being built — keep this section in step with `chat_note.py`, `memory.py`,
-and `init_memory_store.py` as that lands.)
 
 ### Provider switch (compaction handoff)
 

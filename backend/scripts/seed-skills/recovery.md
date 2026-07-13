@@ -31,19 +31,19 @@ SQLAlchemy `create_all` only CREATEs missing tables; it never adds a column to a
 
 ## `/data` is a git repo — commit agent-owned state
 
-`/data/` is a git repo initialized on first boot. After substantial changes (apps, shell, memory graph, theme), commit so undo is clean:
+`/data/` is a git repo initialized on first boot. After substantial changes (apps, shell, shared data, theme), commit so undo is clean:
 
 ```bash
 pm-commit 'one-line what and why'
 ```
 
-It stages, unstages a runtime-state denylist (profiles, compiled, logs, generated), then commits; it refuses (exit 2) if >50 files stage after filtering. Re-run with `--allow-broad` only after confirming the staged set is what you meant. The memory graph under `shared/memory/` and your editable skills under `shared/skills/` are tracked here, so this history is your undo for a bad Memory consolidation or a skill edit you regret. The scheduled Memory and Reflection passes also take pre-run snapshots before they touch anything.
+It stages, unstages a runtime-state denylist (profiles, compiled, logs, generated), then commits; it refuses (exit 2) if >50 files stage after filtering. Re-run with `--allow-broad` only after confirming the staged set is what you meant. Shared user data and editable skills are tracked here, so this history is your undo for a bad app-owned data rewrite or a skill edit you regret. Scheduled background agents should take pre-run snapshots before they touch anything.
 
 To actually roll one back, find the commit that last had the good version and restore just that path:
 
 ```bash
-git -C /data log --oneline -- shared/memory/notes/<slug>.md   # find the good <sha>
-git -C /data checkout <sha> -- shared/memory/notes/<slug>.md   # restore just that file
+git -C /data log --oneline -- shared/<path>   # find the good <sha>
+git -C /data checkout <sha> -- shared/<path>  # restore just that file
 ```
 
 ---
@@ -125,7 +125,7 @@ their mind.
 - **Chat media (screenshots + generated):** `/data/chats/{chat_id}/media/` — the old `generated/` path is still served for embeds in pre-`media/` messages.
 - **Per-app storage (numeric id):** `/data/apps/{app_id}/<path>` — what `PUT /api/storage/apps/{app_id}/...` writes to, keyed by the numeric DB id.
 - **Per-app source (slug):** `/data/apps/{slug}/` — where app source lives, keyed by slug. `index.jsx` is the entrypoint and can import sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules. NOT the same dir as storage; the slug tree and the numeric-id tree are separate.
-- **Shared storage (cross-app):** `/data/shared/<path>` — what `PUT /api/storage/shared/...` writes to; used for theme.css, agent-settings.json, the memory graph, etc.
+- **Shared storage (cross-app):** `/data/shared/<path>` — what `PUT /api/storage/shared/...` writes to; used for theme.css, agent-settings.json, chat summaries, and app-owned shared data.
 - **Compiled bundles:** `/data/compiled/app-{app_id}.js`.
 - **Cron logs:** `/data/cron-logs/`. **Service token:** `/data/service-token.txt` (chmod 600).
 

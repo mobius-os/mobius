@@ -837,11 +837,10 @@ python3 /app/scripts/init_agent_context.py
 # mobius crontab; as root it would poison /data ownership + target root's crontab).
 su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1 || true
 
-# Bootstrap the knowledge graph (/data/shared/memory/). CREATE-IF-ABSENT:
-# unlike the flat experience file above, the graph is the agent's persistent
-# memory and must never be reseeded over learned notes. Writes the `.ready`
-# sentinel LAST; until then memory injection uses the legacy flat-file path.
-python3 /app/scripts/init_memory_graph.py
+# Bootstrap only the always-on per-chat summary directory. Optional graph
+# memory, its seeds, and its `.ready` lifecycle belong to the installed Memory
+# system app; base boot must not activate them.
+python3 /app/scripts/init_chat_summaries.py
 
 # Bootstrap the agent-editable skills layer (/data/shared/skills/). CREATE-IF-
 # ABSENT like the graph — the agent (and the nightly Reflection agent) improve
