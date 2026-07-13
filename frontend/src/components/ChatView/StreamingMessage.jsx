@@ -1,213 +1,38 @@
-import { useEffect, useState } from 'react'
-import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
-import ToolBlock from './ToolBlock.jsx'
-import ToolActivityGroup from './ToolActivityGroup.jsx'
-import { groupToolRuns } from './groupBlocks.js'
-import { thinkingElapsedMs } from './streamReducers.js'
-import QuestionCard from './QuestionCard.jsx'
-import ErrorCard from './ErrorCard.jsx'
-
-
-function durationSeconds(durationMs) {
-  if (!Number.isFinite(durationMs)) return null
-  return Math.max(1, Math.round(durationMs / 1000))
-}
-
-
-function formatSeconds(seconds) {
-  if (!Number.isFinite(seconds)) return null
-  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
-}
-
-
-function ThinkingDisclosure({ item, isActive }) {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!isActive) return undefined
-    const id = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [isActive])
-
-  // Anchored to the runner's clock (duration_ms + tail since the last delta),
-  // NOT the client mount time — so navigating back to a still-thinking block
-  // shows its true elapsed instead of restarting at 1s. See thinkingElapsedMs.
-  const activeSeconds = durationSeconds(thinkingElapsedMs(item, now))
-  const frozenSeconds = durationSeconds(item.duration_ms)
-  const seconds = isActive ? (activeSeconds || 1) : frozenSeconds
-  const secondsText = formatSeconds(seconds)
-  const label = isActive
-    ? `> Thinking for ${secondsText || 'a moment'}`
-    : secondsText
-      ? `> Thought for ${secondsText}`
-      : '> Thought'
-
-  return (
-    <details className="chat__reasoning">
-      <summary className="chat__reasoning-summary">
-        <span className="chat__reasoning-line">
-          {label}
-          {isActive && (
-            <span className="chat__reasoning-ellipsis" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-          )}
-        </span>
-      </summary>
-      <div className="chat__reasoning-body">
-        <StandardMarkdown text={item.content} />
-      </div>
-    </details>
-  )
-}
+import MsgContent from './MsgContent.jsx'
 
 
 /**
- * The single live `<li>` that renders the in-flight turn's
- * `streamItems` (text deltas, tool blocks, question cards, provider
- * errors) while the agent is streaming — i.e. the
- * `sending && streamItems.length > 0` branch of the message list.
+ * Stable row shell for the one active assistant answer.
  *
- * Relocated verbatim from ChatView's render. This is a pure leaf:
- * no refs, no effects, no scroll/spacer/queue logic. It exists only
- * to keep that vocabulary (the four block renderers) out of ChatView,
- * which no longer imports any of them.
- *
- * The `<li>` MUST keep `className="chat__msg chat__msg--assistant"`
-   * and `data-key={dataKey}`: the scroll state machine
-   * (useScrollMode's applyMode) resolves ANCHOR_AT via
-   * `querySelector('.chat__msg[data-key]')`. `dataKey` is
-   * `streamingDataKey` from ChatView — the kept DB partial's key in the
-   * BRIDGE case, otherwise a synthetic `streaming-<chatId>` key. The
-   * synthetic key lets foreground reconnect preserve the reader's position
-   * inside a live streaming answer while catch-up fills content below.
- *
- * @param {object} props
- * @param {Array<object>} props.streamItems  the live stream items
- *   (latestItemsRef's render mirror): text/tool/question/error.
-   * @param {string|undefined} props.dataKey  ChatView's stable
-   *   `streamingDataKey`.
- * @param {(text: string, resolvedAnswers: object, questionId?: string) => void} props.onAnswer
- *   doSendSilent — submits an AskUserQuestion answer as a hidden
- *   user message. The card is clickable even mid-stream because the
- *   runner is paused on the AskUserQuestion future.
+ * The DB partial and the live SSE payload both flow through MsgContent. This
+ * wrapper never selects a renderer; it only owns the invariant DOM anchor the
+ * scroll state machine resolves through `[data-key]`.
  */
-export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
-  // Render a single stream item by type. `i` is the ORIGINAL index in
-  // streamItems, so the isLast/isActive checks below (which key off
-  // `streamItems.length - 1`) stay correct even after adjacent tool items are
-  // folded into a group — grouping never touches a trailing text/thinking item.
-  const renderItem = (item, i) => {
-    if (item.type === 'tool') {
-      // Key a lone tool by its real `tool_use_id` (lever 2a) so the block —
-      // the heaviest remount cost — survives a catch-up commit and the answer's
-      // source switch by identity. Fall back to `s-t-<firstIdx>` for a
-      // legacy/tokenless block: the SAME scheme the group wrapper below uses, so
-      // when a second adjacent tool arrives and this slot becomes a group the
-      // wrapper key is unchanged and React updates it in place instead of
-      // delete+insert. `i` is the item's original index = the group's first
-      // index, and the group wrapper prefers the same tool's id, so the keys
-      // coincide across the 1→2 transition either way.
-      return (
-        <div key={item.tool_use_id ?? `s-t-${i}`} className="chat__tools">
-          <ToolBlock t={item} />
-        </div>
-      )
-    }
-    if (item.type === 'question') {
-      // QuestionCard tracks its own `submitted` state and
-      // disables itself after the user answers. The agent
-      // is paused on the AskUserQuestion future, so the
-      // user MUST be able to click these chips even while
-      // the turn is otherwise "streaming". No external
-      // disabled gate.
-      //
-      // Pass item.answers as answeredMap so patchQuestionAnswers's
-      // optimistic update is visible immediately when the question
-      // is still in streamItems — without this, the card stays
-      // in the interactive state even after the user submitted.
-      return (
-        <div key={`s-${i}`}>
-          <QuestionCard
-            questions={item.questions}
-            questionId={item.question_id}
-            answeredMap={item.answers}
-            onAnswer={item.answers ? undefined : onAnswer}
-          />
-        </div>
-      )
-    }
-    if (item.type === 'thinking') {
-      // The agent's live reasoning, shown as a COLLAPSED, secondary
-      // disclosure so a long "thinking" stretch reads as a quiet
-      // timer (filling the silence) rather than a
-      // wall of raw chain-of-thought. The partner can expand it to
-      // peek; by default the answer stays the focus. While this is
-      // the last item the agent is still mid-thought, so the summary
-      // animates with dots; an earlier thinking block the agent has
-      // already moved past reads as a frozen "Thought for Ns" toggle.
-      const isActive = i === streamItems.length - 1
-      return (
-        <ThinkingDisclosure key={`s-${i}`} item={item} isActive={isActive} />
-      )
-    }
-    if (item.type === 'text') {
-      const isLast = i === streamItems.length - 1
-      return (
-        <div key={`s-${i}`} className="chat__text chat__text--assistant">
-          <ProgressiveMarkdown text={item.content} />
-          {isLast && <span className="chat__cursor" />}
-        </div>
-      )
-    }
-    if (item.type === 'error') {
-      // The SAME ErrorCard renderer MsgContent uses for persisted blocks, so
-      // a benign pause/park renders calm on the live stream and SSE catch-up
-      // too — a hardcoded red card here made a pause flash "Error" until
-      // promotion. No Resume button on the live surface: the button's
-      // tail-only gate is a persisted-transcript concept, and a terminal
-      // error promotes within the same breath.
-      return <ErrorCard key={`s-${i}`} block={item} />
-    }
-    return null
-  }
-
-  // Fold adjacent tool items into one Activity card — the SAME grouping
-  // MsgContent applies to the persisted blocks, so the live view and the
-  // promoted message look identical.
-  const nodes = groupToolRuns(streamItems.map((item, i) => ({ item, idx: i })))
-
+export default function StreamingMessage({
+  msg,
+  dataKey,
+  chatId,
+  onAnswer,
+  onResume,
+  liveQuestionId,
+  isStreaming,
+}) {
   return (
     <li
       className="chat__msg chat__msg--assistant"
       data-key={dataKey}
     >
-      {nodes.map(node => {
-        if (node.group) {
-          const tools = node.group.map(e => e.item)
-          // Prefer the first tool's `tool_use_id` (lever 2a); fall back to
-          // `s-t-<firstIdx>` — the SAME key a lone tool at that index uses (see
-          // renderItem), so the 1→2-tool transition updates this slot in place
-          // rather than swapping keys and forcing a delete+insert. Each grouped
-          // ToolBlock is keyed by its own id so a catch-up commit reconciles
-          // each block by identity within the group.
-          return (
-            <div
-              key={node.group[0].item.tool_use_id ?? `s-t-${node.group[0].idx}`}
-              className="chat__tools"
-            >
-              <ToolActivityGroup tools={tools}>
-                {node.group.map(e => (
-                  <ToolBlock key={e.item.tool_use_id ?? `s-${e.idx}`} t={e.item} />
-                ))}
-              </ToolActivityGroup>
-            </div>
-          )
-        }
-        return renderItem(node.single.item, node.single.idx)
-      })}
+      <MsgContent
+        msg={msg}
+        chatId={chatId}
+        onQuestionAnswer={onAnswer}
+        onResume={onResume}
+        isLastMsg
+        liveQuestionId={liveQuestionId}
+        isActiveAnswer
+        isStreaming={isStreaming}
+        suppressedQuestionKeys={null}
+      />
     </li>
   )
 }

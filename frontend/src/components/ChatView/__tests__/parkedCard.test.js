@@ -6,9 +6,8 @@ import assert from 'node:assert/strict'
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
 // renders as a live "Rate limit — resets at … · Resume now" card. That one
 // field must survive all three client seams: the live stream reducer,
-// promote-to-block, and the shared ErrorCard renderer (consumed by BOTH
-// MsgContent and StreamingMessage, so the persisted and live surfaces cannot
-// diverge).
+// promote-to-block, and the shared ErrorCard renderer. MsgContent owns the
+// block tree for BOTH persisted and live data, so those sources cannot diverge.
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
@@ -28,13 +27,16 @@ test('ErrorCard renders a parked card for a block whose pause has a reset time',
     'the tail resume button reads "Resume now" on a parked card')
 })
 
-test('both surfaces consume the shared ErrorCard — no private error render', () => {
+test('the one block renderer owns ErrorCard for both active sources', () => {
   // The live/catch-up surface once hardcoded a red "Error" card, so a benign
-  // pause flashed red until promotion. One renderer is the invariant.
+  // pause flashed red until promotion. StreamingMessage is now only the stable
+  // <li> shell and delegates all blocks to MsgContent.
   assert.match(msgContent, /import ErrorCard from '\.\/ErrorCard\.jsx'/,
     'MsgContent must consume the shared ErrorCard')
-  assert.match(streamingMessage, /import ErrorCard from '\.\/ErrorCard\.jsx'/,
-    'StreamingMessage must consume the shared ErrorCard')
+  assert.match(streamingMessage, /import MsgContent from '\.\/MsgContent\.jsx'/,
+    'the active row shell must delegate both DB and live payloads to MsgContent')
+  assert.doesNotMatch(streamingMessage, /import (ErrorCard|ToolBlock|QuestionCard)/,
+    'the active row shell must not grow a second block renderer')
   assert.doesNotMatch(streamingMessage, /chat__error-label/,
     'the live surface must not hand-roll its own error card body')
   assert.doesNotMatch(msgContent, /chat__error-label/,

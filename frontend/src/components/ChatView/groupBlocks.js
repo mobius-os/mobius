@@ -4,10 +4,9 @@ import { toolActivityLabel } from './toolActivityLabel.js'
 // Fold runs of adjacent tool entries into one activity node, including a lone
 // tool. This gives single-tool and multi-tool runs the same collapsed header and
 // lets a live single tool become a multi-tool run without swapping visual
-// primitives. This runs on BOTH render paths — MsgContent (persisted msg.blocks)
-// and StreamingMessage (live streamItems) — so the transcript looks the same
-// before and after a streaming turn is promoted. Keep them calling the same
-// function.
+// primitives. MsgContent applies this to both DB-shaped history blocks and the
+// converted live payload, so source selection cannot reshuffle the active
+// answer.
 //
 // Rules:
 //   - any run of entries whose item.type === 'tool' becomes a group

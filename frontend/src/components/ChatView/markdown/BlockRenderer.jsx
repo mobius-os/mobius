@@ -22,28 +22,33 @@ function tokenize(text) {
 
 
 /**
- * ProgressiveMarkdown — streaming mode.
- * Re-lexes on every update; only the last block re-renders
- * thanks to React.memo comparison on token.raw.
+ * ProgressiveMarkdown — active-answer mode.
+ * Re-lexes on every update; only changed blocks re-render thanks to
+ * React.memo comparison on token.raw. The same component stays mounted when
+ * the active answer switches from its DB partial to live SSE data; streaming
+ * affordances are props, not a second markdown subtree.
  */
-export function ProgressiveMarkdown({ text }) {
+export function ProgressiveMarkdown({ text, isStreaming = false }) {
   const tokens = useMemo(() => tokenize(text), [text])
 
   return (
-    <div
-      className="progressive-markdown md-blocks"
-      data-is-streaming="true"
-      aria-live="polite"
-      aria-atomic="false"
-    >
-      {tokens.map((token, i) => {
-        if (token.type === 'blockKatex') {
-          return <MathBlock key={i} tex={token.text} />
-        }
-        if (token.type === 'space') return null
-        return <MemoBlock key={i} token={token} />
-      })}
-    </div>
+    <>
+      <div
+        className="progressive-markdown md-blocks"
+        data-is-streaming={isStreaming ? 'true' : undefined}
+        aria-live={isStreaming ? 'polite' : undefined}
+        aria-atomic={isStreaming ? 'false' : undefined}
+      >
+        {tokens.map((token, i) => {
+          if (token.type === 'blockKatex') {
+            return <MathBlock key={i} tex={token.text} />
+          }
+          if (token.type === 'space') return null
+          return <MemoBlock key={i} token={token} />
+        })}
+      </div>
+      {isStreaming && <span className="chat__cursor" />}
+    </>
   )
 }
 
