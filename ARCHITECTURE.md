@@ -468,7 +468,14 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   treated like a mid-turn send — reserve, but don't yank you down. The only
   unconditional pins are the first message and an at-bottom (auto-scroll) send. Owner
   decision 2026-07-12; `CLAUDE.md`/`AGENTS.md` constraint #1 has been updated to
-  match.
+  match. **Do not re-flip without a new owner decision** — this rule has already
+  ping-ponged (now its 4th revision). `9b9ab86b` was itself a fix for a "messages
+  don't go to the top" report (a new turn started after a tall reply is never near
+  the tail, so the mode-gate didn't lift it); the owner has weighed that and accepts
+  the tradeoff — a fresh send while scrolled up won't auto-lift; the reader scrolls
+  down to follow. Lock-in: `tests/send-rule.spec.mjs` + `spacer.spec.mjs` #26 both
+  assert "no pin when scrolled up," and `ChatView.jsx`'s fresh-send `willPin` gates
+  on `shouldPinSend` (same call the queue/steer paths use).
 - **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
 - **R4** Leave-and-return restores the same scroll position, even mid-stream
   (hide-then-reveal + the versioned snapshot cache).
