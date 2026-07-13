@@ -689,13 +689,14 @@ def get_chat_agent_context(
     _custom_system_prompt,
     _latest_compaction_brief,
     _read_skill_text,
+    _with_system_app_prompts,
   )
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
   overrides = _chat_settings_dict(chat)
   custom = _custom_system_prompt(overrides)
-  system_prompt = custom or _read_skill_text()
+  system_prompt = _with_system_app_prompts(custom) if custom else _read_skill_text()
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)

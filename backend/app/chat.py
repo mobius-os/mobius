@@ -721,6 +721,28 @@ def is_draining() -> bool:
   return draining
 
 
+_SYSTEM_APP_PROMPT_SUFFIX_CACHE: str | None = None
+
+
+def _with_system_app_prompts(base: str) -> str:
+  """Append the restart-bound live system-app fragments to any chat prompt."""
+  global _SYSTEM_APP_PROMPT_SUFFIX_CACHE
+  if _SYSTEM_APP_PROMPT_SUFFIX_CACHE is None:
+    try:
+      from app.database import SessionLocal
+      from app.system_prompts import compose_system_prompt
+      with SessionLocal() as db:
+        _SYSTEM_APP_PROMPT_SUFFIX_CACHE = compose_system_prompt("", db)
+    except Exception:
+      _get_logger().warning(
+        "could not compose installed-app system prompts", exc_info=True
+      )
+      _SYSTEM_APP_PROMPT_SUFFIX_CACHE = ""
+  if not _SYSTEM_APP_PROMPT_SUFFIX_CACHE:
+    return base
+  return base.rstrip() + _SYSTEM_APP_PROMPT_SUFFIX_CACHE
+
+
 def _read_skill_text() -> str:
   """Returns the agent skill (system-prompt) text, cached after first
   read. Used by SDK runners as the `system_prompt` option.
@@ -739,8 +761,10 @@ def _read_skill_text() -> str:
   if skill_path is not None:
     try:
       text = skill_path.read_text(encoding="utf-8")
-      _SKILL_TEXT_CACHE = text
-      return text
+      # The fragment cache is shared with custom-prompt chats below, so Memory
+      # remains available in every chat while activation stays restart-bound.
+      _SKILL_TEXT_CACHE = _with_system_app_prompts(text)
+      return _SKILL_TEXT_CACHE
     except (OSError, FileNotFoundError):
       pass
   # No skill file found — cache the empty fallback so subsequent calls
@@ -4120,12 +4144,15 @@ async def _run_chat_impl(
         )
         db.rollback()
 
-  # A turn runs the deployed skill plus the chat's picker-chosen
-  # provider/model/effort. A per-chat custom system prompt (from
-  # chat_overrides) still wins when present; otherwise the deployed
-  # skill text is the system prompt.
+  # A per-chat custom prompt replaces the base constitution, but installed
+  # system-app contributions still append to it: system apps apply to every
+  # chat, including embedded/custom-prompt app chats.
   runner_agent_settings = agent_settings
-  system_prompt = _custom_system_prompt(chat_overrides) or _read_skill_text()
+  custom_prompt = _custom_system_prompt(chat_overrides)
+  system_prompt = (
+    _with_system_app_prompts(custom_prompt) if custom_prompt
+    else _read_skill_text()
+  )
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.

@@ -114,6 +114,9 @@ class AppOut(BaseModel):
   # block was declared; otherwise the raw validated JSON object. Informational
   # for the agent + future store badge — no server-side enforcement.
   offline_contract: dict | None = None
+  # Root-level manifest file composed into the agent prompt while this app is
+  # live. Informational so install UIs can surface the privileged declaration.
+  system_prompt_file: str | None = None
   created_at: datetime
   updated_at: datetime
 

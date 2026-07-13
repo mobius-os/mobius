@@ -347,6 +347,14 @@ def run_migrations(eng) -> None:
         "ALTER TABLE apps ADD COLUMN offline_contract JSON NULL"
       ))
       conn.commit()
+  if "system_prompt_file" not in apps_cols:
+    # Installed system-app prompt contribution. Existing apps remain inert
+    # until updated from a manifest that explicitly declares the file.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN system_prompt_file VARCHAR(255) NULL"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []
