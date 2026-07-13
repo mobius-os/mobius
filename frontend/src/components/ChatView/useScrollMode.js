@@ -32,7 +32,7 @@
  * See ARCHITECTURE.md "Chat scroll + steer contract" for the full design.
  */
 
-import { useState, useRef, useLayoutEffect } from 'react'
+import { useState, useRef, useLayoutEffect, useCallback } from 'react'
 import { cidOf } from './chatRuntimeState.js'
 
 
@@ -444,6 +444,10 @@ export default function useScrollMode({
   spacerActive = false,
 }) {
   const [revealed, setRevealed] = useState(false)
+  // Synchronous mirror of `revealed` for reapplyActiveMode, which is called
+  // from a ChatView layout effect (a closure that may pre-date the reveal
+  // flip). Set inline at every setRevealed(true) so the read is never stale.
+  const revealedRef = useRef(false)
   const modeRef = useRef({ kind: 'INITIAL' })
   const modeChatIdRef = useRef(null)
   const bottomVisibleRef = useRef(false)
@@ -691,6 +695,7 @@ export default function useScrollMode({
       revealTimer = setTimeout(() => {
         if (scrollRef.current === scrollEl) syncLayout()
         revealedOnce = true
+        revealedRef.current = true
         setRevealed(true)
       }, 50)
     }
@@ -836,6 +841,7 @@ export default function useScrollMode({
       requestRevealOnQuiet()
       safetyReveal = setTimeout(() => {
         revealedOnce = true
+        revealedRef.current = true
         setRevealed(true)
       }, REVEAL_CAP_MS)
     }
@@ -861,10 +867,29 @@ export default function useScrollMode({
     // but the flip is an explicit trigger, not an inferred one).
   }, [messages, pendingMessagesLength, chatId, spacerActive])
 
+  // Re-hold the reading position after an atomic catch-up commit lands
+  // post-reveal (contract v2 item 2, lever 3 — cloak the commit). The in-place
+  // reconcile keeps DOM identity but can still re-settle heights, so a real
+  // reconnect (Path B) or a Path-A commit after the reveal cap must not shift
+  // what the reader was looking at. Before reveal, hide-then-reveal already owns
+  // the position, so this no-ops; a quick-wake kept socket produces no commit,
+  // so the caller never invokes it. Mirrors the RO's content-tracking re-apply
+  // (FOLLOW_BOTTOM/ANCHOR_AT only — PIN_USER_MSG settles via its own RO branch).
+  const reapplyActiveMode = useCallback(() => {
+    if (!revealedRef.current) return
+    const scrollEl = scrollRef.current
+    if (!scrollEl) return
+    const k = modeRef.current.kind
+    if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT') {
+      applyMode(scrollEl, modeRef.current)
+    }
+  }, [scrollRef])
+
   return {
     modeRef,
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
+    reapplyActiveMode,
   }
 }
