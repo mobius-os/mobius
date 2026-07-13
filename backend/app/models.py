@@ -365,9 +365,9 @@ class App(Base):
   #               stripped; surviving text secret-scrubbed). "Reduced
   #               exposure," not "safe" — regex can't catch pasted
   #               documents or encoded secrets.
-  #   'full'    — DEFERRED. Reserved so the column's value space is
-  #               stable; the read API rejects it until a concrete
-  #               consumer + louder consent lands (design §2).
+  #   'full'    — legacy declaration accepted for compatibility; the only
+  #               route still serves the same structurally redacted view as
+  #               'summary', and the reviewed contract says so explicitly.
   # App frames receive only their scoped JWT and run in opaque-origin
   # sandboxes, so this live-row permission is an enforceable boundary in
   # addition to recording owner consent.
@@ -399,6 +399,13 @@ class App(Base):
   # Only live installed rows are composed; soft-uninstall is therefore the
   # activation gate even though the app's source tree remains recoverable.
   system_prompt_file = Column(String(255), nullable=True, default=None)
+  # Explicit manifest identity for apps that participate in the agent/system
+  # lifecycle.  This flag grants nothing by itself; the individual manifest
+  # declarations remain the capabilities and the install review is consent.
+  system_app = Column(Boolean, nullable=False, default=False)
+  # Server-derived, versioned capability contract reviewed at install time.
+  # Null is a legitimate legacy state for apps installed before contracts.
+  capability_contract = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

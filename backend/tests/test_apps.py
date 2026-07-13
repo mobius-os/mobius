@@ -340,6 +340,63 @@ def test_app_schedules_prefer_init_cron_over_manifest(client, auth):
   ]
 
 
+def test_app_schedules_resolve_supervised_runner_job(client, auth):
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+  r = client.post("/api/apps/", json={
+    "name": "Memory",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=_service_auth())
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  from app.routes import apps as apps_module
+  supervised = (
+    "15 4 * * * python3 /app/scripts/app-job-runner.py "
+    f"{app_id} {source_dir}/fetch.sh"
+  )
+  with patch.object(apps_module, "_read_live_crontab", return_value=supervised):
+    r = client.get("/api/apps/schedules", headers=auth)
+
+  assert r.status_code == 200, r.text
+  assert [(job["cron"], job["job"]) for job in r.json()] == [
+    ("15 4 * * *", "fetch.sh")
+  ]
+
+
+def test_boot_reconciles_legacy_direct_cron_through_runner(client, db):
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  job = source_dir / "fetch.sh"
+  job.write_text("#!/bin/sh\n", encoding="utf-8")
+  app = models.App(
+    name="Memory",
+    slug="memory",
+    description="test",
+    jsx_source="export default function App() { return <div/> }",
+    source_dir=str(source_dir),
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+
+  from app.routes import apps as apps_module
+  direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
+  with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
+       patch("app.install._register_cron") as register:
+    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+
+  assert count == 1
+  assert warnings == []
+  register.assert_called_once_with(
+    "memory", "15 4 * * *", job.resolve(), app.id,
+  )
+
+
 def _make_icon_app(client, auth, db):
   """An app row whose `icon_png` is a large (512px) PNG, so a ?size= variant
   is provably smaller. Returns the app id."""

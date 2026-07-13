@@ -143,8 +143,6 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | File | Role |
 |------|------|
 | `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
-| `memory_graph.py` | Builds + lints the knowledge-graph index (`graph.json`) for the Memory viewer |
-| `memory_trace.py` | Utility used by an installed Memory reader to persist explicit graph-read traces for its scheduled consolidation pass; it is not part of startup injection |
 | `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
@@ -316,7 +314,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — baked `skill/core.md`; `chat._read_skill_text()` caches it for the process lifetime. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file. The installer stores its basename, and prompt composition appends fragments only from live (`deleted_at IS NULL`) app rows in stable id order. Install/uninstall activation is restart-bound so an in-flight chat's system prompt never shifts. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills such as `memory.md` arrive through app manifests. Independently of optional apps, every chat maintains `description` (name), a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free turn-end backstop, and compaction prefers the chat's cumulative Summary. The optional Memory app contributes graph instructions, its graph skill, scheduled consolidator, seeds, and a prompt-scoped reader; no router/fact note is injected and uninstall removes the instructions after restart while preserving user data.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — baked `skill/core.md`; `chat._read_skill_text()` caches only this platform text for the process lifetime. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. Prompt composition reads live (`deleted_at IS NULL`) app rows in stable id order for every turn, so install/uninstall takes effect on the next turn without restarting or changing an already-running turn. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer, and compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, immutable-generation publisher, and retrieval telemetry; no router/fact note is injected. Uninstall removes its prompt, skill, and jobs immediately while leaving core chat summaries intact.
 
 ## Data layout (`/data/` volume)
 
@@ -331,7 +329,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 ├── cli-auth/claude/        CLI credentials
 ├── cron-logs/              output from scheduled task scripts
 ├── published/<token>/      published site snapshots (shareable /sites/<token>/ URLs)
-└── service-token.txt       long-lived JWT for cron scripts (chmod 600)
+└── service-token.txt       owner JWT used only by the platform job wrapper (chmod 600)
 ```
 
 `/data` is itself a git repo owned by the `mobius` user, tracking `shared/memory/` and `shared/skills/` with a nightly safety-net commit, so a bad memory consolidation or skill overwrite is recoverable. Inspect it as that user (`docker exec -u mobius ... git -C /data ...`) — as root it dies with "dubious ownership," which reads misleadingly as an empty/non-repo tree.
@@ -528,10 +526,13 @@ Memory app is not installed. Its consumers:
   bounded Digest from the ~10 most-recently-modified chats
   (`backend/app/memory.py`); the fenced path lets the agent deliberately open a
   relevant full note. Facts and cumulative Summaries are not injected.
-- **Knowledge graph (Memory-app extension).** If the Memory app is installed and set
-  up, its scheduled runner grows the wider graph (`mocs/`, `notes/`, `graph.json`,
-  `.ready`) FROM these per-chat notes. The graph is an extension, not core; boot only
-  provisions the per-chat surface (`backend/scripts/init_chat_summaries.py`).
+- **Knowledge graph (installed Memory system app).** The app requests structurally
+  redacted chat text through its declared API permission, writes a complete graph to
+  a same-filesystem staging tree, and atomically advances a JSON `.ready` pointer to
+  an immutable generation containing `mocs/`, `notes/`, and `graph.json`. Its confined
+  reader pins one generation and returns cited snippets on demand. The graph is not
+  platform code; base boot provisions only the per-chat summary surface
+  (`backend/scripts/init_chat_summaries.py`).
 - **Reflection.** Without the Memory app, the per-chat summaries are what Reflection
   reads.
 - **Compaction + provider switch.** The cumulative Summary is the source for compacting a

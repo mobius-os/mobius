@@ -1,8 +1,12 @@
 """Storage API: tests for both envelope and inner-object PUT forms."""
 
 import json
+from pathlib import Path
 
 import pytest
+
+from app import models
+from app.config import get_settings
 
 
 def _make_app(client, owner_token):
@@ -139,6 +143,49 @@ def test_put_shared_inner_object(client, auth):
 
   r = client.get("/api/storage/shared/config.json", headers=auth)
   assert r.json() == {"theme": "dark"}
+
+
+def test_shared_memory_reads_require_live_declared_contract(
+  client, auth, owner_token, db,
+):
+  app_id = _make_app(client, owner_token)
+  token = client.post(
+    "/api/auth/app-token",
+    json={"app_id": app_id},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+  memory = Path(get_settings().data_dir) / "shared" / "memory"
+  memory.mkdir(parents=True, exist_ok=True)
+  (memory / ".ready").write_text("pointer", encoding="utf-8")
+
+  assert client.get(
+    "/api/storage/shared/memory/.ready", headers=app_auth,
+  ).status_code == 403
+  assert client.get(
+    "/api/storage/shared-list/memory", headers=app_auth,
+  ).status_code == 403
+  # Other longstanding shared resources retain their existing app-readable
+  # behavior; the new gate is scoped to the optional graph namespace.
+  client.put(
+    "/api/storage/shared/config.json", json={"ok": True}, headers=auth,
+  )
+  assert client.get(
+    "/api/storage/shared/config.json", headers=app_auth,
+  ).status_code == 200
+
+  app = db.query(models.App).filter(models.App.id == app_id).one()
+  app.capability_contract = {"data": {"shared_memory": "read"}}
+  db.commit()
+
+  allowed = client.get(
+    "/api/storage/shared/memory/.ready", headers=app_auth,
+  )
+  assert allowed.status_code == 200
+  assert allowed.text == "pointer"
+  assert client.get(
+    "/api/storage/shared-list/memory", headers=app_auth,
+  ).status_code == 200
 
 
 def test_put_text_accepts_non_json_content_type(client, auth, owner_token):

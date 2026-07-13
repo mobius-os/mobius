@@ -10,7 +10,10 @@ trap cleanup TERM INT
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
-mkdir -p /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform
+mkdir -p /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
+# Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
+# discovered managed schedule has been converged through the common runner.
+rm -f /data/run/app-cron-supervision-ready
 
 # /data/agent-browser-profiles holds PER-CHAT Chrome user-data dirs
 # (chat-<chat_id>/...) for agent-browser. The path is set per-chat by
@@ -116,7 +119,7 @@ if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: /data/service-token.txt — POST /api/auth/setup writes it as the mobius user, and" >&2
   echo "WARNING: it needs to be able to create files in /data, not just traverse." >&2
   chmod 1777 /data 2>/dev/null || true
-  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth 2>/dev/null || true
+  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/run 2>/dev/null || true
 fi
 
 # The /app/platform-baked/ clone stays root-owned + chmod a-w as the baked
@@ -661,13 +664,10 @@ echo "$_key_hash" > "$_fp_file"
 chmod 640 "$_fp_file"
 chown root:mobius "$_fp_file" 2>/dev/null || true
 
-# Start cron daemon (runs as root, jobs execute as mobius).
-cron
-
-# Verify cron started (pgrep may not exist in slim images).
-if command -v pgrep > /dev/null 2>&1; then
-  pgrep -x cron > /dev/null || echo "WARNING: cron daemon failed to start" >&2
-fi
+# Cron is started by the health-probe process only AFTER FastAPI lifespan has
+# completed. Lifespan rewrites replayed legacy app entries through the common
+# leased/sandboxed runner; keeping the daemon stopped until then closes the
+# boot window in which an old direct entry could fire unsupervised.
 
 # Create cron log directory.
 mkdir -p /data/cron-logs
@@ -776,10 +776,9 @@ fi
 # Install the agent self-reminders cron dispatcher (feature 088). This
 # is platform-level, not a mini-app, so it lives under a reserved
 # _self-reminders/ slug and runs a tiny job.sh that execs the baked
-# /app/scripts/self-reminders-dispatch.sh. The scaffold writes job.sh +
-# init-cron.sh and installs the entry; the replay loop below re-adds it
-# on every boot like any other app cron. Create-if-absent so we never
-# clobber an operator edit to the schedule. DEFAULT OFF: the dispatcher
+# /app/scripts/self-reminders-dispatch.sh. The platform invokes its own trusted
+# scaffold on every boot; app-owned init scripts are never executed. The job is
+# create-if-absent so we never clobber an operator edit. DEFAULT OFF: the dispatcher
 # itself fires nothing until /data/shared/self-reminders.enabled exists,
 # so this installs the plumbing without firing any check-in.
 SR_DIR=/data/apps/_self-reminders
@@ -792,27 +791,21 @@ exec /app/scripts/self-reminders-dispatch.sh
 SRJOB
   chmod +x "$SR_DIR/job.sh" 2>/dev/null || true
   chown -R mobius:mobius "$SR_DIR" 2>/dev/null || true
-  su -s /bin/sh mobius -c \
-    "bash /app/scripts/init-cron-scaffold.sh _self-reminders '*/5 * * * *'" \
-    2>/dev/null || true
 fi
+su -s /bin/sh mobius -c \
+  "bash /app/scripts/init-cron-scaffold.sh _self-reminders '*/5 * * * *'" \
+  2>/dev/null || true
 
-# Run per-app init scripts to restore cron entries lost on container
-# restart. Don't pre-clear the crontab — agents (and the operator) may
-# have installed cron entries directly via `crontab -u`, and a blanket
-# `crontab -r` on every boot would silently wipe them. Init scripts
-# that use idempotent patterns (e.g. write a full crontab, or check
-# for existing entries before appending) survive replay. The cost of
-# the previous policing was real: agent-installed crons disappeared
-# on the next deploy with no signal. Per Möbius's design philosophy
-# (CLAUDE.md), "code empowers the agent; it does not police it."
-for init_script in /data/apps/*/init-cron.sh; do
-  [ -f "$init_script" ] && su -s /bin/sh mobius -c "bash $init_script" 2>/dev/null || true
-done
+# Never execute app-owned init-cron.sh at boot. Older files are declarations,
+# not trusted code: FastAPI lifespan parses their effective ENTRY (or the
+# manifest schedule) and rewrites both the durable file and live crontab through
+# app-job-runner.py. Cron remains stopped until that reconciliation proves every
+# discovered live app schedule safe. This closes the pre-supervision path where
+# arbitrary persisted shell could run merely because the container restarted.
 
 # Ensure mobius's crontab has the full PATH at the top. Must run AFTER
-# init-cron.sh — those scripts call `crontab -u mobius` which overwrites
-# the file. Without PATH, cron's minimal /usr/bin:/bin can't resolve
+# the trusted self-reminder scaffold; app schedule reconciliation preserves
+# existing environment rows. Without PATH, cron's minimal /usr/bin:/bin can't resolve
 # `#!/usr/bin/env node` shebangs (claude pre-2.1.119 was such a script);
 # defensive against any future shebang script the agent creates.
 # Uses `crontab -u` rather than direct file writes so cron's locking
@@ -1105,6 +1098,16 @@ fi
   # Wait up to 90 seconds for /api/health to return 200.
   for i in $(seq 1 90); do
     if curl -sf "$_health_url" > /dev/null 2>&1; then
+      # Lifespan has completed, including app-cron supervision. Start cron now
+      # (as root; entries themselves execute as mobius).
+      if [ -f /data/run/app-cron-supervision-ready ]; then
+        cron
+        if command -v pgrep > /dev/null 2>&1; then
+          pgrep -x cron > /dev/null || echo "WARNING: cron daemon failed to start" >&2
+        fi
+      else
+        echo "WARNING: app cron supervision did not complete; cron remains disabled (fail closed)" >&2
+      fi
       # Health probe passed — record the success sentinel and reset counter.
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.last-successful-boot
       echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt

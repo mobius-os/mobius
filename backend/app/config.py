@@ -69,12 +69,9 @@ class Settings(BaseSettings):
   # concern, not a today one.
   github_oauth_client_id: str = "Ov23liMpOLS6qp5YV8Vk"
 
-  # Ensure every settled chat has a current per-chat memory note. The agent is
-  # told to maintain chats/<id>/index.md every turn but does so VARIABLY; when a
-  # turn settles and the agent left the note untouched, the platform fires a
-  # tool-free summarizer (scripts/chat_note.py) to write it. ON by default: it
-  # runs at TURN-END (after the reply is sent → no user-facing latency) and only
-  # when the agent skipped the note, so the cost is bounded to the skipped turns.
+  # Ensure every settled chat has a current platform-owned summary note. The
+  # tool-free publisher (scripts/chat_note.py) runs at turn-end after the reply
+  # is sent, so it adds no user-facing latency. No chat agent writes these files.
   ensure_chat_note: bool = True
 
   model_config = SettingsConfigDict(env_file=".env")

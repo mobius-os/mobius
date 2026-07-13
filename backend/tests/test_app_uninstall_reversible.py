@@ -444,15 +444,14 @@ def test_now_naive_utc_returns_naive():
   assert v.tzinfo is None
 
 
-# --- cron-tombstone replay robustness (entrypoint replays init-cron.sh) ---
+# --- cron-tombstone declaration robustness ------------------------------
 
 
 def _write_init_cron(source_dir: Path) -> Path:
   """Drop a harmless init-cron.sh into an app's source tree.
 
-  The real scaffold installs a crontab entry; this stub just exits 0 so
-  _reenable_init_cron_replay's one-shot run touches nothing global but still
-  exercises the rename + bash-run path.
+  The real scaffold installs a crontab entry; this stub exercises the durable
+  tombstone/restore path without declaring a schedule.
   """
   script = source_dir / "init-cron.sh"
   script.write_text("#!/bin/bash\nexit 0\n")
@@ -462,9 +461,7 @@ def _write_init_cron(source_dir: Path) -> Path:
 def test_tombstone_disables_init_cron_replay(
   client, auth, db, bypass_url_validation,
 ):
-  """Tombstoning a scheduled app moves init-cron.sh aside so entrypoint.sh's
-  boot replay (which runs every /data/apps/*/init-cron.sh) can't resurrect the
-  schedule the tombstone just dropped."""
+  """Tombstoning moves the durable declaration aside until recovery."""
   app = _install(client, auth)
   app_id = app["id"]
   source_dir = Path(
@@ -475,7 +472,7 @@ def test_tombstone_disables_init_cron_replay(
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
-  # init-cron.sh renamed outside the entrypoint's */init-cron.sh glob.
+  # The live app no longer presents a schedule declaration.
   assert not script.exists()
   assert tombstoned.exists()
 
@@ -483,9 +480,7 @@ def test_tombstone_disables_init_cron_replay(
 def test_recover_reenables_init_cron_replay(
   client, auth, db, bypass_url_validation,
 ):
-  """Recovery renames init-cron.sh.tombstoned back into the replay glob (and
-  re-runs it) so the revived app's schedule is re-armed — recovery undoes every
-  side-effect the delete tore down."""
+  """Recovery restores init-cron.sh for supervised schedule reconciliation."""
   app = _install(client, auth)
   app_id = app["id"]
   source_dir = Path(
@@ -504,3 +499,32 @@ def test_recover_reenables_init_cron_replay(
   # Renamed back into place; the tombstoned copy is gone.
   assert script.exists()
   assert not tombstoned.exists()
+
+
+def test_recover_migrates_preserved_direct_cron_without_executing_it(
+  client, auth, db, bypass_url_validation,
+):
+  """A pre-supervision replay script is parsed and replaced, never run."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  source_dir = Path(
+    db.query(models.App).filter(models.App.id == app_id).first().source_dir
+  )
+  job = source_dir / "fetch.sh"
+  job.write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="15 4 * * * {job} {app_id}"\n', encoding="utf-8",
+  )
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+
+  with patch("app.install._register_cron") as register, \
+       patch("app.routes.apps._read_live_crontab", return_value=""), \
+       patch("app.routes.apps.subprocess.run") as direct_run:
+    response = client.post(f"/api/apps/{app_id}/recover", headers=auth)
+
+  assert response.status_code == 200, response.text
+  register.assert_called_once_with(
+    source_dir.name, "15 4 * * *", job.resolve(), app_id,
+  )
+  direct_run.assert_not_called()
