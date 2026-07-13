@@ -2,7 +2,7 @@
 
 The full mini-app contract: component shape, `window.mobius.storage` and its traps, the app lifecycle (register-on-create only), offline, fetching, embedded app chats, back-navigation, and theming. `Read` this before building or updating any mini-app.
 
-Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and `token` props and persists through `window.mobius.storage`. The iframe is same-origin, so all browser storage works and `fetch('/api/...')` is free; this also means a mini-app can read the owner JWT — an accepted single-owner trade-off, not a license to be careless.
+Mini-apps are JSX components in opaque-origin sandboxed iframes. Each gets `appId` and an app-scoped `token` prop, and should use `window.mobius` for storage, navigation, chat, and supported shell capabilities. Do not assume access to the shell's DOM, owner credentials, cookies, or same-origin browser storage; communicate with the parent only through the documented runtime bridge.
 
 ---
 
@@ -20,7 +20,7 @@ When unsure, build local-first, but leave the app repo-ready.
 
 ## Start minimal — a functional core, designed to grow
 
-**Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next over the iterate turns — richer views, more entry types, automation — and you add it when they ask. Building takes three turns (propose → build → iterate); the iterate turns are where richness accrues, not the first build.
+**Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next — richer views, more entry types, automation — and you add it when they ask. Deliver progressively, but do not manufacture extra conversational turns when the request is already clear.
 
 This is a default, **not a ceiling**. Möbius apps are low-floor / high-ceiling: a small first cut keeps the floor low and reversible (less surface to break, easy to reshape), and the architecture here — split-on-concept modules, scoped CSS, a storage layer — exists so that ceiling stays open. Build for the expansion you can't see yet; don't wall it off with a sprawling v1.
 
@@ -38,7 +38,7 @@ For new mini-apps, get to an openable first layer quickly, then keep improving
 it while the partner can watch and try it:
 
 1. Create a coherent first layer: themed shell, primary layout, empty/loading/error states, storage paths, and one real functional slice. Do not register a blank "coming soon" stub unless the partner explicitly asked for a placeholder.
-2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration can show an open-preview affordance while the turn is still running, so the partner does not have to wait for the final handoff to try the app. Once registered, the partner can open the app in a tab (drawer row ⋮ → "Open in tab") and watch it take shape while you keep working — every save the file watcher recompiles refreshes it live. That makes registering the first coherent layer promptly worth even more: it's the moment the app becomes something to watch, not just a promise.
+2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration opens the app as a tab beside its owning chat without stealing focus, so the partner can keep talking while the preview becomes available. They can switch to that tab and watch it take shape while you keep working — every save the file watcher recompiles and refreshes it live. That makes registering the first coherent layer promptly worth even more: it is the moment the app becomes something to watch, not just a promise.
 3. Immediately smoke-check the shell preview before continuing: it renders coherently, has no missing imports/assets, and any storage-backed path used by the slice works.
 4. Continue in visible increments. Each save should leave the app in a coherent state; the file watcher recompiles source edits and an app open in the shell preview/canvas refreshes to the latest compiled bundle. Standalone `/apps/<slug>/` PWAs may need a manual refresh/reopen.
 5. Signal each milestone with the build-phase helper so the chat renders a live progress rail — `python "$SCRIPTS_DIR/build_phase.py" "Storage wired"` as each lands ("first layer is openable", "storage is wired", "mobile layout is fixed", "review pass running"). The helper is best-effort (a failed signal never breaks a build) and carries the structure; a one-line prose note is now secondary, welcome for color, so the partner feels progress without reading raw tool logs.
