@@ -13,7 +13,30 @@ import {
   assistantMessageText,
   findTrailingAssistantPartialIndex,
   streamItemsHaveRenderableContent,
+  streamItemToBlock,
 } from '../streamPromotion.js'
+
+// Lever 2a: the live tool item carries tool_use_id, and streamItemToBlock
+// spreads ...item, so the identity flows onto the promoted DB-shaped block for
+// free — MsgContent then keys the persisted tool block by the same id the live
+// stream used, so a promote (or reopen) reuses the ToolBlock by identity.
+test('streamItemToBlock carries tool_use_id onto the promoted tool block', () => {
+  const block = streamItemToBlock({
+    type: 'tool', tool: 'Bash', input: 'ls', output: 'a', status: 'done',
+    tool_use_id: 'toolu_42',
+  })
+  assert.equal(block.type, 'tool')
+  assert.equal(block.tool_use_id, 'toolu_42',
+    'tool_use_id must flow through the promotion so live and persisted keys agree')
+})
+
+test('streamItemToBlock leaves tool_use_id absent for a legacy tokenless item', () => {
+  const block = streamItemToBlock({
+    type: 'tool', tool: 'Bash', input: 'ls', output: 'a', status: 'running',
+  })
+  assert.equal(block.tool_use_id, undefined, 'no id on the item → none on the block; ordinal key applies')
+  assert.equal(block.status, 'done', 'running promotes to done as before')
+})
 
 test('streamItemsToAssistantPayload preserves text boundaries in legacy content', () => {
   const payload = streamItemsToAssistantPayload([

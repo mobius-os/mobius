@@ -274,3 +274,72 @@ export function closeAllToolLifecycles(prev) {
     return b
   })
 }
+
+/**
+ * True when two stream items carry identical own-enumerable fields by ===.
+ * Nested values (a tool's `sources` array, a question's `answers`/`questions`)
+ * compare by reference, so an item that gained or replaced one of those reads
+ * as changed and is merged rather than reused — 2a's key still preserves its
+ * DOM node, only the props update.
+ */
+function shallowEqualItem(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  if (ka.length !== kb.length) return false
+  for (const k of ka) {
+    if (a[k] !== b[k]) return false
+  }
+  return true
+}
+
+/**
+ * Reconcile a catch-up replay (`next`) onto the on-screen stream (`prev`),
+ * merging by key so unchanged items keep their object + DOM identity through
+ * the commit instead of remounting the whole answer (contract v2 item 2, lever
+ * 2c — "return without redraw").
+ *
+ * The replay is deterministic and in-order, so position k in `next` is the same
+ * logical item as position k in `prev`. Tool items additionally require a
+ * matching `tool_use_id` (lever 2a) before reusing identity, so a positional
+ * collision between two different tools can never silently merge; text/thinking
+ * match positionally (until lever 2b gives them a synthetic id). For each
+ * replayed item:
+ *   - identity matches an on-screen item AND all fields are equal → reuse the
+ *     on-screen object, so React skips even a memoized re-render;
+ *   - identity matches but fields differ → merge `{...prev, ...next}` (a new
+ *     object under the SAME key, so the DOM node survives and only props
+ *     update);
+ *   - no identity match → take the replayed object (a genuinely new item).
+ *
+ * Items on-screen but absent from `next` are dropped — catch-up is
+ * authoritative, so a steer-dropped or trimmed pre-reconnect segment is never
+ * resurrected. Returns `prev` unchanged (same array ref) when nothing changed,
+ * making a no-op reconnect commit a complete React bail-out.
+ */
+export function reconcileStreamItems(prev, next) {
+  if (!Array.isArray(next)) return prev
+  if (!Array.isArray(prev) || prev.length === 0) return next
+  let changed = next.length !== prev.length
+  const result = next.map((n, k) => {
+    const p = prev[k]
+    if (!p || p.type !== n.type) {
+      changed = true
+      return n
+    }
+    if (n.type === 'tool') {
+      const bothTagged = p.tool_use_id != null && n.tool_use_id != null
+      const bothLegacy = p.tool_use_id == null && n.tool_use_id == null
+      const idMatch = bothTagged ? p.tool_use_id === n.tool_use_id : bothLegacy
+      if (!idMatch) {
+        changed = true
+        return n
+      }
+    }
+    if (shallowEqualItem(p, n)) return p
+    changed = true
+    return { ...p, ...n }
+  })
+  return changed ? result : prev
+}

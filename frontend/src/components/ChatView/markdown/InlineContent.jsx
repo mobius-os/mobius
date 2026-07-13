@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify'
 import { getToken, BASE } from '../../../api/client.js'
 import { mediaTokenParam } from '../../../api/mediaToken.js'
 import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
+import { parseImageDims, imageVarsFromDims } from './imageDims.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
 
@@ -128,11 +129,22 @@ function resolveStaticImageSrc(href) {
 
 function ExpandableImage({ href, alt }) {
   const [open, setOpen] = useState(false)
-  const [imageVars, setImageVars] = useState(null)
   const [resolvedSrc, setResolvedSrc] = useState(null)
 
   const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
+
+  // Reserve the exact aspect ratio on the FIRST paint when the markup carries
+  // known dimensions (?w=&h=, lever 3): a screenshot whose size the agent
+  // already knew never shifts on decode. Absent dims this stays null and the
+  // frame falls back to the CSS 4/3 default, corrected by onLoad below.
+  const [imageVars, setImageVars] = useState(() => {
+    const dims = parseImageDims(rawSrc)
+    if (!dims) return null
+    const viewportH = (typeof window !== 'undefined'
+      && (window.visualViewport?.height || window.innerHeight)) || 800
+    return imageVarsFromDims(dims.width, dims.height, viewportH)
+  })
 
   useEffect(() => {
     if (!rawSrc) { setResolvedSrc(null); return }
@@ -149,38 +161,38 @@ function ExpandableImage({ href, alt }) {
     return () => { cancelled = true }
   }, [rawSrc, mediaChatId])
 
-  if (!resolvedSrc) return null
+  // A blocked/empty href (javascript:, data:, "") renders nothing. But a valid
+  // href whose token has not resolved yet still reserves its frame (lever 3):
+  // returning null until resolvedSrc let the whole box insert late and shove the
+  // surrounding text. The <img> swaps in once resolvedSrc lands.
+  if (!rawSrc) return null
   return (
     <>
       <span
         className="md-image-frame"
         style={imageVars || undefined}
       >
-        <img
-          src={resolvedSrc}
-          alt={alt}
-          className="md-image"
-          onLoad={(e) => {
-            const img = e.currentTarget
-            if (img.naturalWidth && img.naturalHeight) {
-              const ratio = img.naturalWidth / img.naturalHeight
-              const viewportH =
-                window.visualViewport?.height || window.innerHeight || 800
-              const cappedH = Math.min(viewportH * 0.60, 480)
-              const fitWidth = Math.min(
-                520,
-                Math.max(120, Math.round(cappedH * ratio)),
-              )
-              setImageVars({
-                '--md-image-ratio': `${img.naturalWidth} / ${img.naturalHeight}`,
-                '--md-image-fit-width': `${fitWidth}px`,
-              })
-            }
-          }}
-          onClick={() => setOpen(true)}
-        />
+        {resolvedSrc && (
+          <img
+            src={resolvedSrc}
+            alt={alt}
+            className="md-image"
+            onLoad={(e) => {
+              const img = e.currentTarget
+              if (img.naturalWidth && img.naturalHeight) {
+                const ratio = img.naturalWidth / img.naturalHeight
+                const viewportH =
+                  window.visualViewport?.height || window.innerHeight || 800
+                setImageVars(imageVarsFromDims(
+                  img.naturalWidth, img.naturalHeight, viewportH,
+                ))
+              }
+            }}
+            onClick={() => setOpen(true)}
+          />
+        )}
       </span>
-      {open && createPortal(
+      {open && resolvedSrc && createPortal(
         <ImageLightbox src={resolvedSrc} alt={alt} onClose={() => setOpen(false)} />,
         document.body,
       )}
