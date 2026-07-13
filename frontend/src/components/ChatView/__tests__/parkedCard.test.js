@@ -17,6 +17,8 @@ const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const chatEmbed = readFileSync(new URL('../../ChatEmbed/ChatEmbed.jsx', import.meta.url), 'utf8')
+const chatSettingsPanel = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
 const settingsView = readFileSync(
   new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
 )
@@ -112,6 +114,10 @@ test('auto-resume is a chat-local switch shown only on the active rate-limit car
     'the in-card control has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
+  assert.match(chatSettingsPanel, /Always continue after limits/,
+    'the durable policy remains manageable in the per-chat settings surface')
+  assert.match(chatSettingsPanel, /Applies only to this chat/,
+    'the management surface names its chat-local scope')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {
@@ -125,14 +131,24 @@ test('an enabled policy stays cancellable after the viewer clock reaches reset',
 })
 
 test('a system-announced auto-resume reconnects the mounted chat surface', () => {
-  assert.match(shell, /externallyRunning=\{streamingChatIds\.has\(activeChatId\)\}/,
-    'Shell must forward its chat_run_started state to the mounted ChatView')
-  assert.match(chatView, /fetchMessages\(\{ force: true, authoritative: true \}\)/,
+  assert.match(shell, /externalRunSignal=\{chatRunSignal\(chatRunSignals, activeChatId\)\}/,
+    'Shell must forward monotonic run activity to the mounted ChatView')
+  assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,
     'the mounted chat must refresh the promoted continuation row')
   assert.match(chatView, /Promise\.resolve\(connectToStream\(true\)\)/,
     'the mounted chat must attach to the automatically started stream')
   assert.match(streamingMessage, /autoResumeAvailable=\{autoResumeAvailable\}/,
     'the active assistant surface must receive the same policy control props')
+  assert.match(chatView, /useSystemEventStream\(handleEmbeddedRunEvent/,
+    'an eligible parked embed must observe automatic runs without Shell')
+  assert.match(chatView, /onExternalRunEventRef\.current\?\.\('auto_resume_waiting'\)/,
+    'the durable park arms parent completion before system events can be missed')
+  assert.match(chatView, /processedExternalSignalRef[\s\S]*externalReconcileInFlightRef/,
+    'external activity must drain through one queued reconciliation')
+  assert.match(chatEmbed, /onExternalRunEvent=\{handleExternalRunEvent\}/,
+    'the embed must receive structured start and finish events')
+  assert.doesNotMatch(chatView, /onStreamEndRef\.current\?\.\(\)/,
+    'system finish reconciliation must not duplicate the stream completion callback')
 })
 
 test('a benign pause (no reset time) renders the calm "Paused" family, not red Error', () => {
@@ -143,8 +159,10 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'ANY pause gets the soft treatment')
   assert.match(errorCard, /block\.pause \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
-  assert.match(errorCard, /role=\{vm\.benign \? 'status' : 'alert'\}/,
-    'wait states are polite status updates, while genuine failures stay alerts')
+  assert.match(errorCard, /role=\{vm\.benign \? undefined : 'alert'\}/,
+    'the global live region announces waits; only genuine failures alert here')
+  assert.match(errorCard, /className="chat__error-status"[\s\S]*<\/div>\s*\{children\}/,
+    'interactive recovery controls must remain separate from the error body')
 })
 
 test('the park card reassures that a reset push is coming', () => {

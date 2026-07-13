@@ -7,6 +7,10 @@ import {
   CONTEXT_REQUEST, CONTEXT_RESPONSE,
   isEmbedMessage,
 } from '../../lib/chatEmbed.js'
+import {
+  EMPTY_TURN_DONE_GATE,
+  advanceTurnDoneGate,
+} from '../../lib/chatRunSignal.js'
 import './ChatEmbed.css'
 
 // Stripped-chrome agent-chat embed (capability A, design §1).
@@ -101,6 +105,30 @@ export default function ChatEmbed() {
   // re-subscribing the listener.
   const chatIdRef = useRef(chatId)
   chatIdRef.current = chatId
+  // TURN_DONE can arrive from the per-chat stream or the process-wide run
+  // signal. Arm once per turn and let the first terminal path win, so cross-SSE
+  // delivery order can never post the parent protocol message twice.
+  const turnDoneGateRef = useRef(EMPTY_TURN_DONE_GATE)
+  const armTurnDone = useCallback(() => {
+    turnDoneGateRef.current = advanceTurnDoneGate(
+      turnDoneGateRef.current,
+      'message_started',
+    ).gate
+  }, [])
+  const notifyTurnDone = useCallback(({ continues = false } = {}) => {
+    const result = advanceTurnDoneGate(
+      turnDoneGateRef.current,
+      continues ? 'stream_continues' : 'stream_finished',
+    )
+    turnDoneGateRef.current = result.gate
+    if (!result.emit) return
+    postToParent(TURN_DONE)
+  }, [postToParent])
+  const handleExternalRunEvent = useCallback((eventType) => {
+    const result = advanceTurnDoneGate(turnDoneGateRef.current, eventType)
+    turnDoneGateRef.current = result.gate
+    if (result.emit) postToParent(TURN_DONE)
+  }, [postToParent])
 
   // Pending context request resolvers keyed by nonce. The getContext callback
   // posts CONTEXT_REQUEST to the parent and resolves within ≤50ms timeout.
@@ -218,13 +246,18 @@ export default function ChatEmbed() {
     >
       <div className="chat-embed">
         <ChatView
+          key={chatId}
           chatId={chatId}
           embedded
           showPicker={picker}
           quickActions={quickActions}
           getContext={getContext}
-          onMessageStart={() => postToParent(MESSAGE_SENT)}
-          onStreamEnd={() => postToParent(TURN_DONE)}
+          onMessageStart={() => {
+            armTurnDone()
+            postToParent(MESSAGE_SENT)
+          }}
+          onStreamEnd={notifyTurnDone}
+          onExternalRunEvent={handleExternalRunEvent}
           // System events (theme_updated, app_created, …) are Shell-level
           // concerns. The embed is a chat renderer, so we drop them — but
           // pass the callback so ChatView never calls an undefined.

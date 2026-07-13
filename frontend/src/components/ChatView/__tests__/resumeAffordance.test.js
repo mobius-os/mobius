@@ -55,7 +55,7 @@ test('Resume button clears the 44px touch floor with press feedback', () => {
 test('ChatView mirrors the offscreen nudge for a scrolled-away resume card', () => {
   assert.match(chatView, /hasPendingResume/,
     'ChatView detects a tail resumable pause/park block')
-  assert.match(chatView, /const pendingResumeBlock = \(\(\) => \{/,
+  assert.match(chatView, /const pendingResumeBlock = tailResumableBlock\(messages\)/,
     'the tail resumable block is found by walking the visible message tail')
   assert.match(chatView, /hasPendingResume && resumeCardOffscreen/,
     'the nudge shows only when the resume card is offscreen')

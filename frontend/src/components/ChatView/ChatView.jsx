@@ -12,6 +12,7 @@ import useScrollMode, {
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
@@ -22,6 +23,16 @@ import StreamingMessage from './StreamingMessage.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { formatResetTime } from './resetTime.js'
+import {
+  resetDeadlineDelay,
+  resetDeadlineState,
+  saveAutoResumePolicy,
+} from './autoResumePolicy.js'
+import {
+  EMPTY_CHAT_RUN_SIGNAL,
+  advanceChatRunSignal,
+  chatRunSignalDelta,
+} from '../../lib/chatRunSignal.js'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
@@ -222,6 +233,17 @@ function evictOldestDraft() {
   } catch { /* ignore */ }
 }
 
+function tailResumableBlock(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].hidden) continue
+    const message = messages[i]
+    if (message.role !== 'assistant' || !message.blocks?.length) return null
+    const tail = message.blocks[message.blocks.length - 1]
+    return tail.type === 'error' && tail.resumable ? tail : null
+  }
+  return null
+}
+
 const PENDING_DRAFT_KEY = 'pending-draft'
 const PENDING_DRAFT_AUTOSEND_KEY = 'pending-draft-autosend'
 const DRAFT_AUTOSEND_PREFIX = 'draft-autosend:'
@@ -302,7 +324,8 @@ export default function ChatView({
   getContext = null,
   composerFocusRequest = null,
   onComposerFocusHandled = null,
-  externallyRunning = false,
+  externalRunSignal = EMPTY_CHAT_RUN_SIGNAL,
+  onExternalRunEvent = null,
 }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
@@ -382,9 +405,18 @@ export default function ChatView({
   const [chatInfo, setChatInfo] = useState(null)
   const [autoResumeSaving, setAutoResumeSaving] = useState(false)
   const [autoResumeError, setAutoResumeError] = useState('')
-  const [limitResetElapsed, setLimitResetElapsed] = useState(false)
+  const [autoResumeErrorSource, setAutoResumeErrorSource] = useState('')
+  const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
+    EMPTY_CHAT_RUN_SIGNAL,
+  )
+  const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
+  // A counter is only a render wake-up; deadline elapsed is derived directly
+  // from the current card's reset timestamp below, so a newly loaded card can
+  // never render using the previous card's boolean state.
+  const [, setLimitResetClockTick] = useState(0)
   const autoResumeSavingRef = useRef(false)
   const autoResumeRequestRef = useRef(0)
+  const armedEmbeddedResetRef = useRef(null)
   // The question_id of the AskUserQuestion the runner is currently parked
   // on, set from the live SSE `question` event (onLiveQuestion). It is a
   // FAST-PATH HINT only, never the sole gate: the backend does not persist
@@ -425,34 +457,30 @@ export default function ChatView({
     autoResumeSavingRef.current = false
     setAutoResumeSaving(false)
     setAutoResumeError('')
+    setAutoResumeErrorSource('')
   }, [chatId])
 
-  const handleAutoResumeChange = useCallback(async (next) => {
+  const handleAutoResumeChange = useCallback(async (next, source = 'card') => {
     if (autoResumeSavingRef.current) return
     autoResumeSavingRef.current = true
     const requestId = ++autoResumeRequestRef.current
     setAutoResumeSaving(true)
     setAutoResumeError('')
+    setAutoResumeErrorSource(source)
     try {
-      const res = await apiFetch(`/chats/${chatId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ auto_resume_on_limit: !!next }),
+      const result = await saveAutoResumePolicy({
+        chatId,
+        next,
+        request: apiFetch,
       })
-      if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json()).detail || '' } catch {}
-        throw new Error(detail || 'Could not save this chat setting.')
+      if (requestId !== autoResumeRequestRef.current) return
+      if (result.value !== null) {
+        setChatInfo(prev => prev ? ({
+          ...prev,
+          auto_resume_on_limit: result.value,
+        }) : prev)
       }
-      const data = await res.json()
-      if (requestId !== autoResumeRequestRef.current) return
-      setChatInfo(prev => prev ? ({
-        ...prev,
-        auto_resume_on_limit: !!data.auto_resume_on_limit,
-        agent_settings_json: data.agent_settings_json ?? prev.agent_settings_json,
-      }) : prev)
-    } catch (err) {
-      if (requestId !== autoResumeRequestRef.current) return
-      setAutoResumeError(err.message || 'Could not save this chat setting.')
+      setAutoResumeError(result.error)
     } finally {
       if (requestId === autoResumeRequestRef.current) {
         autoResumeSavingRef.current = false
@@ -460,6 +488,11 @@ export default function ChatView({
       }
     }
   }, [chatId])
+
+  const handleAutoResumeSettingsChange = useCallback(
+    next => handleAutoResumeChange(next, 'settings'),
+    [handleAutoResumeChange],
+  )
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -661,6 +694,8 @@ export default function ChatView({
   onFirstMessageRef.current = onFirstMessage
   const onStreamEndRef = useRef(onStreamEnd)
   onStreamEndRef.current = onStreamEnd
+  const onExternalRunEventRef = useRef(onExternalRunEvent)
+  onExternalRunEventRef.current = onExternalRunEvent
   // getContext: optional callback that returns a Promise<object|null> with
   // the current app state snapshot. Called on the fresh-send path only (not
   // the queue path, which is already mid-turn). The result is serialized as a
@@ -797,6 +832,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(`/chats/${chatId}?limit=20`, { timeoutMs: 15000 })
+      if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
       const data = await res.json()
       if (chatIdStaleRef.current) return
       // Discard if a Stop (or other clear) bumped gen while we waited.
@@ -847,11 +883,15 @@ export default function ChatView({
       if (!preserveLocalTurn) {
         pendingQueue.hydrate(data.pending_messages || [])
       }
-      return !!data.running
+      return {
+        running: !!data.running,
+        pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
+      }
     } catch {
       // Network error — silent, user can retry. Callers that need to attach
-      // to a newly announced run treat false as "wait for the next signal".
-      return false
+      // to a newly announced run must distinguish this ambiguous result from
+      // an authoritative idle verdict.
+      return null
     }
   }, [chatId, commitMessages, pendingQueue.hydrate, queryClient])
 
@@ -926,6 +966,7 @@ export default function ChatView({
     patchQuestionAnswers,
   } = useStreamConnection(chatId, {
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
+      if (embedded && continues === false) setEmbeddedRunActive(false)
       promoteStreamToMessages()
       if (continues) {
         // Backend auto-promoted queued follow-ups into the next turn. Newer
@@ -1095,34 +1136,82 @@ export default function ChatView({
     },
   })
 
-  // The shell owns the process-wide system-event stream. When a reset sweep
-  // starts this already-mounted chat automatically, its chat_run_started
-  // event flips externallyRunning without a local send. Refresh the promoted
-  // synthetic user row, then attach to the run's SSE stream. A normal local
-  // send has already set sendingRef/isStreamingRef and is deliberately left
-  // to its existing connection path.
-  const previousExternallyRunningRef = useRef(!!externallyRunning)
-  useEffect(() => {
-    const startedExternally = (
-      !!externallyRunning && !previousExternallyRunningRef.current
-    )
-    previousExternallyRunningRef.current = !!externallyRunning
-    if (
-      !startedExternally
-      || sendingRef.current
-      || isStreamingRef.current
-    ) return undefined
+  // System run activity is a structured sequence, not a running boolean: it
+  // preserves coalesced start+finish events. Reconciliation is single-flight
+  // and drains the latest sequence without effect cleanup cancelling an older
+  // GET. Only an authoritative/announced start attaches; a Stop-invalidated
+  // `undefined` fetch result never can.
+  const effectiveRunSignal = embedded ? embeddedRunSignal : externalRunSignal
+  const externalSignalRef = useRef(effectiveRunSignal)
+  externalSignalRef.current = effectiveRunSignal
+  const processedExternalSignalRef = useRef(effectiveRunSignal)
+  const externalReconcileInFlightRef = useRef(false)
+  const externalClaimedRunRef = useRef(false)
+  const reconcileExternalActivity = useCallback(async () => {
+    if (externalReconcileInFlightRef.current) return
+    externalReconcileInFlightRef.current = true
+    try {
+      while (
+        processedExternalSignalRef.current.seq
+        < externalSignalRef.current.seq
+      ) {
+        const previous = processedExternalSignalRef.current
+        const target = externalSignalRef.current
+        processedExternalSignalRef.current = target
+        const delta = chatRunSignalDelta(previous, target)
+        const locallyActive = (
+          sendingRef.current || isStreamingRef.current
+        ) && !externalClaimedRunRef.current
+        if (locallyActive) continue
 
-    let cancelled = false
-    sendingRef.current = true
-    setSending(true)
-    setServerRunningState(true)
-    fetchMessages({ force: true, authoritative: true }).then(running => {
-      if (cancelled || !running || isStreamingRef.current) return
-      Promise.resolve(connectToStream(true)).catch(() => {})
-    })
-    return () => { cancelled = true }
-  }, [connectToStream, externallyRunning, fetchMessages, isStreamingRef])
+        if (delta.started && !delta.finished) {
+          externalClaimedRunRef.current = true
+          sendingRef.current = true
+          setSending(true)
+          setServerRunningState(true)
+        } else if (delta.finished) {
+          externalClaimedRunRef.current = false
+          sendingRef.current = false
+          setSending(false)
+          setServerRunningState(false)
+        }
+
+        const snapshot = await fetchMessages({
+          force: true,
+          authoritative: true,
+        })
+        if (externalSignalRef.current.seq !== target.seq) continue
+        const running = snapshot?.running
+        if (running === false) {
+          externalClaimedRunRef.current = false
+          if (embedded) setEmbeddedRunActive(false)
+          if (!snapshot.pendingLimitResume) {
+            onExternalRunEventRef.current?.('chat_run_finished')
+          }
+        } else if (running === true && embedded) {
+          setEmbeddedRunActive(true)
+        }
+        if (
+          (running === true || (snapshot === null && delta.started))
+          && !delta.finished
+          && !isStreamingRef.current
+        ) {
+          await Promise.resolve(connectToStream(true)).catch(() => {})
+        }
+      }
+    } finally {
+      externalReconcileInFlightRef.current = false
+      if (
+        processedExternalSignalRef.current.seq
+        < externalSignalRef.current.seq
+      ) {
+        queueMicrotask(reconcileExternalActivity)
+      }
+    }
+  }, [connectToStream, embedded, fetchMessages, isStreamingRef])
+  useEffect(() => {
+    reconcileExternalActivity()
+  }, [effectiveRunSignal.seq, reconcileExternalActivity])
 
   const ensureRuntimeStreamConnected = useCallback(() => {
     if (connectionError === 'disconnected') return
@@ -2815,19 +2904,51 @@ export default function ChatView({
   // then just looks stopped. Detect the tail resumable block so the offscreen
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
-  const pendingResumeBlock = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].hidden) continue
-      const msg = messages[i]
-      if (msg.role !== 'assistant' || !msg.blocks?.length) return null
-      const tail = msg.blocks[msg.blocks.length - 1]
-      return tail.type === 'error' && tail.resumable ? tail : null
-    }
-    return null
-  })()
+  const pendingResumeBlock = tailResumableBlock(messages)
   const hasPendingResume = !!pendingResumeBlock
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   const autoResumeEnabled = !!chatInfo?.auto_resume_on_limit
+  useEffect(() => {
+    if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
+      if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
+      return
+    }
+    if (armedEmbeddedResetRef.current === pendingLimitResetAt) return
+    armedEmbeddedResetRef.current = pendingLimitResetAt
+    // Arm the parent protocol once per durable park, before the automatic run
+    // exists. If both system events are missed, the stream-open authoritative
+    // idle handshake can still complete this new turn exactly once.
+    onExternalRunEventRef.current?.('auto_resume_waiting')
+  }, [autoResumeEnabled, embedded, pendingLimitResetAt])
+  const handleEmbeddedRunEvent = useCallback((event) => {
+    if (
+      !embedded
+      || String(event.chatId || '') !== String(chatId || '')
+      || (event.type !== 'chat_run_started'
+        && event.type !== 'chat_run_finished')
+    ) return
+    setEmbeddedRunSignal(previous => (
+      advanceChatRunSignal(previous, event.type)
+    ))
+    setEmbeddedRunActive(event.type === 'chat_run_started')
+    onExternalRunEventRef.current?.(event.type)
+  }, [chatId, embedded])
+  const handleEmbeddedStreamOpen = useCallback(() => {
+    setEmbeddedRunSignal(previous => (
+      advanceChatRunSignal(previous, 'chat_run_reconcile')
+    ))
+  }, [])
+  // Embedded chats do not have Shell's process stream. Subscribe only while
+  // an opted-in limit park is waiting (and through its observed run), rather
+  // than holding one permanent SSE connection per retained app iframe.
+  useSystemEventStream(handleEmbeddedRunEvent, {
+    enabled: !!(
+      embedded
+      && ((autoResumeEnabled && pendingLimitResetAt) || embeddedRunActive)
+    ),
+    onOpen: handleEmbeddedStreamOpen,
+  })
+  const limitResetElapsed = resetDeadlineState(pendingLimitResetAt).elapsed
   const showAutoResumeControl = !!(
     !embedded
     && chatInfo !== null
@@ -2839,21 +2960,25 @@ export default function ChatView({
 
   useEffect(() => {
     setAutoResumeError('')
-    if (!pendingLimitResetAt) {
-      setLimitResetElapsed(false)
-      return undefined
+    setAutoResumeErrorSource('')
+    let timer = null
+    let cancelled = false
+    const schedule = () => {
+      if (cancelled) return
+      const delayMs = resetDeadlineDelay(pendingLimitResetAt)
+      if (delayMs === null) return
+      timer = setTimeout(() => {
+        setLimitResetClockTick(tick => tick + 1)
+        // Deadlines beyond the browser timer ceiling need another wait rather
+        // than being treated as elapsed at the first capped wake-up.
+        schedule()
+      }, delayMs)
     }
-    const remaining = Date.parse(pendingLimitResetAt) - Date.now()
-    if (!Number.isFinite(remaining) || remaining <= 0) {
-      setLimitResetElapsed(true)
-      return undefined
+    schedule()
+    return () => {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
     }
-    setLimitResetElapsed(false)
-    const timer = setTimeout(
-      () => setLimitResetElapsed(true),
-      Math.min(remaining + 250, 2_147_483_647),
-    )
-    return () => clearTimeout(timer)
   }, [pendingLimitResetAt])
 
   // Visibility of that card is a pure viewport question — an
@@ -3141,7 +3266,11 @@ export default function ChatView({
                   isLastMsg && showAutoResumeControl
                 }
                 autoResumeSaving={isLastMsg && autoResumeSaving}
-                autoResumeError={isLastMsg ? autoResumeError : ''}
+                autoResumeError={
+                  isLastMsg && autoResumeErrorSource === 'card'
+                    ? autoResumeError
+                    : ''
+                }
                 onAutoResumeChange={
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
@@ -3171,7 +3300,9 @@ export default function ChatView({
               autoResumeEnabled={autoResumeEnabled}
               autoResumeAvailable={showAutoResumeControl}
               autoResumeSaving={autoResumeSaving}
-              autoResumeError={autoResumeError}
+              autoResumeError={
+                autoResumeErrorSource === 'card' ? autoResumeError : ''
+              }
               onAutoResumeChange={handleAutoResumeChange}
               liveQuestionId={liveQuestionId}
               isStreaming={activeAssistantIsStreaming}
@@ -3297,6 +3428,14 @@ export default function ChatView({
                 hasAssistantTurns={
                   (chatInfo?.has_assistant_turns ?? false)
                   || messages.some(m => m.role === 'assistant')
+                }
+                autoResumeEnabled={autoResumeEnabled}
+                autoResumeSaving={autoResumeSaving}
+                autoResumeError={
+                  autoResumeErrorSource === 'settings' ? autoResumeError : ''
+                }
+                onAutoResumeChange={
+                  embedded ? undefined : handleAutoResumeSettingsChange
                 }
                 onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
                   // Merge into chatInfo so the next render reflects the

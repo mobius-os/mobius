@@ -37,6 +37,7 @@ from app.broadcast import (
   create_broadcast,
   get_broadcast,
   get_system_broadcast,
+  has_running_chat_broadcast,
   set_active_broadcast,
 )
 from app.chat_writer import (
@@ -52,6 +53,7 @@ from app.chat_writer import (
   PersistTranscript,
   QuestionCommit,
   ResolvePark,
+  RollbackAutoResume,
   StashToolOutput,
   alloc_run_token,
   await_ack as _await_ack,
@@ -1740,6 +1742,13 @@ async def _auto_resume_chat(
       the failure path (releases _starting, leaves the marker for
       reconciliation).
 
+  A reported task-creation failure is rolled back below using the exact
+  pre-promote rows returned by PromotePending. One crash boundary remains by
+  design: SIGKILL after that promote commits but before task creation loses the
+  in-memory rollback payload. Boot reconciliation then marks the promoted turn
+  interrupted/resumable for manual recovery; automatic retry across that
+  window requires a durable predecessor/payload link and is not claimed here.
+
   Re-park-on-re-hit is automatic: the resumed turn is an ordinary turn, so
   if it dies on the limit again it parks again with a fresh reset time.
   Returns True when a turn was scheduled.
@@ -1754,17 +1763,37 @@ async def _auto_resume_chat(
     # swept into the synthetic owner continuation.
     async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
       async with chat_queue.get_lock(chat_id):
-        if is_chat_running(chat_id):
+        # The outer sweep check can go stale while this task waits for the
+        # per-chat lock. Re-check GLOBAL liveness at the actual claim point.
+        # There is no await between this read and mark_starting below, making
+        # the global-idle check + per-chat claim atomic on the event loop.
+        if _any_chat_turn_active():
           return False
         with SessionLocal() as check_db:
           chat = check_db.query(models.Chat).filter(
             models.Chat.id == chat_id,
           ).first()
           pending = list(chat.pending_messages or []) if chat is not None else []
+          park = check_db.query(models.ChatRun).filter(
+            models.ChatRun.id == park_token,
+            models.ChatRun.chat_id == chat_id,
+          ).first()
+          latest = (
+            check_db.query(models.ChatRun.id)
+            .filter(models.ChatRun.chat_id == chat_id)
+            .order_by(
+              models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+            )
+            .first()
+          )
+          latest_id = latest[0] if latest is not None else None
           if (
             chat is None
             or chat.deleted_at is not None
             or not chat.auto_resume_on_limit
+            or park is None
+            or park.status != "resume_pending"
+            or latest_id != park.id
             or any(
               isinstance(msg, dict)
               and msg.get("_initiated_by_app_id") is not None
@@ -1804,7 +1833,7 @@ async def _auto_resume_chat(
           "type": "chat_run_started",
           "chatId": chat_id,
         })
-        _schedule_continuation(
+        scheduled = _schedule_continuation(
           chat_id=chat_id,
           messages=next_messages,
           session_id=next_session_id,
@@ -1812,6 +1841,24 @@ async def _auto_resume_chat(
           next_user=next_user,
           run_token=drain_token,
         )
+        if scheduled is False:
+          # PromotePending committed before task creation. Reverse only this
+          # exact speculative handoff while the queue lock is still held, so
+          # the original park and preserved queue remain retryable.
+          rolled_back = await _await_ack(get_writer().submit(
+            RollbackAutoResume(
+              chat_id=chat_id,
+              run_token=park_token or "",
+              promoted_run_token=drain_token,
+              promoted_pending=list(
+                next_user.get("_promoted_pending") or []
+              ),
+            )
+          ))
+          if rolled_back:
+            forget_chat(chat_id)
+          claimed = False
+          return False
         return True
   except Exception:
     _get_logger().warning(
@@ -1833,8 +1880,9 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     - Notify-only parks resolve first, then send one best-effort notification.
     - Auto-resume parks first become ``resume_pending``. That durable
       state suppresses duplicate notifications but remains sweepable until a
-      continuation is actually scheduled; a race or spawn failure cannot
-      silently consume the promised continuation.
+      continuation is actually scheduled; a race or reported task-creation
+      failure cannot silently consume the promised continuation. The narrow
+      post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
     - A park whose chat was deleted resolves silently.
     - Auto-resume is a per-chat opt-in and STRICTLY SERIAL: at most one
       opted-in park starts per tick, and none while any turn is live anywhere.
@@ -1905,7 +1953,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
     if auto_resume and (
-      auto_resume_started or registry.all_alive_chat_ids()
+      auto_resume_started or _any_chat_turn_active()
     ):
       # Strictly-serial gate: a live turn (an earlier auto-resume, or the
       # owner's own send) must settle before this opted-in park is processed.
@@ -1963,7 +2011,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
 
       if prepared.get("notify"):
         notify_reset(chat_id)
-      if registry.all_alive_chat_ids():
+      if _any_chat_turn_active():
         # The notification or refresh window admitted another turn. Keep the
         # durable pending state so the next sweep retries instead of silently
         # dropping the promised continuation.
@@ -2081,6 +2129,11 @@ def is_chat_running(chat_id: str) -> bool:
     return True
   bc = get_broadcast(chat_id)
   return bc is not None and bc.running
+
+
+def _any_chat_turn_active() -> bool:
+  """Include the terminal window after a provider handle unregisters."""
+  return bool(registry.all_alive_chat_ids()) or has_running_chat_broadcast()
 
 
 def mark_starting(chat_id: str) -> bool:
@@ -2257,7 +2310,7 @@ def _schedule_continuation(
   provider_id: str | None,
   next_user: dict,
   run_token: str | None = None,
-) -> None:
+) -> bool:
   """Bumps generation and spawns the next-turn run_chat.
 
   `run_token` is the per-turn persistence run identity. The continuation
@@ -2280,6 +2333,10 @@ def _schedule_continuation(
   (so the chat isn't stuck 'starting') but LEAVES the durable run marker set:
   the turn is promoted-but-unscheduled, so reconciliation must recover it
   (clearing the marker here would strand the promoted turn).
+
+  Returns True when the task was created and False when creation failed. The
+  auto-resume caller uses False to reverse its speculative promote; generic
+  queue drains retain the marker for their established reconciliation path.
   """
   log = _get_logger()
   bc = None
@@ -2309,6 +2366,7 @@ def _schedule_continuation(
     asyncio.create_task(coro)
     # Task owns the coroutine now — don't close it in the except.
     coro = None
+    return True
   except Exception as exc:
     log.exception(
       "continuation scheduling failed chat_id=%s: %s", chat_id, exc,
@@ -2343,6 +2401,11 @@ def _schedule_continuation(
       })
       bc.publish({"type": "done"})
       bc.mark_completed()
+    # Every caller announces chat_run_started before it reaches this helper.
+    # Balance that shell-level signal when task creation fails, or the shell's
+    # local streaming set remains stuck even though _starting was released.
+    _publish_chat_run_finished(chat_id)
+    return False
 
 
 # Queue drain helpers — pre-bound to the chat-side callbacks so the

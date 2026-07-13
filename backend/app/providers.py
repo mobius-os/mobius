@@ -109,6 +109,34 @@ DEFAULT_MODELS = {
 # picking anything".
 DEFAULT_EFFORT = "medium"
 
+# This setting used to be owner-global. It is now a dedicated per-chat DB
+# policy; retaining a true value on disk would reactivate the removed global
+# behavior if a deployment rolled back to an older binary.
+_LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
+
+
+def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
+  """Delete the removed owner-global policy so rollback cannot revive it.
+
+  Returns False only when a readable legacy value was found but the cleaned
+  file could not be persisted. Missing, malformed, and already-clean files
+  need no migration and return True.
+  """
+  path = Path(data_dir) / "shared" / "agent-settings.json"
+  if not path.exists():
+    return True
+  try:
+    settings = json.loads(path.read_text())
+  except (json.JSONDecodeError, OSError):
+    return True
+  if (
+    not isinstance(settings, dict)
+    or _LEGACY_GLOBAL_AUTO_RESUME_KEY not in settings
+  ):
+    return True
+  settings.pop(_LEGACY_GLOBAL_AUTO_RESUME_KEY)
+  return write_agent_settings(data_dir, settings)
+
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when `model` is a KNOWN model for some OTHER provider.
@@ -127,7 +155,8 @@ def _load_agent_settings(data_dir: str) -> dict:
   path = Path(data_dir) / "shared" / "agent-settings.json"
   if path.exists():
     try:
-      return json.loads(path.read_text())
+      settings = json.loads(path.read_text())
+      return settings if isinstance(settings, dict) else {}
     except (json.JSONDecodeError, OSError):
       pass
   return {}

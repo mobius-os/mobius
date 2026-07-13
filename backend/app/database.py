@@ -93,7 +93,7 @@ def run_migrations(eng) -> None:
     if "title_locked" not in chats_cols:
       with eng.connect() as conn:
         conn.execute(text(
-          "ALTER TABLE chats ADD COLUMN title_locked BOOLEAN NOT NULL DEFAULT 0"
+          "ALTER TABLE chats ADD COLUMN title_locked BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         conn.commit()
   if "chat_id" not in apps_cols:
@@ -126,7 +126,7 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN offline_capable BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "manage_apps" not in apps_cols:
@@ -136,7 +136,7 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN manage_apps BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "github_access" not in apps_cols:
@@ -147,7 +147,7 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN github_access BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "filesystem_access" not in apps_cols:
@@ -156,7 +156,7 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN filesystem_access BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "manifest_url" not in apps_cols:
@@ -181,7 +181,7 @@ def run_migrations(eng) -> None:
     # Existing rows default false; backfill on their next install/update.
     with eng.connect() as conn:
       conn.execute(text(
-        "ALTER TABLE apps ADD COLUMN embeds_agent BOOLEAN NOT NULL DEFAULT 0"
+        "ALTER TABLE apps ADD COLUMN embeds_agent BOOLEAN NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "deleted_at" not in apps_cols:
@@ -387,7 +387,7 @@ def run_migrations(eng) -> None:
       # safe notify + one-tap Resume path until the owner opts this chat in.
       _add.append(
         "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       )
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).

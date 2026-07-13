@@ -490,8 +490,9 @@ class ResolvePark(_Command):
   """Move a parked/pending run to ``parked_notified``.
 
   Submitted by the reset sweep AFTER `parked_until` elapses. Notify-only
-  parks resolve before their one-shot push; auto-resume parks first pass
-  through PrepareAutoResume so retries remain selectable without re-notifying.
+  parks resolve before their at-most-once push attempt; auto-resume parks first
+  pass through PrepareAutoResume so retries remain selectable without
+  re-notifying.
   Not identity-keyed against `_run_token_owner`: the parked turn ended long
   ago and ParkRun already dropped its ownership entry. Idempotent — a row
   no longer parked is a no-op.
@@ -513,6 +514,23 @@ class PrepareAutoResume(_Command):
 
   chat_id: str = ""
   run_token: str = ""
+
+
+@dataclass
+class RollbackAutoResume(_Command):
+  """Undo a speculative auto-resume promote whose task could not spawn.
+
+  ``PromotePending`` must land before a continuation may run, but task creation
+  can still fail afterward.  This command reverses that narrow handoff: remove
+  the speculative run, put the exact promoted rows back at the head of the
+  queue, and re-upgrade the original park to ``resume_pending``.  Both run
+  identities are required so a stale rollback can never unwind a newer turn.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  promoted_run_token: str = ""
+  promoted_pending: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -584,6 +602,7 @@ _FENCE_COMMANDS = (
   ParkRun,
   ResolvePark,
   PrepareAutoResume,
+  RollbackAutoResume,
 )
 
 
@@ -1286,6 +1305,8 @@ class ChatWriterActor:
       return self._resolve_park(db, cmd)
     if isinstance(cmd, PrepareAutoResume):
       return self._prepare_auto_resume(db, cmd)
+    if isinstance(cmd, RollbackAutoResume):
+      return self._rollback_auto_resume(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
 
   # -- real DB dispatch (one method per command) -------------------------
@@ -1836,6 +1857,11 @@ class ChatWriterActor:
       **agent_pending,
       "_consumed_cids": consumed_cids,
       "_messages": stored_messages,
+      # Exact pre-promote rows for the auto-resume scheduling rollback. Kept
+      # private so provider runners ignore it; ordinary continuations never
+      # inspect it. The rollback validates their stable cids against the
+      # transcript tail before reversing anything.
+      "_promoted_pending": promoted_group,
     }
     # Build the next-turn history as schemas.ChatMessage objects BEFORE
     # committing, exactly as chat_queue.promote_pending_messages_locked does —
@@ -2128,6 +2154,15 @@ class ChatWriterActor:
     run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
     if run is None or run.status not in ("parked", "resume_pending"):
       return False
+    if not self._run_is_latest(db, run):
+      # A newer run already superseded this park. Retire the stale signal but
+      # report False so the sweep neither notifies nor claims it resolved.
+      run.status = "completed"
+      if run.ended_at is None:
+        run.ended_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("ResolvePark stale-run retire did not persist")
+      return False
     run.status = "parked_notified"
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
@@ -2136,11 +2171,22 @@ class ChatWriterActor:
     return True
 
   def _prepare_auto_resume(self, db, cmd: PrepareAutoResume):
-    """Keep auto-resume retryable while making notification one-shot."""
+    """Keep auto-resume retryable with one best-effort notify attempt."""
+    from datetime import UTC, datetime
+
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
     if run is None or run.status not in ("parked", "resume_pending"):
+      return {"active": False, "notify": False}
+    if not self._run_is_latest(db, run):
+      run.status = "completed"
+      if run.ended_at is None:
+        run.ended_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed(
+          "PrepareAutoResume stale-run retire did not persist"
+        )
       return {"active": False, "notify": False}
     if run.status == "resume_pending":
       return {"active": True, "notify": False}
@@ -2148,6 +2194,67 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("PrepareAutoResume did not persist")
     return {"active": True, "notify": True}
+
+  @staticmethod
+  def _run_is_latest(db, run) -> bool:
+    """Whether ``run`` is the deterministic latest run for its chat."""
+    from app.models import ChatRun
+
+    latest = (
+      db.query(ChatRun.id)
+      .filter(ChatRun.chat_id == run.chat_id)
+      .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
+      .first()
+    )
+    latest_id = latest[0] if latest is not None else None
+    return latest_id == run.id
+
+  def _rollback_auto_resume(self, db, cmd: RollbackAutoResume) -> bool:
+    """Reverse only the exact unscheduled PromotePending handoff."""
+    from app.models import Chat, ChatRun
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    park = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+    promoted_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.promoted_run_token,
+    ).first()
+    if (
+      chat is None
+      or park is None
+      or promoted_run is None
+      or park.chat_id != cmd.chat_id
+      or promoted_run.chat_id != cmd.chat_id
+      or park.status != "completed"
+      or promoted_run.status != "running"
+      or not self._run_is_latest(db, promoted_run)
+      or self._run_token_owner.get(cmd.chat_id) != cmd.promoted_run_token
+      or chat.run_status != "running"
+    ):
+      return False
+
+    promoted_pending = [dict(row) for row in cmd.promoted_pending]
+    promoted_cids = [cid_of(row) for row in promoted_pending]
+    if not promoted_pending or any(cid is None for cid in promoted_cids):
+      return False
+    messages = list(chat.messages or [])
+    if len(messages) < len(promoted_pending):
+      return False
+    transcript_tail = messages[-len(promoted_pending):]
+    if [cid_of(row) for row in transcript_tail] != promoted_cids:
+      # A successor wrote after the promote. Never peel arbitrary transcript
+      # rows off the end; its turn owns recovery now.
+      return False
+
+    chat.messages = messages[:-len(promoted_pending)]
+    chat.pending_messages = promoted_pending + list(chat.pending_messages or [])
+    chat.run_status = None
+    chat.run_started_at = None
+    db.delete(promoted_run)
+    park.status = "resume_pending"
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RollbackAutoResume did not persist")
+    self._run_token_owner.pop(cmd.chat_id, None)
+    return True
 
   @staticmethod
   def _commit_snapshot(db, snapshot: dict):

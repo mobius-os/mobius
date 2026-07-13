@@ -76,6 +76,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
+import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { modelQueries } from '../../hooks/queries.js'
 import {
   CLAUDE_MODELS,
@@ -223,6 +224,10 @@ export default function ChatSettingsPanel({
   provider,
   effective,
   hasAssistantTurns,
+  autoResumeEnabled = false,
+  autoResumeSaving = false,
+  autoResumeError = '',
+  onAutoResumeChange,
   onChange,
   // Stale-PATCH guard: parent passes a ref that survives panel
   // mount/unmount. See ComposerPopover for the rationale.
@@ -553,6 +558,9 @@ export default function ChatSettingsPanel({
   const hiddenIds = prefs?.hidden_ids || []
   const selectedProvider = pendingSwitch?.provider ?? draftProvider
   const selectedModel = pendingSwitch?.model ?? draftModel
+  const autoResumeSwitchId = chatId
+    ? `chat-settings-auto-resume-${chatId}`
+    : undefined
 
   // Build the per-provider displayed-models list once per render.
   // Falls back to the bundled CLAUDE_MODELS / CODEX_MODELS until the
@@ -683,6 +691,35 @@ export default function ChatSettingsPanel({
           )
         })
       })}
+      {onAutoResumeChange && (
+        <div className="csp__automation">
+          <div className="csp__label csp__label--automation">Automation</div>
+          <div
+            className="csp__automation-row"
+            onPointerDown={preserveFocusUnlessTouch}
+          >
+            <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
+              <span className="csp__automation-title">
+                Always continue after limits
+              </span>
+              <span className="csp__automation-sub">
+                Applies only to this chat. You can turn it off here anytime.
+              </span>
+            </label>
+            <Switch
+              id={autoResumeSwitchId}
+              checked={!!autoResumeEnabled}
+              onCheckedChange={onAutoResumeChange}
+              disabled={!!autoResumeSaving}
+            />
+          </div>
+          {autoResumeError && (
+            <p className="csp__automation-error" role="alert">
+              {autoResumeError}
+            </p>
+          )}
+        </div>
+      )}
       {(codexSwitchWarning || compacting || error) && (
         <div className="csp__foot">
           {compacting && (

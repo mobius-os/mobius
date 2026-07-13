@@ -90,6 +90,18 @@ async def lifespan(app):
     _assert_provider_defaults(PROVIDER_NAMES)
   except Exception as exc:
     _log.error("provider defaults check skipped: %s", exc, exc_info=True)
+  # One-way compatibility migration: the preference is now chat-local, but a
+  # legacy true value left in the shared JSON would become global again after
+  # a rollback. Run before serving (not lazily on the first settings request)
+  # so every successful boot removes that rollback hazard.
+  try:
+    from app.providers import remove_legacy_global_auto_resume_setting
+    if not remove_legacy_global_auto_resume_setting(get_settings().data_dir):
+      _log.warning("legacy global auto-resume setting cleanup did not persist")
+  except Exception as exc:
+    # providers.py and the shared file are recovery-surface dependencies:
+    # report cleanup failure without making the whole service unbootable.
+    _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
   # Crash recovery: a process death (OOM / SIGKILL — a recurring
   # failure mode on this host) mid-turn leaves the chat's durable

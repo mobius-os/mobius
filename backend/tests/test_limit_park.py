@@ -10,7 +10,8 @@ Locks in the six contracts of the limit-park feature:
   (c) Latest-run-wins: the park probe + stall exemption honor a park only
       while the chat's newest run row is the parked one, and a fresh
       StartTurn closes a stale park (no orphaned notify/auto-resume).
-  (d) The reset sweep notifies exactly ONCE per park, keeps an opted park
+  (d) The reset sweep makes at most one notification attempt per park, keeps
+      an opted park
       retryable until its continuation starts, skips future parks, stands down
       while draining, and resolves deleted chats silently.
   (e) Auto-resume is opt-in (off = notify only) and strictly serial: one
@@ -27,9 +28,12 @@ from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
   Barrier,
+  ClearRunStatus,
   ParkRun,
   PrepareAutoResume,
+  PromotePending,
   ResolvePark,
+  RollbackAutoResume,
   StartTurn,
   get_writer,
 )
@@ -342,6 +346,71 @@ def test_prepare_auto_resume_is_retryable_and_notification_is_one_shot():
   assert _run_row("rt-auto-prepare")["status"] == "resume_pending"
 
 
+def test_prepare_and_resolve_retire_a_stale_nonlatest_park():
+  """A delayed sweep command must never revive or notify an older park."""
+  cid = "park-stale-command"
+  _seed_chat(cid)
+  _seed_run(cid, "rt-old-park", status="parked", started_offset=-30)
+  _seed_run(cid, "rt-new-run", status="running", started_offset=30)
+
+  prepared = get_writer().submit(PrepareAutoResume(
+    chat_id=cid, run_token="rt-old-park",
+  )).result(timeout=5)
+  assert prepared == {"active": False, "notify": False}
+  assert _run_row("rt-old-park")["status"] == "completed"
+
+  # The same latest-run fence applies to ResolvePark. Re-seed a second stale
+  # park so the two commands are independently covered.
+  _seed_run(cid, "rt-old-notify", status="parked", started_offset=-20)
+  resolved = get_writer().submit(ResolvePark(
+    chat_id=cid, run_token="rt-old-notify",
+  )).result(timeout=5)
+  assert resolved is False
+  assert _run_row("rt-old-notify")["status"] == "completed"
+
+
+def test_auto_resume_rollback_cannot_unwind_a_newer_successor():
+  cid = "park-stale-rollback"
+  park_token = "rt-stale-rollback-park"
+  promoted_token = "rt-stale-rollback-promoted"
+  successor_token = "rt-stale-rollback-successor"
+  queued = {
+    "role": "user", "content": "continue", "ts": 5,
+    "cid": f"limit-resume-{park_token}",
+  }
+  _seed_chat(cid, pending=[queued])
+  _seed_run(cid, park_token, status="resume_pending", started_offset=-30)
+  get_writer().submit(PromotePending(
+    chat_id=cid, run_token=promoted_token,
+  )).result(timeout=5)
+  get_writer().submit(StartTurn(
+    chat_id=cid,
+    run_token=successor_token,
+    user_msg={
+      "role": "user", "content": "new owner turn", "ts": 10,
+      "cid": "new-owner-turn",
+    },
+    title_source="new owner turn",
+    default_provider="claude",
+  )).result(timeout=5)
+
+  rolled_back = get_writer().submit(RollbackAutoResume(
+    chat_id=cid,
+    run_token=park_token,
+    promoted_run_token=promoted_token,
+    promoted_pending=[queued],
+  )).result(timeout=5)
+  assert rolled_back is False
+  assert _run_row(successor_token)["status"] == "running"
+  state = _chat_row(cid)
+  assert state["run_status"] == "running"
+  assert state["messages"][-1]["cid"] == "new-owner-turn"
+
+  get_writer().submit(ClearRunStatus(
+    chat_id=cid, run_token=successor_token,
+  )).result(timeout=5)
+
+
 # -- (c) latest-run-wins + supersession ----------------------------------------
 
 def test_parked_probe_latest_run_wins():
@@ -449,7 +518,7 @@ def test_sweep_notifies_once_and_resolves(owner_token, monkeypatch):
   assert calls[0]["source_id"] == "sweep-once"
   assert _run_row("rt-sweep-once")["status"] == "parked_notified"
 
-  # A second tick finds nothing parked — the notify fires exactly once.
+  # A second tick finds nothing parked — the notify is attempted at most once.
   assert _run_sweep() == []
   assert len(calls) == 1
 
@@ -679,6 +748,175 @@ def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
       chat_mod.discard_starting(cid)
 
 
+def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
+  owner_token, monkeypatch,
+):
+  """A failed task spawn restores the park + exact queue, without re-notify."""
+  del owner_token
+  cid = "sweep-spawn-rollback"
+  park_token = f"rt-{cid}"
+  notifications = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+  )
+  queued = {
+    "role": "user", "content": "preserve me", "ts": 5,
+    "cid": "queued-before-limit",
+  }
+  _due_park(
+    cid, park_token, pending=[queued], auto_resume=True,
+  )
+  original_create_broadcast = chat_mod.create_broadcast
+
+  def _spawn_fails(chat_id):
+    del chat_id
+    raise RuntimeError("spawn failed")
+
+  monkeypatch.setattr(chat_mod, "create_broadcast", _spawn_fails)
+  system_queue = chat_mod.get_system_broadcast().subscribe()
+  try:
+    assert _run_sweep() == []
+    system_events = [system_queue.get_nowait(), system_queue.get_nowait()]
+  finally:
+    chat_mod.get_system_broadcast().unsubscribe(system_queue)
+    monkeypatch.setattr(chat_mod, "create_broadcast", original_create_broadcast)
+  assert len(notifications) == 1
+  assert [event["type"] for event in system_events] == [
+    "chat_run_started", "chat_run_finished",
+  ]
+  assert _run_row(park_token)["status"] == "resume_pending"
+  state = _chat_row(cid)
+  assert state["run_status"] is None
+  assert [m.get("cid") for m in state["pending"]] == [
+    "queued-before-limit", f"limit-resume-{park_token}",
+  ]
+  assert all(
+    m.get("cid") not in {"queued-before-limit", f"limit-resume-{park_token}"}
+    for m in state["messages"]
+  )
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    assert len(notifications) == 1
+    assert "preserve me" in scheduled[0]["next_user"]["content"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_post_promote_process_death_recovers_as_manual_resume_boundary():
+  """SIGKILL after promote has no durable rollback payload.
+
+  Boot reconciliation resolves that speculative run as an interrupted,
+  resumable turn. This intentionally documents the narrow at-most-once window
+  rather than claiming the reset sweep can reconstruct and auto-retry it.
+  """
+  cid = "auto-post-promote-crash"
+  park_token = f"rt-{cid}"
+  promoted_token = f"promoted-{cid}"
+  synthetic = {
+    "role": "user", "content": "continue", "ts": 5,
+    "cid": f"limit-resume-{park_token}",
+  }
+  _seed_chat(cid, pending=[synthetic], auto_resume=True)
+  _seed_run(
+    cid, park_token, status="resume_pending",
+    parked_until=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1),
+    started_offset=-30,
+  )
+  get_writer().submit(PromotePending(
+    chat_id=cid, run_token=promoted_token,
+  )).result(timeout=5)
+
+  # Simulate the next boot: the in-memory task/rollback payload disappeared,
+  # while the promoted run marker survived.
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
+  finally:
+    db.close()
+  state = _chat_row(cid)
+  assert state["run_status"] is None
+  assert state["pending"] == []
+  assert _run_row(park_token)["status"] == "completed"
+  assert _run_row(promoted_token)["status"] == "interrupted"
+  tail_blocks = state["messages"][-1].get("blocks") or []
+  assert any(block.get("resumable") for block in tail_blocks)
+
+  # reconcile normally runs before the writer starts. This test drives it
+  # against the fixture's live actor, so clear its in-memory owner bookkeeping.
+  get_writer().submit(ClearRunStatus(
+    chat_id=cid, run_token="",
+  )).result(timeout=5)
+
+
+def test_auto_resume_global_idle_check_is_repeated_at_locked_claim():
+  """A different chat starting while this chat waits on its lock wins."""
+  cid = "auto-global-claim-race"
+  _seed_chat(cid, auto_resume=True)
+  other = f"live-{uuid.uuid4()}"
+  blocker = _Handle(other)
+
+  async def scenario():
+    lock = chat_mod.chat_queue.get_lock(cid)
+    await lock.acquire()
+    task = asyncio.create_task(
+      chat_mod._auto_resume_chat(cid, "claude", park_token="rt-race")
+    )
+    await asyncio.sleep(0)
+    registry.register(blocker)
+    lock.release()
+    try:
+      return await task
+    finally:
+      registry.unregister(other, blocker.kind)
+
+  assert asyncio.run(scenario()) is False
+  assert _chat_row(cid)["pending"] == []
+  assert not chat_mod.is_chat_running(cid)
+
+
+def test_auto_resume_locked_claim_rejects_superseded_park():
+  """The selected park can become stale while the sweep waits on the lock."""
+  cid = "auto-superseded-locked-claim"
+  park_token = f"park-{cid}"
+  _seed_chat(cid, auto_resume=True)
+  _seed_run(cid, park_token, status="resume_pending", started_offset=-30)
+  _seed_run(cid, f"newer-{cid}", status="completed", started_offset=-10)
+
+  assert asyncio.run(
+    chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+  ) is False
+  assert _chat_row(cid)["pending"] == []
+  assert not chat_mod.is_chat_running(cid)
+
+
+def test_auto_resume_global_gate_includes_running_terminal_broadcast():
+  """Provider unregister is not idle until its broadcast completes."""
+  from app.broadcast import create_broadcast
+
+  cid = "auto-terminal-broadcast-gate"
+  park_token = f"park-{cid}"
+  other = f"terminal-{uuid.uuid4()}"
+  _seed_chat(cid, auto_resume=True)
+  _seed_run(cid, park_token, status="resume_pending", started_offset=-30)
+  broadcast = create_broadcast(other)
+  try:
+    assert asyncio.run(
+      chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+    ) is False
+  finally:
+    broadcast.mark_completed()
+  assert _chat_row(cid)["pending"] == []
+  assert not chat_mod.is_chat_running(cid)
+
+
 def test_app_initiated_park_never_auto_resumes(owner_token, monkeypatch):
   """App-token turns are background work even though they own a ChatRun."""
   del owner_token
@@ -770,6 +1008,7 @@ def test_debug_status_lists_parked_runs(client, auth):
     item for item in r.json()["parked_runs"] if item["chat_id"] == cid
   )
   assert entry["run_id"] == "rt-park-debug"
+  assert entry["status"] == "parked"
   assert entry["parked_until"] == until.isoformat()
   assert entry["park_reason"] == "usage_limit"
 

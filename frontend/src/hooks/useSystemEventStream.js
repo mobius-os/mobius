@@ -24,14 +24,20 @@ import * as setupSession from '../lib/setupSession.js'
  * in-chat catch-up coherence. Handlers should be idempotent (theme
  * reload, refreshApps, version bump) so duplicates are harmless.
  */
-export default function useSystemEventStream(onEvent) {
+export default function useSystemEventStream(
+  onEvent,
+  { enabled = true, onOpen = null } = {},
+) {
   // Mirror onEvent in a ref so the long-lived effect can call the
   // latest handler without re-running the connection setup whenever
   // the callback identity changes.
   const onEventRef = useRef(onEvent)
   useEffect(() => { onEventRef.current = onEvent }, [onEvent])
+  const onOpenRef = useRef(onOpen)
+  useEffect(() => { onOpenRef.current = onOpen }, [onOpen])
 
   useEffect(() => {
+    if (!enabled) return undefined
     let cancelled = false
     let controller = null
     let backoffMs = 1000
@@ -71,6 +77,7 @@ export default function useSystemEventStream(onEvent) {
           throw new Error(`system stream status ${res.status}`)
         }
         backoffMs = 1000  // Reset on a successful connect.
+        onOpenRef.current?.()
 
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
@@ -118,5 +125,5 @@ export default function useSystemEventStream(onEvent) {
       cancelled = true
       controller?.abort()
     }
-  }, [])
+  }, [enabled])
 }

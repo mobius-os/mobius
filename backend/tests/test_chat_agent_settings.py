@@ -153,7 +153,13 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   client, auth, chat, db,
 ):
   """The limit preference is chat-local and independent of model settings."""
+  from app import models
+
   chat.agent_settings_json = {"model": "historical-model", "effort": "high"}
+  chat.provider = "codex"
+  db.commit()
+  owner = db.query(models.Owner).first()
+  owner.provider = "claude"
   db.commit()
   _write_global_settings({"model": "current-model", "effort": "low"})
   other = client.post(
@@ -174,6 +180,8 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   assert _read_global_settings() == {
     "model": "current-model", "effort": "low",
   }
+  db.expire_all()
+  assert db.query(models.Owner).first().provider == "claude"
 
   sibling = client.get(f"/api/chats/{other['id']}", headers=auth).json()
   assert sibling["auto_resume_on_limit"] is False
@@ -201,9 +209,18 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(
   client, auth, chat,
 ):
-  _write_global_settings({"auto_resume_on_limit": True})
+  _write_global_settings({
+    "auto_resume_on_limit": True,
+    "model": "claude-opus-4-7",
+  })
   detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
   assert detail["auto_resume_on_limit"] is False
+  # Reads ignore the removed owner-global key. The one-way file cleanup is a
+  # boot migration (covered in test_settings), not a racy write from GET.
+  assert _read_global_settings() == {
+    "auto_resume_on_limit": True,
+    "model": "claude-opus-4-7",
+  }
 
 
 def test_get_chat_includes_effective_settings(client, auth, chat):

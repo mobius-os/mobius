@@ -560,7 +560,11 @@ async def patch_chat(
           mirror[key] = value
       if mirror:
         write_agent_settings(data_dir, mirror)
-    if chat.provider:
+    # Provider is part of the picker default, so mirror it only when this
+    # PATCH actually represents a picker/provider choice. A title, pin, or
+    # auto-resume-only PATCH on a historical chat must not change which
+    # provider the next new chat inherits.
+    if chat.provider and (target_provider is not None or picker_settings_changed):
       owner = db.query(models.Owner).first()
       if owner is not None:
         owner.provider = chat.provider

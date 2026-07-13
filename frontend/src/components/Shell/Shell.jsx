@@ -18,6 +18,7 @@ import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
+import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
@@ -380,6 +381,10 @@ export default function Shell() {
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
+  // Monotonic per-chat activity survives a start+finish pair delivered in one
+  // system-stream chunk. A running boolean can end the React batch exactly as
+  // it began (false) and lose the fact that the transcript changed.
+  const [chatRunSignals, setChatRunSignals] = useState(() => new Map())
   // Voice dictation is a single boolean — is the (single-mount) ChatView's mic
   // active right now — not a per-chat Set: nothing ever read which chat was
   // dictating, only whether any dictation is live, so the shell-reload policy
@@ -429,6 +434,14 @@ export default function Shell() {
       next.delete(chatId)
       return next
     })
+  }, [])
+
+  const markChatRunActivity = useCallback((chatId) => {
+    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_started'))
+  }, [])
+
+  const markChatRunFinished = useCallback((chatId) => {
+    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
   }, [])
 
   const markVoiceListening = useCallback((listening) => {
@@ -997,11 +1010,18 @@ export default function Shell() {
         duration: 10000,
       })
     } else if (ev.type === 'chat_run_started') {
-      if (ev.chatId) markStreamingStart(ev.chatId)
+      if (ev.chatId) {
+        markChatRunActivity(ev.chatId)
+        markStreamingStart(ev.chatId)
+      }
       refreshChats()
     } else if (ev.type === 'chat_run_finished') {
       const chatId = ev.chatId
       if (chatId) {
+        // Finish is activity too: if start was missed during a reconnect, or
+        // both events batch together, the active ChatView still fetches the
+        // final durable transcript.
+        markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         if (
           activeViewRef.current !== 'chat'
@@ -1048,7 +1068,8 @@ export default function Shell() {
     // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
-    loadTheme, markStreamingEnd, markStreamingStart,
+    loadTheme, markChatRunActivity, markChatRunFinished,
+    markStreamingEnd, markStreamingStart,
     refreshApps, refreshChats, warmAppCode,
   ])
 
@@ -1687,7 +1708,7 @@ export default function Shell() {
           <ChatView
             key={activeChatId}
             chatId={activeChatId}
-            externallyRunning={streamingChatIds.has(activeChatId)}
+            externalRunSignal={chatRunSignal(chatRunSignals, activeChatId)}
             onStreamEnd={({ continues } = {}) => {
               // ChatView calls this when the agent turn finishes
               // streaming. Keep the running marker across queued

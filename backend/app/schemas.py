@@ -422,6 +422,10 @@ class BackgroundAgentsUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
   """Owner-level settings updates."""
 
+  # Settings used to include a global auto-resume flag. Reject stale cached
+  # clients (and typos) instead of returning {ok: true} for an ignored field.
+  model_config = ConfigDict(extra="forbid")
+
   gemini_api_key: str | None = None
   provider: str | None = None
   # Legacy owner-level agent settings. Live chat surfaces should write

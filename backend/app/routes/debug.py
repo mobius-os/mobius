@@ -103,6 +103,10 @@ def debug_status(
     {
       "chat_id": run.chat_id,
       "run_id": run.id,
+      # Distinguish an untouched park from an opted-in park whose automatic
+      # continuation is still waiting/retrying. Without this, operators cannot
+      # tell whether the reset sweep has claimed the row at all.
+      "status": run.status,
       "parked_until": (
         run.parked_until.isoformat() if run.parked_until else None
       ),

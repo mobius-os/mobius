@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text,
+  String, Text, false,
 )
 
 from app.database import Base
@@ -98,7 +98,9 @@ class Chat(Base):
   # agent_settings_json because that blob is snapshotted/mirrored as SDK
   # runtime configuration; mixing this policy into it can skip first-send
   # model snapshots or overwrite the owner's global model defaults.
-  auto_resume_on_limit = Column(Boolean, nullable=False, default=False)
+  auto_resume_on_limit = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
   agent_id = Column(String(64), nullable=True, default=None)

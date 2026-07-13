@@ -41,6 +41,40 @@ def test_global_settings_do_not_expose_chat_auto_resume(client, auth):
   assert "auto_resume_on_limit" not in SettingsUpdate.model_fields
 
 
+def test_global_settings_reject_stale_auto_resume_payload(client, auth):
+  """A cached pre-removal client must not receive a false success."""
+  res = client.post(
+    "/api/settings",
+    headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+
+  assert res.status_code == 422
+  assert res.json()["detail"][0]["type"] == "extra_forbidden"
+
+
+def test_boot_removes_stale_global_auto_resume_setting():
+  """A deploy cleans the rollback hazard before accepting requests."""
+  import json
+  import os
+  from pathlib import Path
+
+  from fastapi.testclient import TestClient
+  from app.main import app
+
+  path = Path(os.environ["DATA_DIR"]) / "shared" / "agent-settings.json"
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(json.dumps({
+    "auto_resume_on_limit": True,
+    "model": "claude-opus-4-7",
+  }))
+
+  with TestClient(app):
+    pass
+
+  assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
+
+
 def test_save_and_check_gemini_key(client, db, auth):
   """POST /api/settings saves the key encrypted; GET reflects configured."""
   res = client.post(

@@ -75,6 +75,10 @@ export default function ComposerPopover({
   // flag with a `messages.some(m => m.role === 'assistant')`
   // check and passes the result down.
   hasAssistantTurns,
+  autoResumeEnabled,
+  autoResumeSaving,
+  autoResumeError,
+  onAutoResumeChange,
   onCompactionStored,
   onOpenInspector,
 }) {
@@ -181,7 +185,7 @@ export default function ComposerPopover({
         <Plus width={26} height={26} />
       </button>
       {open && (
-        <div className="composer-popover" role="dialog">
+        <div className="composer-popover" role="dialog" aria-label="Chat options">
           <div className="composer-popover__section">
             <button
               type="button"
@@ -208,6 +212,10 @@ export default function ComposerPopover({
                 provider={chatInfo.provider}
                 effective={chatInfo.effective}
                 hasAssistantTurns={hasAssistantTurns}
+                autoResumeEnabled={autoResumeEnabled}
+                autoResumeSaving={autoResumeSaving}
+                autoResumeError={autoResumeError}
+                onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
                 onCompactionStored={onCompactionStored}
                 reqIdRef={reqIdRef}
