@@ -137,6 +137,12 @@ services:
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
       - MOBIUS_BUILD_INFO_PATH=/workspace/.test-build-info-does-not-exist.json
+      # Worktrees can retain __pycache__ files first compiled at the old /app
+      # mount.  Their embedded filenames and, in timestamp/size collisions,
+      # bytecode can then come from a different checkout.  Use a fresh cache
+      # root per throwaway pytest container so the coherent /workspace source
+      # is also what Python compiles and executes.
+      - PYTHONPYCACHEPREFIX=/tmp/pytest-pycache
       # This may be a linked git worktree whose .git file points to a host-only
       # common dir. Tests create and query explicit temporary repos; prevent an
       # unrelated `git ls-remote` from failing while discovering the broken
