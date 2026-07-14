@@ -911,6 +911,9 @@ chown mobius:mobius /data/.gitignore 2>/dev/null || true
 # does not try to treat them as submodules, while the installer/update path can
 # still keep each manifest-installed app's upstream/main history across
 # container restarts.
+# Contribution checkouts under /data/contrib and legacy /data/contributions are
+# intentional durable repos too: prepared review cards point at their exact
+# commits and the approved Send path re-verifies that history before pushing.
 #
 # The .pre-clone.<ts> / .crashloop-prev.<ts> quarantines are also preserved
 # WHOLE (including their .git): they hold the agent's migrated-aside platform
@@ -920,6 +923,8 @@ find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   -type d -name '.git' \
   ! -regex '/data/apps/[^/]+/\.git' \
   ! -regex '/data/platform/\.git' \
+  ! -path '/data/contrib/*' \
+  ! -path '/data/contributions/*' \
   ! -regex '/data/platform\.pre-clone\..*' \
   ! -regex '/data/platform\.crashloop-prev\..*' \
   -prune -exec rm -rf {} + 2>/dev/null || true
