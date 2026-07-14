@@ -21,9 +21,10 @@
  * 1px borders, sentence-case titles, the shared .settings tokens.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api } from '../../api/client.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 import {
   fileStatusLabel,
   shortSha,
@@ -45,6 +46,8 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [diffOpen, setDiffOpen] = useState(false)
+  const dialogRef = useRef(null)
+  const closeRef = useRef(null)
 
   const loadPreview = useCallback(async () => {
     setLoading(true)
@@ -62,19 +65,17 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
 
   useEffect(() => { loadPreview() }, [loadPreview])
 
-  // Escape closes, but never mid-apply — an apply leads to a restart, so we
-  // don't want a stray keypress to abandon the sheet while it's in flight.
-  useEffect(() => {
-    const onKey = (event) => {
-      if (event.key === 'Escape' && !applying) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [applying, onClose])
-
   const requestClose = useCallback(() => {
     if (!applying) onClose()
   }, [applying, onClose])
+
+  // Escape and backdrop dismissal remain disabled while an update is applying.
+  useDialogFocus({
+    containerRef: dialogRef,
+    initialFocusRef: closeRef,
+    onClose: requestClose,
+    closeOnEscape: !applying,
+  })
 
   const handleApply = useCallback(async () => {
     const ok = await onApply()
@@ -99,15 +100,21 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   return (
     <div
       className="urm__overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="urm-title"
+      role="presentation"
       onClick={requestClose}
     >
-      <div className="urm" onClick={(event) => event.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="urm"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="urm-title"
+        onClick={(event) => event.stopPropagation()}
+      >
         <div className="urm__head">
           <h2 id="urm-title" className="urm__title">Review update</h2>
           <button
+            ref={closeRef}
             type="button"
             className="urm__close"
             onClick={requestClose}

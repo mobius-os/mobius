@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import warnings as _warnings_mod
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -46,8 +47,28 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
+from app.app_capabilities import contract_and_digest
+from app.app_source_check import check_app_source
 from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
+from app.manifest_contract import (
+  ENTRY_MAX_BYTES as _CONTRACT_ENTRY_MAX_BYTES,
+  ICON_MAX_BYTES as _CONTRACT_ICON_MAX_BYTES,
+  MANIFEST_MAX_BYTES as _CONTRACT_MANIFEST_MAX_BYTES,
+  SEED_MAX_BYTES as _CONTRACT_SEED_MAX_BYTES,
+  SEEDS_COUNT_MAX as _CONTRACT_SEEDS_COUNT_MAX,
+  SEEDS_TOTAL_MAX as _CONTRACT_SEEDS_TOTAL_MAX,
+  SKILL_MAX_BYTES as _CONTRACT_SKILL_MAX_BYTES,
+  SOURCE_FILES_TOTAL_MAX as _CONTRACT_SOURCE_FILES_TOTAL_MAX,
+  STATIC_ASSET_MAX_BYTES as _CONTRACT_STATIC_ASSET_MAX_BYTES,
+  STATIC_ASSETS_COUNT_MAX as _CONTRACT_STATIC_ASSETS_COUNT_MAX,
+  STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
+  SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
+  ManifestContractError,
+  static_asset_entries,
+  validate_manifest_contract,
+  validate_storage_destination,
+)
 # Keep the underscore alias: install._http_get calls _validate_url_safe, and
 # the install tests patch `app.install._validate_url_safe`. The canonical
 # validator now lives in net_utils (shared with routes/proxy.py) — see
@@ -73,15 +94,15 @@ log = logging.getLogger("mobius.install")
 
 # Manifest fetch cap. A legitimate manifest is < 4 KB. The cap is
 # the safety net against malicious URLs streaming GB of data.
-_MANIFEST_MAX_BYTES = 64 * 1024
+_MANIFEST_MAX_BYTES = _CONTRACT_MANIFEST_MAX_BYTES
 
 # Entry JSX cap. Real apps run 5-50 KB; 1 MB is enough headroom for
 # anything reasonable while bounding worst-case install cost.
-_ENTRY_MAX_BYTES = 1024 * 1024
+_ENTRY_MAX_BYTES = _CONTRACT_ENTRY_MAX_BYTES
 
 # Seed file cap (per file). Storage seeds are prompts, default
 # configs, sample images — never huge.
-_SEED_MAX_BYTES = 4 * 1024 * 1024
+_SEED_MAX_BYTES = _CONTRACT_SEED_MAX_BYTES
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -131,43 +152,31 @@ def _compile_error_detail(app_name: str, exc: CompileError) -> str:
 # leaves the total unbounded (a manifest can list many seeds), so a small
 # manifest could still force large memory growth holding them all (Codex
 # review round-10 #6). These bound the count and the summed bytes.
-_SEEDS_COUNT_MAX = 64
-_SEEDS_TOTAL_MAX = 32 * 1024 * 1024
+_SEEDS_COUNT_MAX = _CONTRACT_SEEDS_COUNT_MAX
+_SEEDS_TOTAL_MAX = _CONTRACT_SEEDS_TOTAL_MAX
 
 # Static site assets declared by a manifest. These are for prebuilt apps that
 # need durable files below /data/apps/<slug>/static (served at /app-assets/...),
 # not one-off files dropped into the platform frontend.
-_STATIC_ASSET_MAX_BYTES = 16 * 1024 * 1024
-_STATIC_ASSETS_COUNT_MAX = 256
-_STATIC_ASSETS_TOTAL_MAX = 64 * 1024 * 1024
+_STATIC_ASSET_MAX_BYTES = _CONTRACT_STATIC_ASSET_MAX_BYTES
+_STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
+_STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_PENDING_UPDATE_DIR = "mobius-pending-update"
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
-# (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. Bounds
-# mirror the static-asset guards: cap the count here, cap the summed bytes at
-# fetch time. Each module reuses the entry cap per file.
-_SOURCE_FILES_COUNT_MAX = 50
-_SOURCE_FILES_TOTAL_MAX = 8 * 1024 * 1024
-
-# Install-managed path prefixes a `source_files` entry must never claim. These
-# are written/owned by other phases (static_assets under static/, the cron
-# scaffold's init-cron.sh, build output, the .bak snapshots, the integer-id
-# storage tree) — a manifest that listed one as a source file would have the
-# source-write loop fight the phase that owns it. Mirrors the app_git
-# `_GITIGNORE` set conceptually so the per-app git model and the installer agree
-# on what is hand-written source versus generated/managed artifact.
-_SOURCE_FILES_MANAGED_PREFIXES = (
-  "static/", "dist/", ".build/", "node_modules/",
-)
-_SOURCE_FILES_MANAGED_EXACT = frozenset((
-  "index.jsx", ".gitignore", "init-cron.sh", _STATIC_ASSETS_MANIFEST,
-))
+# (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. The shared
+# manifest contract caps the count; fetch additionally caps the summed bytes.
+_SOURCE_FILES_TOTAL_MAX = _CONTRACT_SOURCE_FILES_TOTAL_MAX
 
 # Shared skill files an app declares via manifest `skills`: each entry is a
 # root-level `source_files` basename the post-commit sync phase copies into
 # /data/shared/skills/. Small caps — skills are instruction prose, not data.
-_SKILLS_COUNT_MAX = 5
-_SKILL_MAX_BYTES = 256 * 1024
+_SKILL_MAX_BYTES = _CONTRACT_SKILL_MAX_BYTES
+
+# A system-prompt fragment is more privileged than a skill because it is read
+# every turn. It uses the same root-level markdown and byte-size contract.
+_SYSTEM_PROMPT_MAX_BYTES = _CONTRACT_SYSTEM_PROMPT_MAX_BYTES
 
 # Installer-owned ownership/provenance sidecar inside the skills dir. A
 # dotfile that is not `*.md`, so the skill loaders (the app-skills catalog
@@ -184,7 +193,7 @@ _MERGED_NON_SOURCE = frozenset((
 ))
 
 # Icon cap matches the icon-upload route's 12 MB ceiling.
-_ICON_MAX_BYTES = 12 * 1024 * 1024
+_ICON_MAX_BYTES = _CONTRACT_ICON_MAX_BYTES
 
 _HTTP_TIMEOUT = 15.0
 
@@ -200,347 +209,17 @@ _MAX_REDIRECTS = 5
 # `/data/apps/<slug>/` and doesn't accept the test's `/tmp/testdata`).
 CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
 
-# Cron field grammar: minute hour dom month dow, allowing the
-# standard wildcards / ranges / lists / step values. Deliberately
-# rejects every shell metacharacter — no `;`, no `$`, no backtick,
-# no quotes. Per-field count check below enforces 5 columns.
-_CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
-
-_REQUIRED_FIELDS = ("id", "name", "version", "description", "entry")
-
-# Slugs are also used as cron-script path components; init-cron-scaffold.sh
-# rejects anything outside this set, so reject at the boundary too.
-_SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
-
-
-def _validate_slug_field(value, field: str) -> None:
-  """Apply the manifest-id slug rules to `value`, raising HTTPException(400).
-
-  Both `id` and `previous_id` become a /data/apps/<slug> path component and a
-  cron-script argv, so they share one charset + shape contract. Factored out so
-  the two checks can't drift (and so a renamed app's old id is held to the same
-  bar its new id was held to when it first installed).
-  """
-  if not isinstance(value, str) or not value:
-    raise HTTPException(400, f"Manifest `{field}` must be a non-empty string.")
-  if any(ch not in _SLUG_OK for ch in value):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` {value!r} contains invalid chars "
-      "(allow a-z, 0-9, -, _).",
-    )
-  # Reject leading `-` / `_` to prevent the slug from being smuggled
-  # as an argv flag into init-cron-scaffold.sh (or any other tool we
-  # hand it to). The scaffold uses `$1` directly so this is defense-
-  # in-depth — the real concern is future callers that do use getopt.
-  if value[0] in "-_":
-    raise HTTPException(
-      400, f"Manifest `{field}` must not start with '-' or '_', got {value!r}",
-    )
-  # A purely-numeric id becomes the slug and source dir /data/apps/<id>,
-  # which collides with the numeric-id storage tree another app writes to
-  # (storage uses /data/apps/<integer app id>). Reserve bare integers for
-  # storage.
-  if value.isdigit():
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` {value!r} must not be purely numeric — bare "
-      "integers are reserved for the per-app storage path /data/apps/<id>.",
-    )
-
 
 def _validate_manifest(m: dict) -> None:
   """Raises HTTPException(400) with a precise message on any issue."""
-  missing = [k for k in _REQUIRED_FIELDS if not m.get(k)]
-  if missing:
-    raise HTTPException(
-      400,
-      f"Manifest is missing required fields: {', '.join(missing)}",
-    )
-  mid = m["id"]
-  _validate_slug_field(mid, "id")
-  # `previous_id` is the optional predecessor identity an app declares when it
-  # renames (or adopts a baked predecessor). It must pass the SAME slug rules as
-  # `id` and name a DIFFERENT app — pointing it at its own id is a no-op that
-  # would only confuse the rename migration below.
-  prev_id = m.get("previous_id")
-  if prev_id is not None:
-    _validate_slug_field(prev_id, "previous_id")
-    if prev_id == mid:
-      raise HTTPException(
-        400, "Manifest `previous_id` must differ from `id`.",
-      )
-  if not isinstance(m.get("name"), str):
-    raise HTTPException(400, "Manifest `name` must be a string.")
-  if not isinstance(m.get("entry"), str):
-    raise HTTPException(400, "Manifest `entry` must be a string.")
-  _validate_repo_relative_path(m["entry"], "entry")
-  if m.get("icon") is not None:
-    _validate_repo_relative_path(m["icon"], "icon")
-  perms = m.get("permissions", {})
-  if not isinstance(perms, dict):
-    raise HTTPException(400, "Manifest `permissions` must be an object.")
-  for key in ("cross_app_access", "share_with_apps"):
-    val = perms.get(key, "none")
-    if val not in ("none", "read", "write"):
-      raise HTTPException(
-        400,
-        f"Manifest `permissions.{key}` must be one of none/read/write.",
-      )
-  # chat_log_access has its own value space (the redaction tiers), not
-  # the storage read/write/none ladder. 'full' is reserved but the read
-  # API rejects it until a concrete consumer lands (design §2) — we
-  # accept it in the manifest so the column round-trips, and surface the
-  # "deferred" gap at request time rather than install time.
-  log_access = perms.get("chat_log_access", "none")
-  if log_access not in ("none", "summary", "full"):
-    raise HTTPException(
-      400,
-      "Manifest `permissions.chat_log_access` must be one of "
-      "none/summary/full.",
-    )
-  if "manage_apps" in perms and not isinstance(perms["manage_apps"], bool):
-    raise HTTPException(
-      400, "Manifest `permissions.manage_apps` must be a boolean.",
-    )
-  if "github_access" in perms and not isinstance(perms["github_access"], bool):
-    raise HTTPException(
-      400, "Manifest `permissions.github_access` must be a boolean.",
-    )
-  # Optional `offline` block — declares the app's offline contract.
-  # Schema only (P1-D): accepted, validated, and stored on the App row as JSON;
-  # no store badge built yet. The block is informational for the SW/agent but
-  # shapes no server-side enforcement — design philosophy §4 ("code empowers
-  # the agent; it does not police it").
-  _validate_manifest_offline(m.get("offline"))
-  seeds = m.get("storage_seeds", {})
-  if seeds is not None and not isinstance(seeds, dict):
-    raise HTTPException(400, "Manifest `storage_seeds` must be an object.")
-  for sub, value in (seeds or {}).items():
-    if not isinstance(sub, str) or not sub:
-      raise HTTPException(400, "Manifest `storage_seeds` keys must be paths.")
-    if isinstance(value, str):
-      _validate_repo_relative_path(value, f"storage_seeds.{sub}")
-  static_assets = m.get("static_assets", {})
-  if static_assets is not None and not isinstance(static_assets, (dict, list)):
-    raise HTTPException(
-      400, "Manifest `static_assets` must be an object or array.",
-    )
-  for dest, src in _static_asset_entries(static_assets).items():
-    _validate_repo_relative_path(dest, f"static_assets.{dest}")
-    _validate_repo_relative_path(src, f"static_assets.{dest}")
-  # Optional sibling modules a multi-file app imports from `index.jsx`. Each is
-  # a repo-relative path the installer fetches and writes next to the entry so
-  # esbuild can bundle the import graph. `entry` is declared separately and the
-  # managed `.gitignore` is never author-supplied, so both are rejected here.
-  source_files = m.get("source_files")
-  if source_files is not None:
-    if not isinstance(source_files, list):
-      raise HTTPException(400, "Manifest `source_files` must be an array.")
-    if len(source_files) > _SOURCE_FILES_COUNT_MAX:
-      raise HTTPException(
-        400,
-        "Manifest has too many source_files "
-        f"(max {_SOURCE_FILES_COUNT_MAX}).",
-      )
-    # The schedule job script is written to the source-dir root under its bare
-    # filename, so a source file naming it would collide with the job-write
-    # phase. Pull the declared job name here so the loop can reject that too.
-    job_sched = m.get("schedule")
-    declared_job = (
-      job_sched.get("job") if isinstance(job_sched, dict) else None
-    )
-    for i, rel in enumerate(source_files):
-      _validate_repo_relative_path(rel, f"source_files[{i}]")
-      # Reject any entry that collides with an install-managed path. `entry`
-      # (index.jsx) is declared separately, and the rest (.gitignore, the cron
-      # script, the static-asset manifest, the static_assets / build-output /
-      # storage trees, the declared job script) are written and owned by other
-      # install phases — a source file there would have the source-write loop
-      # fight the owning phase.
-      if (
-        rel in _SOURCE_FILES_MANAGED_EXACT
-        or rel == declared_job
-        or rel.endswith(".bak")
-        or rel[0].isdigit()
-        or any(rel.startswith(p) for p in _SOURCE_FILES_MANAGED_PREFIXES)
-      ):
-        raise HTTPException(
-          400,
-          f"Manifest `source_files[{i}]` {rel!r} collides with an "
-          "install-managed path (entry, .gitignore, static/, dist/, .build/, "
-          "node_modules/, the cron/job scripts, .bak snapshots, or the "
-          "numeric-id storage tree).",
-        )
-  # Shared skill files the app ships (`skills`). Shape only here; the
-  # subset-of-source_files rule is the existence guarantee — skill bytes ride
-  # the source tree on every install path (synthetic fetch, clone, clone
-  # fallback), so the sync phase can read them from the final on-disk tree.
-  # The size cap is enforced there too, where the final bytes are known.
-  skills = m.get("skills")
-  if skills is not None:
-    if not isinstance(skills, list):
-      raise HTTPException(400, "Manifest `skills` must be an array.")
-    if len(skills) > _SKILLS_COUNT_MAX:
-      raise HTTPException(
-        400, f"Manifest has too many skills (max {_SKILLS_COUNT_MAX}).",
-      )
-    root_sources = {
-      rel for rel in (source_files or [])
-      if isinstance(rel, str) and "/" not in rel
-    }
-    for i, rel in enumerate(skills):
-      if not isinstance(rel, str) or not rel.endswith(".md") or rel == ".md":
-        raise HTTPException(
-          400, f"Manifest `skills[{i}]` must be a `<name>.md` filename.",
-        )
-      if "/" in rel or "\\" in rel or ".." in rel or rel.startswith("."):
-        raise HTTPException(
-          400,
-          f"Manifest `skills[{i}]` {rel!r} must be a bare .md basename — "
-          "no directories, no traversal, no dotfiles (dotfiles in the "
-          "skills dir are installer-owned).",
-        )
-      if rel not in root_sources:
-        raise HTTPException(
-          400,
-          f"Manifest `skills[{i}]` {rel!r} must also be listed in "
-          "`source_files` as a root-level file — the installer reads skill "
-          "bytes from the installed source tree, so a skill that is not a "
-          "source file has nothing to install.",
-        )
-  sched = m.get("schedule")
-  if sched is not None:
-    if not isinstance(sched, dict):
-      raise HTTPException(400, "Manifest `schedule` must be an object.")
-    expr = sched.get("default")
-    if expr is not None:
-      _validate_cron_expr(expr)
-    job = sched.get("job")
-    if job is not None and (
-      not isinstance(job, str) or "/" in job or ".." in job
-    ):
-      raise HTTPException(
-        400,
-        "Manifest `schedule.job` must be a bare filename (no path "
-        "separators): cron registration and the run-job endpoint both use "
-        "only the basename, so a nested path would silently register/run a "
-        "different file than the manifest names.",
-      )
-    if job is not None:
-      _validate_repo_relative_path(job, "schedule.job")
-
-
-def _validate_manifest_offline(offline) -> None:
-  """Validate the optional `offline` block in a manifest.
-
-  Accepted shape:
-    {
-      "reads":     bool,              # app reads storage offline (optional)
-      "writes":    "queued" | "none", # write strategy (optional)
-      "execution": "full" | "partial" | "none", # compute capability (optional)
-      "precache":  [str, ...]         # extra repo-relative paths to precache (optional)
-    }
-
-  All keys are optional; an empty dict {} is valid. The block is stored as JSON
-  on the App row and forwarded in AppOut. It is informational — no field gates
-  server behaviour (the offline_capable flag on the App row is the runtime gate).
-  """
-  if offline is None:
-    return
-  if not isinstance(offline, dict):
-    raise HTTPException(400, "Manifest `offline` must be an object.")
-  if "reads" in offline and not isinstance(offline["reads"], bool):
-    raise HTTPException(400, "Manifest `offline.reads` must be a boolean.")
-  if "writes" in offline:
-    if offline["writes"] not in ("queued", "none"):
-      raise HTTPException(
-        400,
-        "Manifest `offline.writes` must be one of queued/none.",
-      )
-  if "execution" in offline:
-    if offline["execution"] not in ("full", "partial", "none"):
-      raise HTTPException(
-        400,
-        "Manifest `offline.execution` must be one of full/partial/none.",
-      )
-  precache = offline.get("precache")
-  if precache is not None:
-    if not isinstance(precache, list):
-      raise HTTPException(400, "Manifest `offline.precache` must be an array.")
-    for i, p in enumerate(precache):
-      _validate_repo_relative_path(p, f"offline.precache[{i}]")
-
-
-def _validate_repo_relative_path(path: str, field: str) -> None:
-  """Reject manifest asset paths that are not repo-relative.
-
-  The public schema says entry/icon/job/string storage seeds are paths within
-  the manifest repo. Enforcing that here keeps community-manifest mistakes as
-  clean 400s instead of fetching odd concatenated URLs or surfacing later 500s.
-
-  For `storage_seeds` the rejection also names the contract: a string value is
-  a path, a non-string is an inline JSON literal. Authors routinely reach for a
-  string to inline file content (HTML/CSS/JS), which trips this check on the
-  first scheme/fragment in the markup — a bare "must be a relative path" then
-  reads as a typo rather than the wrong shape. The hint teaches the fork.
-  """
-  seed_hint = (
-    " For storage_seeds, a string value is a repo-relative path that the"
-    " installer fetches, not inline content. To seed literal text, put it in"
-    " a repo file and point this key at that path; to store an inline JSON"
-    " value, use a non-string (object/array/number/bool/null)."
-  ) if field.startswith("storage_seeds.") else ""
-  if not isinstance(path, str) or not path:
-    raise HTTPException(
-      400, f"Manifest `{field}` must be a non-empty string.{seed_hint}"
-    )
-  parsed = urlparse(path)
-  if (
-    parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or
-    path.startswith("/") or "\\" in path
-  ):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` must be a relative path inside the app repo."
-      f"{seed_hint}",
-    )
-  parts = [unquote(part) for part in path.split("/")]
-  if any(part in ("", ".", "..") for part in parts):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` must not contain empty, '.', or '..' segments."
-      f"{seed_hint}",
-    )
-  if any("/" in part or "\\" in part for part in parts):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` must not contain encoded path separators."
-      f"{seed_hint}",
-    )
-
-
-def _validate_cron_expr(expr: str) -> None:
-  """5-field cron grammar, no shell metacharacters. Prevents the
-  schedule expression from being smuggled past the argv barrier into
-  whatever cron interpreter the scaffold installs it under."""
-  if not isinstance(expr, str):
-    raise HTTPException(400, "schedule.default must be a string.")
-  if not expr or expr[0] in "-":
-    raise HTTPException(
-      400, f"schedule.default must not be empty or start with '-': {expr!r}",
-    )
-  if not _CRON_FIELD_OK.match(expr):
-    raise HTTPException(
-      400,
-      f"schedule.default contains disallowed characters: {expr!r}. "
-      "Allowed: digits, *, /, ,, -, whitespace.",
-    )
-  if len(expr.split()) < 5:
-    raise HTTPException(
-      400,
-      f"schedule.default must have at least 5 cron fields, got {expr!r}",
-    )
+  try:
+    validate_manifest_contract(m)
+  except ManifestContractError as exc:
+    raise HTTPException(400, str(exc)) from exc
+  # The dependency-free shared contract above is the complete shape/path
+  # contract used by both installation and pre-publication validation. Keep the
+  # adapter here limited to translating its exception into the HTTP boundary.
+  return
 
 
 def _derive_raw_base(manifest_url: str) -> str:
@@ -793,7 +472,10 @@ async def _http_get(
     async with client.stream(
       "GET", pinned_url,
       headers={"Host": host_header},
-      extensions={"sni_hostname": sni_host.encode("ascii")},
+      # httpcore/anyio expect a hostname string here. Passing bytes worked with
+      # older httpx but now reaches idna2008_resolve(), which calls `.encode()`
+      # and crashes every real HTTPS install/update before the request is sent.
+      extensions={"sni_hostname": sni_host},
     ) as r:
       # Handle redirects + error statuses with the stream closed
       # quickly so we don't hold a connection while recursing.
@@ -875,27 +557,6 @@ def _seed_value_is_inline(value) -> bool:
   """`storage_seeds` values: a string is a repo-relative path; anything
   else (dict, list, bool, number) is an inline JSON literal."""
   return not isinstance(value, str)
-
-
-def _static_asset_entries(value) -> dict[str, str]:
-  """Normalize manifest.static_assets into dest -> source repo paths."""
-  if not value:
-    return {}
-  if isinstance(value, list):
-    return {path: path for path in value}
-  if isinstance(value, dict):
-    entries: dict[str, str] = {}
-    for dest, src in value.items():
-      if not isinstance(dest, str) or not isinstance(src, str):
-        raise HTTPException(
-          400,
-          "Manifest `static_assets` entries must map paths to paths.",
-        )
-      entries[dest] = src
-    return entries
-  raise HTTPException(
-    400, "Manifest `static_assets` must be an object or array.",
-  )
 
 
 def _assert_within(root: Path, target: Path, field: str) -> None:
@@ -1115,6 +776,162 @@ def _write_static_assets(
     )
 
 
+def stage_pending_conflict_update(
+  source_dir: str | Path,
+  *,
+  app_id: int,
+  upstream_commit: str,
+  manifest: dict,
+  raw_base: str,
+  capability_digest: str,
+  candidate_digest: str,
+) -> None:
+  """Persist everything the watcher needs to finish a resolved update.
+
+  A conflict deliberately returns before install materialization. The resolver
+  may run minutes later (or after a restart), so its exact identity must
+  outlive the request. The digest binds every fetched source/static/icon/seed
+  byte; replay refetches and refuses to promote if any byte moved. The receipt
+  lives under ``.git`` and is replaced atomically, so a restart sees either the
+  previous complete candidate or the new complete candidate, never a gap.
+  """
+  repo = Path(source_dir)
+  git_dir = repo / ".git"
+  target = git_dir / _PENDING_UPDATE_DIR
+  if target.is_symlink():
+    raise ValueError("pending update path must not be a symlink")
+  target.mkdir(parents=True, exist_ok=True)
+  atomic_write(target / "receipt.json", json.dumps({
+    "schema": 1,
+    "app_id": app_id,
+    "upstream_commit": upstream_commit,
+    "manifest": manifest,
+    "raw_base": raw_base,
+    "capability_digest": capability_digest,
+    "candidate_digest": candidate_digest,
+  }, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def read_pending_conflict_update_receipt(
+  source_dir: str | Path, *, app_id: int, upstream_commit: str | None,
+) -> dict | None:
+  """Read validated pending metadata without loading potentially large assets."""
+  root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
+  receipt_path = root / "receipt.json"
+  if root.is_symlink() or receipt_path.is_symlink():
+    return None
+  try:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return None
+  if (
+    not isinstance(receipt, dict)
+    or receipt.get("schema") != 1
+    or receipt.get("app_id") != app_id
+    or not upstream_commit
+    or receipt.get("upstream_commit") != upstream_commit
+    or not isinstance(receipt.get("manifest"), dict)
+    or not isinstance(receipt.get("raw_base"), str)
+    or not isinstance(receipt.get("capability_digest"), str)
+    or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
+  ):
+    return None
+  return receipt
+
+
+def _install_candidate_digest(
+  *,
+  manifest: dict,
+  raw_base: str,
+  entry_bytes: bytes,
+  icon_processed: bytes | None,
+  bundled_job: bytes | None,
+  static_assets: dict[str, bytes],
+  source_files: dict[str, bytes],
+  seeds: dict[str, bytes],
+) -> str:
+  """Bind a deferred conflict resolution to the exact fetched candidate.
+
+  A resolver can finish long after the first install request. Its replay may
+  fetch through a moving branch URL, so manifest/version equality alone is not
+  enough: publishers can replace static, seed, icon, or source bytes without a
+  version bump. Length-prefixed fields make this digest unambiguous while
+  streaming large assets instead of base64-encoding them into the receipt.
+  """
+  digest = hashlib.sha256()
+
+  def add(label: str, value: bytes) -> None:
+    label_bytes = label.encode("utf-8")
+    digest.update(len(label_bytes).to_bytes(4, "big"))
+    digest.update(label_bytes)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+  add(
+    "manifest",
+    json.dumps(
+      manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"),
+  )
+  add("raw_base", raw_base.encode("utf-8"))
+  add("entry", entry_bytes)
+  add("icon-present", b"1" if icon_processed is not None else b"0")
+  if icon_processed is not None:
+    add("icon", icon_processed)
+  add("job-present", b"1" if bundled_job is not None else b"0")
+  if bundled_job is not None:
+    add("job", bundled_job)
+  for group, values in (
+    ("source", source_files),
+    ("static", static_assets),
+    ("seed", seeds),
+  ):
+    for rel in sorted(values):
+      add(f"{group}-path", rel.encode("utf-8"))
+      add(f"{group}-bytes", values[rel])
+  return digest.hexdigest()
+
+
+def _source_review_digest(
+  *,
+  manifest: dict,
+  entry_bytes: bytes,
+  bundled_job: bytes | None,
+  source_files: dict[str, bytes],
+) -> str:
+  """Bind an owner-reviewed diff to the manifest and executable source bytes."""
+  digest = hashlib.sha256()
+
+  def add(label: str, value: bytes) -> None:
+    label_bytes = label.encode("utf-8")
+    digest.update(len(label_bytes).to_bytes(4, "big"))
+    digest.update(label_bytes)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+  add(
+    "manifest",
+    json.dumps(
+      manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"),
+  )
+  add("entry", entry_bytes)
+  add("job-present", b"1" if bundled_job is not None else b"0")
+  if bundled_job is not None:
+    add("job", bundled_job)
+  for rel in sorted(source_files):
+    add("source-path", rel.encode("utf-8"))
+    add("source-bytes", source_files[rel])
+  return digest.hexdigest()
+
+
+def clear_pending_conflict_update(source_dir: str | Path) -> None:
+  shutil.rmtree(
+    Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,
+    ignore_errors=True,
+  )
+
+
 def _process_icon(raw: bytes) -> bytes:
   """PIL pipeline matches routes/apps.py:update_icon — center-square,
   resize-to-fit, preserve alpha, re-encode as PNG.
@@ -1177,10 +994,11 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
                    app_id: int | None = None) -> None:
   """Runs init-cron-scaffold.sh to install the crontab entry.
 
-  The scaffold script writes init-cron.sh + installs the crontab entry
-  AND restores it on the next container restart by replaying every
-  /data/apps/*/init-cron.sh from the entrypoint. Idempotent — calling
-  it for an unchanged (slug, schedule, job) is a no-op.
+  The scaffold writes both the durable ``init-cron.sh`` declaration and the
+  live crontab entry. On restart, lifespan parses that declaration and rewrites
+  it through the supervised runner; app-owned shell is never executed merely
+  because the container booted. Calling the scaffold for an unchanged
+  ``(slug, schedule, job)`` is idempotent.
 
   The job script itself is written earlier, in the transactional source
   write (so a locally edited job survives an update via the per-app git
@@ -1216,6 +1034,31 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
     )
 
 
+def _reconcile_cron_after_install_rollback() -> None:
+  """Best-effort safe restoration after an adopted source-dir move fails.
+
+  The prior implementation executed the restored app-owned ``init-cron.sh``
+  directly. That made an install failure a supervision bypass. At this point
+  the DB transaction and source-dir rename have already been rolled back, so
+  the normal reconciler can rediscover the live row, parse its declaration,
+  and register the common runner without trusting the shell body.
+  """
+  try:
+    from app.database import SessionLocal
+    from app.routes.apps import reconcile_app_cron_supervision
+    cron_db = SessionLocal()
+    try:
+      _count, warnings = reconcile_app_cron_supervision(cron_db)
+    finally:
+      cron_db.close()
+    for warning in warnings:
+      log.warning("install rollback cron supervision skipped: %s", warning)
+  except Exception as exc:
+    # Rollback is already a best-effort failure path. Log without masking the
+    # original install exception that caused it.
+    log.warning("install rollback cron reconciliation failed: %s", exc)
+
+
 def _crontab_command_path(line: str) -> str:
   """The executable path a crontab job line runs, or "" for a line that
   runs no job (blank, comment, or a `NAME=value` env/setting line).
@@ -1239,7 +1082,12 @@ def _crontab_command_path(line: str) -> str:
   toks = cmd.split()
   while toks and "=" in toks[0] and not toks[0].startswith("/"):
     toks.pop(0)
-  return toks[0] if toks else ""
+  if not toks:
+    return ""
+  for i, token in enumerate(toks):
+    if token.endswith("/app-job-runner.py") and len(toks) > i + 2:
+      return toks[i + 2]
+  return toks[0]
 
 
 def _crontab_without_app(current: str, source_dir: Path) -> str | None:
@@ -1308,12 +1156,12 @@ def _unregister_cron(source_dir: Path) -> None:
 
 def _drop_app_cron(source_dir: Path) -> None:
   """Converge an updated app's cron to "no schedule": drop its live crontab
-  entry AND delete the replayable init-cron.sh under `source_dir`.
+  entry AND delete the durable init-cron.sh declaration under `source_dir`.
 
   The update path is otherwise add-only, so an app that migrates from a
   recurring schedule (v1) to on-demand-only (v2, no `schedule.default`) would
-  leave the v1 crontab line firing and its init-cron.sh re-installed by the
-  entrypoint boot replay forever (card 099). Removing the script — not just
+  leave the v1 crontab line firing and its init-cron.sh discovered by boot
+  reconciliation forever (card 099). Removing the script — not just
   tombstoning it like the soft-delete path — is correct here because an
   in-place update has no recover step to re-arm from; the next update that
   re-declares a schedule rewrites init-cron.sh from scratch via the scaffold.
@@ -1336,11 +1184,10 @@ def _storage_path(app_id: int, sub: str) -> Path:
   # Path validation mirrors routes/storage.py — keep characters safe
   # against traversal. The store mini-app is the primary caller, but
   # community manifests might be careless / hostile.
-  if ".." in sub or sub.startswith("/"):
-    raise HTTPException(400, f"Invalid storage path: {sub}")
-  for ch in sub:
-    if not (ch.isalnum() or ch in "._-/"):
-      raise HTTPException(400, f"Invalid storage path char: {sub}")
+  try:
+    validate_storage_destination(sub)
+  except ManifestContractError as exc:
+    raise HTTPException(400, str(exc)) from exc
   return data_dir / "apps" / str(app_id) / sub
 
 
@@ -1429,8 +1276,6 @@ async def _sync_app_skills(
   silently take over another live app's skill file.
   """
   skills = list(dict.fromkeys(manifest.get("skills") or []))
-  if not skills:
-    return
   if not app.source_dir:
     # A legacy no-source_dir app has no on-disk tree to read skill bytes
     # from — Path("") / rel would resolve against the server's CWD.
@@ -1453,6 +1298,26 @@ async def _sync_app_skills(
         # modified-or-unrecorded case — snapshot-then-overwrite — which is
         # the safe direction: work is preserved, ownership is re-earned.
         warnings.append("skills: ownership sidecar unreadable — rebuilding")
+    desired = set(skills)
+    # An update that drops a previously-owned skill must deactivate it just as
+    # surely as an uninstall. Preserve the exact bytes in a retired archive,
+    # then release the basename for another app.
+    for rel, rec in list(records.items()):
+      if not isinstance(rec, dict) or rec.get("app_id") != app.id:
+        continue
+      if rel in desired:
+        continue
+      target = skills_dir / rel
+      retired = (
+        skills_dir / ".inactive" / str(app.id) / "retired" / rel
+      )
+      inactive = skills_dir / ".inactive" / str(app.id) / rel
+      source = target if target.is_file() else inactive
+      if source.is_file():
+        retired.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, retired)
+      records.pop(rel, None)
+      warnings.append(f"skill {rel}: retired by update")
     for rel in skills:
       try:
         content = (source_dir / rel).read_bytes()
@@ -1469,20 +1334,26 @@ async def _sync_app_skills(
       rec = records.get(rel)
       owner_id = rec.get("app_id") if isinstance(rec, dict) else None
       if owner_id is not None and owner_id != app.id:
-        owner = (
-          db.query(models.App)
-          .filter(
-            models.App.id == owner_id, models.App.deleted_at.is_(None),
-          )
-          .first()
-        )
+        owner = db.query(models.App).filter(models.App.id == owner_id).first()
         if owner is not None:
           warnings.append(
             f"skill {rel}: owned by app {owner.slug} — skipped"
           )
           continue
-        # Recorded owner is gone (uninstalled past TTL or tombstoned) —
-        # this app takes the file over through the normal cases below.
+        # The recorded owner was hard-purged after its recovery window, so the
+        # basename is no longer reserved and this app may take it over.
+      if (
+        isinstance(rec, dict)
+        and owner_id == app.id
+        and rec.get("active", True) is False
+      ):
+        inactive = skills_dir / ".inactive" / str(app.id) / rel
+        if inactive.is_file():
+          retired = (
+            skills_dir / ".inactive" / str(app.id) / "retired" / rel
+          )
+          retired.parent.mkdir(parents=True, exist_ok=True)
+          os.replace(inactive, retired)
       target = skills_dir / rel
       recorded_sha = rec.get("sha256") if isinstance(rec, dict) else None
       if target.exists():
@@ -1519,6 +1390,7 @@ async def _sync_app_skills(
         "manifest_url": app.manifest_url,
         "sha256": hashlib.sha256(content).hexdigest(),
         "installed_at": datetime.now(UTC).isoformat(),
+        "active": True,
       }
       # Persist provenance immediately after each file lands: a crash
       # between files must never leave an installed skill without its
@@ -1529,6 +1401,327 @@ async def _sync_app_skills(
         sidecar_path,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+    # Persist a drop-only reconciliation too (the per-file writes above cover
+    # every non-empty desired set).
+    if not skills:
+      skills_dir.mkdir(parents=True, exist_ok=True)
+      atomic_write(
+        sidecar_path,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+
+
+def _read_app_skill_records(skills_dir: Path) -> tuple[Path, dict]:
+  sidecar = skills_dir / _APP_SKILLS_SIDECAR
+  try:
+    value = json.loads(sidecar.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    value = {}
+  return sidecar, value if isinstance(value, dict) else {}
+
+
+async def deactivate_app_skills(app_id: int) -> list[str]:
+  """Remove one app's skills from discovery while preserving exact bytes."""
+  warnings: list[str] = []
+  skills_dir = Path(get_settings().data_dir) / "shared" / "skills"
+  async with fs_locks.shared_skills_lock():
+    sidecar, records = _read_app_skill_records(skills_dir)
+    changed = False
+    for rel, rec in records.items():
+      if not isinstance(rec, dict) or rec.get("app_id") != app_id:
+        continue
+      if Path(rel).name != rel or not rel.endswith(".md"):
+        warnings.append(f"skill record {rel!r}: invalid basename")
+        continue
+      target = skills_dir / rel
+      inactive = skills_dir / ".inactive" / str(app_id) / rel
+      try:
+        if target.is_file():
+          inactive.parent.mkdir(parents=True, exist_ok=True)
+          os.replace(target, inactive)
+        if inactive.is_file():
+          # Keep ``sha256`` as the last app-supplied baseline. The inactive
+          # digest records the exact preserved bytes separately; otherwise an
+          # owner-edited skill would become its own new baseline and a later
+          # app update could overwrite it without taking the normal snapshot.
+          rec["inactive_sha256"] = hashlib.sha256(
+            inactive.read_bytes()
+          ).hexdigest()
+          rec["active"] = False
+          rec["inactive_path"] = str(inactive.relative_to(skills_dir))
+          rec["deactivated_at"] = datetime.now(UTC).isoformat()
+          changed = True
+      except OSError as exc:
+        warnings.append(f"skill {rel}: could not deactivate ({exc})")
+    if changed:
+      atomic_write(
+        sidecar,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+  return warnings
+
+
+async def restore_app_skills(app_id: int) -> list[str]:
+  """Restore exact tombstoned skill bytes and their discovery records."""
+  warnings: list[str] = []
+  skills_dir = Path(get_settings().data_dir) / "shared" / "skills"
+  async with fs_locks.shared_skills_lock():
+    sidecar, records = _read_app_skill_records(skills_dir)
+    changed = False
+    for rel, rec in records.items():
+      if (
+        not isinstance(rec, dict)
+        or rec.get("app_id") != app_id
+        or rec.get("active", True) is not False
+      ):
+        continue
+      inactive = skills_dir / ".inactive" / str(app_id) / rel
+      target = skills_dir / rel
+      if not inactive.is_file():
+        warnings.append(f"skill {rel}: preserved bytes are missing")
+        continue
+      try:
+        if target.exists():
+          if target.read_bytes() != inactive.read_bytes():
+            conflict = (
+              skills_dir / ".inactive" / str(app_id) / "conflicts" / rel
+            )
+            conflict.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, conflict)
+            warnings.append(
+              f"skill {rel}: preserved a file created while app was inactive"
+            )
+          else:
+            target.unlink()
+        os.replace(inactive, target)
+        rec["active"] = True
+        rec.pop("inactive_path", None)
+        rec.pop("inactive_sha256", None)
+        rec["restored_at"] = datetime.now(UTC).isoformat()
+        changed = True
+      except OSError as exc:
+        warnings.append(f"skill {rel}: could not restore ({exc})")
+    if changed:
+      atomic_write(
+        sidecar,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+  return warnings
+
+
+async def purge_app_skills(app_id: int) -> None:
+  """Release records and inactive archives after the recovery TTL expires."""
+  skills_dir = Path(get_settings().data_dir) / "shared" / "skills"
+  async with fs_locks.shared_skills_lock():
+    sidecar, records = _read_app_skill_records(skills_dir)
+    for rel, rec in list(records.items()):
+      if isinstance(rec, dict) and rec.get("app_id") == app_id:
+        target = skills_dir / rel
+        if rec.get("active", True) and target.is_file():
+          try:
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            if digest == rec.get("sha256"):
+              target.unlink()
+          except OSError:
+            pass
+        records.pop(rel, None)
+    shutil.rmtree(
+      skills_dir / ".inactive" / str(app_id), ignore_errors=True,
+    )
+    atomic_write(
+      sidecar,
+      json.dumps(records, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def _check_source_completeness(
+  *,
+  app_name: str,
+  manifest: dict,
+  source_tree: dict[str, bytes],
+  entry_key: str,
+  static_dests: list[str],
+  job_name: str | None,
+) -> None:
+  """Assert the source tree the manifest declares is self-contained.
+
+  Runs the static ``app_source_check`` against the tree about to be compiled:
+  every relative sibling import reachable from the entry (and the job) must be
+  declared in ``source_files`` (an incomplete list installs fine from a git
+  clone but breaks every synthetic-fetch install), and no shipped module may
+  reference an off-origin http(s) host the ``connect-src 'self'`` CSP blocks.
+
+  The completeness misses are ERRORS and raise ``HTTPException(422)`` — caught
+  by the install's ``except HTTPException`` handler, which rolls the source
+  writes back exactly like a compile failure. External-host references are
+  logged as warnings (runtime quality, not install-breaking).
+
+  The caller invokes this only on the synthetic-fetch path, where
+  ``source_tree`` IS the whole declared tree (entry + every fetched
+  ``source_files`` entry + the job script), so it is the sole source of bytes.
+  Static-asset dests are recorded below their installer-owned ``static/``
+  directory so source checks see the exact path compilation sees. For example,
+  logical destination ``logo.js`` is importable as ``./static/logo.js``.
+  """
+  files: dict[str, str] = {
+    rel: data.decode("utf-8", "replace") for rel, data in source_tree.items()
+  }
+  static_source_paths = [f"static/{dest}" for dest in static_dests]
+  for path in static_source_paths:
+    files.setdefault(path, "")
+
+  result = check_app_source(
+    files,
+    entry=entry_key,
+    source_files=manifest.get("source_files") or [],
+    job=job_name,
+    static_assets=static_source_paths,
+  )
+  for warning in result.warnings:
+    log.warning(
+      "install: %s external-host reference in %s — %s",
+      app_name, warning.path, warning.detail,
+    )
+  if result.errors:
+    detail = "; ".join(f"{e.path}: {e.detail}" for e in result.errors)
+    raise HTTPException(
+      422,
+      f"{app_name} has an incomplete `source_files` manifest — {detail}",
+    )
+
+
+@dataclass
+class FetchedUpstream:
+  """The manifest + source bytes install would record, fetched read-only.
+
+  `source_files` and `job_bytes` mirror what `install_from_manifest` records on
+  the per-app `upstream` branch — canonical ``index.jsx``, its declared sibling
+  modules, and the schedule job script."""
+  manifest: dict
+  entry_bytes: bytes
+  source_files: dict[str, bytes]
+  job_name: str | None
+  job_bytes: bytes | None
+
+
+async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
+  """Fetch a manifest and its source files read-only — no install, DB, or git.
+
+  The read-only twin of `install_from_manifest`'s fetch phase: GET the manifest
+  at `manifest_url`, then the entry JSX, every declared `source_files` sibling,
+  and the schedule job script — exactly the files install records on the
+  per-app `upstream` branch. Reuses the same `_http_get` (SSRF-validated,
+  size-capped, manual-redirect) and `_validate_manifest` that install uses, so
+  the fetched bytes match install's byte-for-byte and a later content compare
+  against the recorded upstream tree is apples-to-apples.
+
+  Storage seeds, static assets, and the icon are deliberately NOT fetched: none
+  of them are tracked source (seeds land in the id-keyed storage tree, static
+  assets under gitignored `static/`, the icon as a processed PNG), so they never
+  appear on the `upstream` branch an update-check compares against.
+
+  Raises HTTPException on any fetch or validation failure. The caller decides
+  whether that is a hard error or a degrade-to-unknown."""
+  # follow_redirects=False — _http_get walks the chain manually so every hop is
+  # re-validated against SSRF, matching install_from_manifest's client setup.
+  async with httpx.AsyncClient(
+    timeout=_HTTP_TIMEOUT, follow_redirects=False,
+  ) as cli:
+    raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
+    try:
+      manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+      raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
+    _validate_manifest(manifest)
+    raw_base = _normalize_raw_base(_derive_raw_base(manifest_url))
+
+    entry_bytes = await _http_get(
+      cli, raw_base + manifest["entry"], _ENTRY_MAX_BYTES,
+    )
+
+    source_files: dict[str, bytes] = {}
+    source_files_total = 0
+    for rel in manifest.get("source_files") or []:
+      data = await _http_get(cli, raw_base + rel, _ENTRY_MAX_BYTES)
+      source_files_total += len(data)
+      if source_files_total > _SOURCE_FILES_TOTAL_MAX:
+        raise HTTPException(
+          400,
+          f"Manifest source_files exceed {_SOURCE_FILES_TOTAL_MAX} bytes total.",
+        )
+      source_files[rel] = data
+
+    sched = manifest.get("schedule")
+    job_name = sched.get("job") if isinstance(sched, dict) else None
+    job_bytes: bytes | None = None
+    if job_name:
+      job_bytes = await _http_get(cli, raw_base + job_name, _ENTRY_MAX_BYTES)
+
+  return FetchedUpstream(
+    manifest=manifest,
+    entry_bytes=entry_bytes,
+    source_files=source_files,
+    job_name=job_name,
+    job_bytes=job_bytes,
+  )
+
+
+async def _fetch_and_validate_manifest(
+  cli: httpx.AsyncClient,
+  *,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+) -> tuple[dict, str]:
+  """Load one manifest and return it with its normalized asset base.
+
+  Preview and install intentionally share this exact boundary.  The preview is
+  therefore not a second, weaker interpretation that can drift from what the
+  installer eventually applies.
+  """
+  if (manifest_url is None) == (manifest is None):
+    raise HTTPException(
+      400, "Provide exactly one of `manifest_url` or `manifest`.",
+    )
+  if manifest_url is not None:
+    raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
+    try:
+      loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+      raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
+    manifest = loaded
+    if raw_base is None:
+      raw_base = _derive_raw_base(manifest_url)
+  elif raw_base is None:
+    raise HTTPException(
+      400, "When passing inline `manifest`, also pass `raw_base`.",
+    )
+  if not isinstance(manifest, dict):
+    raise HTTPException(400, "Manifest root must be a JSON object.")
+
+  _validate_manifest(manifest)
+  return manifest, _normalize_raw_base(raw_base)
+
+
+async def preview_manifest_capabilities(
+  *,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+) -> tuple[dict, str, dict, str]:
+  """Return the validated manifest/base and its canonical review contract."""
+  async with httpx.AsyncClient(
+    timeout=_HTTP_TIMEOUT,
+    follow_redirects=False,
+  ) as cli:
+    loaded, normalized_base = await _fetch_and_validate_manifest(
+      cli,
+      manifest_url=manifest_url,
+      manifest=manifest,
+      raw_base=raw_base,
+    )
+  contract, digest = contract_and_digest(loaded)
+  return loaded, normalized_base, contract, digest
 
 
 async def install_from_manifest(
@@ -1537,6 +1730,11 @@ async def install_from_manifest(
   manifest: dict | None,
   raw_base: str | None,
   source: str = "url",
+  reviewed_capability_digest: str | None = None,
+  reviewed_source_digest: str | None = None,
+  expected_app_id: int | None = None,
+  expected_upstream_commit: str | None = None,
+  expected_candidate_digest: str | None = None,
 ) -> tuple[models.App, str, list[str], dict, list[str], str]:
   """Returns `(app, mode, warnings, manifest, conflict_paths, divergence)`.
 
@@ -1578,31 +1776,35 @@ async def install_from_manifest(
       we never catch + swallow anything that would land the DB or
       filesystem in a half state.
   """
-  if (manifest_url is None) == (manifest is None):
-    raise HTTPException(
-      400, "Provide exactly one of `manifest_url` or `manifest`.",
-    )
-
   # --- Phase 1: fetch + validate manifest -----------------------------
   # follow_redirects=False — _http_get walks the chain manually so
   # every hop runs through _validate_url_safe (a 302 to a private IP
   # would otherwise bypass our pre-flight check).
   async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False) as cli:
-    if manifest_url is not None:
-      raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
-      try:
-        manifest = json.loads(raw)
-      except json.JSONDecodeError as exc:
-        raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
-      if raw_base is None:
-        raw_base = _derive_raw_base(manifest_url)
-    elif raw_base is None:
+    manifest, raw_base = await _fetch_and_validate_manifest(
+      cli,
+      manifest_url=manifest_url,
+      manifest=manifest,
+      raw_base=raw_base,
+    )
+    capability_contract, fetched_capability_digest = contract_and_digest(manifest)
+    if (
+      reviewed_capability_digest is not None
+      and reviewed_capability_digest != fetched_capability_digest
+    ):
       raise HTTPException(
-        400, "When passing inline `manifest`, also pass `raw_base`.",
+        409,
+        {
+          "code": "capability_changed",
+          "message": (
+            "The app's capabilities changed after they were reviewed. "
+            "Review the current manifest and try again."
+          ),
+          "manifest": manifest,
+          "capability_contract": capability_contract,
+          "capability_digest": fetched_capability_digest,
+        },
       )
-
-    _validate_manifest(manifest)
-    raw_base = _normalize_raw_base(raw_base)
 
     # --- Phase 2: fetch entry JSX + bundled assets --------------------
     entry_bytes = await _http_get(
@@ -1633,7 +1835,7 @@ async def install_from_manifest(
 
     static_assets_fetched: dict[str, bytes] = {}
     static_assets_total = 0
-    for dest, src in _static_asset_entries(
+    for dest, src in static_asset_entries(
       manifest.get("static_assets") or {},
     ).items():
       if len(static_assets_fetched) >= _STATIC_ASSETS_COUNT_MAX:
@@ -1675,7 +1877,12 @@ async def install_from_manifest(
           f"Manifest has too many storage_seeds (max {_SEEDS_COUNT_MAX}).",
         )
       if _seed_value_is_inline(value):
-        data = json.dumps(value).encode("utf-8")
+        # Canonical bytes keep a deferred conflict receipt stable after its
+        # manifest is serialized/reloaded (JSON object key order is semantic-
+        # free and must not make an unchanged candidate look different).
+        data = json.dumps(
+          value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
       else:
         data = await _http_get(cli, raw_base + value, _SEED_MAX_BYTES)
       seeds_total += len(data)
@@ -1685,6 +1892,54 @@ async def install_from_manifest(
           f"Manifest storage_seeds exceed {_SEEDS_TOTAL_MAX} bytes total.",
         )
       seeds_fetched[sub] = data
+
+  candidate_digest = _install_candidate_digest(
+    manifest=manifest,
+    raw_base=raw_base,
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    bundled_job=bundled_job,
+    static_assets=static_assets_fetched,
+    source_files=source_files_fetched,
+    seeds=seeds_fetched,
+  )
+  source_review_digest = _source_review_digest(
+    manifest=manifest,
+    entry_bytes=entry_bytes,
+    bundled_job=bundled_job,
+    source_files=source_files_fetched,
+  )
+  if (
+    reviewed_source_digest is not None
+    and source_review_digest != reviewed_source_digest
+  ):
+    raise HTTPException(
+      409,
+      {
+        "code": "update_changed",
+        "message": (
+          "The app source changed after it was reviewed. "
+          "Refresh the update preview and try again."
+        ),
+      },
+    )
+  replay_fields = (
+    expected_app_id,
+    expected_upstream_commit,
+    expected_candidate_digest,
+  )
+  if any(value is not None for value in replay_fields) and not all(
+    value is not None for value in replay_fields
+  ):
+    raise RuntimeError("resolved update replay identity is incomplete")
+  if (
+    expected_candidate_digest is not None
+    and candidate_digest != expected_candidate_digest
+  ):
+    raise HTTPException(
+      409,
+      "The pending update's fetched artifacts changed; start the update again.",
+    )
 
   # --- Phase 3: decide install vs update -------------------------------
   # Match by manifest_url, NOT by slug. Slug is now a routing concern
@@ -1850,6 +2105,10 @@ async def install_from_manifest(
         existing = platform_row
         adopt_kind = "legacy-catalog"
   mode = "update" if existing else "install"
+  if expected_app_id is not None and (
+    existing is None or existing.id != expected_app_id
+  ):
+    raise HTTPException(409, "Pending update no longer matches this app.")
   legacy_platform_migration = adopt_kind == "legacy-platform"
   if (
     existing
@@ -1905,6 +2164,12 @@ async def install_from_manifest(
     "index.jsx": entry_bytes,
     **source_files_fetched,
   }
+  prompt_rel = manifest.get("system_prompt")
+  if prompt_rel and len(source_tree.get(prompt_rel, b"")) > _SYSTEM_PROMPT_MAX_BYTES:
+    raise HTTPException(
+      400,
+      f"Manifest system_prompt exceeds {_SYSTEM_PROMPT_MAX_BYTES} bytes.",
+    )
   if job_name and bundled_job is not None:
     source_tree[job_name] = bundled_job
   repo_ref = (
@@ -1916,12 +2181,9 @@ async def install_from_manifest(
   # phase consumes this explicit diff so local-only tracked siblings are not
   # mistaken for files the manifest intentionally removed.
   dropped_source_paths: set[str] = set()
-  # The `source_tree` key that carries the entry's bytes — and, on every path
-  # that writes or compiles from disk, the entry's on-disk name. Fetched/
-  # synthetic trees always key the entry as the root "index.jsx" they
-  # materialize (whatever the manifest calls it); a real origin-backed tree
-  # (cloned install or update) keys files by their repo names, so there the
-  # entry sits under manifest["entry"]. The clone branches below reassign it.
+  # One canonical entry identity across fetched and origin-backed trees. The
+  # editor and watcher use the same path, so compilation never branches on
+  # package provenance.
   entry_key = "index.jsx"
   # True once `source_tree` is the MERGED tree (a clean merge or forced
   # take-upstream): the post-write commit then replays the result on the
@@ -2032,20 +2294,12 @@ async def install_from_manifest(
               _unregister_cron(Path(old_source_dir))
               os.rename(old_source_dir, target_source_dir)
               moved = True
-              # Re-establish the predecessor's crontab at the restored old path
-              # if the move is rolled back, otherwise a later-phase failure
-              # leaves the source tree back at the old path but its cron entry
-              # gone until the next reboot. Rollback actions run in REVERSE
-              # append order, so this is appended BEFORE the move-reversal below
-              # to run AFTER the dir is back at old_source_dir. For a
-              # non-scheduled app (no init-cron.sh) it's a no-op.
-              rollback_actions.append(
-                lambda o=old_source_dir:
-                  subprocess.run(
-                    ["bash", str(Path(o) / "init-cron.sh")],
-                    timeout=10, check=False,
-                  ) if (Path(o) / "init-cron.sh").exists() else None
-              )
+              # Re-establish the predecessor's supervised crontab if the move
+              # rolls back. Actions run in reverse append order, so append the
+              # reconciler before the move reversal below: it runs only after
+              # the tree and rolled-back DB row point at the old source again.
+              # Never execute the app-owned durable declaration directly.
+              rollback_actions.append(_reconcile_cron_after_install_rollback)
               # Reverse the move on rollback so a later-phase failure doesn't
               # leave a half-renamed app. Registered before slug/source_dir are
               # re-stamped on the row, which roll back with the DB transaction.
@@ -2115,6 +2369,7 @@ async def install_from_manifest(
         chat_log_access=perms.get("chat_log_access", "none"),
         manage_apps=bool(perms.get("manage_apps", False)),
         github_access=bool(perms.get("github_access", False)),
+        filesystem_access=bool(perms.get("filesystem_access", False)),
         # The manifest's `offline_capable: true` opts the app into the
         # SW frame cache + the window.mobius.storage outbox. Without
         # this line every installed app defaulted to offline_capable=
@@ -2125,6 +2380,9 @@ async def install_from_manifest(
         embeds_agent=bool(manifest.get("embeds_agent", False)),
         # P1-D: persist the offline contract block (None when not declared).
         offline_contract=manifest.get("offline") or None,
+        system_prompt_file=manifest.get("system_prompt") or None,
+        system_app=bool(manifest.get("system_app", False)),
+        capability_contract=capability_contract,
       )
       db.add(app)
       db.flush()  # assign app.id without committing yet
@@ -2174,6 +2432,22 @@ async def install_from_manifest(
         )
         if merge_existing_source:
           prev_upstream_commit = app.upstream_commit
+          if (
+            expected_upstream_commit is not None
+            and prev_upstream_commit != expected_upstream_commit
+          ):
+            raise HTTPException(
+              409, "Pending update no longer matches the recorded upstream.",
+            )
+          restored_upstream = await asyncio.to_thread(
+            app_git.restore_upstream_ref,
+            git_source_dir, prev_upstream_commit,
+          )
+          if restored_upstream:
+            log.warning(
+              "install: restored %s upstream ref to DB-recorded commit %s",
+              git_source_dir, prev_upstream_commit,
+            )
           previous_upstream_paths = await asyncio.to_thread(
             _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
           )
@@ -2183,9 +2457,17 @@ async def install_from_manifest(
           # source corruption). The newer update supersedes the abandoned one
           # and re-merges against the latest upstream; the resolver chat is
           # deduped so this doesn't pile up chats.
-          await asyncio.to_thread(
-            app_git.abort_in_progress_merge, git_source_dir,
-          )
+          if expected_upstream_commit is not None:
+            if await asyncio.to_thread(
+              app_git.merge_in_progress, git_source_dir,
+            ):
+              raise HTTPException(
+                409, "Resolve and save every conflict before replaying update.",
+              )
+          else:
+            await asyncio.to_thread(
+              app_git.abort_in_progress_merge, git_source_dir,
+            )
           # Update of an app already on the git model. First capture any
           # uncommitted on-disk local edits onto `main` (the watcher may
           # not have committed the agent's latest save yet) so the
@@ -2217,7 +2499,18 @@ async def install_from_manifest(
               git_source_dir, prev_upstream_commit,
             )
           )
-          if repo_ref is not None and await asyncio.to_thread(
+          if expected_upstream_commit is not None:
+            current_upstream = await asyncio.to_thread(
+              app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+            )
+            if current_upstream != expected_upstream_commit:
+              raise HTTPException(
+                409, "Pending update upstream ref changed before replay.",
+              )
+            cloned_update = await asyncio.to_thread(
+              app_git.has_origin, git_source_dir,
+            )
+          elif repo_ref is not None and await asyncio.to_thread(
             app_git.has_origin, git_source_dir,
           ):
             _, ref = repo_ref
@@ -2226,17 +2519,18 @@ async def install_from_manifest(
                 app_git.fetch_upstream, git_source_dir, ref,
               )
               cloned_update = True
-              # Real origin trees key files by their repo names — the entry
-              # lives under the manifest's own name, not a synthetic root
-              # index.jsx.
-              entry_key = manifest["entry"]
             except Exception as exc:
               log.warning(
                 "install: fetch from origin at %s failed; falling back to "
                 "fetched source path — %r",
                 ref, exc,
               )
-          if not cloned_update:
+          if expected_upstream_commit is not None:
+            new_upstream_paths = await asyncio.to_thread(
+              _read_upstream_source_paths, git_source_dir,
+              app_git.UPSTREAM_BRANCH,
+            )
+          elif not cloned_update:
             await asyncio.to_thread(
               app_git.record_upstream,
               git_source_dir, source_tree, canonical_manifest_url, version,
@@ -2290,22 +2584,51 @@ async def install_from_manifest(
             if merge.status == "conflict":
               if force_core_store_update:
                 # Core App Store self-update: published upstream wins, keep the
-                # fetched `source_tree` and apply it like a fast-forward. The
-                # fetched tree keys its entry as the root index.jsx, so the
-                # entry key reverts with it (a cloned fetch above may have
-                # pointed it at the repo's own entry name).
+                # fetched `source_tree` and apply it like a fast-forward.
                 warnings.append(
                   "core App Store self-update replaced local edits with upstream"
                 )
                 divergence = "fast_forward"
                 merge_applied = True
-                entry_key = "index.jsx"
               else:
-                # Never rebase local. The app stays served with its current
-                # bundle + source; the new upstream is recorded for a later
-                # agent-resolution pass. Switch to conflict mode below.
-                mode = "conflict"
-                conflict_paths = merge.conflict_paths
+                # Before routing to the owner, auto-resolve a conflict CONFINED
+                # to the version identifier: a version label is never a semantic
+                # merge, so take-upstream is always right. This kills the most
+                # common update-conflict class — a prior local "agent edit"
+                # bumped the version and the release bumps the same line. Any
+                # conflict beyond the version line returns None and falls through
+                # to the owner-resolver flow. Fail-safe: a genuine local edit is
+                # never dropped (a residual conflict aborts the whole attempt).
+                version_only = await asyncio.to_thread(
+                  app_git.resolve_version_only_conflict,
+                  git_source_dir, merge.conflict_paths,
+                )
+                resolved_source = None
+                if version_only is not None:
+                  resolved_source = {
+                    rel: data for rel, data in version_only.tree.items()
+                    if rel not in _MERGED_NON_SOURCE
+                  }
+                if resolved_source is not None and entry_key in resolved_source:
+                  source_tree = resolved_source
+                  divergence = "clean_merge"
+                  merge_applied = True
+                  warnings.append(
+                    "auto-resolved a version-only update conflict "
+                    "(took the upstream version)"
+                  )
+                  # Exec bits come from the same merged tree the resolution was
+                  # built on, mirroring the clean-merge branch above.
+                  git_exec_paths = await asyncio.to_thread(
+                    app_git.read_tree_exec_paths,
+                    git_source_dir, version_only.tree_oid,
+                  )
+                else:
+                  # Never rebase local. The app stays served with its current
+                  # bundle + source; the new upstream is recorded for a later
+                  # agent-resolution pass. Switch to conflict mode below.
+                  mode = "conflict"
+                  conflict_paths = merge.conflict_paths
             else:
               # Clean merge: the WHOLE merged tree is what we write + compile.
               # Read it in full (one path for one and many files) and drop the
@@ -2344,25 +2667,19 @@ async def install_from_manifest(
           # for a new raw-GitHub catalog install, prefer a REAL clone so the
           # source tree carries origin/<ref> and the app's own .gitignore. If
           # cloning fails (private repo, renamed repo, offline git access), fall
-          # back to the existing synthetic-upstream path unchanged. The entry
-          # is read back from the clone under whatever name the manifest
-          # declares — the repo's bytes, not the HTTP fetch, are canonical on
-          # this path. `source_tree` keys it by that same repo name and
-          # `entry_key` tracks it, so every downstream consumer (entry_source,
-          # the compile) reads the right file and no synthetic root index.jsx
-          # is ever materialized for a cloned tree (the write loop is skipped;
-          # the on-disk file keeps the repo's name).
+          # back to the existing synthetic-upstream path unchanged. Canonical
+          # index.jsx is read back from the clone — the repo's bytes, not the
+          # HTTP fetch, are authoritative on this path.
           if not existing and repo_ref is not None:
             repo_url, ref = repo_ref
             try:
               app.upstream_commit = await asyncio.to_thread(
                 app_git.clone_upstream, git_source_dir, repo_url, ref,
               )
-              entry_bytes = (git_source_dir / manifest["entry"]).read_bytes()
+              entry_bytes = (git_source_dir / "index.jsx").read_bytes()
               jsx_source = entry_bytes.decode("utf-8")
               upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
-              source_tree = {manifest["entry"]: entry_bytes}
-              entry_key = manifest["entry"]
+              source_tree = {"index.jsx": entry_bytes}
               cloned_install = True
             except Exception as exc:
               log.warning(
@@ -2397,7 +2714,18 @@ async def install_from_manifest(
           # `app.jsx_source` stays the LOCAL source and the upstream provenance
           # (upstream_commit / upstream_jsx_sha, set above) persists for the
           # later resolution.
-          pass
+          if not app.upstream_commit:
+            raise RuntimeError("conflicting update has no recorded upstream commit")
+          await asyncio.to_thread(
+            stage_pending_conflict_update,
+            git_source_dir,
+            app_id=app.id,
+            upstream_commit=app.upstream_commit,
+            manifest=manifest,
+            raw_base=raw_base,
+            capability_digest=fetched_capability_digest,
+            candidate_digest=candidate_digest,
+          )
 
       # The disk-write phase runs INSIDE the same held lock for the git path so
       # no watcher commit interleaves between the merge decision and the write; a
@@ -2436,12 +2764,16 @@ async def install_from_manifest(
           app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
           app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
           app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-          # manage_apps, github_access, and offline_capable can change across
+          # Privileged booleans and offline_capable can change across
           # versions; default to the existing value when the manifest omits the key.
           if "manage_apps" in perms:
             app.manage_apps = bool(perms["manage_apps"])
           if "github_access" in perms:
             app.github_access = bool(perms["github_access"])
+          # Filesystem authority is opt-in on every published version. Omitting
+          # the grant from an update revokes it instead of preserving a stale
+          # privileged bit from an older manifest.
+          app.filesystem_access = bool(perms.get("filesystem_access", False))
           if "offline_capable" in manifest:
             app.offline_capable = bool(manifest["offline_capable"])
           if "embeds_agent" in manifest:
@@ -2449,6 +2781,9 @@ async def install_from_manifest(
           # P1-D: persist the offline contract block (replaces on update to match
           # the new manifest; None if the key is absent in the new manifest).
           app.offline_contract = manifest.get("offline") or None
+          app.system_prompt_file = manifest.get("system_prompt") or None
+          app.system_app = bool(manifest.get("system_app", False))
+          app.capability_contract = capability_contract
 
         # The compiled bundle is written OUT OF PLACE to a staging file and
         # promoted into the live bundle only AFTER the DB commit (commit_actions
@@ -2514,6 +2849,38 @@ async def install_from_manifest(
               source_dir_path, dropped_source_paths,
               rollback_actions, commit_actions,
             )
+            # On the synthetic-fetch path the on-disk tree is EXACTLY what the
+            # manifest declared (entry + source_files + job), so an entry that
+            # imports an undeclared sibling ships an incomplete tree that can't
+            # load — the Editor launch bug. Reject it here with a precise 422
+            # (esbuild would too, but with a cryptic "Could not resolve"). A
+            # git-origin-backed tree (`cloned_install` fresh clone, or
+            # `cloned_update` origin fetch) is skipped: it carries the whole
+            # repo, complete by construction, so source_files completeness is
+            # moot for it — the standalone CLI (scripts/validate-app.py) is the
+            # pre-push gate that holds a cloned app's manifest to the same bar
+            # for OTHER install paths. Errors raise HTTPException(422) → the
+            # outer handler rolls the source writes back.
+            if not cloned_update:
+              _check_source_completeness(
+                app_name=str(manifest.get("name") or app.slug),
+                manifest=manifest,
+                source_tree=source_tree,
+                entry_key=entry_key,
+                static_dests=list(static_assets_fetched.keys()),
+                job_name=job_name,
+              )
+          # Materialize declared static destinations before compilation: an app
+          # may import a generated same-origin module from `./static/...`, and
+          # the source completeness contract already treats those destinations
+          # as valid graph nodes. Rollback actions keep a failed compile atomic.
+          _write_static_assets(
+            source_dir_path,
+            static_assets_fetched,
+            created_paths,
+            rollback_actions,
+            commit_actions,
+          )
           # Compile now that the whole source tree is on disk. Passing the real
           # entry path makes esbuild resolve `./cards.js`-style sibling imports
           # from the files just written; promotion of the staged bundle into the
@@ -2532,13 +2899,6 @@ async def install_from_manifest(
           )
           commit_actions.append(
             lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
-          )
-          _write_static_assets(
-            source_dir_path,
-            static_assets_fetched,
-            created_paths,
-            rollback_actions,
-            commit_actions,
           )
           # On the git path, commit the working-tree source onto the local
           # `main` branch so the watcher's future commits build on a known base.
@@ -2639,6 +2999,8 @@ async def install_from_manifest(
         action()
       except OSError as exc:
         log.warning("install: post-commit cleanup failed — %s", exc)
+    if app.source_dir:
+      clear_pending_conflict_update(app.source_dir)
 
   except CompileError as exc:
     app_name = str(
@@ -2774,6 +3136,25 @@ async def install_from_manifest(
   except Exception as exc:
     log.exception("install: skill sync failed post-commit")
     warnings.append(f"skills: sync failed — {exc!r}")
+
+  # A first install may request a deterministic initialization run so the app
+  # does not remain empty until its first cron tick.  It enters through the
+  # same supervised wrapper as cron and Run now, so uninstall can revoke it.
+  if (
+    mode == "install"
+    and sched
+    and sched.get("initialize_on_install") is True
+    and job_name
+    and app.source_dir
+  ):
+    try:
+      from app.app_jobs import launch_app_job
+      source = Path(app.source_dir)
+      launch_app_job(app.id, source / job_name, source)
+      warnings.append("initialization started")
+    except Exception as exc:
+      log.exception("install: initialization job failed to start")
+      warnings.append(f"initialization failed to start — {exc!r}")
 
   return app, mode, warnings, manifest, conflict_paths, divergence
 

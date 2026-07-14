@@ -66,6 +66,11 @@ def get_active_broadcast() -> "ChatBroadcast | None":
   return _active_broadcast
 
 
+def has_running_chat_broadcast() -> bool:
+  """Whether any chat turn is still live through terminal cleanup."""
+  return any(bc.running for bc in list(_broadcasts.values()))
+
+
 # How long a completed broadcast stays alive for late reconnectors.
 _COMPLETED_TTL_SECS = 30
 

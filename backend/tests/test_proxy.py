@@ -129,15 +129,93 @@ def test_validate_url_preserves_https_scheme():
   assert "93.184.216.34" in pinned
 
 
-def test_proxy_get_rejects_cross_site_request(client, owner_token):
-  """GET /api/proxy must reject cross-site requests (Task 1b CSRF fix)."""
-  auth = {"Authorization": f"Bearer {owner_token}"}
+def test_proxy_get_allows_opaque_app_frame_request(
+  client, owner_token, monkeypatch
+):
+  """Opaque app frames may use the authenticated, read-only GET proxy."""
+  created = client.post("/api/apps/", json={
+    "name": "proxy-frame",
+    "description": "test",
+    "jsx_source": "export default function App() { return null }",
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert created.status_code == 201, created.text
+  token_response = client.post("/api/auth/app-token", json={
+    "app_id": created.json()["id"],
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert token_response.status_code == 200, token_response.text
+
+  def fake_validate_url_safe(url):
+    assert url == "https://example.com/manifest.json"
+    return "https://93.184.216.34/manifest.json", "example.com", "example.com"
+
+  async def fake_capped_response(_client, _req):
+    return Response(content=b'{"id":"test"}', media_type="application/json")
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
   r = client.get(
     "/api/proxy",
-    params={"url": "http://example.com/"},
-    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+    params={"url": "https://example.com/manifest.json"},
+    headers={
+      "Authorization": f"Bearer {token_response.json()['token']}",
+      "Origin": "null",
+      "Sec-Fetch-Site": "cross-site",
+    },
+  )
+  assert r.status_code == 200
+  assert r.json() == {"id": "test"}
+  assert r.headers["access-control-allow-origin"] == "null"
+
+
+def test_proxy_post_rejects_foreign_cross_site_request(client, owner_token):
+  """The mutation-capable POST proxy keeps the foreign-origin CSRF guard."""
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/", "body": "value=1"},
+    headers={
+      "Authorization": f"Bearer {owner_token}",
+      "Sec-Fetch-Site": "cross-site",
+    },
   )
   assert r.status_code == 403
+
+
+def test_proxy_post_allows_opaque_app_frame_request(
+  client, owner_token, monkeypatch
+):
+  """Scoped Bearer auth distinguishes a real app fetch from foreign CSRF."""
+  created = client.post("/api/apps/", json={
+    "name": "proxy-post-frame",
+    "description": "test",
+    "jsx_source": "export default function App() { return null }",
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  token_response = client.post("/api/auth/app-token", json={
+    "app_id": created.json()["id"],
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+
+  monkeypatch.setattr(
+    "app.routes.proxy.validate_url_safe",
+    lambda _url: (
+      "https://93.184.216.34/data", "example.com", "example.com",
+    ),
+  )
+
+  async def fake_capped_response(_client, _req):
+    return Response(content=b"ok", media_type="text/plain")
+
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/data", "body": "value=1"},
+    headers={
+      "Authorization": f"Bearer {token_response.json()['token']}",
+      "Origin": "null",
+      "Sec-Fetch-Site": "cross-site",
+    },
+  )
+  assert r.status_code == 200
+  assert r.text == "ok"
+  assert r.headers["access-control-allow-origin"] == "null"
 
 
 def test_proxy_get_allows_same_origin_request(client, owner_token):
@@ -164,7 +242,9 @@ def test_proxy_releases_db_connection_before_external_fetch(
     assert url == "https://example.com/data"
     return "https://93.184.216.34/data", "example.com", "example.com"
 
-  async def fake_capped_response(_client, _req):
+  async def fake_capped_response(_client, req):
+    assert req.extensions["sni_hostname"] == "example.com"
+    assert isinstance(req.extensions["sni_hostname"], str)
     checked_out.append(engine.pool.checkedout())
     return Response(content=b"ok", media_type="text/plain")
 
@@ -180,6 +260,32 @@ def test_proxy_releases_db_connection_before_external_fetch(
   assert r.status_code == 200
   assert r.text == "ok"
   assert checked_out == [baseline_checked_out]
+
+
+def test_proxy_post_passes_sni_hostname_as_text(
+  client, owner_token, monkeypatch
+):
+  """The POST proxy uses the same httpcore-compatible SNI representation."""
+  def fake_validate_url_safe(url):
+    assert url == "https://example.com/data"
+    return "https://93.184.216.34/data", "example.com", "example.com"
+
+  async def fake_capped_response(_client, req):
+    assert req.extensions["sni_hostname"] == "example.com"
+    assert isinstance(req.extensions["sni_hostname"], str)
+    return Response(content=b"ok", media_type="text/plain")
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/data", "body": "value=1"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert r.status_code == 200
+  assert r.text == "ok"
 
 
 def test_proxy_forwards_rate_limit_headers():

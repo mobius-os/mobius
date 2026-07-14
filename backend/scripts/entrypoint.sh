@@ -10,7 +10,10 @@ trap cleanup TERM INT
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
-mkdir -p /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform
+mkdir -p /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
+# Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
+# discovered managed schedule has been converged through the common runner.
+rm -f /data/run/app-cron-supervision-ready
 
 # /data/agent-browser-profiles holds PER-CHAT Chrome user-data dirs
 # (chat-<chat_id>/...) for agent-browser. The path is set per-chat by
@@ -116,7 +119,7 @@ if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: /data/service-token.txt — POST /api/auth/setup writes it as the mobius user, and" >&2
   echo "WARNING: it needs to be able to create files in /data, not just traverse." >&2
   chmod 1777 /data 2>/dev/null || true
-  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth 2>/dev/null || true
+  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/run 2>/dev/null || true
 fi
 
 # The /app/platform-baked/ clone stays root-owned + chmod a-w as the baked
@@ -580,16 +583,27 @@ if [ "$_use_platform" -eq 1 ]; then
   # `|| true` guards the shell, so a reconcile failure never bricks boot; a
   # conflict/rollback leaves the pre-reconcile code on disk (aborted/reset) and
   # sets a flag Settings surfaces. The outer `timeout` is a last-resort bound set
-  # ABOVE the sum of the reconcile's own per-op timeouts (fetch 120 + unshallow
-  # 120 + probe 60 = 300) so an internal timeout always fires FIRST — a clean
-  # offline/rollback return — and the outer never fires during the fast local
-  # rebase/reset mutation (which would otherwise leave a half-applied tree this
-  # boot then serves). recoveryd remains the outer floor.
+  # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + rebase
+  # 120 + probe 60 = 420, plus commit_local's own bounded git calls. Keep this
+  # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
+  # below still cleans the tree if the outer kill ever wins. recoveryd remains
+  # the outer floor.
   echo "Platform layer: reconciling /data/platform with origin (slice B deploy=rebase)..." >&2
   su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub timeout 450 python3 -c \
+    "cd /data/platform/backend && $_env_scrub timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
     2>&1 || true
+  # Reconcile itself is best-effort, but the post-reconcile guard is the final
+  # safety boundary: if it cannot prove/reset the tree to a clean committed
+  # state, do not import that tree. Exiting lets recoveryd/container policy use
+  # the baked recovery floor instead of serving possibly half-applied code.
+  if ! su -s /bin/sh mobius -c \
+    "cd /data/platform/backend && $_env_scrub python3 -c \
+     'from app import platform_update; print(platform_update.boot_guard_sync())'" \
+    2>&1; then
+    echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
+    exit 1
+  fi
   # A fast-forward / rebase advanced main, so the served sha the /api/version and
   # /api/debug/serving routes report (written to /tmp/serving-sha above) must
   # reflect the reconciled HEAD, not the pre-reconcile clone tip.
@@ -650,13 +664,10 @@ echo "$_key_hash" > "$_fp_file"
 chmod 640 "$_fp_file"
 chown root:mobius "$_fp_file" 2>/dev/null || true
 
-# Start cron daemon (runs as root, jobs execute as mobius).
-cron
-
-# Verify cron started (pgrep may not exist in slim images).
-if command -v pgrep > /dev/null 2>&1; then
-  pgrep -x cron > /dev/null || echo "WARNING: cron daemon failed to start" >&2
-fi
+# Cron is started by the health-probe process only AFTER FastAPI lifespan has
+# completed. Lifespan rewrites replayed legacy app entries through the common
+# leased/sandboxed runner; keeping the daemon stopped until then closes the
+# boot window in which an old direct entry could fire unsupervised.
 
 # Create cron log directory.
 mkdir -p /data/cron-logs
@@ -765,10 +776,9 @@ fi
 # Install the agent self-reminders cron dispatcher (feature 088). This
 # is platform-level, not a mini-app, so it lives under a reserved
 # _self-reminders/ slug and runs a tiny job.sh that execs the baked
-# /app/scripts/self-reminders-dispatch.sh. The scaffold writes job.sh +
-# init-cron.sh and installs the entry; the replay loop below re-adds it
-# on every boot like any other app cron. Create-if-absent so we never
-# clobber an operator edit to the schedule. DEFAULT OFF: the dispatcher
+# /app/scripts/self-reminders-dispatch.sh. The platform invokes its own trusted
+# scaffold on every boot; app-owned init scripts are never executed. The job is
+# create-if-absent so we never clobber an operator edit. DEFAULT OFF: the dispatcher
 # itself fires nothing until /data/shared/self-reminders.enabled exists,
 # so this installs the plumbing without firing any check-in.
 SR_DIR=/data/apps/_self-reminders
@@ -781,27 +791,21 @@ exec /app/scripts/self-reminders-dispatch.sh
 SRJOB
   chmod +x "$SR_DIR/job.sh" 2>/dev/null || true
   chown -R mobius:mobius "$SR_DIR" 2>/dev/null || true
-  su -s /bin/sh mobius -c \
-    "bash /app/scripts/init-cron-scaffold.sh _self-reminders '*/5 * * * *'" \
-    2>/dev/null || true
 fi
+su -s /bin/sh mobius -c \
+  "bash /app/scripts/init-cron-scaffold.sh _self-reminders '*/5 * * * *'" \
+  2>/dev/null || true
 
-# Run per-app init scripts to restore cron entries lost on container
-# restart. Don't pre-clear the crontab — agents (and the operator) may
-# have installed cron entries directly via `crontab -u`, and a blanket
-# `crontab -r` on every boot would silently wipe them. Init scripts
-# that use idempotent patterns (e.g. write a full crontab, or check
-# for existing entries before appending) survive replay. The cost of
-# the previous policing was real: agent-installed crons disappeared
-# on the next deploy with no signal. Per Möbius's design philosophy
-# (CLAUDE.md), "code empowers the agent; it does not police it."
-for init_script in /data/apps/*/init-cron.sh; do
-  [ -f "$init_script" ] && su -s /bin/sh mobius -c "bash $init_script" 2>/dev/null || true
-done
+# Never execute app-owned init-cron.sh at boot. Older files are declarations,
+# not trusted code: FastAPI lifespan parses their effective ENTRY (or the
+# manifest schedule) and rewrites both the durable file and live crontab through
+# app-job-runner.py. Cron remains stopped until that reconciliation proves every
+# discovered live app schedule safe. This closes the pre-supervision path where
+# arbitrary persisted shell could run merely because the container restarted.
 
 # Ensure mobius's crontab has the full PATH at the top. Must run AFTER
-# init-cron.sh — those scripts call `crontab -u mobius` which overwrites
-# the file. Without PATH, cron's minimal /usr/bin:/bin can't resolve
+# the trusted self-reminder scaffold; app schedule reconciliation preserves
+# existing environment rows. Without PATH, cron's minimal /usr/bin:/bin can't resolve
 # `#!/usr/bin/env node` shebangs (claude pre-2.1.119 was such a script);
 # defensive against any future shebang script the agent creates.
 # Uses `crontab -u` rather than direct file writes so cron's locking
@@ -819,19 +823,17 @@ fi
 python3 /app/scripts/init_agent_context.py
 
 # One-time idempotent app-rename migration (mind->memory, dreaming->reflection)
-# for EXISTING instances. MUST run before init_skills (it renames the
-# agent-edited skill file in place) and install-core-apps (it renames the app
-# slug in place), so neither reseeds a fresh file nor registers a duplicate.
-# Preserves each app's numeric id, so reports/storage are untouched. No-op on a
-# fresh instance or one already migrated. Runs as mobius (writes /data + the
+# for EXISTING instances. MUST run before init_skills, which renames the
+# agent-edited skill file in place, so the migration does not reseed a fresh
+# file. Preserves each app's numeric id, so reports/storage are untouched. No-op
+# on a fresh instance or one already migrated. Runs as mobius (writes /data + the
 # mobius crontab; as root it would poison /data ownership + target root's crontab).
 su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1 || true
 
-# Bootstrap the knowledge graph (/data/shared/memory/). CREATE-IF-ABSENT:
-# unlike the flat experience file above, the graph is the agent's persistent
-# memory and must never be reseeded over learned notes. Writes the `.ready`
-# sentinel LAST; until then memory injection uses the legacy flat-file path.
-python3 /app/scripts/init_memory_graph.py
+# Bootstrap only the always-on per-chat summary directory. Optional graph
+# memory, its seeds, and its `.ready` lifecycle belong to the installed Memory
+# system app; base boot must not activate them.
+python3 /app/scripts/init_chat_summaries.py
 
 # Bootstrap the agent-editable skills layer (/data/shared/skills/). CREATE-IF-
 # ABSENT like the graph — the agent (and the nightly Reflection agent) improve
@@ -898,6 +900,7 @@ platform.crashloop-prev.*
 .platform-apply-in-progress
 .platform-restart-requested
 .platform-rolled-back
+.platform-reconcile-pre
 .platform-reconcile.lock
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
@@ -1055,15 +1058,6 @@ fi
 # failures that look like generic CLI crashes.
 umask 022
 
-# Retired app seeding compatibility hook. Kept as a non-fatal background no-op
-# so older images/platform clones still boot through the same path while app
-# installs live in the App Store and /data/apps.
-_core_installer=/app/scripts/install-core-apps.sh
-if [ "$_use_platform" -eq 1 ] && [ -f /data/platform/backend/scripts/install-core-apps.sh ]; then
-  _core_installer=/data/platform/backend/scripts/install-core-apps.sh
-fi
-su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash '$_core_installer'" &
-
 # O1: platform-restart sentinel poller (the recoveryd handshake).
 #
 # The frozen recovery process cannot depend on app imports or app signal paths.
@@ -1109,6 +1103,16 @@ fi
   # Wait up to 90 seconds for /api/health to return 200.
   for i in $(seq 1 90); do
     if curl -sf "$_health_url" > /dev/null 2>&1; then
+      # Lifespan has completed, including app-cron supervision. Start cron now
+      # (as root; entries themselves execute as mobius).
+      if [ -f /data/run/app-cron-supervision-ready ]; then
+        cron
+        if command -v pgrep > /dev/null 2>&1; then
+          pgrep -x cron > /dev/null || echo "WARNING: cron daemon failed to start" >&2
+        fi
+      else
+        echo "WARNING: app cron supervision did not complete; cron remains disabled (fail closed)" >&2
+      fi
       # Health probe passed — record the success sentinel and reset counter.
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.last-successful-boot
       echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt

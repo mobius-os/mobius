@@ -15,9 +15,14 @@ dist/
 .vite/
 .vite-cache/
 .vite-tmp/
+.vite-cache-rebuild/
+.vite-tmp-rebuild/
 .dist-next/
 .dist-old/
+.dist-staging/
+.dist-rebuild/
 .assets-attic/
+.publish.lock
 
 # OS
 .DS_Store
@@ -53,14 +58,14 @@ playwright-report/
 core-apps/*/tests/.build*/
 
 # Internal planning docs — not for public release
-docs/
+/docs
 
 # Internal dev artifacts — not for public release
-demo-logs/
-.claude/
-.pm/
-AGENTS.md
-CLAUDE.md
+/demo-logs
+/.claude
+/.pm
+/AGENTS.md
+/CLAUDE.md
 
 # Baked Vite build output (created by the image build / test conftest stub)
 backend/static/

@@ -1,13 +1,12 @@
-import { toolResultFailed } from './toolResultFormat.js'
+import { toolBlockFailed } from './toolResultFormat.js'
 import { toolActivityLabel } from './toolActivityLabel.js'
 
 // Fold runs of adjacent tool entries into one activity node, including a lone
 // tool. This gives single-tool and multi-tool runs the same collapsed header and
 // lets a live single tool become a multi-tool run without swapping visual
-// primitives. This runs on BOTH render paths — MsgContent (persisted msg.blocks)
-// and StreamingMessage (live streamItems) — so the transcript looks the same
-// before and after a streaming turn is promoted. Keep them calling the same
-// function.
+// primitives. MsgContent applies this to both DB-shaped history blocks and the
+// converted live payload, so source selection cannot reshuffle the active
+// answer.
 //
 // Rules:
 //   - any run of entries whose item.type === 'tool' becomes a group
@@ -43,6 +42,42 @@ export function groupToolRuns(entries) {
   return nodes
 }
 
+// Merge runs of ADJACENT thinking entries into one, so a persisted transcript
+// renders a continuous reasoning pass as a SINGLE "Thought for Ns" disclosure
+// instead of many tiny fragments. Fragments only exist in already-saved chats
+// from before the backend stopped closing the thinking run on transparent
+// bookkeeping events (see events.py _THINKING_INTERRUPTING_TYPES); the live path
+// already coalesces in streamReducers.appendThinkingChunk. This is a render-time
+// repair with no migration — same spirit as suppressedQuestionToolIndices.
+//
+// CRITICAL: this runs on the ENTRIES array (each `{ item, idx }`) AFTER idx has
+// been assigned from the persisted position, and it PRESERVES the first merged
+// entry's original `idx`. idx is an absolute reference into the persisted
+// msg.blocks (ToolBlock uses it for the lazy GET /tool-output fetch), so
+// re-deriving it from a shortened array would fetch the wrong block / 404. Only
+// truly-adjacent thinking entries merge; anything between them (a tool/text
+// block) breaks the run, so distinct reasoning segments around tool calls stay
+// separate. Pure — new entries, inputs untouched.
+export function coalesceThinkingEntries(entries) {
+  const out = []
+  for (const entry of entries) {
+    const prev = out[out.length - 1]
+    if (prev?.item?.type === 'thinking' && entry?.item?.type === 'thinking') {
+      out[out.length - 1] = {
+        ...prev,
+        item: {
+          ...prev.item,
+          content: (prev.item.content || '') + (entry.item.content || ''),
+          duration_ms: (prev.item.duration_ms || 0) + (entry.item.duration_ms || 0),
+        },
+      }
+    } else {
+      out.push(entry)
+    }
+  }
+  return out
+}
+
 // Derive the collapsed status of a tool group from its children: a failed tool
 // dominates (so a broken step is visible without expanding), then a running
 // tool, else done. Shared by ToolActivityGroup, which maps this to the header
@@ -52,8 +87,10 @@ export function groupToolRuns(entries) {
 //
 // "Failed" comes from the result's exit code, NOT a tool status — the stream
 // contract only sets 'running' → 'done' (streamReducers.js), so a failed bash
-// still ends 'done'. toolResultFailed reads the nonzero exit out of the parsed
-// terminal envelope, the same signal ToolBlock shows on the block header. A
+// still ends 'done'. toolBlockFailed reads the explicit output_exit_code field
+// when a reduced block carries one (contract rule 6), else the nonzero exit out
+// of the parsed terminal envelope — the same signal ToolBlock shows on the
+// block header. A
 // still-running tool has no final output yet, so it can't be "failed" here.
 //
 // `running` wins over `error`: while ANY child is still live the header reads
@@ -63,7 +100,7 @@ export function groupToolRuns(entries) {
 // every streaming frame while the run is in flight.
 export function toolGroupState(tools) {
   if (tools.some(t => t?.status === 'running')) return 'running'
-  if (tools.some(t => toolResultFailed(t?.output))) return 'error'
+  if (tools.some(t => toolBlockFailed(t))) return 'error'
   return 'done'
 }
 

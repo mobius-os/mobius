@@ -197,7 +197,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
     "reconcile PRESERVES the queue (bug #2); it drains on the next send"
   )
   err = [b for b in state["messages"][-1]["blocks"] if b["type"] == "error"]
-  assert err and "interrupted" in err[0]["message"].lower()
+  assert err and "paused" in err[0]["message"].lower()
 
 
 # -- 3. await_ack boundary trips mid-promote (small-timeout seam) --------
@@ -861,9 +861,10 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
   # after the fresh user message (the else-branch append, because msgs[-1] is
   # now a user row). The fix skips finalize, so the fresh user message stays
   # the last row.
-  assert state["messages"][-1] == {
-    "role": "user", "content": "fresh question", "ts": 9
-  }, (
+  last = state["messages"][-1]
+  # StartTurn keeps display ts strictly monotonic (it may bump 9 past the
+  # stale rows) — the invariant here is WHICH row is last, not its ts.
+  assert (last["role"], last["content"]) == ("user", "fresh question"), (
     "the dying run must NOT append its stale assistant content after the "
     "fresh turn's user message"
   )
@@ -1221,7 +1222,7 @@ def test_reconcile_preserves_tail_unanswered_question_card():
   )
   err_idx = next(
     i for i, b in enumerate(blocks)
-    if b.get("type") == "error" and "interrupted" in b["message"].lower()
+    if b.get("type") == "error" and "paused" in b["message"].lower()
   )
   open_idx = next(
     i for i, b in enumerate(blocks)
@@ -1309,6 +1310,49 @@ def test_stop_during_starting_does_not_spawn_superseded_turn(monkeypatch):
   # The user message is durable (StartTurn committed it before the bump).
   state = _load(cid)
   assert state is not None and len(state["messages"]) == 1
+
+
+def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
+  """A Stop can land after run_chat's entry generation check but before the
+  SDK handle is registered (for example during a preflight await). The turn
+  must re-check the generation after that await; otherwise Stop returns
+  success, clears the marker, and the now-untracked runner starts anyway."""
+  _seed_owner_and_creds()
+  cid = "setup-stop"
+  _seed_chat(
+    cid,
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[],
+    run_status="running",
+  )
+  gen = chat_mod.registry.bump_generation(cid)
+
+  import app.claude_sdk_runner as csr
+  import app.providers as providers
+
+  dispatched = []
+
+  async def fake_runner(*, bc, **kwargs):
+    dispatched.append(kwargs)
+    bc.publish({"type": "text", "content": "must not run"})
+    return {"session_id": "sess", "cost_usd": 0.0}
+
+  async def stopping_ensure_auth(self, data_dir):
+    stopped, _ = await chat_mod.stop_chat_for(cid)
+    assert stopped is True
+
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
+  monkeypatch.setattr(providers.ClaudeProvider, "ensure_auth", stopping_ensure_auth)
+
+  _run_real_chat(cid, run_token="rt-setup-stop", run_gen=gen)
+  _drain_actor()
+
+  assert dispatched == [], (
+    "a Stop during provider setup must prevent SDK dispatch before a handle "
+    "exists"
+  )
+  state = _load(cid)
+  assert state["run_status"] is None
 
 
 def test_normal_send_spawns_turn(monkeypatch):

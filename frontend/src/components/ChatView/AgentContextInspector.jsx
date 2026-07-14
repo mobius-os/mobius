@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 // Same marked + DOMPurify markdown pipeline used by MsgContent.
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 
@@ -196,6 +197,15 @@ function Section({ title, source, children }) {
 
 export default function AgentContextInspector({ chatId, onClose }) {
   const [state, setState] = useState({ status: 'loading', data: null, error: '' })
+  const dialogRef = useRef(null)
+  const closeRef = useRef(null)
+
+  useDialogFocus({
+    containerRef: dialogRef,
+    initialFocusRef: onClose ? closeRef : dialogRef,
+    onClose,
+    closeOnEscape: !!onClose,
+  })
 
   useEffect(() => {
     if (!chatId) {
@@ -230,15 +240,6 @@ export default function AgentContextInspector({ chatId, onClose }) {
     return () => controller.abort()
   }, [chatId])
 
-  useEffect(() => {
-    if (!onClose) return
-    function onKey(e) {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
   const sections = useMemo(() => {
     const data = state.data || {}
     return [
@@ -269,16 +270,19 @@ export default function AgentContextInspector({ chatId, onClose }) {
     >
       <style>{CSS}</style>
       <div
+        ref={dialogRef}
         className="aci"
         role="dialog"
         aria-modal="true"
         aria-labelledby="aci-title"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="aci__head">
           <h2 id="aci-title" className="aci__title">System prompt inspector</h2>
           {onClose && (
             <button
+              ref={closeRef}
               type="button"
               className="aci__close"
               onClick={onClose}

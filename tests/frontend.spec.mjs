@@ -73,6 +73,13 @@ async function sendMessage(page, text) {
 // Tests
 // ---------------------------------------------------------------------------
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('Input behavior', () => {
   test('1. Input clears after send', async ({ page }) => {
     await setup(page)
@@ -567,9 +574,12 @@ test.describe('Scroll position', () => {
 
     // Stamp an ANCHOR_AT mode with a real wheel gesture; the scroll state
     // machine intentionally ignores non-gesture scroll events.
-    const scroll = page.locator('.chat__scroll')
-    await scroll.hover()
-    await page.mouse.wheel(0, -3000)
+    await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      if (!el) return
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      el.scrollTop = Math.floor(el.scrollHeight / 3)
+    })
     await page.waitForFunction(() => {
       const el = document.querySelector('.chat__scroll')
       if (!el) return false
@@ -622,6 +632,125 @@ test.describe('Scroll position', () => {
       return el ? el.scrollTop : null
     })
     expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(50)
+  })
+
+  test('10b. Leaving auto-scroll restores the exact old tail, not content grown while away', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
+
+    let messages = [
+      { role: 'user', content: 'Follow restore prompt', ts: 1700000100000 },
+      {
+        role: 'assistant',
+        ts: 1700000100001,
+        content: Array.from({ length: 32 }, (_, i) =>
+          `Initial follow paragraph ${i + 1}. ${'Existing content. '.repeat(10)}`
+        ).join('\n\n'),
+        blocks: Array.from({ length: 32 }, (_, i) => ({
+          type: 'text',
+          content: `Initial follow paragraph ${i + 1}. ${'Existing content. '.repeat(10)}`,
+        })),
+      },
+    ]
+
+    await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages,
+          total: messages.length,
+          offset: 0,
+          running: false,
+          pending_messages: [],
+        }),
+      })
+    })
+
+    await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.chat__scroll')
+        return !!el
+          && getComputedStyle(el).visibility !== 'hidden'
+          && el.scrollHeight > el.clientHeight + 100
+          && el.textContent.includes('Initial follow paragraph 32')
+      },
+      { timeout: 10000 },
+    )
+
+    // A real wheel gesture is the sole transition into FOLLOW_BOTTOM.
+    const scroll = page.locator('.chat__scroll')
+    await scroll.hover()
+    await page.mouse.wheel(0, 100000)
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 50
+    }, { timeout: 3000 })
+    const scrollBefore = await page.evaluate(
+      () => document.querySelector('.chat__scroll')?.scrollTop ?? null,
+    )
+    expect(scrollBefore).toBeGreaterThan(0)
+
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+    await page.waitForFunction(
+      id => {
+        try {
+          return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.kind
+            === 'ANCHOR_AT'
+        } catch {
+          return false
+        }
+      },
+      chatId,
+      { timeout: 3000 },
+    )
+
+    // Grow the same assistant row while the chat is inactive. A restored
+    // FOLLOW_BOTTOM would jump to this new tail; the saved anchor must not.
+    const grownBlocks = Array.from({ length: 18 }, (_, i) => ({
+      type: 'text',
+      content: `Grown while away marker ${i + 1}. ${'New content. '.repeat(10)}`,
+    }))
+    messages = [
+      messages[0],
+      {
+        ...messages[1],
+        content: `${messages[1].content}\n\n${grownBlocks.map(b => b.content).join('\n\n')}`,
+        blocks: [...messages[1].blocks, ...grownBlocks],
+      },
+    ]
+
+    await page.evaluate(() => history.back())
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.chat__scroll')
+        return !!el
+          && getComputedStyle(el).visibility !== 'hidden'
+          && el.textContent.includes('Grown while away marker 18')
+      },
+      { timeout: 10000 },
+    )
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))))
+
+    const restored = await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      return el ? {
+        scrollTop: el.scrollTop,
+        bottomGap: el.scrollHeight - el.scrollTop - el.clientHeight,
+      } : null
+    })
+    expect(restored).not.toBeNull()
+    expect(Math.abs(restored.scrollTop - scrollBefore)).toBeLessThan(50)
+    expect(restored.bottomGap).toBeGreaterThan(100)
   })
 })
 

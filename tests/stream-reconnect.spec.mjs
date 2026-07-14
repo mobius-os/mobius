@@ -109,6 +109,13 @@ async function pillOverlapDiagnostics(page) {
   })
 }
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('Stream reconnection', () => {
   test('1. Completed stream stays idle after visibility change', async ({ page }) => {
     let streamRequestCount = 0
@@ -807,9 +814,9 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
 
-    // Cancel-queued (DELETE /pending/{ts}) → 200 with an empty queue, so the
+    // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[0-9]+$/, route =>
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route =>
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -871,6 +878,12 @@ test.describe('Stream reconnection', () => {
     // and zeroes justSentAtRef.
     await expect(page.locator('button[aria-label="Stop"]')).toBeVisible()
     await page.locator('button[aria-label="Stop"]').click()
+    // click() only waits for the DOM event, not handleStop's async backend
+    // confirmation. Wait for the state machine to become idle before modeling
+    // the user's next send; otherwise Enter can race the still-active Stop
+    // state and legitimately enqueue instead of opening the fresh stream this
+    // test is meant to exercise.
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
 
     // Send the follow-up as a fresh turn whose /stream (request #2) hits the
     // real route above — this is the turn the stale 204 must not clobber.

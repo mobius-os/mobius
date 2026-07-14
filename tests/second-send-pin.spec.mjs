@@ -126,7 +126,14 @@ async function measure(page) {
   })
 }
 
-test('Second send through full SSE flow: new user msg pins to viewport top', async ({ page }) => {
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
+test('Second send from auto-scroll pins to viewport top through the full SSE flow', async ({ page }) => {
   // Mock a long streamed response so the chat has real content
   // through React's promoteStreamToMessages path (the user's actual
   // production flow). Direct DOM injection (spacer test 10) doesn't
@@ -231,4 +238,121 @@ test('Pin HOLDS when content above the pinned message grows after send (late ima
   expect(afterGrow.lastUserText).toBe('Second user message')
   expect(afterGrow.lastUserVisualTop).toBeGreaterThanOrEqual(-50)
   expect(afterGrow.lastUserVisualTop).toBeLessThanOrEqual(afterGrow.clientH / 3)
+})
+
+test('Second send pins and HOLDS through a thinking pause when the server ts differs from the optimistic ts (F1)', async ({ page }) => {
+  // The deterministic "2nd-and-later send never pins" bug. Every existing spec
+  // mocked POST /messages with an EMPTY body, so startedMessagesFromResponse
+  // returned null and the ts-swap RETARGET never fired — which is exactly how
+  // F1 shipped. Here the server assigns its OWN ts (distinct from the optimistic
+  // Date.now()), arming the retarget, and the SSE withholds content for >1s so
+  // no ResizeObserver firing can mask a stranded pin. The old retarget collapsed
+  // the spacer to 0px, clamping scrollTop to 0 with nothing to recover it
+  // through the quiet window. The pin must hold at pinGap ≈ PIN_OFFSET (4)
+  // through the pause AND after content finally streams.
+  await page.setViewportSize({ width: 412, height: 915 })
+
+  // Echo the sent content with a server ts. The echoed content keeps the SAME
+  // last message across the replace-optimistic commit, so sameMessageList skips
+  // the re-render — no layout effect runs to restore a collapsed spacer (the
+  // load-bearing detail the bug depended on).
+  let serverTsCounter = 0
+  const postedCids = []
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
+    const req = route.request().postDataJSON() || {}
+    // Wire regression guard: every fresh send must carry its minted cid on
+    // the POST — without it the durable row derives legacy-<ts> and the
+    // strict data-cid pin selector goes blind after the ack (the gap the
+    // adversarial review caught: the optimistic pin worked while the wire
+    // silently dropped the identity).
+    postedCids.push(req.cid ?? null)
+    const serverTs = 1900000000000 + (serverTsCounter++)
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        status: 'started',
+        // Echo the cid exactly as the real backend persists + returns it.
+        message: {
+          role: 'user', content: req.content ?? '', ts: serverTs,
+          ...(req.cid ? { cid: req.cid } : {}),
+        },
+      }),
+    })
+  })
+  await page.route('**/api/chat/stop', route =>
+    route.fulfill({ status: 200, body: '{}' }))
+
+  // First send streams immediately (just to build content + depth). The SECOND
+  // send gets the thinking pause: the SSE is held open >1s after the POST (and
+  // the retarget) resolve, before any content arrives.
+  let streamCall = 0
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+    const n = streamCall++
+    if (n >= 1) await new Promise(r => setTimeout(r, 1300))
+    const events = n === 0
+      ? [
+          { type: 'catch_up_done' },
+          { type: 'text', content: 'First response paragraph. '.repeat(60) },
+          { type: 'done' },
+        ]
+      : [
+          { type: 'catch_up_done' },
+          { type: 'text', content: 'Second response arrives after the pause.' },
+          { type: 'done' },
+        ]
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      body: events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''),
+    })
+  })
+
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
+    { timeout: 10000 })
+  await newChat(page)
+
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  // Be at the bottom (following) so the second send legitimately pins.
+  await gestureToBottom(page)
+
+  // Send 2. The POST resolves fast (retarget fires); the SSE pauses ~1.3s.
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  await input.fill('Second user message')
+  await page.keyboard.press('Enter')
+
+  // DURING the pause: wait for the optimistic row to render (POST + retarget
+  // land well under the 1.3s stream delay), then assert the pin held with no
+  // streamed content on screen yet.
+  await page.waitForFunction(() => {
+    const users = document.querySelectorAll('.chat__msg--user')
+    const last = users[users.length - 1]
+    return !!last && (last.querySelector('.chat__text--user')?.textContent || '')
+      .includes('Second user message')
+  }, { timeout: 3000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))))
+
+  const duringPause = await measure(page)
+  expect(duringPause.lastUserText).toBe('Second user message')
+  // pinGap ≈ PIN_OFFSET (4). The bug strands the row at scrollTop 0 (pinGap =
+  // the full offset — deep down the viewport or off the top).
+  expect(duringPause.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(duringPause.lastUserVisualTop).toBeLessThanOrEqual(12)
+
+  // Every send carried its minted cid on the wire (see route guard above).
+  expect(postedCids.length).toBeGreaterThanOrEqual(2)
+  for (const c of postedCids) expect(c).toBeTruthy()
+
+  // After content finally streams in, the pin still holds.
+  await waitStreamDone(page)
+  const afterContent = await measure(page)
+  expect(afterContent.lastUserText).toBe('Second user message')
+  expect(afterContent.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(afterContent.lastUserVisualTop).toBeLessThanOrEqual(12)
 })

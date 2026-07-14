@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { ownerQueries } from '../../hooks/queries.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 import {
   copyOriginUrl,
   detectInstallPlatform,
@@ -53,6 +54,7 @@ export default function WalkthroughOverlay({ onDone }) {
   // Tracks whether copy-link succeeded so we can surface a confirm
   // toast on the iOS-non-Safari path.
   const [copyState, setCopyState] = useState(null)
+  const dialogRef = useRef(null)
 
   const STEPS = platform.iosNonSafari ? STEPS_NO_INSTALL : STEPS_FULL
   const step = STEPS[stepIdx]
@@ -110,15 +112,11 @@ export default function WalkthroughOverlay({ onDone }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Esc dismisses (treated as Skip). Captures at document level so
-  // it works even if no field is focused.
-  useEffect(() => {
-    function onKey(e) {
-      if (e.key === 'Escape') skip()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [skip])
+  useDialogFocus({
+    containerRef: dialogRef,
+    initialFocusRef: dialogRef,
+    onClose: skip,
+  })
 
   // Already installed → complete silently. If the shell is running as a
   // standalone PWA, the user has clearly installed Möbius, so the
@@ -159,11 +157,16 @@ export default function WalkthroughOverlay({ onDone }) {
   return (
     <div
       className={`wt__overlay${closing ? ' wt__overlay--closing' : ''}`}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="wt-title"
+      role="presentation"
     >
-      <div className={`wt__card wt__card--${step}`}>
+      <div
+        ref={dialogRef}
+        className={`wt__card wt__card--${step}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="wt-title"
+        tabIndex={-1}
+      >
         <div className="wt__steps" aria-hidden="true">
           {STEPS.map((s, i) => (
             <span

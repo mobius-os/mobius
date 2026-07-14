@@ -26,6 +26,7 @@ import asyncio
 
 from app import models
 from app.broadcast import create_broadcast, get_broadcast
+from app.chat_writer import cid_of
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
@@ -168,6 +169,14 @@ def test_steers_into_live_codex_turn_when_flag_on(
   ]
   assert len(steered_events) == 1
   assert steered_events[0]["content"] == "actually use blue"
+  assert steered_events[0]["messages"] == [
+    {
+      "role": "user",
+      "ts": chat.messages[-1]["ts"],
+      "cid": cid_of(chat.messages[-1]),
+      "content": "actually use blue",
+    }
+  ]
 
 
 def _register_sink_with_partial(chat_id: str, run_token: str, text: str):
@@ -392,8 +401,10 @@ def test_seal_steer_split_retains_buffer_on_failure_and_delta_clears():
   handle = _make_active_claude_client("sealunit")
 
   async def _run():
-    handle._steer_user_msgs = [{"role": "user", "content": "Q2", "ts": 10}]
-    handle._steer_consume_ts = []
+    handle._steer_user_msgs = [
+      {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
+    ]
+    handle._steer_consume_cids = []
 
     # 1) A failing split must NOT clear the buffer.
     class _FailBc:
@@ -445,7 +456,9 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
       agent_settings_json={},  # auto-steer OFF — force_steer overrides.
     )
-    chat.pending_messages = [{"role": "user", "content": "use blue", "ts": 10}]
+    chat.pending_messages = [
+      {"role": "user", "content": "use blue", "ts": 10, "cid": "legacy-10"}
+    ]
     db.add(chat)
     db.commit()
   finally:
@@ -459,7 +472,8 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={
-      "content": "use blue", "force_steer": True, "consume_pending_ts": [10],
+      "content": "use blue", "force_steer": True,
+      "consume_pending_cids": ["legacy-10"],
     },
     headers=auth,
   )
@@ -561,9 +575,9 @@ def test_force_steer_consumes_existing_queued_messages(
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     chat.pending_messages = [
-      {"role": "user", "content": "use blue", "ts": 10},
-      {"role": "user", "content": "also square", "ts": 11},
-      {"role": "user", "content": "later", "ts": 12},
+      {"role": "user", "content": "use blue", "ts": 10, "cid": "legacy-10"},
+      {"role": "user", "content": "also square", "ts": 11, "cid": "legacy-11"},
+      {"role": "user", "content": "later", "ts": 12, "cid": "legacy-12"},
     ]
     db.commit()
   finally:
@@ -586,7 +600,7 @@ def test_force_steer_consumes_existing_queued_messages(
     json={
       "content": "use blue\n\nalso square",
       "force_steer": True,
-      "consume_pending_ts": [10, 11],
+      "consume_pending_cids": ["legacy-10", "legacy-11"],
     },
     headers=auth,
   )
@@ -600,6 +614,14 @@ def test_force_steer_consumes_existing_queued_messages(
   # Each consumed queued row is stored SEPARATELY (rebuilt from the
   # server-owned pending rows), not one combined \n\n message.
   assert [m["content"] for m in chat.messages[-2:]] == ["use blue", "also square"]
+  bc = get_broadcast(chat_id)
+  steered_events = [
+    e for e in bc.event_log if e.get("type") == "steered_into_turn"
+  ]
+  assert len(steered_events) == 1
+  assert [m["content"] for m in steered_events[0]["messages"]] == [
+    "use blue", "also square"
+  ]
 
 
 def test_force_steer_failure_does_not_append_duplicate_queue(
@@ -632,7 +654,7 @@ def test_force_steer_failure_does_not_append_duplicate_queue(
     json={
       "content": "use blue",
       "force_steer": True,
-      "consume_pending_ts": [10],
+      "consume_pending_cids": ["legacy-10"],
     },
     headers=auth,
   )
@@ -643,10 +665,13 @@ def test_force_steer_failure_does_not_append_duplicate_queue(
   assert [m["content"] for m in chat.pending_messages] == ["use blue"]
 
 
-def test_force_steer_requires_matching_queued_messages(
+def test_force_steer_requires_known_cids(
   client, auth, monkeypatch,
 ):
-  """Forced steer is the Stop conversion path, not a public steer bypass."""
+  """Forced steer selects queued rows by cid; a consume list naming a cid
+  that isn't in the queue selects nothing → not_steered (the whole batch
+  must resolve, so a partial/unknown selection is refused). This replaces
+  the old content byte-match guard, which cid selection makes unnecessary."""
   chat_id = "codexforceguard"
   _make_codex_chat(chat_id, steer_enabled=False)
   db = SessionLocal()
@@ -671,9 +696,9 @@ def test_force_steer_requires_matching_queued_messages(
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={
-      "content": "different text",
+      "content": "use blue",
       "force_steer": True,
-      "consume_pending_ts": [10],
+      "consume_pending_cids": ["legacy-999"],
     },
     headers=auth,
   )
@@ -791,6 +816,14 @@ def test_steers_into_live_claude_turn_when_flag_on(
   ]
   assert len(steered_events) == 1
   assert steered_events[0]["content"] == "actually use blue"
+  assert steered_events[0]["messages"] == [
+    {
+      "role": "user",
+      "ts": handle._steer_user_msgs[0]["ts"],
+      "cid": cid_of(handle._steer_user_msgs[0]),
+      "content": "actually use blue",
+    }
+  ]
 
 
 def test_claude_runner_splits_steer_at_boundary_not_http_arrival(

@@ -30,6 +30,20 @@ services:
     container_name: mobius
     init: true
     restart: unless-stopped
+    # Bubblewrap is the security boundary for reviewed `background_agent` app
+    # jobs. Nested Docker blocks its namespace setup by default. The image's
+    # setuid bwrap keeps only these setup capabilities and drops them before the
+    # unprivileged job starts; recoveryd deliberately receives none of them.
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      # Docker's default profiles block mount/pivot_root even after bwrap has
+      # entered its private namespace. The outer service remains unprivileged at
+      # runtime; bwrap supplies the per-job read-only/masked filesystem policy.
+      - seccomp=unconfined
+      - apparmor=unconfined
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - DOMAIN=${DOMAIN}

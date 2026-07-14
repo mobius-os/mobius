@@ -16,39 +16,57 @@ import {
   liveAppToken,
   latchedAppToken,
   resolveLatchedToken,
+  appTokenRefreshInterval,
   _resetLatchStore,
 } from '../appToken.js'
 
 beforeEach(() => { _resetLatchStore() })
 
-const OWNER = 'owner-jwt'
+const CACHED = 'cached-app-scoped-tok'
 const APP = 'app-scoped-tok'
 
+function tokenWithExpiry(exp) {
+  const payload = Buffer.from(JSON.stringify({ exp })).toString('base64url')
+  return `header.${payload}.signature`
+}
+
+test('app token refresh follows JWT expiry with a five-minute safety window', () => {
+  const now = Date.UTC(2026, 6, 13, 12, 0, 0)
+  const expires = now + 8 * 60 * 60_000
+  assert.equal(appTokenRefreshInterval(tokenWithExpiry(expires / 1000), now), 7 * 60 * 60_000 + 55 * 60_000)
+})
+
+test('app token refresh is bounded for nearly-expired and malformed tokens', () => {
+  const now = Date.UTC(2026, 6, 13, 12, 0, 0)
+  assert.equal(appTokenRefreshInterval(tokenWithExpiry((now + 60_000) / 1000), now), 30_000)
+  assert.equal(appTokenRefreshInterval('not-a-jwt', now), 5 * 60_000)
+})
+
 test('liveAppToken: app-scoped token always wins', () => {
-  assert.equal(liveAppToken(APP, true, OWNER), APP)
-  assert.equal(liveAppToken(APP, false, OWNER), APP)
+  assert.equal(liveAppToken(APP, true, CACHED), APP)
+  assert.equal(liveAppToken(APP, false, CACHED), APP)
 })
 
-test('liveAppToken: online with no app-token → undefined (never substitutes owner JWT)', () => {
-  assert.equal(liveAppToken(undefined, true, OWNER), undefined)
+test('liveAppToken: online with no fresh token waits instead of using the cache', () => {
+  assert.equal(liveAppToken(undefined, true, CACHED), undefined)
 })
 
-test('liveAppToken: offline with no app-token → owner JWT (so cached app still boots)', () => {
-  assert.equal(liveAppToken(undefined, false, OWNER), OWNER)
+test('liveAppToken: offline uses the cached app-scoped token', () => {
+  assert.equal(liveAppToken(undefined, false, CACHED), CACHED)
 })
 
-test('liveAppToken: offline with no owner JWT → undefined (nothing to use)', () => {
+test('liveAppToken: offline with no cached app token → undefined', () => {
   assert.equal(liveAppToken(undefined, false, null), undefined)
 })
 
 test('latchedAppToken: holds the latch when the live token blips to undefined', () => {
   // The latch was set offline; a transient online=true makes liveToken
   // undefined, but the latch must keep the resolved token.
-  assert.equal(latchedAppToken(undefined, OWNER), OWNER)
+  assert.equal(latchedAppToken(undefined, CACHED), CACHED)
 })
 
 test('latchedAppToken: a fresh app-scoped token supersedes the latch', () => {
-  assert.equal(latchedAppToken(APP, OWNER), APP)
+  assert.equal(latchedAppToken(APP, CACHED), APP)
 })
 
 test('latchedAppToken: empty when nothing resolved yet', () => {
@@ -62,31 +80,31 @@ test('reproduce-android-online-flap: token stays stable across online oscillatio
   // useRef the component holds; we update it exactly as the component does:
   // `if (liveToken) latched = liveToken`.
   let latched = undefined
-  const step = (appToken, online, ownerToken) => {
-    const live = liveAppToken(appToken, online, ownerToken)
+  const step = (appToken, online, cachedToken) => {
+    const live = liveAppToken(appToken, online, cachedToken)
     if (live) latched = live
     return latchedAppToken(appToken, latched)
   }
 
   // 1. Online boot, app-scoped token resolves → app mounts with APP token.
-  assert.equal(step(APP, true, OWNER), APP, 'online boot uses app token')
+  assert.equal(step(APP, true, CACHED), APP, 'online boot uses app token')
 
   // 2. Go offline (airplane). No app-token offline; reachability=false →
-  //    owner JWT. App stays mounted.
-  assert.equal(step(undefined, false, OWNER), OWNER, 'offline falls back to owner JWT')
+  //    persisted app token. App stays mounted.
+  assert.equal(step(undefined, false, CACHED), CACHED, 'offline uses the persisted app token')
 
   // 3. THE FLAP: navigator.onLine reports stale `true` → online=true for a
   //    render, no app-token. OLD code returned undefined here → iframe
   //    unmount → spinner. With the latch, the token MUST hold.
-  assert.equal(step(undefined, true, OWNER), OWNER, 'online blip must NOT drop the token')
+  assert.equal(step(undefined, true, CACHED), CACHED, 'online blip must NOT drop the token')
 
   // 4. Flip back to offline. Still stable.
-  assert.equal(step(undefined, false, OWNER), OWNER, 'still stable after flap')
+  assert.equal(step(undefined, false, CACHED), CACHED, 'still stable after flap')
 
   // 5. Several more oscillations — token never drops to undefined.
   for (let i = 0; i < 6; i++) {
     const online = i % 2 === 0
-    assert.ok(step(undefined, online, OWNER), `flap iter ${i} keeps a token`)
+    assert.ok(step(undefined, online, CACHED), `flap iter ${i} keeps a token`)
   }
 })
 
@@ -95,12 +113,12 @@ test('reproduce-android-online-flap: token stays stable across online oscillatio
 test('resolveLatchedToken: holds token across a simulated AppCanvas remount', () => {
   // First mount: online boot resolves app token.
   assert.equal(resolveLatchedToken(22, 0, APP, APP), APP)
-  // Go offline: live token = owner JWT, latched.
-  assert.equal(resolveLatchedToken(22, 0, OWNER, undefined), OWNER)
+  // Go offline: cached app token is latched.
+  assert.equal(resolveLatchedToken(22, 0, CACHED, undefined), CACHED)
   // *** REMOUNT *** — in the real component every useRef would reset here.
   // We simulate it by simply calling again with the flap's bad live value
   // (online blip → liveToken undefined). The module store must still hold.
-  assert.equal(resolveLatchedToken(22, 0, undefined, undefined), OWNER,
+  assert.equal(resolveLatchedToken(22, 0, undefined, undefined), CACHED,
     'token must survive a remount during the online flap')
   // Several flap iterations across "remounts" — never drops.
   for (let i = 0; i < 5; i++) {
@@ -109,14 +127,14 @@ test('resolveLatchedToken: holds token across a simulated AppCanvas remount', ()
 })
 
 test('resolveLatchedToken: a different app does NOT inherit the previous latch', () => {
-  assert.equal(resolveLatchedToken(22, 0, OWNER, undefined), OWNER)
+  assert.equal(resolveLatchedToken(22, 0, CACHED, undefined), CACHED)
   // Switch to app 99 while offline with no live token — must NOT get app 22's.
   assert.equal(resolveLatchedToken(99, 0, undefined, undefined), undefined,
     'a switched app must start with no latched token')
 })
 
 test('resolveLatchedToken: a version bump resets the latch for the same app', () => {
-  assert.equal(resolveLatchedToken(22, 0, OWNER, undefined), OWNER)
+  assert.equal(resolveLatchedToken(22, 0, CACHED, undefined), CACHED)
   // version 1 of the same app is a real teardown → fresh.
   assert.equal(resolveLatchedToken(22, 1, undefined, undefined), undefined,
     'a version bump must not reuse the old version latch')
@@ -144,18 +162,17 @@ test('clearLatchedTokens drops everything (logout)', () => {
 })
 
 // Guard the security intent: a GENUINE online session that never went offline
-// must never end up holding the owner JWT (the latch can only hold what the
-// live selection produced, and online-with-no-app-token produces undefined).
-test('genuine online session never latches the owner JWT', () => {
+// must wait for a fresh token instead of silently trusting persisted auth.
+test('genuine online session waits for a fresh app token', () => {
   let latched = undefined
-  const step = (appToken, online, ownerToken) => {
-    const live = liveAppToken(appToken, online, ownerToken)
+  const step = (appToken, online, cachedToken) => {
+    const live = liveAppToken(appToken, online, cachedToken)
     if (live) latched = live
     return latchedAppToken(appToken, latched)
   }
   // Online the whole time, app-scoped token slow to resolve.
-  assert.equal(step(undefined, true, OWNER), undefined)
-  assert.equal(step(undefined, true, OWNER), undefined)
-  // App token finally resolves → used; owner JWT was never latched.
-  assert.equal(step(APP, true, OWNER), APP)
+  assert.equal(step(undefined, true, CACHED), undefined)
+  assert.equal(step(undefined, true, CACHED), undefined)
+  // Fresh app token finally resolves and supersedes any persisted token.
+  assert.equal(step(APP, true, CACHED), APP)
 })

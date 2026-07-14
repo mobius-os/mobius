@@ -1,14 +1,17 @@
-import { memo } from 'react'
-import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { memo, useEffect, useState } from 'react'
+import { Switch } from '@openai/apps-sdk-ui/components/Switch'
+import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import ToolActivityGroup from './ToolActivityGroup.jsx'
-import { groupToolRuns } from './groupBlocks.js'
+import { groupToolRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
-import { suppressedQuestionToolIndices } from './streamReducers.js'
+import { suppressedQuestionToolIndices, thinkingElapsedMs } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
+import ErrorCard from './ErrorCard.jsx'
+import { assistantBlockKey } from './streamPromotion.js'
 
 
 function thoughtSeconds(durationMs) {
@@ -21,6 +24,55 @@ function thoughtLine(durationMs) {
   const seconds = thoughtSeconds(durationMs)
   if (!seconds) return '> Thought'
   return `> Thought for ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+}
+
+
+function formatSeconds(seconds) {
+  if (!Number.isFinite(seconds)) return null
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+}
+
+
+function ActiveThinkingDisclosure({ block, isStreaming }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!isStreaming) return undefined
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [isStreaming])
+
+  // Live items carry the runner-clock anchors used by thinkingElapsedMs.
+  // Persisted partials may only have duration_ms, so the shared renderer
+  // freezes at that durable value until live data becomes the selected source.
+  const elapsedMs = isStreaming ? thinkingElapsedMs(block, now) : block.duration_ms
+  const seconds = thoughtSeconds(elapsedMs)
+  const secondsText = formatSeconds(seconds)
+  const label = isStreaming
+    ? `> Thinking for ${secondsText || 'a moment'}`
+    : secondsText
+      ? `> Thought for ${secondsText}`
+      : '> Thought'
+
+  return (
+    <details className="chat__reasoning">
+      <summary className="chat__reasoning-summary">
+        <span className="chat__reasoning-line">
+          {label}
+          {isStreaming && (
+            <span className="chat__reasoning-ellipsis" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          )}
+        </span>
+      </summary>
+      <div className="chat__reasoning-body">
+        <StandardMarkdown text={block.content || ''} />
+      </div>
+    </details>
+  )
 }
 
 
@@ -44,11 +96,27 @@ function MsgContentInner({
   msg,
   chatId,
   onQuestionAnswer,
-  // isLastMsg + liveQuestionId replace the old inline isQuestionAnswerable
-  // arrow so memo can do a stable shallow comparison instead of seeing a
-  // fresh function reference every render.
+  // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
+  // a stable send callback that re-sends a short "continue". Only the tail
+  // interrupt note (a resumable error block on the last message) shows the
+  // button. Compared in the memo below, so pass a stable reference.
+  onResume,
+  autoResumeEnabled,
+  autoResumeAvailable,
+  autoResumeSaving,
+  autoResumeError,
+  onAutoResumeChange,
+  submissionBlocked = false,
+  // isLastMsg + liveQuestionId are primitive props so memo can do a stable
+  // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
+  // fresh function reference every render and defeat it.
   isLastMsg,
   liveQuestionId,
+  // Active answers always use this renderer for both their DB partial and
+  // live SSE payload. isStreaming only enables the cursor, aria-live, and the
+  // active thinking timer; it never selects a different component tree.
+  isActiveAnswer = false,
+  isStreaming = false,
   // Set of questionKey strings currently live in streamItems. When
   // non-null, any question block whose key appears here is already
   // rendered by the streaming <li> and should be suppressed to prevent
@@ -57,6 +125,7 @@ function MsgContentInner({
   // the persisted message and streamItems.
   suppressedQuestionKeys,
 }) {
+  const autoResumeSwitchId = chatId ? `auto-resume-${chatId}` : undefined
   // Build a stable per-render answerable predicate that closes over the
   // scalar props (no function prop needed from ChatView).
   const isQuestionAnswerable = (block) =>
@@ -88,31 +157,48 @@ function MsgContentInner({
           ? stripAugmentation(block.content) : block.content
         if (!text) return null
         return (
-          <div key={i} className={`chat__text chat__text--${msg.role}`}>
+          <div key={assistantBlockKey(block, i)} className={`chat__text chat__text--${msg.role}`}>
             {msg.role === 'assistant'
-              ? <StandardMarkdown text={text} />
+              ? (isActiveAnswer
+                  ? <ProgressiveMarkdown
+                      text={text}
+                      isStreaming={isStreaming && i === msg.blocks.length - 1}
+                    />
+                  : <StandardMarkdown text={text} />)
               : text}
           </div>
         )
       }
       if (block.type === 'tool') {
-        // Key a lone tool by `t-<firstIdx>` — the SAME scheme the group wrapper
-        // below uses — so a message that renders one tool and then (on a later
-        // render carrying a second adjacent tool) folds it into a group updates
-        // the slot in place instead of delete+insert. `i` is the block's index
-        // = the group's first index, so the keys coincide.
+        // Key a lone tool by its persisted `tool_use_id` (lever 2a) so the block
+        // survives the live↔DB surface switch and a catch-up commit by identity.
+        // Fall back to `t-<firstIdx>` for a legacy/tokenless block — the SAME
+        // scheme the group wrapper below uses — so a message that renders one
+        // tool and then (on a later render carrying a second adjacent tool)
+        // folds it into a group updates the slot in place instead of
+        // delete+insert. `i` is the block's index = the group's first index, and
+        // the group wrapper prefers the same tool's id, so the keys coincide.
         return (
-          <div key={`t-${i}`} className="chat__tools">
-            {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
-                truncated large output on expand (see chats.py
-                _truncate_large_tool_outputs + GET /tool-output). */}
-            <ToolBlock t={block} chatId={chatId} msgTs={msg.ts} blockIdx={i} />
+          <div key={assistantBlockKey(block, i)} className="chat__tools">
+            {/* chatId + the block's tool_use_id let ToolBlock lazily fetch a
+                truncated large output on expand (GET
+                /tool-output/{tool_use_id}). */}
+            <ToolBlock t={block} chatId={chatId} />
           </div>
         )
       }
       if (block.type === 'thinking') {
+        if (isActiveAnswer) {
+          return (
+            <ActiveThinkingDisclosure
+              key={assistantBlockKey(block, i)}
+              block={block}
+              isStreaming={isStreaming && i === msg.blocks.length - 1}
+            />
+          )
+        }
         return (
-          <details key={i} className="chat__reasoning">
+          <details key={assistantBlockKey(block, i)} className="chat__reasoning">
             <summary className="chat__reasoning-summary">
               <span className="chat__reasoning-line">
                 {thoughtLine(block.duration_ms)}
@@ -142,7 +228,7 @@ function MsgContentInner({
           onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
         )
         return (
-          <div key={i}>
+          <div key={assistantBlockKey(block, i)}>
             <QuestionCard
               questions={block.questions || []}
               questionId={block.question_id}
@@ -162,32 +248,78 @@ function MsgContentInner({
         // branch the block rendered to null and the error
         // vanished on chat return; that was the bug.
         //
-        // Run the message through StandardMarkdown so URLs in
-        // provider error responses (quota links, billing
-        // pages) become clickable — agents' error payloads
-        // typically include "Upgrade to Pro (https://...)" and
-        // "purchase more credits at https://..." that the user
-        // wants to tap straight from the chat.
+        // The card body (label, park/pause classification, reset line) is
+        // ErrorCard — this SAME block renderer consumes the live payload too,
+        // so the two sources cannot diverge. Only the Resume button
+        // lives here: a turn paused by a drain-gated restart (or interrupted
+        // by a crash) persists a `resumable` note (backend reconcile marks
+        // it), and only the TAIL note on the last message is resumable —
+        // mirrors how a question card is only answerable at the tail — so
+        // scrolled-back history and live provider errors never show a Resume
+        // button. One tap re-sends a short "continue" as a normal visible
+        // send; on a park the button reads "Resume now" (design §2.4).
+        const resumable = !!(block.resumable && isLastMsg && onResume)
+        const parked = !!block.pause?.resets_at
         return (
-          <div key={i} className="chat__text--error" role="alert">
-            <span className="chat__error-label">Error</span>
-            <StandardMarkdown
-              text={block.message || 'The agent ran into an issue.'}
-            />
-          </div>
+          <ErrorCard
+            key={assistantBlockKey(block, i)}
+            block={block}
+            autoResume={resumable && parked && !!autoResumeEnabled}
+          >
+            {resumable && parked && autoResumeAvailable && onAutoResumeChange && (
+              <div className="chat__limit-option">
+                <div className="chat__limit-option-copy">
+                  <label
+                    className="chat__limit-option-label"
+                    htmlFor={autoResumeSwitchId}
+                  >
+                    Always continue after limits in this chat
+                  </label>
+                </div>
+                <Switch
+                  id={autoResumeSwitchId}
+                  checked={!!autoResumeEnabled}
+                  onCheckedChange={onAutoResumeChange}
+                  disabled={!!autoResumeSaving || submissionBlocked}
+                />
+                {autoResumeError && (
+                  <span className="chat__limit-option-error" role="alert">
+                    {autoResumeError}
+                  </span>
+                )}
+              </div>
+            )}
+            {resumable && (
+              <button
+                type="button"
+                className="chat__resume"
+                onClick={() => onResume('continue')}
+                disabled={submissionBlocked}
+                title={submissionBlocked
+                  ? 'Wait for the provider switch to finish.'
+                  : undefined}
+              >
+                {parked ? 'Resume now' : 'Resume'}
+              </button>
+            )}
+          </ErrorCard>
         )
       }
       return null
     }
 
     // Skip the AskUserQuestion tool twin, then fold runs of adjacent tool
-    // blocks into one Activity card. groupToolRuns runs on the SAME entries on
-    // the live path (StreamingMessage), so the transcript doesn't reshuffle
-    // when a streaming turn is promoted.
+    // blocks into one Activity card. Live items arrive here after conversion
+    // to the same block shape, so the transcript doesn't reshuffle on promote.
     const entries = msg.blocks
       .map((block, i) => ({ item: block, idx: i }))
       .filter(({ idx }) => !skipToolIdx.has(idx))
-    const nodes = groupToolRuns(entries)
+    // Repair already-persisted transcripts where a continuous reasoning pass was
+    // fragmented into many thinking blocks: coalesce runs of adjacent thinking
+    // AFTER idx assignment (each survivor keeps its original persisted idx) so a
+    // tokenless tool block's `t-<idx>` React key stays stable across renders.
+    // See groupBlocks.coalesceThinkingEntries.
+    const nodes = groupToolRuns(coalesceThinkingEntries(entries))
 
     return (
       <>
@@ -195,19 +327,23 @@ function MsgContentInner({
         {nodes.map(node => {
           if (node.group) {
             const tools = node.group.map(e => e.item)
+            // Prefer the first tool's `tool_use_id` (lever 2a); fall back to
             // `t-<firstIdx>` — the SAME key a lone tool at that index uses (see
             // renderBlock), so a single→group transition updates this slot in
-            // place rather than swapping keys and forcing a delete+insert.
+            // place rather than swapping keys and forcing a delete+insert. Each
+            // grouped ToolBlock is keyed by its own id so a catch-up commit
+            // reconciles each block by identity within the group.
             return (
-              <div key={`t-${node.group[0].idx}`} className="chat__tools">
+              <div
+                key={assistantBlockKey(node.group[0].item, node.group[0].idx)}
+                className="chat__tools"
+              >
                 <ToolActivityGroup tools={tools}>
                   {node.group.map(e => (
                     <ToolBlock
-                      key={e.idx}
+                      key={assistantBlockKey(e.item, e.idx)}
                       t={e.item}
                       chatId={chatId}
-                      msgTs={msg.ts}
-                      blockIdx={e.idx}
                     />
                   ))}
                 </ToolActivityGroup>
@@ -227,9 +363,14 @@ function MsgContentInner({
     <>
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
-        <div className={`chat__text chat__text--${msg.role}`}>
+        <div
+          key={isActiveAnswer ? 0 : undefined}
+          className={`chat__text chat__text--${msg.role}`}
+        >
           {msg.role === 'assistant'
-            ? <StandardMarkdown text={text} />
+            ? (isActiveAnswer
+                ? <ProgressiveMarkdown text={text} isStreaming={isStreaming} />
+                : <StandardMarkdown text={text} />)
             : text}
         </div>
       ) : null}
@@ -250,8 +391,17 @@ export default memo(MsgContentInner, (prev, next) => {
     prev.msg === next.msg
     && prev.chatId === next.chatId
     && prev.onQuestionAnswer === next.onQuestionAnswer
+    && prev.onResume === next.onResume
+    && prev.autoResumeEnabled === next.autoResumeEnabled
+    && prev.autoResumeAvailable === next.autoResumeAvailable
+    && prev.autoResumeSaving === next.autoResumeSaving
+    && prev.autoResumeError === next.autoResumeError
+    && prev.onAutoResumeChange === next.onAutoResumeChange
+    && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
+    && prev.isActiveAnswer === next.isActiveAnswer
+    && prev.isStreaming === next.isStreaming
     // suppressedQuestionKeys is a Set (new reference each render) or null.
     // Compare by size + content when both are Sets; treat null vs Set as unequal.
     // This is intentionally conservative — a false inequality triggers a

@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -48,6 +49,31 @@ def test_log_event_appends_multiple_lines_in_order():
   activity.log_event("storage_write", app_id=1, path="notes.json", size_delta=42)
   lines = _read_lines()
   assert [e["ev"] for e in lines] == ["app_open", "app_install", "storage_write"]
+
+
+def test_log_event_ascii_escapes_a_lone_surrogate():
+  assert activity.log_event("app_error", message="bad-\ud800-tail") is True
+  assert _read_lines()[0]["message"] == "bad-\ud800-tail"
+
+
+def test_log_event_repairs_an_interrupted_partial_tail():
+  path = _activity_path()
+  path.parent.mkdir(parents=True, exist_ok=True)
+  current = datetime.now(timezone.utc).isoformat()
+  path.write_bytes(f'{{"ev":"old","ts":"{current}"}}\n{{"ev":'.encode())
+  assert activity.log_event("app_open", app_id=2, slug="new") is True
+  assert [event["ev"] for event in _read_lines()] == ["old", "app_open"]
+
+
+def test_only_durable_batches_fsync(monkeypatch):
+  calls = []
+  monkeypatch.setattr(activity.os, "fsync", lambda fd: calls.append(fd))
+  assert activity.log_event("app_open", app_id=1, slug="fast") is True
+  assert calls == []
+  assert activity.log_events(
+    [("app_signal", {"app_id": 1, "id": "durable"})], durable=True,
+  ) is True
+  assert len(calls) == 1
 
 
 def test_log_event_disabled_via_env(monkeypatch):
@@ -278,6 +304,34 @@ def test_read_events_spans_rotated_archives():
   ))
   ids = [e["app_id"] for e in events]
   assert ids == [1, 2, 3], f"got {ids}"
+
+
+def test_read_events_keeps_snapshotted_active_inode_across_rotation(monkeypatch):
+  """Rotation after source enumeration must not make the old active file vanish.
+
+  This injects a write in the exact historical gap: the reader has opened its
+  source snapshot, but has not consumed the active file yet. The write rotates
+  that pathname and creates a new active file. The reader must still consume
+  the already-open old inode.
+  """
+  old_ts = datetime.now(timezone.utc) - timedelta(days=8)
+  activity.log_event(
+    "app_open", ts=old_ts.isoformat(), app_id=1, slug="before-rotation",
+  )
+  original_snapshot = activity._event_source_snapshot
+
+  @contextmanager
+  def rotate_after_snapshot(active):
+    with original_snapshot(active) as sources:
+      activity.log_event("app_open", app_id=2, slug="rotation-trigger")
+      yield sources
+
+  monkeypatch.setattr(activity, "_event_source_snapshot", rotate_after_snapshot)
+  events = list(activity.read_events(
+    since=old_ts - timedelta(minutes=1),
+    until=datetime.now(timezone.utc) + timedelta(minutes=1),
+  ))
+  assert [event["slug"] for event in events] == ["before-rotation"]
 
 
 def test_read_events_archive_only_window():

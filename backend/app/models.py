@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text,
+  String, Text, false,
 )
 
 from app.database import Base
@@ -94,6 +94,13 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Per-chat policy for provider-limit recovery. Kept out of
+  # agent_settings_json because that blob is snapshotted/mirrored as SDK
+  # runtime configuration; mixing this policy into it can skip first-send
+  # model snapshots or overwrite the owner's global model defaults.
+  auto_resume_on_limit = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
   agent_id = Column(String(64), nullable=True, default=None)
@@ -196,6 +203,18 @@ class ChatRun(Base):
   cost_usd = Column(Float, nullable=True, default=None)
   started_at = Column(DateTime, default=lambda: datetime.now(UTC))
   ended_at = Column(DateTime, nullable=True, default=None)
+  # Provider rate/usage-limit parking (design §2.4). When a turn dies on a
+  # provider limit, the run is PARKED instead of just cleared: `status` moves
+  # to "parked", `parked_until` holds the reset time (naive UTC, matching every
+  # other DateTime here), and `park_reason` a short label ("rate_limit" /
+  # "usage_limit" / …). This run row IS the provider-parked signal — no
+  # separate state enum. The liveness checks read it via
+  # `chat._parked_until_for_chat`; the periodic reset sweep notifies once at
+  # `parked_until`; auto-resume may pass through the retryable
+  # "resume_pending" state before the row becomes terminal. Null on every
+  # non-parked run and on rows created before this column existed.
+  parked_until = Column(DateTime, nullable=True, default=None)
+  park_reason = Column(String(32), nullable=True, default=None)
 
 
 class App(Base):
@@ -316,6 +335,11 @@ class App(Base):
   # like manage_apps, not a ladder. Default False — only granted by
   # manifest declaration on install.
   github_access = Column(Boolean, nullable=False, default=False)
+  # Owner filesystem capability. This is intentionally separate from storage
+  # interop: it grants the app-scoped token access to the guarded /api/fs
+  # surface (still path-confined and secret-denied there). The Editor is the
+  # canonical holder. Default false and checked from the live row per request.
+  filesystem_access = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
@@ -341,13 +365,12 @@ class App(Base):
   #               stripped; surviving text secret-scrubbed). "Reduced
   #               exposure," not "safe" — regex can't catch pasted
   #               documents or encoded secrets.
-  #   'full'    — DEFERRED. Reserved so the column's value space is
-  #               stable; the read API rejects it until a concrete
-  #               consumer + louder consent lands (design §2).
-  # This is consent/attribution/audit, NOT a sandbox: a same-origin app
-  # holds the owner JWT and can hit /api/chats directly. The enforceable
-  # control is that THIS gated surface returns redacted data; the owner-
-  # only routes stay closed (design §0b).
+  #   'full'    — legacy declaration accepted for compatibility; the only
+  #               route still serves the same structurally redacted view as
+  #               'summary', and the reviewed contract says so explicitly.
+  # App frames receive only their scoped JWT and run in opaque-origin
+  # sandboxes, so this live-row permission is an enforceable boundary in
+  # addition to recording owner consent.
   chat_log_access = Column(
     String(16), nullable=False, default="none"
   )
@@ -372,6 +395,17 @@ class App(Base):
   # for the agent and SW; no server-side enforcement. Example shape:
   #   {"reads": true, "writes": "queued", "execution": "full", "precache": []}
   offline_contract = Column(JSON, nullable=True, default=None)
+  # Optional root-level markdown file contributed to the agent system prompt.
+  # Only live installed rows are composed; soft-uninstall is therefore the
+  # activation gate even though the app's source tree remains recoverable.
+  system_prompt_file = Column(String(255), nullable=True, default=None)
+  # Explicit manifest identity for apps that participate in the agent/system
+  # lifecycle.  This flag grants nothing by itself; the individual manifest
+  # declarations remain the capabilities and the install review is consent.
+  system_app = Column(Boolean, nullable=False, default=False)
+  # Server-derived, versioned capability contract reviewed at install time.
+  # Null is a legitimate legacy state for apps installed before contracts.
+  capability_contract = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
@@ -407,3 +441,33 @@ class Notification(Base):
   actions = Column(JSON, nullable=True)
   sent_at = Column(DateTime, default=lambda: datetime.now(UTC))
   clicked_at = Column(DateTime, nullable=True)
+
+
+class ToolOutput(Base):
+  """Full text of a large tool result, stored out-of-band (contract rule 6).
+
+  The chat transcript blob (`Chat.messages`) and the live / catch-up event
+  stream carry only a bounded head+tail excerpt of a big tool output; the full
+  text lives here, keyed by the tool's stable identity, and `ToolBlock` fetches
+  it lazily on expand via GET /api/chats/{chat_id}/tool-output/{tool_use_id}.
+
+  Why a table, not a file: `db/` (ultimate.db) is gitignored, so these blobs
+  are correctly EXCLUDED from the nightly `/data` git safety-net (we do not want
+  megabytes of tool output versioned every night), and the rows ride the chat
+  lifecycle for free — soft-delete keeps them (a recovered chat re-shows its
+  outputs), the hard-purge sweep drops them with their chat. Written via the
+  single-writer actor's `StashToolOutput` command as an insert/upsert on the
+  composite PK (race-immune; see chat_writer.py). `create_all` builds this table
+  on the next boot — a new table needs no ALTER migration (see run_migrations,
+  which only ALTERs existing tables)."""
+
+  __tablename__ = "tool_outputs"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), primary_key=True, index=True
+  )
+  # The tool_use_id (Claude) / ThreadItem id (Codex) — stable emit→read and
+  # unique within the chat, which is all the composite PK needs.
+  tool_use_id = Column(String(128), primary_key=True)
+  output = Column(Text, nullable=False, default="")
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))

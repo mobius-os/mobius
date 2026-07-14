@@ -33,6 +33,48 @@ def test_get_settings_unconfigured(client, auth):
   assert res.json()["gemini_configured"] is False
 
 
+def test_global_settings_do_not_expose_chat_auto_resume(client, auth):
+  """Rate-limit auto-resume is controlled per chat, not globally."""
+  res = client.get("/api/settings", headers=auth)
+  assert res.status_code == 200
+  assert "auto_resume_on_limit" not in res.json()
+  assert "auto_resume_on_limit" not in SettingsUpdate.model_fields
+
+
+def test_global_settings_reject_stale_auto_resume_payload(client, auth):
+  """A cached pre-removal client must not receive a false success."""
+  res = client.post(
+    "/api/settings",
+    headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+
+  assert res.status_code == 422
+  assert res.json()["detail"][0]["type"] == "extra_forbidden"
+
+
+def test_boot_removes_stale_global_auto_resume_setting():
+  """A deploy cleans the rollback hazard before accepting requests."""
+  import json
+  import os
+  from pathlib import Path
+
+  from fastapi.testclient import TestClient
+  from app.main import app
+
+  path = Path(os.environ["DATA_DIR"]) / "shared" / "agent-settings.json"
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(json.dumps({
+    "auto_resume_on_limit": True,
+    "model": "claude-opus-4-7",
+  }))
+
+  with TestClient(app):
+    pass
+
+  assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
+
+
 def test_save_and_check_gemini_key(client, db, auth):
   """POST /api/settings saves the key encrypted; GET reflects configured."""
   res = client.post(
@@ -301,7 +343,7 @@ def test_background_agent_defaults_do_not_inherit_chat_model_defaults(tmp_path):
   background = providers.background_agent_settings(str(tmp_path), "codex")
   assert background["primary"] == {
     "provider": "codex",
-    "model": "gpt-5.5",
+    "model": providers.DEFAULT_MODELS["codex"],
     "effort": "medium",
   }
   assert background["fallback"] is None
@@ -312,6 +354,7 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(client, a
   surface Codex as the active default instead of a disconnected Claude."""
   from pathlib import Path
   from app.config import get_settings as _gs
+  from app import providers
 
   codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
   codex_auth.parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +364,7 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(client, a
     body = client.get("/api/settings", headers=auth).json()
     assert body["codex_authenticated"] is True
     assert body["provider"] == "codex"
-    assert body["agent_settings"]["model"] == "gpt-5.5"
+    assert body["agent_settings"]["model"] == providers.DEFAULT_MODELS["codex"]
     assert body["background_agents"]["primary"]["provider"] == "codex"
   finally:
     codex_auth.unlink(missing_ok=True)
@@ -633,7 +676,7 @@ def test_background_agent_settings_drops_cross_provider_models(tmp_path):
   }
   assert background["fallback"] == {
     "provider": "codex",
-    "model": "gpt-5.5",
+    "model": providers.DEFAULT_MODELS["codex"],
     "effort": "medium",
   }
 
@@ -767,6 +810,57 @@ def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
   assert "codex_home" not in captured
   assert captured["codex_bin"] == "/usr/bin/codex"
   assert captured["env"]["CODEX_HOME"] == str(codex_home)
+
+
+def test_fetch_codex_models_falls_back_to_cli_debug_catalog(
+  tmp_path, monkeypatch
+):
+  """New Codex catalog metadata can outrun the SDK's generated enums.
+
+  When `AsyncCodex.models()` rejects the catalog shape, the registry should
+  still read slugs from `codex debug models` rather than falling all the way
+  back to the static KNOWN_MODELS list.
+  """
+  from app import providers
+
+  codex_home = tmp_path / "cli-auth" / "codex"
+  codex_home.mkdir(parents=True)
+  (codex_home / "auth.json").write_text("{}")
+
+  class FakeCodexConfig:
+    def __init__(self, **_kwargs):
+      pass
+
+  class FakeCodex:
+    def __init__(self, config):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def models(self):
+      raise ValueError("unsupported enum value: max")
+
+  async def fake_cli_fetch(data_dir):
+    assert data_dir == str(tmp_path)
+    return ["gpt-5.6-sol", "gpt-5.6-terra"]
+
+  monkeypatch.setitem(
+    sys.modules, "openai_codex", SimpleNamespace(AsyncCodex=FakeCodex),
+  )
+  monkeypatch.setitem(
+    sys.modules, "openai_codex.client",
+    SimpleNamespace(CodexConfig=FakeCodexConfig),
+  )
+  monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
+  monkeypatch.setattr(providers, "_fetch_codex_models_from_cli", fake_cli_fetch)
+
+  ids = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
+
+  assert ids == ["gpt-5.6-sol", "gpt-5.6-terra"]
 
 
 def test_model_prefs_default_empty(client, auth):

@@ -81,6 +81,11 @@ OFFLINE_FLAG = Path("/data/.platform-offline")
 # can show "rolled back — needs repair" rather than silently staying "up to
 # date".
 ROLLED_BACK_FLAG = Path("/data/.platform-rolled-back")
+# Transient crash-safety marker written immediately before reconcile mutates the
+# served tree. If the boot subprocess is SIGKILLed mid-rebase/probe/rollback, the
+# post-timeout boot guard uses this sha to restore the last committed served tip
+# before uvicorn imports anything.
+RECONCILE_PRE_FLAG = Path("/data/.platform-reconcile-pre")
 # A filesystem lock shared by the boot reconcile subprocess and the running
 # uvicorn's Apply path. It MUST be a real flock (not an asyncio.Lock): the boot
 # reconcile runs in a throwaway ``python3 -c`` process, so an in-process lock
@@ -285,6 +290,21 @@ def _local_branch(repo: Path = PLATFORM_REPO) -> str:
   return name if name and name != "HEAD" else LOCAL_BRANCH
 
 
+def _head_detached(repo: Path = PLATFORM_REPO) -> bool:
+  name = _git(
+    "rev-parse", "--abbrev-ref", "HEAD", repo=repo, check=False,
+  ).stdout.strip()
+  return name == "HEAD"
+
+
+def _reattach_detached_head(repo: Path, local: str) -> None:
+  """Move the working branch to the current detached HEAD, preserving the
+  worktree. This makes the subsequent ``commit_local`` land on the branch the
+  reconcile will actually fast-forward/rebase."""
+  if _head_detached(repo):
+    _git("checkout", "-B", local, "HEAD", repo=repo)
+
+
 def _has_origin(repo: Path = PLATFORM_REPO) -> bool:
   return _git("remote", "get-url", "origin", repo=repo, check=False).returncode == 0
 
@@ -321,6 +341,51 @@ def _abort_interrupted(repo: Path = PLATFORM_REPO) -> None:
     _git("rebase", "--abort", repo=repo, check=False)
   if (repo / ".git" / "MERGE_HEAD").exists():
     _git("merge", "--abort", repo=repo, check=False)
+
+
+def _write_reconcile_pre(sha: str) -> None:
+  tmp = RECONCILE_PRE_FLAG.with_name(
+    RECONCILE_PRE_FLAG.name + f".tmp-{os.getpid()}")
+  tmp.write_text(sha + "\n")
+  os.replace(tmp, RECONCILE_PRE_FLAG)
+
+
+def _clear_reconcile_pre() -> None:
+  RECONCILE_PRE_FLAG.unlink(missing_ok=True)
+
+
+def _read_reconcile_pre() -> str | None:
+  if not RECONCILE_PRE_FLAG.exists():
+    return None
+  sha = RECONCILE_PRE_FLAG.read_text().strip()
+  return sha or None
+
+
+def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
+  """Post-timeout boot guard: never let uvicorn import a half-applied tree.
+
+  The normal reconcile path cleans up after itself. This guard is for the harder
+  case where the outer shell timeout SIGKILLed that process before Python could
+  abort/reset. If the transient pre-mutation marker remains, restore that exact
+  committed tip. Otherwise still abort any sequencer state and hard-reset the
+  working branch to its current committed tip so conflict markers cannot be
+  served.
+  """
+  if not (repo / ".git").exists():
+    return "boot_guard[skipped] no_git"
+  local = _local_branch(repo)
+  pre = _read_reconcile_pre()
+  interrupted = _rebase_in_progress(repo) or (repo / ".git" / "MERGE_HEAD").exists()
+  _abort_interrupted(repo)
+  if pre and _rev(repo, pre):
+    _reset_hard_to(repo, local, pre)
+    _clear_reconcile_pre()
+    return f"boot_guard[reset] pre={_short(pre)}"
+  if interrupted:
+    _git("checkout", "-q", local, repo=repo, check=False)
+    _git("reset", "--hard", local, repo=repo, check=False)
+  _clear_reconcile_pre()
+  return "boot_guard[clean]"
 
 
 def _fetch(repo: Path = PLATFORM_REPO) -> bool:
@@ -552,6 +617,53 @@ def _served_platform_sha() -> str | None:
   return sha or None
 
 
+# The served uvicorn runs with cwd ``backend/`` and imports the platform backend,
+# so a change to any backend RUNTIME source (anything under ``backend/`` EXCEPT
+# the never-imported subtrees below) can alter the running server and needs a
+# restart to load. Everything else takes effect without restarting the served
+# process: frontend/** rebuilds into dist (served per-request), top-level tests/
+# and docs never run in the server, backend/tests/** never imports, backend/
+# scripts/** are subprocess-invoked fresh each call, backend/recovery/** is the
+# separate recoveryd container, and backend/memeval/** is eval tooling. Broad
+# (any backend/ runtime path, not just backend/app/**) so a root-level module or
+# a symlinked source can't silently slip past — fail toward restarting.
+_NON_RUNTIME_BACKEND_SUBDIRS = (
+  "backend/tests/", "backend/scripts/", "backend/recovery/", "backend/memeval/",
+)
+
+
+def _paths_need_restart(paths: list[str]) -> bool:
+  """True iff any changed path is served-backend RUNTIME code (needs a restart)."""
+  for p in paths:
+    if p != "backend" and not p.startswith("backend/"):
+      continue  # not backend (frontend/tests/docs/…) — no server restart
+    if any(p.startswith(sub) for sub in _NON_RUNTIME_BACKEND_SUBDIRS):
+      continue  # backend, but a subtree the served process never imports
+    return True
+  return False
+
+
+def _tree_change_needs_restart(
+  repo: Path, before: str | None, after: str | None
+) -> bool:
+  """Does the ``before``→``after`` change require restarting the served uvicorn?
+
+  True iff it touched served backend runtime code. Fail SAFE toward restarting:
+  a missing sha or an uncomputable diff returns True, so a restart is never
+  skipped on an ambiguous change (the one thing the old blunt check got right —
+  never serve stale backend). Same commit → False; a genuinely empty diff (an
+  ``--allow-empty`` commit) → False (nothing to load).
+  """
+  if before == after:
+    return False  # same sha (or both missing) — nothing changed
+  if not before or not after:
+    return True  # one side unknown — can't prove no backend change, fail closed
+  paths = _changed_paths(repo, before, after)
+  if paths is None:
+    return True  # diff failed — fail closed
+  return _paths_need_restart(paths)  # empty list → genuine no-change → False
+
+
 def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
   served = _served_platform_sha()
   if not served:
@@ -561,25 +673,37 @@ def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
     head = _rev(repo, local)
   except Exception:
     return False
-  return bool(head and head != served)
+  # The tree advanced past what's served, but a restart is only needed if the
+  # served BACKEND package changed; a frontend/tests/docs/scripts advance is
+  # already live or irrelevant to the running server.
+  return _tree_change_needs_restart(repo, served, head)
 
 
-def _changed_paths(repo: Path, before: str | None, after: str | None) -> list[str]:
-  """Repo-relative paths changed between two commits, best-effort."""
+def _changed_paths(
+  repo: Path, before: str | None, after: str | None
+) -> list[str] | None:
+  """Repo-relative paths changed between two commits, or None if the diff failed.
+
+  ``--no-renames`` so a file moved OUT of a runtime dir (``git mv backend/app/x
+  docs/x``) shows BOTH the deleted source and the added destination — otherwise
+  rename detection reports only the destination and the classifier would miss
+  that the served backend lost a module. None (diff failed) is distinct from []
+  (a real, empty diff) so callers can fail closed on the former.
+  """
   if not before or not after or before == after:
     return []
   proc = _git(
-    "diff", "--name-only", before, after, repo=repo, check=False,
+    "diff", "--name-only", "--no-renames", before, after, repo=repo, check=False,
   )
   if proc.returncode != 0:
-    return []
+    return None
   return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def _touched_frontend(repo: Path, before: str | None, after: str | None) -> bool:
   return any(
     path == "frontend" or path.startswith("frontend/")
-    for path in _changed_paths(repo, before, after)
+    for path in (_changed_paths(repo, before, after) or [])
   )
 
 
@@ -669,8 +793,11 @@ def reconcile_clone(
 
   # A deploy advanced origin beyond committed main. Commit any uncommitted edits
   # FIRST so neither the fast-forward reset nor the rebase can discard them.
+  _reattach_detached_head(repo, local)
   app_git.commit_local(repo, "platform: local edits before reconcile")
   pre = _rev(repo, local)  # now includes the just-committed edits
+  if pre:
+    _write_reconcile_pre(pre)
 
   # From here on the working tree is mutated. The served tree MUST end at either
   # the update or exactly PRE — never a half-applied state — so any UNEXPECTED
@@ -702,21 +829,29 @@ def reconcile_clone(
         _reset_hard_to(repo, local, pre)  # belt-and-braces: ensure main == PRE
         _write_conflict_flag(target, paths)
         ROLLED_BACK_FLAG.unlink(missing_ok=True)
+        _clear_reconcile_pre()
         return ReconcileResult("conflict", pre, pre, target, conflict_paths=paths)
 
     # Post-reconcile import probe: a text-clean ff/rebase can still produce a
     # tree that fails to import (upstream dropped a module a local edit imports;
     # a bad deploy). Roll back to the previous served commit rather than serve it
-    # broken.
-    ok, err = _import_probe(repo)
-    if not ok:
-      _reset_hard_to(repo, local, pre)
-      _write_rolled_back_flag(target, err)
-      CONFLICT_FLAG.unlink(missing_ok=True)
-      return ReconcileResult("rolled_back", pre, pre, target, error=err)
+    # broken. Skip the ~60s throwaway boot when the reconcile touched NO served
+    # backend code (frontend/tests/docs/scripts only): the backend tree is then
+    # byte-identical, so the probe would only re-prove an unchanged import. This
+    # is the same backend-change gate that decides the restart, so the two stay
+    # consistent.
+    if _tree_change_needs_restart(repo, pre, _rev(repo, local)):
+      ok, err = _import_probe(repo)
+      if not ok:
+        _reset_hard_to(repo, local, pre)
+        _write_rolled_back_flag(target, err)
+        CONFLICT_FLAG.unlink(missing_ok=True)
+        _clear_reconcile_pre()
+        return ReconcileResult("rolled_back", pre, pre, target, error=err)
   except Exception as exc:  # unexpected git failure — never serve a half-tree
     _abort_interrupted(repo)
     _reset_hard_to(repo, local, pre)
+    _clear_reconcile_pre()
     return ReconcileResult("error", pre, pre, target, error=repr(exc))
 
   # Success: main now carries the update plus any replayed local edits. Advance
@@ -730,6 +865,7 @@ def reconcile_clone(
   ROLLED_BACK_FLAG.unlink(missing_ok=True)
   if at_boot:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+  _clear_reconcile_pre()
   return ReconcileResult("updated", pre, new_sha, target, error=None)
 
 
@@ -762,6 +898,17 @@ def reconcile_clone_sync() -> str:
     return summary
   except Exception as exc:  # never propagate to the boot shell
     return f"reconcile[error] {exc!r}"
+
+
+def boot_guard_sync() -> str:
+  """Shell entry point run after reconcile and before uvicorn.
+
+  Unlike the best-effort reconcile, this deliberately propagates failures: the
+  guard is the final proof that the served tree is clean. Booting after a guard
+  error would silently bypass the safety boundary it exists to enforce.
+  """
+  with _reconcile_flock():
+    return boot_guard_clean_served_tree(PLATFORM_REPO)
 
 
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
@@ -817,19 +964,24 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   :func:`platform_status` is deliberately fetch-free — it reads the
   remote-tracking ``origin/main`` left by the last boot/apply fetch — so this is
   the one on-demand path that refreshes that ref without waiting for a reboot.
-  The fetch is best-effort (offline simply leaves the last-known ref, so the
-  answer is "no newer update", never an error) and runs under
-  :data:`RECONCILE_LOCK` so it can never fetch mid-reconcile. The working tree and
-  ``main`` are untouched — a fetch only advances remote-tracking refs, so this is
-  safe to run anytime and never mutates the served code.
+  A missing clone/origin or failed fetch is an explicit error: returning status
+  from a stale remote-tracking ref would tell the owner "No updates found" when
+  the service never actually reached upstream. The fetch runs under
+  :data:`RECONCILE_LOCK` so it can never fetch mid-reconcile. The working tree
+  and ``main`` are untouched — a fetch only advances remote-tracking refs, so
+  this is safe to run anytime and never mutates the served code.
   """
-  if (repo / ".git").exists() and _has_origin(repo):
-    with _reconcile_flock():
-      if _fetch(repo):
-        target = _rev(repo, DEFAULT_TARGET_REF)
-        local = _local_branch(repo)
-        if target and _is_ancestor(repo, target, local):
-          _set_upstream(repo, target)
+  if not (repo / ".git").exists():
+    raise PlatformUpdateError("platform_repo_missing")
+  if not _has_origin(repo):
+    raise PlatformUpdateError("platform_origin_missing")
+  with _reconcile_flock():
+    if not _fetch(repo):
+      raise PlatformUpdateError("platform_fetch_failed")
+    target = _rev(repo, DEFAULT_TARGET_REF)
+    local = _local_branch(repo)
+    if target and _is_ancestor(repo, target, local):
+      _set_upstream(repo, target)
   return platform_status(repo)
 
 
@@ -978,9 +1130,19 @@ async def apply_platform_update(
     chat_id: str | None = None
 
     if res.status == "updated":
-      mark_restart_needed(res.new_sha or "")
+      # Frontend changes rebuild into dist (served per-request, no restart);
+      # only a served-backend change requires restarting uvicorn. Path-aware so a
+      # test/docs/frontend-only update finishes without a spurious restart prompt.
       await _rebuild_frontend_after_update_if_needed(repo, res)
-      state = PlatformUpdateState.RESTART_NEEDED
+      # Compare the SERVED sha (what the running uvicorn imported) to the new
+      # head, not just this reconcile's delta: a backend edit committed locally
+      # while the server ran would otherwise be missed if the incoming update
+      # only touched the frontend, leaving apply and status disagreeing.
+      if _tree_change_needs_restart(repo, _served_platform_sha(), res.new_sha):
+        mark_restart_needed(res.new_sha or "")
+        state = PlatformUpdateState.RESTART_NEEDED
+      else:
+        state = PlatformUpdateState.UP_TO_DATE
     elif res.status == "conflict":
       # Keep the resolver gated behind the owner's next click. A conflict pass
       # rewrites the flag with target + paths, so preserve a previously opened

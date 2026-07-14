@@ -127,9 +127,21 @@ async function goBack(page) {
   await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 }
 
+async function goForward(page) {
+  await page.evaluate(() => history.forward())
+  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
   test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
@@ -330,6 +342,29 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect((await getNavState(page)).drawerOpen).toBe(true)
   })
 
+  test('Brand button is the only header drawer trigger', async ({ page }) => {
+    await setup(page)
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    const header = page.locator('.shell__bar')
+    await expect(toggle).toHaveAttribute('type', 'button')
+    await expect(toggle).toHaveAttribute('aria-controls', 'navigation-drawer')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    const [toggleBox, headerBox] = await Promise.all([toggle.boundingBox(), header.boundingBox()])
+    expect(toggleBox).not.toBeNull()
+    expect(headerBox).not.toBeNull()
+    expect(toggleBox.width).toBeLessThan(headerBox.width / 2)
+
+    // A tap in the intentionally empty part of the toolbar must not open the drawer.
+    await page.mouse.click(headerBox.x + headerBox.width - 12, headerBox.y + headerBox.height / 2)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await toggle.focus()
+    await page.keyboard.press('Space')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  })
+
   test('12. closeDrawer when drawer already closed is a no-op', async ({ page }) => {
     // Defensive guard against wiring extra close calls.
     await setup(page)
@@ -460,6 +495,92 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect(afterToggle).toBe(beforeToggle)
     expect((await getNavState(page)).drawerOpen).toBe(false)
   })
+
+  test('20. Back and Forward restore shell routes without reversing semantic direction', async ({ page }) => {
+    await setup(page)
+    const startId = (await getNavState(page)).activeChatId
+
+    // Build chat -> settings -> chat. The final chat may have the same id as
+    // the first; the view transition itself is the history edge under test.
+    await openDrawer(page)
+    await navigateToSettings(page)
+    await openDrawer(page)
+    await navigateToChat(page, 0)
+
+    const destinationState = await page.evaluate(() => history.state)
+    expect(destinationState).toMatchObject({
+      __mobiusNav: true,
+      kind: 'nav',
+      route: { view: 'chat' },
+    })
+    expect(Number.isInteger(destinationState.index)).toBe(true)
+
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+    expect((await getNavState(page)).activeChatId).toBe(startId)
+
+    // Before the indexed history model this first Forward either did nothing
+    // or called handleBack again and moved the visible UI farther backward.
+    await goForward(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+    await goForward(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+
+    // Forward rebuilt the semantic edges, so Back works again normally.
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('20b. Forward to an unconsumed drawer sentinel reopens the drawer', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await goBack(page)
+    expect((await getNavState(page)).drawerOpen).toBe(false)
+
+    await goForward(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await goBack(page)
+    expect((await getNavState(page)).drawerOpen).toBe(false)
+  })
+
+  test('20c. revisiting a consumed app entry does not close nested state twice', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    await navigateToApp(page, 0)
+    const iframe = page.locator('iframe[data-app-id]').first()
+    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
+    const appId = await iframe.getAttribute('data-app-id')
+    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
+    if (!appFrame) test.skip(true, 'app frame did not load')
+
+    // Drive the same wire protocol a nested app route uses, while recording
+    // how many semantic closes the shell sends back to that exact frame.
+    await appFrame.evaluate((ownerId) => {
+      window.__mobiusBackCount = 0
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:nav-back') window.__mobiusBackCount += 1
+      })
+      window.parent.postMessage({ type: 'moebius:nav-push', appId: ownerId }, '*')
+    }, appId)
+    await page.waitForFunction(() => history.state?.kind === 'app')
+
+    await goBack(page) // consumes the app-local level
+    expect((await getNavState(page)).hasCanvas).toBe(true)
+    expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
+
+    await goForward(page) // physical entry returns; nested level cannot
+    await goBack(page) // must absorb, not close it again or over-pop the shell
+    expect((await getNavState(page)).hasCanvas).toBe(true)
+    expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
+
+    await goBack(page)
+    expect((await getNavState(page)).hasChat).toBe(true)
+  })
 })
 
 // Note on the chat-delete + back-nav guarantee:
@@ -532,22 +653,32 @@ test.describe('Drawer close paths converge through handleBack', () => {
   // prevents the navStack pop. These tests lock in that contract for
   // each close path independently.
 
-  test('22. Tap overlay closes drawer (does not navigate)', async ({ page }) => {
+  test('22. Pointer-down on overlay closes drawer (does not navigate)', async ({ page }) => {
     await setup(page)
     await openDrawer(page)
     await navigateToSettings(page)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
     await openDrawer(page)
     expect((await getNavState(page)).drawerOpen).toBe(true)
-    // Tap the drawer overlay (.drawer-overlay element).
-    await page.evaluate(() => {
-      const overlay = document.querySelector('.drawer-overlay')
-      if (overlay) overlay.click()
-    })
+    // Use a real pointer sequence rather than HTMLElement.click(). The drawer
+    // dismisses on pointerdown so a touch that moves enough for Chrome to
+    // suppress the later synthetic click still closes reliably.
+    await page.locator('.drawer-overlay').click({ position: { x: 400, y: 300 } })
     await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
     expect((await getNavState(page)).drawerOpen).toBe(false)
     // Still on settings — overlay tap did not navigate.
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('22b. Drawer scrim owns touch pans instead of the background', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    const contract = await page.locator('.drawer-overlay').evaluate((overlay) => ({
+      touchAction: getComputedStyle(overlay).touchAction,
+      overscrollBehavior: getComputedStyle(overlay).overscrollBehavior,
+    }))
+    expect(contract.touchAction).toBe('none')
+    expect(contract.overscrollBehavior).toBe('none')
   })
 
   test('23. X-button (toggle) closes drawer (does not navigate, even from deep view)', async ({ page }) => {

@@ -1,4 +1,11 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import {
+  useState,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useSyncExternalStore,
+} from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
@@ -6,12 +13,12 @@ import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   shouldPinSend,
   anchorModeFromScroll,
-  isNearContentBottom,
   modeForForegroundReturn,
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
@@ -21,21 +28,47 @@ import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
+import { formatResetTime } from './resetTime.js'
+import {
+  resetDeadlineDelay,
+  resetDeadlineState,
+  saveAutoResumePolicy,
+} from './autoResumePolicy.js'
+import {
+  EMPTY_CHAT_RUN_SIGNAL,
+  advanceChatRunSignal,
+  chatRunSignalDelta,
+} from '../../lib/chatRunSignal.js'
+import {
+  clearProviderSwitch,
+  getProviderSwitchState,
+  isProviderSwitchBlocking,
+  subscribeProviderSwitch,
+} from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
-import { chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
+  builtAppPulseDecision,
   canFastForwardQueue,
+  cidOf,
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
-  previewReadyAnnouncement,
-  resolveSteeredPinDecision,
+  shouldRetryStopAfterConfirm,
+  stopConfirmedIdle,
+  stopRequestSucceeded,
   serverSnapshotBehindLocal,
-  shouldShowOpenAppCta,
   startedMessagesFromResponse,
   systemEventForChat,
 } from './chatRuntimeState.js'
+import {
+  EMPTY_BUILD_PHASE_RAIL,
+  accumulateBuildPhase,
+  buildPhaseRailViewModel,
+  latestBuildPhaseAnnouncement,
+  railAtRunStart,
+} from './buildPhaseRail.js'
 import './ChatView.css'
 
 
@@ -51,6 +84,12 @@ const EMPTY_PROMPTS = [
   { label: 'Plan a task', prompt: 'Help me break down a task I need to finish this week.' },
   { label: 'Analyze an idea', prompt: 'Help me think through an idea and find the sharpest next step.' },
 ]
+
+const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 /** Cheap structural equality for chat-message arrays. Returns true when
  *  the lists have the same length AND the last message has the same
@@ -71,6 +110,16 @@ function sameBlock(a, b) {
       && a.input === b.input && a.output === b.output
       && a.questions === b.questions && a.answers === b.answers
       && a.question_id === b.question_id
+      // The error-card fields: a warm DB refresh can deliver a message that
+      // differs ONLY in these (e.g. boot reconcile stamped resumable + a
+      // `pause` descriptor onto an existing drain note, or a coalescing error
+      // event rewrote the message/pause). Skipping them froze a stale red card
+      // on screen until a remount. Compare the pause sub-fields (kind +
+      // resets_at) rather than the object reference, which a refetch always
+      // recreates.
+      && a.message === b.message && a.resumable === b.resumable
+      && a.pause?.kind === b.pause?.kind
+      && a.pause?.resets_at === b.pause?.resets_at
 }
 
 function sameMessageList(a, b) {
@@ -128,17 +177,18 @@ function insertMessageBatchByTs(prev, rows) {
   return changed ? next : prev
 }
 
-function replaceOptimisticWithBatch(prev, optimisticTs, rows) {
-  const base = optimisticTs == null
+function replaceOptimisticWithBatch(prev, cid, rows) {
+  const base = cid == null
     ? prev
-    : prev.filter(m => !(m?.role === 'user' && m.ts === optimisticTs))
+    : prev.filter(m => !(m?.role === 'user' && cidOf(m) === cid))
   return appendMessageBatch(base, rows)
 }
 
-function findOptimisticUserIndex(messages, ts) {
+function findUserIndexByCid(messages, cid) {
+  if (cid == null) return -1
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
-    if (msg?.role === 'user' && msg.ts === ts) return i
+    if (msg?.role === 'user' && cidOf(msg) === cid) return i
   }
   return -1
 }
@@ -195,6 +245,17 @@ function evictOldestDraft() {
   } catch { /* ignore */ }
 }
 
+function tailResumableBlock(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].hidden) continue
+    const message = messages[i]
+    if (message.role !== 'assistant' || !message.blocks?.length) return null
+    const tail = message.blocks[message.blocks.length - 1]
+    return tail.type === 'error' && tail.resumable ? tail : null
+  }
+  return null
+}
+
 const PENDING_DRAFT_KEY = 'pending-draft'
 const PENDING_DRAFT_AUTOSEND_KEY = 'pending-draft-autosend'
 const DRAFT_AUTOSEND_PREFIX = 'draft-autosend:'
@@ -216,8 +277,68 @@ function readInitialComposer(chatId) {
   }
 }
 
+// Stable empty default so callers that pass no built apps (the embedded
+// composer) don't hand ChatView a fresh array each render and re-fire its
+// list-keyed effects.
+const NO_BUILT_APPS = []
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, onChatMissing, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null, composerFocusRequest = null, onComposerFocusHandled = null }) {
+// One offscreen-visibility observer for a sticky footer nudge, used twice (the
+// pending-question card and the resume card). Returns whether the found card is
+// currently scrolled OUT of the scroll container's viewport, so the caller can
+// show a "tap to jump to it" chip.
+//
+// `findCard` is a fresh closure every render (it reads scrollRef.current, a
+// ref, so even a stale one queries live DOM), so it is deliberately kept OUT of
+// the reactive dep array and read through a ref. The observer rebinds only on
+// `active` flips and the explicit `rebindDeps` — the rendering-surface signals
+// that can move the card's DOM node — exactly as the two hand-written effects
+// did. Listing `findCard` in the deps would recreate the observer on every
+// streaming re-render (a per-token IntersectionObserver thrash); the card's DOM
+// node is stable across those, so it must not.
+function useOffscreenNudge(scrollRef, active, findCard, rebindDeps) {
+  const [offscreen, setOffscreen] = useState(false)
+  const findCardRef = useRef(findCard)
+  findCardRef.current = findCard
+  useEffect(() => {
+    if (!active) {
+      setOffscreen(false)
+      return undefined
+    }
+    const scrollEl = scrollRef.current
+    const card = findCardRef.current()
+    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
+      setOffscreen(false)
+      return undefined
+    }
+    const io = new IntersectionObserver(entries => {
+      setOffscreen(!entries[0]?.isIntersecting)
+    }, { root: scrollEl, threshold: 0 })
+    io.observe(card)
+    return () => io.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, scrollRef, ...rebindDeps])
+  return offscreen
+}
+
+export default function ChatView({
+  chatId,
+  onStreamEnd,
+  onFirstMessage,
+  onSystemEvent,
+  onChatMissing,
+  builtApps = NO_BUILT_APPS,
+  onOpenApp,
+  onMessageStart,
+  onVoiceListeningChange,
+  showPicker = true,
+  embedded = false,
+  quickActions = null,
+  getContext = null,
+  composerFocusRequest = null,
+  onComposerFocusHandled = null,
+  externalRunSignal = EMPTY_CHAT_RUN_SIGNAL,
+  onExternalRunEvent = null,
+}) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -239,11 +360,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const [loading, setLoading] = useState(!cached)
-  // When the initial /chats/{id} fetch fails we used to silently
-  // setLoading(false) — the empty-state UI ("What's on your mind?")
-  // would then render as if the chat had no history, hiding the
-  // real problem. loadError flips on the catch so we can render a
-  // retry message instead of pretending the chat is empty.
+  // On a failed initial /chats/{id} fetch, loadError flips in the catch so
+  // the UI can render a retry message. Setting loading false alone would
+  // render the empty-state UI ("What's on your mind?") as if the chat had no
+  // history, hiding the real problem.
   const [loadError, setLoadError] = useState(false)
   // Bumped by the load-error Retry button to re-run the load effect in
   // place, instead of a hard window.location.reload (which would nuke the
@@ -295,6 +415,37 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // (the model + effort picker inside the `+` popover). Stays null
   // until the fetch lands; the picker simply hides until then.
   const [chatInfo, setChatInfo] = useState(null)
+  const [autoResumeSaving, setAutoResumeSaving] = useState(false)
+  const [autoResumeError, setAutoResumeError] = useState('')
+  const [autoResumeErrorSource, setAutoResumeErrorSource] = useState('')
+  const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
+    EMPTY_CHAT_RUN_SIGNAL,
+  )
+  const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
+  // A counter is only a render wake-up; deadline elapsed is derived directly
+  // from the current card's reset timestamp below, so a newly loaded card can
+  // never render using the previous card's boolean state.
+  const [, setLimitResetClockTick] = useState(0)
+  const autoResumeSavingRef = useRef(false)
+  const autoResumeRequestRef = useRef(0)
+  const armedEmbeddedResetRef = useRef(null)
+  // This external per-chat state survives ChatView's keyed unmount/remount.
+  // Send handlers also read the store directly, closing the same-frame gap
+  // before React paints disabled controls.
+  const subscribeToProviderSwitch = useCallback(
+    listener => subscribeProviderSwitch(chatId, listener),
+    [chatId],
+  )
+  const readProviderSwitch = useCallback(
+    () => getProviderSwitchState(chatId),
+    [chatId],
+  )
+  const providerSwitchState = useSyncExternalStore(
+    subscribeToProviderSwitch,
+    readProviderSwitch,
+    readProviderSwitch,
+  )
+  const providerSwitching = providerSwitchState.status === 'switching'
   // The question_id of the AskUserQuestion the runner is currently parked
   // on, set from the live SSE `question` event (onLiveQuestion). It is a
   // FAST-PATH HINT only, never the sole gate: the backend does not persist
@@ -305,13 +456,72 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // read is forward-compat: harmlessly null today, it would pick up a
   // persisted pending_question_id if one is ever added.)
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
-  // True while a pending (unanswered) question card exists but is scrolled
-  // out of the viewport — drives the footer "tap to answer" chip. Written
-  // only by the IntersectionObserver effect below (near hasPendingQuestion).
-  const [pendingCardOffscreen, setPendingCardOffscreen] = useState(false)
+  // The pending-question and resume "tap to jump to it" nudges each track
+  // whether their card is scrolled out of the viewport. Both use one shared
+  // observer hook (useOffscreenNudge, below); their booleans are computed near
+  // hasPendingQuestion / hasPendingResume where the card finders live.
   const [showInspector, setShowInspector] = useState(false)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
-  const lastAnnouncedPreviewRef = useRef(null)
+  // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
+  // updated ✓" for ~2s), or null.
+  const [pulsedAppId, setPulsedAppId] = useState(null)
+  // Last-seen updated_at per built-app id, so the pulse/announce effect can tell
+  // a first build (a new id) from a recompile (an existing id whose updated_at
+  // advanced) without a separate app_built event — updated_at IS the monotonic
+  // re-fire key. Per-ChatView-instance (fresh on remount), which is why the
+  // pulse is naturally scoped to this chat.
+  const lastSeenUpdatedAtRef = useRef(new Map())
+  // Build-milestone rail: phases accumulated from chat-scoped `build_phase`
+  // stream events (deduped by ts so catch-up replay rebuilds it), reset ONLY
+  // when a new run starts for this chat (see buildPhaseRail.js for why a
+  // mid-run reset is replay-incoherent). Rendered as a slim rail in the foot
+  // near the open-app CTA; the announcement mirrors previewReadyStatus for
+  // the polite live region.
+  const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
+  const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
+  const lastAnnouncedPhaseRef = useRef(null)
+
+  useEffect(() => {
+    autoResumeRequestRef.current += 1
+    autoResumeSavingRef.current = false
+    setAutoResumeSaving(false)
+    setAutoResumeError('')
+    setAutoResumeErrorSource('')
+  }, [chatId])
+
+  const handleAutoResumeChange = useCallback(async (next, source = 'card') => {
+    if (autoResumeSavingRef.current) return
+    autoResumeSavingRef.current = true
+    const requestId = ++autoResumeRequestRef.current
+    setAutoResumeSaving(true)
+    setAutoResumeError('')
+    setAutoResumeErrorSource(source)
+    try {
+      const result = await saveAutoResumePolicy({
+        chatId,
+        next,
+        request: apiFetch,
+      })
+      if (requestId !== autoResumeRequestRef.current) return
+      if (result.value !== null) {
+        setChatInfo(prev => prev ? ({
+          ...prev,
+          auto_resume_on_limit: result.value,
+        }) : prev)
+      }
+      setAutoResumeError(result.error)
+    } finally {
+      if (requestId === autoResumeRequestRef.current) {
+        autoResumeSavingRef.current = false
+        setAutoResumeSaving(false)
+      }
+    }
+  }, [chatId])
+
+  const handleAutoResumeSettingsChange = useCallback(
+    next => handleAutoResumeChange(next, 'settings'),
+    [handleAutoResumeChange],
+  )
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -331,7 +541,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const queuedContinuationLocalPromotedRef = useRef(null)
   const queuedContinuationPinIntentRef = useRef(null)
   const queuedPinIntentByCidRef = useRef(new Map())
-  const queuedPinIntentByTsRef = useRef(new Map())
   const steerPinIntentRef = useRef(null)
   const inlineSteerPinIntentRef = useRef(null)
   const runtimeReconnectInFlightRef = useRef(false)
@@ -458,6 +667,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const chatIdStaleRef = useRef(false)
   const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
+  const activeAssistantDataKeyRef = useRef(null)
   // Bridge-partial gating decides whether the next promote REPLACES
   // the kept DB partial (in-flight turn whose snapshot we mounted
   // on top of) or APPENDS a fresh assistant message. The captured
@@ -472,11 +682,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   }))
   const bridgeHook = useBridgePartial(bridgeMountInputs)
 
-  // Spacer "active" CSS state — keeps min-height: 0 on the list while
-  // the spacer is in play, preventing the elastic-overscroll
-  // min-height: calc(100% + 1px) from inflating offsetHeight and
-  // breaking the spacer formula.
-  const [spacerActive, setSpacerActive] = useState(false)
   // Ref mirror of `sending`. Read by doSend's queue-vs-fresh-send
   // guard (and by fetchMessages). Reading state directly would
   // capture a render-time value in doSend's closure — stale when
@@ -513,6 +718,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   onFirstMessageRef.current = onFirstMessage
   const onStreamEndRef = useRef(onStreamEnd)
   onStreamEndRef.current = onStreamEnd
+  const onExternalRunEventRef = useRef(onExternalRunEvent)
+  onExternalRunEventRef.current = onExternalRunEvent
   // getContext: optional callback that returns a Promise<object|null> with
   // the current app state snapshot. Called on the fresh-send path only (not
   // the queue path, which is already mid-turn). The result is serialized as a
@@ -563,6 +770,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
+    reapplyActiveMode,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -591,57 +799,73 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     queuedPinIntentByCidRef.current.set(cid, intent)
   }
 
-  function rememberQueuedPinIntentTs(cid, ts) {
-    if (ts == null) return
-    const intent = cid ? queuedPinIntentByCidRef.current.get(cid) : null
-    if (intent) queuedPinIntentByTsRef.current.set(ts, intent)
-  }
-
-  function forgetQueuedPinIntent({ cid = null, ts = null, tsList = null } = {}) {
+  function forgetQueuedPinIntent({ cid = null, cidList = null } = {}) {
     if (cid) queuedPinIntentByCidRef.current.delete(cid)
-    if (ts != null) queuedPinIntentByTsRef.current.delete(ts)
-    if (Array.isArray(tsList)) {
-      for (const value of tsList) queuedPinIntentByTsRef.current.delete(value)
+    if (Array.isArray(cidList)) {
+      for (const value of cidList) queuedPinIntentByCidRef.current.delete(value)
     }
   }
 
-  function takeQueuedPinIntent({ tsList = null, ts = null, localPromoted = null } = {}) {
-    const keys = []
-    if (Array.isArray(tsList)) keys.push(...tsList.filter(v => v != null))
-    if (ts != null) keys.push(ts)
-    let intent = null
-    for (const key of keys) {
-      if (!intent && queuedPinIntentByTsRef.current.has(key)) {
-        intent = queuedPinIntentByTsRef.current.get(key)
-      }
-      queuedPinIntentByTsRef.current.delete(key)
-    }
-    const cid = localPromoted?.cid
-    if (cid) {
-      if (!intent && queuedPinIntentByCidRef.current.has(cid)) {
-        intent = queuedPinIntentByCidRef.current.get(cid)
-      }
-      queuedPinIntentByCidRef.current.delete(cid)
-    }
+  function takeQueuedPinIntent(cid) {
+    if (!cid) return null
+    const intent = queuedPinIntentByCidRef.current.get(cid) || null
+    queuedPinIntentByCidRef.current.delete(cid)
     return intent
   }
 
   function forgetAllQueuedPinIntents() {
     queuedPinIntentByCidRef.current.clear()
-    queuedPinIntentByTsRef.current.clear()
     queuedContinuationPinIntentRef.current = null
     inlineSteerPinIntentRef.current = null
+  }
+
+  // The first-message exception is shared by every direct/promotion/steer
+  // path. Stream promotion can render a user row one React commit before
+  // messagesRef catches up, so state alone is not authoritative. A row is
+  // first only when both the state mirror and rendered transcript are empty.
+  function isFirstVisibleUserMessage() {
+    const stateHasUser = messagesRef.current.some(
+      m => m.role === 'user' && !m.hidden,
+    )
+    const domHasUser = !!scrollRef.current?.querySelector('.chat__msg--user')
+    return !stateHasUser && !domHasUser
+  }
+
+  // The ONE place a send/steer/promote arms the pin. Owns intent-staleness (a
+  // real user scroll after submit wins) and the PIN-vs-settle mode write. The pin
+  // targets the stable `cid`, which the DOM row already carries from mint, so
+  // the pin lands on the first apply — no ts-swap retarget, ever. Spacer HEIGHT
+  // belongs to the layout effect's sizeSpacer; this never zeroes it (zeroing
+  // would clamp scrollTop with no guaranteed re-run to re-pin).
+  function pinSentMessage(cid, { willPin, intent } = {}) {
+    if (intent && !pinIntentStillCurrent(intent)) {
+      // A real user scroll landed after submit — the reader wins. Leave
+      // scrollTop where they put it; retire any stale PIN/FOLLOW to their
+      // current anchor so the reserved room stays available below.
+      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
+      return
+    }
+    if (willPin && cid != null) {
+      modeRef.current = { kind: 'PIN_USER_MSG', cid }
+    } else {
+      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
+    }
   }
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
   // with the current DB state.
-  const fetchMessages = useCallback(async ({ force = false, terminal204 = false } = {}) => {
+  const fetchMessages = useCallback(async ({
+    force = false,
+    terminal204 = false,
+    authoritative = false,
+  } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(`/chats/${chatId}?limit=20`, { timeoutMs: 15000 })
+      if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
       const data = await res.json()
       if (chatIdStaleRef.current) return
       // Discard if a Stop (or other clear) bumped gen while we waited.
@@ -657,7 +881,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       }
       const preserveLocalTurn =
-        force && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
+        !authoritative
+        && force
+        && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
       const staleSnapshot =
         !terminal204
         && !preserveLocalTurn
@@ -690,7 +916,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (!preserveLocalTurn) {
         pendingQueue.hydrate(data.pending_messages || [])
       }
-    } catch { /* network error — silent, user can retry */ }
+      return {
+        running: !!data.running,
+        pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
+      }
+    } catch {
+      // Network error — silent, user can retry. Callers that need to attach
+      // to a newly announced run must distinguish this ambiguous result from
+      // an authoritative idle verdict.
+      return null
+    }
   }, [chatId, commitMessages, pendingQueue.hydrate, queryClient])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -735,7 +970,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         pending_question_id: data.pending_question_id || null,
       }))
       // Don't let the fallback poll add/clobber the queue while a turn is live
-      // (localAuthoritative, above) — the optimistic queue + swapOptimisticTs
+      // (localAuthoritative, above) — the optimistic queue + confirmQueued
       // own it during a turn; hydrate only when the stream is dead.
       if (!localAuthoritative) {
         pendingQueue.hydrate(serverPending)
@@ -748,6 +983,27 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     [fetchMessages],
   )
 
+  useEffect(() => {
+    if (
+      providerSwitchState.status !== 'success'
+      || !providerSwitchState.result
+    ) return
+    const data = providerSwitchState.result
+    setChatInfo(prev => prev ? ({
+      ...prev,
+      agent_settings_json: data.agent_settings_json,
+      provider: data.provider || prev.provider,
+      effective: data.effective || prev.effective,
+    }) : prev)
+    handleCompactionStored()
+    clearProviderSwitch(chatId)
+  }, [
+    chatId,
+    handleCompactionStored,
+    providerSwitchState.result,
+    providerSwitchState.status,
+  ])
+
   const {
     streamItems,
     latestItemsRef,
@@ -755,6 +1011,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     isStreamingRef,
     connectionError,
     reconnecting,
+    catchUpCommitSeq,
     sendMessage: streamSend,
     connectToStream,
     retry,
@@ -763,6 +1020,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     patchQuestionAnswers,
   } = useStreamConnection(chatId, {
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
+      if (embedded && continues === false) setEmbeddedRunActive(false)
       promoteStreamToMessages()
       if (continues) {
         // Backend auto-promoted queued follow-ups into the next turn. Newer
@@ -786,33 +1044,26 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // before the append. When not pinning, leave the reader where
           // the previous turn left them — the continuation just appears
           // below without moving the scroll.
-          const contIsFirstUser = !messagesRef.current.some(
-            m => m.role === 'user' && !m.hidden,
-          )
-          const pinTargetTs = promotedRows[0]?.ts
+          const contIsFirstUser = isFirstVisibleUserMessage()
+          const pinCid = cidOf(promotedRows[0])
           const fallbackWillPin = () => shouldPinSend({
             scrollEl: scrollRef.current,
             mode: modeRef.current,
             isFirstUserMsg: contIsFirstUser,
-            respectFollowMode: false,
+            // The original submit-time intent is unavailable (for example
+            // after a remount). Never infer a delayed pin from the reader's
+            // later position; only the first-message exception remains.
+            wasAutoScrollAtBottom: false,
           })
-          const intentStillCurrent = continuationPinIntent
-            ? pinIntentStillCurrent(continuationPinIntent)
-            : true
-          const contWillPin = pinTargetTs != null && intentStillCurrent && (
-            continuationPinIntent
-              ? continuationPinIntent.willPin
-              : fallbackWillPin()
-          )
+          const contWillPin = continuationPinIntent
+            ? continuationPinIntent.willPin
+            : fallbackWillPin()
           commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
-          setSpacerActive(true)
-          if (contWillPin) {
-            if (spacerRef.current) spacerRef.current.style.height = '0px'
-            modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
-          } else if (intentStillCurrent) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-          }
+          pinSentMessage(pinCid, {
+            willPin: contWillPin,
+            intent: continuationPinIntent,
+          })
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
           // with promote). Refetch authoritative state.
@@ -836,23 +1087,43 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       onStreamEnd?.({ continues })
     },
-    onSystemEvent: event => onSystemEvent?.(systemEventForChat(event, chatId)),
+    onSystemEvent: event => {
+      // A build_phase is chat-local: it only feeds this chat's milestone rail,
+      // so accumulate it here (deduped by ts) instead of forwarding it to the
+      // Shell, which has no handler for it.
+      if (event?.type === 'build_phase') {
+        setBuildPhases(prev => accumulateBuildPhase(prev, event))
+        return
+      }
+      onSystemEvent?.(systemEventForChat(event, chatId))
+    },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
-      const consumedTs = message?._consumed_ts
+      // A queued message is being promoted into its OWN run — the rail's
+      // run-start boundary for queue drains. useStreamConnection fires this
+      // callback during catch-up replay too, in event order, so a reconnect
+      // that replays the old run's log applies this reset at the same
+      // position the live stream did (old-run phases, then reset) and the
+      // rail always lands on the run being displayed.
+      setBuildPhases(railAtRunStart())
+      const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
         : null
-      const localPromoted = Array.isArray(consumedTs)
-        ? pendingQueue.promoteManyByTs(consumedTs)
-        : pendingQueue.promoteAll(ts)
+      const localPromoted = Array.isArray(consumedCids)
+        ? pendingQueue.promoteManyByCid(consumedCids)
+        : pendingQueue.promoteAll()
       queuedContinuationLocalPromotedRef.current =
         serverRows?.length ? serverRows : localPromoted
-      queuedContinuationPinIntentRef.current = takeQueuedPinIntent({
-        tsList: consumedTs,
-        ts,
-        localPromoted,
-      })
+      // The pin intent was stamped at submit under the queued row's cid; the
+      // backend echoes those cids back as _consumed_cids (or the promoted row
+      // carries the head cid). Look it up by the head cid.
+      const pinCid = cidOf(
+        (serverRows && serverRows[0])
+        || localPromoted
+        || (Array.isArray(consumedCids) ? { cid: consumedCids[0] } : null),
+      )
+      queuedContinuationPinIntentRef.current = takeQueuedPinIntent(pinCid)
     },
     onLiveQuestion: setLiveQuestionId,
     onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
@@ -864,68 +1135,137 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // segment into `messages`, then append the steered user row, then let
       // future text deltas build a fresh streaming assistant block.
       //
-      // It still follows the USER-SEND scroll rule: if the reader was at the
-      // bottom when they tapped fast-forward, the steered message pins to the
-      // top and gets the same bottom spacer as a normal send. If the reader
-      // was scrolled up, leave them anchored. Earlier code treated steering
-      // as generic content growth and never armed the spacer, so fast-forward
-      // could work while the message stayed low in the viewport with no
-      // reserved room below it.
+      // It still follows the one USER-SEND scroll rule. The queued row keeps
+      // its original submit-time decision: first row always pins; a later row
+      // pins only if it was submitted from gesture-entered FOLLOW_BOTTOM at
+      // the real-content tail. Tapping fast-forward never recomputes intent
+      // from the reader's later position. Whether it pins or holds, the row
+      // receives the same permanent bottom reservation as a normal send.
       //
-      const steeredMessages = Array.isArray(steeredBatch) && steeredBatch.length > 0
-        ? steeredBatch.map((m, i) => ({
+      // Current backends carry a non-empty `messages` array, each row with its
+      // stable cid (card-221: every row carries one). During rolling deploys an
+      // older stream may still send only the legacy single-row `{ts, content}`
+      // shape; render that too so a steered message is not dropped.
+      const steeredSource = Array.isArray(steeredBatch) && steeredBatch.length > 0
+        ? steeredBatch
+        : (content ? [{ ts, content }] : [])
+      const steeredMessages = steeredSource
+        .map((m, i) => {
+          const tsv = m?.ts ?? (ts != null ? ts + i : Date.now() + i)
+          return {
             role: 'user',
             content: m?.content || '',
-            ts: m?.ts ?? (ts != null ? ts + i : Date.now() + i),
+            ts: tsv,
+            cid: m?.cid ?? null,
             ...(m?.attachments ? { attachments: m.attachments } : {}),
-          }))
-        : [{ role: 'user', content, ts: ts ?? Date.now() }]
-      const pinTargetTs = steeredMessages[0]?.ts
-      const steeredTsList = steeredMessages
-        .map(m => m?.ts)
-        .filter(v => v != null)
+          }
+        })
+      const pinCid = cidOf(steeredMessages[0])
       const pinIntent = steerPinIntentRef.current
         || inlineSteerPinIntentRef.current
-        || takeQueuedPinIntent({ tsList: steeredTsList, ts })
+        || takeQueuedPinIntent(pinCid)
       inlineSteerPinIntentRef.current = null
       promoteStreamToMessages({ keepTurnOpen: true })
-      const steeredIsFirstUser = !messagesRef.current.some(
-        m => m.role === 'user' && !m.hidden,
-      )
+      const steeredIsFirstUser = isFirstVisibleUserMessage()
       const fallbackWillPin = () => shouldPinSend({
         scrollEl: scrollRef.current,
         mode: modeRef.current,
         isFirstUserMsg: steeredIsFirstUser,
-        respectFollowMode: false,
+        // A missing submit-time intent must degrade to hold, not infer a pin
+        // from wherever the reader happens to be when the SSE event arrives.
+        wasAutoScrollAtBottom: false,
       })
-      const {
-        intentStillCurrent: pinStillValid,
-        shouldPin: shouldPinSteered,
-      } = resolveSteeredPinDecision({
-        pinTargetTs,
-        pinIntent,
-        pinIntentStillCurrent,
-        fallbackWillPin,
-      })
-      // Dedup by ts so a reconnect's catch-up replay of the same event
-      // can't double-insert the steered user message. Insert by transcript ts
-      // instead of blindly appending: if a fetch/replay already committed the
-      // post-steer assistant row, the steered user still belongs before it.
+      const steerWillPin = pinIntent ? pinIntent.willPin : fallbackWillPin()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
       // listeners can observe the transcript update immediately; setting the
       // mode first prevents a one-frame "row appears low, then snaps up" steer.
-      setSpacerActive(true)
-      if (shouldPinSteered) {
-        if (spacerRef.current) spacerRef.current.style.height = '0px'
-        modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
-      } else if (pinStillValid) {
-        settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-      }
+      pinSentMessage(pinCid, { willPin: steerWillPin, intent: pinIntent })
+      // Dedup by ts so a reconnect's catch-up replay of the same event
+      // can't double-insert the steered user message. Insert by transcript ts
+      // instead of blindly appending: if a fetch/replay already committed the
+      // post-steer assistant row, the steered user still belongs before it.
       commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       steerPinIntentRef.current = null
     },
   })
+
+  // System run activity is a structured sequence, not a running boolean: it
+  // preserves coalesced start+finish events. Reconciliation is single-flight
+  // and drains the latest sequence without effect cleanup cancelling an older
+  // GET. Only an authoritative/announced start attaches; a Stop-invalidated
+  // `undefined` fetch result never can.
+  const effectiveRunSignal = embedded ? embeddedRunSignal : externalRunSignal
+  const externalSignalRef = useRef(effectiveRunSignal)
+  externalSignalRef.current = effectiveRunSignal
+  const processedExternalSignalRef = useRef(effectiveRunSignal)
+  const externalReconcileInFlightRef = useRef(false)
+  const externalClaimedRunRef = useRef(false)
+  const reconcileExternalActivity = useCallback(async () => {
+    if (externalReconcileInFlightRef.current) return
+    externalReconcileInFlightRef.current = true
+    try {
+      while (
+        processedExternalSignalRef.current.seq
+        < externalSignalRef.current.seq
+      ) {
+        const previous = processedExternalSignalRef.current
+        const target = externalSignalRef.current
+        processedExternalSignalRef.current = target
+        const delta = chatRunSignalDelta(previous, target)
+        const locallyActive = (
+          sendingRef.current || isStreamingRef.current
+        ) && !externalClaimedRunRef.current
+        if (locallyActive) continue
+
+        if (delta.started && !delta.finished) {
+          externalClaimedRunRef.current = true
+          sendingRef.current = true
+          setSending(true)
+          setServerRunningState(true)
+        } else if (delta.finished) {
+          externalClaimedRunRef.current = false
+          sendingRef.current = false
+          setSending(false)
+          setServerRunningState(false)
+        }
+
+        const snapshot = await fetchMessages({
+          force: true,
+          authoritative: true,
+        })
+        if (externalSignalRef.current.seq !== target.seq) continue
+        const running = snapshot?.running
+        if (running === false) {
+          externalClaimedRunRef.current = false
+          if (embedded) setEmbeddedRunActive(false)
+          if (!snapshot.pendingLimitResume) {
+            onExternalRunEventRef.current?.('chat_run_finished')
+          }
+        } else if (running === true && embedded) {
+          setEmbeddedRunActive(true)
+        }
+        if (
+          (running === true || (snapshot === null && delta.started))
+          && !delta.finished
+          && !isStreamingRef.current
+        ) {
+          await Promise.resolve(connectToStream(true)).catch(() => {})
+        }
+      }
+    } finally {
+      externalReconcileInFlightRef.current = false
+      if (
+        processedExternalSignalRef.current.seq
+        < externalSignalRef.current.seq
+      ) {
+        queueMicrotask(reconcileExternalActivity)
+      }
+    }
+  }, [connectToStream, embedded, fetchMessages, isStreamingRef])
+  useEffect(() => {
+    reconcileExternalActivity()
+  }, [effectiveRunSignal.seq, reconcileExternalActivity])
 
   const ensureRuntimeStreamConnected = useCallback(() => {
     if (connectionError === 'disconnected') return
@@ -977,6 +1317,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onTranscript: (text) => setInput(text),
     inputRef,
   })
+  // Report only WHETHER dictation is live (the shell tracks a single boolean,
+  // not which chat) — this ChatView is single-mount, so it is the sole source.
+  useEffect(() => {
+    onVoiceListeningChange?.(listening)
+    return () => { onVoiceListeningChange?.(false) }
+  }, [listening, onVoiceListeningChange])
 
   // Ref mirror of stopVoice (peer of onMessageStartRef /
   // onFirstMessageRef above). useVoiceInput may not memoize its
@@ -1028,6 +1374,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           ? messagesRef.current[trailingIdx]?.ts
           : null)
     bridgeHook.markBridged()
+    // Promotion ends this active row. A queued/steered continuation must seed
+    // its own anchor instead of inheriting a bridged DB key.
+    activeAssistantDataKeyRef.current = null
     commitMessages(
       prev => promoteAssistantStream(prev, { items, bridgeTs }),
       undefined,
@@ -1146,19 +1495,46 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     measureComposerHeight()
     const raf = requestAnimationFrame(measureComposerHeight)
     return () => cancelAnimationFrame(raf)
-  }, [builtApp, sending, measureComposerHeight])
+  }, [builtApps, sending, buildPhases, measureComposerHeight])
 
   useEffect(() => {
-    if (!shouldShowOpenAppCta(builtApp)) {
-      lastAnnouncedPreviewRef.current = null
+    const latest = buildPhases[buildPhases.length - 1]
+    if (!latest) {
+      lastAnnouncedPhaseRef.current = null
+      setBuildPhaseStatus('')
+      return
+    }
+    // Announce a phase once, keyed on its ts — an aria-live re-fire on every
+    // rail change (e.g. an unrelated re-render) would re-read the same phrase.
+    if (lastAnnouncedPhaseRef.current === latest.ts) return
+    lastAnnouncedPhaseRef.current = latest.ts
+    setBuildPhaseStatus(latestBuildPhaseAnnouncement(buildPhases))
+  }, [buildPhases])
+
+  // Announce a new build and flash a recompile, both derived from updated_at
+  // deltas on the (server-derived) CTA list — no app_built event, no nonce. A
+  // brand-new CTA id is a first build (announce "Live preview ready …" without
+  // pulsing); an already-seen id whose updated_at advanced is a recompile
+  // (flash "Preview updated ✓" for 2s + announce). builtAppPulseDecision owns
+  // that pure distinction; this effect applies its verdict. Because `builtApps`
+  // is referentially stable (Shell memoizes it on a content signature) this runs
+  // only when THIS chat's derived list actually changes.
+  useEffect(() => {
+    if (builtApps.length === 0) {
+      lastSeenUpdatedAtRef.current = new Map()
       setPreviewReadyStatus('')
       return
     }
-    const key = `${builtApp.id}:${builtApp.name || ''}`
-    if (lastAnnouncedPreviewRef.current === key) return
-    lastAnnouncedPreviewRef.current = key
-    setPreviewReadyStatus(previewReadyAnnouncement(builtApp))
-  }, [builtApp])
+    const { pulseId, announce, nextSeen } = builtAppPulseDecision(
+      builtApps, lastSeenUpdatedAtRef.current,
+    )
+    lastSeenUpdatedAtRef.current = nextSeen
+    if (announce) setPreviewReadyStatus(announce)
+    if (pulseId == null) return
+    setPulsedAppId(pulseId)
+    const t = setTimeout(() => setPulsedAppId(null), 2000)
+    return () => clearTimeout(t)
+  }, [builtApps])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -1186,23 +1562,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // regardless of the messages fast-path.
         setChatInfo({
           provider: data.provider || 'claude',
+          created_by_app_id: data.created_by_app_id ?? null,
           agent_settings_json: data.agent_settings_json || null,
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
+          auto_resume_on_limit: !!data.auto_resume_on_limit,
         })
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
           setLoading(false)
           return
         }
 
-        // Keep the DB partial when the agent is still running. The
-        // user sees the most recent persisted state immediately; SSE
-        // catch-up populates streamItems and the streaming <li> takes
-        // over visually (see messages.map render — last assistant is
-        // suppressed when sending && streamItems.length > 0). On done,
-        // promoteStreamToMessages replaces this partial with the
-        // final version. Previously we stripped this and waited for
-        // SSE — caused the "message disappears on choppy return" bug.
+        // Keep the DB partial when the agent is still running. The user sees
+        // the most recent persisted state immediately; SSE catch-up makes the
+        // same active MsgContent swap to the live payload. On done,
+        // promoteStreamToMessages replaces this partial with the final version.
+        // Previously we stripped this and waited for SSE — caused the "message
+        // disappears on choppy return" bug.
 
         // Normalize stale "running" tool blocks from interrupted sessions.
         for (const msg of msgs) {
@@ -1363,10 +1739,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   }
 
 
-  // `opts.pin` controls whether the new user message pins to the top
-  // of the viewport (the standard ChatGPT/Claude.ai send UX). Defaults
-  // to true for normal user-initiated sends. Pass `pin: false` from
-  // synthetic-send paths where pinning would be surprising:
+  // `opts.pin` allows the shared submit-time rule to pin the message. Normal
+  // user sends opt in, but still pin only when first-or-already-following at
+  // the bottom. Pass `pin: false` from synthetic-send paths where pinning
+  // would be surprising:
   //   - handleStop's queue-collapse: the user clicked Stop, not Send;
   //     pinning the auto-generated combined message would yank the
   //     viewport away from whatever the user was reading (the partial
@@ -1374,6 +1750,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   //     pushed above the viewport. Keep their current scroll mode
   //     instead — the new turn streams into view from where they were.
   const doSend = useCallback(async (text, opts = {}) => {
+    if (isProviderSwitchBlocking(chatId)) return
     const pin = opts.pin !== false  // default true
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
@@ -1382,14 +1759,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // after we clear it.
     if (listeningRef.current) stopVoiceRef.current?.()
 
-    // Capture bottom intent BEFORE blurring the textarea. On mobile,
-    // blur collapses the soft keyboard and can resize/clamp the visual
-    // viewport before we compute the send rule; if we measure after
-    // blur, a reader who was genuinely at the bottom can be misread as
-    // scrolled up and the new user message won't pin to the top.
-    const wasNearContentBottomAtSubmit = scrollRef.current
-      ? isNearContentBottom(scrollRef.current)
-      : null
+    // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
+    // textarea. Pin only for the first visible user message, or when the reader
+    // is already in gesture-entered FOLLOW_BOTTOM and remains at the real
+    // content tail. Mobile blur can resize/clamp the viewport, so the complete
+    // decision (mode + geometry) must be captured before it.
+    const isFirstUserMsgAtSubmit = isFirstVisibleUserMessage()
+    const willPinAtSubmit = pin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg: isFirstUserMsgAtSubmit,
+    })
+    const sendPinIntent = makeSendPinIntent(willPinAtSubmit)
 
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
@@ -1421,10 +1802,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
+    // Mint the message's stable identity ONCE, before the queue-vs-fresh
+    // branch, so both paths carry the same `cid` from optimistic render
+    // through the wire and into persistence. The row's identity never changes
+    // across the optimistic→server-ts update — that is the whole redesign.
+    const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+
     // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
-    // entry with a stable client-side `cid` (UUID) that survives the
-    // optimistic-ts → server-ts swap. Backend writes to chat.pending_messages
-    // via POST /messages returning {status: "queued", ts, position}.
+    // entry carrying the minted `cid` — the row identity is stable across
+    // the optimistic→server-ts display update. Backend writes to
+    // chat.pending_messages via POST /messages returning {status, ts, position}.
     //
     // Read from refs (not React state) so doSend stays closure-safe.
     // Callers like handleStop invoke doSend AFTER calling
@@ -1438,14 +1827,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       || serverRunningRef.current
       || pendingQueue.pendingMessagesRef.current.length > 0
     ) {
-      const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
-      pendingQueue.add(queuedMsg)
-      // Capture the send rule's inputs AT SEND TIME, before the POST. If
-      // this queued send is promoted into the active turn (the backend
+      pendingQueue.add(queuedMsg, { inFlight: true })
+      // The shared send decision was captured AT SEND TIME, before blur or the
+      // POST. If this queued send is promoted into the active turn (the backend
       // returns started, either as `queued+started` or the `started` race),
       // it becomes a new visible user message and must follow the same pin
       // rule as a fresh send. The at-bottom / following decision and the
@@ -1453,16 +1839,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // AFTER `await streamSend(...)` lets a scroll during the POST flip the
       // decision. The user-scroll intent version lets us detect such a scroll
       // and yield to it (a user-driven scroll after send is the newer intent).
-      const queuedIsFirstUser = !messagesRef.current.some(
-        m => m.role === 'user' && !m.hidden,
-      )
-      const queuedWillPin = pin && shouldPinSend({
-        scrollEl: scrollRef.current,
-        mode: modeRef.current,
-        isFirstUserMsg: queuedIsFirstUser,
-        wasNearScrollBottom: wasNearContentBottomAtSubmit,
-      })
-      const queuedPinIntent = makeSendPinIntent(queuedWillPin)
+      const queuedWillPin = willPinAtSubmit
+      const queuedPinIntent = sendPinIntent
       rememberQueuedPinIntent(cid, queuedPinIntent)
       inlineSteerPinIntentRef.current = queuedPinIntent
       setInput('')
@@ -1484,21 +1862,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         const result = await streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
-          { queueOnly: true },
+          { queueOnly: true, cid },
         )
         releaseComposerFilesAfterAccepted()
         if (result?.status === 'queued') {
           const canonicalPending = result.pending_message || null
-          // Replace optimistic ts with server's (cid is stable).
+          // Update the DISPLAY ts + canonical content on the cid-matched row.
+          // Identity (cid) never changes, so there is no swap — just a confirm.
           const ackTs = canonicalPending?.ts ?? result.ts
-          rememberQueuedPinIntentTs(queuedMsg.cid, ackTs)
-          pendingQueue.swapOptimisticTs(
-            queuedMsg.cid,
-            ackTs ?? queuedMsg.ts,
-            result.position,
-            canonicalPending,
-            { confirmed: !!canonicalPending || typeof ackTs === 'number' },
-          )
+          pendingQueue.confirmQueued(cid, {
+            ts: ackTs ?? queuedMsg.ts,
+            position: result.position,
+            serverMsg: canonicalPending,
+          })
           if (!canonicalPending) {
             // Older backends acknowledge only {ts, position}. Hydrate
             // immediately so the queued row uses the server's canonical text
@@ -1507,8 +1883,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             fetchMessages({ force: true })
           }
           if (result.started) {
-            if (Array.isArray(result.message?._consumed_ts)) {
-              pendingQueue.promoteManyByTs(result.message._consumed_ts)
+            if (Array.isArray(result.message?._consumed_cids)) {
+              pendingQueue.promoteManyByCid(result.message._consumed_cids)
             }
             const startedMessages = startedMessagesFromResponse(result)
             if (startedMessages) {
@@ -1516,30 +1892,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             }
             onMessageStartRef.current?.()
             promotedRef.current = false
+            // started=true means this send began a NEW run (stale-pending
+            // self-heal) rather than queueing behind one — a run start, so
+            // the rail resets. A plain enqueue (started falsy) must NOT
+            // touch the in-flight build's rail.
+            setBuildPhases(railAtRunStart())
             setSending(true)
             setServerRunningState(true)
-            // The queued send was promoted straight into the active turn,
-            // so it's a new visible user message and follows the send rule
-            // just like a fresh send. Use the at-send-time decision
-            // (captured before the await) and yield to a user scroll that
-            // changed the mode during the POST. Pin keys to the first SERVER
-            // ts from the promoted batch, not the optimistic queuedMsg.ts.
-            const pinStillValid = pinIntentStillCurrent(queuedPinIntent)
-            const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
-            setSpacerActive(true)
-            if (queuedWillPin && pinStillValid) {
-              if (spacerRef.current) spacerRef.current.style.height = '0px'
-              modeRef.current = {
-                kind: 'PIN_USER_MSG',
-                ts: pinTargetTs,
-              }
-            } else if (pinStillValid) {
-              settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-            }
+            // The queued send was promoted straight into the active turn, so
+            // it's a new visible user message and follows the send rule just
+            // like a fresh send. The pin targets the stable cid (the started
+            // row carries the same cid the client minted).
+            pinSentMessage(cid, {
+              willPin: queuedWillPin,
+              intent: queuedPinIntent,
+            })
             forgetQueuedPinIntent({
-              cid: queuedMsg.cid,
-              ts: ackTs,
-              tsList: result.message?._consumed_ts,
+              cid,
+              cidList: result.message?._consumed_cids,
             })
             bridgeHook.markBridged()
           }
@@ -1555,47 +1925,39 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
-          if (Array.isArray(result.message?._consumed_ts)) {
-            pendingQueue.promoteManyByTs(result.message._consumed_ts)
+          if (Array.isArray(result.message?._consumed_cids)) {
+            pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
-          pendingQueue.cancelByCid(queuedMsg.cid)
+          pendingQueue.cancelByCid(cid)
           onMessageStartRef.current?.()
           promotedRef.current = false
+          // Same run-start semantics as the branch above: this send became
+          // the first message of a NEW run, so the rail resets here too.
+          setBuildPhases(railAtRunStart())
           // Apply the send rule before appending — see shouldPinSend and
           // the fresh-send path. A message that raced into a started turn
           // is still a new send becoming the active turn, so it pins only
-          // when first-or-at-bottom. The decision was captured at send
-          // time (before the await): reading scrollRef/modeRef HERE would
-          // let a scroll during the POST flip it. `pinStillValid` yields to
-          // a user-driven mode change that landed during the await.
+          // when first-or-at-bottom. The decision was captured at send time.
           const startedMessages = startedMessagesFromResponse(result)
           commitMessages(prev => {
             if (startedMessages) return appendMessageBatch(prev, startedMessages)
-            const { queued: _q, cid: _c, position: _p, ...msg } = queuedMsg
+            // Strip the queue-envelope fields but KEEP cid — the visible user
+            // row needs it as its stable data-cid pin target.
+            const { queued: _q, position: _p, ...msg } = queuedMsg
             return appendMessageBatch(prev, [msg])
           })
           setSending(true)
           setServerRunningState(true)
-          // New visible user msg → pin to the top only when the rule
-          // allows; otherwise convert any stale pin to the reader's
-          // ANCHOR_AT (see settleNonPinMode) so the reader stays put with
-          // reservation still available below. Pin keys to the first SERVER
-          // ts when available; otherwise fall back to the optimistic ts.
-          const startedPinStillValid = pinIntentStillCurrent(queuedPinIntent)
-          const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
-          setSpacerActive(true)
-          if (queuedWillPin && startedPinStillValid) {
-            if (spacerRef.current) spacerRef.current.style.height = '0px'
-            modeRef.current = {
-              kind: 'PIN_USER_MSG',
-              ts: pinTargetTs,
-            }
-          } else if (startedPinStillValid) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-          }
+          // New visible user msg → pin the stable cid to the top when the rule
+          // allows; otherwise the funnel retires any stale pin to the reader's
+          // anchor and reservation stays available below.
+          pinSentMessage(cid, {
+            willPin: queuedWillPin,
+            intent: queuedPinIntent,
+          })
           forgetQueuedPinIntent({
-            cid: queuedMsg.cid,
-            tsList: result.message?._consumed_ts,
+            cid,
+            cidList: result.message?._consumed_cids,
           })
           // This is a NEW turn (not the bridge turn from mount).
           // Retire the bridge gate so the upcoming promote appends a
@@ -1608,7 +1970,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         // Invariant: every observable queue-path status must resolve
         // the optimistic entry's in-flight flag. queued/steered/started
-        // each clear it above (swapOptimisticTs / cancelByCid). Any
+        // each clear it above (confirmQueued / cancelByCid). Any
         // other status — e.g. streamSend's `not_steered` — leaves the
         // entry as an ordinary queued row, so clear the flag here or it
         // leaks forever and a later hydrate would wrongly preserve it.
@@ -1641,24 +2003,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
+    // A fresh send starts a NEW run — the rail's only reset seam besides
+    // queued_turn_starting. Resetting on ENQUEUE instead (the queue path
+    // above) wiped the in-flight build's rail, which the next catch-up
+    // replay then silently repopulated (see buildPhaseRail.js).
+    setBuildPhases(railAtRunStart())
 
-    // The send rule (see shouldPinSend): pin the new message to the top
-    // only when it is the first message OR the user is at the bottom.
-    // Read both inputs BEFORE the append: `hasPriorVisibleUser` from the
-    // synchronous messagesRef (commitMessages advances it eagerly), and
-    // the at-bottom snapshot from the pre-append scrollHeight. `pin` is
-    // the caller opt-out (handleStop's queue-collapse passes pin:false).
-    const isFirstUserMsg = !messagesRef.current.some(
-      m => m.role === 'user' && !m.hidden,
-    )
-    const willPin = pin && shouldPinSend({
-      scrollEl: scrollRef.current,
-      mode: modeRef.current,
-      isFirstUserMsg,
-      wasNearScrollBottom: wasNearContentBottomAtSubmit,
-    })
+    // Direct sends use the same submit-time decision as queued/steered sends.
+    // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth
+    // stays below the prompt until the user manually scrolls to the bottom.
+    const willPin = willPinAtSubmit
+    // The send-time pin intent, carried across the async POST so a user scroll
+    // that lands during it can still win. The pinned row's identity is the
+    // minted `cid`, which the optimistic row and the confirmed server row
+    // share — so the pin never needs to be retargeted across a ts swap.
+    const freshPinIntent = sendPinIntent
 
-    const userMsg = { role: 'user', content: text, ts: Date.now(), optimistic: true }
+    const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setInput('')
@@ -1671,21 +2032,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
     setSending(true)
     setServerRunningState(true)
-    // Pin to top only when the rule allows. Reservation is separate:
-    // every visible user send activates the dynamic bottom spacer, but
-    // only first-or-at-bottom sends mutate scrollTop to PIN_USER_MSG.
-    // When not pinning the user is reading (scrolled up), so convert any
-    // stale PIN_USER_MSG from an earlier send into the reader's current
-    // ANCHOR_AT and leave their viewport fixed. The optimistic userMsg.ts is
-    // the rendered data-ts until the backend's canonical row arrives in the
-    // fresh-start response.
-    setSpacerActive(true)
-    if (willPin) {
-      if (spacerRef.current) spacerRef.current.style.height = '0px'
-      modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
-    } else {
-      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
-    }
+    // Pin per the R2 send rule via the funnel: it arms the reservation spacer
+    // on every send and, when not pinning, retires any stale PIN to the
+    // reader's anchor so their viewport stays fixed. The row carries its final
+    // cid from mint, so the pin lands on the first apply.
+    pinSentMessage(cid, { willPin, intent: freshPinIntent })
     // Fresh turn — not a bridge from a mounted DB partial.
     bridgeHook.markBridged()
 
@@ -1712,26 +2063,35 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
 
     try {
-      const result = await streamSend(sendText, attachments.length > 0 ? attachments : undefined)
+      const result = await streamSend(
+        sendText,
+        attachments.length > 0 ? attachments : undefined,
+        // The minted cid rides the POST so the durable row carries the same
+        // identity the optimistic row (and its pin) already use — without it
+        // the server row derives legacy-<ts> and the strict data-cid pin
+        // selector goes blind after the ack re-render.
+        { cid },
+      )
       releaseComposerFilesAfterAccepted()
       if (result?.status === 'queued') {
         const canonicalPending = result.pending_message || null
         commitMessages(prev => {
           const next = [...prev]
-          const idx = findOptimisticUserIndex(next, userMsg.ts)
+          const idx = findUserIndexByCid(next, cid)
           if (idx >= 0) next.splice(idx, 1)
           return next
         })
+        // The queued row keeps the MINTED cid — its identity does not change
+        // because the server was told to queue a fresh send. It is already
+        // server-confirmed (the POST acked), so it is NOT in flight.
         pendingQueue.add({
           ...(canonicalPending || userMsg),
           ts: canonicalPending?.ts ?? result.ts ?? userMsg.ts,
-          cid: canonicalPending
-            ? `s-${canonicalPending.ts ?? result.ts ?? userMsg.ts}`
-            : `q-${userMsg.ts}`,
+          cid,
           queued: true,
           serverTs: !!canonicalPending || typeof result.ts === 'number',
           position: result.position,
-        })
+        }, { inFlight: false })
         if (!canonicalPending) {
           // Same compatibility path as the queue-only branch: reconcile the
           // visible queued tray with the server's exact pending row before
@@ -1739,16 +2099,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           fetchMessages({ force: true })
         }
         if (result.started) {
-          if (Array.isArray(result.message?._consumed_ts)) {
-            pendingQueue.promoteManyByTs(result.message._consumed_ts)
+          if (Array.isArray(result.message?._consumed_cids)) {
+            pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
           const startedMessages = startedMessagesFromResponse(result)
+          pinSentMessage(cid, { willPin, intent: freshPinIntent })
           if (startedMessages) {
             commitMessages(prev => appendMessageBatch(prev, startedMessages))
           }
           return
         }
         if (!result.started) {
+          const queuedPinStillValid = pinIntentStillCurrent(freshPinIntent)
+          if (queuedPinStillValid) {
+            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
+          }
           setSending(false)
           setServerRunningState(false)
         }
@@ -1756,8 +2121,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       const startedMessages = startedMessagesFromResponse(result)
       if (startedMessages) {
+        // The started row carries the same cid the client minted, so the pin
+        // targets that cid directly — no retarget from optimistic to canonical
+        // ts, and no last-row fallback. The funnel owns arming + staleness.
+        pinSentMessage(cid, { willPin, intent: freshPinIntent })
         commitMessages(prev => {
-          return replaceOptimisticWithBatch(prev, userMsg.ts, startedMessages)
+          return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
       }
       if (!hadMessagesRef.current) {
@@ -1775,7 +2144,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // silently disappears from the durable chat after refresh.
       commitMessages(prev => {
         const next = [...prev]
-        const idx = findOptimisticUserIndex(next, userMsg.ts)
+        const idx = findUserIndexByCid(next, cid)
         if (idx >= 0) next.splice(idx, 1)
         next.push({
           role: 'assistant',
@@ -1796,6 +2165,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // re-creating doSend on every stream tick (and avoids the
     // stale-closure trap for callers like handleStop).
   }, [
+    chatId,
     streamSend,
     pendingFiles,
     commitMessages,
@@ -1898,8 +2268,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // message; if the user was at FOLLOW_BOTTOM they'll see it
     // forming, if ANCHOR_AT they stay where they are.
     try {
+      // Mint a cid for symmetry so the persisted hidden row carries a stable
+      // identity for reload dedup. It is inert here — a hidden answer send
+      // renders no visible user bubble and never pins.
+      const silentCid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
       await streamSend(text, undefined, {
         hidden: true,
+        cid: silentCid,
         answers: resolvedAnswers,
         question_id: questionId,
       })
@@ -1928,16 +2305,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   function handleSubmit(e) {
     e.preventDefault()
+    if (isProviderSwitchBlocking(chatId)) return
     doSend(input.trim())
   }
 
   // Cancel a queued message via DELETE. Optimistic remove; reconcile
   // by re-fetching authoritative state on success or on error.
-  const handleCancelPending = useCallback(async (ts) => {
-    pendingQueue.cancelByTs(ts)
-    forgetQueuedPinIntent({ ts })
+  const handleCancelPending = useCallback(async (cid) => {
+    pendingQueue.cancelByCid(cid)
+    forgetQueuedPinIntent({ cid })
     try {
-      const res = await apiFetch(`/chats/${chatId}/pending/${ts}`, {
+      const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
       })
       const data = await res.json()
@@ -2009,19 +2387,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // stale DB state. Bumping fetchGen NOW makes any such in-flight
       // fetch get discarded by its gen guard; clearing the queue NOW
       // also prevents the natural handler from triggering the fetch
-      // at all. R1 in _034-design.md spells out the contract —
-      // pendingQueue.clear() updates pendingMessagesRef.current to
+      // at all. pendingQueue.clear() updates pendingMessagesRef.current to
       // [] before this line returns (synchronous).
       fetchGenRef.current += 1
       forgetAllQueuedPinIntents()
       pendingQueue.clear()
 
-      let stoppedCleanly = true
-      // The backend reports which queued ts it actually removed. null = an
+      let stoppedCleanly = false
+      // The backend reports which queued cids it actually removed. null = an
       // older backend without the field (→ fall back to resending all); an
       // array is the authoritative cleared set.
-      let clearedPendingTs = null
-      try {
+      let clearedPendingCids = null
+      const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
           headers: {
@@ -2030,34 +2407,72 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           },
           body: JSON.stringify({ chat_id: chatId }),
         })
+        let data = null
         if (stopRes.ok) {
           // stop_chat returns {stopped: false} when the SDK interrupt
           // timed out — the runner is still alive. We must NOT tear
           // down local state or re-send the collapsed queue, because
           // that would mean two concurrent runs of the same chat.
-          // Leave the stream attached and surface the failure so the
-          // user can retry. Network errors are treated as success-ish
-          // (we have to assume the proc died on our end too).
+          // Leave the stream attached so the user can retry. Likewise,
+          // a non-OK / missing response is NOT success: keeping Stop visible
+          // is safer than pretending the turn halted while the backend runs on.
           try {
-            const data = await stopRes.json()
-            if (data && data.stopped === false) stoppedCleanly = false
-            // Resend only what Stop truly cleared: a queued message the
-            // turn-end drain already promoted into a continuation (right as
-            // Stop landed) is gone from the queue, so it's absent here and
-            // must NOT be re-sent — that was the natural-finish-races-Stop
-            // double-send (PM 115).
-            if (Array.isArray(data?.cleared_pending_ts)) {
-              clearedPendingTs = data.cleared_pending_ts
-            }
-          } catch { /* non-JSON body — assume legacy success */ }
+            data = await stopRes.json()
+          } catch { /* non-JSON body — legacy success if HTTP itself was OK */ }
+          // Resend only what Stop truly cleared: a queued message the
+          // turn-end drain already promoted into a continuation (right as
+          // Stop landed) is gone from the queue, so it's absent here and
+          // must NOT be re-sent — that was the natural-finish-races-Stop
+          // double-send (PM 115).
+          if (clearedPendingCids === null && Array.isArray(data?.cleared_pending_cids)) {
+            clearedPendingCids = data.cleared_pending_cids
+          }
         }
-      } catch { /* network error during stop is non-critical */ }
+        return stopRequestSucceeded({ responseOk: stopRes.ok, data })
+      }
+      const confirmStopIdle = async () => {
+        try {
+          const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 5000 })
+          if (!res.ok) return { failed: true, running: null }
+          const data = await res.json()
+          return { failed: false, running: data?.running }
+        } catch {
+          return { failed: true, running: null }
+        }
+      }
+      for (const retryDelayMs of STOP_RETRY_DELAYS_MS) {
+        if (retryDelayMs > 0) await delay(retryDelayMs)
+        let requestSucceeded = false
+        try {
+          requestSucceeded = await requestStopOnce()
+        } catch {
+          requestSucceeded = stopRequestSucceeded({ fetchFailed: true })
+        }
+        if (!requestSucceeded) {
+          stoppedCleanly = false
+          break
+        }
+        const confirmation = await confirmStopIdle()
+        stoppedCleanly = stopConfirmedIdle({
+          stopSucceeded: requestSucceeded,
+          confirmRunning: confirmation.running,
+          confirmFailed: confirmation.failed,
+        })
+        if (stoppedCleanly) break
+        if (!shouldRetryStopAfterConfirm({
+          requestSucceeded,
+          confirmRunning: confirmation.running,
+          confirmFailed: confirmation.failed,
+        })) {
+          break
+        }
+      }
 
       // Resolve WHAT to resend from the queued snapshot + the set the
       // backend reports it actually cleared, via the SHARED, pure
       // resolveStopResend — ONE code path for both the clean-stop and
       // the timeout branch so they can't drift. The timeout branch used
-      // to ignore clearedPendingTs and re-send the full snapshot
+      // to ignore clearedPendingCids and re-send the full snapshot
       // unconditionally, which double-sent a message the natural turn-end
       // drain had already consumed (cleared set []). The full contract +
       // its tests live in resolveStopResend.js.
@@ -2076,7 +2491,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // from authoritative server state would silently drop the queued
         // text (the "Stop ate my message" bug). Restore from the LOCAL
         // snapshot instead, via the same doSend re-send path — and
-        // narrowed by clearedPendingTs through the SHARED resolveResend
+        // narrowed by clearedPendingCids through the SHARED resolveResend
         // (above) so a queued message the natural turn-end drain already
         // consumed (cleared set []) is NOT re-sent here: re-sending it
         // would duplicate the message and risk a duplicate follow-up run.
@@ -2099,7 +2514,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // The 2s timeout is NOT surfaced as a user-facing error; only a
         // genuine re-queue POST failure (doSend's catch) shows a block.
         const { text: resendText, attachments: resendAttachments } =
-          resolveResend(clearedPendingTs)
+          resolveResend(clearedPendingCids)
         if (resendText) {
           doSend(resendText, {
             pin: false,
@@ -2130,7 +2545,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // set → nothing re-sent (the natural-finish-races-Stop double-send,
       // PM 115), exact match → that subset, partial/legacy → full combined.
       const { text: resendText, attachments: resendAttachments } =
-        resolveResend(clearedPendingTs)
+        resolveResend(clearedPendingCids)
 
       if (resendText) {
         // doSend's guard reads sendingRef/isStreamingRef (just synced to false
@@ -2151,8 +2566,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   // Re-entry guard for handleSteer, peer of handlingStopRef. Two rapid
   // taps on the fast-forward button would otherwise both snapshot the
-  // same queue and both POST a force_steer for the same ts → the second
-  // POST's consume_pending_ts no longer matches pending (the first
+  // same queue and both POST a force_steer for the same cids → the second
+  // POST's consume_pending_cids no longer matches pending (the first
   // already consumed them) and comes back not_steered, but the optimistic
   // double-fire is still wasteful. Synchronous flip at entry, cleared in
   // finally.
@@ -2172,14 +2587,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     handlingSteerRef.current = true
     try {
       const snapshot = pendingQueue.pendingMessagesRef.current
-      // Only entries with a real numeric SERVER ts can be force-steered:
-      // _force_steer_matches_pending compares consume_pending_ts against
-      // chat.pending_messages[].ts, so an optimistic-only entry whose
-      // queue-POST hasn't been server-acked (its ts is a client Date.now(),
-      // not the server's) would make the match fail. We take the
-      // simpler-correct option: only steer when EVERY queued entry is
-      // serverTs-confirmed (usePendingQueue sets that flag on the
-      // server-origin / swapOptimisticTs / hydrate paths). The button gate
+      // Only server-confirmed entries can be force-steered: the backend
+      // reconstructs the durable rows from chat.pending_messages, so an
+      // optimistic-only entry whose queue-POST hasn't acked yet is not visible
+      // there and its cid selects nothing. We take the simpler-correct option:
+      // only steer when EVERY queued entry is serverTs-confirmed (usePendingQueue
+      // sets that flag on the confirmQueued / hydrate paths). The button gate
       // (canSteer below) keeps the fast-forward hidden until then, so this
       // is belt-and-suspenders — if a stray optimistic entry slips in, bail
       // and leave the queue intact (it drains at turn-end as usual).
@@ -2198,17 +2611,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       )
       if (!allServerConfirmed) return
 
-      // Build content EXACTLY as the backend expects: the non-empty
-      // trimmed contents joined by "\n\n", in pending order. This must
-      // byte-match _force_steer_matches_pending's `expected` or the
-      // request is rejected (not_steered). consume_pending_ts is every
-      // snapshot entry's ts (the backend selects pending rows by this set
-      // and rebuilds the same join over them).
+      // The provider-facing steer text: the non-empty trimmed contents joined
+      // by "\n\n", in pending order. The backend no longer byte-matches this
+      // against the queue — it selects the durable rows by cid — so the join is
+      // just the text delivered into the live turn. consume_pending_cids is
+      // every snapshot entry's stable cid (the backend selects pending rows by
+      // this set and rebuilds its own rows over them).
       const steerTexts = confirmedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
       const content = steerTexts.join('\n\n')
-      const consumePendingTs = confirmedSnapshot.map(m => m.ts)
+      const consumePendingCids = confirmedSnapshot.map(m => cidOf(m))
       // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
       const seenNames = new Set()
       const attachments = []
@@ -2223,27 +2636,30 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (!content) return
 
       try {
-        const wasNearContentBottomAtSteer = scrollRef.current
-          ? isNearContentBottom(scrollRef.current)
-          : null
-        const steerIsFirstUser = !messagesRef.current.some(
-          m => m.role === 'user' && !m.hidden,
-        )
-        const steerWillPin = shouldPinSend({
+        const steerIsFirstUser = isFirstVisibleUserMessage()
+        // Fast-forward promotes rows that were already submitted. Preserve
+        // the head row's original submit-time decision; do not recompute it
+        // from the reader's later fast-forward position. After a remount the
+        // in-memory intent may be unavailable, in which case hold is the safe
+        // default (except for the first-message rule).
+        const headQueuedIntent = queuedPinIntentByCidRef.current.get(
+          consumePendingCids[0],
+        ) || null
+        const fallbackSteerWillPin = shouldPinSend({
           scrollEl: scrollRef.current,
           mode: modeRef.current,
           isFirstUserMsg: steerIsFirstUser,
-          respectFollowMode: false,
-          wasNearScrollBottom: wasNearContentBottomAtSteer,
+          wasAutoScrollAtBottom: false,
         })
-        steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+        steerPinIntentRef.current = headQueuedIntent
+          || makeSendPinIntent(fallbackSteerWillPin)
         // The queued tray is part of the footer height. If it stays visible
         // until after the steered row is inserted, the scroll system pins with
         // one layout and then immediately reflows when the tray disappears — the
         // visible "down, then up" fast-forward jump. Hide only the confirmed
         // rows this request is steering; restore the snapshot below if the
         // backend says the turn was not steered.
-        pendingQueue.promoteManyByTs(consumePendingTs)
+        pendingQueue.promoteManyByCid(consumePendingCids)
         const queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
         const restoreOptimisticSteerQueue = () => {
           // If another path touched the queue while the POST was in flight
@@ -2256,9 +2672,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         const result = await streamSend(content, attachments, {
           forceSteer: true,
-          consumePendingTs,
+          consumePendingCids,
           steeredMessages: confirmedSnapshot.map(m => ({
             ts: m.ts,
+            cid: cidOf(m),
             content: m.content || '',
             ...(m.attachments ? { attachments: m.attachments } : {}),
           })),
@@ -2267,13 +2684,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // The steered rows now render inline (onSteeredIntoTurn promotes
           // them from the SSE event + transcript). Drop them from the local
           // tray. Reconcile against the server's authoritative remaining
-          // queue when present, else remove exactly the steered ts.
+          // queue when present, else remove exactly the steered cids.
           if (Array.isArray(result.pending_messages)) {
             pendingQueue.hydrate(result.pending_messages)
           } else {
-            for (const ts of consumePendingTs) pendingQueue.cancelByTs(ts)
+            for (const c of consumePendingCids) pendingQueue.cancelByCid(c)
           }
-          forgetQueuedPinIntent({ tsList: consumePendingTs })
+          forgetQueuedPinIntent({ cidList: consumePendingCids })
         }
         if (result?.status !== 'steered') {
           steerPinIntentRef.current = null
@@ -2296,10 +2713,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
   // backgrounded-then-resumed streaming chat doesn't snap away from where the
-  // user was reading. If the user is already at the tail, preserve
-  // FOLLOW_BOTTOM so thinking/timer updates keep flowing at the bottom instead
-  // of converting the tail into a fixed anchor. No-op when the turn isn't
-  // active or the tab is hidden.
+  // user was reading. A chat must return to exactly where it was — never to a
+  // NEW tail that grew while hidden, even if it had been following before it
+  // left. Returning freezes hold; only a later manual bottom gesture can
+  // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
   // (The fast-forward affordance is computed separately at `canSteer` below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
@@ -2323,6 +2740,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       window.removeEventListener('online', freezeStreamingReturn)
     }
   }, [turnActive, modeRef])
+
+  // Cloak the first post-reconnect catch-up commit (contract v2 item 2, lever
+  // 3). freezeStreamingReturn above already anchors the mode at the moment the
+  // tab returns; the atomic catch-up commit lands async AFTER that, and even the
+  // in-place reconcile (lever 2c) can re-settle heights. Re-hold the anchor the
+  // instant the commit's DOM mutation lands — in a layout effect, before paint,
+  // so a real reconnect (Path B) or a Path-A commit after the reveal cap never
+  // blinks the reader's position. reapplyActiveMode no-ops before reveal, and a
+  // quick-wake kept socket never reconnects (no commit → seq stays put), so a
+  // glance at the notification shade cannot trigger it. The seq starts at 0 and
+  // only a commit bumps it, so this skips the initial mount.
+  useLayoutEffect(() => {
+    if (catchUpCommitSeq === 0) return
+    reapplyActiveMode()
+  }, [catchUpCommitSeq, reapplyActiveMode])
 
   // Composer action state: queued work is also non-idle from the user's point
   // of view. Even if we momentarily don't have a live stream attached yet, a
@@ -2437,28 +2869,49 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
-  const bridgeMsgIdx = (turnActive && streamItems.length > 0)
+  // The captured bridge partial enters the active row before catch-up emits a
+  // single item. That is the load-bearing part of Lever 1: when SSE becomes the
+  // selected source, React updates MsgContent props instead of replacing the
+  // DB row with a different renderer subtree.
+  const bridgeMsgIdx = turnActive
     ? bridgeHook.findBridgeIndex(messages)
     : -1
-  const trailingAssistantPartialIdx = (turnActive && streamItems.length > 0)
+  const trailingAssistantPartialIdx = turnActive
     ? findTrailingAssistantPartialIndex(messages)
     : -1
   const activePartialMsgIdx = bridgeMsgIdx >= 0 ? bridgeMsgIdx : trailingAssistantPartialIdx
   const activePartialMsg = activePartialMsgIdx >= 0 ? messages[activePartialMsgIdx] : null
-  // Single-surface invariant for active assistant partials:
-  // - if the live stream is at least as fresh as the saved DB partial, hide the
-  //   DB row and render StreamingMessage; final promotion replaces that row.
-  // - if the DB partial is richer than a stale cached stream snapshot (e.g.
-  //   stray "I" after returning to chat), keep the DB row and suppress the
-  //   stale stream until catch-up catches up.
-  // - if both surfaces clearly belong to the same active answer but tool /
-  //   thinking metadata is only partially replayed, still choose ONE surface.
-  //   Rendering both was the transient "duplicated agent output" bug: reopening
-  //   the chat fixed it because the durable transcript had only one copy.
+  // Select DATA, never a component tree. A captured bridge is authoritative;
+  // without one, the trailing assistant is folded into the active row only
+  // when chooseActiveAssistantSurface establishes that it mirrors this stream.
+  // Unrelated prior assistant history therefore remains untouched.
   const activeAssistantSurface = chooseActiveAssistantSurface(activePartialMsg, streamItems)
-  const liveMirrorMsgIdx = activeAssistantSurface.hideMessage ? activePartialMsgIdx : -1
-  const suppressStreamingSurface = !!(activePartialMsg && activeAssistantSurface.suppressStream)
-  const showStreamingSurface = turnActive && streamItems.length > 0 && !suppressStreamingSurface
+  const hasLiveAssistantPayload = turnActive && streamItems.length > 0
+  const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx,
+    trailingAssistantPartialIdx,
+    hasLivePayload: hasLiveAssistantPayload,
+    surface: activeAssistantSurface,
+  })
+  const activeMirrorMsg = activeMirrorMsgIdx >= 0 ? messages[activeMirrorMsgIdx] : null
+  const useDbActivePayload = !!(
+    activeMirrorMsg
+    && (!hasLiveAssistantPayload || activeAssistantSurface.suppressStream)
+  )
+  const activeAssistantMsg = useDbActivePayload
+    ? activeMirrorMsg
+    : (hasLiveAssistantPayload
+        ? {
+            ...(activeMirrorMsg || {}),
+            role: 'assistant',
+            // Live rendering keeps running tool state and thinking clock
+            // anchors; final promotion uses the converter's default finalize
+            // mode and still seals running tools as done.
+            ...streamItemsToAssistantPayload(streamItems, { finalize: false }),
+          }
+        : null)
+  const showActiveAssistantSurface = !!activeAssistantMsg
+  const activeAssistantIsStreaming = !!(activeAssistantMsg && !useDbActivePayload)
 
   // ── Sticky "needs your answer" affordance ──────────────────────────
   // A pending AskUserQuestion freezes the turn until the user answers,
@@ -2469,7 +2922,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // tail-question invariant on the last visible assistant message (the
   // same rule MsgContent's blockAnswerable enforces; recovery preserves
   // that tail question even when the original process was interrupted).
-  const pendingQuestionInStream = showStreamingSurface
+  const pendingQuestionInStream = activeAssistantIsStreaming
     && streamItems.some(it => it.type === 'question' && !it.answers)
   const pendingQuestionInMessages = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2484,43 +2937,122 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   })()
   const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
 
+  // ── Sticky "tap to resume" affordance ──────────────────────────────
+  // A turn paused by a drain-gated restart, a stall, or a provider-limit park
+  // persists a resumable error block at the tail of the last assistant message
+  // (the same tail invariant MsgContent's Resume gate enforces). Like a pending
+  // question, that card can sit outside the viewport after a scroll — the chat
+  // then just looks stopped. Detect the tail resumable block so the offscreen
+  // nudge + SR status can name the recovery. A pause is terminal (the turn has
+  // ended), so it only ever lives in `messages`, never in a live stream item.
+  const pendingResumeBlock = tailResumableBlock(messages)
+  const hasPendingResume = !!pendingResumeBlock
+  const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
+  const autoResumeEnabled = !!chatInfo?.auto_resume_on_limit
+  useEffect(() => {
+    if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
+      if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
+      return
+    }
+    if (armedEmbeddedResetRef.current === pendingLimitResetAt) return
+    armedEmbeddedResetRef.current = pendingLimitResetAt
+    // Arm the parent protocol once per durable park, before the automatic run
+    // exists. If both system events are missed, the stream-open authoritative
+    // idle handshake can still complete this new turn exactly once.
+    onExternalRunEventRef.current?.('auto_resume_waiting')
+  }, [autoResumeEnabled, embedded, pendingLimitResetAt])
+  const handleEmbeddedRunEvent = useCallback((event) => {
+    if (
+      !embedded
+      || String(event.chatId || '') !== String(chatId || '')
+      || (event.type !== 'chat_run_started'
+        && event.type !== 'chat_run_finished')
+    ) return
+    setEmbeddedRunSignal(previous => (
+      advanceChatRunSignal(previous, event.type)
+    ))
+    setEmbeddedRunActive(event.type === 'chat_run_started')
+    onExternalRunEventRef.current?.(event.type)
+  }, [chatId, embedded])
+  const handleEmbeddedStreamOpen = useCallback(() => {
+    setEmbeddedRunSignal(previous => (
+      advanceChatRunSignal(previous, 'chat_run_reconcile')
+    ))
+  }, [])
+  // Embedded chats do not have Shell's process stream. Subscribe only while
+  // an opted-in limit park is waiting (and through its observed run), rather
+  // than holding one permanent SSE connection per retained app iframe.
+  useSystemEventStream(handleEmbeddedRunEvent, {
+    enabled: !!(
+      embedded
+      && ((autoResumeEnabled && pendingLimitResetAt) || embeddedRunActive)
+    ),
+    onOpen: handleEmbeddedStreamOpen,
+  })
+  const limitResetElapsed = resetDeadlineState(pendingLimitResetAt).elapsed
+  const showAutoResumeControl = !!(
+    !embedded
+    && chatInfo !== null
+    && pendingLimitResetAt
+    // Once enabled, keep the persistent policy cancellable even if the
+    // viewer's clock passes the advertised reset before the server resumes.
+    && (!limitResetElapsed || autoResumeEnabled)
+  )
+
+  useEffect(() => {
+    setAutoResumeError('')
+    setAutoResumeErrorSource('')
+    let timer = null
+    let cancelled = false
+    const schedule = () => {
+      if (cancelled) return
+      const delayMs = resetDeadlineDelay(pendingLimitResetAt)
+      if (delayMs === null) return
+      timer = setTimeout(() => {
+        setLimitResetClockTick(tick => tick + 1)
+        // Deadlines beyond the browser timer ceiling need another wait rather
+        // than being treated as elapsed at the first capped wake-up.
+        schedule()
+      }, delayMs)
+    }
+    schedule()
+    return () => {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [pendingLimitResetAt])
+
   // Visibility of that card is a pure viewport question — an
   // IntersectionObserver rooted at the scroll container is the signal,
   // no scroll math and no interaction with the spacer machinery. The
   // card's DOM node is stable across streaming ticks (keyed children),
   // so the observer only needs re-binding when the rendering surface
   // can change: pending-flag flips, stream↔messages promotion, or a
-  // messages commit.
+  // messages commit. Both nudges share useOffscreenNudge (above).
   // The LAST un-answered card is the pending one: it lives in the last
   // assistant message or the streaming <li>.
   const findPendingQuestionCard = () =>
     [...(scrollRef.current?.querySelectorAll('.qcard:not(.qcard--answered)') ?? [])].pop()
+  const pendingCardOffscreen = useOffscreenNudge(
+    scrollRef, hasPendingQuestion, findPendingQuestionCard,
+    [showActiveAssistantSurface, messages],
+  )
 
-  useEffect(() => {
-    if (!hasPendingQuestion) {
-      setPendingCardOffscreen(false)
-      return undefined
-    }
-    const scrollEl = scrollRef.current
-    const card = findPendingQuestionCard()
-    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
-      setPendingCardOffscreen(false)
-      return undefined
-    }
-    const io = new IntersectionObserver(entries => {
-      setPendingCardOffscreen(!entries[0]?.isIntersecting)
-    }, { root: scrollEl, threshold: 0 })
-    io.observe(card)
-    return () => io.disconnect()
-  }, [hasPendingQuestion, showStreamingSurface, messages])
+  // The resume card: only the tail resumable note renders `.chat__resume`
+  // (MsgContent gates the button on isLastMsg), so observing that button is
+  // enough to know the card's visibility; a tap on the nudge scrolls it in.
+  const findResumeCard = () =>
+    [...(scrollRef.current?.querySelectorAll('.chat__resume') ?? [])].pop()
+  const resumeCardOffscreen = useOffscreenNudge(
+    scrollRef, hasPendingResume, findResumeCard,
+    [showActiveAssistantSurface, messages],
+  )
 
-  // The streaming <li> carries a stable data-key so the scroll state machine
-  // can anchor inside an in-flight answer. Without this, returning to a
-  // streaming chat while scrolled into the live bubble had no anchorable row,
-  // so reconnect/catch-up could fall back to bottom-follow behavior. In the
-  // BRIDGE case (we kept a DB partial on mount and the streaming <li> is the
-  // visual replacement for that suppressed message), use the partial's key so
-  // an existing ANCHOR_AT still resolves through the catch-up window.
+  // The ONE active <li> carries this data-key for both DB and live payloads.
+  // ANCHOR_AT resolves `[data-key]`, so source selection must never change it.
+  // The first committed source owns the key: a DB-first bridge seeds the
+  // partial's durable key, while a live-first answer keeps its synthetic key
+  // even if a related DB partial arrives later.
   //
   // Fast-forward can insert a user row AFTER the mounted partial while the
   // stream remains live. Therefore bridge identity is ts-based across the
@@ -2528,22 +3060,59 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // bridge), the previous assistant is rendered alongside the streaming
   // <li> (different turns), so the streaming <li> gets its own synthetic key
   // rather than reusing a previous assistant row's key.
-  const streamingDataKey = (() => {
-    const bridged = liveMirrorMsgIdx >= 0 ? messages[liveMirrorMsgIdx] : null
-    if (!bridged || bridged.role !== 'assistant' || bridged.hidden) {
-      return `streaming-${chatId}`
+  const streamingDataKey = chooseActiveAssistantDataKey({
+    latched: activeAssistantDataKeyRef.current,
+    mirroredMsg: activeMirrorMsg,
+    mirrorIndex: activeMirrorMsgIdx,
+    hasLivePayload: hasLiveAssistantPayload,
+    chatId,
+  })
+  useLayoutEffect(() => {
+    if (!turnActive) {
+      activeAssistantDataKeyRef.current = null
+      return
     }
-    return bridged.id || `${bridged.role}-${bridged.ts ?? bridgeMsgIdx}`
-  })()
+    if (showActiveAssistantSurface
+        && activeAssistantDataKeyRef.current?.key !== streamingDataKey) {
+      activeAssistantDataKeyRef.current = {
+        key: streamingDataKey,
+        mirrorKey: activeMirrorMsg
+          ? (activeMirrorMsg.id
+              || `${activeMirrorMsg.role}-${activeMirrorMsg.ts ?? activeMirrorMsgIdx}`)
+          : null,
+      }
+    }
+  }, [turnActive, showActiveAssistantSurface, streamingDataKey, activeMirrorMsg, activeMirrorMsgIdx])
 
   // Polite aria-live status: announced once per state transition, not per
   // token. Visually hidden via the sr-only utility in ChatView.css.
+  // When the tail turn paused/parked and needs a Resume tap, announce the
+  // recovery state — "Response ready." would be a lie (a paused turn isn't
+  // ready, it's waiting on the owner), and a screen-reader user has no visual
+  // Resume card to fall back on.
+  const resumeStatus = (() => {
+    if (!pendingResumeBlock) return null
+    if (pendingResumeBlock.pause?.resets_at) {
+      const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+      return label
+        ? `Rate limit reached, resets ${label} — Resume available.`
+        : 'Rate limit reached — Resume available.'
+    }
+    return 'Turn paused — Resume available.'
+  })()
   const ariaStatus = turnActive
     ? 'Assistant is responding…'
-    : (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
-        ? 'Response ready.'
-        : '')
-  const openAppCta = openAppCtaViewModel(builtApp, turnActive)
+    : (resumeStatus
+        ?? (messages.length > 0
+            && messages[messages.length - 1]?.role === 'assistant'
+              ? 'Response ready.'
+              : ''))
+  // One CTA row per built app (most recent last). The view-model stays pure
+  // and per-app; the pulse/label-swap is layered on in the render below.
+  const openAppCtas = builtApps
+    .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
+    .filter(entry => entry.vm)
+  const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
 
   return (
     <div
@@ -2567,6 +3136,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         aria-relevant="text"
       >
         {previewReadyStatus}
+      </div>
+      <div
+        className="chat__sr-status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-relevant="text"
+      >
+        {buildPhaseStatus}
       </div>
       {showInspector && (
         <AgentContextInspector
@@ -2650,7 +3227,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         onScroll={handleScroll}
         style={revealed ? undefined : { visibility: 'hidden' }}
       >
-        <ul className="chat__list" style={spacerActive ? { minHeight: 0 } : undefined}>
+        {/* The reservation is a permanent geometry invariant for every
+            non-empty chat, including after unmount/remount. Keep the list's
+            elastic min-height out of the spacer formula at all times. */}
+        <ul className="chat__list" style={{ minHeight: 0 }}>
           {hasMore && (
             <li className="chat__older">
               <button onClick={loadOlderMessages}>Load earlier messages</button>
@@ -2661,17 +3241,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             if (msg.hidden) return null
             const isLastMsg = i === messages.length - 1
               || messages.slice(i + 1).every(m => m.hidden)
-            // Suppress the last assistant message ONLY when this is
-            // the BRIDGE case (we kept a DB partial on mount and the
-            // streaming <li> is about to render the same in-flight
-            // turn). For normal multi-turn flow, the existing
-            // assistant message and the streaming <li> represent
-            // DIFFERENT turns and must BOTH render — otherwise a
-            // user's answered-question card would hide whenever the
-            // next turn streams.
-            if (i === liveMirrorMsgIdx
+            // The mirrored DB row is rendered below by the SAME active
+            // MsgContent instance that consumes live payloads. Suppress only
+            // that row; unrelated assistant history remains in this map.
+            if (i === activeMirrorMsgIdx
                 && msg.role === 'assistant'
-                && showStreamingSurface) {
+                && showActiveAssistantSurface) {
               return null
             }
             // A question is answerable while the runner is parked on it,
@@ -2684,13 +3259,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // That invariant is fully DURABLE: it reads only the persisted
             // message blocks, so it survives a reload AND Möbius's
             // kill-on-question `done` (the SSE closes the moment a question
-            // fires, but the runner keeps waiting). Gating on the live
-            // stream instead — an earlier version required `isStreaming`,
-            // which flips false on that `done` — is exactly what wedged the
-            // card disabled-forever. `liveQuestionId`, when the live stream
-            // handed it to us, is an extra precision filter; after a reload
-            // we may never have seen it, and then the tail-unanswered
-            // invariant stands on its own.
+            // fires, but the runner keeps waiting). It must NOT gate on the
+            // live stream: `isStreaming` flips false on that `done`, which
+            // would leave the card disabled forever. `liveQuestionId`, when
+            // the live stream handed it to us, is an extra precision filter;
+            // after a reload we may never have seen it, and then the
+            // tail-unanswered invariant stands on its own.
             //
             // MsgContent enforces the "tail block" half (the question is the
             // LAST block). Recovery may insert an interruption note before a
@@ -2708,12 +3282,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
             // fall back to role+ts which is also stable across renders.
             const dataKey = msg.id || `${msg.role}-${msg.ts ?? i}`
+            // User rows key + pin on the stable cid so the optimistic→confirm
+            // display-ts update never remounts the row (which would drop the
+            // pin target mid-swap). data-ts stays for the timestamp tooltip only.
+            const userCid = msg.role === 'user' ? cidOf(msg) : null
             return (
             <li
-              key={msg.id || msg.ts || `${msg.role}-${i}`}
+              key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${msg.role}`}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
+              data-cid={userCid || undefined}
               data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
               onClick={msg.ts && msg.role === 'user'
                 ? (e) => { e.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible') }
@@ -2723,6 +3302,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 msg={msg}
                 chatId={chatId}
                 onQuestionAnswer={doSendSilent}
+                onResume={doSend}
+                autoResumeEnabled={
+                  isLastMsg && autoResumeEnabled
+                }
+                autoResumeAvailable={
+                  isLastMsg && showAutoResumeControl
+                }
+                autoResumeSaving={isLastMsg && autoResumeSaving}
+                autoResumeError={
+                  isLastMsg && autoResumeErrorSource === 'card'
+                    ? autoResumeError
+                    : ''
+                }
+                onAutoResumeChange={
+                  isLastMsg ? handleAutoResumeChange : undefined
+                }
+                submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
@@ -2738,15 +3334,28 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             </li>
           )})}
 
-          {showStreamingSurface && (
+          {showActiveAssistantSurface && (
             <StreamingMessage
-              streamItems={streamItems}
+              key={streamingDataKey}
+              msg={activeAssistantMsg}
               dataKey={streamingDataKey}
+              chatId={chatId}
               onAnswer={doSendSilent}
+              onResume={activeAssistantIsStreaming ? undefined : doSend}
+              autoResumeEnabled={autoResumeEnabled}
+              autoResumeAvailable={showAutoResumeControl}
+              autoResumeSaving={autoResumeSaving}
+              autoResumeError={
+                autoResumeErrorSource === 'card' ? autoResumeError : ''
+              }
+              onAutoResumeChange={handleAutoResumeChange}
+              submissionBlocked={providerSwitching}
+              liveQuestionId={liveQuestionId}
+              isStreaming={activeAssistantIsStreaming}
             />
           )}
 
-          {turnActive && streamItems.length === 0 && !loading && (
+          {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
             <li className="chat__msg chat__msg--assistant">
               <div className="chat__thinking"><span /><span /><span /></div>
             </li>
@@ -2763,15 +3372,36 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       )}
 
       <div ref={footRef} className="chat__foot">
-        {openAppCta && (
+        {buildPhaseRail.length > 0 && (
+          <div className="chat__build-rail" role="group" aria-label="Build progress">
+            {buildPhaseRail.map(phase => (
+              <span
+                key={phase.ts}
+                className={`chat__build-phase${
+                  phase.current ? ' chat__build-phase--current' : ''
+                }`}
+              >
+                <span className="chat__build-phase-dot" aria-hidden="true" />
+                <span className="chat__build-phase-label">{phase.label}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        {openAppCtas.length > 0 && (
           <div className="chat__open-app">
-            <button
-              className="chat__open-app-btn"
-              aria-label={openAppCta.ariaLabel}
-              onClick={() => onOpenApp?.(builtApp.id)}
-            >
-              {openAppCta.label} →
-            </button>
+            {openAppCtas.map(({ app, vm }) => {
+              const pulsing = pulsedAppId === Number(app.id)
+              return (
+                <button
+                  key={app.id}
+                  className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
+                  aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
+                  onClick={() => onOpenApp?.(app.id)}
+                >
+                  {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
+                </button>
+              )
+            })}
           </div>
         )}
         {hasPendingQuestion && pendingCardOffscreen && (
@@ -2786,6 +3416,22 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             }}
           >
             Möbius asked you something — tap to answer
+          </button>
+        )}
+        {hasPendingResume && resumeCardOffscreen && (
+          <button
+            type="button"
+            className="chat__resume-nudge"
+            onClick={() => {
+              // USER-initiated scroll — same contract as the question nudge: a
+              // tap is the user asking to be taken to the card, not the app
+              // moving the viewport on its own.
+              findResumeCard()?.scrollIntoView({ block: 'nearest' })
+            }}
+          >
+            {pendingResumeBlock?.pause?.resets_at
+              ? 'Rate limit reached — tap to resume'
+              : 'Turn paused — tap to resume'}
           </button>
         )}
         <ConnectionStatus
@@ -2808,6 +3454,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           canSteer={canSteer}
           canRequestSteer={canRequestSteer}
           offline={!online}
+          submissionBlocked={providerSwitching}
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
           onRemoveFile={removeFile}
@@ -2822,12 +3469,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                    once on mount via the API and never refreshed when
                    the running turn finishes. Without this OR, sending
                    a message and getting a reply in the same session
-                   leaves the cross-provider lock disengaged: the user
-                   can flip Claude ↔ Codex mid-chat and lose the
-                   session, which neither SDK can recover from. */
+                   would skip the cross-provider handoff confirmation:
+                   the user could flip Claude ↔ Codex mid-chat without
+                   preparing the incoming provider's context. */
                 hasAssistantTurns={
                   (chatInfo?.has_assistant_turns ?? false)
                   || messages.some(m => m.role === 'assistant')
+                }
+                autoResumeEnabled={autoResumeEnabled}
+                autoResumeSaving={autoResumeSaving}
+                autoResumeError={
+                  autoResumeErrorSource === 'settings' ? autoResumeError : ''
+                }
+                onAutoResumeChange={
+                  embedded ? undefined : handleAutoResumeSettingsChange
                 }
                 onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
                   // Merge into chatInfo so the next render reflects the
@@ -2843,7 +3498,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                     effective: effective || prev.effective,
                   }) : prev)
                 }}
-                onCompactionStored={handleCompactionStored}
+                providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
               />
             </>

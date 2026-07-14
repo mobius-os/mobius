@@ -144,8 +144,8 @@
 
 /* Chat scroll: always hidden, never reveals on scroll. Mirrors the
    global default in index.css after the on-scroll reveal mechanism
-   was retired. ALL chat-scroll invariants in CLAUDE.md ("Chat UX —
-   non-negotiable constraints") still hold: overflow, spacer math,
+   was retired. ALL invariants in ARCHITECTURE.md's "Chat scroll + steer
+   contract" still hold: overflow, spacer math,
    scrollTop, overflow-anchor, useScrollMode listeners are untouched. */
 .chat__scroll { scrollbar-width: none; }
 .chat__scroll::-webkit-scrollbar { width: 0; height: 0; }
@@ -430,6 +430,83 @@
   text-transform: uppercase;
   color: var(--danger);
 }
+/* Provider-limit park (design §2.4): a rate-limit note is a WAIT state, not a
+   failure, so soften the danger tint toward the neutral accent and let the
+   reset time + Resume-now button carry the card. Declared after
+   .chat__text--error so the override wins (the element carries both classes). */
+.chat__text--parked {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
+}
+.chat__text--parked .chat__error-label {
+  color: var(--accent);
+}
+.chat__parked-reset {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+/* Reassurance under a park: a reset push is coming, and tapping Resume now
+   before the reset may re-park. Muted so it reads as a calm footnote, not a
+   second warning. */
+.chat__parked-note {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.7;
+}
+.chat__limit-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  min-height: 44px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
+}
+.chat__limit-option-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.chat__limit-option-label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.chat__limit-option-error {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 12px;
+}
+/* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
+   Rendered only on the tail resumable interrupt note; re-sends "continue".
+   This is the single most important recovery gesture, so it clears the 44px
+   touch floor (an inline-flex box, not a 31px text pill) and carries an
+   accent-tinted fill so it reads as the PRIMARY next action, not a muted
+   secondary. */
+.chat__resume {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 8px 18px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-light));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.08s;
+}
+.chat__resume:hover {
+  background: color-mix(in srgb, var(--accent) 26%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-light));
+}
+.chat__resume:active { transform: scale(0.97); }
 
 /* ── Typing indicator ─────────────────────────────── */
 
@@ -912,6 +989,18 @@
   flex-shrink: 0;
   font-size: 12px;
   color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
+  display: inline-flex;
+}
+
+/* Rotating disclosure chevron shared by the tool-activity and marker cards,
+   matching the queued-tray chevron idiom: the SVG points down when open and
+   rotates to point right when collapsed, easing the transform so the state
+   change reads as motion rather than an instant glyph swap. */
+.chat__chevron {
+  transition: transform 0.15s;
+}
+.chat__chevron--collapsed {
+  transform: rotate(-90deg);
 }
 
 /* The individual tool blocks, stacked with a small gap when expanded. */
@@ -1003,6 +1092,7 @@
   flex-shrink: 0;
   font-size: 12px;
   color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
+  display: inline-flex;
 }
 
 .chat__marker-body {
@@ -1090,6 +1180,7 @@
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__question-nudge,
+.chat__foot .chat__resume-nudge,
 .chat__foot .chat__open-app,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
@@ -1288,7 +1379,8 @@
    recipe as .chat__open-app-btn: it must read as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
    the whole conversation rather than the queued tray. */
-.chat__question-nudge {
+.chat__question-nudge,
+.chat__resume-nudge {
   display: block;
   margin: 0 auto 8px;
   padding: 5px 14px;
@@ -1302,13 +1394,19 @@
   font-weight: 600;
   line-height: 1.35;
   cursor: pointer;
+  /* Same transform/opacity entrance as the CTA (foot ResizeObserver contract).
+     No fill mode — a filled transform would permanently override the :active
+     press scale below; see the CTA button's entrance note. */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
   transition: background 0.15s, color 0.15s, transform 0.08s;
 }
-.chat__question-nudge:hover {
+.chat__question-nudge:hover,
+.chat__resume-nudge:hover {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
 }
-.chat__question-nudge:active { transform: scale(0.96); }
+.chat__question-nudge:active,
+.chat__resume-nudge:active { transform: scale(0.96); }
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {
@@ -1713,13 +1811,29 @@
   gap: 6px;
 }
 
+.chat__attach-thumb-button {
+  display: inline-flex;
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chat__attach-thumb-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .chat__attach-thumb {
   height: 80px;
   max-width: 160px;
   object-fit: cover;
   border-radius: 8px;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  cursor: pointer;
+  cursor: inherit;
   transition: opacity 0.15s;
 }
 
@@ -1762,11 +1876,31 @@
 
 /* ── Open app CTA ──────────────────────────────────── */
 
+/* Chat-foot entrance: opacity + translateY ONLY. The foot is absolutely
+   positioned and its ResizeObserver publishes --composer-h to size the
+   message-list spacer, so a height/margin animation here would reflow the
+   list mid-stream. Transform + opacity paint without touching layout. */
+@keyframes chat-foot-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* One accent ring that expands and fades — box-shadow only, so it never
+   affects layout. Reused for the CTA's first-plant welcome and the recompile
+   confirmation so "your change landed" rhymes with the app's arrival. */
+@keyframes chat-cta-ring {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+  to   { box-shadow: 0 0 0 7px transparent; }
+}
+
 .chat__open-app {
   max-width: 720px;
   margin: 0 auto 8px;
   display: flex;
-  justify-content: flex-end;
+  /* One CTA row per built app, stacked and right-aligned (most recent last). */
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
   padding: 0 4px;
   pointer-events: none;
 }
@@ -1790,18 +1924,120 @@
   border-radius: 8px;
   padding: 8px 16px;
   max-width: min(100%, 360px);
-  overflow: hidden;
+  position: relative; /* anchors the recompile-pulse ring pseudo-element */
+  overflow: hidden; /* long app names ellipsis; an element's OWN box-shadow
+                       (the plant ring below) is not clipped by its overflow */
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s;
+  /* Entrance on plant: rise in, then one subtle accent ring (the button's own
+     box-shadow, so overflow:hidden doesn't clip it). Both run once on mount
+     and never replay — the recompile pulse rides a pseudo-element, not this
+     list, so toggling that class can't restart these. NO fill mode on the
+     rise: a filled animation's transform keeps applying after it ends and —
+     animations outrank author rules in the cascade — would beat the :active
+     press scale below forever. With no delay there is no pre-play gap for
+     fill to cover, and the `to` keyframe equals the natural styles, so the
+     end of the animation is seamless. */
+  animation:
+    chat-foot-rise 0.22s var(--ease-out-soft, ease-out),
+    chat-cta-ring 0.9s ease-out 0.12s;
+  transition: background 0.15s, transform 0.08s;
 }
 
 .chat__open-app-btn:hover {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
+}
+
+.chat__open-app-btn:active { transform: scale(0.97); }
+
+/* Recompile confirmation: a one-shot INSET accent ring on a pseudo-element. It
+   plays whenever the --pulse class toggles without disturbing the button's own
+   one-time entrance animation, and an inset ring stays inside overflow:hidden
+   (a descendant's box-shadow would otherwise be clipped). Label swap is in JSX. */
+.chat__open-app-btn--pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: chat-cta-flash 0.9s ease-out;
+}
+
+@keyframes chat-cta-flash {
+  from { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 75%, transparent); }
+  to   { box-shadow: inset 0 0 0 2px transparent; }
+}
+
+/* ── Build-milestone rail ──────────────────────────── */
+/* A slim, non-interactive progress rail in the foot, above the open-app CTA:
+   one dot+label per milestone the building agent emitted this turn. Frosted so
+   it reads as a card over the chat scrolling behind the transparent foot, muted
+   so it stays quiet next to the composer. The most recent phase is emphasized;
+   earlier ones dim to compact history. Entrance is transform/opacity ONLY — the
+   foot's ResizeObserver publishes --composer-h off its height, so a height
+   animation would fight the composer clearance. */
+.chat__build-rail {
+  max-width: 720px;
+  margin: 0 auto 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent); /* CONTRACT: frosted surface floor over the chat */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on the frosted card */
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  font-size: 12px;
+  line-height: 1.3;
+  animation: build-rail-in 0.22s ease both;
+}
+
+@keyframes build-rail-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.chat__build-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted); /* CONTRACT: low-contrast text — earlier phases read as dim history */
+}
+
+.chat__build-phase-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.chat__build-phase-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The most recent phase carries the eye: accent dot, full-contrast label. */
+.chat__build-phase--current {
+  color: var(--text); /* CONTRACT: high-contrast text on the current milestone */
+  font-weight: 600;
+}
+.chat__build-phase--current .chat__build-phase-dot {
+  background: var(--accent); /* CONTRACT: vivid accent marks the live phase */
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__build-rail { animation: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */
@@ -1816,6 +2052,10 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Same transform/opacity entrance as the CTA — the tray shares the foot's
+     ResizeObserver, so no height/margin animation here. No fill mode: see the
+     CTA button's entrance note. */
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
 }
 
 .queued__hdr {

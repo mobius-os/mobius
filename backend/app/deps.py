@@ -20,11 +20,14 @@ def reject_cross_site(request: Request) -> None:
   Möbius's baseline CSRF posture is "Authorization: Bearer + CORS" —
   cross-origin JS can't read the token from localStorage without a
   preflight that fails (allow_credentials=False, allow_origins is
-  pinned). This dependency adds a second layer that doesn't require
-  token plumbing: reject any request whose `Sec-Fetch-Site` claims
-  cross-site origin. Modern browsers always send this header; on
-  ancient clients without it we fall back to a same-origin Referer
-  check before allowing the request through.
+  pinned). This dependency adds a second layer: reject requests whose
+  `Sec-Fetch-Site` claims a cross-site origin, except authenticated fetches
+  from Möbius's deliberately opaque app sandbox. Sandboxed app frames have
+  `Origin: null` and browsers label even their same-host API calls as
+  `Sec-Fetch-Site: cross-site`; requiring a valid app-scoped Bearer token
+  keeps that narrow exception on the same boundary as the app APIs themselves.
+  On ancient clients without the header we fall back to a same-origin
+  Referer check before allowing the request through.
 
   Apply to POST/PATCH/DELETE endpoints that mutate owner state. Read-
   only GETs don't need it (CORS already gates them).
@@ -39,6 +42,13 @@ def reject_cross_site(request: Request) -> None:
     # attacks. Same-origin + none + same-site are all OK; only
     # cross-site is rejected.
     if sec_fetch_site == "cross-site":
+      origin = request.headers.get("origin")
+      authorization = request.headers.get("authorization", "")
+      scheme, _, token = authorization.partition(" ")
+      if origin == "null" and scheme.lower() == "bearer" and token:
+        payload = auth.decode_access_token(token)
+        if payload and payload.get("scope") == "app":
+          return
       raise HTTPException(
         status_code=403,
         detail="Cross-site request blocked.",
@@ -76,6 +86,7 @@ class Principal:
   """
   owner: models.Owner
   app_id: int | None
+  app_instance_id: str | None = None
 
 
 def _resolve_owner(
@@ -298,7 +309,11 @@ def get_principal(
   """
   owner, payload = _resolve_owner(token, db)
   app_id = _enforce_app_scope(payload, db)
-  return Principal(owner=owner, app_id=app_id)
+  return Principal(
+    owner=owner,
+    app_id=app_id,
+    app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+  )
 
 
 # Ordered tiers for permission keys whose values form a ladder. Each
@@ -329,11 +344,9 @@ def require_app_permission(
   the boolean grants below (manage_apps, github_access) use their own
   small owner-or-app gates instead.
 
-  Honest scope (design §0b): a same-origin app holds the owner JWT and
-  could call owner routes directly. This gate is consent/attribution/
-  audit for honest apps plus the enforceable half — the gated surface
-  itself returns redacted/scoped data and refuses the un-consented app.
-  It is not a sandbox.
+  App frames receive only app-scoped JWTs and run in opaque-origin sandboxes.
+  This live-row gate is therefore an enforceable authorization boundary, while
+  also making the owner's consent visible and immediately revocable.
 
   Raises:
     HTTPException: 403 if the app's granted level is below `level`, or
@@ -440,5 +453,32 @@ def get_owner_or_app_with_github_access(
     detail=(
       "This app needs permissions.github_access=true in its manifest "
       "to manage and read the GitHub connection on your behalf."
+    ),
+  )
+
+
+def get_owner_or_app_with_filesystem_access(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app token with live filesystem_access authority.
+
+  The grant is deliberately narrow in identity but broad in filesystem scope:
+  /api/fs still enforces its root, secret deny-list, symlink containment, and
+  size limits. Reading the live App row makes reinstall/revocation effective on
+  the next request without waiting for the eight-hour app token to expire.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.filesystem_access):
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.filesystem_access=true in its manifest "
+      "to use the owner filesystem."
     ),
   )

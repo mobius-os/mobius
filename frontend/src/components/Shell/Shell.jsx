@@ -1,17 +1,16 @@
-import { useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Minimize2 } from 'lucide-react'
+import { Minimize2, X, MessageSquare, AppWindow } from 'lucide-react'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
-import SettingsView from '../SettingsView/SettingsView.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, apiFetch, BASE } from '../../api/client.js'
+import { api, apiFetch, BASE, clearAppRuntimeData } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
-import { pushNavEntry, replaceNavEntry } from '../../lib/navHistory.js'
+import { replaceNavEntry } from '../../lib/navHistory.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
@@ -19,15 +18,31 @@ import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
+import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
+import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
+import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
+import * as tabModel from './tabModel.js'
 import {
-  builtAppForChat,
-  withBuiltAppForChat,
-  withoutBuiltAppForChat,
-} from './builtAppState.js'
+  applyWorkspaceRequestsToFlatTabs,
+  workspaceRequestFromSystemEvent,
+  workspaceRequestsForBuiltApps,
+} from './workspacePlacement.js'
+import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
+import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
+import {
+  freshChatBuiltApps,
+  freshAppIds,
+  withAppsFlagged,
+  withoutAppFlagged,
+} from './newAppAttention.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
+import {
+  reloadWhenWorkerTakesOver,
+  shouldRearmShellApply,
+} from './swHandoff.js'
 import './Shell.css'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -46,6 +61,7 @@ function _warmTargetSw() {
 }
 
 const SHELL_RELOAD_RECHECK_MS = 6000
+const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
   const {
@@ -152,6 +168,15 @@ export default function Shell() {
   }
 
   async function performShellReload() {
+    let stalePrecache = false
+    try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
+    if (stalePrecache && navigator.onLine === false) {
+      // An offline reload is safe only while the existing precache remains
+      // intact; purging Workbox offline can strand an installed PWA on the
+      // fallback page, so stale recovery waits for an online idle boundary.
+      deferShellReload()
+      return
+    }
     pendingShellReloadRef.current = false
     if (shellReloadTimerRef.current) {
       clearTimeout(shellReloadTimerRef.current)
@@ -177,8 +202,6 @@ export default function Shell() {
     // fall through to the network for index.html + the new hashed assets. Done
     // HERE, at the same idle boundary as the reload, instead of index.html's old
     // boot-time force-reload — so it can never blank a live turn.
-    let stalePrecache = false
-    try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
     if (stalePrecache) {
       if (typeof caches !== 'undefined') {
         try {
@@ -194,19 +217,28 @@ export default function Shell() {
       try { sessionStorage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
     }
 
-    // Hand control to the waiting worker (if any) at THIS idle moment. No
-    // waiting worker (unchanged sw.js, e.g. a backend-only rebuild) → the reload
-    // alone re-fetches the current generation. The SW skips-waiting only on this
-    // message, never on its own. Fire-and-forget: the reload below (220ms — a
-    // touch longer than the plain-reload delay to give skipWaiting→activate room
-    // before the navigation adopts the new worker) is the durable apply, and the
-    // mount-time pickup + stale-precache recovery self-heal a lost handoff race.
+    // Hand control to the waiting worker (if any) and reload only once it has
+    // actually TAKEN OVER — the waiting worker reaching 'activated' (or a
+    // controllerchange), with a bounded fallback if the SW wedges. A blind
+    // ~220ms timer here used to reload before skipWaiting()->activate finished
+    // on a client's first update cycle, so the navigation was answered by the
+    // OUTGOING worker's precache and the page came back on the old generation
+    // and stuck (feature 207). No waiting worker (unchanged sw.js, e.g. a
+    // backend-only rebuild) → reload immediately: the reload alone re-fetches
+    // the current generation. The boot-time re-arm net (shouldRearmShellApply,
+    // mount effect below) still catches a stale landing if the fallback fires.
+    const doReload = () => window.location.reload()
     if (navigator.serviceWorker?.getRegistration) {
       navigator.serviceWorker.getRegistration()
-        .then(reg => reg?.waiting?.postMessage({ type: 'SKIP_WAITING' }))
-        .catch(() => {})
+        .then(reg => reloadWhenWorkerTakesOver({
+          registration: reg,
+          serviceWorker: navigator.serviceWorker,
+          reload: doReload,
+        }))
+        .catch(doReload)
+    } else {
+      doReload()
     }
-    setTimeout(() => window.location.reload(), 220)
   }
 
   function shellReloadWouldDisruptUser() {
@@ -215,6 +247,7 @@ export default function Shell() {
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
       streamingChatIds: streamingChatIdsRef.current,
+      voiceDictationActive: voiceDictationActiveRef.current,
       lastUserInteractionAt: lastShellInteractionAtRef.current,
       visibilityState: document.visibilityState,
     })
@@ -277,6 +310,18 @@ export default function Shell() {
   // instead so we always demote to the current most-recent chat.
   const chatsRef = useRef(chats)
   useEffect(() => { chatsRef.current = chats }, [chats])
+  // Always-current apps, read by the STABLE handleAppError callback (below) so
+  // it can stay `useCallback([])` — required to keep AppCanvas's message
+  // listener registered once per appId mount (it lists onAppError in its deps).
+  // `apps` itself is `appsQuery.data ?? []`, a fresh array every render, so a
+  // ref mirror is the only way a []-dep callback can see the live list.
+  const appsRef = useRef(apps)
+  useEffect(() => { appsRef.current = apps }, [apps])
+  // Latest-`newChat` ref so the stable handleAppError can start a fresh chat
+  // for a crash report without depending on newChat's identity (newChat is a
+  // per-render function declaration with volatile inputs — chats, streaming,
+  // online — that would churn any callback listing it as a dep).
+  const newChatRef = useRef(null)
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
@@ -291,8 +336,55 @@ export default function Shell() {
   // guarantees the has_messages flag is now true and the reuse guard
   // (which reads has_messages from the chats query) is reliable again.
   const recoveredChatIdsRef = useRef(new Set())
-  const [builtAppsByChatId, setBuiltAppsByChatId] = useState({})
-  const builtApp = builtAppForChat(builtAppsByChatId, activeChatId)
+  // The built-app CTA list is DERIVED from the apps query's `chat_id` column —
+  // no client mirror, no sessionStorage, no app_built round-trip. Memoize on a
+  // primitive signature (id:updated_at joined) rather than on `apps` identity:
+  // every app_updated returns a fresh `apps` array, but ChatView's
+  // builtApps-keyed effects must NOT re-fire unless THIS chat's derived content
+  // actually changed. When the signature is unchanged the memo returns the same
+  // reference, so an unrelated app's refetch is a no-op for the CTA effects.
+  const builtApps = useMemo(
+    () => derivedBuiltApps(apps, activeChatId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [builtAppsSignature(apps, activeChatId)],
+  )
+
+  // ── Tabs: hold several chats/apps open and swap between them ───────
+  // The tab data model (shape, dedup+cap, persistence, nav mapping,
+  // active-ness) lives in tabModel.js; this is just the shell's single open
+  // set + the wiring to navigation. Switching a tab is ordinary navTo, so the
+  // back button rides the existing navStack — no new history sentinels. The
+  // planned multi-pane workspace gives each pane its own open set from these
+  // same primitives — see ARCHITECTURE.md's "Multi-pane workspace" section.
+  const [openTabs, setOpenTabs] = useState(tabModel.readOpenTabs)
+  useEffect(() => { tabModel.writeOpenTabs(openTabs) }, [openTabs])
+  const openInTab = useCallback((kind, id) => {
+    setOpenTabs(prev => tabModel.addTab(prev, kind, id))
+    const { view, opts } = tabModel.tabNavTarget(tabModel.makeTab(kind, id))
+    navTo(view, opts)
+  }, [navTo])
+  const closeTab = useCallback((kind, id) => {
+    setOpenTabs(prev => tabModel.removeTab(prev, kind, id))
+  }, [])
+  const placeInWorkspace = useCallback((requestOrRequests) => {
+    const requests = Array.isArray(requestOrRequests)
+      ? requestOrRequests
+      : [requestOrRequests]
+    const protectedTab = activeViewRef.current === 'canvas' && activeAppIdRef.current != null
+      ? tabModel.makeTab('app', activeAppIdRef.current)
+      : activeViewRef.current === 'chat' && activeChatIdRef.current != null
+        ? tabModel.makeTab('chat', activeChatIdRef.current)
+        : null
+    setOpenTabs(prev => applyWorkspaceRequestsToFlatTabs(
+      prev,
+      requests,
+      { protectedTab },
+    ))
+  }, [activeAppIdRef, activeChatIdRef, activeViewRef])
+  const tabStripVisible = openTabs.length >= 1
+  // Ids of apps that appeared in the fetched list AFTER this session's
+  // baseline — the drawer renders a subtle accent dot until each is opened.
+  const [newAppIds, setNewAppIds] = useState(() => new Set())
   // First-sign-in walkthrough. The query result is the source of
   // truth — backend persists completion via
   // POST /api/owner/walkthrough/complete. We render the overlay iff
@@ -311,6 +403,15 @@ export default function Shell() {
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
+  // Monotonic per-chat activity survives a start+finish pair delivered in one
+  // system-stream chunk. A running boolean can end the React batch exactly as
+  // it began (false) and lose the fact that the transcript changed.
+  const [chatRunSignals, setChatRunSignals] = useState(() => new Map())
+  // Voice dictation is a single boolean — is the (single-mount) ChatView's mic
+  // active right now — not a per-chat Set: nothing ever read which chat was
+  // dictating, only whether any dictation is live, so the shell-reload policy
+  // just needs "hold the reload while the mic is on."
+  const [voiceDictationActive, setVoiceDictationActive] = useState(false)
   const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
   const streamingChatIds = useMemo(() => {
     const next = new Set(localStreamingChatIds)
@@ -321,6 +422,13 @@ export default function Shell() {
   }, [localStreamingChatIds, chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
+  // The reload check runs inside a setTimeout (scheduleShellReloadCheck), which
+  // reads render-time state through a ref, so the boolean still needs a ref
+  // mirror even though it is no longer a Set.
+  const voiceDictationActiveRef = useRef(voiceDictationActive)
+  useEffect(() => {
+    voiceDictationActiveRef.current = voiceDictationActive
+  }, [voiceDictationActive])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -350,6 +458,18 @@ export default function Shell() {
     })
   }, [])
 
+  const markChatRunActivity = useCallback((chatId) => {
+    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_started'))
+  }, [])
+
+  const markChatRunFinished = useCallback((chatId) => {
+    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
+  }, [])
+
+  const markVoiceListening = useCallback((listening) => {
+    setVoiceDictationActive(!!listening)
+  }, [])
+
   const clearChatAttention = useCallback((chatId) => {
     if (!chatId) return
     setAttentionChatIds(prev => {
@@ -363,6 +483,27 @@ export default function Shell() {
   useEffect(() => {
     if (activeView === 'chat') clearChatAttention(activeChatId)
   }, [activeChatId, activeView, clearChatAttention])
+
+  // New-app arrival dot. `appBaselineRef` holds every id the session has
+  // already accounted for (the apps present at the first live fetch, plus any
+  // arrival we've since flagged), so a freshly built or App-Store-installed
+  // app — which lands at the bottom of the oldest-first drawer list with no
+  // affordance — gets a subtle accent dot until it's opened. Separate from
+  // `seenAppIdsRef`, which starts empty and drives eviction: keying the dot
+  // off that would mark every app "new" on first boot.
+  const appBaselineRef = useRef(null)
+  const clearAppAttention = useCallback((appId) => {
+    setNewAppIds(prev => withoutAppFlagged(prev, appId))
+  }, [])
+  // The detection effect lives beside the apps-eviction effect below, where
+  // `appsLiveFetched` is in scope. Opening an app clears its dot on any path
+  // (drawer tap, back-nav, moebius:open-app) because it keys on the active
+  // canvas rather than a single onSelect handler.
+  useEffect(() => {
+    if (activeView === 'canvas' && activeAppId != null) {
+      clearAppAttention(activeAppId)
+    }
+  }, [activeAppId, activeView, clearAppAttention])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of
   // the app holding an immersive request (or null); it's APPLIED — bar
@@ -552,6 +693,31 @@ export default function Shell() {
   }, [apps, appsLiveFetched, appCache, activeView, activeAppId,
       navStackRef, setActiveAppId, setActiveView])
 
+  // New-app dot detection (state + open-clear live up beside the chat
+  // attention machinery). First live list = the session baseline; anything
+  // appearing after it is a genuine arrival and gets flagged.
+  useEffect(() => {
+    if (!appsLiveFetched) return
+    const ids = apps.map(a => a.id)
+    if (appBaselineRef.current === null) {
+      appBaselineRef.current = new Set(ids.map(Number))
+      return
+    }
+    const fresh = freshAppIds(appBaselineRef.current, ids)
+    if (fresh.length === 0) return
+    for (const id of fresh) appBaselineRef.current.add(id)
+    setNewAppIds(prev => withAppsFlagged(prev, fresh))
+
+    // Durable-list fallback for an app-created event missed during reconnect.
+    // Convert server relationships into the same pane-neutral
+    // requests used by the live event path; the flat resolver is only today's
+    // one-pane projection.
+    const builtArrivals = freshChatBuiltApps(apps, fresh)
+    if (builtArrivals.length > 0) {
+      placeInWorkspace(workspaceRequestsForBuiltApps(builtArrivals))
+    }
+  }, [apps, appsLiveFetched, placeInWorkspace])
+
   // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
   // useNavigation can't see the apps list. Once the live list lands, if the
   // restored app is gone (uninstalled since), demote the canvas to chat.
@@ -632,6 +798,39 @@ export default function Shell() {
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
       .catch(() => [])
   }, [queryClient])
+
+  // Route a mini-app crash report to the chat that built the app (its
+  // `chat_id`), falling back to a new chat when that chat was deleted. The
+  // report is set as a DRAFT (not auto-sent) so the owner reviews before
+  // sending. AppCanvas forwards ONLY its LIVE frame's app-error here (it
+  // swallows a hidden incoming preview frame's), so there is no window-level
+  // e.source guard to make — source attribution now lives entirely in
+  // AppCanvas. STABLE `useCallback([])`: it reads the live apps/chats through
+  // refs and calls the current newChat through `newChatRef`, so its identity
+  // never changes and AppCanvas's message listener (which deps on it) never
+  // re-registers.
+  const handleAppError = useCallback((appId, error, chatId) => {
+    const appEntry = appsRef.current.find(a => String(a.id) === String(appId))
+    const appName = appEntry?.name || `app ${appId}`
+    const report = `The app "${appName}" crashed with this error:\n\`\`\`\n${error}\n\`\`\`\nPlease investigate and fix.`
+    const buildingChatId = appEntry?.chat_id || chatId || null
+    const buildingChat = buildingChatId
+      && chatsRef.current.find(c => c.id === buildingChatId)
+    if (buildingChat) {
+      try {
+        sessionStorage.setItem('pending-draft', report)
+        sessionStorage.setItem(`draft:${buildingChatId}`, report)
+        sessionStorage.removeItem('pending-draft-autosend')
+        sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
+      } catch {}
+      // Set view and chatId together to avoid flashing the previous chat.
+      setActiveView('chat')
+      setActiveChatId(buildingChatId)
+      refreshChats()
+    } else {
+      newChatRef.current?.({ draft: report, forceNew: true })
+    }
+  }, [refreshChats, setActiveView, setActiveChatId])
 
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated
@@ -771,9 +970,11 @@ export default function Shell() {
   // boot-time stale-precache flag. Route it through the SAME hold-until-idle
   // path as a live shell_rebuilt (requestShellReload → apply if idle, else hold
   // the reload until the running turn ends). This recovers a lost apply race:
-  // the SW generation that installed just after an earlier apply signal, or a
-  // stale precache the boot check spotted. Gate on a live-confirmed chats list
-  // so streamingChatIds reflects any running background turn — a cold mount's
+  // the SW generation that installed just after an earlier apply signal, a
+  // stale precache the boot check spotted, or an ACTIVE worker newer than the
+  // page's controller (feature 207 — reg.waiting is null in that settled
+  // state, so a waiting-only check misses it). Gate on a live-confirmed chats
+  // list, so streamingChatIds reflects any running background turn — a cold mount's
   // empty pre-fetch list would otherwise read as idle and reload straight
   // through a reconnecting turn. Runs at most once per mount.
   useEffect(() => {
@@ -783,14 +984,19 @@ export default function Shell() {
     ;(async () => {
       let flagged = false
       try { flagged = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-      let waiting = false
+      let rearm = flagged
       if (navigator.serviceWorker?.getRegistration) {
         try {
           const reg = await navigator.serviceWorker.getRegistration()
-          waiting = !!reg?.waiting
+          rearm = shouldRearmShellApply({
+            stalePrecacheFlagged: flagged,
+            waiting: reg?.waiting || null,
+            active: reg?.active || null,
+            controller: navigator.serviceWorker.controller || null,
+          })
         } catch { /* ignore */ }
       }
-      if (cancelled || (!flagged && !waiting)) return
+      if (cancelled || !rearm) return
       shellUpdatePickupRef.current = true
       // requestShellReload reads streaming/view state from refs at call time, so
       // the captured closure is fresh even though it isn't in this effect's deps.
@@ -809,15 +1015,13 @@ export default function Shell() {
       // to bump appVersions / cycle iframe keys — that would tear
       // down running apps for a CSS swap and lose their state.
       loadTheme()
-    } else if (ev.type === 'app_updated') {
-      // LIST-REFRESH ONLY. Refetch the apps list so the affected app's
-      // `updated_at` reflects the server's new state. versionForApp reads
-      // from that field, so the iframe URL automatically picks up the new
-      // cache-buster on the next render — no separate version counter to
-      // keep in sync. This event reaches every view (it's on the global
-      // SystemBroadcast), so it must NOT plant the "Open app" CTA — that's
-      // the chat-scoped `app_built` event's job (below). Doing the CTA here
-      // is what leaked it into unrelated chats.
+    } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
+      const placementRequest = workspaceRequestFromSystemEvent(ev)
+      // Refresh server truth before warming or placing. app_updated is
+      // refresh-only; app_created may additionally issue one background
+      // workspace placement after the returned row confirms the relationship.
+      // `updated_at` drives the iframe cache-buster and the derived built-app
+      // CTA, so neither needs a separate client mirror.
       refreshApps().then(updatedApps => {
         // Warm the SW cache for the updated app immediately — the edit
         // rotated the `?v=` cache key, so without this the next open pays
@@ -827,38 +1031,37 @@ export default function Shell() {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           if (app) warmAppCode(app)
         }
-      })
-    } else if (ev.type === 'app_built') {
-      // CHAT-SCOPED CTA. The backend publishes `app_built` onto ONLY the
-      // broadcast of the chat that built the app (routes/notify.py), so it
-      // arrives exclusively via that chat's own SSE stream — ChatView
-      // forwards it here through onSystemEvent. Because the event never
-      // touches the global SystemBroadcast or any other chat's stream, the
-      // CTA is naturally scoped to the building chat and cannot leak. Still
-      // refresh the apps list so the name lookup below resolves the fresh
-      // row (app_built and app_updated arrive close together but order
-      // isn't guaranteed).
-      if (ev.appId) {
-        const sourceChatId = ev.chatId || activeChatIdRef.current
-        refreshApps().then(updatedApps => {
-          const app = updatedApps.find(a => String(a.id) === String(ev.appId))
-          const name = app?.name || null
-          setBuiltAppsByChatId(prev => withBuiltAppForChat(
-            prev,
-            sourceChatId,
-            { id: Number(ev.appId), name },
+        // `app_created` is emitted only after the first runnable compile. Check
+        // the refreshed row before honoring it, then place in the background;
+        // a malformed/spoofed event cannot open an absent or unrelated app.
+        if (placementRequest) {
+          const app = updatedApps.find(a => (
+            String(a.id) === placementRequest.item.id
+            && String(a.chat_id) === placementRequest.source.id
           ))
-          // Warm the SW cache immediately after a build lands so the
-          // "Open app" CTA tap is served from cache.
-          if (app) warmAppCode(app)
-        })
-      }
+          if (app) placeInWorkspace(placementRequest)
+        }
+      })
+    } else if (ev.type === 'app_build_failed') {
+      // System-bus-only (app_watcher publishes it there alone), so it arrives
+      // exactly once — no dedup stamp needed.
+      showToast(appBuildFailureMessage(ev), {
+        variant: 'error',
+        duration: 10000,
+      })
     } else if (ev.type === 'chat_run_started') {
-      if (ev.chatId) markStreamingStart(ev.chatId)
+      if (ev.chatId) {
+        markChatRunActivity(ev.chatId)
+        markStreamingStart(ev.chatId)
+      }
       refreshChats()
     } else if (ev.type === 'chat_run_finished') {
       const chatId = ev.chatId
       if (chatId) {
+        // Finish is activity too: if start was missed during a reconnect, or
+        // both events batch together, the active ChatView still fetches the
+        // final durable transcript.
+        markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         if (
           activeViewRef.current !== 'chat'
@@ -876,22 +1079,13 @@ export default function Shell() {
     } else if (ev.type === 'shell_rebuilt' || ev.type === 'shell_apply_now') {
       // A new shell generation is available. `shell_rebuilt` fires automatically
       // when the frontend rebuilds; `shell_apply_now` is the agent's EXPLICIT
-      // "look now" signal (design §1.5, whitelisted in backend/app/events.py).
-      // Both carry identical client policy — apply if idle, else hold — so they
-      // share this branch.
+      // "look now" signal (design §1.5). Both carry identical client policy —
+      // apply if idle, else hold — so they share this branch.
       //
-      // Deduplicate against the SSE catch-up burst (both the global system
-      // stream and the per-chat stream can deliver these) to avoid reload loops.
-      // The two event types use SEPARATE dedup windows so an early
-      // shell_apply_now cannot swallow the subsequent automatic shell_rebuilt,
-      // nor vice versa.
-      const now = Date.now()
-      const dedupKey = ev.type === 'shell_apply_now'
-        ? 'shell-apply-now-at'
-        : 'shell-rebuilt-at'
-      const lastSignal = Number(sessionStorage.getItem(dedupKey) || 0)
-      if (now - lastSignal < 5000) return
-      sessionStorage.setItem(dedupKey, String(now))
+      // These are system-bus-only (frontend_watcher / notify skip the per-chat
+      // fan-out) and SystemBroadcast has no replay, so each reaches the Shell
+      // exactly once — no dedup stamp needed to avoid reload loops.
+      //
       // Apply-on-idle: the streaming view is sacred. requestShellReload reads
       // view + streaming state from refs (not closure-captured scalars, which
       // can lag concurrent updates by a render) and applies immediately when
@@ -902,14 +1096,21 @@ export default function Shell() {
       // the waiting worker so the SW generation flips exactly when the page
       // reloads.
       requestShellReload()
+    } else if (ev.type === 'shell_rebuild_failed') {
+      // System-bus-only, delivered once — no dedup stamp.
+      showToast(shellRebuildFailureMessage(ev), {
+        variant: 'error',
+        duration: 10000,
+      })
     }
   }, [
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
     // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
-    loadTheme, markStreamingEnd, markStreamingStart,
-    refreshApps, refreshChats, warmAppCode,
+    loadTheme, markChatRunActivity, markChatRunFinished,
+    markStreamingEnd, markStreamingStart,
+    placeInWorkspace, refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -918,7 +1119,11 @@ export default function Shell() {
   // The active chat's SSE stream still forwards the same events for
   // in-chat catch-up coherence — handlers are idempotent (theme
   // reload, refreshApps, version bump) so the duplicate is harmless.
-  useSystemEventStream(handleSystemEvent)
+  // A system-bus event can be lost while the stream is disconnected. Refetch
+  // the durable app list after every initial connection/reconnect; after the
+  // first list establishes the session baseline, fresh chat-owned rows flow
+  // through the same idempotent placement resolver as live app_created events.
+  useSystemEventStream(handleSystemEvent, { onOpen: refreshApps })
 
   // Listen for postMessage events from mini-app iframes:
   //   moebius:app-error — route crash report to the chat that built the app
@@ -951,45 +1156,21 @@ export default function Shell() {
         String(a.id) === String(target) || a.slug === target) || null
     }
 
-    async function handleAppError(e) {
-      const appEntry = apps.find(a => String(a.id) === String(e.data.appId))
-      const appName = appEntry?.name || `app ${e.data.appId}`
-      const report = `The app "${appName}" crashed with this error:\n\`\`\`\n${e.data.error}\n\`\`\`\nPlease investigate and fix.`
-
-      const buildingChatId = appEntry?.chat_id || e.data.chatId || null
-      const buildingChat = buildingChatId && chats.find(c => c.id === buildingChatId)
-      if (buildingChat) {
-        try {
-          sessionStorage.setItem('pending-draft', report)
-          sessionStorage.setItem(`draft:${buildingChatId}`, report)
-          sessionStorage.removeItem('pending-draft-autosend')
-          sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
-        } catch {}
-        // Set view and chatId together to avoid flashing the previous chat.
-        setActiveView('chat')
-        setActiveChatId(buildingChatId)
-        refreshChats()
-      } else {
-        newChat({ draft: report, forceNew: true })
-      }
-    }
-
     async function onMessage(e) {
-      // window 'message' events are for cross-frame postMessage from
-      // same-origin sibling frames. NOT service-worker messages —
+      // window 'message' events are for cross-frame postMessage from app
+      // frames. NOT service-worker messages —
       // those arrive on navigator.serviceWorker, handled separately
       // below.
       //
-      // The iframes mount with allow-same-origin so e.origin is always
-      // window.location.origin, never the string 'null'. The 'null'-origin
-      // branch was dead (sandboxed-without-allow-same-origin iframes).
-      // e.source is intentionally NOT checked: Möbius is single-owner and
-      // every iframe on this origin is owned by the shell, so source
-      // verification would add complexity with no security benefit.
-      if (e.origin !== window.location.origin) return
-      if (e.data?.type === 'moebius:app-error') {
-        handleAppError(e)
-      } else if (e.data?.type === 'moebius:new-chat') {
+      // Sandboxed app frames intentionally have the opaque `null` origin. A
+      // null origin alone is not identity, so require the event source to be
+      // one of the AppCanvas windows currently mounted by this shell. This also
+      // keeps same-origin popups or stale frames from driving navigation.
+      if (e.origin !== 'null' && e.origin !== window.location.origin) return
+      const fromMountedApp = [...document.querySelectorAll('iframe.canvas')]
+        .some((frame) => frame.contentWindow === e.source)
+      if (!fromMountedApp) return
+      if (e.data?.type === 'moebius:new-chat') {
         newChat({
           draft: e.data.draft,
           forceNew: true,
@@ -1093,7 +1274,7 @@ export default function Shell() {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [apps, chats, navTo, refreshApps, refreshChats])
+  }, [apps, navTo, refreshApps, refreshChats])
 
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only
@@ -1193,22 +1374,7 @@ export default function Shell() {
       }
     }
 
-    // Push nav stack so back returns to the previous view (skip
-    // automatic calls — bootstrap or chat-deletion-induced re-create).
-    // If the drawer was open, its sentinel becomes this nav's back-
-    // target (no new pushState needed). Otherwise, push our own
-    // sentinel so back returns to the previous view rather than
-    // exiting the PWA.
-    if (draft || forceNew || drawerPushedRef.current) {
-      if (!drawerPushedRef.current) pushNavEntry('nav')
-      drawerPushedRef.current = false
-      navStackRef.current.push({
-        view: activeViewRef.current,
-        chatId: activeChatIdRef.current,
-        appId: activeAppIdRef.current,
-      })
-    }
-    closeDrawer()
+    const recordsHistory = !!(draft || forceNew || drawerPushedRef.current)
     if (draft) {
       const draftText = String(draft)
       try {
@@ -1223,10 +1389,20 @@ export default function Shell() {
         }
       } catch {}
     }
-    setActiveView('chat')
-    setActiveChatId(chatId)
+    // Keep history writes inside useNavigation so the entry gets its route,
+    // unique identity, and monotonic cursor synchronously. The former direct
+    // push left an immediate Back/Forward race before React's route effect ran.
+    if (recordsHistory) navTo('chat', { chatId })
+    else {
+      closeDrawer()
+      setActiveView('chat')
+      setActiveChatId(chatId)
+    }
     if (focusComposer) requestComposerFocus(chatId)
   }
+  // Keep the latest-newChat ref current so handleAppError's crash-report
+  // fallback starts a chat with this render's live closure.
+  newChatRef.current = newChat
 
   function selectChat(id) {
     clearChatAttention(id)
@@ -1267,6 +1443,8 @@ export default function Shell() {
     // they re-enter the chat list normally and rebuild navStack via
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
+    // Drop the tab pinned to this chat (local delete only — see deleteApp).
+    setOpenTabs(prev => tabModel.removeTab(prev, 'chat', id))
     if (activeChatId === id) {
       // Exclude the just-deleted id: it's still in `chats` until the
       // refreshChats below, and the reuse filter would otherwise pick it
@@ -1326,6 +1504,11 @@ export default function Shell() {
     navStackRef.current = navStackRef.current.filter(
       e => !(e.view === 'canvas' && e.appId === id)
     )
+    // Drop the tab pinned to this app. Only LOCAL deletes prune the strip; an
+    // out-of-band delete leaves the tab, which degrades gracefully (clicking it
+    // 404s the iframe). Auto-pruning against the live list is unsafe — /api/apps
+    // is NetworkFirst, so a transient stale refetch could drop a live tab.
+    setOpenTabs(prev => tabModel.removeTab(prev, 'app', id))
     if (activeView === 'canvas' && activeAppId === id) {
       setActiveAppId(null)
       setActiveView('chat')
@@ -1369,6 +1552,14 @@ export default function Shell() {
       showToast("Couldn't delete app data.", { variant: 'error' })
       return
     }
+    // The server rotated this app's immutable storage generation under the
+    // write lock. Unmount the old runtime before clearing its local mirror and
+    // token so no old-generation queue can refresh into the empty generation.
+    setAppCache(prev => prev.filter(cachedId => cachedId !== id))
+    clearAppFrameStorage(id)
+    clearCachedAppToken(id)
+    await clearAppRuntimeData(id)
+    await appQueries.token.invalidate(queryClient, id)
     await refreshApps()
     showToast('App data deleted')
   }
@@ -1426,22 +1617,20 @@ export default function Shell() {
           a no-op because React 19 normalizes the known boolean attribute and
           an empty string serializes as falsy, so it never applied. */}
       <header className="shell__bar" inert={drawerOpen}>
-        {/* The brand area (logo + wordmark) below is the drawer toggle: it is
-            a role=button with aria-label + aria-expanded + Enter/Space
-            handling, so it serves touch, pointer, keyboard, and AT alike. A
-            standalone visible hamburger was redundant next to it. */}
-        <div
+        {/* The brand area (logo + wordmark) is the only drawer trigger. A
+            native button provides pointer, keyboard, and assistive-technology
+            behavior without recreating it with a role and key handler. */}
+        <button
+          type="button"
           className="shell__brand"
-          role="button"
-          tabIndex="0"
           aria-label="Toggle navigation"
+          aria-controls="navigation-drawer"
           aria-expanded={drawerOpen}
           onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
-          onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (drawerOpen ? closeDrawer() : openDrawer())}
         >
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
-        </div>
+        </button>
         {!online && (
           <span className="shell__offline" role="status" aria-live="polite">
             Offline
@@ -1459,6 +1648,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
+        onOpenInTab={openInTab}
         onNewChat={() => newChat({ focusComposer: true })}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
@@ -1469,6 +1659,7 @@ export default function Shell() {
         }}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
+        newAppIds={newAppIds}
         settingsWarning={providerAuth.anyDisconnected}
       />
 
@@ -1488,6 +1679,58 @@ export default function Shell() {
           app canvas while the drawer is overlaid in front of it. Boolean
           prop form — see the header's inert note for why the old
           `? '' : undefined` form was a React 19 no-op. */}
+      {/* Tab strip: pinned chats/apps to swap between with one tap.
+          Switching a tab is ordinary navTo, so back works through the
+          existing navStack. The strip shrinks .shell__content by one row;
+          the chat re-measures its spacer at the new height on the next
+          layout event (a ~1-row imprecision on the 0<->1 crossing that
+          self-corrects). Deliberately NOT a ChatView remount — that would
+          reset the send-reservation and freeze stream-follow (the reason the
+          bespoke split view was parked). */}
+      {tabStripVisible && (
+        <nav className="shell__tabstrip" inert={drawerOpen} aria-label="Open tabs">
+          {openTabs.map(tab => {
+            const isChat = tab.kind === 'chat'
+            // Label resolution is the shell's job (it holds the live lists);
+            // identity, active-ness, and the nav target are the tab model's.
+            const meta = isChat
+              ? chats.find(c => String(c.id) === tab.id)
+              : apps.find(a => String(a.id) === tab.id)
+            const label = isChat ? (meta?.title || 'Chat') : (meta?.name || 'App')
+            const active = tabModel.isTabActive(tab, {
+              view: activeView, chatId: activeChatId, appId: activeAppId,
+            })
+            const TabIcon = isChat ? MessageSquare : AppWindow
+            return (
+              <div
+                key={tabModel.tabKey(tab)}
+                className={`shell__tab${active ? ' shell__tab--active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="shell__tab-open"
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => {
+                    const { view, opts } = tabModel.tabNavTarget(tab)
+                    navTo(view, opts)
+                  }}
+                >
+                  <TabIcon size={13} aria-hidden="true" />
+                  <span className="shell__tab-text">{label}</span>
+                </button>
+                <button
+                  type="button"
+                  className="shell__tab-close"
+                  aria-label={`Close ${label} tab`}
+                  onClick={() => closeTab(tab.kind, tab.id)}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              </div>
+            )
+          })}
+        </nav>
+      )}
       <main className="shell__content" inert={drawerOpen}>
         {/* Single-mount ChatView, keyed by activeChatId. Switching
             chats unmounts and remounts; ChatView's hide-then-reveal
@@ -1507,6 +1750,7 @@ export default function Shell() {
           <ChatView
             key={activeChatId}
             chatId={activeChatId}
+            externalRunSignal={chatRunSignal(chatRunSignals, activeChatId)}
             onStreamEnd={({ continues } = {}) => {
               // ChatView calls this when the agent turn finishes
               // streaming. Keep the running marker across queued
@@ -1536,10 +1780,13 @@ export default function Shell() {
                 setActiveChatId(chatsRef.current[0]?.id || null)
               }
             }}
-            builtApp={builtApp}
+            builtApps={builtApps}
             onOpenApp={(appId) => {
+              // The CTA is DERIVED from the apps this chat owns, so it is
+              // durable: opening it, sending a new message, or reloading never
+              // retires it. It flips its label to "Open {name}" when the turn
+              // ends, and stays as a route back to the app the chat built.
               navTo('canvas', { appId })
-              setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}
             onMessageStart={() => {
               // User just sent a message — the agent is about to
@@ -1547,8 +1794,8 @@ export default function Shell() {
               // drawer's pulse dot picks it up immediately (no
               // round-trip wait for the first SSE event).
               markStreamingStart(activeChatId)
-              setBuiltAppsByChatId(prev => withoutBuiltAppForChat(prev, activeChatId))
             }}
+            onVoiceListeningChange={markVoiceListening}
             composerFocusRequest={composerFocusRequest}
             onComposerFocusHandled={handleComposerFocusHandled}
           />
@@ -1573,8 +1820,20 @@ export default function Shell() {
           >
             <AppCanvas
               appId={id}
+              // True only while this app is the visible canvas. Mirrors the
+              // .shell__view--active class above (which toggles visibility).
+              // Two consumers inside AppCanvas: the frame-visibility signal
+              // (apps pause background work — audio, rAF — when hidden) and
+              // the immersive gate (the immersive holder is global
+              // last-writer-wins, so a hidden cached app — or its rebuilt
+              // frame promoting in the background — must not steal
+              // chrome/insets from the active app). String-normalized: the
+              // LRU holds whatever id type planted it, activeAppId whatever
+              // navigation set.
+              active={activeView === 'canvas' && String(activeAppId) === String(id)}
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
+              appSlug={apps.find(a => String(a.id) === String(id))?.slug}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
               pendingIntent={appIntents[String(id)] || null}
               // Immersive is APPLIED only while this app is the active holder
@@ -1588,15 +1847,22 @@ export default function Shell() {
               onNavReset={appNavReset}
               onImmersive={handleImmersive}
               onIntentDelivered={handleAppIntentDelivered}
+              onAppError={handleAppError}
             />
           </div>
         ))}
         {activeView === 'settings' && (
-          <SettingsView
-            onThemeChange={loadTheme}
-            onOpenChat={selectChat}
-            focusTarget={settingsFocusTarget}
-          />
+          <Suspense fallback={(
+            <div className="shell__settings-loading" role="status" aria-label="Loading settings">
+              <span className="shell__settings-loading-dot" aria-hidden="true" />
+            </div>
+          )}>
+            <SettingsView
+              onThemeChange={loadTheme}
+              onOpenChat={selectChat}
+              focusTarget={settingsFocusTarget}
+            />
+          </Suspense>
         )}
       </main>
       {/* SHELL-provided immersive exit. With the top bar gone the drawer

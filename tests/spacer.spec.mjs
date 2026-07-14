@@ -50,19 +50,16 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 /** Navigate to a new empty chat. */
 async function newChat(page) {
   // Create a worker-tagged chat via the API so cleanupWorkerChats
-  // can find and delete it after the spec finishes.
-  await createTaggedChat(page)
-  // Click new-chat button via DOM (works even if drawer is hidden).
-  await page.evaluate(() => {
-    document.querySelector('.drawer__item--new')?.click()
-  })
-  // If that didn't work (drawer off-screen), reload.
-  const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('.chat__empty-wrap')
-  )
-  if (!hasEmpty) {
-    await page.goto(BASE)
-  }
+  // can find and delete it after the spec finishes. Navigate to that exact
+  // chat on the next shell mount. Clicking the drawer's New-chat action here
+  // races its cached chat list: it can reuse an older empty chat or create an
+  // untagged second row, which makes retries stateful and defeats cleanup.
+  const chat = await createTaggedChat(page)
+  if (!chat?.id) throw new Error('failed to create tagged test chat')
+  await page.evaluate((chatId) => {
+    localStorage.setItem('moebius_active_chat', chatId)
+  }, chat.id)
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
@@ -240,6 +237,13 @@ function assertSpacerReasonable(m, label = '') {
 // Tests
 // ---------------------------------------------------------------------------
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('Spacer mechanics', () => {
   test('1. First message — spacer reserves space, user msg at top', async ({ page }) => {
     await setup(page)
@@ -253,34 +257,44 @@ test.describe('Spacer mechanics', () => {
     assertSpacerReasonable(m)
   })
 
-  test('2. Second message — new spacer anchored to latest user msg', async ({ page }) => {
+  test('2. Second message in hold — spacer retargets without moving the reader', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First message')
+    const first = await measure(page)
     await stopAgent(page)
     await sendMessage(page, 'Second message')
 
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
     expect(m.spacerH).toBeGreaterThan(0)
-    assertUserMsgAtTop(m)
+    expect(Math.abs(m.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
+    expect(m.lastUserTop).toBeGreaterThan(first.lastUserTop)
+    expect(m.userVisualTop).toBeGreaterThan(10)
     assertSpacerReasonable(m)
   })
 
-  test('3. Third message — consistent behavior', async ({ page }) => {
+  test('3. Repeated messages in hold keep the original reading position', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First')
+    const first = await measure(page)
     await stopAgent(page)
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
     await sendMessage(page, 'Second')
+    const second = await measure(page)
     await stopAgent(page)
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
     await sendMessage(page, 'Third')
 
-    const m = await measure(page)
-    assertUserMsgAtTop(m)
-    assertSpacerReasonable(m)
+    const third = await measure(page)
+    expect(Math.abs(second.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
+    expect(Math.abs(third.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
+    expect(second.lastUserTop).toBeGreaterThan(first.lastUserTop)
+    expect(third.lastUserTop).toBeGreaterThan(second.lastUserTop)
+    expect(third.userVisualTop).toBeGreaterThan(10)
+    expect(third.spacerH).toBeGreaterThan(0)
+    assertSpacerReasonable(third)
   })
 })
 
@@ -373,7 +387,7 @@ test.describe('Short responses', () => {
     // makes ChatView's post-mount fetch resolve with messages=[],
     // showEmpty flips true, .chat__scroll unmounts and is replaced by
     // .chat__empty-wrap — which is documented intentional behavior
-    // (see CLAUDE.md "Chat UX — non-negotiable constraints" #6: the
+    // (see ARCHITECTURE.md "Chat scroll + steer contract" R1: the
     // scroll container only mounts after the first user send).
     //
     // To exercise the "returning to a chat that has messages" path
@@ -417,10 +431,10 @@ test.describe('Short responses', () => {
 
     // Reload to simulate returning to the chat.
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await page.waitForFunction(
-      () => !!document.querySelector('.chat__scroll'),
-      { timeout: 15000 }
-    )
+    // ChatView intentionally keeps a restored transcript hidden while its
+    // quiet-layout pass sizes the reservation. Waiting only for DOM presence
+    // races that pass and can sample the spacer's pre-reveal 0px bootstrap.
+    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 15000 })
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
@@ -429,7 +443,14 @@ test.describe('Short responses', () => {
     // No `if (!afterReturn.error)` guard — when state pollution
     // landed us on the wrong chat the older form silently passed.
     expect(afterReturn.error).toBeUndefined()
+    expect(afterReturn.spacerH).toBeGreaterThan(0)
     assertSpacerReasonable(afterReturn)
+    // The restored reservation is exact: max scroll equals the latest user
+    // row's pin target, so it can reach the top but there is no extra blank.
+    expect(Math.abs(
+      (afterReturn.scrollH - afterReturn.clientH)
+      - Math.max(0, afterReturn.lastUserTop - 4)
+    )).toBeLessThanOrEqual(2)
   })
 
   test('10. New send after short response — old spacer replaced', async ({ page }) => {
@@ -445,10 +466,11 @@ test.describe('Short responses', () => {
     // Let spacer recalculation settle before next send.
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
-    // Send a new message — spacer should be recalculated for the new msg.
+    // Send a new message while still in hold. The viewport stays put, while
+    // the permanent reservation retargets to the new latest user row.
     await sendMessage(page, 'Follow-up question')
     const m = await measure(page)
-    assertUserMsgAtTop(m)
+    expect(Math.abs(m.scrollTop - withOldSpacer.scrollTop)).toBeLessThanOrEqual(8)
     assertSpacerReasonable(m)
     // The spacer should anchor to the new user message, not the old one.
     // DOM-injected content may not survive React re-render, so the new
@@ -965,12 +987,9 @@ test.describe('Scroll edge cases', () => {
     expect(afterGap).toBeLessThan(50)
   })
 
-  test('26. Second send while scrolled up (reading) does NOT pin to the top', async ({ page }) => {
-    // Under the send rule, a second send while the user is scrolled up
-    // (reading, possibly with something queued) must NOT pin to the top —
-    // the reader stays where they were; the message just appends. Pre-rule
-    // this test asserted the opposite (a scroll-up second send still
-    // pinned); the owner reversed that: don't yank a reader.
+  test('26. Fresh second send while scrolled up preserves the reading anchor', async ({ page }) => {
+    // A subsequent send outside gesture-entered auto-scroll reserves room for
+    // its reply but leaves the reader at the exact current position.
     //
     // Uses the REAL SSE path (not injectContent) so the long first
     // response PERSISTS across the second send — DOM-injected content
@@ -1025,11 +1044,10 @@ test.describe('Scroll edge cases', () => {
     })
     expect(userMsgs).toContain('Second message')
 
-    // CRITICAL: NOT pinned — the message is not flush at the top, and the
-    // scroll did not jump there. The reader stays put.
+    // CRITICAL: no pin while the reader is holding a reading anchor.
     const after = await measure(page)
-    expect(after.userVisualTop).toBeGreaterThan(50)
     expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
+    expect(after.spacerH).toBeGreaterThanOrEqual(0)
   })
 
   test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {

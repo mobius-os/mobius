@@ -27,11 +27,23 @@ import './ProviderAuth.css'
  *                     (e.g. "Recommended for personal use" in setup).
  *   version         — optional installed CLI/SDK version, shown inline
  *                     next to the name when the provider is connected.
+ *
+ *   The next three make this the ONE row used for every Settings
+ *   line — the two providers, "Chat model", and "Gemini API key" —
+ *   so they read as one family. All optional; the provider callers
+ *   pass none and keep the connected/version behavior above.
+ *   subtitle        — optional one-line muted description under the name.
+ *   statusNode      — optional node replacing the default Connected/Not
+ *                     connected StatusDot (e.g. "Configured", or the
+ *                     chat model's "Last model: Opus 4.8").
+ *   actionLabel     — optional override for the action button text
+ *                     (e.g. "Reconfigure" / "Configure"); the default
+ *                     is the Connect/Reconnect/Close verb below.
  */
 export default function ProviderRow({
   id, name, connected, expanded, onToggleExpand, children,
   showRadio = true, isDefault = false, onSelect, disabled = false,
-  badge, version,
+  badge, version, subtitle, statusNode, actionLabel,
 }) {
   // Settings page (showRadio=false): the main row is informational
   // only — clicking it does nothing. The user must explicitly tap
@@ -64,9 +76,16 @@ export default function ProviderRow({
       {badge && (
         <span className="provider-row__badge">{badge}</span>
       )}
-      <StatusDot color={connected ? '--green' : '--muted'}>
-        {connected ? 'Connected' : 'Not connected'}
-      </StatusDot>
+      {subtitle && (
+        <span className="provider-row__sub">{subtitle}</span>
+      )}
+      {statusNode !== undefined ? (
+        statusNode
+      ) : (
+        <StatusDot color={connected ? '--green' : '--muted'}>
+          {connected ? 'Connected' : 'Not connected'}
+        </StatusDot>
+      )}
     </span>
   )
 
@@ -105,13 +124,15 @@ export default function ProviderRow({
         }}
         aria-expanded={expanded}
         aria-label={(() => {
-          const verb = expanded ? 'Close' : (connected ? 'Reconnect' : 'Connect')
+          const verb = expanded
+            ? 'Close'
+            : (actionLabel || (connected ? 'Reconnect' : 'Connect'))
           return `${verb} ${name}`
         })()}
       >
-        {connected
-          ? (expanded ? 'Close' : 'Reconnect')
-          : (expanded ? 'Close' : 'Connect')}
+        {expanded
+          ? 'Close'
+          : (actionLabel || (connected ? 'Reconnect' : 'Connect'))}
       </button>
       {expanded && (
         <div className="provider-row__auth">

@@ -208,7 +208,7 @@ class ActiveClaudeClient:
     # streamed, so it sealed an empty A1 and the real A1 then merged with A2
     # after the steered row on reload (Q1, Q2, A1A2 instead of Q1, A1, Q2, A2).
     self._steer_user_msgs: list[dict] = []
-    self._steer_consume_ts: list[int] = []
+    self._steer_consume_cids: list[str] = []
     # A steer was requested but not yet cut over. The runner clears the
     # turn at the NEXT completed content-block boundary (an AssistantMessage)
     # rather than mid-token, so the user sees the finished sentence/thought
@@ -230,7 +230,7 @@ class ActiveClaudeClient:
     self,
     text: str,
     user_msgs: list[dict] | None = None,
-    consume_pending_ts: list[int] | None = None,
+    consume_pending_cids: list[str] | None = None,
   ) -> bool:
     """Buffers a steer to cut in at the next content-block boundary.
 
@@ -246,18 +246,47 @@ class ActiveClaudeClient:
     connected client, preserving session context. (Stop is the separate
     immediate-cut path — see `interrupt()`.)
 
-    `user_msgs` / `consume_pending_ts` are the transcript-side payload the
+    `user_msgs` / `consume_pending_cids` are the transcript-side payload the
     runner replays into `sink.split_for_steer` when the interrupted turn
     ends (seal A1, append these rows, reset for A2). They are buffered here
     rather than split at the route so A1 is the real pre-interrupt text.
     """
     if self._finished.done():
       return False
-    self.pending_steer.append(text)
+    # Dedup before buffering. A repeated force-steer of the SAME still-live
+    # pending row (common when the client retries a send right after an
+    # interrupt) re-delivers the same user_msg / consume cid here. The queued
+    # row is not consumed until the interrupt-boundary drain, so without this
+    # guard the buffer grows to [msgA, msgA] and the writer persists the row
+    # twice. A queued row carries a stable `cid` (see schemas.SendMessage.cid),
+    # so keying on cid drops only true re-deliveries and never a genuinely
+    # distinct send — even two sends with identical text carry distinct cids.
+    #
+    # The provider-facing `text` follows the SAME boundary: when every
+    # delivered row is a cid-duplicate, the whole call is a re-delivery and
+    # the redirect text must not queue a second time — otherwise the durable
+    # transcript holds one user message while Claude receives it twice.
+    appended_any = False
     if user_msgs:
-      self._steer_user_msgs.extend(user_msgs)
-    if consume_pending_ts:
-      self._steer_consume_ts.extend(consume_pending_ts)
+      from app.chat_writer import cid_of
+      buffered_cids = {cid_of(m) for m in self._steer_user_msgs}
+      for m in user_msgs:
+        mcid = cid_of(m)
+        if mcid is not None and mcid in buffered_cids:
+          continue
+        self._steer_user_msgs.append(m)
+        buffered_cids.add(mcid)
+        appended_any = True
+    if user_msgs and not appended_any:
+      return True
+    self.pending_steer.append(text)
+    if consume_pending_cids:
+      buffered_consume = set(self._steer_consume_cids)
+      for cid in consume_pending_cids:
+        if cid in buffered_consume:
+          continue
+        self._steer_consume_cids.append(cid)
+        buffered_consume.add(cid)
     self._steer_requested = True
     return True
 
@@ -324,18 +353,18 @@ async def steer_into_active_turn(
   chat_id: str,
   text: str,
   user_msgs: list[dict] | None = None,
-  consume_pending_ts: list[int] | None = None,
+  consume_pending_cids: list[str] | None = None,
 ) -> bool:
   """Interrupts a live Claude SDK turn so it can resume with `text`.
 
-  `user_msgs` / `consume_pending_ts` are buffered on the handle so the
+  `user_msgs` / `consume_pending_cids` are buffered on the handle so the
   runner can seal A1 and append the steered rows at the interrupt boundary;
   see `ActiveClaudeClient.steer`.
   """
   handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
   if not isinstance(handle, ActiveClaudeClient):
     return False
-  return await handle.steer(text, user_msgs, consume_pending_ts)
+  return await handle.steer(text, user_msgs, consume_pending_cids)
 
 
 async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
@@ -370,14 +399,14 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   rows = list(active_client._steer_user_msgs)
   if not rows:
     return
-  consume = list(active_client._steer_consume_ts)
+  consume = list(active_client._steer_consume_cids)
   split = getattr(bc, "split_for_steer", None)
   if split is None:
     # No live sink (legacy/test caller): there is no streamed A1 to seal
     # against and no way to persist here — drop the buffer.
     active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
-    active_client._steer_consume_ts = (
-      active_client._steer_consume_ts[len(consume):]
+    active_client._steer_consume_cids = (
+      active_client._steer_consume_cids[len(consume):]
     )
     return
   try:
@@ -391,8 +420,8 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   # Success: remove ONLY the rows just sealed; a steer that landed during the
   # await was appended after them and must survive.
   active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
-  active_client._steer_consume_ts = (
-    active_client._steer_consume_ts[len(consume):]
+  active_client._steer_consume_cids = (
+    active_client._steer_consume_cids[len(consume):]
   )
 
 
@@ -408,7 +437,7 @@ def _skill_file_read_name(
   The match is purely lexical (normpath, no filesystem access) and
   returns "" for anything that isn't a direct skill-file read. A
   relative path is resolved against the turn's cwd: the agent runs
-  with cwd=/data, so `shared/skills/memory.md` is the same load.
+  with cwd=/data, so `shared/skills/example.md` is the same load.
   """
   if tool_name != "Read" or not isinstance(input_data, dict):
     return ""
@@ -455,70 +484,6 @@ def observe_skill_file_read(
     activity.log_skill_load(chat_id, skill)
   except Exception:
     log.debug("skill_loaded read observability failed", exc_info=True)
-
-
-def _memory_node_read_id(
-  tool_name: str, input_data: Any, cwd: str,
-) -> str:
-  """Returns the memory-graph node id when a Read targets a note or MOC.
-
-  The agent descends the graph by Reading
-  `<data_dir>/shared/memory/{notes,mocs}/<slug>.md` — exactly the
-  explicit-read signal the per-chat read-trace wants (the injected
-  block is recorded separately at the injection site). index.md,
-  inbox.md, and recent-chats.md don't count: they arrive injected, so
-  a Read of them says nothing about what the agent dug for. Purely
-  lexical, like `_skill_file_read_name` above; returns "" for anything
-  that isn't a direct note/MOC read."""
-  if tool_name != "Read" or not isinstance(input_data, dict):
-    return ""
-  raw = input_data.get("file_path")
-  if not isinstance(raw, str) or not raw.strip():
-    return ""
-  path = raw.strip()
-  if not os.path.isabs(path):
-    path = os.path.join(cwd or "/", path)
-  path = os.path.normpath(path)
-  from app.config import get_settings
-  memory_root = os.path.normpath(
-    os.path.join(get_settings().data_dir, "shared", "memory")
-  )
-  parent, filename = os.path.split(path)
-  if os.path.dirname(parent) != memory_root:
-    return ""
-  if os.path.basename(parent) not in ("notes", "mocs"):
-    return ""
-  if not filename.endswith(".md"):
-    return ""
-  return filename[: -len(".md")]
-
-
-def observe_memory_node_read(
-  tool_name: str,
-  input_data: Any,
-  *,
-  chat_id: str,
-  cwd: str,
-) -> None:
-  """Fire-and-forget read-trace entry for memory-node Reads.
-
-  Mirrors `observe_skill_file_read`: called from `can_use_tool` on
-  every non-question tool, filters down to note/MOC reads, and merges
-  the slug into this chat's read-trace file so the nightly Reflection
-  pass can see what the agent went looking for. Never raises — a full
-  disk or broken trace file must not block or fail the Read being
-  intercepted."""
-  try:
-    node_id = _memory_node_read_id(tool_name, input_data, cwd)
-    if not node_id:
-      return
-    from app import memory_trace
-    from app.config import get_settings
-    memory_trace.record_note_read(
-      get_settings().data_dir, chat_id, node_id
-    )
-  except Exception:
-    log.debug("memory read-trace observability failed", exc_info=True)
 
 
 def _skill_name_from_input(input_data: Any) -> str:
@@ -741,10 +706,14 @@ def dispatch_sdk_message(
     server_tools: dict[str, str] = {}
     for block in sdk_msg.content:
       if isinstance(block, ToolUseBlock):
+        # block.id is the canonical tool_use_id; the matching ToolResultBlock
+        # carries it as .tool_use_id. Thread it through so a large tool output
+        # can be reduced on the wire and fetched lazily by id (contract rule 6).
         bc.publish({
           "type": "tool_start",
           "tool": block.name,
           "input": "",
+          "tool_use_id": block.id,
         })
         summary = summarize_tool_input(block.name, block.input)
         if summary:
@@ -828,15 +797,18 @@ def dispatch_sdk_message(
     for block in content:
       if isinstance(block, ToolResultBlock):
         output = _format_tool_output(block.content)
+        # Carry the tool_use_id (matches the ToolUseBlock's .id) so the sink can
+        # key a stash of the full output and the block can fetch it by id.
         bc.publish({
           "type": "tool_output",
           "content": output,
+          "tool_use_id": block.tool_use_id,
         })
         if output.startswith("Web search results for query"):
           sources = sources_from_websearch_text(output)
           if sources:
             bc.publish({"type": "tool_sources", "sources": sources})
-        bc.publish({"type": "tool_end"})
+        bc.publish({"type": "tool_end", "tool_use_id": block.tool_use_id})
         continue
       _emit_unknown(bc, f"user_block:{type(block).__name__}", block)
     return current_session_id, None
@@ -991,9 +963,6 @@ async def run_claude_sdk_turn(
       observe_skill_file_read(
         tool_name, input_data, bc=bc, chat_id=chat_id, cwd=cwd,
       )
-      observe_memory_node_read(
-        tool_name, input_data, chat_id=chat_id, cwd=cwd,
-      )
       return PermissionResultAllow(updated_input=input_data)
 
     questions = input_data.get("questions", [])
@@ -1118,6 +1087,13 @@ async def run_claude_sdk_turn(
     _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
+    # Most recent provider rate-limit reset time seen this attempt (from any
+    # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
+    # can park until the STRUCTURED reset time rather than parsing the error
+    # string (design §2.4). Lives HERE, in the attempt scope where it is
+    # assigned — an outer-scope init would be shadowed by that assignment and
+    # read unbound on turns with no rate-limit event.
+    rate_limit_resets_at = None
     # Skills are gated behind the per-owner `skills_enabled` flag. OFF
     # (the default) keeps the historical posture: `setting_sources=None`
     # means the SDK loads NO user/project settings, so the Skill tool is
@@ -1197,6 +1173,10 @@ async def run_claude_sdk_turn(
         }
       await client.query(turn_message)
 
+      # At most one automatic re-query per turn (see the synthetic-resume
+      # recovery in the terminal branch below), so a genuinely-empty resume
+      # can never loop.
+      did_auto_requery = False
       while True:
         async for sdk_msg in client.receive_response():
           # Persist the session id ONLY from real conversation messages.
@@ -1215,6 +1195,10 @@ async def run_claude_sdk_turn(
             incoming_session_id = getattr(sdk_msg, "session_id", None)
             if incoming_session_id and incoming_session_id != current_session_id:
               await _persist_session_id(db, chat_id, incoming_session_id)
+          if isinstance(sdk_msg, RateLimitEvent):
+            _resets = getattr(sdk_msg.rate_limit_info, "resets_at", None)
+            if _resets is not None:
+              rate_limit_resets_at = _resets
           current_session_id, terminal = dispatch_sdk_message(
             sdk_msg, bc, current_session_id,
           )
@@ -1257,7 +1241,36 @@ async def run_claude_sdk_turn(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
             break
+          # Recover a synthetic no-op RESUME. When a resumed session's prior
+          # turn was interrupted (e.g. a server restart with a dangling
+          # background task), the Claude CLI can spend the resumed turn
+          # RECONCILING state — it writes a synthetic "No response requested."
+          # close-out and returns a CLEAN terminal (is_error False) WITHOUT ever
+          # running the model on the real prompt, so the sink accrues zero
+          # blocks and the reply silently vanishes (proven from CLI transcripts:
+          # the "continue" case, chat 04ef66df). Re-ask the same prompt ONCE to
+          # force a real answer — exactly what a manual re-send recovers, and
+          # what a second reconciled turn produced in the wild. Bounded by
+          # did_auto_requery so a legitimately-empty resume cannot loop; if the
+          # retry is also empty the finalize backstop records a retry marker.
+          if (
+            session_id is not None            # a resume (non-first turn)
+            and not terminal.get("error")     # clean terminal (is_error False)
+            and terminal.get("api_error_status") != 429  # not a bare 429/park
+            and not active_client.pending_steer
+            and not did_auto_requery
+            and len(bc.assistant_blocks) == 0  # zero blocks: the synthetic no-op
+          ):
+            did_auto_requery = True
+            log.info(
+              "claude resume produced no reply (synthetic no-op); "
+              "auto-requerying once chat_id=%s", chat_id,
+            )
+            await client.query(turn_message)
+            break
           cost_usd = terminal.get("cost_usd")
+          if rate_limit_resets_at is not None:
+            terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
           return terminal
         else:
           # The stream ended without a terminal ResultMessage. Any buffered

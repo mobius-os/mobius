@@ -67,6 +67,13 @@ async function sendMessage(page, text) {
   await page.keyboard.press('Enter')
 }
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
   test('Stop with a queued message clears the queue and never resurrects it during the stop POST', async ({ page }) => {
     // Route plan:

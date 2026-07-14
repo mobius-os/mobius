@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-commit.sh — Lightweight syntax-only checks for staged files.
+# pre-commit.sh — Privacy and lightweight syntax checks for staged files.
 #
 # Runs in well under 1 second on a typical 5-file commit. NOT a substitute
 # for tests or linting — just catches "I committed a file with a typo /
@@ -16,18 +16,10 @@
 #                          esbuild runs in the build path; let it catch them.
 #   tests, linters, formatters — too slow for a pre-commit gate.
 #
-# Install (pick one — this script is NOT auto-installed):
-#
-#   # Option A — point core.hooksPath at the scripts/ dir (requires a
-#   # `pre-commit` filename, so symlink it once):
-#   ln -sf "$(pwd)/scripts/pre-commit.sh" scripts/pre-commit
-#   git config core.hooksPath scripts
-#
-#   # Option B — symlink directly into .git/hooks (per-clone, not tracked):
-#   ln -sf "$(pwd)/scripts/pre-commit.sh" .git/hooks/pre-commit
-#
-# Bypass (always available, by design):
-#   git commit --no-verify
+# Install with `scripts/install-hooks.sh`. The installer copies this hook into
+# the shared git-common-dir, covering every linked worktree in the clone.
+# Syntax checks can be bypassed in an emergency; privacy failures must never be
+# bypassed. Remove private paths from the index instead.
 #
 # Run manually against currently-staged files:
 #   bash scripts/pre-commit.sh
@@ -43,10 +35,27 @@ if [ "${#STAGED[@]}" -eq 0 ]; then
 fi
 
 FAILURES=0
+PRIVACY_FAILURES=0
 fail() {
   printf 'pre-commit: %s\n' "$*" >&2
   FAILURES=$((FAILURES + 1))
 }
+privacy_fail() {
+  fail "$@"
+  PRIVACY_FAILURES=$((PRIVACY_FAILURES + 1))
+}
+
+# Gitignore only protects untracked files: `git add -f` can still stage a
+# private path. Block every private workspace root at commit time. The exact
+# root names matter because local private directories may be symlinked into a
+# clean public checkout.
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    docs|docs/*|demo-logs|demo-logs/*|.claude|.claude/*|.pm|.pm/*|AGENTS.md|CLAUDE.md)
+      privacy_fail "refusing to commit $f — private workspace path (git reset $f to unstage)"
+      ;;
+  esac
+done
 
 # Pre-collect by type so we run each tool at most once per language.
 PY_FILES=()
@@ -96,8 +105,13 @@ for f in "${MD_FILES[@]:-}"; do
 done
 
 if [ "$FAILURES" -gt 0 ]; then
-  printf '\npre-commit: %d check(s) failed. Fix the issues above, or bypass with `git commit --no-verify`.\n' \
-    "$FAILURES" >&2
+  if [ "$PRIVACY_FAILURES" -gt 0 ]; then
+    printf '\npre-commit: %d check(s) failed, including %d privacy failure(s). Do not bypass this gate; remove the private paths from the index.\n' \
+      "$FAILURES" "$PRIVACY_FAILURES" >&2
+  else
+    printf '\npre-commit: %d syntax check(s) failed. Fix the issues above, or bypass only if the failure is understood.\n' \
+      "$FAILURES" >&2
+  fi
   exit 1
 fi
 

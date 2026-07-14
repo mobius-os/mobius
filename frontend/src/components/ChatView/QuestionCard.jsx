@@ -206,7 +206,9 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
               <input
                 className="qcard__input"
                 type="text"
-                placeholder="Type your answer..."
+                aria-label={`Other answer for: ${q.question}`}
+                placeholder="Type your answer…"
+                autoComplete="off"
                 value={otherTexts[q.question] || ''}
                 onChange={e => setOtherText(q.question, e.target.value)}
                 disabled={inactive}

@@ -59,8 +59,13 @@ KNOWN_MODELS = {
     "claude-haiku-4-5-20251001",
   ],
   "codex": [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
   ],
 }
 
@@ -79,9 +84,20 @@ MODEL_LABELS: dict[str, str] = {
   "claude-sonnet-4-7-20251215": "Sonnet 4.7",
   "claude-sonnet-4-5-20251001": "Sonnet 4.5",
   "claude-haiku-4-5-20251001": "Haiku 4.5",
+  "gpt-5.6-sol": "GPT-5.6 Sol",
+  "gpt-5.6-terra": "GPT-5.6 Terra",
+  "gpt-5.6-luna": "GPT-5.6 Luna",
   "gpt-5.5": "gpt-5.5",
   "gpt-5.4": "gpt-5.4",
+  "gpt-5.4-mini": "gpt-5.4 mini",
+  "gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
 }
+
+# Optional model-specific effort capability overrides. Provider defaults remain
+# the fallback, so adding a new model normally needs no entry. Add a row only
+# when a model supports a narrower, reordered, or extended effort scale; the
+# registry carries it to every shell/app picker as data.
+MODEL_EFFORT_LEVELS: dict[str, list[str]] = {}
 
 DEFAULT_MODELS = {
   provider: models[0] for provider, models in KNOWN_MODELS.items()
@@ -92,6 +108,34 @@ DEFAULT_MODELS = {
 # something selected — no error handling needed for "user sent without
 # picking anything".
 DEFAULT_EFFORT = "medium"
+
+# This setting used to be owner-global. It is now a dedicated per-chat DB
+# policy; retaining a true value on disk would reactivate the removed global
+# behavior if a deployment rolled back to an older binary.
+_LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
+
+
+def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
+  """Delete the removed owner-global policy so rollback cannot revive it.
+
+  Returns False only when a readable legacy value was found but the cleaned
+  file could not be persisted. Missing, malformed, and already-clean files
+  need no migration and return True.
+  """
+  path = Path(data_dir) / "shared" / "agent-settings.json"
+  if not path.exists():
+    return True
+  try:
+    settings = json.loads(path.read_text())
+  except (json.JSONDecodeError, OSError):
+    return True
+  if (
+    not isinstance(settings, dict)
+    or _LEGACY_GLOBAL_AUTO_RESUME_KEY not in settings
+  ):
+    return True
+  settings.pop(_LEGACY_GLOBAL_AUTO_RESUME_KEY)
+  return write_agent_settings(data_dir, settings)
 
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
@@ -111,7 +155,8 @@ def _load_agent_settings(data_dir: str) -> dict:
   path = Path(data_dir) / "shared" / "agent-settings.json"
   if path.exists():
     try:
-      return json.loads(path.read_text())
+      settings = json.loads(path.read_text())
+      return settings if isinstance(settings, dict) else {}
     except (json.JSONDecodeError, OSError):
       pass
   return {}
@@ -699,6 +744,8 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
       "label": _label_for(mid),
       "provider": provider_id,
       "available": True,
+      **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
+         if mid in MODEL_EFFORT_LEVELS else {}),
     }
     for mid in KNOWN_MODELS.get(provider_id, [])
   ]
@@ -719,6 +766,8 @@ def _live_model_entries(
       "label": _label_for(mid),
       "provider": provider_id,
       "available": True,
+      **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
+         if mid in MODEL_EFFORT_LEVELS else {}),
     }
     for mid in live_ids
   ]
@@ -923,12 +972,83 @@ async def _fetch_claude_models(data_dir: str) -> list[str]:
   return ids
 
 
+def _codex_model_slug(entry: Any) -> str | None:
+  """Extract a model id from SDK objects, raw CLI JSON dicts, or strings."""
+  if isinstance(entry, str):
+    return entry
+  if isinstance(entry, dict):
+    if entry.get("visibility") == "hide":
+      return None
+    slug = entry.get("slug") or entry.get("id")
+    return slug if isinstance(slug, str) else None
+  if getattr(entry, "visibility", None) == "hide":
+    return None
+  slug = getattr(entry, "slug", None) or getattr(entry, "id", None)
+  return slug if isinstance(slug, str) else None
+
+
+def _codex_model_slugs_from_payload(payload: Any) -> list[str]:
+  """Extract ordered Codex model slugs from `codex debug models` JSON."""
+  raw_models = payload.get("models") if isinstance(payload, dict) else payload
+  if not isinstance(raw_models, list):
+    return []
+  ids: list[str] = []
+  for entry in raw_models:
+    slug = _codex_model_slug(entry)
+    if slug:
+      ids.append(slug)
+  return ids
+
+
+async def _fetch_codex_models_from_cli(data_dir: str) -> list[str]:
+  """Fetch raw Codex model catalog JSON from `codex debug models`.
+
+  This is the compatibility fallback for catalog schema drift in the Python
+  SDK. New model metadata can add enum values before the SDK types are updated;
+  the CLI debug command prints the raw catalog, so model discovery can keep
+  working while chat execution still uses the SDK path.
+  """
+  codex_home = Path(data_dir) / "cli-auth" / "codex"
+  codex_bin = shutil.which("codex")
+  if not codex_bin:
+    raise RuntimeError("codex CLI not found")
+  env = dict(os.environ)
+  env["CODEX_HOME"] = str(codex_home)
+  proc = await asyncio.create_subprocess_exec(
+    codex_bin,
+    "debug",
+    "models",
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+    env=env,
+  )
+  try:
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+  except asyncio.TimeoutError:
+    proc.kill()
+    await proc.wait()
+    raise RuntimeError("codex debug models timed out")
+  if proc.returncode != 0:
+    msg = stderr.decode("utf-8", "replace").strip()
+    raise RuntimeError(f"codex debug models failed: {msg[:500]}")
+  try:
+    payload = json.loads(stdout.decode("utf-8"))
+  except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise RuntimeError("codex debug models returned invalid JSON") from exc
+  ids = _codex_model_slugs_from_payload(payload)
+  if not ids:
+    raise RuntimeError("codex debug models returned no model slugs")
+  return ids
+
+
 async def _fetch_codex_models(data_dir: str) -> list[str]:
   """Calls the Codex SDK's `AsyncCodex.models()`.
 
   Codex auth happens transparently inside the SDK — it reads the
   same `CODEX_HOME` directory the chat path uses, so once the user
-  has connected Codex in Settings the call works.
+  has connected Codex in Settings the call works. If the SDK cannot
+  parse a newer model-catalog shape, fall back to `codex debug models`
+  and extract only the slugs.
   """
   from openai_codex import AsyncCodex
   from openai_codex.client import CodexConfig
@@ -943,20 +1063,24 @@ async def _fetch_codex_models(data_dir: str) -> list[str]:
     codex_bin=shutil.which("codex"),
     env={"CODEX_HOME": str(codex_home)},
   )
-  ids: list[str] = []
-  async with AsyncCodex(config=config) as codex:
-    response = await codex.models()
+  try:
+    async with AsyncCodex(config=config) as codex:
+      response = await codex.models()
+  except Exception as exc:  # noqa: BLE001 - CLI raw catalog is the fallback
+    log.warning(
+      "codex SDK model registry fetch failed: %s; trying codex debug models",
+      exc,
+    )
+    return await _fetch_codex_models_from_cli(data_dir)
   # The SDK returns a ModelListResponse with `.models` list. Each
   # entry exposes a `.slug` (the model ID). Defensive: tolerate
   # bare strings too in case the upstream shape drifts.
   raw_models = getattr(response, "models", None) or []
+  ids: list[str] = []
   for entry in raw_models:
-    if isinstance(entry, str):
-      ids.append(entry)
-    else:
-      slug = getattr(entry, "slug", None) or getattr(entry, "id", None)
-      if isinstance(slug, str):
-        ids.append(slug)
+    slug = _codex_model_slug(entry)
+    if slug:
+      ids.append(slug)
   return ids
 
 

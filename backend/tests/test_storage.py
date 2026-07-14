@@ -1,8 +1,12 @@
 """Storage API: tests for both envelope and inner-object PUT forms."""
 
 import json
+from pathlib import Path
 
 import pytest
+
+from app import models
+from app.config import get_settings
 
 
 def _make_app(client, owner_token):
@@ -139,6 +143,49 @@ def test_put_shared_inner_object(client, auth):
 
   r = client.get("/api/storage/shared/config.json", headers=auth)
   assert r.json() == {"theme": "dark"}
+
+
+def test_shared_memory_reads_require_live_declared_contract(
+  client, auth, owner_token, db,
+):
+  app_id = _make_app(client, owner_token)
+  token = client.post(
+    "/api/auth/app-token",
+    json={"app_id": app_id},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+  memory = Path(get_settings().data_dir) / "shared" / "memory"
+  memory.mkdir(parents=True, exist_ok=True)
+  (memory / ".ready").write_text("pointer", encoding="utf-8")
+
+  assert client.get(
+    "/api/storage/shared/memory/.ready", headers=app_auth,
+  ).status_code == 403
+  assert client.get(
+    "/api/storage/shared-list/memory", headers=app_auth,
+  ).status_code == 403
+  # Other longstanding shared resources retain their existing app-readable
+  # behavior; the new gate is scoped to the optional graph namespace.
+  client.put(
+    "/api/storage/shared/config.json", json={"ok": True}, headers=auth,
+  )
+  assert client.get(
+    "/api/storage/shared/config.json", headers=app_auth,
+  ).status_code == 200
+
+  app = db.query(models.App).filter(models.App.id == app_id).one()
+  app.capability_contract = {"data": {"shared_memory": "read"}}
+  db.commit()
+
+  allowed = client.get(
+    "/api/storage/shared/memory/.ready", headers=app_auth,
+  )
+  assert allowed.status_code == 200
+  assert allowed.text == "pointer"
+  assert client.get(
+    "/api/storage/shared-list/memory", headers=app_auth,
+  ).status_code == 200
 
 
 def test_put_text_accepts_non_json_content_type(client, auth, owner_token):
@@ -897,8 +944,103 @@ async def test_watcher_recompiles_when_imported_module_changes(
 
 
 @pytest.mark.asyncio
+async def test_watcher_publish_app_build_failed_is_system_bus_only(
+  client, owner_token,
+):
+  """A watcher compile failure rides the system broadcast ALONE.
+
+  app_build_failed is catch-up-unsafe (a chat reconnect must not replay a
+  stale failure toast), so it is NOT fanned out to any per-chat broadcast —
+  the system bus reaches Shell.handleSystemEvent in every view, which is the
+  posture for a failed build (the owner went to look at the app)."""
+  import asyncio
+  import os
+  import app.models as models
+  from app import broadcast as bc_mod
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "watch-fail")
+  os.makedirs(src, exist_ok=True)
+  initial = "export default function App(){ return <div>V0</div> }"
+  app_id = client.post("/api/apps/", json={
+    "name": "Watch Fail",
+    "description": "x",
+    "jsx_source": initial,
+    "source_dir": src,
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+
+  s = SessionLocal()
+  try:
+    row = s.query(models.App).filter(models.App.id == app_id).first()
+    row.chat_id = "builder-chat"
+    s.commit()
+  finally:
+    s.close()
+
+  building = bc_mod.create_broadcast("builder-chat")
+  other = bc_mod.create_broadcast("bystander-chat")
+  q_build = building.subscribe()[1]
+  q_system = bc_mod.get_system_broadcast().subscribe()
+  jsx_path = os.path.join(src, "index.jsx")
+  with open(jsx_path, "w", encoding="utf-8") as f:
+    f.write("export default function App(){ return <div>Broken</div")
+
+  try:
+    await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
+    # The failure rides the system broadcast so the Shell's toast fires in
+    # every view.
+    sys_ev = await asyncio.wait_for(q_system.get(), timeout=1.0)
+    assert sys_ev["type"] == "app_build_failed"
+    assert sys_ev["appId"] == str(app_id)
+    assert sys_ev["appName"] == "Watch Fail"
+    assert "Expected" in sys_ev["summary"] or "Unexpected" in sys_ev["summary"]
+    # NEITHER the building chat NOR a bystander chat receives it — no per-chat
+    # fan-out for a catch-up-unsafe event.
+    assert all(
+      e.get("type") != "app_build_failed" for e in building.event_log
+    ), building.event_log
+    assert all(
+      e.get("type") != "app_build_failed" for e in other.event_log
+    ), other.event_log
+    with pytest.raises(asyncio.TimeoutError):
+      await asyncio.wait_for(q_build.get(), timeout=0.2)
+  finally:
+    bc_mod.get_system_broadcast().unsubscribe(q_system)
+    bc_mod.remove_broadcast("builder-chat")
+    bc_mod.remove_broadcast("bystander-chat")
+
+  s = SessionLocal()
+  try:
+    row = s.query(models.App).filter(models.App.id == app_id).first()
+    assert row.jsx_source == initial
+  finally:
+    s.close()
+
+
+def test_summarize_app_build_failure_extracts_esbuild_error_line():
+  """Owner-facing app build summaries skip esbuild framing."""
+  from app.app_watcher import _summarize_app_build_failure
+
+  output = "\n".join([
+    "✘ [ERROR] Expected \">\" but found end of file",
+    "",
+    "    /data/apps/demo/index.jsx:1:46:",
+    "      1 │ export default function App(){ return <div>Broken</div",
+    "        ╵                                               ^",
+    "",
+    "1 error",
+  ])
+  assert (
+    _summarize_app_build_failure(output)
+    == 'Expected ">" but found end of file'
+  )
+
+
+@pytest.mark.asyncio
 async def test_watcher_ignores_platform_core_source():
-  """Only /data/apps source edits are watched; platform core paths are legacy."""
+  """Only /data/apps source edits are watched."""
   import os
   from app.app_watcher import _source_dir_for_changed_path
 

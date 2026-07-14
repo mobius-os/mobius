@@ -160,6 +160,26 @@ def _fake_sdk(async_codex_cls):
   }
 
 
+def test_stamp_tool_use_id_uses_stable_item_id():
+  # Every Codex ThreadItem carries a stable `id` (same id on ItemStarted /
+  # ItemCompleted for one tool call); _stamp_tool_use_id threads it onto the
+  # tool event so a large output can be reduced + fetched by id (contract rule
+  # 6). A fake without an id is left unstamped, so event shape is unchanged.
+  from types import SimpleNamespace
+
+  event = {"type": "tool_output", "content": "x"}
+  codex_sdk_runner._stamp_tool_use_id(event, SimpleNamespace(id="item_42"))
+  assert event["tool_use_id"] == "item_42"
+
+  untagged = {"type": "tool_output", "content": "x"}
+  codex_sdk_runner._stamp_tool_use_id(untagged, SimpleNamespace())
+  assert "tool_use_id" not in untagged
+
+  null_id = {"type": "tool_output", "content": "x"}
+  codex_sdk_runner._stamp_tool_use_id(null_id, SimpleNamespace(id=None))
+  assert "tool_use_id" not in null_id
+
+
 def test_tool_completed_events_emit_output_before_end():
   class CommandExecutionThreadItem:
     def __init__(self, output: str):
@@ -449,6 +469,63 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
     "session_id": "requested-thread",
   }]
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+
+
+def test_run_codex_sdk_turn_aborts_after_turn_before_stream_registration(monkeypatch):
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  turn_handle = _FakeTurnHandle([
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ])
+  thread = _FakeThread("thread-1", turn_handle)
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(
+    codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id="chat-1",
+      bc=bc,
+      pending_questions={},
+      db=None,
+      should_abort=lambda: thread.turn_args is not None,
+    )
+  )
+
+  assert result == {
+    "session_id": "thread-1",
+    "cost_usd": None,
+    "error": None,
+  }
+  assert turn_handle.interrupt_calls == 1
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+  assert bc.events == [{
+    "type": "session_init",
+    "session_id": "thread-1",
+  }]
 
 
 def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(

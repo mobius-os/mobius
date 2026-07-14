@@ -15,6 +15,57 @@
   background: var(--bg);
 }
 
+/* Double-buffered version swap. Both frames (the live one, plus a hidden
+   incoming frame while a rebuild loads) are stacked absolutely so the incoming
+   frame renders at full size off-screen and can post frame-mounted before it is
+   ever shown. Scoped to `.canvas-wrap >` so the top-level `.canvas--empty`
+   placeholder (not inside the wrap) keeps its own flex layout. */
+.canvas-wrap > .canvas {
+  position: absolute;
+  inset: 0;
+}
+
+/* Hidden incoming frame: fully rendering (opacity 0, NOT display:none) but
+   invisible and non-interactive until it is promoted. */
+.canvas--incoming {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Visible frame. We SNAP the promoted frame to visible rather than cross-fading
+   two live iframes: it already finished rendering (it posted frame-mounted), so
+   snapping shows a complete app with zero blank, and the old frame is unmounted
+   in the same commit — keeping memory strictly bounded to two frames on phones.
+   The "updated" feel comes from .canvas-swap-flash below, not an opacity fade
+   (a fade from 0 would flash the wrapper background as the old frame leaves). */
+.canvas--live {
+  opacity: 1;
+}
+
+/* One-shot shimmer confirming the preview refreshed in place. A faint accent
+   veil that pulses and fades; opacity-only + pointer-events:none so it never
+   blocks input or forces layout. Sits above the frames but below nothing that
+   matters. Keyed on the live version in JSX so it replays on each swap. */
+.canvas-swap-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--accent, #8b6cf7);
+  opacity: 0;
+  animation: canvas-swap-flash 460ms ease-out;
+}
+
+@keyframes canvas-swap-flash {
+  0% { opacity: 0; }
+  22% { opacity: 0.1; }
+  100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-swap-flash { animation: none; }
+}
+
 .canvas--empty {
   display: flex;
   align-items: center;
@@ -53,9 +104,11 @@
 }
 
 .canvas-loading__spinner {
-  width: 28px;
-  height: 28px;
-  border: 2.5px solid var(--border-light, rgba(127, 127, 127, 0.2));
+  width: 30px;
+  height: 30px;
+  /* Accent-forward: a thick accent arc on a faint accent-tinted track, so the
+     spinner reads as the app's own color rather than a generic gray ring. */
+  border: 3px solid color-mix(in srgb, var(--accent, #8b6cf7) 20%, transparent);
   border-top-color: var(--accent, #8b6cf7);
   border-radius: 50%;
   animation: canvas-loading-spin 0.8s linear infinite;
@@ -66,10 +119,48 @@
 }
 
 .canvas-loading__name {
-  font-size: 13px;
-  color: var(--muted, #999);
+  /* More present than the old muted 13px label — this is the app announcing
+     itself at the peak of the build. */
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text, #e5e5e5);
   font-family: var(--font, inherit);
   letter-spacing: 0.02em;
+}
+
+/* Shimmer skeleton hinting a header + a couple of list rows arriving, so the
+   flattest moment of the build reads as "something's coming" rather than a
+   bare spinner. Left-aligned within a centered block so the varying widths
+   read as content. The moving gradient is a paint animation (no layout). */
+.canvas-loading__skeleton {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: min(60vw, 220px);
+  margin-top: 4px;
+}
+
+.canvas-loading__bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent, #8b6cf7) 6%, var(--surface, #1a1a1a)) 25%,
+    color-mix(in srgb, var(--accent, #8b6cf7) 18%, var(--surface, #1a1a1a)) 50%,
+    color-mix(in srgb, var(--accent, #8b6cf7) 6%, var(--surface, #1a1a1a)) 75%
+  );
+  background-size: 200% 100%;
+  animation: canvas-loading-shimmer 1.4s ease-in-out infinite;
+}
+
+.canvas-loading__bar--head { height: 12px; width: 70%; }
+.canvas-loading__bar--short { width: 45%; }
+
+@keyframes canvas-loading-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
 }
 
 .canvas-loading__offline {

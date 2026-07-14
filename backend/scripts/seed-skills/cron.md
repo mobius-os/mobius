@@ -1,14 +1,33 @@
 # Scheduled tasks (cron)
 
-How to create recurring jobs that survive a rebuild: the scaffold, why every cron task needs an `init-cron.sh`, the service token, and the scheduled-app UI rule. `Read` this before scheduling anything.
+How to create recurring jobs that survive a rebuild: manifest schedules, supervised app jobs, the scaffold for owner-managed jobs, and the scheduled-app UI rule. `Read` this before scheduling anything.
 
 The container has `cron` installed. Cron tasks run as `mobius` and get the app id as `$1`.
 
 ---
 
-## Every cron task needs an `init-cron.sh` or it vanishes on rebuild
+## App schedules are declarations, never boot scripts
 
-`/var/spool/cron/crontabs/` lives in the IMAGE layer, not on `/data`, so any rebuild (deploy, image pull) starts with an empty crontab. The entrypoint replays `/data/apps/*/init-cron.sh` on every boot to restore entries — so a cron task without a matching `init-cron.sh` silently disappears on the next rebuild, with no error. A scheduled job that just stops running is hard to notice, so this is the cardinal cron rule.
+`/var/spool/cron/crontabs/` lives in the image layer, not on `/data`, so a rebuild starts with an empty crontab. Installed apps should declare `schedule.default` and `schedule.job` in `mobius.json`. The installer persists an `init-cron.sh` declaration, but boot never executes app-owned shell from that file. FastAPI lifespan parses the effective cadence and job, validates the live app/source tree, and rewrites the entry through `app-job-runner.py` before cron starts.
+
+Managed jobs receive a short-lived app-scoped `APP_TOKEN`, not the owner service token. A manifest with `permissions.background_agent: true` also runs inside the reviewed filesystem sandbox. Its job can see its read-only source, numeric app storage, declared Memory mount, and configured provider credentials; it cannot see arbitrary owner/platform state.
+
+For an installable app, use the manifest contract:
+
+```json
+{
+  "permissions": { "background_agent": true },
+  "schedule": {
+    "default": "30 5 * * *",
+    "user_configurable": true,
+    "job": "fetch.sh"
+  }
+}
+```
+
+The job reads its numeric app id from `$1` and uses `$APP_TOKEN` for its own reviewed API routes. Add the job filename to the manifest install inputs as required by the app contract.
+
+The scaffold is for explicit owner-managed platform/legacy jobs that are not installed from a manifest:
 
 **Use the scaffold, never `crontab -u mobius` directly:**
 
@@ -17,7 +36,7 @@ bash /app/scripts/init-cron-scaffold.sh <slug> "<cron-schedule>"
 # e.g. init-cron-scaffold.sh news "*/10 * * * *"
 ```
 
-It writes `/data/apps/<slug>/job.sh` (stub, if absent), writes `/data/apps/<slug>/init-cron.sh` (the replay script), and installs the live entry. Idempotent — re-running with the same args is a no-op. Then edit `job.sh` for the actual work.
+It writes `/data/apps/<slug>/job.sh` (stub, if absent), writes the durable declaration, and installs the live entry. Idempotent — re-running with the same args is a no-op. Then edit `job.sh` for the actual work. This manual path has owner authority; do not present it as the security model for an installable app.
 
 To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (or delete it before re-running the scaffold). Never call `crontab -u mobius` directly without writing an `init-cron.sh` alongside.
 
@@ -25,33 +44,28 @@ Optionally wrap the job command with `cron-emit.sh` (a manual edit — the scaff
 
 ---
 
-## Example cron script
+## Example managed app job
 
 ```bash
 #!/bin/bash
-# /data/apps/myapp/job.sh
-SERVICE_TOKEN=$(cat /data/service-token.txt)
+# /data/apps/myapp/fetch.sh
 API_BASE_URL=http://localhost:8000
-APP_ID=<numeric app id>
+APP_ID="$1"
 
-claude -p "Fetch today's data, process it, and write the result to \
-  the storage API at $API_BASE_URL/api/storage/apps/$APP_ID/data.json \
-  using bearer token $SERVICE_TOKEN" \
-  --system-prompt-file /data/apps/myapp/prompt.md \
-  --allowedTools "Bash(command)" \
-  --max-turns 30 \
-  2>> /data/cron-logs/myapp.log
+curl -fsS \
+  -H "Authorization: Bearer $APP_TOKEN" \
+  "$API_BASE_URL/api/apps/$APP_ID/job-context"
 ```
 
 ---
 
 ## Key details
 
-- **Service token:** `/data/service-token.txt` (chmod 600 — do NOT move to `/data/shared/`).
-- **Logs:** write stderr to `/data/cron-logs/`.
+- **Credentials:** installable jobs use `$APP_TOKEN`. Never read `/data/service-token.txt` from an app job.
+- **Logs:** supervised jobs receive `$APP_JOB_STATE_DIR`; keep app-owned logs there.
 - **Sub-agents start with no context** — the `--system-prompt-file` is all they get. Spell out the task fully there.
 - **Storage from a cron script** uses the raw API (`window.mobius.storage` only exists inside a running app). Enumerate, don't probe — see the storage section of `building-apps.md`.
-- After setting up a scheduled task, record it in this chat's note (`chats/$CHAT_ID/index.md`) — grow its `## Summary`; see the `memory.md` skill. (There is no inbox.)
+- App-scoped routes enforce the reviewed capability contract even if a job asks for more.
 
 ---
 

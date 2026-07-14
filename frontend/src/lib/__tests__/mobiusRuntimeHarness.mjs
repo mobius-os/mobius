@@ -57,17 +57,36 @@ function installGlobals() {
 //   DELETE /api/storage/apps/{appId}/{path}   → 200 (remove) | 404 | scripted
 //   GET    /api/storage/apps-list/{appId}/... → list() — not exercised here
 export function makeServer() {
-  const files = new Map()           // path -> { value, kind, contentType }
+  const files = new Map()           // path -> { value, kind, contentType, etag }
+  const signalEvents = []
+  let signalStatus = 204
   let online = true
   // path -> status to force on the NEXT matching write (poison/transient tests).
   const forcedWriteStatus = new Map()
   const log = []                    // every fetch the runtime made
+  // Monotonic version token per successful write, quoted like a real strong
+  // ETag. The CAS path (getWithVersion + If-Match) round-trips this exactly as
+  // the backend's file_version_token does.
+  let etagSeq = 0
+  const nextEtag = () => `"${++etagSeq}"`
+  // Case-insensitive read of a header the runtime set on `init.headers`.
+  const reqHeader = (init, name) => {
+    const h = (init && init.headers) || {}
+    const target = name.toLowerCase()
+    for (const k of Object.keys(h)) if (k.toLowerCase() === target) return h[k]
+    return undefined
+  }
 
-  function res(status, body) {
+  function res(status, body, headers = {}) {
     const ok = status >= 200 && status < 300
+    // Case-insensitive header lookup, mirroring a real fetch Response's Headers
+    // (the runtime reads res.headers.get('ETag') || .get('etag')).
+    const lower = {}
+    for (const k of Object.keys(headers)) lower[k.toLowerCase()] = headers[k]
     return {
       ok,
       status,
+      headers: { get(name) { const v = lower[String(name).toLowerCase()]; return v == null ? null : v } },
       async json() { return body === undefined ? null : body },
       async text() { return body == null ? '' : String(body) },
       async blob() { return body instanceof Blob ? body : new Blob([]) },
@@ -76,10 +95,37 @@ export function makeServer() {
 
   async function fetchImpl(url, init = {}) {
     const method = init.method || 'GET'
-    log.push({ url, method })
+    log.push({ url, method, headers: (init && init.headers) || {}, body: init.body })
     if (!online) {
       // A real offline fetch rejects; the runtime catches it as transient.
       throw new TypeError('Failed to fetch (offline)')
+    }
+    if (method === 'POST' && url === '/api/client-signal') {
+      if (signalStatus !== 204) return res(signalStatus)
+      const body = JSON.parse(init.body)
+      signalEvents.push(...(body.signals || []))
+      return res(204)
+    }
+    const listMatch = url.match(/\/api\/storage\/apps-list\/[^/]+\/(.*?)(?:\?.*)?$/)
+    if (method === 'GET' && listMatch) {
+      const prefix = decodeURIComponent(listMatch[1] || '').replace(/^\/+|\/+$/g, '')
+      const base = prefix ? `${prefix}/` : ''
+      const byName = new Map()
+      for (const [storedPath, rec] of files) {
+        if (base && !storedPath.startsWith(base)) continue
+        const rest = base ? storedPath.slice(base.length) : storedPath
+        if (!rest) continue
+        const [name, ...tail] = rest.split('/')
+        if (!byName.has(name)) {
+          byName.set(name, {
+            name,
+            path: `${base}${name}`,
+            type: tail.length ? 'directory' : 'file',
+            ...(tail.length ? {} : { mime_type: rec.contentType }),
+          })
+        }
+      }
+      return res(200, { entries: [...byName.values()], next_cursor: null })
     }
     const m = url.match(/\/api\/storage\/apps\/[^/]+\/(.+?)(\?.*)?$/)
     const path = m ? decodeURIComponent(m[1]) : null
@@ -90,14 +136,25 @@ export function makeServer() {
         forcedWriteStatus.delete(path)
         return res(forced)
       }
+      // Conditional-write preconditions, mirroring backend storage.py: an
+      // If-None-Match:* fails when the file exists (create-only), an If-Match
+      // fails when the file is absent or its version differs. A request that
+      // carried EITHER is a CAS write, so the 200 echoes the new ETag.
+      const ifMatch = reqHeader(init, 'if-match')
+      const ifNoneMatch = reqHeader(init, 'if-none-match')
+      const existing = files.get(path)
+      if (ifNoneMatch === '*' && existing) return res(412)
+      if (ifMatch !== undefined && (!existing || existing.etag !== ifMatch)) return res(412)
       let value
       const ct = init.headers && init.headers['Content-Type']
       if (ct === 'application/json') value = JSON.parse(init.body)
       else value = init.body
       const kind = ct === 'application/json' ? 'json'
         : (ct && ct.startsWith('text/')) ? 'text' : 'blob'
-      files.set(path, { value, kind, contentType: ct })
-      return res(200)
+      const etag = nextEtag()
+      files.set(path, { value, kind, contentType: ct, etag })
+      const wantsCas = ifMatch !== undefined || ifNoneMatch !== undefined
+      return res(200, undefined, wantsCas ? { ETag: etag } : {})
     }
     if (method === 'DELETE' && path != null) {
       const forced = forcedWriteStatus.get(path)
@@ -108,11 +165,13 @@ export function makeServer() {
       const had = files.delete(path)
       return res(had ? 200 : 404)
     }
-    // GET
+    // GET — echo the current ETag only when the caller opted in with the
+    // X-Mobius-Version:1 header, exactly like the backend read route.
     if (path != null) {
       if (!files.has(path)) return res(404)
       const rec = files.get(path)
-      return res(200, rec.value)
+      const headers = reqHeader(init, 'x-mobius-version') === '1' ? { ETag: rec.etag } : {}
+      return res(200, rec.value, headers)
     }
     return res(404)
   }
@@ -125,11 +184,15 @@ export function makeServer() {
       if (globalThis.navigator) globalThis.navigator.onLine = v
     },
     // Seed the server directly (simulates a value another client/agent wrote).
+    // Each seed bumps the version, so re-seeding an existing path models a
+    // concurrent writer moving the ETag out from under a held version.
     seed(path, value, kind = 'json', contentType = 'application/json') {
-      files.set(path, { value, kind, contentType })
+      files.set(path, { value, kind, contentType, etag: nextEtag() })
     },
     serverValue(path) { return files.has(path) ? files.get(path).value : undefined },
     serverHas(path) { return files.has(path) },
+    signalEvents,
+    setSignalStatus(status) { signalStatus = status },
     // Force the NEXT write to `path` to return `status` (e.g. 422 poison, 503
     // transient). Consumed once.
     forceWrite(path, status) { forcedWriteStatus.set(path, status) },

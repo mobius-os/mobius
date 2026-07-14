@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -48,6 +49,77 @@ _IGNORED_SOURCE_PARTS = {
   "node_modules",
   "static",
 }
+_MAX_FAILURE_SUMMARY = 160
+
+
+def _compact_failure_text(text: str) -> str:
+  """Normalize compiler output into one display-safe line."""
+  return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _truncate_failure_text(text: str, limit: int = _MAX_FAILURE_SUMMARY) -> str:
+  """Return ``text`` trimmed to the owner-visible summary budget."""
+  if len(text) <= limit:
+    return text
+  return text[:max(0, limit - 1)].rstrip() + "…"
+
+
+def _is_build_noise(line: str) -> bool:
+  """Return True for esbuild framing lines that hide the real error."""
+  return bool(re.search(
+    r"^(vite v|transforming|rendering chunks|computing gzip size|"
+    r"[✓✗]|\d+\s+error|warning:|files generated$)",
+    line,
+    flags=re.IGNORECASE,
+  ))
+
+
+def _summarize_app_build_failure(error: object) -> str:
+  """Extract the first meaningful mini-app compiler error line."""
+  raw = getattr(error, "stderr", None) or str(error or "")
+  lines = [
+    _compact_failure_text(line)
+    for line in str(raw).splitlines()
+  ]
+  lines = [line for line in lines if line]
+  if not lines:
+    return ""
+
+  high_signal = next((
+    line for line in lines
+    if (
+      re.search(r"\bERROR\b|Failed to resolve|Cannot find module", line, re.I)
+      or "Unexpected" in line
+      or "Expected" in line
+    )
+  ), None)
+  summary = high_signal or next((
+    line for line in lines if not _is_build_noise(line)
+  ), lines[0])
+  summary = re.sub(r"^.*?\[ERROR\]\s*", "", summary, flags=re.IGNORECASE)
+  summary = re.sub(r"^.*?\bERROR:\s*", "", summary, flags=re.IGNORECASE)
+  return _truncate_failure_text(summary)
+
+
+def _publish_app_build_failed(
+  *, app_id: int, app_name: str, summary: str,
+) -> None:
+  """Emit an app build failure to the system bus ONLY.
+
+  The system broadcast reaches Shell.handleSystemEvent in every view — which
+  is exactly the posture for a build failure, since "the previous version is
+  still running" describes an owner who navigated to look at the app. It is
+  catch-up-unsafe (a chat reconnect must not replay a stale failure toast), so
+  it rides the system bus alone; SystemBroadcast has no replay, so one
+  delivery per client and no frontend dedup.
+  """
+  from app.broadcast import get_system_broadcast
+  get_system_broadcast().publish({
+    "type": "app_build_failed",
+    "appId": str(app_id),
+    "appName": app_name,
+    "summary": summary,
+  })
 
 
 def _source_roots() -> list[Path]:
@@ -58,8 +130,6 @@ def _source_roots() -> list[Path]:
 def _source_dir_for_changed_path(path: str | Path) -> Path | None:
   """Returns the immediate source-tree owner for a source edit."""
   p = Path(path)
-  if p.suffix not in _SOURCE_SUFFIXES:
-    return None
   try:
     resolved = p.resolve()
   except (OSError, RuntimeError):
@@ -79,7 +149,17 @@ def _source_dir_for_changed_path(path: str | Path) -> Path | None:
       return None
     if rel.name.startswith("."):
       return None
-    return root / rel.parts[0]
+    source_dir = root / rel.parts[0]
+    # Ordinary rebuilds only care about importable source. During a real
+    # update merge, however, the conflict may be in fetch.sh, mobius.json, or
+    # any other tracked file. Let every safe in-tree file wake the resolver
+    # finalizer while MERGE_HEAD exists; the unresolved-marker gate below still
+    # prevents a premature bundle swap.
+    if p.suffix not in _SOURCE_SUFFIXES and not (
+      source_dir / ".git" / "MERGE_HEAD"
+    ).exists():
+      return None
+    return source_dir
   return None
 
 
@@ -170,6 +250,9 @@ class _JsxHandler(FileSystemEventHandler):
     index_path = source_dir_path / _INDEX_JSX
     changed_is_entry = p.resolve() == index_path.resolve()
     skip_unchanged_entry = changed_is_entry and not force_rebuild
+    has_pending_update = (
+      source_dir_path / ".git" / "mobius-pending-update" / "receipt.json"
+    ).is_file()
     try:
       jsx_source = index_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -204,7 +287,10 @@ class _JsxHandler(FileSystemEventHandler):
         if app is None or app.deleted_at is not None:
           return  # No such app, or it's tombstoned — don't recompile/revive
           # a soft-deleted app's source touched during the recovery window.
-        if skip_unchanged_entry and app.jsx_source == jsx_source:
+        has_pending_update = (
+          source_dir_path / ".git" / "mobius-pending-update" / "receipt.json"
+        ).is_file()
+        if skip_unchanged_entry and app.jsx_source == jsx_source and not has_pending_update:
           return  # Already compiled — nothing to do.
         app_id = app.id
         async with (
@@ -223,13 +309,16 @@ class _JsxHandler(FileSystemEventHandler):
           )
           if app is None or app.deleted_at is not None or app.source_dir != source_dir:
             return
+          has_pending_update = (
+            source_dir_path / ".git" / "mobius-pending-update" / "receipt.json"
+          ).is_file()
           try:
             jsx_source = index_path.read_text(encoding="utf-8")
           except FileNotFoundError:
             return
           if not jsx_source.strip():
             return
-          if skip_unchanged_entry and app.jsx_source == jsx_source:
+          if skip_unchanged_entry and app.jsx_source == jsx_source and not has_pending_update:
             return
           # Hold the PRIOR version entirely while a conflicting update is
           # unresolved. `index.jsx` may well compile (the conflict can be in
@@ -239,31 +328,135 @@ class _JsxHandler(FileSystemEventHandler):
           # that an update finalizes (recompile/swap AND commit) only when no
           # tracked file has unresolved conflicts. commit_local refuses the
           # commit on its own; bailing here also blocks the bundle swap.
-          if (
-            app_git.is_repo(source_dir)
-            and await asyncio.to_thread(
+          merge_in_progress = (
+            source_dir_path / ".git" / "MERGE_HEAD"
+          ).exists()
+          if app_git.is_repo(source_dir):
+            if merge_in_progress:
+              # Marker-free text is a positive resolution signal; commit_local
+              # stages it and performs the final all-tracked marker scan. Binary
+              # conflicts have no marker proof and remain gated until the agent
+              # explicitly stages them.
+              if await asyncio.to_thread(
+                app_git.has_conflict_markers, source_dir,
+              ) or await asyncio.to_thread(
+                app_git.has_unresolved_binary_conflicts, source_dir,
+              ):
+                return
+            elif await asyncio.to_thread(
               app_git.has_unresolved_conflicts, source_dir,
+            ):
+              return
+          pending_receipt = None
+          if app_git.is_repo(source_dir) and (merge_in_progress or has_pending_update):
+            # A resolver is finishing a previously blocked Store update. It may
+            # commit the resolved source, but it must not publish a new bundle,
+            # static tree, or DB metadata piecemeal. The canonical installer
+            # below promotes all of those together after verifying the receipt.
+            from app import install
+            pending_receipt = install.read_pending_conflict_update_receipt(
+              source_dir,
+              app_id=app.id,
+              upstream_commit=app.upstream_commit,
             )
-          ):
-            return
-          try:
-            await recompile_app_bundle(db, app, jsx_source)
-            if app_git.is_repo(source_dir):
+            if pending_receipt is None:
+              summary = "Pending update receipt is missing or no longer matches."
+              db.rollback()
+              _publish_app_build_failed(
+                app_id=app.id, app_name=app.name, summary=summary,
+              )
+              return
+            if merge_in_progress:
               try:
-                await asyncio.to_thread(
-                  app_git.commit_local, source_dir, "agent edit",
+                committed = await asyncio.to_thread(
+                  app_git.commit_local, source_dir, "resolve app update",
                 )
-              except subprocess.CalledProcessError as exc:
-                log.info(
-                  "auto-recompile: git commit skipped for %s: %s",
+              except Exception as exc:
+                log.warning(
+                  "auto-recompile: resolved update commit failed for %s: %s",
                   changed_path, exc,
                 )
-          except RuntimeError as exc:
-            log.warning(
-              "auto-recompile: compile failed for %s: %s", changed_path, exc,
+                _publish_app_build_failed(
+                  app_id=app.id,
+                  app_name=app.name,
+                  summary=_summarize_app_build_failure(exc),
+                )
+                return
+              if committed is None or await asyncio.to_thread(
+                app_git.merge_in_progress, source_dir,
+              ):
+                _publish_app_build_failed(
+                  app_id=app.id,
+                  app_name=app.name,
+                  summary="Resolved update could not finalize its source merge.",
+                )
+                return
+          if pending_receipt is None:
+            try:
+              await recompile_app_bundle(db, app, jsx_source)
+              if app_git.is_repo(source_dir):
+                try:
+                  await asyncio.to_thread(
+                    app_git.commit_local, source_dir, "agent edit",
+                  )
+                except subprocess.CalledProcessError as exc:
+                  log.info(
+                    "auto-recompile: git commit skipped for %s: %s",
+                    changed_path, exc,
+                  )
+            except RuntimeError as exc:
+              summary = _summarize_app_build_failure(exc)
+              failure = {
+                "app_id": app.id,
+                "app_name": app.name,
+                "summary": summary,
+              }
+              log.warning(
+                "auto-recompile: compile failed for %s: %s", changed_path, exc,
+              )
+              db.rollback()
+              _publish_app_build_failed(**failure)
+              return
+          replay_app_id = app.id
+          replay_app_name = app.name
+          replay_upstream_commit = app.upstream_commit
+        if pending_receipt is not None:
+          # Re-enter the canonical installer while the lifecycle lock is still
+          # held but the inner app/source locks are released. The old DB source,
+          # bundle, static files, icon, and capabilities remain live until this
+          # exact-candidate replay reaches its normal commit/promotion boundary.
+          from app import install
+          try:
+            reapplied, reapplied_mode, reapply_warnings, *_ = (
+              await install.install_from_manifest(
+                db,
+                manifest_url=None,
+                manifest=pending_receipt["manifest"],
+                raw_base=pending_receipt["raw_base"],
+                source="store",
+                reviewed_capability_digest=pending_receipt["capability_digest"],
+                expected_app_id=replay_app_id,
+                expected_upstream_commit=replay_upstream_commit,
+                expected_candidate_digest=pending_receipt["candidate_digest"],
+              )
             )
+          except Exception as exc:
             db.rollback()
+            log.warning(
+              "resolved update replay failed for app %s: %s",
+              replay_app_id, exc,
+            )
+            _publish_app_build_failed(
+              app_id=replay_app_id,
+              app_name=replay_app_name,
+              summary=_summarize_app_build_failure(exc),
+            )
             return
+          if reapplied.id != replay_app_id or reapplied_mode != "update":
+            raise RuntimeError("resolved update replay targeted the wrong app")
+          for warning in reapply_warnings:
+            log.warning("resolved update %s: %s", replay_app_id, warning)
+          app = reapplied
         log.info(
           "auto-recompiled app id=%s name=%s", app.id, app.name,
         )
@@ -278,22 +471,16 @@ class _JsxHandler(FileSystemEventHandler):
         # same callback) — so an extra fan-out to every active
         # ChatBroadcast (the v1 design preserved this as "intentional")
         # was redundant, not load-bearing. Ticket 033 removed it.
-        from app.broadcast import get_broadcast, get_system_broadcast
+        from app.broadcast import get_system_broadcast
         event = {"type": "app_updated", "appId": str(app.id)}
         get_system_broadcast().publish(event)
-        # Chat-scoped CTA: if this edit landed during the building chat's
-        # turn, fire `app_built` onto only that chat's stream so the
-        # "Open app" CTA shows in the right chat (and nowhere else). The
-        # global `app_updated` above stays list-refresh-only. No-op when
-        # the app has no owning chat or that chat isn't streaming. See
-        # routes/notify.publish_app_built_to_owning_chat for the rationale.
-        if app.chat_id:
-          bc = get_broadcast(str(app.chat_id))
-          if bc is not None and bc.running:
-            bc.publish({"type": "app_built", "appId": str(app.id)})
+        # The built-app "Open app" CTA is now DERIVED on the frontend from the
+        # apps query's chat_id + updated_at (Shell.builtAppState), so a bumped
+        # updated_at + this app_updated refetch surface the CTA in the owning
+        # chat with no separate app_built event to publish here.
       except Exception:
         # Watcher must keep running across any single-event failure.
-        log.exception("auto-recompile unexpected error for %s", path)
+        log.exception("auto-recompile unexpected error for %s", changed_path)
         try:
           db.rollback()
         except Exception:
@@ -326,5 +513,20 @@ def start_watcher(
       observer.schedule(handler, str(root), recursive=True)
       watched.append(str(root))
   observer.start()
+  # A process restart can happen after the agent saved a marker-free
+  # resolution but before the debounce fired. Polling establishes its baseline
+  # from the already-resolved bytes and would never emit that old change, so
+  # explicitly revisit every in-progress merge once at startup. Unresolved
+  # merges safely no-op at the hard gate; resolved ones finish and replay their
+  # pending install receipt.
+  for root in _source_roots():
+    if not root.is_dir():
+      continue
+    for repo in root.iterdir():
+      if (
+        (repo / ".git" / "MERGE_HEAD").exists()
+        or (repo / ".git" / "mobius-pending-update" / "receipt.json").is_file()
+      ):
+        handler._schedule(str(repo / _INDEX_JSX))
   log.info("app watcher started on %s", ", ".join(watched))
   return observer, handler

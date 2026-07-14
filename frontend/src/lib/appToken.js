@@ -26,13 +26,36 @@
  * Once a usable token has been resolved, keep it: a transient `online === true`
  * blip must not revoke a token we already legitimately chose and tear down the
  * live app. The latch only ever holds a value the live selection itself
- * produced (an app-scoped token while genuinely online, or the owner JWT once
- * reachability reported offline) — so it does NOT weaken the security intent of
- * "never substitute the owner JWT during a real online session." Callers reset
+ * produced (a fresh app-scoped token while online, or a still-valid persisted
+ * app-scoped token while offline). The owner's login token is never considered.
+ * Callers reset
  * the latch (pass latched = undefined) when the iframe is torn down for a real
  * reason (different appId or version bump) so a new app can't inherit the
  * previous one's token.
  */
+import { clearCachedAppTokens } from './appFrameStorage.js'
+
+const APP_TOKEN_REFRESH_SKEW_MS = 5 * 60_000
+const APP_TOKEN_MIN_REFRESH_MS = 30_000
+const APP_TOKEN_FALLBACK_REFRESH_MS = 5 * 60_000
+
+// React Query calls this after every successful mint. Refresh shortly before
+// the JWT's actual expiry instead of relying on a fixed cache lifetime; hidden
+// AppCanvas siblings can remain mounted for days in the shell LRU.
+export function appTokenRefreshInterval(token, now = Date.now()) {
+  try {
+    const encoded = String(token || '').split('.')[1]
+    if (!encoded) return APP_TOKEN_FALLBACK_REFRESH_MS
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+    const expiresAt = Number(payload.exp) * 1000
+    if (!Number.isFinite(expiresAt)) return APP_TOKEN_FALLBACK_REFRESH_MS
+    return Math.max(APP_TOKEN_MIN_REFRESH_MS, expiresAt - now - APP_TOKEN_REFRESH_SKEW_MS)
+  } catch {
+    return APP_TOKEN_FALLBACK_REFRESH_MS
+  }
+}
+
 
 /**
  * The live (un-latched) token choice for this render.
@@ -40,19 +63,18 @@
  *   • online  → wait for the app-scoped token; never substitute the owner JWT
  *     (keeps the long-lived owner JWT out of the module URL during a genuine
  *     online session).
- *   • offline → fall back to the owner JWT so a fully-cached offline-capable
- *     app still boots. The iframe is same-origin and can already read this JWT
- *     (documented sandbox trade-off), so passing it is not a new exposure.
+ *   • offline → use a persisted, still-valid token for this exact app so a
+ *     fully-cached offline-capable app can boot without exposing owner auth.
  *
  * @param {string|undefined|null} appToken app-scoped token, or falsy if none
  * @param {boolean} online real reachability (NOT navigator.onLine)
- * @param {string|undefined|null} ownerToken owner JWT from localStorage
+ * @param {string|undefined|null} cachedAppToken persisted token for this app
  * @returns {string|undefined} the token to use this render, or undefined
  */
-export function liveAppToken(appToken, online, ownerToken) {
+export function liveAppToken(appToken, online, cachedAppToken) {
   if (appToken) return appToken
   if (online) return undefined
-  return ownerToken || undefined
+  return cachedAppToken || undefined
 }
 
 /**
@@ -124,6 +146,7 @@ export function resolveLatchedToken(appId, version, liveToken, appToken) {
 // the SW caches client.js wipes).
 export function clearLatchedTokens() {
   _latchStore.clear()
+  clearCachedAppTokens()
 }
 
 // Test-only alias.

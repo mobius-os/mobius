@@ -9,11 +9,30 @@ cd "$ROOT"
 err() { printf 'land: %s\n' "$*" >&2; }
 info() { printf 'land: %s\n' "$*"; }
 
+check_private_history() {
+  local ref="${1:-HEAD}"
+  local commits
+  commits="$(git rev-list "$ref" -- \
+    docs demo-logs .claude .pm AGENTS.md CLAUDE.md 2>/dev/null || true)"
+  if [ -n "$commits" ]; then
+    err "refusing to land history containing private workspace paths from ${ref}:"
+    git log -n 8 --format='    %h %s' "$ref" -- \
+      docs demo-logs .claude .pm AGENTS.md CLAUDE.md >&2
+    err "deleting a path later is insufficient; purge it from reachable history"
+    err "this privacy gate must not be bypassed"
+    return 1
+  fi
+}
+
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 if [ -z "$branch" ]; then
   err "detached HEAD; check out a session branch before landing"
   exit 2
 fi
+
+# This must run before the preservation push below. Otherwise the backup ref
+# intended to protect work could itself publish private workspace material.
+check_private_history HEAD
 
 dirty="$(git status --porcelain)"
 if [ -n "$dirty" ]; then
@@ -62,6 +81,10 @@ if [ -n "$dirty" ]; then
   git status --short >&2
   exit 1
 fi
+
+# Rebase can introduce paths from the updated base. Re-check the exact tree
+# that will be sent to main.
+check_private_history HEAD
 
 info "pushing HEAD to main with normal fast-forward semantics"
 if git push origin HEAD:main; then

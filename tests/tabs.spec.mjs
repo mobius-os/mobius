@@ -1,0 +1,174 @@
+/**
+ * Tab-strip tests for the shell.
+ *
+ * Tabs pin chats/apps to a strip; switching a tab is ordinary navTo, so the
+ * back button rides the existing navStack. The strip shrinks .shell__content
+ * by one row; the chat re-measures its spacer on the next layout event, and —
+ * deliberately — does NOT remount (a remount would reset the send-reservation
+ * and freeze stream-follow; see card 220).
+ *
+ * Runs against the deployed app with agent + apps routes intercepted — no
+ * agent tokens consumed.
+ *
+ * Run: MOBIUS_URL=http://localhost:8079 npx playwright test tests/tabs.spec.mjs --project=tests
+ */
+import { test, expect } from '@playwright/test'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+
+const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const APP_ID = 990001
+
+attachCleanup()
+
+/** Mock agent routes, boot the shell (so localStorage/auth is reachable on
+ *  the app origin), and create a worker-tagged chat. Returns the chat. */
+async function bootAndCreateChat(page, label, viewport = { width: 412, height: 915 }) {
+  await page.setViewportSize(viewport)
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
+  await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
+    { timeout: 10000 })
+  const chat = await createTaggedChat(page, label)
+  return chat
+}
+
+/** Make the apps list report one app owned by `chatId`, plus a stubbed frame
+ *  so the app iframe mounts cheaply. */
+async function mockOwnedApp(page, chatId) {
+  await page.route(/\/api\/apps\/(\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{
+        id: APP_ID, name: 'Demo App', description: '', compiled_path: '',
+        chat_id: chatId, source_dir: null, pinned_at: null,
+        cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
+        updated_at: '2026-07-12T12:00:00Z',
+      }]),
+    })
+  })
+  await page.route(new RegExp(`/api/apps/${APP_ID}/frame`), route => route.fulfill({
+    status: 200, contentType: 'text/html',
+    body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
+  }))
+}
+
+async function sendMessage(page, text) {
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  await input.fill(text)
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))))
+}
+
+async function measure(page) {
+  return page.evaluate(() => {
+    const content = document.querySelector('.shell__content')
+    const chat = document.querySelector('.chat')
+    const scroll = document.querySelector('.chat__scroll')
+    const spacer = document.querySelector('.spacer-dynamic')
+    return {
+      contentH: content?.offsetHeight || 0,
+      chatH: chat?.offsetHeight || 0,
+      scrollClientH: scroll?.clientHeight || 0,
+      spacerH: parseInt(spacer?.style.height) || 0,
+    }
+  })
+}
+
+async function seedTabs(page, tabs) {
+  await page.addInitScript(([key, t]) => {
+    try { sessionStorage.setItem(key, JSON.stringify(t)) } catch { /* private mode */ }
+  }, ['mobius-open-tabs', tabs])
+}
+
+test.describe('Tabs', () => {
+  test('strip shows pinned tabs, switches, closes, and keeps the spacer sane', async ({ page }) => {
+    const chat = await bootAndCreateChat(page, 'tabs')
+    await mockOwnedApp(page, chat.id)
+    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
+
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await sendMessage(page, 'build me a thing')
+
+    // Strip renders both tabs; exactly one (the current chat) is active.
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(1)
+    await expect(page.locator('.shell__tab')).toHaveCount(2)
+    await expect(page.locator('.shell__tab--active')).toHaveCount(1)
+    await expect(page.locator('.shell__tab', { hasText: 'Demo App' })).toHaveCount(1)
+
+    // With the strip present, the chat spacer must not exceed the pane.
+    await page.waitForTimeout(200)
+    const withStrip = await measure(page)
+    expect(withStrip.spacerH).toBeLessThanOrEqual(withStrip.scrollClientH)
+
+    // Tap the app tab — ordinary navigation to the canvas view.
+    await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open').click()
+    await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 3000 })
+
+    // Tap the chat tab (the one that is NOT the app) — back to the chat.
+    await page.locator('.shell__tab:not(:has-text("Demo App")) .shell__tab-open').click()
+    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+
+    // Close the app tab — one fewer tab, strip stays.
+    await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-close').click()
+    await expect(page.locator('.shell__tab')).toHaveCount(1)
+
+    // Close the last tab — strip disappears, chat back to full height, spacer sane.
+    await page.locator('.shell__tab-close').first().click()
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
+    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+    await page.waitForTimeout(300)
+    const noStrip = await measure(page)
+    expect(noStrip.chatH / noStrip.contentH).toBeGreaterThan(0.9)
+    expect(noStrip.spacerH).toBeLessThanOrEqual(noStrip.scrollClientH)
+  })
+
+  test('no toggle/strip surface when nothing is pinned', async ({ page }) => {
+    const chat = await bootAndCreateChat(page, 'notabs')
+    await mockOwnedApp(page, chat.id)
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await sendMessage(page, 'just a chat')
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
+    // The parked split view left no toggle behind.
+    await expect(page.locator('.shell__split-toggle')).toHaveCount(0)
+  })
+
+  // Regression for the review's HIGH finding: an app opened numerically (drawer/
+  // deep-link) then re-opened via its tab (string id) must not double-mount —
+  // the LRU dedups on strict !==, so a string id would sit beside the number.
+  test('switching to an app tab does not double-mount the iframe', async ({ page }) => {
+    const chat = await bootAndCreateChat(page, 'dup')
+    await mockOwnedApp(page, chat.id)
+    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
+
+    const keyErrors = []
+    page.on('console', m => {
+      if (m.type() === 'error' && /same key|two children/i.test(m.text())) keyErrors.push(m.text())
+    })
+
+    // Open the app numerically first — appCache holds a Number id.
+    await page.goto(`${BASE}/shell/?app=${APP_ID}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 5000 })
+
+    // Switch to the chat tab (wait for it to settle), then back to the app tab
+    // (string id → Number()). Waiting between taps keeps the sequence
+    // deterministic under multi-worker load.
+    await page.locator('.shell__tab:not(:has-text("Demo App")) .shell__tab-open').click()
+    await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
+    await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open').click()
+    await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 3000 })
+    await page.waitForTimeout(400)
+
+    // Exactly one iframe wrapper for the single app — no string/number duplicate.
+    await expect(page.locator('.shell__view')).toHaveCount(1)
+    expect(keyErrors, keyErrors.join('\n')).toHaveLength(0)
+  })
+})

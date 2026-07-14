@@ -69,26 +69,9 @@ class Settings(BaseSettings):
   # concern, not a today one.
   github_oauth_client_id: str = "Ov23liMpOLS6qp5YV8Vk"
 
-  # Auto memory-search: on a substantive FIRST message of a chat, the platform
-  # runs the memory-search subagent (scripts/memory_search.py) and injects its
-  # result into the <agent_experience> block — so deep recall happens without
-  # the agent remembering to call it (it empirically routes around the
-  # instruction). OFF by default: it adds the search's latency (up to the
-  # timeout) to the first reply and spends tokens, so it's an owner opt-in.
-  auto_memory_search: bool = False
-  # Seconds to wait for the auto-search before proceeding without it. A miss
-  # never fails the turn — the agent just gets the normal injected block. The
-  # subagent traversal takes ~35-45s, so this is the dead latency added to the
-  # FIRST reply when the flag is on; that latency (vs the agent narrating while
-  # it runs its own search) is the main reason this path is off by default.
-  auto_memory_search_timeout: int = 60
-
-  # Ensure every settled chat has a current per-chat memory note. The agent is
-  # told to maintain chats/<id>/index.md every turn but does so VARIABLY; when a
-  # turn settles and the agent left the note untouched, the platform fires a
-  # tool-free summarizer (scripts/chat_note.py) to write it. ON by default: it
-  # runs at TURN-END (after the reply is sent → no user-facing latency) and only
-  # when the agent skipped the note, so the cost is bounded to the skipped turns.
+  # Ensure every settled chat has a current platform-owned summary note. The
+  # tool-free publisher (scripts/chat_note.py) runs at turn-end after the reply
+  # is sent, so it adds no user-facing latency. No chat agent writes these files.
   ensure_chat_note: bool = True
 
   model_config = SettingsConfigDict(env_file=".env")

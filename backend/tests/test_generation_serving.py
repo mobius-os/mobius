@@ -207,12 +207,14 @@ def fw_dirs(tmp_path, monkeypatch):
   dirs = {
     "frontend": frontend,
     "dist": frontend / "dist",
+    "staging": frontend / ".dist-staging",
     "next": frontend / ".dist-next",
     "old": frontend / ".dist-old",
     "attic": frontend / ".assets-attic",
   }
   monkeypatch.setattr(fw, "_FRONTEND_DIR", frontend)
   monkeypatch.setattr(fw, "_DIST_DIR", dirs["dist"])
+  monkeypatch.setattr(fw, "_STAGING_DIST_DIR", dirs["staging"])
   monkeypatch.setattr(fw, "_NEXT_DIST_DIR", dirs["next"])
   monkeypatch.setattr(fw, "_OLD_DIST_DIR", dirs["old"])
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
@@ -264,8 +266,19 @@ def test_attic_prunes_to_keep_three_generations(fw_dirs):
   assert not (attic / "gen-2").exists()
 
 
-def test_attic_dir_is_in_the_watcher_ignore_set():
-  # attic writes must never re-trigger a rebuild.
-  assert ".assets-attic" in fw._IGNORED_PARTS
-  path = str(fw._FRONTEND_DIR / ".assets-attic" / "gen-1" / "assets" / "x.js")
-  assert not fw._is_frontend_source_path(path)
+def test_publish_reads_only_the_staging_generation(fw_dirs):
+  # The source watcher is Vite now; Python publishes only the staging tree.
+  # Attic content must never be copied forward into the next live generation.
+  dist, staging, attic = (
+    fw_dirs["dist"], fw_dirs["staging"], fw_dirs["attic"]
+  )
+  _fw_build(staging, "g1")
+  (attic / "gen-1" / "assets").mkdir(parents=True)
+  (attic / "gen-1" / "assets" / "stale.js").write_text(
+    "// stale", encoding="utf-8",
+  )
+
+  fw._publish_built_dir(staging, "test")
+
+  assert (dist / "assets" / "index-g1.js").is_file()
+  assert not (dist / "assets" / "stale.js").exists()

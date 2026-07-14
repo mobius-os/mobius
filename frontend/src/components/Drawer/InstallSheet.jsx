@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { detectInstallPlatform } from '../../utils/installPlatform.js'
 import './InstallSheet.css'
 
@@ -52,6 +53,8 @@ async function fileToSquarePng(file, size = 512) {
 export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, onClose }) {
   const queryClient = useQueryClient()
   const fileRef = useRef(null)
+  const cardRef = useRef(null)
+  const primaryFocusRef = useRef(null)
   const [draftName, setDraftName] = useState(appName || '')
   const [iconBlob, setIconBlob] = useState(null)
   const [iconPreview, setIconPreview] = useState(null) // object URL or null
@@ -75,14 +78,17 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
     }
   }, [iconPreview])
 
-  // Escape closes (unless mid-submit, where navigation is imminent).
+  useDialogFocus({
+    containerRef: cardRef,
+    initialFocusRef: primaryFocusRef,
+    onClose: () => { if (!submitting) onClose?.() },
+  })
+
+  // The iOS path replaces the form after saving. Move focus into its new
+  // confirmation action instead of leaving focus on an unmounted Continue.
   useEffect(() => {
-    function onKey(e) {
-      if (e.key === 'Escape' && !submitting) onClose?.()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [submitting, onClose])
+    if (iosInstructions) queueMicrotask(() => primaryFocusRef.current?.focus())
+  }, [iosInstructions])
 
   // onContinue navigates the whole document away and intentionally leaves
   // `submitting` true (the page is leaving). BFCache can restore this page
@@ -165,10 +171,12 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
       onClick={() => { if (!submitting) onClose?.() }}
     >
       <div
+        ref={cardRef}
         className="is__card"
         role="dialog"
         aria-modal="true"
         aria-label="Add to home screen"
+        tabIndex={-1}
         onClick={e => e.stopPropagation()}
       >
         {iosInstructions ? (
@@ -191,6 +199,7 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
             )}
             <div className="is__actions">
               <button
+                ref={primaryFocusRef}
                 type="button"
                 className="is__btn is__btn--primary"
                 onClick={() => onClose?.()}
@@ -230,6 +239,7 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
           <div className="is__fields">
             <label className="is__field-label" htmlFor="is-name">Name</label>
             <input
+              ref={primaryFocusRef}
               id="is-name"
               className="is__name-input"
               type="text"

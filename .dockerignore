@@ -3,8 +3,12 @@
 README.md
 SECURITY.md
 CONTRIBUTING.md
+AGENTS.md
 CLAUDE.md
-docs/
+docs
+demo-logs
+.claude
+.pm
 assets/
 apps/
 node_modules/

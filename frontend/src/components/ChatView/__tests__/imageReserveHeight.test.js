@@ -4,8 +4,8 @@
  * them and yank the scroll position (CLS).
  *
  * The chat scroll contract disables Chrome's scroll anchoring
- * (`overflow-anchor: none` on `.chat__scroll`, see CLAUDE.md "Chat UX —
- * non-negotiable constraints") so the browser does NOT compensate for a
+ * (`overflow-anchor: none` on `.chat__scroll`, see ARCHITECTURE.md's
+ * "Chat scroll + steer contract") so the browser does NOT compensate for a
  * height change above the viewport. That makes any image that changes height
  * after first layout a visible jump. Two mechanisms keep image height stable:
  *
@@ -40,6 +40,7 @@ import { dirname, resolve } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const markdownCss = readFileSync(resolve(here, '../markdown.css'), 'utf8')
 const chatViewCss = readFileSync(resolve(here, '../ChatView.css'), 'utf8')
+const inlineContentJsx = readFileSync(resolve(here, '../markdown/InlineContent.jsx'), 'utf8')
 
 /** Extract the body `{ ... }` of the first rule whose selector list contains
  *  `selector`. Brace-counting so nested at-rules don't trip a naive regex. */
@@ -105,12 +106,40 @@ describe('chat messages must NOT use content-visibility (it clamps the pin-scrol
   // scroll write (useScrollMode) is clamped and the 2nd+ user message lands
   // mid-screen instead of pinned to the top. Added as a phone-scroll perf hint
   // (2459dff), it regressed the pin both times it was present. The pin is a
-  // non-negotiable chat-UX invariant (CLAUDE.md), so the hint stays out.
+  // non-negotiable architecture contract, so the hint stays out.
   test('ChatView.css declares no content-visibility on chat messages', () => {
     // strip CSS comments so the prose explaining the removal does not count
     const cssNoComments = chatViewCss.replace(/\/\*[\s\S]*?\*\//g, '')
     assert.doesNotMatch(cssNoComments, /content-visibility/,
       'content-visibility on .chat__msg clamps the pin-scroll so 2nd+ sends are ' +
       'no longer pinned to top — do not re-add it (see useScrollMode PIN_USER_MSG)')
+  })
+})
+
+describe('ExpandableImage reserves the frame BEFORE the token resolves (lever 3)', () => {
+  // Strip comments so prose describing the old behavior does not match.
+  const src = inlineContentJsx.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+
+  test('does not early-return null on a missing resolvedSrc (that inserted the frame late)', () => {
+    assert.doesNotMatch(src, /if\s*\(\s*!resolvedSrc\s*\)\s*return\s+null/,
+      'returning null until resolvedSrc let the whole .md-image-frame insert late and ' +
+      'shove the surrounding text — the box must be reserved during the async token hop')
+  })
+
+  test('guards only the render on an INVALID href (rawSrc), reserving the frame otherwise', () => {
+    assert.match(src, /if\s*\(\s*!rawSrc\s*\)\s*return\s+null/,
+      'a blocked/empty href renders nothing, but a valid-but-unresolved href still reserves its frame')
+  })
+
+  test('the <img> element is gated on resolvedSrc while the frame is not', () => {
+    // The frame span is unconditional; the img swaps in once resolvedSrc lands.
+    assert.match(src, /resolvedSrc\s*&&\s*\(?\s*<img/,
+      'the <img> must render only once resolvedSrc is ready, inside an always-present frame')
+  })
+
+  test('seeds first-paint aspect ratio from known dims (parseImageDims/imageVarsFromDims)', () => {
+    assert.match(src, /parseImageDims/,
+      'known dimensions carried in the markup must seed --md-image-ratio on the first paint')
+    assert.match(src, /imageVarsFromDims/)
   })
 })

@@ -18,7 +18,7 @@ test('summarizes Vite parser errors from noisy build output', () => {
   assert.equal(summarizeShellRebuildFailure(output), 'Unexpected "<<"')
   assert.equal(
     shellRebuildFailureMessage({ error: output }),
-    'Shell rebuild failed: Unexpected "<<"',
+    'Shell rebuild failed: Unexpected "<<". Previous shell is still running.',
   )
 })
 

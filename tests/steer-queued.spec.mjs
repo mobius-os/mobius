@@ -6,8 +6,9 @@
  * mid-turn flush, and it HARD-interrupts. This feature adds a
  * fast-forward button that STEERS the queued messages into the LIVE turn
  * at the next natural boundary via POST /messages with
- * `force_steer:true` + `consume_pending_ts` (backend contract in
- * routes/chats_stream.py `_force_steer_matches_pending`).
+ * `force_steer:true` + `consume_pending_cids` (backend contract in
+ * routes/chats_stream.py `_selected_force_steer_pending` — cid selection,
+ * no content byte-match).
  *
  * This spec mocks the network (no live backend), mirroring the
  * route-mock style of second-send-pin.spec.mjs + handleStop-sync-
@@ -15,7 +16,7 @@
  *   (a) the fast-forward button appears (replacing Stop) once a message
  *       is queued AND server-confirmed during streaming,
  *   (b) pressing it POSTs force_steer:true with the right
- *       consume_pending_ts + the exact "\n\n"-joined content,
+ *       consume_pending_cids + the exact "\n\n"-joined content,
  *   (c) the queued tray clears on a {status:"steered"} response.
  *
  * Run: npx playwright test tests/steer-queued.spec.mjs
@@ -64,10 +65,17 @@ async function sendMessage(page, text) {
   await page.keyboard.press('Enter')
 }
 
+// The real service worker claims the page ~1s after load; from then on its
+// fetch() handler bypasses page.route, so the mocked /messages + /stream
+// contracts silently fall through to the real backend and the mock's steer
+// events never arrive (the app-canvas spec hit the identical class). These
+// tests mock the network and do not exercise SW behavior, so block it.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('fast-forward button appears, POSTs force_steer with the right payload, and clears the tray', async ({ page }) => {
     // The server-assigned ts the queueOnly POST hands back. The steer's
-    // consume_pending_ts must equal [QUEUE_TS] and its content must equal
+    // consume_pending_cids must equal [queued cid] and its content must equal
     // the queued message's trimmed content (single message → no join).
     const QUEUE_TS = 777001
     const QUEUED_TEXT = 'queued message to steer'
@@ -103,7 +111,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
 
       // Second send while streaming: the queue path. Return a SERVER ts so
-      // swapOptimisticTs clears the in-flight flag — only then is the entry
+      // confirmQueued clears the in-flight flag — only then is the entry
       // steer-eligible (canSteer requires a confirmed server ts).
       return route.fulfill({
         status: 202,
@@ -143,7 +151,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     )
 
     // (a) Once the queue entry is server-confirmed (the queueOnly POST
-    // returned a server ts → swapOptimisticTs cleared the in-flight flag),
+    // returned a server ts → confirmQueued cleared the in-flight flag),
     // the Stop square is swapped for the fast-forward (steer) button.
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
@@ -159,8 +167,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     const steerPost = messagePosts.find(b => b.force_steer)
     expect(steerPost.force_steer).toBe(true)
-    // consume_pending_ts is exactly the queued entry's server ts.
-    expect(steerPost.consume_pending_ts).toEqual([QUEUE_TS])
+    // consume_pending_cids is exactly the queued row's stable cid (minted
+    // client-side and echoed on the queue POST body).
+    const queuePost = messagePosts.find(b => !b.force_steer && b.content === QUEUED_TEXT)
+    expect(typeof queuePost.cid).toBe('string')
+    expect(steerPost.consume_pending_cids).toEqual([queuePost.cid])
     // content is the queued message's trimmed content (single msg, no join).
     expect(steerPost.content).toBe(QUEUED_TEXT)
 
@@ -174,9 +185,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   })
 
   test('two queued messages steer with the exact "\\n\\n"-joined content', async ({ page }) => {
-    // Verifies the content-join contract the backend enforces byte-for-byte
-    // in _force_steer_matches_pending: the non-empty trimmed contents joined
-    // by "\n\n", in pending order, with consume_pending_ts = both ts.
+    // Verifies the frontend content join sent to the provider steer: the
+    // non-empty trimmed contents joined
+    // by "\n\n", in pending order, with consume_pending_cids = both cids.
     const TS1 = 880001
     const TS2 = 880002
     const TEXT1 = 'first queued'
@@ -243,11 +254,14 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     ).toBe(1)
 
     const steerPost = messagePosts.find(b => b.force_steer)
-    expect(steerPost.consume_pending_ts).toEqual([TS1, TS2])
+    // consume_pending_cids is the two queued rows' cids, in pending order.
+    const cid1 = messagePosts.find(b => !b.force_steer && b.content === TEXT1).cid
+    const cid2 = messagePosts.find(b => !b.force_steer && b.content === TEXT2).cid
+    expect(steerPost.consume_pending_cids).toEqual([cid1, cid2])
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
 
-  test('a steer does NOT wipe the live stream (pre-steer text survives, no reconnect flash)', async ({ page }) => {
+  test('a steer preserves the live stream and held scroll position', async ({ page }) => {
     // Regression for bug #1: a force_steer must inject into the LIVE turn,
     // not trigger the fresh-send reset. The old code ran sendMessage's
     // "new turn" reset (setStreamItems([]) + setIsStreaming + reconnect) for
@@ -260,7 +274,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     //   - no second /stream connection is opened (no reconnect flash),
     //   - after the steered_into_turn SSE event the steered user row renders
     //     inline and the pre-steer text is sealed as an assistant message.
-    const QUEUE_TS = 990001
+    const QUEUE_TS = Date.now() + 60_000
     const QUEUED_TEXT = 'steer me in'
     const PRE_STEER = 'thinking out loud before the steer'
     const POST_STEER = 'continuing after the steered message'
@@ -319,16 +333,24 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
                 { type: 'catch_up_done' },
                 { type: 'text', content: preSteer },
               ]))
-              emitSteer = () => {
+              emitSteer = (steeredMessages = []) => {
+                const messages = Array.isArray(steeredMessages) && steeredMessages.length > 0
+                  ? steeredMessages
+                  : [{ role: 'user', ts: queueTs, cid: `legacy-${queueTs}`, content: queuedText }]
                 controller.enqueue(encodeSse([
-                  { type: 'steered_into_turn', ts: queueTs, content: queuedText },
+                  {
+                    type: 'steered_into_turn',
+                    ts: queueTs,
+                    content: queuedText,
+                    messages,
+                  },
                   { type: 'text', content: postSteer },
                 ]))
               }
             },
             cancel() {},
           })
-          window.__steerQueuedStreamMock.emitSteer = () => emitSteer?.()
+          window.__steerQueuedStreamMock.emitSteer = messages => emitSteer?.(messages)
           return new Response(body, {
             status: 200,
             headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -353,11 +375,34 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await sendMessage(page, QUEUED_TEXT)
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
+    const heldBeforeSteer = await page.evaluate(() => {
+      const scroll = document.querySelector('.chat__scroll')
+      const firstUser = document.querySelector('.chat__msg--user')
+      if (!scroll || !firstUser) return null
+      return {
+        scrollTop: scroll.scrollTop,
+        clientHeight: scroll.clientHeight,
+        anchorKey: firstUser.dataset.key,
+        firstUserVisualTop: firstUser.getBoundingClientRect().top
+          - scroll.getBoundingClientRect().top,
+      }
+    })
+    expect(heldBeforeSteer).not.toBeNull()
     await steerBtn.click()
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
     ).toBe(1)
-    await page.evaluate(() => window.__steerQueuedStreamMock?.emitSteer?.())
+    const steerPost = messagePosts.find(b => b.force_steer)
+    const steeredMessages = [{
+      role: 'user',
+      ts: QUEUE_TS,
+      cid: steerPost?.consume_pending_cids?.[0],
+      content: QUEUED_TEXT,
+    }]
+    await page.evaluate(
+      messages => window.__steerQueuedStreamMock?.emitSteer?.(messages),
+      steeredMessages,
+    )
 
     // CORE ASSERTION: the pre-steer text is STILL on screen right after the
     // steer resolved. Before the fix, sendMessage's fresh-send reset cleared
@@ -375,6 +420,28 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       { queuedText: QUEUED_TEXT, postSteer: POST_STEER },
       { timeout: 5000 },
     )
+    const heldAfterSteer = await page.evaluate((anchorKey) => {
+      const scroll = document.querySelector('.chat__scroll')
+      const users = document.querySelectorAll('.chat__msg--user')
+      if (!scroll || users.length < 2) return null
+      const scrollTop = scroll.getBoundingClientRect().top
+      const heldUser = Array.from(users).find(el => el.dataset.key === anchorKey)
+      const steeredUser = Array.from(users).find(el => el !== heldUser)
+      if (!heldUser || !steeredUser) return null
+      return {
+        scrollTop: scroll.scrollTop,
+        clientHeight: scroll.clientHeight,
+        anchorVisualTop: heldUser.getBoundingClientRect().top - scrollTop,
+        steeredUserVisualTop: steeredUser.getBoundingClientRect().top - scrollTop,
+      }
+    }, heldBeforeSteer.anchorKey)
+    expect(heldAfterSteer).not.toBeNull()
+    expect(
+      Math.abs(heldAfterSteer.anchorVisualTop - heldBeforeSteer.firstUserVisualTop),
+      JSON.stringify({ heldBeforeSteer, heldAfterSteer }),
+    )
+      .toBeLessThanOrEqual(8)
+    expect(heldAfterSteer.steeredUserVisualTop).toBeGreaterThan(10)
     streamConnections = await page.evaluate(
       () => window.__steerQueuedStreamMock?.connections || 0,
     )

@@ -6,33 +6,35 @@ import {
   shouldForwardChatStreamSystemEvent,
 } from '../chatSystemEvents.js'
 
-test('chat stream recognizes system events without swallowing unknown events', () => {
+test('chat stream recognizes catch-up-safe system events without swallowing unknown events', () => {
   assert.equal(isChatStreamSystemEvent('theme_updated'), true)
-  assert.equal(isChatStreamSystemEvent('shell_rebuilt'), true)
+  assert.equal(isChatStreamSystemEvent('app_updated'), true)
+  assert.equal(isChatStreamSystemEvent('build_phase'), true)
   assert.equal(isChatStreamSystemEvent('text'), false)
 })
 
-test('chat catch-up does not replay shell rebuild lifecycle events', () => {
-  for (const type of ['shell_rebuilding', 'shell_rebuilt', 'shell_rebuild_failed']) {
-    assert.equal(
-      shouldForwardChatStreamSystemEvent({ type }, { isCatchUp: true }),
-      false,
-      `${type} should be ignored during chat catch-up`,
-    )
-    assert.equal(
-      shouldForwardChatStreamSystemEvent({ type }, { isCatchUp: false }),
-      true,
-      `${type} should still forward when live`,
-    )
+test('catch-up-unsafe events never ride the chat stream (system-bus-only)', () => {
+  // These are published to the system broadcast alone, so they must not be
+  // recognized as chat-stream events at all — there is nothing to gate.
+  for (const type of [
+    'shell_rebuilding',
+    'shell_rebuilt',
+    'shell_apply_now',
+    'shell_rebuild_failed',
+    'app_build_failed',
+    'app_built',
+  ]) {
+    assert.equal(isChatStreamSystemEvent(type), false, `${type} is system-bus-only`)
+    assert.equal(shouldForwardChatStreamSystemEvent({ type }), false)
   }
 })
 
-test('chat catch-up still forwards safe chat-scoped system events', () => {
-  for (const type of ['theme_updated', 'app_updated', 'app_built', 'chat_run_started', 'chat_run_finished']) {
+test('every recognized chat-stream system event forwards (all are catch-up-safe)', () => {
+  for (const type of ['theme_updated', 'app_updated', 'build_phase', 'chat_run_started', 'chat_run_finished']) {
     assert.equal(
-      shouldForwardChatStreamSystemEvent({ type }, { isCatchUp: true }),
+      shouldForwardChatStreamSystemEvent({ type }),
       true,
-      `${type} should remain catch-up-safe`,
+      `${type} should forward`,
     )
   }
 })

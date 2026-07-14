@@ -35,9 +35,9 @@ acquires in reverse, so there is no cycle:
 
     install_uninstall_lock  ->  app_storage_lock(id)  ->  source_dir_lock(dir)
 
-``shared_skills_lock`` sits outside that chain: the installer's post-commit
-skill-sync phase takes it while (at most) the lifecycle lock is held, and no
-holder ever nests it with the keyed locks, so it cannot form a cycle.
+``shared_skills_lock`` is always innermost. Install sync takes lifecycle then
+shared; uninstall/recover release any source-dir lock before taking shared.
+No shared-skills holder ever acquires a lifecycle, app, or source lock.
 
 Multi-lock holders, all acquiring left-to-right:
 
@@ -87,9 +87,9 @@ def shared_skills_lock() -> asyncio.Lock:
   and overwriting it (one would clobber the other's snapshot decision, or
   lose a sidecar record to a stale read-modify-write). One lock for the
   whole skills dir rather than per-file: every sync rewrites the single
-  ownership sidecar anyway, and installs are infrequent owner actions, so
-  the coarse lock costs nothing. Uninstall never touches the skills dir or
-  the sidecar, so it does not participate.
+  ownership sidecar anyway, and lifecycle changes are infrequent owner
+  actions, so the coarse lock costs nothing. Uninstall/recover use the same
+  lock to move app-owned files into/out of the inactive archive.
   """
   return _shared_skills_lock
 

@@ -23,6 +23,8 @@ export default function Drawer({
   activeChatId,
   onChat,
   onApp,
+  // Open a chat/app as a pinned tab in the shell tab strip: onOpenInTab(kind, id).
+  onOpenInTab,
   onNewChat,
   onDeleteChat,
   onDeleteApp,
@@ -39,6 +41,12 @@ export default function Drawer({
   // user was elsewhere. Rendered as a steady attention dot, distinct
   // from the animated streaming dot above.
   attentionChatIds,
+  // Set of app ids that first appeared in the fetched list this session
+  // (freshly built or App-Store-installed). Rendered as the same steady
+  // accent dot as chat attention, cleared by Shell when the app is opened —
+  // an arrival cue for an app that otherwise lands silently at the bottom
+  // of the oldest-first list.
+  newAppIds,
   // Truthy when any registered provider's refresh token is no longer
   // valid. Drives a small warning dot on the Settings row — passive
   // nudge toward Reconnect, no modal, no banner.
@@ -46,6 +54,7 @@ export default function Drawer({
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
+  const newAppSet = newAppIds || EMPTY_SET
   // Pinned-first sort: pinned rows by pinned_at desc, then unpinned by
   // activity_at desc (owner-send), with updated_at as a fallback. Server
   // returns this order already (see routes/chats.py list_chats), but we
@@ -114,8 +123,7 @@ export default function Drawer({
   // wrap the state setter and update the ref inline.
   // `overlayCancelRef` is set by the overlay's pointerdown when a
   // rename is active; read by the rename-submit callback to skip
-  // the PATCH (overlay-tap = cancel, not commit) and by the
-  // overlay's click to suppress the drawer-close.
+  // the PATCH (overlay-tap = cancel, not commit).
   const renamingRef = useRef(null)
   const overlayCancelRef = useRef(false)
   const renaming = renamingState
@@ -124,19 +132,23 @@ export default function Drawer({
     setRenamingState(next)
   }
 
-  function handleOverlayPointerDown() {
-    if (renamingRef.current) overlayCancelRef.current = true
-  }
-  function handleOverlayClick() {
+  function handleOverlayPointerDown(e) {
+    // Pointerdown is the canonical dismiss event. Waiting for `click` is
+    // unreliable on touchscreens: even a tiny pan can suppress the synthetic
+    // click, leaving the drawer visibly open while the gesture scrolls the
+    // content underneath. Primary pointerdown both acknowledges the outside
+    // tap immediately and pairs with the scrim's touch-action:none contract.
+    if (e.button !== 0 || !e.isPrimary) return
     if (renamingRef.current || overlayCancelRef.current) {
-      // Overlay was tapped during a rename. The blur has already
-      // fired → onRenameSubmit will see overlayCancelRef and skip
-      // the PATCH. Here we just suppress the drawer-close.
+      // Defensive fallback for browsers that reach the overlay before the
+      // rename row's document-capture listener. Cancel the rename and let this
+      // same outside gesture close the drawer; one tap should never be needed
+      // merely to clear an intermediate drawer state.
+      overlayCancelRef.current = true
       renamingRef.current = null
-      overlayCancelRef.current = false
       setRenaming(null)
-      return
     }
+    e.preventDefault()
     onClose?.()
   }
 
@@ -387,7 +399,6 @@ export default function Drawer({
       <div
         className={`drawer-overlay ${open ? 'drawer-overlay--visible' : ''}`}
         onPointerDown={handleOverlayPointerDown}
-        onClick={handleOverlayClick}
       />
       {/* React 19 reflects the boolean `inert` prop to the boolean
           attribute (present when true, absent when false), so a closed
@@ -397,6 +408,7 @@ export default function Drawer({
           applied and focus/clicks still reached the off-screen drawer. */}
       <nav
         ref={drawerRef}
+        id="navigation-drawer"
         className={`drawer ${open ? 'drawer--open' : ''}`}
         aria-hidden={!open}
         inert={!open}
@@ -457,6 +469,7 @@ export default function Drawer({
                     if (next && next !== chat.title) renameChat(chat.id, next)
                   }}
                   onPin={(next) => pinChat(chat.id, next)}
+                  onOpenInTab={onOpenInTab ? () => onOpenInTab('chat', chat.id) : undefined}
                   onDelete={() => onDeleteChat(chat.id)}
                 />
               )) : (
@@ -484,6 +497,8 @@ export default function Drawer({
                     label={app.name}
                     slug={app.slug}
                     pinned={!!app.pinned_at}
+                    building={!!(app.chat_id && streamingSet.has(app.chat_id))}
+                    attention={newAppSet.has(Number(app.id))}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
                     onSelect={() => onApp(app.id)}
                     menuOpen={!!(openMenu && openMenu.kind === 'app' && openMenu.id === app.id)}
@@ -500,6 +515,7 @@ export default function Drawer({
                       if (next && next !== app.name) renameApp(app.id, next)
                     }}
                     onPin={(next) => pinApp(app.id, next)}
+                    onOpenInTab={onOpenInTab ? () => onOpenInTab('app', app.id) : undefined}
                     onDelete={() => onDeleteApp?.(app.id)}
                     onDeleteData={() => onDeleteAppData?.(app.id)}
                     onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
@@ -558,6 +574,11 @@ function DrawerRow({
   active,
   slug,
   streaming,
+  // App rows only: the app's owning chat is streaming, i.e. the agent is
+  // actively building/editing this app right now. Reuses the streaming
+  // dot's animation with a "Building" label so an app under construction
+  // pulses the same way an active chat does.
+  building,
   attention,
   onSelect,
   menuOpen,
@@ -567,6 +588,7 @@ function DrawerRow({
   onRenameCancel,
   onRenameSubmit,
   onPin,
+  onOpenInTab,
   onDelete,
   onDeleteData,
   onInstall,
@@ -592,10 +614,11 @@ function DrawerRow({
   }, [menuOpen])
 
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
-  // pointerdown AND click anywhere outside the rename input call
-  // preventDefault + stopPropagation so the tapped element (overlay,
-  // another row, Settings, New chat) does NOT fire its own click —
-  // the rename just exits without selecting anything else.
+  // pointerdown AND click anywhere outside the rename input normally call
+  // preventDefault + stopPropagation so another row, Settings, or New chat
+  // does NOT fire its own click — the rename just exits. The scrim is the one
+  // exception: it remains a reliable drawer-close surface, so a scrim tap
+  // cancels the rename and continues to Drawer.handleOverlayPointerDown.
   // Both events are needed: pointerdown prevents focus shift,
   // click is a separate event that some browsers fire regardless.
   // `cancelingRef` tells `commitRename` to bail when the impending
@@ -609,11 +632,12 @@ function DrawerRow({
     function onOutsidePointer(e) {
       const inputEl = inputRef.current
       if (!inputEl || inputEl.contains(e.target)) return
+      cancelingRef.current = true
+      onRenameCancel()
+      if (e.target?.closest?.('.drawer-overlay')) return
       e.preventDefault()
       e.stopPropagation()
-      cancelingRef.current = true
       swallowClickRef.current = true
-      onRenameCancel()
     }
     function onOutsideClick(e) {
       if (!swallowClickRef.current) return
@@ -683,6 +707,12 @@ function DrawerRow({
             aria-label="Currently streaming"
             title="Currently streaming"
           />
+        ) : building ? (
+          <span
+            className="drawer__streaming-dot"
+            aria-label="Building"
+            title="Building…"
+          />
         ) : attention ? (
           <span
             className="drawer__attention-dot"
@@ -732,6 +762,15 @@ function DrawerRow({
                 <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
+              {onOpenInTab && (
+                // Pin this chat/app as a tab in the shell strip so the owner
+                // can swap to it with one tap. Closes the menu first (same
+                // reason as Delete below — the row can slide as the strip
+                // renders).
+                <Menu.Item onSelect={() => { onMenuToggle(false); onOpenInTab() }}>
+                  Open in tab
+                </Menu.Item>
+              )}
               {kind === 'app' && slug && (
                 // Opens the in-PWA InstallSheet to set the home-screen
                 // name + icon first; the sheet saves, then navigates

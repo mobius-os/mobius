@@ -15,9 +15,8 @@ import { compactionBrief } from './compactionToolBlock.js'
 // Rendering never touches the stored shape, so the round-trip stays intact.
 export default function CompactionCard({ msg }) {
   const brief = compactionBrief(msg)
-  // `provider` isn't part of the stored compaction shape today, so this
-  // context line only appears if a future writer attaches it — the card
-  // degrades to the plain "Conversation summarized" label otherwise.
+  // Atomic provider handoffs attach `to_provider`; older compaction rows have
+  // neither field and degrade to the plain label.
   const provider = providerLabel(msg)
   const subtitle = provider ? `before switching to ${provider}` : null
 
@@ -37,11 +36,7 @@ export default function CompactionCard({ msg }) {
   )
 }
 
-// Pull a provider name off the message if one was ever attached. The stored
-// compaction message has no provider field today (chat_writer's
-// `_persist_compaction`), so this returns null in practice — the card simply
-// omits the context line. Kept so the card lights up automatically if the
-// stored shape later grows a provider hint, without another frontend change.
+// Pull a readable provider name off new handoff rows while preserving old rows.
 function providerLabel(msg) {
   const raw = msg?.to_provider || msg?.provider
   if (typeof raw !== 'string' || !raw.trim()) return null

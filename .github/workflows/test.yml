@@ -23,6 +23,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Reject private workspace paths
+        run: scripts/check-private-paths.sh
+      - name: Test local privacy gates
+        run: scripts/test-git-privacy-gates.sh
+
   backend:
     runs-on: ubuntu-latest
     # The full backend suite is now large enough that cold hosted runners can
@@ -30,13 +42,13 @@ jobs:
     # leave headroom so the job fails on assertions instead of a hard cancel.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
           cache-dependency-path: backend/requirements.txt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Install esbuild
@@ -65,9 +77,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Node with npm cache
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm'
@@ -87,8 +99,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Run static app packager tests
@@ -98,9 +110,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Node with npm cache
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm'
@@ -115,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check core-apps matches the pinned catalog
         run: scripts/check-core-apps-sync.sh
 
@@ -128,7 +140,7 @@ jobs:
     needs: backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -140,7 +152,10 @@ jobs:
           load: true
           tags: mobius-test:ci
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A transient GHA cache-service miss must not turn a successfully
+          # built and loaded image into a red build. The image itself remains
+          # authoritative; cache export is only a performance optimization.
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Start test container
         run: |
@@ -155,7 +170,7 @@ jobs:
           echo "Container is healthy"
 
       - name: Set up Node with npm cache
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm'
@@ -201,7 +216,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: Report e2e result
-        if: always()
+        # If setup or image construction failed, preserve that real failure
+        # instead of adding a misleading "playwright exit" error with an
+        # empty output from a step that never ran.
+        if: always() && steps.pw.outcome != 'skipped'
         env:
           PW_EXIT: ${{ steps.pw.outputs.exit }}
         run: |

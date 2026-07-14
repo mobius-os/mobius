@@ -37,7 +37,7 @@ from app.routes import (
   debug_router, fs_router, generate_router, github_router,
   notifications_router, notify_router, proxy_router, push_router,
   self_reminders_router, settings_router,
-  client_error_router, standalone_router, storage_router,
+  client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
 )
@@ -90,6 +90,18 @@ async def lifespan(app):
     _assert_provider_defaults(PROVIDER_NAMES)
   except Exception as exc:
     _log.error("provider defaults check skipped: %s", exc, exc_info=True)
+  # One-way compatibility migration: the preference is now chat-local, but a
+  # legacy true value left in the shared JSON would become global again after
+  # a rollback. Run before serving (not lazily on the first settings request)
+  # so every successful boot removes that rollback hazard.
+  try:
+    from app.providers import remove_legacy_global_auto_resume_setting
+    if not remove_legacy_global_auto_resume_setting(get_settings().data_dir):
+      _log.warning("legacy global auto-resume setting cleanup did not persist")
+  except Exception as exc:
+    # providers.py and the shared file are recovery-surface dependencies:
+    # report cleanup failure without making the whole service unbootable.
+    _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
   # Crash recovery: a process death (OOM / SIGKILL — a recurring
   # failure mode on this host) mid-turn leaves the chat's durable
@@ -100,12 +112,16 @@ async def lifespan(app):
   # other lifespan steps: a failure here must not brick the recovery
   # surface. Runs single-threaded pre-serving, so no queue-lock
   # contention — see reconcile_interrupted_chats for the argument.
+  # Chats reconciled at boot (incl. any turn paused by a drain-gated restart),
+  # carried to the post-`init_vapid` notify below — VAPID must be initialized
+  # before a push can be delivered.
+  _reconciled_chats: list[str] = []
   try:
     from app.chat import reconcile_interrupted_chats
     from app.database import SessionLocal as _ReconcileSession
     _rc_db = _ReconcileSession()
     try:
-      reconcile_interrupted_chats(_rc_db)
+      _reconciled_chats = reconcile_interrupted_chats(_rc_db) or []
     finally:
       _rc_db.close()
   except Exception as exc:
@@ -160,6 +176,22 @@ async def lifespan(app):
     init_vapid()
   except Exception as exc:
     _log.error("init_vapid failed: %s", exc, exc_info=True)
+  # Boot resume notify (design §2.2 step 4). Runs AFTER init_vapid so the push
+  # can actually deliver: one "tap to resume" notification for any turn left
+  # paused by a drain-gated restart (or crash) that boot reconcile finalized.
+  # Best-effort — the resumable note is already durable in the transcript, so a
+  # notify failure never blocks boot.
+  try:
+    if _reconciled_chats:
+      from app.chat import notify_after_reconcile
+      from app.database import SessionLocal as _NotifySession
+      _nt_db = _NotifySession()
+      try:
+        notify_after_reconcile(_nt_db, _reconciled_chats)
+      finally:
+        _nt_db.close()
+  except Exception as exc:
+    _log.error("paused-turn resume notify failed: %s", exc, exc_info=True)
   # First-boot auto-install of the curated app-store mini-app so a
   # fresh container shows the store in the drawer immediately. The
   # bootstrap module is idempotent (no-op if slug='store' already
@@ -231,6 +263,31 @@ async def lifespan(app):
       _db.close()
   except Exception as exc:
     _log.error("source_dir backfill failed: %s", exc, exc_info=True)
+  # Rewrite schedules created by older releases through the revocable common
+  # job runner. The entrypoint does not start cron until lifespan completes,
+  # so replayed legacy direct entries cannot fire in the migration window.
+  # Best-effort and per-app isolated: one malformed legacy source must not
+  # prevent the server (or unrelated schedules) from starting.
+  try:
+    from app.routes.apps import reconcile_app_cron_supervision
+    from app.database import SessionLocal as _CronSession
+    _cron_db = _CronSession()
+    try:
+      _cron_count, _cron_warnings = reconcile_app_cron_supervision(_cron_db)
+    finally:
+      _cron_db.close()
+    if _cron_count:
+      _log.info("supervised %d app cron schedule(s)", _cron_count)
+    for _warning in _cron_warnings:
+      _log.warning("app cron supervision skipped: %s", _warning)
+    if not _cron_warnings:
+      _cron_ready = (
+        Path(settings.data_dir) / "run" / "app-cron-supervision-ready"
+      )
+      _cron_ready.parent.mkdir(parents=True, exist_ok=True)
+      _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
+  except Exception as exc:
+    _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
   # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
   # auto-recompile and refresh the served bundle — agents don't need to
   # re-run register_app.py just to push a code change.
@@ -266,8 +323,13 @@ async def lifespan(app):
   # can't kill the loop; the loop is cancelled on shutdown.
   _wedged_sweep_task = None
   _stalled_live_task = None
+  _reset_park_task = None
   try:
-    from app.chat import sweep_stalled_live_runs, sweep_wedged_run_markers
+    from app.chat import (
+      sweep_reset_parks,
+      sweep_stalled_live_runs,
+      sweep_wedged_run_markers,
+    )
     from app.database import SessionLocal as _SweepSession
 
     async def _wedged_marker_loop():
@@ -301,6 +363,25 @@ async def lifespan(app):
           _log.error("stalled-live sweep failed: %s", _exc, exc_info=True)
 
     _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
+
+    # Provider-limit reset sweep (design §2.4): notifies once when a parked
+    # turn's reset time arrives, and — when the owner opted in — starts the
+    # strictly-serial auto-resume. Same shape as the two loops above.
+    async def _reset_park_loop():
+      while True:
+        await _asyncio.sleep(60)
+        try:
+          _rp_db = _SweepSession()
+          try:
+            await sweep_reset_parks(_rp_db)
+          finally:
+            _rp_db.close()
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+
+    _reset_park_task = _asyncio.create_task(_reset_park_loop())
   except Exception as exc:
     _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
   try:
@@ -311,6 +392,8 @@ async def lifespan(app):
       _wedged_sweep_task.cancel()
     if _stalled_live_task is not None:
       _stalled_live_task.cancel()
+    if _reset_park_task is not None:
+      _reset_park_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
@@ -460,12 +543,11 @@ class _BodySizeLimitMiddleware:
 # Setting them here means they hold regardless of what fronts the app. These are
 # resource-load-agnostic — they protect against clickjacking, MIME-sniffing, TLS
 # downgrade, and referrer leakage WITHOUT restricting what apps may load, so web
-# images / external embeds keep working. There is deliberately NO Content-Security-
-# Policy here: a same-origin mini-app can read the owner JWT (the documented
-# same-origin trade-off) and exfiltrate it via /api/proxy regardless of any CSP,
-# so a CSP wouldn't close that and a strict one would just break apps — the real
-# fix is an HttpOnly-cookie session (.pm/172). Clickjacking is covered by
-# X-Frame-Options without a CSP.
+# images / external embeds keep working. There is deliberately no global
+# Content-Security-Policy here yet: mini-apps intentionally support user-chosen
+# external resources and a strict shell-wide policy would break that contract.
+# App isolation instead comes from opaque-origin sandboxed frames plus scoped
+# tokens. Clickjacking is covered by X-Frame-Options without a CSP.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
@@ -543,6 +625,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(client_error_router)
+app.include_router(client_signal_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)
@@ -1132,9 +1215,16 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     if path == "manifest.webmanifest":
       import json
       from fastapi.responses import JSONResponse
-      manifest = json.loads(
-        (static_dir / "manifest.webmanifest").read_text()
-      )
+      try:
+        manifest = json.loads(
+          (static_dir / "manifest.webmanifest").read_text()
+        )
+      except OSError:
+        # The dist swap has a microsecond two-rename window where the resolved
+        # static dir can vanish; mirror the index.html guard below — a 503
+        # asks the client to retry rather than 500ing a manifest fetch that
+        # raced the publish.
+        return Response(status_code=503, headers={"Retry-After": "1"})
       bg = get_bg_color(settings.data_dir)
       manifest["background_color"] = bg
       manifest["theme_color"] = bg

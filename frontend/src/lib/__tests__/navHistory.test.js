@@ -3,15 +3,26 @@ import assert from 'node:assert/strict'
 
 import {
   isMobiusNavState,
+  isVisibleAppOwner,
+  navEntryIndex,
+  navEntryId,
   navState,
+  navTraversalDirection,
   pushNavEntry,
   replaceNavEntry,
+  updateCurrentNavEntry,
 } from '../navHistory.js'
 
 // navState / isMobiusNavState are pure — test them without globals first.
 
-test('navState tags with __mobiusNav and the kind', () => {
-  assert.deepEqual(navState('drawer'), { __mobiusNav: true, kind: 'drawer' })
+test('navState carries kind, position, and restorable route', () => {
+  const route = { view: 'chat', chatId: 'chat-1', appId: null }
+  assert.deepEqual(navState('drawer', { index: 4, route }), {
+    __mobiusNav: true,
+    kind: 'drawer',
+    index: 4,
+    route,
+  })
 })
 
 test('isMobiusNavState recognizes a tagged state', () => {
@@ -29,17 +40,43 @@ test('isMobiusNavState rejects untagged / phantom states', () => {
   assert.equal(isMobiusNavState({ kind: 'drawer' }), false)
 })
 
+test('navTraversalDirection compares tagged shell positions', () => {
+  const at = (index) => navState('nav', { index })
+  assert.equal(navTraversalDirection(at(2), at(1)), 'back')
+  assert.equal(navTraversalDirection(at(1), at(2)), 'forward')
+  assert.equal(navTraversalDirection(at(2), at(2)), 'same')
+  assert.equal(navTraversalDirection({}, at(2)), 'unknown')
+  assert.equal(navTraversalDirection(at(2), { __mobiusNav: true }), 'unknown')
+  assert.equal(navEntryIndex(at(3)), 3)
+  assert.equal(navTraversalDirection(
+    { __mobiusNav: true },
+    { __mobiusNav: true },
+    { currentEntryIndex: 8, destinationEntryIndex: 9 },
+  ), 'forward')
+})
+
+test('only the visible canvas app owns app-level history', () => {
+  assert.equal(isVisibleAppOwner('canvas', 7, '7'), true)
+  assert.equal(isVisibleAppOwner('chat', 7, 7), false)
+  assert.equal(isVisibleAppOwner('settings', 7, 7), false)
+  assert.equal(isVisibleAppOwner('canvas', 8, 7), false)
+  assert.equal(isVisibleAppOwner('canvas', null, 7), false)
+})
+
 // pushNavEntry / replaceNavEntry write to BOTH stores. Mock the two browser
 // globals (history + navigation) and assert each helper hits each store.
 
 function installBrowserMocks({ withNavigation = true } = {}) {
   const history = {
     calls: [],
+    state: undefined,
     pushState(state, title, url) {
       this.calls.push({ method: 'pushState', state, title, url })
+      this.state = state
     },
     replaceState(state, title, url) {
       this.calls.push({ method: 'replaceState', state, title, url })
+      this.state = state
     },
   }
   globalThis.history = history
@@ -75,18 +112,23 @@ function clearBrowserMocks() {
 test('pushNavEntry writes the tag to BOTH the History and Navigation stores', () => {
   const { history, navigation } = installBrowserMocks()
   try {
-    pushNavEntry('drawer')
+    const route = { view: 'settings', chatId: null, appId: null }
+    pushNavEntry('drawer', route)
 
     // Classic History API got the tag.
     assert.equal(history.calls.length, 1)
     assert.equal(history.calls[0].method, 'pushState')
-    assert.deepEqual(history.calls[0].state, { __mobiusNav: true, kind: 'drawer' })
+    assert.deepEqual(history.calls[0].state, {
+      __mobiusNav: true, kind: 'drawer', index: 0, route,
+      entryId: history.calls[0].state.entryId,
+    })
+    assert.equal(navEntryId(history.calls[0].state), history.calls[0].state.entryId)
 
     // Navigation API got the SAME tag — this is what makes
     // e.destination.getState() return the tag so the drawer/back guard
     // passes the shell's own entries on modern Chrome / installed PWAs.
     assert.equal(navigation.calls.length, 1)
-    assert.deepEqual(navigation.calls[0].state, { __mobiusNav: true, kind: 'drawer' })
+    assert.deepEqual(navigation.calls[0].state, history.calls[0].state)
     assert.equal(isMobiusNavState(navigation.getCurrentState()), true)
   } finally {
     clearBrowserMocks()
@@ -100,13 +142,49 @@ test('replaceNavEntry writes the tag to BOTH stores and forwards the URL', () =>
 
     assert.equal(history.calls.length, 1)
     assert.equal(history.calls[0].method, 'replaceState')
-    assert.deepEqual(history.calls[0].state, { __mobiusNav: true, kind: 'base' })
+    assert.deepEqual(history.calls[0].state, {
+      __mobiusNav: true, kind: 'base', index: 0, route: null,
+      entryId: history.calls[0].state.entryId,
+    })
     // The base-entry reset must keep passing the manifest-scope URL.
     assert.equal(history.calls[0].url, '/shell/')
 
     assert.equal(navigation.calls.length, 1)
-    assert.deepEqual(navigation.calls[0].state, { __mobiusNav: true, kind: 'base' })
+    assert.deepEqual(navigation.calls[0].state, history.calls[0].state)
     assert.equal(isMobiusNavState(navigation.getCurrentState()), true)
+  } finally {
+    clearBrowserMocks()
+  }
+})
+
+test('pushes increment from the current shell position and retain routes', () => {
+  const { history } = installBrowserMocks({ withNavigation: false })
+  try {
+    replaceNavEntry('base', '/shell/', { view: 'chat', chatId: 'a', appId: null })
+    const first = pushNavEntry('nav', { view: 'settings', chatId: 'a', appId: null })
+    const second = pushNavEntry('app', { view: 'canvas', chatId: 'a', appId: 7 })
+    assert.equal(first.index, 1)
+    assert.equal(second.index, 2)
+    assert.equal(second.route.appId, 7)
+    assert.equal(history.state, second)
+  } finally {
+    clearBrowserMocks()
+  }
+})
+
+test('updateCurrentNavEntry preserves position and can promote drawer to nav', () => {
+  const { history, navigation } = installBrowserMocks()
+  try {
+    replaceNavEntry('base', '/shell/')
+    pushNavEntry('drawer', { view: 'chat', chatId: 'a', appId: null })
+    const route = { view: 'settings', chatId: 'a', appId: null }
+    const updated = updateCurrentNavEntry(route, { kind: 'nav' })
+    assert.deepEqual(updated, {
+      __mobiusNav: true, kind: 'nav', index: 1, route,
+      entryId: updated.entryId,
+    })
+    assert.equal(history.state, updated)
+    assert.equal(navigation.getCurrentState(), updated)
   } finally {
     clearBrowserMocks()
   }
@@ -133,6 +211,19 @@ test('helpers degrade gracefully when the Navigation API is absent', () => {
     assert.equal(history.calls.length, 2)
     assert.equal(history.calls[0].method, 'pushState')
     assert.equal(history.calls[1].method, 'replaceState')
+  } finally {
+    clearBrowserMocks()
+  }
+})
+
+test('a shell push after a phantom entry continues from the last tagged cursor', () => {
+  const { history } = installBrowserMocks({ withNavigation: false })
+  try {
+    const tagged = replaceNavEntry('base', '/shell/')
+    history.state = null // descendant frame pushed an untagged joint entry
+    const next = pushNavEntry('nav', null, { currentState: tagged })
+    assert.equal(next.index, 1)
+    assert.notEqual(next.entryId, tagged.entryId)
   } finally {
     clearBrowserMocks()
   }

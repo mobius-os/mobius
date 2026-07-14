@@ -18,6 +18,7 @@ from app.chat import (
   discard_starting,
   get_active_sink,
   is_chat_running,
+  is_draining,
   mark_starting,
   run_chat,
 )
@@ -30,6 +31,7 @@ from app.chat_writer import (
   StartTurn,
   alloc_run_token,
   await_ack,
+  cid_of,
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
@@ -224,6 +226,11 @@ def _user_message_from_body(
     "content": _content_with_uploads(chat, body),
     "ts": int(time.time() * 1000),
   }
+  # Carry the client-minted stable identity into persistence so the row keeps
+  # one identity across optimistic→confirm, reload, and echo. Absent (older
+  # client / legacy) rows derive `legacy-<ts>` lazily via cid_of at read time.
+  if body.cid:
+    user_msg["cid"] = body.cid
   if body.hidden:
     user_msg["hidden"] = True
   if body.attachments:
@@ -294,11 +301,11 @@ async def _steer_into_active_turn(
   chat_id: str,
   content: str,
   user_msgs: list[dict] | None = None,
-  consume_pending_ts: list[int] | None = None,
+  consume_pending_cids: list[str] | None = None,
 ) -> bool:
   """Routes a steer request to the active provider-specific handle.
 
-  For Claude the `user_msgs` / `consume_pending_ts` payload is buffered on
+  For Claude the `user_msgs` / `consume_pending_cids` payload is buffered on
   the handle so the RUNNER performs the transcript split (seal A1, append the
   steered rows, reset for A2) when the interrupted turn ends — the first point
   the true A1/A2 boundary is known. Codex still splits at the route below
@@ -307,13 +314,13 @@ async def _steer_into_active_turn(
   """
   if provider == "claude":
     return await claude_sdk_runner.steer_into_active_turn(
-      chat_id, content, user_msgs, consume_pending_ts,
+      chat_id, content, user_msgs, consume_pending_cids,
     )
   return await codex_sdk_runner.steer_into_active_turn(chat_id, content)
 
 
 async def _split_steer_at_route(
-  chat_id: str, user_msgs: list[dict], consume_pending_ts: list[int],
+  chat_id: str, user_msgs: list[dict], consume_pending_cids: list[str],
 ) -> dict:
   """Route-driven transcript split for Codex (seal A1, append steered rows).
 
@@ -326,13 +333,13 @@ async def _split_steer_at_route(
   """
   sink = get_active_sink(chat_id)
   if sink is not None:
-    return await sink.split_for_steer(user_msgs, consume_pending_ts)
+    return await sink.split_for_steer(user_msgs, consume_pending_cids)
   ack = get_writer().submit(
     AppendSteeredUserMessage(
       chat_id=chat_id,
       run_token="",
       user_msgs=user_msgs,
-      consume_pending_ts=consume_pending_ts,
+      consume_pending_cids=consume_pending_cids,
     )
   )
   return await await_ack(ack)
@@ -369,25 +376,20 @@ def _selected_force_steer_pending(
   may send a newer `steered_messages` hint so it can render a batch as
   separate rows, but durable rows are reconstructed from the server-owned
   pending queue here; the client cannot forge transcript entries.
+
+  Selection is keyed on the stable `cid` (matched via cid_of, which covers a
+  legacy `legacy-<ts>` derivation). The old content byte-match is GONE — cid
+  binds the request to specific queued rows directly, with no fragile
+  "\n\n"-join contract against the composer text.
   """
-  requested_ts = set(body.consume_pending_ts or [])
-  if not requested_ts:
+  requested_cids = set(body.consume_pending_cids or [])
+  if not requested_cids:
     return None
   selected = [
     m for m in list(chat.pending_messages or [])
-    if m.get("ts") in requested_ts
+    if cid_of(m) in requested_cids
   ]
-  if len(selected) != len(requested_ts):
-    return None
-  # Join with "\n\n" (paragraph break) so a steered multi-message turn reads
-  # as distinct messages, not a single newline-crammed blob — must byte-match
-  # the frontend handleSteer content (steerTexts.join("\n\n")).
-  expected = "\n\n".join(
-    (m.get("content") or "").strip()
-    for m in selected
-    if (m.get("content") or "").strip()
-  )
-  if not (bool(expected) and body.content == expected):
+  if len(selected) != len(requested_cids):
     return None
   return selected
 
@@ -409,6 +411,14 @@ def _user_messages_from_pending(
     msg.pop("queued", None)
     msg.pop("serverTs", None)
     msg.pop("position", None)
+    # Preserve the stable identity across the queue→transcript hop. A legacy
+    # pending row without a cid gets its `legacy-<ts>` derivation stamped so
+    # the steered transcript row and its echo carry the same value the client
+    # will compare against.
+    if not msg.get("cid"):
+      derived = cid_of(pending)
+      if derived is not None:
+        msg["cid"] = derived
     user_msgs.append(msg)
   return user_msgs or [fallback_user_msg]
 
@@ -620,6 +630,26 @@ async def send_message(
         content={"status": "started", "message": started_message},
       )
 
+  # Serialize an ordinary send with the provider-switch synthesis/commit.
+  # Whichever request owns the lock first establishes the state the other
+  # observes: a send first makes the switch see a busy chat; a switch first
+  # makes the send reload and start on the newly committed provider. This
+  # removes the actor-order race where a message could begin on the outgoing
+  # provider while its handoff was still being synthesized.
+  async with chat_queue.get_transition_lock(chat_id):
+    db.expire(chat)
+    return await _send_message_locked(body, chat_id, principal, db, chat)
+
+
+async def _send_message_locked(
+  body: schemas.SendMessage,
+  chat_id: str,
+  principal: Principal,
+  db: Session,
+  chat: models.Chat,
+):
+  """Handle a normal send while holding the per-chat transition lock."""
+
   # One choke point for every genuine user send (initial / queued / steered all
   # pass here, after the answer-delivery returns above). Skip force_steer —
   # Stop's queue-collapse re-send of already-counted messages. Counts a turn
@@ -652,6 +682,24 @@ async def send_message(
       except (ValueError, TypeError):
         return {}
     return {}
+
+  # Drain gate (design §2.2): while the worker is draining for a restart, never
+  # start a new turn or promote the queue — append to pending and return
+  # "queued". The send is preserved and self-heals on the owner's next action
+  # after the restart (the stale-pending drain), so nothing the owner sent is
+  # lost. This must intercept BEFORE the queue-or-start branches below, which
+  # would otherwise spawn a turn (fresh StartTurn, or a stale-pending drain).
+  # force_steer is deliberately NOT exempt: a steer accepted while the drain is
+  # interrupting a handle can buffer into the dying runner's continuation and
+  # start fresh provider work mid-shutdown (or, with no running turn at all,
+  # fall through to a fresh StartTurn). During the restart window every send —
+  # steer included — queues.
+  if is_draining():
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
+    db.expire(chat)
+    return _queued_response(new_msg, len(chat.pending_messages or []))
 
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending
@@ -701,7 +749,7 @@ async def send_message(
         steered = await _steer_into_active_turn(
           provider, chat_id, user_msg["content"],
           user_msgs if defer_to_runner else None,
-          (body.consume_pending_ts or []) if defer_to_runner else None,
+          (body.consume_pending_cids or []) if defer_to_runner else None,
         )
       except Exception:
         # Any steer failure is non-fatal: log nothing louder than the
@@ -727,18 +775,18 @@ async def send_message(
         # sink (closed-turn race / non-SDK path) falls back to a plain
         # end-of-transcript append.
         if defer_to_runner:
-          consumed = set(body.consume_pending_ts or [])
+          consumed = set(body.consume_pending_cids or [])
           stored_result = {
             "stored_messages": user_msgs,
             "pending": [
               m for m in (chat.pending_messages or [])
-              if m.get("ts") not in consumed
+              if cid_of(m) not in consumed
             ],
           }
         else:
           try:
             stored_result = await _split_steer_at_route(
-              chat_id, user_msgs, body.consume_pending_ts or [],
+              chat_id, user_msgs, body.consume_pending_cids or [],
             )
           except Exception:
             # The transcript write didn't land, but the live turn already
@@ -764,6 +812,7 @@ async def send_message(
               {
                 "role": "user",
                 "ts": msg.get("ts"),
+                "cid": cid_of(msg),
                 "content": msg.get("content", ""),
                 **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
               }
@@ -795,7 +844,7 @@ async def send_message(
           # its run marker under it, and the spawned runner reuses it.
           drain_token = alloc_run_token()
           next_messages, next_user, next_session_id = (
-            await chat_queue.promote_pending_messages(
+            await chat_queue.promote_pending_messages_locked(
               db, chat_id, drain_token,
             )
           )
@@ -941,18 +990,19 @@ async def send_message(
 
 
 @router.delete(
-  "/{chat_id}/pending/{ts}",
+  "/{chat_id}/pending/{cid}",
   status_code=200,
   dependencies=[Depends(reject_cross_site)],
 )
 async def cancel_pending_message(
   chat_id: str,
-  ts: int,
+  cid: str,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
   """Removes a queued (not-yet-started) user message from the pending
-  queue. Identifies the message by its client-assigned timestamp.
+  queue. Identifies the message by its stable `cid` (client-minted, or a
+  `legacy-<ts>` derivation for pre-cid rows).
 
   Returns the updated pending queue so the client can reconcile any
   drift (e.g. the backend promoted a message into the active turn
@@ -962,13 +1012,13 @@ async def cancel_pending_message(
   # 404 here keeps the route's contract (unknown / deleted chat → 404).
   get_active_chat_or_404(db, chat_id)
 
-  # The actor's CancelPending removes the matching ts and commits — the
+  # The actor's CancelPending removes the matching cid and commits — the
   # SOLE runtime mutator of pending_messages, so a DELETE racing a
   # concurrent POST/promote can't lost-update. Returns the remaining
   # queue so the client can reconcile drift (e.g. the backend promoted a
   # message into the active turn between the click and the DELETE).
   ack = get_writer().submit(
-    CancelPending(chat_id=chat_id, run_token="", ts=ts)
+    CancelPending(chat_id=chat_id, run_token="", cid=cid)
   )
   result = await await_ack(ack)
   return {"pending_messages": result["pending"]}

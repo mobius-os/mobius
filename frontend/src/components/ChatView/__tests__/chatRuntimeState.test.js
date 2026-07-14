@@ -2,16 +2,49 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  builtAppPulseDecision,
   canFastForwardQueue,
+  cidOf,
   continuationRowsFromPromotedMessage,
   openAppCtaViewModel,
   previewReadyAnnouncement,
-  resolveSteeredPinDecision,
+  previewUpdatedAnnouncement,
   serverSnapshotBehindLocal,
+  shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
+  stopConfirmedIdle,
+  stopRequestSucceeded,
+  stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+
+test('cidOf returns the row cid, else null (no read-time derivation)', () => {
+  // Post-card-221 every user row carries an explicit cid (client-minted, or a
+  // backfilled `legacy-<ts>`); cidOf returns it as-is and no longer derives one
+  // from `ts`. `ts` is display/ordering metadata only.
+  assert.equal(cidOf({ cid: 'abc', ts: 5 }), 'abc')
+  assert.equal(cidOf({ cid: 'legacy-5', ts: 5 }), 'legacy-5')
+  assert.equal(cidOf({ ts: 5 }), null)
+  assert.equal(cidOf({}), null)
+  assert.equal(cidOf(null), null)
+})
+
+test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {
+  const kept = stripInternalUserMessageFields({
+    role: 'user', content: 'hi', ts: 7, cid: 'keep-me',
+    queued: true, position: 2, _consumed_cids: ['a'], _messages: [{}],
+    _agent_content: 'x',
+  })
+  assert.equal(kept.cid, 'keep-me')
+  assert.equal(kept.queued, undefined)
+  assert.equal(kept.position, undefined)
+  assert.equal(kept._consumed_cids, undefined)
+  assert.equal(kept._messages, undefined)
+  assert.equal(kept._agent_content, undefined)
+  assert.equal(kept.content, 'hi')
+  assert.equal(kept.ts, 7)
+})
 
 test('startedMessagesFromResponse preserves backend _messages as separate visible rows', () => {
   const rows = startedMessagesFromResponse({
@@ -28,7 +61,8 @@ test('startedMessagesFromResponse preserves backend _messages as separate visibl
   assert.deepEqual(rows.map(r => r.content), ['A', 'B'])
   assert.deepEqual(rows.map(r => r.ts), [10, 11])
   assert.equal(rows[0].queued, undefined)
-  assert.equal(rows[0].cid, undefined)
+  // cid now SURVIVES the strip — it is the durable row identity.
+  assert.equal(rows[0].cid, 'x')
 })
 
 test('continuationRowsFromPromotedMessage prefers backend _messages over local combined row', () => {
@@ -78,17 +112,56 @@ test('previewReadyAnnouncement announces when a preview becomes available', () =
 })
 
 test('systemEventForChat annotates forwarded stream events with their chat id', () => {
-  assert.deepEqual(systemEventForChat({ type: 'app_built', appId: '7' }, 'chat-a'), {
-    type: 'app_built',
+  assert.deepEqual(systemEventForChat({ type: 'app_updated', appId: '7' }, 'chat-a'), {
+    type: 'app_updated',
     appId: '7',
     chatId: 'chat-a',
   })
-  assert.deepEqual(systemEventForChat({ type: 'app_built', chatId: 'old' }, 'chat-a'), {
-    type: 'app_built',
+  assert.deepEqual(systemEventForChat({ type: 'app_updated', chatId: 'old' }, 'chat-a'), {
+    type: 'app_updated',
     chatId: 'chat-a',
   })
   assert.equal(systemEventForChat(null, 'chat-a'), null)
-  assert.deepEqual(systemEventForChat({ type: 'app_built' }, null), { type: 'app_built' })
+  assert.deepEqual(systemEventForChat({ type: 'app_updated' }, null), { type: 'app_updated' })
+})
+
+test('previewUpdatedAnnouncement names the recompiled app', () => {
+  assert.equal(previewUpdatedAnnouncement({ id: 7, name: 'Habits' }), 'Preview updated for Habits.')
+  assert.equal(previewUpdatedAnnouncement({ id: 7 }), 'Preview updated for app.')
+})
+
+test('builtAppPulseDecision: a first-seen app announces but does not pulse', () => {
+  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
+  const d = builtAppPulseDecision(list, new Map())
+  assert.equal(d.pulseId, null)
+  assert.equal(d.announce, 'Live preview ready for Habits.')
+  assert.equal(d.nextSeen.get(7), 't1')
+})
+
+test('builtAppPulseDecision: an already-seen app whose updated_at advanced pulses', () => {
+  const list = [{ id: 7, name: 'Habits', updated_at: 't2' }]
+  const seen = new Map([[7, 't1']])
+  const d = builtAppPulseDecision(list, seen)
+  assert.equal(d.pulseId, 7)
+  assert.equal(d.announce, 'Preview updated for Habits.')
+  assert.equal(d.nextSeen.get(7), 't2')
+})
+
+test('builtAppPulseDecision: an already-seen app at the same updated_at neither pulses nor announces', () => {
+  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
+  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
+  assert.equal(d.pulseId, null)
+  assert.equal(d.announce, '')
+})
+
+test('builtAppPulseDecision: a recompile wins the announce over a co-arriving new app', () => {
+  const list = [
+    { id: 7, name: 'Habits', updated_at: 't2' }, // seen at t1 → recompile
+    { id: 8, name: 'Notes', updated_at: 't1' },  // brand new
+  ]
+  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
+  assert.equal(d.pulseId, 7)
+  assert.equal(d.announce, 'Preview updated for Habits.')
 })
 
 test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () => {
@@ -118,34 +191,55 @@ test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () 
   ]), true)
 })
 
-test('resolveSteeredPinDecision falls back to live scroll when local intent is missing', () => {
-  assert.deepEqual(resolveSteeredPinDecision({
-    pinTargetTs: 123,
-    pinIntent: null,
-    fallbackWillPin: () => true,
-  }), {
-    intentStillCurrent: true,
-    shouldPin: true,
-  })
-
-  assert.deepEqual(resolveSteeredPinDecision({
-    pinTargetTs: 123,
-    pinIntent: null,
-    fallbackWillPin: () => false,
-  }), {
-    intentStillCurrent: true,
-    shouldPin: false,
-  })
+test('stopRequestSucceeded requires a confirmed backend stop', () => {
+  assert.equal(stopRequestSucceeded({ responseOk: true, data: { stopped: true } }), true)
+  assert.equal(stopRequestSucceeded({ responseOk: true, data: {} }), true,
+    'legacy 200/non-json stop responses are accepted')
+  assert.equal(stopRequestSucceeded({ responseOk: true, data: { stopped: false } }), false)
+  assert.equal(stopRequestSucceeded({ responseOk: false, data: null }), false)
+  assert.equal(stopRequestSucceeded({ fetchFailed: true }), false)
 })
 
-test('resolveSteeredPinDecision honors stale local intent over fallback', () => {
-  assert.deepEqual(resolveSteeredPinDecision({
-    pinTargetTs: 123,
-    pinIntent: { willPin: true, userScrollIntentVersion: 1 },
-    pinIntentStillCurrent: () => false,
-    fallbackWillPin: () => true,
-  }), {
-    intentStillCurrent: false,
-    shouldPin: false,
-  })
+test('stopConfirmedIdle requires the chat runtime to report idle', () => {
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: false,
+  }), true)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: true,
+  }), false)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: undefined,
+  }), false)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: false,
+    confirmRunning: false,
+  }), false)
+  assert.equal(stopConfirmedIdle({
+    stopSucceeded: true,
+    confirmRunning: false,
+    confirmFailed: true,
+  }), false)
+})
+
+test('shouldRetryStopAfterConfirm retries only the start-window running race', () => {
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: true,
+    confirmRunning: true,
+  }), true)
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: true,
+    confirmRunning: false,
+  }), false)
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: false,
+    confirmRunning: true,
+  }), false)
+  assert.equal(shouldRetryStopAfterConfirm({
+    requestSucceeded: true,
+    confirmRunning: true,
+    confirmFailed: true,
+  }), false)
 })

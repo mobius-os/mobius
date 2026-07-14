@@ -14,6 +14,12 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+const frameSource = readFileSync(
+  new URL('../../../public/app-frame.html', import.meta.url),
+  'utf8',
+)
 
 // Pure function that mirrors the frame-side detection logic in app-frame.html:
 // given the probe's HTTP status (or null if the network threw), decide whether
@@ -112,4 +118,15 @@ test('protocol: token expiry recovery preserves offline-latch semantics', () => 
   //
   // No code logic here — this is a contract assertion.
   assert.ok(true, 'latch semantics preserved: see appToken.js resolveLatchedToken')
+})
+
+test('protocol: an already-mounted frame accepts refreshed credentials', () => {
+  assert.match(frameSource, /if \(msg\.type === 'moebius:frame-init'\) \{\s+acceptToken\(msg\.token\);\s+if \(initialized\) return;/)
+  assert.match(frameSource, /getToken: runtimeToken/)
+  assert.match(frameSource, /token: currentToken/)
+})
+
+test('protocol: app error reporting uses the same refreshable token broker', () => {
+  assert.match(frameSource, /runtimeToken\(\{ forceRefresh: true \}\)/)
+  assert.doesNotMatch(frameSource, /Authorization': 'Bearer ' \+ _reportToken/)
 })

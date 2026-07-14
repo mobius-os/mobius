@@ -70,7 +70,7 @@ rebase the local edits onto it:                    A → B → X
 The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
 - **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the surface recompiles (apps) or restarts (backend) onto the new code.
-- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Either way the resolution is finalized as the *same* single-parent replay — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
+- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
@@ -142,9 +142,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `memory.py` | `build_memory_block()` — assembles the agent's injected memory block from the knowledge graph (graph mode, ~25KB budget) |
-| `memory_graph.py` | Builds + lints the knowledge-graph index (`graph.json`) for the Memory viewer |
-| `memory_trace.py` | Persists per-chat read traces of the memory graph for the nightly reflection pass |
+| `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
 | `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
@@ -316,7 +314,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior is governed by three layers, not one. (1) **Constitution** — `skill/core.md`, the owner-curated system prompt, baked to `/app/skill/core.md`; `chat.py` reads it into `system_prompt` (the Claude SDK receives it on every turn; the Codex SDK uses it as base instructions only when starting a new thread, i.e. `session_id is None`). `providers.get_skill_path()` resolves `core.md` only (there is no `agent-skill.md` fallback). (2) **Skills** — `/data/shared/skills/*.md` (building-apps, theming, cron, notifications, recovery, memory, reflection, …), seeded create-if-absent by `backend/scripts/init_skills.py` from `backend/scripts/seed-skills/`; the agent `Read`s the relevant one on demand and may edit them. (3) **Memory** — the knowledge graph under `/data/shared/memory/` (`index.md` + per-chat notes `chats/<id>/index.md` — the primary day-time memory carrier — + `mocs/` + `notes/` + `graph.json` + `read-trace/` + `.ready`), injected progressive-disclosure by `backend/app/memory.py` into the first user message as an `<agent_experience>` block (not the system prompt, so static content caches), indexed by `memory_graph.py`, and viewed through the Memory mini-app. The injected block is `index.md` plus the ~10 most-recently-modified chat notes; the deeper graph (`mocs/`, `notes/`) is read on demand. Two platform scripts maintain/retrieve it: `backend/scripts/chat_note.py` (tool-free turn-end summarizer `chat.py` runs when a settled chat's note is missing or stale; it also syncs the chat title from the note's gist) and `backend/scripts/memory_search.py` (the memory-search recall subagent, auto-run on substantive first messages when `auto_memory_search` is enabled). To change agent behavior, edit `skill/core.md` and the seeds — not code-level validators (see the design philosophy above).
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — baked `skill/core.md`; `chat._read_skill_text()` caches only this platform text for the process lifetime. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. Prompt composition reads live (`deleted_at IS NULL`) app rows in stable id order for every turn, so install/uninstall takes effect on the next turn without restarting or changing an already-running turn. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer, and compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, immutable-generation publisher, and retrieval telemetry; no router/fact note is injected. Uninstall removes its prompt, skill, and jobs immediately while leaving core chat summaries intact.
 
 ## Data layout (`/data/` volume)
 
@@ -331,7 +329,7 @@ The in-product agent is a first-class reader of this code, and its behavior is g
 ├── cli-auth/claude/        CLI credentials
 ├── cron-logs/              output from scheduled task scripts
 ├── published/<token>/      published site snapshots (shareable /sites/<token>/ URLs)
-└── service-token.txt       long-lived JWT for cron scripts (chmod 600)
+└── service-token.txt       owner JWT used only by the platform job wrapper (chmod 600)
 ```
 
 `/data` is itself a git repo owned by the `mobius` user, tracking `shared/memory/` and `shared/skills/` with a nightly safety-net commit, so a bad memory consolidation or skill overwrite is recoverable. Inspect it as that user (`docker exec -u mobius ... git -C /data ...`) — as root it dies with "dubious ownership," which reads misleadingly as an empty/non-repo tree.
@@ -447,23 +445,58 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
 `backend/tests/test_chats_stream_steer`) encode this:
 
-- **R1** First message always pins to the viewport top, reserving bottom room for
-  the streaming reply.
-- **R2** Subsequent messages always reserve enough space, but only MOVE the scroll
-  if the user is at the bottom (the autoscroll zone). Scrolled-up/reading → the
-  viewport must NOT jump (the load-bearing guarantee is "don't move a reading
-  user", not "spacer is zero"). At-bottom is read from `scrollTop` before the
-  append (`shouldPinSend`/`isNearScrollBottom` in `useScrollMode.js`), not a
-  sentinel.
-- **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
-- **R4** Leave-and-return restores the same scroll position, even mid-stream
-  (hide-then-reveal + the versioned snapshot cache).
+- **R0 — Two modes; one auto-scroll entrance.** A chat is either in **auto-scroll**
+  (`FOLLOW_BOTTOM`, following the real-content tail as the reply streams) or **hold**
+  (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
+  position). Auto-scroll engages ONLY through the gesture-gated scroll handler after
+  the user manually scrolls to the physical bottom. A send, viewport/keyboard change,
+  foreground return, mount, or chat restoration must never create auto-scroll.
+- **R1 — Permanent exact reservation.** Every non-empty chat keeps enough dynamic
+  bottom spacer for its latest visible user message to reach the viewport top,
+  including after leaving and reopening the chat. The reservation is exact — no
+  extra scrollable blank beyond that target — and shrinks as the reply fills it.
+  `FOLLOW_BOTTOM` follows real conversation content, excluding the reservation, so
+  a short restored chat cannot open on an empty viewport.
+- **R2 — One send rule everywhere.** The first visible user message always pins to
+  the viewport top. Every subsequent direct, queued, promoted, or steered message
+  pins only when its submit-time snapshot says the reader was already in
+  `FOLLOW_BOTTOM` at the real-content tail. Merely being geometrically near the tail
+  while in hold is not enough. A user scroll after submission invalidates a delayed
+  queued/steered pin. Missing delayed intent degrades to hold, never to an inferred
+  pin.
+- **R3 — Pin means hold.** A legitimate pin transitions to `PIN_USER_MSG`, not
+  `FOLLOW_BOTTOM`; the response grows below the prompt without moving it. Auto-scroll
+  resumes only after the user manually scrolls to the physical bottom. A non-pinning
+  send preserves the exact reading anchor.
+- **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
+  same visible anchor, even if the chat had been auto-scrolling and content grew while
+  it was inactive. Return never jumps to the new tail and does not restore
+  auto-scroll; the user must manually reach the bottom again.
+
+The transition table is intentionally exhaustive; adding a new send or lifecycle
+path means routing it through the same entries rather than inventing another rule:
+
+| Event | Before | After | Scroll write |
+|---|---|---|---|
+| First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
+| Later send submitted while manually entered `FOLLOW_BOTTOM` and still at real-content tail | `FOLLOW_BOTTOM` | `PIN_USER_MSG` | New row to top |
+| Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
+| Reader scrolls manually to physical bottom | any | `FOLLOW_BOTTOM` | User-owned |
+| Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
+| Reply/layout grows while pinned or anchored | hold | same hold | Reapply only the held target |
+| Viewport/keyboard changes | any | same follow, or hold anchor | Never creates follow |
+| Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
+
+Every visible user row also makes R1's reservation current, whether or not that row
+pins. Reservation lifetime and pin decisions are independent.
 - **Steer = separate rows, one turn.** Steered queued messages render as separate
   transcript rows in send order (`insertMessageBatchByTs`), never one stranded
   after the reply. The agent receives them joined by `\n\n` (clean paragraphs,
-  not a `\n` blob) — matched byte-for-byte FE (`handleSteer`) + BE
-  (`_selected_force_steer_pending`). The fast-forward button shows only when every
-  queued row is server-confirmed (`canFastForwardQueue`); confirm on a numeric ts.
+  not a `\n` blob). The request binds to specific queued rows by their stable
+  `cid` (`consume_pending_cids`; `_selected_force_steer_pending` selects by cid) —
+  the earlier byte-for-byte content match existed only because no shared id
+  crossed the wire, and is gone. The fast-forward button shows only when every
+  queued row is server-confirmed (`canFastForwardQueue`; the `serverTs` flag).
   A steer landing before any renderable assistant output seals nothing — the
   empty/whitespace pre-steer segment is dropped symmetrically on the live path
   (`streamPromotion.streamItemsHaveRenderableContent`) and the persisted path
@@ -473,13 +506,86 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
 - **Regression guards (owner-observed prod bugs):** an at-bottom send must not land
   mid-viewport; a steered row must not render after the agent's reply.
 
+### Tool output rendering
+
+Tool runs are **grouped** so the reader sees at a glance what is running vs finished
+(`ToolActivityGroup` folds adjacent runs into one collapsed-by-default card; per-tool
+status only ever goes `running → done`, with failure derived from a nonzero exit
+code, never a block status). Output is **lazy**: the chat-load payload ships a reduced
+form (outputs over ~4KB are dropped to a length marker in the `routes/chats.py`
+serializer), and the FULL output is fetched only when the block is expanded (`GET
+/api/chats/{id}/tool-output`). Small outputs stay inline; live streaming is unchanged.
+
+### Chat summary + continuity contract
+
+Each chat maintains a **growing per-chat note** at
+`/data/shared/memory/chats/<chat-id>/index.md` — a bounded `## Digest`, durable
+facts + the partner's intent, an uncapped cumulative `## Summary`, and a one-line
+**gist that IS the chat title**
+(`backend/scripts/chat_note.py` summarizer subagent: transcript in the prompt, no
+tools). This note is **core continuity** — it exists and is useful even when the
+Memory app is not installed. Its consumers:
+
+- **Short-term continuity into new chats.** A fresh chat opens with only the gist and
+  bounded Digest from the ~10 most-recently-modified chats
+  (`backend/app/memory.py`); the fenced path lets the agent deliberately open a
+  relevant full note. Facts and cumulative Summaries are not injected.
+- **Knowledge graph (installed Memory system app).** The app requests structurally
+  redacted chat text through its declared API permission, writes a complete graph to
+  a same-filesystem staging tree, and atomically advances a JSON `.ready` pointer to
+  an immutable generation containing `mocs/`, `notes/`, and `graph.json`. Its confined
+  reader pins one generation and returns cited snippets on demand. The graph is not
+  platform code; base boot provisions only the per-chat summary surface
+  (`backend/scripts/init_chat_summaries.py`).
+- **Reflection.** Without the Memory app, the per-chat summaries are what Reflection
+  reads.
+- **Compaction + provider switch.** The cumulative Summary is the source for compacting a
+  long chat and for the provider-switch handoff below — preferred over a from-scratch
+  default compaction.
+
+### Provider switch (compaction handoff)
+
+Sessions are not portable across providers, so switching provider mid-chat uses
+an **incoming-provider handoff**: the composer confirms and POSTs the target
+provider, model, effort, and a stable switch id to
+`/chats/{id}/provider-switch`. A successful response is explicitly versioned as
+`provider-switch-v1` and echoes both the switch id and target provider; a generic
+2xx response is not authoritative. The bodyless `/chats/{id}/compact` route
+remains as a rolling-upgrade bridge for older clients that compact and then
+PATCH the provider.
+
+The incoming provider runs a disposable, tool-free synthesis turn over the complete
+running `## Summary` plus the complete current transcript. Large sources are folded
+through bounded progressive synthesis turns so no middle interval is silently
+omitted. The writer actor then stores that portable brief, changes
+provider/settings, clears the outgoing session, and supersedes outgoing
+`parked`/`resume_pending` runs in one conditional transaction; sends, settings
+PATCHes, app-chat PATCHes, and auto-resume share the same per-chat transition lock,
+while a Summary or transcript change invalidates the commit. Provider-switch UI
+state is keyed by chat outside the keyed `ChatView`, so navigation cannot unlock a
+handoff or lose its idempotent retry id. The brief is replayed into the incoming provider's first
+real turn as a `<compacted_chat>` block, so the new agent continues rather than
+starting cold. Same-provider model swaps skip the handoff because their session
+context is preserved.
+
+### Staying aligned (enforcement)
+
+This section is the **owner-authoritative source of truth** for chat UX; the
+gitignored `CLAUDE.md` / `docs/*` copies must not diverge from it (when they do, this
+wins). Alignment is held
+by the lock-in Playwright specs above **plus** three harnesses tracked in `.pm/` that
+exist specifically to keep prod matching this contract: a runtime chat-contract
+monitor on the live shell (`208`), a deterministic chat-states gallery with geometry
+goldens (`209`), and an SSE event-replay harness (`210`). Changing a rule here means
+updating those specs in the same change.
+
 ## Stop-chat contract
 
-Stop is a two-layer contract: the backend interrupts and clears, while `frontend/src/components/ChatView/ChatView.jsx:handleStop` owns the user-visible collapse-and-resend behavior. On entry, `handleStop` synchronously guards against double clicks, snapshots `pendingQueue.pendingMessagesRef.current`, joins queued text with a single `\n`, dedupes attachments by `name`, bumps `fetchGenRef`, and clears the pending queue before awaiting `/api/chat/stop`. The endpoint `backend/app/routes/chat.py:chat_stop` returns `{"stopped": bool, "cleared_pending_ts": [...]}` from `chat.py:stop_chat`, and the frontend runs that through `resolveStopResend()` for both clean-stop and timeout branches: `null`/missing `cleared_pending_ts` falls back to the whole snapshot, `[]` resends nothing, exact matches resend only those queued rows, and unmatched optimistic timestamps fall back to the whole snapshot rather than dropping work.
+Stop is a two-layer contract: the backend interrupts and clears, while `frontend/src/components/ChatView/ChatView.jsx:handleStop` owns the user-visible collapse-and-resend behavior. On entry, `handleStop` synchronously guards against double clicks, snapshots `pendingQueue.pendingMessagesRef.current`, joins queued text with a single `\n`, dedupes attachments by `name`, bumps `fetchGenRef`, and clears the pending queue before awaiting `/api/chat/stop`. The endpoint `backend/app/routes/chat.py:chat_stop` returns `{"stopped": bool, "cleared_pending_cids": [...]}` from `chat.py:stop_chat` (cleared-set identity is the stable `cid`; `ts` is display metadata), and the frontend runs that through `resolveStopResend()` for both clean-stop and timeout branches: `null`/missing `cleared_pending_cids` falls back to the whole snapshot, `[]` resends nothing, exact matches resend only those queued rows, and an unmatched cleared cid falls back to the whole snapshot rather than dropping work.
 
 `backend/app/chat.py:stop_chat_for` is an interrupt primitive, not a queue-drain primitive. It snapshots the generation, calls `bump_run_generation(chat_id)` before killing handles, registers `_clear_after_terminal_generation` when handles exist, clears pending under `chat_queue.get_lock()`, cancels any live `app.questions` pending question, then calls each runner handle's `stop(timeout=2.0)`. If every handle stops it unregisters them and finalizes the broadcast (discarding `_starting`); the stuck run-marker is cleared via the actor only on the no-handles path — active handles hand that clear to `run_chat`'s finally block. If any handle times out it leaves the registry entry and broadcast intact for runner-side teardown and returns `stopped=False` — in that branch the frontend must NOT disconnect or start a second run. Instead, if `resolveStopResend()` returns text, `handleStop` calls `doSend(..., { pin:false })` while `isStreamingRef` is still true, so the message follows the queue path and is re-persisted as pending.
 
-The generation bump is the key invariant. A dying `_run_chat_impl` rechecks ownership in its terminal path; after Stop it must resolve to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promote pending or schedule a backend continuation behind the frontend's resend. Do not refetch pending from the server after Stop to rebuild the resend — Stop already cleared the durable queue, so the local snapshot is the only source that preserves text + attachments; and do not resend the full snapshot unconditionally on `stopped:false` — the natural turn-end drain may already have consumed some rows, and `cleared_pending_ts` is the only guard against duplicate follow-up work.
+The generation bump is the key invariant. A dying `_run_chat_impl` rechecks ownership in its terminal path; after Stop it must resolve to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promote pending or schedule a backend continuation behind the frontend's resend. Do not refetch pending from the server after Stop to rebuild the resend — Stop already cleared the durable queue, so the local snapshot is the only source that preserves text + attachments; and do not resend the full snapshot unconditionally on `stopped:false` — the natural turn-end drain may already have consumed some rows, and `cleared_pending_cids` is the only guard against duplicate follow-up work.
 
 ## AskUserQuestion interception
 
@@ -499,6 +605,101 @@ All chat-domain mutations — transcript writes, run-markers, question rows, ans
 
 **GUARDRAIL — never write `Chat.messages` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); `recovery_chat_runner.py` is actor-independent by design and appends to its own `/data/recovery/chats/<chat_id>.jsonl`, not the `Chat.messages` column.
 
+## Multi-pane workspace (design only)
+
+The shipped feature is a single tab strip that swaps one on-screen view. The
+target is a workspace where tabs can move between tiled panes: a build chat on
+the left and its app preview on the right, or several agent chats side by side.
+Phones degrade to swap-only tabs; tiling is a web/desktop capability.
+
+### Existing pane seams
+
+`frontend/src/components/Shell/tabModel.js` is the openable-item primitive. A
+tab is `{ kind: 'chat' | 'app', id: string }`; the module owns construction,
+identity (`tabKey`, `sameTab`), deduplication, capacity, persistence, navigation
+mapping, and current single-view active state. Construction, identity,
+deduplication, capacity, and `tabNavTarget` carry into panes unchanged. Today
+`isTabActive(tab, view)` maps the global `{ view, chatId, appId }` focus to a
+tab. A pane will instead store `activeTabKey` and compare it with `tabKey(tab)`.
+
+`Shell.jsx` currently keeps one `openTabs` set, one active-view triple, and the
+hidden app-iframe LRU. This is the degenerate one-pane form of the target model.
+
+`frontend/src/components/Shell/workspacePlacement.js` is the placement seam.
+Producers issue an `open-item` request with `placement: 'beside-source'` and
+`activation: 'background'`; they never name a tab strip, pane id, split
+direction, or breakpoint. The flat resolver inserts a built app after its
+source chat. A pane resolver should interpret the same request as: use the next
+pane when one exists, create one when the viewport supports it, and fall back
+to an adjacent background tab on narrow screens.
+
+| Input | Confirmation | Current action |
+| --- | --- | --- |
+| `app_created {appId, chatId}` | Refetched row matches both ids | Apply one background `beside-source` request |
+| `app_created` missing/mismatched ids | No matching live row | Ignore the placement request |
+| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same request as reconnect fallback |
+| `app_updated` | Live row exists | Refresh CTA/code and warm cache; never place again |
+| Store install or app without `chat_id` | No source-chat relationship | Drawer arrival only |
+| Replayed/duplicate placement | Target app already open | Strict same-reference no-op |
+
+Every automatic built-preview path passes through
+`applyWorkspaceRequestsToFlatTabs`. Direct drawer/user tab opens remain
+explicit foreground navigation and bypass automatic placement by design.
+When the flat strip is at capacity, automatic placement protects the currently
+visible tab as well as the new source-chat/app pair; background work must never
+make the user's on-screen tab disappear from the strip.
+
+### Target pane model
+
+- **Workspace** = a `layout` tree plus a set of `panes`.
+- **Pane** = `{ id, tabs: Tab[], activeTabKey }`, with its own open set and
+  focused tab. The current shell is `panes: [pane0]` with
+  `pane0.tabs = openTabs`.
+- **Layout** = a binary split tree: `{ dir: 'row' | 'col', a, b, ratio }`, with
+  pane leaves. A single pane is the trivial leaf.
+- **Focus** = the pane receiving keyboard input and serving as the current back
+  target.
+
+`paneModel.js`, beside `tabModel.js`, should own pure layout operations: split
+a pane, move a tab, close a pane, and resize a split. Rendering walks the tree
+and renders each leaf pane's active tab.
+
+### Localized migration path
+
+1. Introduce `paneModel.js` and a workspace reducer. Seed one pane from today's
+   `openTabs`; do not change the UI yet.
+2. Render the layout tree instead of one `<main>`. The single-pane output must
+   remain identical; this step unlocks two panes.
+3. Add drag-to-tile: dropping a tab on a pane edge splits it and moves the tab.
+   The strip's drag source already has `tabKey`.
+4. Add per-pane chat/app rendering. Today only the active ChatView mounts; a
+   workspace mounts one ChatView per visible chat pane and must obey the
+   constraints below.
+
+### Hard pane constraints
+
+1. **Never remount ChatView to re-measure.** Pane resizing must imperatively
+   reset its grow-only `fullViewHRef` in `useScrollMode` while preserving
+   `FOLLOW_BOTTOM`. Folding pane size into a React key freezes live follow
+   behavior. Each pane owns
+   its own height ref; keyboard resizing is pane-local.
+2. **Never reparent keyed app iframes, and keep the global cap.** Visible app
+   panes count against `APP_CACHE_MAX` (currently four). Preserve id-sorted
+   render order across the workspace; reparenting a sandboxed iframe reloads it
+   and can hit the ten-second loading timeout.
+3. **App ids remain numeric for navigation.** Route every pane open through
+   `tabModel.tabNavTarget`; string/number divergence double-mounts the iframe.
+4. **Design Back and pane focus together.** Multiple panes need per-pane
+   history or explicitly tagged tab/pane history entries dispatched by type.
+   A priority-list guess desynchronizes the Navigation API and sentinel model.
+5. **Test positive behavior.** Assert that a message stays pinned and a pane
+   continues following its stream across resize/toggle. A bound such as
+   `spacer <= client` is insufficient because a broken zero spacer passes it.
+
+`paneModel`, the layout reducer, multi-pane rendering, resizing, and drag/drop
+remain deferred until panes are the explicit task. The tab and placement seams
+above are useful in the shipped one-pane experience today.
+
 ## Navigation back-stack + drawer model
 
 The drawer is modeled as a *virtual route*: opening it pushes one history entry but keeps the URL at `/` (`openDrawer` → `pushNavEntry('drawer')` + `drawerPushedRef = true`). The design satisfies a few hard desiderata — no "two drawers" artifact during Chrome-Android swipe-back, the 250ms slide stays visible, one back-press exits the PWA from home, and closing the drawer (overlay tap / X) must never navigate. Three load-bearing invariants in `useNavigation.js` enforce this: (1) **`navTo` consumes the existing drawer-sentinel rather than pushing** when the drawer is open (it pushes one `'nav'` entry only if the drawer was closed), so an in-app nav reuses the drawer's history slot instead of growing the stack — keeping history pinned to a pre-drawer snapshot and killing the BFCache artifact; (2) **every close path funnels through `history.back()` → `handleBack`**, whose drawer-first guard (`if (drawerOpenRef && drawerPushedRef) { close; return }`) prevents over-popping `navStackRef`; (3) **`drawerPushedRef` is a ref, not state** (mutated synchronously in the same task as the history call) and is the single source of truth for "is a drawer-sentinel above the current entry." Every shell-pushed entry is tagged `{__mobiusNav:true, kind}` via `navHistory.js` and written to *both* the classic History store and the Navigation API entry (`updateCurrentEntry`); both back handlers ignore untagged pops so sandboxed-iframe phantom entries can't over-pop — do not drop the tag from any push site or genuine sentinels read as phantoms and back-nav dies. Mini-apps install their own back-targets via the `moebius:nav-push` postMessage protocol (per-app counts in `appSentinelCountsRef`, capped at 20), consumed before navStack pops; `Shell.deleteChat` must scrub `navStackRef` of the deleted chat's entries or back lands on a 404'd chat. Three architectures were tried and rejected (per-nav pushState, `flushSync`-before-pushState, perpetual single-sentinel) — read `tests/navigation.spec.mjs` (22 invariants) before changing anything.
@@ -513,7 +714,7 @@ Install-time precache includes the Vite shell plus a large same-origin vendor se
 
 ## Mini-app manifest (mobius.json)
 
-Every mini-app ships a `mobius.json`; the enforcing source of truth is `install._validate_manifest` (`backend/app/install.py`), reached via `POST /api/apps/install`. **Five required fields** (`_REQUIRED_FIELDS`), all present-and-truthy or install 400s: `id`, `name`, `version`, `description`, `entry`. The `id` is the manifest identity and the initial slug (source dir `/data/apps/<slug>/`; `allocate_unique_slug` can diverge it on a collision, and cron registration keys off the resolved `app.slug`), so it has strict slug rules (`_validate_slug_field`): charset `a-z 0-9 - _`, not starting with `-`/`_`, not purely numeric (bare integers are reserved for the numeric-id storage tree). Optional fields the parser actually recognizes: `previous_id` (rename migration; same slug rules, must differ from `id`), `icon` (repo-relative path, 12 MB cap), `theme_color`/`background_color` (coerced to `#RRGGBB` by `_manifest_color`; non-hex silently → None, background falls back to theme), `offline_capable` + `embeds_agent` (bools, on the App row), `display` (web-manifest mode standalone/fullscreen/minimal-ui/browser via `_manifest_display`, else None), `offline` (object — `reads:bool`, `writes:queued|none`, `execution:full|partial|none`, `precache:[paths]` — validated by `_validate_manifest_offline`, stored as `App.offline_contract` JSON), `permissions`, `storage_seeds`, `static_assets`, `schedule`. Decorative-only (not validated, not stored): `author`, `license`, `homepage`. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational — the installer never reads it**; dependency resolution is governed solely by `runtime_libs.py` + the two importmaps, so a dep resolves only if wired there. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative path the installer *fetches* (`_validate_repo_relative_path` — inlining literal markup trips on the first `://` or `#`); a non-string is stored *inline* as a JSON literal. (3) **`schedule.job` has dual semantics** — with `schedule.default` (a `_validate_cron_expr` 5-field expression) it installs a recurring cron job; without it the script lands on disk as an on-demand build hook run only via the run-job endpoint. `static_assets` caps at 256 files / 16 MB each / 64 MB total.
+Every mini-app ships a `mobius.json`; the dependency-free source of truth is `backend/app/manifest_contract.py`, used by both `install._validate_manifest` (`POST /api/apps/install`) and `backend/scripts/validate-app.py`. Five required non-empty string fields are `id`, `name`, `version`, `description`, and `entry`; `entry` must be the canonical `index.jsx` used by the editor/watcher lifecycle. The `id` is the manifest identity and the initial slug (source dir `/data/apps/<slug>/`; `allocate_unique_slug` can diverge it on a collision, and cron registration keys off the resolved `app.slug`), so it uses charset `a-z 0-9 - _`, cannot start with `-`/`_`, and cannot be purely numeric (bare integers are reserved for the numeric-id storage tree). Optional fields the parser recognizes include `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, and `schedule`. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by `app_compile_contract.py` plus the served importmap. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
 
 ## Testing — determinism principle
 

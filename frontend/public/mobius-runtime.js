@@ -32,23 +32,30 @@
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
 //   window.mobius.storage.pendingCount()          -> Promise<number>
+//   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   read + its server ETag, for compare-and-swap
+//   window.mobius.storage.durableWrite(path, data, opts?) -> {durability, path, writeId, version?}
+//     opts.ifMatch=version makes it a CONDITIONAL write; a 412 rejects with DurableWriteError{code:'conflict', retryable:true}.
+//     CAS a file with several writers (agent + cron + UI): getWithVersion -> merge -> durableWrite({ifMatch:version}); on a
+//     'conflict' error re-read + retry (the app owns its merge; the runtime does NOT retry for you). See building-apps.md.
 //   window.mobius.chat({mount, chatId?, picker?, ...}) -> Promise<handle>
 //     Embeds the real agent chat (ChatView) in a nested iframe inside
 //     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
 //     and handle.destroy(). See the "Agent-chat embed" block below.
-//   window.mobius.nav.open(label, onBack)        -> { ready, close }  (shell-mediated back target; see building-apps.md)
+//   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
+//     outcome distinguishes shell ownership from standalone fallback and
+//     request failures; see building-apps.md.
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
 // ignore it and use raw IndexedDB / OPFS / SQLite-wasm directly (same-origin
 // iframe → all browser storage works), or talk to its own backend. The
 // platform provides the on-ramp; it never gates the escape hatch.
 //
-// Conflict policy: last-write-wins at the path granularity. The newest
-// write for a path supersedes any earlier one — enforced by coalescing
-// the outbox on every write (enqueueing a newer write for a path purges the
-// older queued op for it) and by routing ALL server writes through the single
-// outbox-lock-serialized drain, so a stale queued op can never replay over a
-// newer value. An app that needs per-record LWW stores one file per record
+// Storage conflict policy: last-write-wins at the path granularity. The newest
+// PUT/DELETE for a path supersedes any earlier one — enforced by coalescing
+// those state operations in the outbox and routing all server writes through
+// the single outbox-lock-serialized drain, so a stale queued op can never replay
+// over a newer value. Signals are events rather than path state and explicitly
+// do NOT coalesce. An app that needs per-record LWW stores one file per record
 // (…/items/<uuid>.json) so concurrent edits to different records don't
 // clobber each other. CRDTs are out of scope (overkill for single-owner
 // personal apps).
@@ -56,13 +63,24 @@
 // Smells: see the block at the bottom of this file.
 
 const DB_NAME = 'mobius-outbox'
+const SIGNAL_DB_NAME = 'mobius-signals'
 const STORE = 'ops'
+const SIGNAL_STORE = 'signals'
 // Read-through mirror of last-known server values, so get() works offline.
 // Keyed by `${appId}:${path}` (one shared DB across all apps, like the outbox).
 const CACHE_STORE = 'cache'
 const OUTCOME_STORE = 'write_outcomes'
 const DB_VERSION = 3
+const SIGNAL_DB_VERSION = 1
 const MAX_WRITE_OUTCOMES = 200
+const MAX_PENDING_SIGNALS = 500
+const MAX_PENDING_SIGNAL_BYTES = 2 * 1024 * 1024
+// The database is shared by every installed app. Per-app limits alone still
+// let a large catalog multiply origin usage without bound, so retain a second
+// owner-wide ceiling and evict the oldest telemetry across apps when needed.
+const MAX_GLOBAL_PENDING_SIGNALS = 2000
+const MAX_GLOBAL_PENDING_SIGNAL_BYTES = 8 * 1024 * 1024
+const SIGNAL_SEND_BATCH = 100
 
 // Per-blob ceiling for setBlob: rejected BEFORE any IDB/outbox/network write, so
 // neither the local mirror nor the offline outbox ever holds an over-cap binary
@@ -97,6 +115,27 @@ function fetchBounded(url, init) {
   let timer
   if (ctrl) timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
   return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
+}
+
+// App-token fetch with one bounded refresh retry. Hosts implement
+// getToken({forceRefresh:true}) differently (the shell asks AppCanvas; the
+// standalone host remints with its owner token), while every runtime subsystem
+// gets the same auth lifecycle and never invents its own stale-token cache.
+async function fetchWithAppToken(getToken, url, init = {}, fetcher = fetch) {
+  const run = async (token) => {
+    if (!token) throw new Error('mobius: app token unavailable')
+    return fetcher(url, {
+      ...init,
+      headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` },
+    })
+  }
+  const token = await getToken()
+  let response = await run(token)
+  if (response.status !== 401) return response
+  const refreshed = await getToken({ forceRefresh: true })
+  if (!refreshed || refreshed === token) return response
+  response = await run(refreshed)
+  return response
 }
 
 export class DurableWriteError extends Error {
@@ -154,6 +193,46 @@ function openDb() {
   })
 }
 
+// Signals intentionally use their own version-1 database. Adding their store
+// to mobius-outbox would force a schema upgrade that makes still-open cached
+// runtimes unable to reopen the owner's user-data outbox during rollout.
+function openSignalDb() {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const req = indexedDB.open(SIGNAL_DB_NAME, SIGNAL_DB_VERSION)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(SIGNAL_STORE)) {
+        db.createObjectStore(SIGNAL_STORE, { keyPath: 'key' })
+      }
+    }
+    req.onsuccess = () => {
+      const db = req.result
+      if (settled) { try { db.close() } catch (e) {} return }
+      settled = true
+      db.onversionchange = () => { try { db.close() } catch (e) {} }
+      resolve(db)
+    }
+    req.onerror = () => { if (!settled) { settled = true; reject(req.error) } }
+    req.onblocked = () => {
+      if (!settled) { settled = true; reject(new Error('mobius-signals open blocked')) }
+    }
+  })
+}
+
+async function withSignalStore(mode, fn) {
+  const db = await openSignalDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SIGNAL_STORE, mode)
+    const box = {}
+    fn(tx.objectStore(SIGNAL_STORE), box)
+    const done = () => { try { db.close() } catch (e) {} }
+    tx.oncomplete = () => { done(); resolve(box.value) }
+    tx.onerror = () => { done(); reject(tx.error) }
+    tx.onabort = () => { done(); reject(tx.error) }
+  })
+}
+
 // Run `fn(store)` in one transaction on `storeName`. `fn` may stash a result
 // on the returned object's `value`; we resolve with it on commit. Doing all
 // IDB work inside the single synchronous `fn` call avoids the auto-close that
@@ -195,16 +274,60 @@ async function withStores(storeNames, mode, fn) {
 // fake-indexeddb + a mocked fetch/navigator under node:test
 // (mobiusRuntimeStore.test.js), the same way overlayPending exposes the
 // PURE read-your-writes logic. `init()` is the only production caller.
-export function makeStorage({ appId, getToken }) {
+export function makeStorage({ appId, appInstanceId = null, getToken }) {
+  const hostGetToken = getToken
+  getToken = async (options) => {
+    const token = await hostGetToken(options)
+    return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null
+  }
   const deadLetterListeners = new Set()
+  const instanceKey = appInstanceId || 'legacy'
+  // App frames deliberately run without `allow-same-origin`, which makes their
+  // origin opaque. Chromium correctly denies IndexedDB in that context. The
+  // offline mirror/outbox is an enhancement, not a prerequisite for online
+  // storage: detect that capability once and fall back to direct scoped API
+  // reads/writes below. Never loosen the iframe sandbox merely to regain IDB.
+  let indexedDbAvailable = null
+  async function hasIndexedDb() {
+    if (indexedDbAvailable !== null) return indexedDbAvailable
+    try {
+      const db = await openDb()
+      try { db.close() } catch (e) {}
+      indexedDbAvailable = true
+    } catch (e) {
+      indexedDbAvailable = false
+    }
+    return indexedDbAvailable
+  }
+  // Generation identity is exact. A legacy record has no proof that it belongs
+  // to the current row after SQLite reuses a numeric id, while a legacy runtime
+  // must never see/delete nonce-stamped records from a newer installation.
+  // Quarantine ambiguity instead of guessing from client clocks or timestamps.
+  const belongsToInstance = (record) => (
+    record && record.appId === appId
+    && (appInstanceId
+      ? record.appInstanceId === appInstanceId
+      : !record.appInstanceId)
+  )
+  // Telemetry is non-load-bearing, so prefer dropping an ambiguous legacy
+  // record over attributing it to a different installation after SQLite reuses
+  // an app ID. Cached old runtimes can still drain their own legacy records;
+  // once a nonce-aware runtime loads it only handles nonce-stamped telemetry.
+  const belongsToSignalInstance = (record) => (
+    record && record.appId === appId
+    && (appInstanceId
+      ? record.appInstanceId === appInstanceId
+      : !record.appInstanceId)
+  )
 
-  function outcomeKey(writeId) { return appId + ':' + String(writeId) }
+  function outcomeKey(writeId) { return appId + ':' + instanceKey + ':' + String(writeId) }
 
   function outcomeFromOp(op, state, extra = {}) {
     const writeId = op.ver || op.seq
     return {
       key: outcomeKey(writeId),
       appId,
+      appInstanceId,
       state,
       path: op.path,
       seq: op.seq,
@@ -227,7 +350,7 @@ export function makeStorage({ appId, getToken }) {
       const cursor = e.target.result
       if (cursor) {
         const v = cursor.value
-        if (v && v.appId === appId) seen.push({ key: v.key, ts: v.ts || 0 })
+        if (belongsToInstance(v)) seen.push({ key: v.key, ts: v.ts || 0 })
         cursor.continue()
         return
       }
@@ -284,7 +407,7 @@ export function makeStorage({ appId, getToken }) {
         const cursor = e.target.result
         if (!cursor) return
         const rec = cursor.value
-        if (rec && rec.appId === appId && rec.state === 'rejected' && !rec.consumed) {
+        if (belongsToInstance(rec) && rec.state === 'rejected' && !rec.consumed) {
           try {
             cb({ path: rec.path, status: rec.status, refusedValue: rec.refusedValue, writeId: rec.writeId, ts: rec.ts })
             cursor.update({ ...rec, consumed: true })
@@ -321,7 +444,7 @@ export function makeStorage({ appId, getToken }) {
           return
         }
         const v = cursor.value
-        if (v.appId === appId && v.path === path) {
+        if (belongsToInstance(v) && v.path === path) {
           putOutcomeInStore(outcomeStore, outcomeFromOp(v, 'superseded'))
           cursor.delete()
         }
@@ -336,7 +459,7 @@ export function makeStorage({ appId, getToken }) {
   // still preserved — drainInner walks `seq` in order.)
   function enqueue(op) {
     return purgePath(op.path, (store, box) => {
-      const queued = { ...op, appId, ts: Date.now() }
+      const queued = { ...op, appId, appInstanceId, ts: Date.now() }
       const r = store.add(queued)
       r.onsuccess = () => { box.value = { ...queued, seq: r.result } }
     })
@@ -348,7 +471,7 @@ export function makeStorage({ appId, getToken }) {
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
         if (!cursor) return
-        if (cursor.value.appId === appId) box.value.push(cursor.value)
+        if (belongsToInstance(cursor.value)) box.value.push(cursor.value)
         cursor.continue()
       }
     })
@@ -364,7 +487,7 @@ export function makeStorage({ appId, getToken }) {
   // `${appId}:${path}` so one shared DB holds every app's mirror. `present`
   // distinguishes a cached null/404 (key exists, value null) from "never
   // fetched" (no key) — so offline we don't claim a value we never had.
-  function cacheKey(path) { return appId + ':' + path }
+  function cacheKey(path) { return appId + ':' + instanceKey + ':' + path }
 
   function cacheGet(path) {
     return withStore(CACHE_STORE, 'readonly', (store, box) => {
@@ -390,7 +513,7 @@ export function makeStorage({ appId, getToken }) {
   // or a native Blob (IndexedDB stores Blobs via structured clone).
   function cachePut(path, data, kind = 'json', contentType = null, ver = nextVer()) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, data, kind, contentType, present: data !== null, ver, ts: Date.now() })
+      store.put({ key: cacheKey(path), path, appId, appInstanceId, data, kind, contentType, present: data !== null, ver, ts: Date.now() })
     })
   }
 
@@ -399,7 +522,7 @@ export function makeStorage({ appId, getToken }) {
   // re-delete re-reads with the right type) + stamp a `ver` for the CAS.
   function cacheDelete(path, kind = null, ver = nextVer()) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, data: null, kind, contentType: null, present: false, ver, ts: Date.now() })
+      store.put({ key: cacheKey(path), path, appId, appInstanceId, data: null, kind, contentType: null, present: false, ver, ts: Date.now() })
     })
   }
 
@@ -425,7 +548,7 @@ export function makeStorage({ appId, getToken }) {
       g.onsuccess = () => {
         const cur = g.result
         if (cur && expectedVer != null && cur.ver === expectedVer) {
-          store.put({ key: cacheKey(path), path, appId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
+          store.put({ key: cacheKey(path), path, appId, appInstanceId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
           box.value = true
         }
       }
@@ -442,7 +565,7 @@ export function makeStorage({ appId, getToken }) {
       g.onsuccess = () => {
         const cur = g.result
         if (!cur || cur.ver == null) {
-          store.put({ key: cacheKey(path), path, appId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
+          store.put({ key: cacheKey(path), path, appId, appInstanceId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
           box.value = true
         }
       }
@@ -576,16 +699,16 @@ export function makeStorage({ appId, getToken }) {
     }
   }
 
-  // Send one queued op to the storage API. PUT and DELETE are both
-  // idempotent by path, so replaying a flushed op is safe. A DELETE
+  // Send one queued op. Storage PUT/DELETE are idempotent by path. Signal
+  // batches instead carry stable event IDs so their consumer can deduplicate a
+  // replay after a successful response is lost. A DELETE
   // that 404s means the file is already absent — the intended end state
   // — so we treat it as success. A 401 means the token is stale; we
   // throw 'AUTH' so the drain stops WITHOUT discarding the op (a fresh
   // token on the next trigger retries it).
   async function send(op) {
-    const token = await getToken()
     const url = `/api/storage/apps/${appId}/${op.path}`
-    const init = { method: op.method, headers: { Authorization: `Bearer ${token}` } }
+    const init = { method: op.method, headers: {} }
     if (op.method === 'PUT') {
       if (op.ifMatch) init.headers['If-Match'] = op.ifMatch
       if (op.ifNoneMatch) init.headers['If-None-Match'] = '*'
@@ -601,7 +724,7 @@ export function makeStorage({ appId, getToken }) {
         init.body = JSON.stringify(op.data)
       }
     }
-    const res = await fetch(url, init)   // network failure throws -> transient
+    const res = await fetchWithAppToken(getToken, url, init) // network failure throws -> transient
     const version = res.headers && typeof res.headers.get === 'function'
       ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
       : undefined
@@ -724,12 +847,14 @@ export function makeStorage({ appId, getToken }) {
     return _drainChain
   }
 
-  for (const ev of ['online', 'focus', 'pageshow']) {
-    window.addEventListener(ev, drain)
+  const drainOnWake = () => { drain(); drainSignals() }
+  const drainOnVisible = () => {
+    if (document.visibilityState === 'visible') { drain(); drainSignals() }
   }
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') drain()
-  })
+  for (const ev of ['online', 'focus', 'pageshow']) {
+    window.addEventListener(ev, drainOnWake)
+  }
+  document.addEventListener('visibilitychange', drainOnVisible)
 
   // The value the caller should see for a path RIGHT NOW: a pending outbox
   // write wins over the server/cache (read-your-writes), else the cache mirror,
@@ -743,22 +868,45 @@ export function makeStorage({ appId, getToken }) {
   // get() directly and the API survives destructuring — `const {get} = ...`.
   // Each runs inside withPathLock so operations on the same path are strictly
   // ordered within this runtime — no GET-vs-write or write-vs-write interleave.
-  function get(path) { return withPathLock(path, () => getInner(path, 'json')) }
-  function getText(path) { return withPathLock(path, () => getInner(path, 'text')) }
-  function getBlob(path) { return withPathLock(path, () => getInner(path, 'blob')) }
+  function get(path) {
+    return withPathLock(path, async () => (
+      await hasIndexedDb() ? getInner(path, 'json') : getDirect(path, 'json')
+    ))
+  }
+  function getText(path) {
+    return withPathLock(path, async () => (
+      await hasIndexedDb() ? getInner(path, 'text') : getDirect(path, 'text')
+    ))
+  }
+  function getBlob(path) {
+    return withPathLock(path, async () => (
+      await hasIndexedDb() ? getInner(path, 'blob') : getDirect(path, 'blob')
+    ))
+  }
   // Writers: the LOCAL mutation runs under the path lock (ordered vs reads + other
   // writes); the server drain runs in settle() OUTSIDE that lock (deadlock-safe).
   function set(path, data) {
-    return withPathLock(path, () => writeLocal(path, data, 'json', null))
-      .then((op) => settle(path, op.writeId, true))
+    return withPathLock(path, async () => {
+      if (!await hasIndexedDb()) {
+        await writeDirect(path, data, 'json', null)
+        return null
+      }
+      return writeLocal(path, data, 'json', null)
+    }).then((op) => op ? settle(path, op.writeId, true) : { synced: true })
   }
   async function setText(path, text, opts) {
     if (typeof text !== 'string') {
       throw new Error('mobius.storage.setText: value must be a string')
     }
     const ct = (opts && opts.contentType) || 'text/plain;charset=utf-8'
-    const op = await withPathLock(path, () => writeLocal(path, text, 'text', ct))
-    return settle(path, op.writeId, true)
+    const op = await withPathLock(path, async () => {
+      if (!await hasIndexedDb()) {
+        await writeDirect(path, text, 'text', ct)
+        return null
+      }
+      return writeLocal(path, text, 'text', ct)
+    })
+    return op ? settle(path, op.writeId, true) : { synced: true }
   }
   // setBlob guards BEFORE any lock/IDB/network: reject a non-Blob, an over-cap
   // blob, or a browser that can't store Blobs in IDB — so neither the mirror nor
@@ -773,16 +921,204 @@ export function makeStorage({ appId, getToken }) {
         `${MAX_BLOB_BYTES}-byte limit (use OPFS or a direct upload for large media)`
       )
     }
-    if (!(await blobStorable())) {
+    const hasIdb = await hasIndexedDb()
+    if (hasIdb && !(await blobStorable())) {
       throw new Error('mobius.storage.setBlob: this browser cannot store Blobs offline')
     }
     const ct = (opts && opts.contentType) || blob.type || 'application/octet-stream'
-    const op = await withPathLock(path, () => writeLocal(path, blob, 'blob', ct))
-    return settle(path, op.writeId, true)
+    const op = await withPathLock(path, async () => {
+      if (!hasIdb) {
+        await writeDirect(path, blob, 'blob', ct)
+        return null
+      }
+      return writeLocal(path, blob, 'blob', ct)
+    })
+    return op ? settle(path, op.writeId, true) : { synced: true }
   }
   function remove(path) {
-    return withPathLock(path, () => removeLocal(path))
-      .then((op) => settle(path, op.writeId, true))
+    return withPathLock(path, async () => {
+      if (!await hasIndexedDb()) {
+        await removeDirect(path)
+        return null
+      }
+      return removeLocal(path)
+    }).then((op) => op ? settle(path, op.writeId, true) : { synced: true })
+  }
+
+  function listSignals() {
+    return withSignalStore('readonly', (store, box) => {
+      box.value = []
+      store.openCursor().onsuccess = (event) => {
+        const cursor = event.target.result
+        if (!cursor) {
+          box.value.sort((a, b) => a.queuedAt - b.queuedAt)
+          return
+        }
+        if (belongsToSignalInstance(cursor.value)) box.value.push(cursor.value)
+        cursor.continue()
+      }
+    })
+  }
+
+  function deleteSignals(records) {
+    return withSignalStore('readwrite', (store) => {
+      for (const record of records) store.delete(record.key)
+    })
+  }
+
+  // Signals have a separate bounded queue and drain. Telemetry can therefore
+  // never block, dead-letter, or inflate pendingCount() for user data writes.
+  let _signalRetryTimer = null
+  let _signalRetryDelay = 5000
+  let _signalNextAttemptAt = 0
+
+  function scheduleSignalRetry(response = null) {
+    if (_signalRetryTimer !== null) return
+    let delay = _signalRetryDelay
+    const retryAfter = response?.headers?.get?.('Retry-After')
+    if (retryAfter) {
+      const seconds = Number(retryAfter)
+      const dateDelay = Date.parse(retryAfter) - Date.now()
+      if (Number.isFinite(seconds)) delay = Math.max(delay, seconds * 1000)
+      else if (Number.isFinite(dateDelay)) delay = Math.max(delay, dateDelay)
+    }
+    const backoffDelay = Math.min(Math.max(_signalRetryDelay, 1000), 5 * 60 * 1000)
+    delay = Math.min(Math.max(delay, backoffDelay), 24 * 60 * 60 * 1000)
+    _signalRetryDelay = Math.min(backoffDelay * 2, 5 * 60 * 1000)
+    _signalNextAttemptAt = Date.now() + delay
+    _signalRetryTimer = setTimeout(() => {
+      _signalRetryTimer = null
+      drainSignals(true).catch(() => {})
+    }, delay)
+    _signalRetryTimer?.unref?.()
+  }
+
+  async function deliverSignalRecords(records) {
+    try {
+      const response = await fetchWithAppToken(getToken, '/api/client-signal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ signals: records.map((record) => record.event) }),
+      })
+      if (response.ok) {
+        await deleteSignals(records)
+        _signalRetryDelay = 5000
+        _signalNextAttemptAt = 0
+        return true
+      }
+      // 404/405 are deployment-compatibility failures, not poison events: the
+      // platform serves rebuilt frontend assets before a backend restart, so a
+      // new runtime can briefly reach an old process without this route. Keep
+      // the durable queue instead of bisecting and deleting every singleton.
+      if ([401, 404, 405, 408, 429].includes(response.status) || response.status >= 500) {
+        scheduleSignalRetry(response)
+        return false
+      }
+      if (response.status === 403) {
+        await deleteSignals(records)
+        return true
+      }
+      // Isolate a poison/future-schema record instead of dropping an otherwise
+      // valid 100-event batch. Only the irreducible rejected record is removed.
+      if (records.length === 1) {
+        await deleteSignals(records)
+        return true
+      }
+      const middle = Math.floor(records.length / 2)
+      if (!await deliverSignalRecords(records.slice(0, middle))) return false
+      return deliverSignalRecords(records.slice(middle))
+    } catch (e) {
+      scheduleSignalRetry()
+      return false
+    }
+  }
+
+  async function drainSignalsInner() {
+    if (!navigator.onLine) return
+    for (;;) {
+      const records = (await listSignals()).slice(0, SIGNAL_SEND_BATCH)
+      if (!records.length) return
+      if (!await deliverSignalRecords(records)) return
+    }
+  }
+
+  let _signalDrainChain = Promise.resolve()
+  function drainSignals(force = false) {
+    if (!force && Date.now() < _signalNextAttemptAt) return Promise.resolve()
+    if (force && _signalRetryTimer !== null) {
+      clearTimeout(_signalRetryTimer)
+      _signalRetryTimer = null
+    }
+    if (navigator.locks && navigator.locks.request) {
+      return navigator.locks.request(`mobius-signals-${appId}`, drainSignalsInner)
+        .catch(() => {})
+    }
+    _signalDrainChain = _signalDrainChain.then(drainSignalsInner, drainSignalsInner)
+    return _signalDrainChain
+  }
+
+  // Internal transport for window.mobius.signal(). The IndexedDB transaction
+  // is the durability boundary. Stable IDs make put() and server replay safe;
+  // the per-app cap prevents noisy offline telemetry from filling shared IDB.
+  async function queueSignals(signals) {
+    if (!Array.isArray(signals) || signals.length === 0) return
+    await withSignalStore('readwrite', (store) => {
+      let queuedAt = Date.now()
+      for (const event of signals) {
+        const serialized = JSON.stringify(event)
+        store.put({
+          key: `${appId}:${appInstanceId || 'legacy'}:${event.id}`,
+          appId,
+          appInstanceId,
+          event,
+          bytes: new Blob([serialized]).size,
+          queuedAt: queuedAt++,
+        })
+      }
+      const records = []
+      const ownRecords = []
+      store.openCursor().onsuccess = (cursorEvent) => {
+        const cursor = cursorEvent.target.result
+        if (cursor) {
+          records.push(cursor.value)
+          if (belongsToSignalInstance(cursor.value)) ownRecords.push(cursor.value)
+          cursor.continue()
+          return
+        }
+        const oldestFirst = (a, b) => (a.queuedAt || 0) - (b.queuedAt || 0)
+        const deleteKeys = new Set()
+
+        ownRecords.sort(oldestFirst)
+        let removeCount = Math.max(0, ownRecords.length - MAX_PENDING_SIGNALS)
+        let totalBytes = ownRecords.slice(removeCount)
+          .reduce((sum, record) => sum + (record.bytes || 0), 0)
+        while (
+          removeCount < ownRecords.length
+          && totalBytes > MAX_PENDING_SIGNAL_BYTES
+        ) {
+          totalBytes -= ownRecords[removeCount].bytes || 0
+          removeCount += 1
+        }
+        for (const record of ownRecords.slice(0, removeCount)) deleteKeys.add(record.key)
+
+        const retained = records.filter((record) => !deleteKeys.has(record.key)).sort(oldestFirst)
+        let globalRemoveCount = Math.max(0, retained.length - MAX_GLOBAL_PENDING_SIGNALS)
+        let globalBytes = retained.slice(globalRemoveCount)
+          .reduce((sum, record) => sum + (record.bytes || 0), 0)
+        while (
+          globalRemoveCount < retained.length
+          && globalBytes > MAX_GLOBAL_PENDING_SIGNAL_BYTES
+        ) {
+          globalBytes -= retained[globalRemoveCount].bytes || 0
+          globalRemoveCount += 1
+        }
+        for (const record of retained.slice(0, globalRemoveCount)) deleteKeys.add(record.key)
+        for (const key of deleteKeys) store.delete(key)
+      }
+    })
+    drainSignals().catch(() => {})
   }
 
   // Page the server's authoritative listing of the immediate children under
@@ -793,14 +1129,15 @@ export function makeStorage({ appId, getToken }) {
   // bounds a pathological/looping cursor.
   async function listServer(prefix) {
     try {
-      const token = await getToken()
       const entries = []
       let cursor = null
       for (let guard = 0; guard < 10000; guard++) {
         const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
-        const res = await fetchBounded(
+        const res = await fetchWithAppToken(
+          getToken,
           `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          {},
+          fetchBounded,
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = await res.json()
@@ -827,7 +1164,7 @@ export function makeStorage({ appId, getToken }) {
         const cursor = e.target.result
         if (!cursor) return
         const v = cursor.value
-        if (v.appId === appId && v.present) {
+        if (belongsToInstance(v) && v.present) {
           box.value.push({ path: v.path, kind: v.kind, contentType: v.contentType })
         }
         cursor.continue()
@@ -880,8 +1217,8 @@ export function makeStorage({ appId, getToken }) {
       for (const c of await listCachePresent()) addDerived(c.path, c)
     }
 
-    // Overlay the outbox (the queue coalesces to <=1 op per path, so the last
-    // intent for a path is the only one): a PUT ensures its child shows even
+    // Overlay state-changing storage ops from the user-data outbox (those
+    // coalesce to <=1 op per path): a PUT ensures its child shows even
     // before the drain reaches the server; a DELETE drops a direct-file child
     // the server/cache still lists.
     for (const op of await listOps()) {
@@ -903,10 +1240,14 @@ export function makeStorage({ appId, getToken }) {
   // any other non-OK → throw (transient/auth — the caller keeps the mirror).
   // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
   async function fetchValueWithVersion(path, kind = 'json', wantVersion = false) {
-    const token = await getToken()
-    const headers = { Authorization: `Bearer ${token}` }
+    const headers = {}
     if (wantVersion) headers['X-Mobius-Version'] = '1'
-    const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, { headers })
+    const res = await fetchWithAppToken(
+      getToken,
+      `/api/storage/apps/${appId}/${path}`,
+      { headers },
+      fetchBounded,
+    )
     const version = res.headers && typeof res.headers.get === 'function'
       ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
       : undefined
@@ -992,6 +1333,41 @@ export function makeStorage({ appId, getToken }) {
       }
     }
     return finalizeRead(await effectiveValue(path, null), kind, null, path)
+  }
+
+  // Opaque sandbox frames cannot persist the offline cache/outbox in IndexedDB.
+  // Keep their online behavior fully functional through the scoped server API;
+  // offline reads honestly return null and writes reject rather than pretending
+  // a queued save survived when there is nowhere safe to keep it.
+  async function getDirect(path, kind = 'json') {
+    if (!navigator.onLine) return null
+    try {
+      return finalizeRead(await fetchValue(path, kind), kind, null, path)
+    } catch (e) {
+      return null
+    }
+  }
+
+  async function writeDirect(path, data, kind, contentType, opts = {}) {
+    if (!navigator.onLine) {
+      throw new Error('mobius.storage: offline saving is unavailable in this sandbox')
+    }
+    const sent = await send({
+      method: 'PUT', path, data, kind, contentType,
+      ifMatch: opts.ifMatch || null,
+      ifNoneMatch: opts.ifNoneMatch === true,
+    })
+    notify(path, data)
+    return sent || {}
+  }
+
+  async function removeDirect(path) {
+    if (!navigator.onLine) {
+      throw new Error('mobius.storage: offline saving is unavailable in this sandbox')
+    }
+    const sent = await send({ method: 'DELETE', path, kind: 'json' })
+    notify(path, null)
+    return sent || {}
   }
 
   // ALWAYS-ENQUEUE write path (081). Update the mirror + notify synchronously so
@@ -1112,11 +1488,26 @@ export function makeStorage({ appId, getToken }) {
       if (!(value instanceof Blob)) throw new Error('mobius.storage.durableWrite: blob writes require a Blob or File value')
       contentType = opts.contentType || value.type || 'application/octet-stream'
     }
-    const op = await withPathLock(path, () => writeLocal(path, value, kind, contentType, {
-      ifMatch: opts.ifMatch,
-      ifNoneMatch: opts.ifNoneMatch,
-    }))
+    const op = await withPathLock(path, async () => {
+      if (!await hasIndexedDb()) {
+        const sent = await writeDirect(path, value, kind, contentType, {
+          ifMatch: opts.ifMatch,
+          ifNoneMatch: opts.ifNoneMatch,
+        })
+        return { direct: true, sent }
+      }
+      return writeLocal(path, value, kind, contentType, {
+        ifMatch: opts.ifMatch,
+        ifNoneMatch: opts.ifNoneMatch,
+      })
+    })
     throwIfAborted(opts.signal)
+    if (op.direct) {
+      return {
+        durability: 'synced', path, writeId: null,
+        ...(op.sent?.version ? { version: op.sent.version } : {}),
+      }
+    }
     const result = await settle(path, op.writeId, false)
     throwIfAborted(opts.signal)
     if (result.rejected) {
@@ -1149,6 +1540,9 @@ export function makeStorage({ appId, getToken }) {
   async function getWithVersion(path, kind = 'json') {
     return withPathLock(path, async () => {
       const { value, version } = await fetchValueWithVersion(path, kind, true)
+      if (!await hasIndexedDb()) {
+        return { value: finalizeRead(value, kind, null, path), version }
+      }
       const ct = kind === 'blob'
         ? (value instanceof Blob ? value.type : null)
         : (kind === 'text' ? 'text/plain;charset=utf-8' : null)
@@ -1192,17 +1586,59 @@ export function makeStorage({ appId, getToken }) {
     durableWrite,
     onDeadLetter,
     remove,
-    list: listInner,
+    async list(prefix) {
+      if (await hasIndexedDb()) return listInner(prefix)
+      const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
+      return (await listServer(norm)) || []
+    },
     subscribe(path, cb) { return subscribeWith(path, cb, get) },
     subscribeText(path, cb) { return subscribeWith(path, cb, getText) },
     subscribeBlob(path, cb) { return subscribeWith(path, cb, getBlob) },
     async pendingCount() {
-      return (await listOps()).length
+      return await hasIndexedDb() ? (await listOps()).length : 0
     },
+    getWithVersion,
+    _queueSignals: queueSignals,
+    _pendingSignalCount: async () => (await listSignals()).length,
+    _drainSignals: drainSignals,
     _drain: drain,
     _notify: notify,
-    _getWithVersion: getWithVersion,
+    _destroy() {
+      for (const ev of ['online', 'focus', 'pageshow']) {
+        window.removeEventListener(ev, drainOnWake)
+      }
+      document.removeEventListener('visibilitychange', drainOnVisible)
+      if (_signalRetryTimer !== null) {
+        clearTimeout(_signalRetryTimer)
+        _signalRetryTimer = null
+      }
+      subscribers.clear()
+      deadLetterListeners.clear()
+    },
   }
+}
+
+// Explicit data wipe is the destructive lifecycle boundary for browser-local
+// app state. Soft uninstall deliberately does NOT call this: its server row,
+// nonce, storage tree, and Undo window all remain the same installation.
+export async function purgeAppRuntimeData(appId) {
+  const sameApp = (record) => record && String(record.appId) === String(appId)
+  const deleteMatching = (store) => {
+    store.openCursor().onsuccess = (event) => {
+      const cursor = event.target.result
+      if (!cursor) return
+      if (sameApp(cursor.value)) cursor.delete()
+      cursor.continue()
+    }
+  }
+  await Promise.all([
+    withStores([STORE, CACHE_STORE, OUTCOME_STORE], 'readwrite', (stores) => {
+      deleteMatching(stores[STORE])
+      deleteMatching(stores[CACHE_STORE])
+      deleteMatching(stores[OUTCOME_STORE])
+    }),
+    withSignalStore('readwrite', (store) => { deleteMatching(store) }),
+  ])
 }
 
 function stableStringify(value) {
@@ -1279,8 +1715,8 @@ export function createUseDocument(storage, reactProvider = null) {
 
     const refresh = React.useCallback(async () => {
       try {
-        const loaded = storage._getWithVersion
-          ? await storage._getWithVersion(path, 'json')
+        const loaded = storage.getWithVersion
+          ? await storage.getWithVersion(path, 'json')
           : { value: await storage.get(path), version: undefined }
         const next = loaded.value == null ? initialValue : loaded.value
         const reconciled = reconcileIdentity(valueRef.current, next, identity)
@@ -1319,8 +1755,8 @@ export function createUseDocument(storage, reactProvider = null) {
           const base = baseRef.current
           let theirs = base
           let version = versionRef.current
-          if (mode === 'cas' && storage._getWithVersion) {
-            const loaded = await storage._getWithVersion(path, 'json')
+          if (mode === 'cas' && storage.getWithVersion) {
+            const loaded = await storage.getWithVersion(path, 'json')
             theirs = loaded.value == null ? initialValue : loaded.value
             version = loaded.version || null
           } else if (mode === 'lww') {
@@ -1371,12 +1807,11 @@ export function createUseDocument(storage, reactProvider = null) {
 
 // ── App analytics: window.mobius.signal() (design §3) ──────────────
 //
-// Fire-and-forget telemetry for Reflection. Buffers events in memory and
-// debounce-flushes them to `signals.jsonl` in the app's own storage
-// path, overwriting the full file on each flush (avoids read-append
-// races). On first signal of a session the existing signals.jsonl is
-// read once and its tail (≤400 lines) seeds the in-memory buffer, so
-// entries from prior sessions are preserved across the overwrite.
+// Fire-and-forget telemetry for Reflection. Events receive stable client IDs,
+// buffer briefly in memory, then enter a dedicated bounded IndexedDB queue
+// that cannot block or upgrade the app's user-data outbox. The server appends them to the
+// platform activity stream. This preserves simultaneous-tab and offline events;
+// the old whole-file signals.jsonl overwrite lost one tab's batch.
 //
 // Placement note: this block lives adjacent to the storage machinery
 // (makeStorage above) to minimize merge conflicts with sibling agents
@@ -1391,43 +1826,81 @@ export function createUseDocument(storage, reactProvider = null) {
 //     NOT enforced); only non-string or empty names are dropped silently
 //   - payload values: primitives only (string/number/boolean); non-
 //     primitive values (objects, arrays) are dropped with no error
-//   - ring buffer cap 500; oldest entries evicted when full
+//   - pending memory cap 500; oldest unqueued entries evicted when full
 //   - debounce: at most one flush per 5 seconds; a final flush fires on
 //     pagehide and visibilitychange-hidden so no events are lost on tab close
-//   - on first signal: read existing signals.jsonl once, seed buffer
-//     with its tail ≤400 lines, then overwrite going forward
+//   - a flush removes entries only after IndexedDB durably accepts them
 //
 // Exported as makeSignal(appId, storage) → the signal() fn, so
 // init() can wire it and tests can drive it without a full init().
 
-const SIGNAL_PATH = 'signals.jsonl'
 const SIGNAL_BUF_CAP = 500
-const SIGNAL_SEED_CAP = 400
+const SIGNAL_BATCH_CAP = 100
 const SIGNAL_FLUSH_INTERVAL_MS = 5000
+const SIGNAL_NAME_MAX = 80
+const SIGNAL_PAYLOAD_KEYS_MAX = 20
+const SIGNAL_PAYLOAD_KEY_MAX = 80
+const SIGNAL_PAYLOAD_STRING_MAX = 500
+// Stay below the server's 4096-byte ceiling. The 96-byte margin covers the
+// bounded difference between JavaScript and Python number formatting across at
+// most 20 payload fields (for example 1e-7 vs 1e-07 and -0 vs -0.0).
+const SIGNAL_EVENT_BYTES_MAX = 4000
 
-export function makeSignal(appId, storage) {
-  if (!storage || !appId) return () => {}
+// Match Python json.dumps(..., ensure_ascii=True) byte-for-byte for the signal
+// shapes we permit. JSON.stringify has already escaped ASCII controls/quotes;
+// every remaining non-ASCII UTF-16 code unit becomes one six-byte \uXXXX
+// escape server-side (a supplementary character is two code units / 12 bytes).
+function _signalServerBytes(value) {
+  const json = JSON.stringify(value)
+  let bytes = 0
+  for (let index = 0; index < json.length; index += 1) {
+    bytes += json.charCodeAt(index) <= 0x7f ? 1 : 6
+  }
+  return bytes
+}
 
-  // State for this session: whether we've seeded the buffer from the
-  // existing file, and the ring buffer of {ts, name, ...payload} lines.
-  let _seeded = false
-  let _seeding = false
-  let _buf = []      // objects not yet serialised
+export function makeSignal(appId, storage, appInstanceId = null) {
+  if (!storage || !appId || typeof storage._queueSignals !== 'function') return () => {}
+
+  let _buf = []
   let _flushTimer = null
-  let _flushPending = false
+  let _flushInFlight = false
+  let _flushAgain = false
+  let _visibilityHandler = null
+
+  function _signalId() {
+    try {
+      if (crypto && crypto.randomUUID) return crypto.randomUUID()
+    } catch (e) {}
+    return `${appId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
 
   // Validate and normalise one signal call. Returns null if invalid.
   function _prepare(name, payload) {
-    if (typeof name !== 'string' || !name) return null
-    // Kebab-case is recommended but we only reject non-strings, not bad format.
-    const entry = { ts: new Date().toISOString(), name }
+    if (typeof name !== 'string' || !name.trim()) return null
+    const entry = {
+      id: _signalId(),
+      occurred_at: new Date().toISOString(),
+      name: name.trim().slice(0, SIGNAL_NAME_MAX),
+      payload: {},
+    }
+    if (typeof appInstanceId === 'string' && appInstanceId) {
+      entry.app_instance_id = appInstanceId.slice(0, 64)
+    }
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-      for (const [k, v] of Object.entries(payload)) {
-        const t = typeof v
-        if (t === 'string' || t === 'number' || t === 'boolean') {
-          entry[k] = v
+      for (const [rawKey, rawValue] of Object.entries(payload).slice(0, SIGNAL_PAYLOAD_KEYS_MAX)) {
+        const key = String(rawKey).slice(0, SIGNAL_PAYLOAD_KEY_MAX)
+        if (!key) continue
+        let value = rawValue
+        if (typeof value === 'string') value = value.slice(0, SIGNAL_PAYLOAD_STRING_MAX)
+        const t = typeof value
+        if (t === 'string' || t === 'boolean' || (t === 'number' && Number.isFinite(value))) {
+          entry.payload[key] = value
+          // Payload is optional telemetry context. Drop the field that crosses
+          // the server's total event budget so helper-produced events can never
+          // become singleton poison records and be silently discarded.
+          if (_signalServerBytes(entry) > SIGNAL_EVENT_BYTES_MAX) delete entry.payload[key]
         }
-        // non-primitives silently dropped
       }
     }
     return entry
@@ -1441,30 +1914,37 @@ export function makeSignal(appId, storage) {
     }
   }
 
-  // Flush the current buffer to storage as a full overwrite of signals.jsonl.
-  // The overwrite-not-append design avoids read-append races (two flushes
-  // from concurrent tabs would each read, append, and write back, potentially
-  // losing one batch; a full overwrite means whichever tab wins last has the
-  // authoritative snapshot of ITS buffer, which is already seeded from the
-  // prior file). Both tabs share the same seeded history so no entries are lost.
   async function _flush() {
-    _flushPending = false
+    if (_flushInFlight) { _flushAgain = true; return }
     if (_buf.length === 0) return
+    _flushInFlight = true
+    const pending = _buf
+    _buf = []
+    let queued = 0
     try {
-      const lines = _buf.map((e) => JSON.stringify(e)).join('\n') + '\n'
-      await storage.setText(SIGNAL_PATH, lines)
+      while (queued < pending.length) {
+        const batch = pending.slice(queued, queued + SIGNAL_BATCH_CAP)
+        await storage._queueSignals(batch)
+        queued += batch.length
+      }
     } catch (e) {
-      // storage unavailable (offline, token expired) — entries stay in
-      // the buffer and will be included in the next flush attempt
+      // Only batches not yet accepted by IndexedDB return to memory. Earlier
+      // batches are already durable and safe for the outbox to replay.
+      _buf = [...pending.slice(queued), ..._buf].slice(-SIGNAL_BUF_CAP)
+    } finally {
+      _flushInFlight = false
+      const runAgain = _flushAgain
+      _flushAgain = false
+      if (runAgain && _buf.length) _flushNow()
+      else if (_buf.length) _scheduleFlush()
     }
   }
 
   // Schedule a debounced flush. At most one flush every 5 seconds.
   function _scheduleFlush() {
-    if (_flushTimer !== null || _flushPending) return
+    if (_flushTimer !== null) return
     _flushTimer = setTimeout(() => {
       _flushTimer = null
-      _flushPending = true
       _flush().catch(() => {})
     }, SIGNAL_FLUSH_INTERVAL_MS)
   }
@@ -1483,58 +1963,41 @@ export function makeSignal(appId, storage) {
     _hooksRegistered = true
     try {
       window.addEventListener('pagehide', _flushNow)
-      document.addEventListener('visibilitychange', () => {
+      _visibilityHandler = () => {
         if (document.visibilityState === 'hidden') _flushNow()
-      })
+      }
+      document.addEventListener('visibilitychange', _visibilityHandler)
     } catch (e) {}
   }
 
-  // Seed the in-memory buffer from the existing signals.jsonl (≤400 tail
-  // lines) so that prior-session entries survive the next overwrite. Called
-  // once per session, before the first flush. Runs async; calls that arrive
-  // while seeding are buffered normally and included in the eventual flush.
-  async function _seed() {
-    _seeding = true
-    try {
-      const text = await storage.getText(SIGNAL_PATH)
-      if (text) {
-        const tail = text
-          .split('\n')
-          .filter((l) => l.trim())
-          .slice(-SIGNAL_SEED_CAP)
-          .map((l) => { try { return JSON.parse(l) } catch (e) { return null } })
-          .filter(Boolean)
-        // Prepend the seeded tail; then add any entries buffered while seeding;
-        // then apply the cap so the total stays within SIGNAL_BUF_CAP.
-        _buf = [...tail, ..._buf].slice(-SIGNAL_BUF_CAP)
-      }
-    } catch (e) {
-      // seed failed (file absent, storage error) — proceed with empty history
-    }
-    _seeded = true
-    _seeding = false
-  }
-
-  // The public signal() function. Fire-and-forget: starts the async seed
-  // path if needed, pushes the entry, schedules a debounced flush.
+  // The public signal() function remains fire-and-forget.
   function signal(name, payload) {
     try {
       const entry = _prepare(name, payload)
       if (!entry) return
       _ensureHooks()
       _push(entry)
-      // Kick off the one-time seed from storage. The entry was already pushed
-      // to _buf above; after seeding it gets prepended to the historical tail,
-      // so it will be included in the next flush regardless of seed timing.
-      if (!_seeded && !_seeding) {
-        _seed().then(_scheduleFlush).catch(() => { _seeded = true; _scheduleFlush() })
-        return
-      }
-      if (_seeded) _scheduleFlush()
-      // While seeding: entry is in _buf, flush will be triggered by _seed().then
+      _scheduleFlush()
     } catch (e) {
       // signal() must never propagate exceptions
     }
+  }
+
+  signal._destroy = () => {
+    if (_flushTimer !== null) {
+      clearTimeout(_flushTimer)
+      _flushTimer = null
+    }
+    if (_hooksRegistered) {
+      try { window.removeEventListener('pagehide', _flushNow) } catch (e) {}
+      try {
+        if (_visibilityHandler) {
+          document.removeEventListener('visibilitychange', _visibilityHandler)
+        }
+      } catch (e) {}
+    }
+    _hooksRegistered = false
+    _visibilityHandler = null
   }
 
   return signal
@@ -1629,6 +2092,14 @@ export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) 
     const pid = opts.projectId == null ? '' : String(opts.projectId).trim()
     if (pid) body.project_id = pid
   }
+  if (hasOwn(opts, 'scope')) {
+    const scope = opts.scope == null ? '' : String(opts.scope).trim()
+    if (scope) body.scope = scope
+  }
+  if (hasOwn(opts, 'scopeLabel')) {
+    const label = opts.scopeLabel == null ? '' : String(opts.scopeLabel).trim()
+    if (label) body.scope_label = label
+  }
   return body
 }
 
@@ -1637,43 +2108,22 @@ function makeChat({ appId, getToken, storage }) {
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
   // The ordinary /api/chats create route is owner-only and intentionally
   // leaves created_by_app_id NULL.
-  // /api/app-chats is APP-TOKEN-ONLY: the create + the resume PATCH both 403 an
-  // owner JWT ("Use POST /api/chats for owner-created chats." / "App chat
-  // metadata may only be changed by an app token."). The in-shell app frame's
-  // getToken returns the OWNER JWT (app-frame.html posts the shell token), so
-  // calling /api/app-chats with it 403d — surfacing as the embedded chat's
-  // "create/update failed (403)". Mint a short-lived app-scoped token for THIS
-  // app (the owner JWT is allowed to mint one for any of its apps via
-  // /api/auth/app-token) and use it for the whole app-chat lifecycle. A
-  // STANDALONE host's getToken already returns an app token; if the mint fails
-  // there we fall back to it (still app-scoped, so app-chats accepts it).
-  // Cached; re-minted on a 401 (the 8-hour app token expired mid-session).
-  let _appChatToken = null
-  async function appChatToken(refresh) {
-    if (_appChatToken && !refresh) return _appChatToken
-    const owner = await getToken()
-    try {
-      const res = await fetch('/api/auth/app-token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${owner}` },
-        body: JSON.stringify({ app_id: Number(appId) }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        if (data && data.token) { _appChatToken = data.token; return _appChatToken }
-      }
-    } catch (e) { /* fall through to the host token */ }
-    return owner
+  // Hosts now expose one refreshable app-token broker. Keep app-chat on that
+  // same authority instead of trying to mint an app token with another app
+  // token (the owner-only mint endpoint correctly rejects that with 403).
+  async function appChatFetch(url, init = {}) {
+    return fetchWithAppToken(getToken, url, init)
   }
 
-  // Call an /api/app-chats endpoint with the app-scoped token, re-minting once on
-  // a 401 (the app token expired mid-session). init.headers is merged so the
-  // caller sets Content-Type without clobbering Authorization.
-  async function appChatFetch(url, init) {
-    const withAuth = (t) => ({ ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${t}` } })
-    let res = await fetch(url, withAuth(await appChatToken()))
-    if (res.status === 401) res = await fetch(url, withAuth(await appChatToken(true)))
-    return res
+  async function listChats(opts = {}) {
+    const scope = opts.scope == null ? '' : String(opts.scope).trim()
+    const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+    const res = await appChatFetch(`/api/app-chats${qs}`)
+    if (!res.ok) {
+      throw new Error(`window.mobius.chat: list failed (${res.status})`)
+    }
+    const data = await res.json()
+    return Array.isArray(data) ? data : []
   }
 
   async function createChat(opts) {
@@ -1783,6 +2233,10 @@ function makeChat({ appId, getToken, storage }) {
       savePersistedId(chatId)
     }
     const pickerOn = opts.picker !== false
+    const scopeValue = hasOwn(opts, 'scope') && opts.scope != null
+      ? String(opts.scope).trim()
+      : ''
+    const controlsOn = opts.controls === true || (opts.controls !== false && !!scopeValue)
     const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
     // Sticky 'ready'/'error' so a handler attached after `await chat(...)`
     // still observes the embed's mount-time READY (see makeEmbedEmitter).
@@ -1792,6 +2246,14 @@ function makeChat({ appId, getToken, storage }) {
     if (typeof opts.onTurnDone === 'function') onEvent('turn-done', opts.onTurnDone)
     if (typeof opts.onMessageSent === 'function') onEvent('message-sent', opts.onMessageSent)
     if (typeof opts.onError === 'function') onEvent('error', opts.onError)
+
+    function embedSrcFor(id) {
+      const params = new URLSearchParams()
+      if (id) params.set('chatId', id)
+      if (!pickerOn) params.set('picker', '0')
+      const qs = params.toString()
+      return qs ? `/shell/embed/chat?${qs}` : '/shell/embed/chat'
+    }
 
     const iframe = document.createElement('iframe')
     iframe.title = 'Agent chat'
@@ -1805,11 +2267,7 @@ function makeChat({ appId, getToken, storage }) {
       'sandbox',
       'allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation',
     )
-    const params = new URLSearchParams()
-    if (chatId) params.set('chatId', chatId)
-    if (!pickerOn) params.set('picker', '0')
-    const qs = params.toString()
-    iframe.src = qs ? `/shell/embed/chat?${qs}` : '/shell/embed/chat'
+    iframe.src = embedSrcFor(chatId)
 
     // Sanitize quickActions: max 4, each must have string label + prompt.
     const quickActions = Array.isArray(opts.quickActions)
@@ -1817,6 +2275,135 @@ function makeChat({ appId, getToken, storage }) {
           .filter(a => a && typeof a.label === 'string' && typeof a.prompt === 'string')
           .slice(0, 4)
       : undefined
+
+    let controlsShell = null
+    let frameMount = mount
+    let selectEl = null
+    let newChatButton = null
+    let onChatSelectChange = null
+    let onNewChatClick = null
+
+    function errorText(err) {
+      return err && err.message ? err.message : String(err || 'Unknown error')
+    }
+
+    function chatOptionLabel(chat) {
+      const label = chat && typeof chat.scope_label === 'string' ? chat.scope_label.trim() : ''
+      const title = chat && typeof chat.title === 'string' ? chat.title.trim() : ''
+      if (label) return label
+      if (title) return title
+      return chat && chat.id ? `Chat ${String(chat.id).slice(0, 8)}` : 'Chat'
+    }
+
+    function renderChatOptions(chats) {
+      if (!selectEl) return
+      const options = []
+      const seen = new Set()
+      for (const chat of chats || []) {
+        if (!chat || !chat.id) continue
+        const id = String(chat.id)
+        if (seen.has(id)) continue
+        seen.add(id)
+        options.push({ ...chat, id })
+      }
+      if (chatId && !seen.has(chatId)) {
+        options.unshift({
+          id: chatId,
+          title: opts.title || 'Current chat',
+          scope_label: opts.scopeLabel || opts.title || 'Current chat',
+        })
+      }
+      selectEl.replaceChildren(...options.map((chat) => {
+        const option = document.createElement('option')
+        option.value = chat.id
+        option.textContent = chatOptionLabel(chat)
+        return option
+      }))
+      selectEl.value = chatId || ''
+    }
+
+    async function refreshChatOptions() {
+      if (!controlsOn || !selectEl) return
+      try {
+        renderChatOptions(await listChats(opts))
+      } catch (e) {
+        emit('error', { chatId, error: errorText(e) })
+      }
+    }
+
+    async function switchToChat(nextId) {
+      nextId = nextId ? String(nextId) : ''
+      if (!nextId || nextId === chatId) return
+      const previousId = chatId
+      if (selectEl) selectEl.disabled = true
+      try {
+        await updateChat(nextId, opts)
+        chatId = nextId
+        savePersistedId(chatId)
+        iframe.src = embedSrcFor(chatId)
+      } catch (e) {
+        if (selectEl) selectEl.value = previousId || ''
+        emit('error', { chatId: previousId, error: errorText(e) })
+      } finally {
+        if (selectEl) selectEl.disabled = false
+      }
+    }
+
+    async function startNewChat() {
+      if (newChatButton) newChatButton.disabled = true
+      try {
+        chatId = await createChat(opts)
+        savePersistedId(chatId)
+        iframe.src = embedSrcFor(chatId)
+        await refreshChatOptions()
+        if (selectEl) selectEl.value = chatId
+      } catch (e) {
+        emit('error', { chatId, error: errorText(e) })
+      } finally {
+        if (newChatButton) newChatButton.disabled = false
+      }
+    }
+
+    if (controlsOn) {
+      controlsShell = document.createElement('div')
+      controlsShell.style.cssText = (
+        'width:100%;height:100%;min-height:0;display:flex;flex-direction:column;'
+      )
+      const chrome = document.createElement('div')
+      chrome.style.cssText = (
+        'display:flex;align-items:center;gap:6px;flex:0 0 auto;'
+        + 'padding:6px 8px;border-bottom:1px solid rgba(148,163,184,.28);'
+        + 'background:rgba(248,250,252,.94);'
+      )
+      selectEl = document.createElement('select')
+      selectEl.setAttribute('aria-label', 'Chat')
+      selectEl.style.cssText = (
+        'min-width:0;flex:1 1 auto;height:28px;border:1px solid rgba(148,163,184,.55);'
+        + 'border-radius:6px;background:#fff;color:#111827;font:500 12px system-ui,sans-serif;'
+        + 'padding:0 26px 0 8px;'
+      )
+      newChatButton = document.createElement('button')
+      newChatButton.type = 'button'
+      newChatButton.textContent = '+'
+      newChatButton.title = 'New chat'
+      newChatButton.setAttribute('aria-label', 'New chat')
+      newChatButton.style.cssText = (
+        'width:28px;height:28px;flex:0 0 28px;border:1px solid rgba(148,163,184,.55);'
+        + 'border-radius:6px;background:#fff;color:#111827;font:600 18px/1 system-ui,sans-serif;'
+        + 'display:grid;place-items:center;cursor:pointer;'
+      )
+      onChatSelectChange = () => { switchToChat(selectEl.value).catch(() => {}) }
+      onNewChatClick = () => { startNewChat().catch(() => {}) }
+      selectEl.addEventListener('change', onChatSelectChange)
+      newChatButton.addEventListener('click', onNewChatClick)
+      chrome.appendChild(selectEl)
+      chrome.appendChild(newChatButton)
+      frameMount = document.createElement('div')
+      frameMount.style.cssText = 'min-height:0;flex:1 1 auto;'
+      controlsShell.appendChild(chrome)
+      controlsShell.appendChild(frameMount)
+      renderChatOptions([])
+    }
 
     function sendInit() {
       const w = iframe.contentWindow
@@ -1883,10 +2470,14 @@ function makeChat({ appId, getToken, storage }) {
     // same handshake AppCanvas ↔ app-frame.html rely on.
     window.addEventListener('message', onMessage)
     iframe.addEventListener('load', sendInit)
-    mount.appendChild(iframe)
+    frameMount.appendChild(iframe)
+    if (controlsShell) {
+      mount.appendChild(controlsShell)
+      refreshChatOptions().catch(() => {})
+    }
 
     return {
-      chatId,
+      get chatId() { return chatId },
       instanceId,
       iframe,
       on(event, cb) {
@@ -1898,7 +2489,17 @@ function makeChat({ appId, getToken, storage }) {
       destroy() {
         window.removeEventListener('message', onMessage)
         iframe.removeEventListener('load', sendInit)
-        if (iframe.parentNode) iframe.parentNode.removeChild(iframe)
+        if (selectEl && onChatSelectChange) {
+          selectEl.removeEventListener('change', onChatSelectChange)
+        }
+        if (newChatButton && onNewChatClick) {
+          newChatButton.removeEventListener('click', onNewChatClick)
+        }
+        if (controlsShell && controlsShell.parentNode) {
+          controlsShell.parentNode.removeChild(controlsShell)
+        } else if (iframe.parentNode) {
+          iframe.parentNode.removeChild(iframe)
+        }
       },
     }
   }
@@ -2208,22 +2809,42 @@ export function makeNav() {
       owned: false,
       done: false,
       settled: false,
+      cleanupTimer: null,
       readyResolve: null,
+      outcomeResolve: null,
       onBack: typeof onBack === 'function' ? onBack : null,
     }
+    const outcome = new Promise((resolve) => {
+      entry.outcomeResolve = resolve
+    })
+    // Compatibility: `ready` keeps its original boolean contract forever.
+    // New callers should inspect `outcome` because false historically folded
+    // together standalone use, shell rejection, timeout, cancellation, and a
+    // failed postMessage — states with different UI consequences.
     const ready = new Promise((resolve) => {
       entry.readyResolve = resolve
     })
-    const settleReady = (value) => {
-      if (!entry.readyResolve) return
-      entry.readyResolve(value)
-      entry.readyResolve = null
+    const settleOutcome = (status) => {
+      if (entry.outcomeResolve) {
+        entry.outcomeResolve({ status })
+        entry.outcomeResolve = null
+      }
+      if (entry.readyResolve) {
+        entry.readyResolve(status === 'owned')
+        entry.readyResolve = null
+      }
     }
     const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const timer = setTimeout(() => {
-      entry.settled = true
-      settleReady(false)
-      window.removeEventListener('message', onMessage)
+      // Ownership is unknown on timeout: the shell may have installed the
+      // sentinel but its ack may be delayed. Mark the request abandoned and
+      // retain correlation briefly so a late ack can be compensated by pop.
+      entry.done = true
+      settleOutcome('timeout')
+      entry.cleanupTimer = setTimeout(() => {
+        entry.settled = true
+        window.removeEventListener('message', onMessage)
+      }, 30000)
     }, 5000)
 
     const close = (fromShell = false) => {
@@ -2237,9 +2858,10 @@ export function makeNav() {
         } catch (e) {}
       }
       entry.owned = false
-      if (!entry.settled) settleReady(false)
+      if (!entry.settled) settleOutcome('cancelled')
       if (entry.settled || fromShell) {
         clearTimeout(timer)
+        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         window.removeEventListener('message', onMessage)
       }
     }
@@ -2258,22 +2880,26 @@ export function makeNav() {
       if (msg.type === 'moebius:nav-push-ack') {
         entry.settled = true
         clearTimeout(timer)
+        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         if (entry.done) {
           try {
             window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
           } catch (e) {}
-          settleReady(false)
+          // A close-before-ack already settled the public outcome as
+          // `cancelled`; the late ack is compensated with exactly one pop.
+          settleOutcome('owned')
           window.removeEventListener('message', onMessage)
           return
         }
         entry.owned = true
         stack.push(entry)
-        settleReady(true)
+        settleOutcome('owned')
       } else if (msg.type === 'moebius:nav-push-rejected') {
         entry.settled = true
         clearTimeout(timer)
+        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         entry.owned = false
-        settleReady(false)
+        settleOutcome('rejected')
         window.removeEventListener('message', onMessage)
       }
     }
@@ -2282,10 +2908,11 @@ export function makeNav() {
     if (window.parent === window) {
       clearTimeout(timer)
       entry.settled = true
-      settleReady(false)
+      settleOutcome('standalone')
       window.removeEventListener('message', onMessage)
       return {
         ready,
+        outcome,
         close() {
           close(false)
         },
@@ -2299,12 +2926,13 @@ export function makeNav() {
     } catch (e) {
       clearTimeout(timer)
       entry.settled = true
-      settleReady(false)
+      settleOutcome('error')
       window.removeEventListener('message', onMessage)
     }
 
     return {
       ready,
+      outcome,
       close() {
         close(false)
       },
@@ -2353,9 +2981,51 @@ if (typeof window !== 'undefined') {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function init({ appId, getToken }) {
-  const storage = makeStorage({ appId, getToken })
-  window.mobius = {
+function appTokenClaims(token) {
+  try {
+    const encoded = String(token || '').split('.')[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+  } catch (e) {
+    return null
+  }
+}
+
+function tokenMatchesRuntime(token, appId, appInstanceId) {
+  const claims = appTokenClaims(token)
+  if (!claims || claims.scope !== 'app' || String(claims.app_id) !== String(appId)) {
+    return false
+  }
+  const tokenInstance = typeof claims.app_nonce === 'string' && claims.app_nonce
+    ? claims.app_nonce
+    : null
+  return appInstanceId ? tokenInstance === appInstanceId : tokenInstance === null
+}
+
+let _runtimeContext = null
+
+export function init({ appId, appInstanceId = null, getToken }) {
+  const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
+  if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
+    // Hosts may replace their token broker after a refresh. Keep one runtime and
+    // one listener set, but route future requests through the newest function.
+    _runtimeContext.tokenRef.current = getToken
+    return _runtimeContext.api
+  }
+  if (_runtimeContext) {
+    _runtimeContext.signal?._destroy?.()
+    _runtimeContext.storage?._destroy?.()
+  }
+
+  const tokenRef = { current: getToken }
+  const scopedToken = async (options) => {
+    const token = await tokenRef.current(options)
+    return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null
+  }
+  const storage = makeStorage({ appId, appInstanceId, getToken: scopedToken })
+  const signal = makeSignal(appId, storage, appInstanceId)
+  const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
     // In the in-shell iframe AppCanvas forwards the shell's /api/health probe
@@ -2381,12 +3051,15 @@ export function init({ appId, getToken }) {
     // the React they already import — `const useDocument =
     // window.mobius.createUseDocument(React)`.
     createUseDocument: (React) => createUseDocument(storage, React),
-    signal: makeSignal(appId, storage),
-    chat: makeChat({ appId, getToken, storage }),
+    signal,
+    chat: makeChat({ appId, getToken: scopedToken, storage }),
     nav: makeNav(),
     split: makeSplit(),
   }
+  window.mobius = api
+  _runtimeContext = { identityKey, tokenRef, storage, signal, api }
   storage._drain()    // flush anything left from a previous offline session
+  storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive
   // storage pressure. Fired here (not only in the shell's index.html) so a
   // standalone mini-app PWA opened WITHOUT the shell still gets it. Best-effort.
@@ -2395,7 +3068,7 @@ export function init({ appId, getToken }) {
       navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {})
     }
   } catch (e) {}
-  return window.mobius
+  return api
 }
 
 // # Smells / notes
@@ -2407,11 +3080,9 @@ export function init({ appId, getToken }) {
 //   logout clears `mobius-*` CacheStorage but the OUTBOX/CACHE IndexedDB is a
 //   separate DB — confirm logout also deletes it (delOutboxDb handles the
 //   outbox DB; the cache store rides the same DB, so it's covered).
-// - The standalone host passes a getToken that returns the boot-time
-//   app token (or owner JWT fallback). On a long offline window the app
-//   token can expire; the owner JWT fallback still authenticates as
-//   owner, so the drain succeeds, but a future refinement could re-mint
-//   the app token at drain time.
+// - The standalone and in-shell hosts both provide a refreshable app-token
+//   broker. Runtime fetches retry one 401 through getToken({forceRefresh:true});
+//   queued writes remain intact if refresh is temporarily offline.
 // - setBlob enforces a per-blob size cap (MAX_BLOB_BYTES) BEFORE any IDB/outbox
 //   write, but the read-through cache has NO total-size eviction yet. A true LRU
 //   needs a lastAccessed field + index the cache store lacks (cacheGet never

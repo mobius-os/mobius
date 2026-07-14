@@ -895,6 +895,23 @@ def test_dispatch_user_tool_result():
   assert "tool_end" in types
 
 
+def test_dispatch_user_tool_result_threads_tool_use_id():
+  # The ToolResultBlock's tool_use_id (contract rule 6) rides both the
+  # tool_output and tool_end events so the sink can key a stash of a large
+  # output and the block can fetch it by id.
+  bus = _Bus()
+  dispatch_sdk_message(
+    UserMessage(
+      content=[ToolResultBlock(tool_use_id="tu_abc", content="output text")],
+    ),
+    bus,
+    None,
+  )
+  by_type = {e["type"]: e for e in bus.events}
+  assert by_type["tool_output"]["tool_use_id"] == "tu_abc"
+  assert by_type["tool_end"]["tool_use_id"] == "tu_abc"
+
+
 def test_dispatch_server_web_search_result_emits_sources():
   bus = _Bus()
   msg = AssistantMessage(
@@ -961,9 +978,9 @@ def test_dispatch_client_web_search_tool_result_emits_sources():
   )
 
   assert bus.events == [
-    {"type": "tool_start", "tool": "WebSearch", "input": ""},
+    {"type": "tool_start", "tool": "WebSearch", "input": "", "tool_use_id": "t1"},
     {"type": "tool_input", "tool": "WebSearch", "input": "mobius docs"},
-    {"type": "tool_output", "content": result_text},
+    {"type": "tool_output", "content": result_text, "tool_use_id": "t1"},
     {"type": "tool_sources", "sources": [
       {
         "title": "Mobius",
@@ -972,7 +989,7 @@ def test_dispatch_client_web_search_tool_result_emits_sources():
       },
       {"title": "Docs", "url": "https://example.com/docs"},
     ]},
-    {"type": "tool_end"},
+    {"type": "tool_end", "tool_use_id": "t1"},
   ]
 
 
@@ -1283,3 +1300,104 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
   assert isinstance(result, PermissionResultAllow)
   assert bus.events == before
   assert logged == [("chat-42", "notifications")]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_resets_at_rides_the_terminal_result(monkeypatch):
+  """A RateLimitEvent's structured resets_at lands on the terminal dict so
+  the limit park (design §2.4) can use the exact reset time; a turn with NO
+  rate-limit event carries no such key and completes cleanly — the
+  regression here was an unbound attempt-scope local that error'd every
+  ordinary turn."""
+  from app import claude_sdk_runner
+
+  epoch = 1783813200  # any fixed unix-seconds reset time
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries = []
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield _stream_delta("text_delta", text="working")
+      yield RateLimitEvent(
+        rate_limit_info=RateLimitInfo(
+          status="rejected", resets_at=epoch, rate_limit_type="five_hour",
+        ),
+        uuid="rl-1",
+        session_id="sess-1",
+      )
+      yield _success_result()
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-42",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["error"] is None
+  assert result["rate_limit_resets_at"] == epoch
+
+
+@pytest.mark.asyncio
+async def test_turn_without_rate_limit_event_has_no_resets_key(monkeypatch):
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      return None
+
+    async def interrupt(self):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield _stream_delta("text_delta", text="fine")
+      yield _success_result()
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-42",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["error"] is None
+  assert "rate_limit_resets_at" not in result

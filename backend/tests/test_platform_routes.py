@@ -27,3 +27,16 @@ def test_update_preview_returns_empty_shape_without_a_clone(client, auth):
   assert body["files"] == []
   assert body["diff"] is None
   assert body["diff_truncated"] is False
+
+
+def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
+  """Settings must not translate an unreachable origin into "up to date"."""
+  def fail_check():
+    from app.platform_update import PlatformUpdateError
+    raise PlatformUpdateError("platform_fetch_failed")
+
+  monkeypatch.setattr("app.routes.platform.platform_update.check_for_updates",
+                      fail_check)
+  res = client.post("/api/platform/check", headers=auth)
+  assert res.status_code == 503
+  assert res.json()["detail"] == "Could not reach the platform update source."

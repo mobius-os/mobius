@@ -12,6 +12,7 @@ import {
   closeAllToolLifecycles,
   appendThinkingChunk,
   attachToolSources,
+  reconcileStreamItems,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -155,9 +156,10 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   isStreamingRef: React.MutableRefObject<boolean>,
  *   connectionError: string | null,
  *   reconnecting: boolean,
+ *   catchUpCommitSeq: number,
  *   sendMessage: (text: string, attachments?: Array<object>,
- *                 opts?: {hidden?: boolean, queueOnly?: boolean,
- *                         forceSteer?: boolean, consumePendingTs?: number[],
+ *                 opts?: {hidden?: boolean, queueOnly?: boolean, cid?: string,
+ *                         forceSteer?: boolean, consumePendingCids?: string[],
  *                         answers?: object}) => Promise<object>,
  *   connectToStream: () => void,
  *   retry: () => void,
@@ -198,6 +200,13 @@ export default function useStreamConnection(chatId, {
   // catch-up commits; if replay stalls on a tool-only pause or drops before
   // catch_up_done, the user still sees the last real stream state.
   const catchUpStartedRef = useRef(false)
+  // Monotonic counter bumped on every atomic catch-up commit. useScrollMode
+  // reads it to cloak the first post-reconnect commit (lever 3): after a real
+  // reconnect the reconcile can still re-settle heights, so the scroll machine
+  // re-holds the reading position once the commit lands. A quick-wake kept
+  // socket never reconnects, so it produces no commit and no bump — the shade
+  // glance can't blink the chat.
+  const [catchUpCommitSeq, setCatchUpCommitSeq] = useState(0)
 
   // Wrapper that keeps latestItemsRef in sync synchronously.
   // This prevents promoteStreamToMessages from reading stale items
@@ -654,7 +663,17 @@ export default function useStreamConnection(chatId, {
       const commitCatchUp = () => {
         if (!isCatchUp) return
         if (catchUpItems.length > 0) {
-          setStreamItems(catchUpItems)
+          // Reconcile-into-existing (lever 2c): merge the replayed items onto
+          // the on-screen items by key so unchanged items keep their object +
+          // DOM identity through the commit, instead of replacing the whole
+          // array with fresh objects (which remounted every ToolBlock, <img>,
+          // KaTeX/highlight node in the answer). `prev` is the visible stream —
+          // catch-up rebuilt off-screen into catchUpItems, so the snapshot- or
+          // live-seeded on-screen items are what we reconcile onto (covers the
+          // streamSnapshotCache hand-off: no duplicate append). A steer drop
+          // leaves catchUpItems empty and falls to the authoritative branch
+          // below, so dropped pre-steer items are never resurrected here.
+          setStreamItems(prev => reconcileStreamItems(prev, catchUpItems))
         } else {
           // Empty replay is authoritative. Do not preserve a stale visible
           // snapshot here: after fast-forward, that snapshot may already be
@@ -667,6 +686,11 @@ export default function useStreamConnection(chatId, {
         catchUpItems = []
         isCatchUp = false
         catchUpStartedRef.current = false
+        // Signal the scroll machine to cloak this commit (lever 3). It only
+        // acts once the chat is already revealed (a real reconnect / a Path-A
+        // commit after the reveal cap); a pre-reveal mount commit is covered by
+        // hide-then-reveal and a kept socket produces no commit at all.
+        setCatchUpCommitSeq(s => s + 1)
       }
 
       const patchCatchUpQuestionAnswers = (questionId, answers) => {
@@ -706,7 +730,7 @@ export default function useStreamConnection(chatId, {
           }
 
           if (isChatStreamSystemEvent(event.type)) {
-            if (shouldForwardChatStreamSystemEvent(event, { isCatchUp })) {
+            if (shouldForwardChatStreamSystemEvent(event)) {
               onSystemEventRef.current?.(event)
             }
             continue
@@ -768,6 +792,14 @@ export default function useStreamConnection(chatId, {
               input: event.input || '',
               output: '',
               status: 'running',
+              // Carry the real per-tool identity from the wire (lever 2a). It
+              // keys the tool block (StreamingMessage/MsgContent) and lets a
+              // catch-up commit reconcile onto it by identity instead of
+              // remounting the heaviest block (expanded state, <img>, lazy
+              // fullOutput). streamItemToBlock spreads ...item, so it flows to
+              // the promoted message too. Undefined on a legacy/tokenless wire,
+              // where the ordinal fallback key still applies.
+              tool_use_id: event.tool_use_id,
             }])
           } else if (event.type === 'tool_input') {
             // Backfill input summary from the assistant event.
@@ -871,7 +903,22 @@ export default function useStreamConnection(chatId, {
               // had no branch for it (which is the bug we're
               // fixing — the error visibly disappeared on chat
               // return).
-              updated.push({ type: 'error', message: event.message })
+              // Carry the whitelisted extras so the promoted block matches the
+              // persisted shape: `resumable` renders the one-tap Resume, and
+              // the single `pause` descriptor ({kind, resets_at?}) renders the
+              // "Paused" family / the provider-limit "resets at … · Resume now"
+              // card. Accepted limitation (adjudicated 2026-07-11): while this
+              // is still a live stream item, the streaming renderer shows the
+              // generic error styling — the full parked card appears at
+              // promotion. A limit kill is terminal, so `done` (and promotion)
+              // follows within the same breath; not worth a parallel live-card
+              // path. streamItemToBlock carries the same fields on promote.
+              updated.push({
+                type: 'error',
+                message: event.message,
+                ...(event.resumable ? { resumable: true } : {}),
+                ...(event.pause ? { pause: event.pause } : {}),
+              })
               return updated
             })
           } else if (event.type === 'queued_turn_starting') {
@@ -1063,7 +1110,8 @@ export default function useStreamConnection(chatId, {
       hidden = false,
       queueOnly = false,
       forceSteer = false,
-      consumePendingTs = undefined,
+      cid = undefined,
+      consumePendingCids = undefined,
       steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
@@ -1103,9 +1151,10 @@ export default function useStreamConnection(chatId, {
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
+      if (cid) body.cid = cid
       if (forceSteer) body.force_steer = true
-      if (consumePendingTs && consumePendingTs.length > 0) {
-        body.consume_pending_ts = consumePendingTs
+      if (consumePendingCids && consumePendingCids.length > 0) {
+        body.consume_pending_cids = consumePendingCids
       }
       if (forceSteer && Array.isArray(steeredMessages) && steeredMessages.length > 0) {
         body.steered_messages = steeredMessages
@@ -1394,6 +1443,7 @@ export default function useStreamConnection(chatId, {
     isStreamingRef,
     connectionError,
     reconnecting,
+    catchUpCommitSeq,
     sendMessage,
     connectToStream,
     retry,

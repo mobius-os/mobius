@@ -71,7 +71,7 @@ function ToolResult({ r }) {
   )
 }
 
-export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
+export default function ToolBlock({ t, chatId }) {
   // Collapsed until tapped — nothing produces a pre-opened tool block anymore
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
@@ -79,13 +79,17 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   const [open, setOpen] = useState(false)
   const headerRef = useRef(null)
   // The full output of a large tool block is fetched lazily on first expand —
-  // a chat load ships only the top-line summary (the tool + its input) and an
-  // output_truncated marker, no output preview (see chats.py
-  // _truncate_large_tool_outputs), so a Read of a huge file or a long bash run
-  // doesn't bloat the payload for blocks the user never opens. Cached here so
-  // re-collapsing doesn't refetch.
+  // a chat load ships only a bounded excerpt plus an output_truncated marker
+  // (the write funnel reduced it and stashed the full text in tool_outputs), so
+  // a Read of a huge file or a long bash run doesn't bloat the payload for
+  // blocks the user never opens. Cached here so re-collapsing doesn't refetch.
   const [fullOutput, setFullOutput] = useState(null)
   const [loadingFull, setLoadingFull] = useState(false)
+  // A fetch that failed (offline, or a 404 when no stash row exists) is
+  // TERMINAL: without this, loadingFull flips false and the effect re-fires on
+  // the same deps, retrying the fetch forever. A 404 is a designed outcome
+  // (contract rule 6: keep the inline excerpt), so try once and stop.
+  const [loadFailed, setLoadFailed] = useState(false)
   const toolName = t.tool || 'Tool'
   const label = toolName + (t.input ? `: ${t.input}` : '')
   const sources = Array.isArray(t.sources)
@@ -96,17 +100,23 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   )
 
   useEffect(() => {
-    if (!open || !t.output_truncated || fullOutput !== null || loadingFull) return
-    if (!chatId || msgTs == null || blockIdx == null) return
+    if (!open || !t.output_truncated || fullOutput !== null || loadingFull || loadFailed) return
+    if (!chatId) return
+    // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
+    // its full text from the side-table endpoint. Every large block is tagged
+    // (card-221 migrated all history), so a block without an id has no fetchable
+    // full text — leave the inline excerpt.
+    if (!t.tool_use_id) return
+    const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
     let cancelled = false
     setLoadingFull(true)
-    apiFetch(`/chats/${chatId}/tool-output?ts=${msgTs}&i=${blockIdx}`)
+    apiFetch(url)
       .then(res => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then(text => { if (!cancelled) setFullOutput(text) })
-      .catch(() => {})
+      .catch(() => { if (!cancelled) setLoadFailed(true) })
       .finally(() => { if (!cancelled) setLoadingFull(false) })
     return () => { cancelled = true }
-  }, [open, t.output_truncated, fullOutput, loadingFull, chatId, msgTs, blockIdx])
+  }, [open, t.output_truncated, t.tool_use_id, fullOutput, loadingFull, loadFailed, chatId])
 
   // Show the fetched full output once it lands; until then the inline preview.
   const shownOutput = t.output_truncated && fullOutput !== null ? fullOutput : t.output
@@ -121,9 +131,15 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
     () => (shownOutput ? formatToolResult(shownOutput) : null),
     [shownOutput],
   )
-  const failed = !!(
-    r && r.kind === 'terminal' && r.exitCode != null && r.exitCode !== 0
-  )
+  // Failure exit code, field-or-parse (contract rule 6): a block reduced at the
+  // funnel carries an explicit output_exit_code, so read that rather than
+  // re-parsing a possibly-carved excerpt; else fall back to the parsed terminal
+  // envelope. This surfaces a failed step on the collapsed header without a
+  // fetch, even when the inline text is only an excerpt.
+  const exitCode = t.output_exit_code != null
+    ? t.output_exit_code
+    : (r && r.kind === 'terminal' ? r.exitCode : null)
+  const failed = exitCode != null && exitCode !== 0
 
   return (
     <div className={
@@ -150,7 +166,7 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
           {t.status === 'running' ? `${toolActivityLabel(toolName)}…` : label}
         </span>
         {failed && (
-          <span className="chat__tool-exit chat__tool-exit--head">exit {r.exitCode}</span>
+          <span className="chat__tool-exit chat__tool-exit--head">exit {exitCode}</span>
         )}
         {hasDetail && <span className="chat__tool-toggle">{open ? '▾' : '▸'}</span>}
       </div>

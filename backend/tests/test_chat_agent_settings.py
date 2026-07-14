@@ -30,6 +30,11 @@ def _write_global_settings(payload: dict) -> None:
   (shared / "agent-settings.json").write_text(json.dumps(payload))
 
 
+def _read_global_settings() -> dict:
+  path = Path(os.environ["DATA_DIR"]) / "shared" / "agent-settings.json"
+  return json.loads(path.read_text())
+
+
 def test_effective_settings_falls_back_to_global(tmp_path):
   """No chat override → returns the global default unchanged."""
   shared = tmp_path / "shared"
@@ -144,6 +149,80 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
   assert body["effective"]["model"] == "fallback-model"
 
 
+def test_auto_resume_is_per_chat_and_survives_runtime_clear(
+  client, auth, chat, db,
+):
+  """The limit preference is chat-local and independent of model settings."""
+  from app import models
+
+  chat.agent_settings_json = {"model": "historical-model", "effort": "high"}
+  chat.provider = "codex"
+  db.commit()
+  owner = db.query(models.Owner).first()
+  owner.provider = "claude"
+  db.commit()
+  _write_global_settings({"model": "current-model", "effort": "low"})
+  other = client.post(
+    "/api/chats", headers=auth, json={"title": "other"},
+  ).json()
+
+  enabled = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+  assert enabled.status_code == 200
+  assert enabled.json()["auto_resume_on_limit"] is True
+  assert enabled.json()["agent_settings_json"] == {
+    "model": "historical-model", "effort": "high",
+  }
+  assert "auto_resume_on_limit" not in enabled.json()["effective"]
+  assert _read_global_settings() == {
+    "model": "current-model", "effort": "low",
+  }
+  db.expire_all()
+  assert db.query(models.Owner).first().provider == "claude"
+
+  sibling = client.get(f"/api/chats/{other['id']}", headers=auth).json()
+  assert sibling["auto_resume_on_limit"] is False
+
+  cleared = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"clear_agent_settings": True},
+  ).json()
+  assert cleared["auto_resume_on_limit"] is True
+  assert cleared["agent_settings_json"] is None
+
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert detail["auto_resume_on_limit"] is True
+
+  disabled = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"auto_resume_on_limit": False},
+  ).json()
+  assert disabled["auto_resume_on_limit"] is False
+  assert disabled["agent_settings_json"] is None
+
+
+def test_stale_global_auto_resume_setting_is_not_a_chat_default(
+  client, auth, chat,
+):
+  _write_global_settings({
+    "auto_resume_on_limit": True,
+    "model": "claude-opus-4-7",
+  })
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert detail["auto_resume_on_limit"] is False
+  # Reads ignore the removed owner-global key. The one-way file cleanup is a
+  # boot migration (covered in test_settings), not a racy write from GET.
+  assert _read_global_settings() == {
+    "auto_resume_on_limit": True,
+    "model": "claude-opus-4-7",
+  }
+
+
 def test_get_chat_includes_effective_settings(client, auth, chat):
   """GET /chats/{id} surfaces both raw override and merged effective.
 
@@ -193,7 +272,9 @@ def test_patch_chat_provider_mirrors_to_owner_immediately(
   """
   from app import models, providers
 
-  monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, d: None)
+  monkeypatch.setattr(
+    providers.CodexProvider, "check_auth", lambda self, d: None,
+  )
 
   owner_before = db.query(models.Owner).first()
   assert owner_before.provider == "claude"
@@ -228,6 +309,35 @@ def test_patch_chat_provider_rejects_unknown_value(client, auth, chat, db):
   assert owner.provider == "claude"  # untouched
 
 
+def test_first_live_turn_cannot_switch_provider_via_patch(
+  client, auth, chat, db,
+):
+  """The provider is immutable once the first run has claimed the chat."""
+  from app import models
+
+  chat.messages = [{"role": "user", "content": "first request"}]
+  chat.run_status = "running"
+  db.add(models.ChatRun(
+    id="first-live-turn",
+    chat_id=chat.id,
+    status="running",
+    provider="claude",
+  ))
+  db.commit()
+
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={
+      "provider": "codex",
+      "agent_settings_json": {"model": "gpt-5.4"},
+    },
+  )
+  assert response.status_code == 409
+  db.refresh(chat)
+  assert chat.provider == "claude"
+
+
 def test_chat_patch_provider_validator_rejects_unknown():
   """ChatPatch rejects unknown provider IDs."""
   try:
@@ -260,7 +370,9 @@ def test_patch_chat_provider_and_model_in_same_request(
   — the slash picker uses this when switching providers (it clears
   the stale per-chat model override at the same time)."""
   from app import providers
-  monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, d: None)
+  monkeypatch.setattr(
+    providers.CodexProvider, "check_auth", lambda self, d: None,
+  )
 
   r = client.patch(
     f"/api/chats/{chat.id}",
@@ -385,6 +497,53 @@ def test_patch_model_only_with_cross_provider_model_switches_provider(
   refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert refreshed.session_id is None
   assert refreshed.provider == "codex"
+
+
+def test_patch_cannot_bypass_handoff_after_assistant_turn(
+  client, auth, chat, db, monkeypatch,
+):
+  """A populated chat must use the atomic incoming-provider handoff route."""
+  from app import models, providers
+
+  monkeypatch.setattr(
+    providers.CodexProvider, "check_auth", lambda self, d: None,
+  )
+  chat.session_id = "claude-session"
+  chat.agent_settings_json = {"model": "claude-sonnet-4-6"}
+  chat.messages = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  db.commit()
+
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={
+      "provider": "codex",
+      "agent_settings_json": {"model": "gpt-5.4"},
+    },
+  )
+  assert response.status_code == 409
+  assert "handoff" in response.json()["detail"].lower()
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  assert row.provider == "claude"
+  assert row.session_id == "claude-session"
+  assert row.agent_settings_json == {"model": "claude-sonnet-4-6"}
+
+
+def test_patch_rejects_explicit_provider_model_mismatch(client, auth, chat):
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={
+      "provider": "claude",
+      "agent_settings_json": {"model": "gpt-5.4"},
+    },
+  )
+  assert response.status_code == 422
+  assert "does not belong" in response.json()["detail"].lower()
 
 
 def test_patch_model_only_cross_provider_409s_if_target_disconnected(

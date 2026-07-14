@@ -25,19 +25,88 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
-import { freshEnv, waitFor } from './mobiusRuntimeHarness.mjs'
+import { freshEnv, recordSubscription, waitFor } from './mobiusRuntimeHarness.mjs'
 
 // makeStorage is imported lazily inside each test AFTER freshEnv() installs the
 // browser globals it reads at construction time. A top-level import would run
 // before the globals exist.
-async function newStorage(appId = '1') {
+function appToken(appId, nonce = null, rev = '1') {
+  const payload = Buffer.from(JSON.stringify({
+    scope: 'app', app_id: appId, ...(nonce ? { app_nonce: nonce } : {}), rev,
+  })).toString('base64url')
+  return `header.${payload}.signature`
+}
+
+async function newStorage(appId = '1', { appInstanceId = null, getToken } = {}) {
   const { makeStorage } = await import('../../../public/mobius-runtime.js')
-  return makeStorage({ appId, getToken: async () => 'test-token' })
+  return makeStorage({
+    appId,
+    appInstanceId,
+    getToken: getToken || (async () => appToken(appId, appInstanceId)),
+  })
 }
 
 async function runtimeExports() {
   return import('../../../public/mobius-runtime.js')
 }
+
+test('an opaque sandbox without IndexedDB still reads and writes online', async () => {
+  const { server } = freshEnv()
+  globalThis.indexedDB = {
+    open() {
+      const err = new Error('IndexedDB is denied in an opaque origin')
+      err.name = 'SecurityError'
+      throw err
+    },
+  }
+  const s = await newStorage()
+  server.seed('saved.json', { survives: true })
+
+  assert.deepEqual(await s.get('saved.json'), { survives: true })
+  assert.deepEqual((await s.list('')).map((entry) => entry.name), ['saved.json'])
+  assert.deepEqual(await s.set('new.json', { writes: true }), { synced: true })
+  assert.deepEqual(server.serverValue('new.json'), { writes: true })
+  assert.equal(await s.pendingCount(), 0)
+
+  server.setOnline(false)
+  assert.equal(await s.get('saved.json'), null)
+  await assert.rejects(s.set('offline.json', { no: 'phantom queue' }), /offline saving is unavailable/)
+})
+
+test('opaque-frame direct storage preserves text, blob, delete, CAS, and subscriptions', async () => {
+  const { server } = freshEnv()
+  globalThis.indexedDB = { open() { throw new DOMException('denied', 'SecurityError') } }
+  const s = await newStorage()
+
+  const observed = recordSubscription((cb) => s.subscribeText('note.txt', cb))
+  await s.setText('note.txt', 'hello', { contentType: 'text/markdown' })
+  await waitFor(() => observed.values.includes('hello'))
+  assert.equal(await s.getText('note.txt'), 'hello')
+
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+  assert.deepEqual(await s.setBlob('image.bin', blob), { synced: true })
+  const loaded = await s.getBlob('image.bin')
+  assert.equal(loaded.type, 'image/png')
+  assert.deepEqual([...new Uint8Array(await loaded.arrayBuffer())], [1, 2, 3])
+
+  const first = await s.durableWrite('cas.json', { n: 1 }, { ifNoneMatch: true })
+  assert.equal(first.durability, 'synced')
+  assert.ok(first.version)
+  const versioned = await s.getWithVersion('cas.json')
+  assert.deepEqual(versioned.value, { n: 1 })
+  const second = await s.durableWrite('cas.json', { n: 2 }, { ifMatch: versioned.version })
+  assert.equal(second.durability, 'synced')
+  assert.ok(second.version)
+  await assert.rejects(
+    s.durableWrite('cas.json', { n: 3 }, { ifMatch: versioned.version }),
+    (error) => error.status === 412,
+  )
+
+  assert.deepEqual(await s.remove('note.txt'), { synced: true })
+  await waitFor(() => observed.values.at(-1) === null)
+  assert.equal(server.serverHas('note.txt'), false)
+  observed.unsub()
+})
 
 async function renderUseDocument(storage, path, opts) {
   const stateSlots = []
@@ -146,6 +215,266 @@ test('the outbox coalesces to one op per path; the last write wins on drain', as
   server.setOnline(true)
   await s._drain()
   assert.deepEqual(server.serverValue('y.json'), { n: 'c' })  // LWW
+})
+
+test('offline signal batches from separate runtimes do not coalesce', async () => {
+  const { server } = freshEnv()
+  const first = await newStorage('7')
+  const second = await newStorage('7')
+  server.setOnline(false)
+
+  await first._queueSignals([{ id: 'first', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await second._queueSignals([{ id: 'second', occurred_at: '2026-07-13T10:00:01Z', name: 'item_created', payload: {} }])
+  assert.equal(await first.pendingCount(), 0) // telemetry never changes user-data sync state
+  assert.equal(await first._pendingSignalCount(), 2)
+
+  server.setOnline(true)
+  await first._drainSignals()
+  assert.equal(await first._pendingSignalCount(), 0)
+  assert.deepEqual(server.signalEvents.map((event) => event.id), ['first', 'second'])
+})
+
+test('signal queues are isolated by immutable app installation identity', async () => {
+  const { server } = freshEnv()
+  const oldInstall = await newStorage('7', { appInstanceId: 'install-old' })
+  const newInstall = await newStorage('7', { appInstanceId: 'install-new' })
+  server.setOnline(false)
+
+  await oldInstall._queueSignals([{ id: 'old', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await newInstall._queueSignals([{ id: 'new', occurred_at: '2026-07-13T10:00:01Z', name: 'app_ready', payload: {} }])
+  assert.equal(await oldInstall._pendingSignalCount(), 1)
+  assert.equal(await newInstall._pendingSignalCount(), 1)
+
+  server.setOnline(true)
+  await newInstall._drainSignals()
+  assert.deepEqual(server.signalEvents.map((event) => event.id), ['new'])
+  assert.equal(await oldInstall._pendingSignalCount(), 1)
+})
+
+test('storage queues and caches are isolated by exact installation identity', async () => {
+  const { server } = freshEnv()
+  const legacy = await newStorage('7')
+  const current = await newStorage('7', { appInstanceId: 'install-current' })
+  server.setOnline(false)
+
+  await legacy.set('legacy.json', { owner: 'legacy' })
+  await current.set('current.json', { owner: 'current' })
+
+  assert.equal(await legacy.pendingCount(), 1)
+  assert.equal(await current.pendingCount(), 1)
+  assert.equal(await legacy.get('current.json'), null)
+  assert.equal(await current.get('legacy.json'), null)
+})
+
+test('an old runtime cannot refresh across a rotated storage generation', async () => {
+  const { server } = freshEnv()
+  let nonce = 'generation-old'
+  const storage = await newStorage('7', {
+    appInstanceId: 'generation-old',
+    getToken: async () => appToken('7', nonce),
+  })
+  server.setOnline(false)
+  await storage.set('wiped.json', { mustNotReturn: true })
+
+  // DELETE /apps/{id}/data rotates the nonce before releasing the server's
+  // storage lock. Even if the host can now mint the new token, this old runtime
+  // remains bound to its init identity and cannot replay the pre-wipe write.
+  nonce = 'generation-new'
+  server.setOnline(true)
+  await storage._drain()
+  assert.equal(server.serverHas('wiped.json'), false)
+  assert.equal(await storage.pendingCount(), 1)
+})
+
+test('nonce-aware signal runtime ignores ambiguous legacy records after ID reuse', async () => {
+  const { server } = freshEnv()
+  const legacy = await newStorage('7')
+  server.setOnline(false)
+  await legacy._queueSignals([{ id: 'legacy', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+
+  const replacement = await newStorage('7', { appInstanceId: 'replacement-install' })
+  assert.equal(await replacement._pendingSignalCount(), 0)
+  server.setOnline(true)
+  await replacement._drainSignals()
+  assert.deepEqual(server.signalEvents, [])
+})
+
+test('a 401 refreshes the app token and retries a storage write once', async () => {
+  const { server } = freshEnv()
+  const calls = []
+  const storage = await newStorage('7', {
+    appInstanceId: 'install-one',
+    getToken: async (options = {}) => {
+      calls.push(options)
+      return appToken('7', 'install-one', options.forceRefresh ? 'fresh' : 'stale')
+    },
+  })
+  server.forceWrite('refresh.json', 401)
+
+  assert.deepEqual(await storage.set('refresh.json', { saved: true }), { synced: true })
+  assert.ok(calls.some((options) => options.forceRefresh === true))
+  assert.deepEqual(server.serverValue('refresh.json'), { saved: true })
+})
+
+test('signal rollout 404 is retryable and preserves the durable queue', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7', { appInstanceId: 'install-one' })
+  server.setSignalStatus(404)
+  await storage._queueSignals([{ id: 'rollout', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await storage._drainSignals()
+  assert.equal(await storage._pendingSignalCount(), 1)
+})
+
+test('a forbidden signal batch is poison and does not retry forever', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7', { appInstanceId: 'install-one' })
+  server.setSignalStatus(403)
+  await storage._queueSignals([{ id: 'forbidden', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+
+  await storage._drainSignals()
+
+  assert.equal(await storage._pendingSignalCount(), 0)
+  assert.deepEqual(server.signalEvents, [])
+})
+
+test('init reuses one runtime per installation and updates its token broker', async () => {
+  const { server } = freshEnv()
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  const windowListeners = new Map()
+  const documentListeners = new Map()
+  const track = (registry, type, cb) => {
+    if (!registry.has(type)) registry.set(type, new Set())
+    registry.get(type).add(cb)
+  }
+  const untrack = (registry, type, cb) => registry.get(type)?.delete(cb)
+  globalThis.window = {
+    location: { origin: 'https://mobius.test' },
+    parent: { postMessage() {} },
+    addEventListener(type, cb) { track(windowListeners, type, cb) },
+    removeEventListener(type, cb) { untrack(windowListeners, type, cb) },
+  }
+  globalThis.document = {
+    visibilityState: 'visible',
+    addEventListener(type, cb) { track(documentListeners, type, cb) },
+    removeEventListener(type, cb) { untrack(documentListeners, type, cb) },
+  }
+  try {
+    const runtime = await import(`../../../public/mobius-runtime.js?init-once=${Date.now()}`)
+    const firstToken = appToken('7', 'install-one', 'first')
+    const secondToken = appToken('7', 'install-one', 'second')
+    const first = runtime.init({
+      appId: '7',
+      appInstanceId: 'install-one',
+      getToken: async () => firstToken,
+    })
+    const listenerCounts = () => ({
+      window: [...windowListeners].map(([type, callbacks]) => [type, callbacks.size]),
+      document: [...documentListeners].map(([type, callbacks]) => [type, callbacks.size]),
+    })
+    const before = listenerCounts()
+
+    const second = runtime.init({
+      appId: '7',
+      appInstanceId: 'install-one',
+      getToken: async () => secondToken,
+    })
+
+    assert.equal(second, first)
+    assert.deepEqual(listenerCounts(), before)
+    await second.storage.set('uses-latest-token.json', { ok: true })
+    const write = server.log.find((entry) => entry.method === 'PUT' && entry.url.includes('uses-latest-token.json'))
+    assert.equal(write.headers.Authorization, `Bearer ${secondToken}`)
+    second.signal._destroy()
+    second.storage._destroy()
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+  }
+})
+
+test('explicit data wipe purges one app runtime state without touching another', async () => {
+  const { server } = freshEnv()
+  const removed = await newStorage('7', { appInstanceId: 'removed-install' })
+  const retained = await newStorage('8', { appInstanceId: 'retained-install' })
+  server.setOnline(false)
+  await removed.set('note.json', { text: 'remove me' })
+  await removed._queueSignals([{ id: 'removed', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await retained.set('note.json', { text: 'keep me' })
+  await retained._queueSignals([{ id: 'retained', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+
+  const { purgeAppRuntimeData } = await runtimeExports()
+  await purgeAppRuntimeData('7')
+  assert.equal(await removed.pendingCount(), 0)
+  assert.equal(await removed._pendingSignalCount(), 0)
+  assert.equal(await retained.pendingCount(), 1)
+  assert.equal(await retained._pendingSignalCount(), 1)
+})
+
+test('a failing signal endpoint cannot block or dead-letter user storage writes', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7')
+  server.setSignalStatus(503)
+
+  await storage._queueSignals([{ id: 'stuck', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await storage._drainSignals()
+  assert.equal(await storage._pendingSignalCount(), 1)
+
+  const result = await storage.set('document.json', { saved: true })
+  assert.deepEqual(result, { synced: true })
+  assert.deepEqual(server.serverValue('document.json'), { saved: true })
+  assert.equal(await storage.pendingCount(), 0)
+  assert.equal(await storage._pendingSignalCount(), 1)
+})
+
+test('the offline signal queue evicts oldest events at its per-app cap', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7')
+  server.setOnline(false)
+  const events = Array.from({ length: 600 }, (_, i) => ({
+    id: `signal-${i}`,
+    occurred_at: '2026-07-13T10:00:00Z',
+    name: 'item_created',
+    payload: {},
+  }))
+
+  await storage._queueSignals(events)
+  assert.equal(await storage._pendingSignalCount(), 500)
+})
+
+test('the offline signal queue is bounded by serialized bytes as well as count', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7')
+  server.setOnline(false)
+  const events = Array.from({ length: 300 }, (_, i) => ({
+    id: `wide-${i}`,
+    occurred_at: '2026-07-13T10:00:00Z',
+    name: 'error',
+    payload: { message: 'x'.repeat(10000) },
+  }))
+
+  await storage._queueSignals(events)
+  assert.ok(await storage._pendingSignalCount() < 300)
+  assert.ok(await storage._pendingSignalCount() > 0)
+})
+
+test('the shared signal database has an owner-wide cap across many apps', async () => {
+  const { server } = freshEnv()
+  server.setOnline(false)
+  const storages = await Promise.all(Array.from({ length: 5 }, (_, index) => (
+    newStorage(String(index + 1), { appInstanceId: `install-${index + 1}` })
+  )))
+  for (let appIndex = 0; appIndex < storages.length; appIndex += 1) {
+    await storages[appIndex]._queueSignals(Array.from({ length: 500 }, (_, eventIndex) => ({
+      id: `${appIndex}-${eventIndex}`,
+      occurred_at: '2026-07-13T10:00:00Z',
+      name: 'item_created',
+      payload: {},
+    })))
+  }
+  const counts = await Promise.all(storages.map((storage) => storage._pendingSignalCount()))
+  assert.equal(counts.reduce((sum, count) => sum + count, 0), 2000)
+  assert.ok(counts.every((count) => count <= 500))
 })
 
 test('a transient failure on the head op stops the drain and preserves order', async () => {
@@ -473,6 +802,108 @@ test('412 CAS conflict is retryable and does not emit dead-letter', async () => 
   assert.equal(await s.pendingCount(), 0)
   assert.deepEqual(deadLetters, [])
   unsub()
+})
+
+// ── Compare-and-swap: getWithVersion + conditional durableWrite ────────────
+
+test('getWithVersion returns the value AND its server version (ETag)', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('index.json', [{ id: 'a' }])
+
+  const { value, version } = await s.getWithVersion('index.json')
+  assert.deepEqual(value, [{ id: 'a' }])
+  assert.equal(typeof version, 'string')
+  assert.ok(version.length > 0)               // the ETag the server handed back
+
+  // The versioned read opted in with X-Mobius-Version:1 (that's what makes the
+  // server echo the ETag) — a plain get() must NOT, so it stays a cheap read.
+  const vget = server.log.filter((e) => e.method === 'GET' && e.url.includes('index.json')).pop()
+  assert.equal(vget.headers['X-Mobius-Version'], '1')
+})
+
+test('durableWrite({ifMatch}) sends If-Match and succeeds when the version matches', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('doc.json', { n: 0 })
+
+  const { version } = await s.getWithVersion('doc.json')
+  const r = await s.durableWrite('doc.json', { n: 1 }, { ifMatch: version })
+
+  assert.equal(r.durability, 'synced')
+  assert.deepEqual(server.serverValue('doc.json'), { n: 1 })
+  // The conditional write carried the held version as an If-Match precondition.
+  const put = server.log.filter((e) => e.method === 'PUT' && e.url.includes('doc.json')).pop()
+  assert.equal(put.headers['If-Match'], version)
+  // ...and the accepted write returns the NEW version for the next CAS round.
+  assert.equal(typeof r.version, 'string')
+  assert.notEqual(r.version, version)
+})
+
+test('a stale ifMatch surfaces as a retryable conflict; a re-read + retry lands both edits', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const { DurableWriteError } = await runtimeExports()
+  server.seed('topics.json', [{ t: 'a' }])
+
+  // We read at version V1, then a CONCURRENT writer (cron/agent) moves the ETag.
+  const first = await s.getWithVersion('topics.json')
+  server.seed('topics.json', [{ t: 'a' }, { t: 'cron' }])   // now at V2 on the server
+
+  // Our conditional write on the stale V1 is rejected as a retryable conflict,
+  // NOT silently last-write-wins (which would drop the cron edit).
+  await assert.rejects(
+    () => s.durableWrite('topics.json', [{ t: 'a' }, { t: 'ui' }], { ifMatch: first.version }),
+    (err) => err instanceof DurableWriteError &&
+      err.code === 'conflict' &&
+      err.status === 412 &&
+      err.retryable === true,
+  )
+  assert.equal(await s.pendingCount(), 0)                    // the conflicted op is not stuck
+  // The server still holds the concurrent writer's value — our stale write never landed.
+  assert.deepEqual(server.serverValue('topics.json'), [{ t: 'a' }, { t: 'cron' }])
+
+  // The app owns the retry: re-read at the fresh version, merge, write again.
+  const second = await s.getWithVersion('topics.json')
+  assert.notEqual(second.version, first.version)
+  const merged = [...second.value, { t: 'ui' }]
+  const r = await s.durableWrite('topics.json', merged, { ifMatch: second.version })
+
+  assert.equal(r.durability, 'synced')
+  // Both edits survive — the whole point of CAS over last-write-wins.
+  assert.deepEqual(server.serverValue('topics.json'), [{ t: 'a' }, { t: 'cron' }, { t: 'ui' }])
+})
+
+test('ifNoneMatch:true is a create-only write that conflicts when the path already exists', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const { DurableWriteError } = await runtimeExports()
+
+  const created = await s.durableWrite('new.json', { first: true }, { ifNoneMatch: true })
+  assert.equal(created.durability, 'synced')
+  assert.deepEqual(server.serverValue('new.json'), { first: true })
+
+  await assert.rejects(
+    () => s.durableWrite('new.json', { clobber: true }, { ifNoneMatch: true }),
+    (err) => err instanceof DurableWriteError && err.code === 'conflict' && err.status === 412,
+  )
+  assert.deepEqual(server.serverValue('new.json'), { first: true })   // not clobbered
+})
+
+test('plain set()/durableWrite (last-write-wins) send NO If-Match — CAS is opt-in', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+
+  await s.set('plain.json', { a: 1 })
+  await s.durableWrite('plain2.json', { b: 2 })
+
+  assert.deepEqual(server.serverValue('plain.json'), { a: 1 })
+  assert.deepEqual(server.serverValue('plain2.json'), { b: 2 })
+  for (const name of ['plain.json', 'plain2.json']) {
+    const put = server.log.filter((e) => e.method === 'PUT' && e.url.includes(name)).pop()
+    assert.equal(put.headers['If-Match'], undefined)
+    assert.equal(put.headers['If-None-Match'], undefined)
+  }
 })
 
 test('onDeadLetter replays an offline-queued write later refused on drain', async () => {

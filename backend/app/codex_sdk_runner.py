@@ -66,7 +66,7 @@ import os
 import re
 import shutil
 import time
-from typing import Any
+from typing import Any, Callable
 
 from app.codex_appserver import _extract_bash_command
 from app.providers import get_skill_path
@@ -321,6 +321,33 @@ def _web_search_sources(item: Any) -> list[dict[str, str]]:
   return collected
 
 
+def _stamp_tool_use_id(event: dict[str, Any], item: Any) -> None:
+  """Stamp the ThreadItem's stable id onto a tool event as `tool_use_id`
+  (contract rule 6), so a large tool output can be reduced on the wire and
+  fetched lazily by id.
+
+  Verified stable: every Codex ThreadItem carries an `id`, the SAME id rides
+  the `ItemStarted` (tool_start) and `ItemCompleted` (tool_output/tool_end)
+  notifications for one tool call, and the streaming output-delta / file-change
+  notifications reference it as `itemId` — so it is stable emit->read and unique
+  within the chat, which is all the stash key needs. A test fake without an
+  `id` (or a null id) is left unstamped, so the event shape is unchanged."""
+  tid = getattr(item, "id", None)
+  if tid:
+    event["tool_use_id"] = tid
+
+
+def _stamp_notification_item_id(event: dict[str, Any], payload: Any) -> None:
+  """Stamp `tool_use_id` from a notification's `item_id` (the streaming
+  output-delta / file-change-patch notifications reference their ThreadItem by
+  `itemId`, the same id the completed item carries). getattr-guarded so SDK
+  shape drift or a test fake without the field degrades to an untagged event
+  (which the sink leaves inline) rather than raising."""
+  item_id = getattr(payload, "item_id", None) or getattr(payload, "itemId", None)
+  if item_id:
+    event["tool_use_id"] = item_id
+
+
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
@@ -410,6 +437,22 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
       events.append({"type": "tool_sources", "sources": sources})
     events.append({"type": "tool_end"})
     return events
+
+  if isinstance(item, sdk["AgentMessageThreadItem"]):
+    # Materialize the authoritative full text of the completed assistant
+    # message. Durable prose otherwise rides ONLY on the streamed
+    # AgentMessageDeltaNotification deltas (published as "text" above); if those
+    # were absent/dropped/coalesced (observed on oversized responses, e.g. a
+    # "very long numbered" request that persisted NOTHING) the reply vanishes
+    # silently. text_final REPLACES the accumulated text block, so it is
+    # idempotent when the deltas already delivered identical prose (events.py
+    # returns False), converts the lingering text_boundary into text when no
+    # delta arrived, and recovers a truncated prefix. Guarded on non-empty text
+    # so a genuinely-empty message stays silent.
+    text = item.text or ""
+    if text.strip():
+      return [{"type": "text_final", "content": text}]
+    return []
 
   return []
 
@@ -782,6 +825,7 @@ async def run_codex_sdk_turn(
   db,
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
+  should_abort: Callable[[], bool] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -882,6 +926,16 @@ async def run_codex_sdk_turn(
   current_session_id = session_id
   completed_turn: Any | None = None
 
+  def abort_requested() -> bool:
+    return bool(should_abort and should_abort())
+
+  def aborted_result() -> RunnerResult:
+    return {
+      "session_id": current_session_id,
+      "cost_usd": None,
+      "error": None,
+    }
+
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
       # Install AskUserQuestion bridge on the sync CodexClient's
@@ -958,7 +1012,13 @@ async def run_codex_sdk_turn(
         )
 
       current_session_id = thread.id
+      if abort_requested():
+        log.info("Codex turn aborted before session persistence chat_id=%s", chat_id)
+        return aborted_result()
       await _persist_session_id(db, chat_id, current_session_id)
+      if abort_requested():
+        log.info("Codex turn aborted after session persistence chat_id=%s", chat_id)
+        return aborted_result()
       if session_id is not None and current_session_id != session_id:
         error_text = (
           "Codex resume returned a different session id "
@@ -989,6 +1049,17 @@ async def run_codex_sdk_turn(
         effort=effort,
         summary=reasoning_summary,
       )
+      if abort_requested():
+        try:
+          await turn.interrupt()
+        except Exception:
+          log.warning(
+            "Codex stale turn interrupt failed chat_id=%s",
+            chat_id,
+            exc_info=True,
+          )
+        log.info("Codex turn aborted before stream registration chat_id=%s", chat_id)
+        return aborted_result()
       active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
       registry.register(active_turn)
 
@@ -1024,7 +1095,9 @@ async def run_codex_sdk_turn(
           sdk["CommandExecutionOutputDeltaNotification"],
         ):
           if payload.delta:
-            bc.publish({"type": "tool_output", "content": payload.delta})
+            event = {"type": "tool_output", "content": payload.delta}
+            _stamp_notification_item_id(event, payload)
+            bc.publish(event)
           continue
 
         if isinstance(payload, sdk["ItemStartedNotification"]):
@@ -1034,6 +1107,7 @@ async def run_codex_sdk_turn(
             continue
           event = _tool_start_event(item, sdk)
           if event is not None:
+            _stamp_tool_use_id(event, item)
             bc.publish(event)
           _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)
           continue
@@ -1041,12 +1115,15 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
           summary = _file_change_patch_summary(payload.changes)
           if summary:
-            bc.publish({"type": "tool_output", "content": summary})
+            event = {"type": "tool_output", "content": summary}
+            _stamp_notification_item_id(event, payload)
+            bc.publish(event)
           continue
 
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           for event in _tool_completed_events(item, sdk):
+            _stamp_tool_use_id(event, item)
             bc.publish(event)
           continue
 

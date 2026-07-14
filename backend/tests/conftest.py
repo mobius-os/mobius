@@ -68,7 +68,11 @@ def _isolate_git_env(monkeypatch):
     monkeypatch.delenv(var, raising=False)
   monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
   monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-  monkeypatch.setenv("GIT_CEILING_DIRECTORIES", tempfile.gettempdir())
+  repo_root = _Path(__file__).resolve().parents[2]
+  monkeypatch.setenv(
+    "GIT_CEILING_DIRECTORIES",
+    os.pathsep.join((tempfile.gettempdir(), str(repo_root))),
+  )
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +113,7 @@ def fresh_db():
   setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
   chat_mod.draining = False
   chat_mod._clear_after_terminal_generation.clear()
+  chat_mod._restart_draining_chats.clear()
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
   # Activity log: clear the per-process debounce cache and delete any
   # /data/logs/activity*.jsonl files written by an earlier test so a
@@ -121,6 +126,8 @@ def fresh_db():
   # show up in any later test's read_events() merged stream.
   from app import activity as activity_mod
   activity_mod._reset_for_tests()
+  from app.routes import client_signal as client_signal_mod
+  client_signal_mod._reset_for_tests()
   # The single-writer chat-persistence actor is a process singleton the
   # FastAPI lifespan starts in production. TestClient(app) (no `with`)
   # doesn't run lifespan, and the C2 live write paths now route through

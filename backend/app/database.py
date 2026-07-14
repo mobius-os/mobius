@@ -93,7 +93,7 @@ def run_migrations(eng) -> None:
     if "title_locked" not in chats_cols:
       with eng.connect() as conn:
         conn.execute(text(
-          "ALTER TABLE chats ADD COLUMN title_locked BOOLEAN NOT NULL DEFAULT 0"
+          "ALTER TABLE chats ADD COLUMN title_locked BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         conn.commit()
   if "chat_id" not in apps_cols:
@@ -126,7 +126,7 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN offline_capable BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "manage_apps" not in apps_cols:
@@ -136,7 +136,7 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN manage_apps BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "github_access" not in apps_cols:
@@ -147,7 +147,16 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN github_access BOOLEAN "
-        "NOT NULL DEFAULT 0"
+        "NOT NULL DEFAULT FALSE"
+      ))
+      conn.commit()
+  if "filesystem_access" not in apps_cols:
+    # Privileged owner-filesystem capability for the Editor. Existing apps stay
+    # denied until reinstalled from a manifest that explicitly requests it.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN filesystem_access BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "manifest_url" not in apps_cols:
@@ -172,7 +181,7 @@ def run_migrations(eng) -> None:
     # Existing rows default false; backfill on their next install/update.
     with eng.connect() as conn:
       conn.execute(text(
-        "ALTER TABLE apps ADD COLUMN embeds_agent BOOLEAN NOT NULL DEFAULT 0"
+        "ALTER TABLE apps ADD COLUMN embeds_agent BOOLEAN NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
   if "deleted_at" not in apps_cols:
@@ -338,6 +347,33 @@ def run_migrations(eng) -> None:
         "ALTER TABLE apps ADD COLUMN offline_contract JSON NULL"
       ))
       conn.commit()
+  if "system_prompt_file" not in apps_cols:
+    # Installed system-app prompt contribution. Existing apps remain inert
+    # until updated from a manifest that explicitly declares the file.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN system_prompt_file VARCHAR(255) NULL"
+      ))
+      conn.commit()
+  if "system_app" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN system_app BOOLEAN "
+        "NOT NULL DEFAULT 0"
+      ))
+      # The system-prompt mechanism predates the explicit identity by one
+      # release. Preserve those already-reviewed live capabilities.
+      conn.execute(text(
+        "UPDATE apps SET system_app = 1 "
+        "WHERE system_prompt_file IS NOT NULL"
+      ))
+      conn.commit()
+  if "capability_contract" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN capability_contract JSON NULL"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []
@@ -364,6 +400,13 @@ def run_migrations(eng) -> None:
       # global default in /data/shared/agent-settings.json".
       _add.append(
         "ALTER TABLE chats ADD COLUMN agent_settings_json JSON"
+      )
+    if "auto_resume_on_limit" not in chats_cols:
+      # Chat-local provider-limit recovery policy. Existing chats stay on the
+      # safe notify + one-tap Resume path until the owner opts this chat in.
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
       )
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
@@ -443,6 +486,27 @@ def run_migrations(eng) -> None:
     if _add_owner:
       with eng.connect() as conn:
         for stmt in _add_owner:
+          conn.execute(text(stmt))
+        conn.commit()
+
+  # `chat_runs` is a newer table (persistence redesign Step 3): create_all
+  # builds it fresh with the current schema, but on an already-deployed DB the
+  # table exists WITHOUT the provider-park columns, so add them here. Guarded on
+  # the table existing — a fresh install returned above (create_all handles it).
+  if "chat_runs" in tables:
+    chat_runs_cols = {c["name"] for c in inspector.get_columns("chat_runs")}
+    _add_runs = []
+    if "parked_until" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN parked_until DATETIME NULL"
+      )
+    if "park_reason" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN park_reason VARCHAR(32) NULL"
+      )
+    if _add_runs:
+      with eng.connect() as conn:
+        for stmt in _add_runs:
           conn.execute(text(stmt))
         conn.commit()
 

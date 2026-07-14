@@ -6,17 +6,33 @@ import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
+import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
 import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
+import ModelSheet from '../ui/ModelSheet.jsx'
+import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
+import '../ui/ModelSheet.css'
 import './SettingsView.css'
+
+// Order a provider's models with the currently-selected one first,
+// then the rest in registry order (which the backend returns newest →
+// oldest / most → least capable). Floating the active model to the top
+// of its group is what makes scrolling the picker feel natural — the
+// choice you reach for is always the first thing under your thumb.
+function orderSelectedFirst(models, selectedId) {
+  if (!Array.isArray(models) || !selectedId) return models || []
+  const sel = models.find((m) => m.id === selectedId)
+  if (!sel) return models
+  return [sel, ...models.filter((m) => m.id !== selectedId)]
+}
 
 const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
@@ -86,76 +102,6 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
   return rows
 }
 
-function providerLabel(provider) {
-  return PROVIDER_CHOICES.find(p => p.id === provider)?.label || 'No provider'
-}
-
-function SettingsEffortStepper({ provider, value, disabled, onChange }) {
-  const efforts = PROVIDER_INFO[provider]?.efforts || []
-  if (!efforts.length) return null
-  const selectedIndex = Math.max(0, efforts.findIndex(e => e.value === value))
-  const selected = efforts[selectedIndex] || efforts[0]
-  const selectedPosition = efforts.length > 1
-    ? `${(selectedIndex / (efforts.length - 1)) * 100}%`
-    : '50%'
-  const labelEdge =
-    selectedIndex === 0 ? 'start' : selectedIndex === efforts.length - 1 ? 'end' : 'middle'
-  return (
-    <div
-      className={`settings-effort-stepper${disabled ? ' settings-effort-stepper--disabled' : ''}`}
-      style={{ '--effort-label-left': selectedPosition }}
-    >
-      <div
-        className="settings-effort-stepper__track"
-        role="radiogroup"
-        aria-label={`${providerLabel(provider)} background effort`}
-      >
-        {efforts.map((effort, index) => (
-          <button
-            key={effort.value}
-            type="button"
-            role="radio"
-            aria-checked={index === selectedIndex}
-            aria-label={effort.label}
-            disabled={disabled}
-            tabIndex={index === selectedIndex ? 0 : -1}
-            className={
-              'settings-effort-stepper__stop'
-              + (index === selectedIndex ? ' settings-effort-stepper__stop--on' : '')
-              + (index < selectedIndex ? ' settings-effort-stepper__stop--filled' : '')
-            }
-            onClick={() => onChange(effort.value)}
-            onKeyDown={(event) => {
-              let next
-              if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-                next = Math.min(efforts.length - 1, index + 1)
-              } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-                next = Math.max(0, index - 1)
-              } else if (event.key === 'Home') {
-                next = 0
-              } else if (event.key === 'End') {
-                next = efforts.length - 1
-              } else {
-                return
-              }
-              event.preventDefault()
-              onChange(efforts[next].value)
-              event.currentTarget.parentElement?.children[next]?.focus()
-            }}
-          />
-        ))}
-      </div>
-      <div className="settings-effort-stepper__label-row" aria-hidden="true">
-        <span
-          className={`settings-effort-stepper__label settings-effort-stepper__label--${labelEdge}`}
-        >
-          {selected.label}
-        </span>
-      </div>
-    </div>
-  )
-}
-
 function BackgroundProviderRow({
   row,
   index,
@@ -164,6 +110,7 @@ function BackgroundProviderRow({
   dropTarget,
   dropPosition,
   dragStyle,
+  reorderMode,
   rowRef,
   onModelChange,
   onEffortChange,
@@ -174,13 +121,35 @@ function BackgroundProviderRow({
   const Logo = info?.Logo
   const enabled = row.enabled !== false
   const selectedModel = enabled ? (row.model || defaultModel(row.provider)) : ''
-  const hasModel = selectedModel && models.some(m => m.id === selectedModel)
+  const selectedRow = models.find((m) => m.id === selectedModel)
+  const efforts = info?.efforts || []
+  const selectedEfforts = modelEfforts(efforts, selectedRow)
+  const effortLabel = enabled
+    ? (selectedEfforts.find((e) => e.value === row.effort)?.label || '')
+    : ''
+  const [sheetOpen, setSheetOpen] = useState(false)
+
+  // This row is a fixed provider, so the sheet shows only that
+  // provider's models plus a "None" row that disables the background
+  // agent. Effort lives inside the sheet, under the selected model:
+  // providers expose different effort scales, so it belongs with the
+  // model choice (mirrors the chat composer's picker).
+  const groups = [{
+    key: row.provider,
+    label: info?.label || row.provider,
+    Logo,
+    models: orderSelectedFirst(models, enabled ? selectedModel : null),
+  }]
+  const triggerLabel = enabled
+    ? (selectedRow?.label || selectedModel || 'Choose model')
+    : 'None'
   return (
     <div
       ref={rowRef}
       className={
         'settings-bg-row'
         + (enabled ? '' : ' settings-bg-row--off')
+        + (reorderMode ? ' settings-bg-row--reordering' : '')
         + (dragging ? ' settings-bg-row--dragging' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
         + (dropTarget && dropPosition ? ` settings-bg-row--drop-${dropPosition}` : '')
@@ -188,53 +157,76 @@ function BackgroundProviderRow({
       style={dragStyle}
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
     >
-      <span
-        className="settings-bg-row__icon"
-        title="Drag to change priority"
-        role="button"
-        tabIndex={0}
-        aria-label={`Drag ${info?.label || row.provider} to change priority`}
-        onPointerDown={(event) => onReorderStart(event, index)}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+      {reorderMode && (
+        <button
+          type="button"
+          className="settings-bg-row__drag-handle"
+          aria-label={`Move ${info?.label || row.provider} background priority`}
+          onPointerDown={(event) => {
+            if (event.button !== undefined && event.button !== 0) return
             event.preventDefault()
-            onMove(-1)
-          } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
-            event.preventDefault()
-            onMove(1)
-          }
-        }}
-      >
-        {Logo ? <Logo /> : row.provider.slice(0, 1).toUpperCase()}
-      </span>
-      <div className="settings-bg-row__agent">
-        <span className="settings-model-select">
-          <select
-            className="settings-model-select__control"
-            value={selectedModel}
-            onChange={(event) => onModelChange(event.target.value)}
-            aria-label={`${info?.label || row.provider} background agent`}
-          >
-            <option value="">None</option>
-            {selectedModel && !hasModel && (
-              <option value={selectedModel}>{selectedModel}</option>
+            event.stopPropagation()
+            onReorderStart(index, {
+              clientY: event.clientY,
+              pointerId: event.pointerId,
+              captureNode: event.currentTarget,
+            })
+          }}
+          onClick={(event) => event.preventDefault()}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              onMove(-1)
+            } else if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              onMove(1)
+            }
+          }}
+        >
+          <span aria-hidden="true">⠿</span>
+        </button>
+      )}
+      <div className="settings-bg-row__body">
+        <button
+          type="button"
+          className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
+          onClick={() => setSheetOpen(true)}
+          aria-haspopup="dialog"
+          aria-label={`${info?.label || row.provider} background model`}
+        >
+          <span className="model-trigger__icon">
+            {Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}
+          </span>
+          <span className="model-trigger__main">
+            <span className="model-trigger__name">{triggerLabel}</span>
+            {enabled && selectedModel && (
+              <span className="model-trigger__id">{selectedModel}</span>
             )}
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.label || model.id}
-              </option>
-            ))}
-          </select>
-        </span>
+          </span>
+          {effortLabel && (
+            <span className="model-trigger__effort">{effortLabel}</span>
+          )}
+          <span className="model-trigger__caret" aria-hidden="true">▾</span>
+        </button>
       </div>
-      <div className="settings-bg-row__effort">
-        <SettingsEffortStepper
-          provider={row.provider}
-          value={row.effort}
-          disabled={!enabled}
-          onChange={onEffortChange}
-        />
-      </div>
+      <ModelSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        title={`${info?.label || row.provider} model`}
+        groups={groups}
+        provider={enabled ? row.provider : ''}
+        model={selectedModel}
+        efforts={efforts}
+        effort={row.effort}
+        onEffortChange={onEffortChange}
+        onPick={(pid, id, pickedModel) => {
+          const nextEfforts = modelEfforts(efforts, pickedModel)
+          onModelChange(id, validEffort(nextEfforts, row.effort))
+        }}
+        allowNone
+        noneLabel="None (disable)"
+        onNone={() => onModelChange('')}
+      />
     </div>
   )
 }
@@ -319,10 +311,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // it so the owner reviews the incoming changes before applying, rather than
   // Apply firing on the first click.
   const [reviewOpen, setReviewOpen] = useState(false)
-  // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
-  // service worker to re-check cached frontend assets and re-reads
+  // 'idle' | 'checking' | 'checked' | 'error' — the "Check for updates" button
+  // asks the service worker to re-check cached frontend assets and re-reads
   // /api/version. 'checked' is a short-lived success label when no update is
-  // available.
+  // available; 'error' means a probe failed, so we say so instead of falsely
+  // claiming "No updates found". 'error' persists (no auto-reset) until the
+  // owner clicks the button again to retry.
   const [updatePhase, setUpdatePhase] = useState('idle')
   useEffect(() => {
     if (updatePhase !== 'checked') return undefined
@@ -377,10 +371,15 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
+  const [backgroundReordering, setBackgroundReordering] = useState(false)
   const [backgroundCommitting, setBackgroundCommitting] = useState(false)
   const backgroundDragRef = useRef(null)
   const backgroundCommitRafRef = useRef(null)
   const backgroundRowRefs = useRef([])
+  // Latest finger Y during a drag. Updated imperatively on every
+  // pointermove so the held row can follow the pointer 1:1 without a
+  // React re-render per frame; render reads it for the same transform.
+  const backgroundPointerYRef = useRef(0)
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
@@ -431,6 +430,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         id: m.id,
         label: m.label || m.id,
         available: m.available,
+        effort_levels: m.effort_levels,
       }))
     }
     return FALLBACK_MODEL_ROWS[provider] || []
@@ -540,15 +540,23 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       })
       .filter(Boolean)
     if (!rows.length) return 0
-    for (let index = 0; index < rows.length; index++) {
-      if (clientY < rows[index].center) return index
+    // Partition by the MIDPOINT between adjacent slot centers, not the
+    // centers themselves: the dragged row's projected center starts on its
+    // own slot center, so a center-based test would flip to the next slot
+    // on the very first pixel of travel (and snap a full row on release).
+    // Midpoints mean "drag past halfway to swap" — a tiny nudge eases back.
+    for (let index = 0; index < rows.length - 1; index++) {
+      const boundary = (rows[index].center + rows[index + 1].center) / 2
+      if (clientY < boundary) return index
     }
     return rows.length - 1
   }, [])
 
-  const startBackgroundReorder = useCallback((event, index) => {
-    if (event.button !== undefined && event.button !== 0) return
-    const node = backgroundRowRefs.current[index]
+  // Called by a row once its press-and-hold elapses. `pointer` carries
+  // the captured hold position/id (the original pointerdown event is
+  // long gone by the time the hold timer fires).
+  const startBackgroundReorder = useCallback((index, pointer) => {
+    const node = backgroundRowRefs.current[index] || pointer?.node
     if (!node) return
     const rowRect = node.getBoundingClientRect()
     const rows = backgroundRowRefs.current
@@ -561,13 +569,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         center: rect.top + rect.height / 2,
       }
     }).filter(Boolean)
-    event.preventDefault()
-    event.stopPropagation()
-    event.currentTarget.setPointerCapture?.(event.pointerId)
+    const captureNode = pointer?.captureNode || node
+    try { captureNode.setPointerCapture?.(pointer?.pointerId) } catch { /* best-effort */ }
+    const grabY = typeof pointer?.clientY === 'number' ? pointer.clientY : rowRect.top
+    backgroundPointerYRef.current = grabY
     const next = {
       fromIndex: index,
       toIndex: index,
-      grabOffsetY: event.clientY - rowRect.top,
+      grabOffsetY: grabY - rowRect.top,
       rowHeight: rowRect.height,
       slots,
     }
@@ -577,25 +586,50 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const activeBackgroundDragFromIndex = backgroundDrag?.fromIndex ?? null
   useEffect(() => {
     if (activeBackgroundDragFromIndex === null) return undefined
-    const fromIndex = activeBackgroundDragFromIndex
+    // Constant for the life of one drag — captured once so pointer
+    // handlers never read stale React state.
+    const start = backgroundDragRef.current
+    if (!start) return undefined
+    const { fromIndex, grabOffsetY, rowHeight, slots } = start
+    const originTop = slots[fromIndex]?.top ?? 0
+    const minOffset = slots.length ? slots[0].top - originTop : 0
+    const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
+    const followOffset = (clientY) => {
+      const raw = clientY - grabOffsetY - originTop
+      return Math.max(minOffset, Math.min(maxOffset, raw))
+    }
 
     const onPointerMove = (event) => {
       event.preventDefault()
-      setBackgroundDrag((current) => {
-        if (!current) return current
-        const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
-        const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
-        if (current.toIndex === toIndex) return current
-        return { ...current, toIndex }
-      })
+      const current = backgroundDragRef.current
+      if (!current) return
+      backgroundPointerYRef.current = event.clientY
+      // Move the held row imperatively so it tracks the finger 1:1
+      // without re-rendering the whole panel every frame.
+      const node = backgroundRowRefs.current[fromIndex]
+      if (node) {
+        node.style.transform = `translateY(${followOffset(event.clientY)}px) scale(1.02)`
+      }
+      // Only re-render (to slide the other rows aside) when the target
+      // slot actually changes.
+      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const toIndex = backgroundIndexFromY(dragCenterY, slots)
+      setBackgroundDrag((c) => (
+        c && c.toIndex !== toIndex ? { ...c, toIndex } : c
+      ))
     }
 
     const finish = (event) => {
       event.preventDefault()
       const current = backgroundDragRef.current
       if (!current) return
-      const dragCenterY = event.clientY - current.grabOffsetY + current.rowHeight / 2
-      const toIndex = backgroundIndexFromY(dragCenterY, current.slots)
+      backgroundPointerYRef.current = event.clientY
+      const dragCenterY = event.clientY - grabOffsetY + rowHeight / 2
+      const toIndex = backgroundIndexFromY(dragCenterY, slots)
+      // Commit synchronously on release. If the row didn't change slots,
+      // just drop the drag and let the base CSS transition ease it back
+      // into place; otherwise reorder under the no-transition "committing"
+      // guard so the displaced rows don't flip-flash.
       if (toIndex === fromIndex) {
         setBackgroundDrag(null)
         return
@@ -774,28 +808,37 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // served identity. Platform: POST /platform/check runs the `git fetch` that the cheap
   // /status read deliberately skips, so a deploy that landed since boot becomes
   // visible without waiting for a reboot. Both run in parallel and neither
-  // failing blocks the other (allSettled) — a hiccup just leaves the last-known
-  // state on the row.
+  // failing blocks the other (allSettled). If either probe rejects we land in
+  // 'error' and say "Couldn't check for updates" rather than falsely reporting
+  // "No updates found" — an honest failure the owner can retry with the same
+  // button (see updateCheckOutcome).
   async function checkForUpdates() {
     if (updatePhase === 'checking') return
     setUpdatePhase('checking')
-    try {
-      const frontendP = (async () => {
-        if ('serviceWorker' in navigator) {
-          const reg = await navigator.serviceWorker.getRegistration()
-          if (reg) await reg.update()
-        }
-        await versionQueries.current.invalidate(queryClient)
-        await versionQuery.refetch()
-      })()
-      const platformP = (async () => {
-        const res = await api.platform.check()
-        if (res.ok) setPlatform(await res.json())
-      })()
-      await Promise.allSettled([frontendP, platformP])
-    } finally {
-      setUpdatePhase('checked')
-    }
+    const frontendP = (async () => {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration()
+        if (reg) await reg.update()
+      }
+      await versionQueries.current.invalidate(queryClient)
+      // refetch resolves with an error result rather than rejecting, so a
+      // failed version probe must be re-thrown for allSettled to see it —
+      // same honesty rule as the platform arm below (feature 20).
+      const versionResult = await versionQuery.refetch()
+      if (versionResult.isError) {
+        throw versionResult.error ?? new Error('version check failed')
+      }
+    })()
+    const platformP = (async () => {
+      const res = await api.platform.check()
+      // An HTTP failure must REJECT, not resolve: allSettled treats a
+      // resolved probe as success, so a swallowed !ok let updateCheckOutcome
+      // report "No updates found" on a real 500 (feature 20).
+      if (!res.ok) throw new Error(`platform check failed: ${res.status}`)
+      setPlatform(await res.json())
+    })()
+    const results = await Promise.allSettled([frontendP, platformP])
+    setUpdatePhase(updateCheckOutcome(results))
   }
 
   // Reload onto the FRESH service worker so the new precache — including the
@@ -1027,12 +1070,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
-  const checkUpdatesLabel =
-    updatePhase === 'checking'
-      ? 'Checking…'
-      : updatePhase === 'checked'
-        ? 'No updates found'
-        : 'Check for updates'
+  const checkUpdatesLabel = updateCheckLabel(updatePhase)
   const effectiveBackgroundDraft = backgroundDraft ||
     normalizeBackgroundAgents(
       settingsQuery.data?.background_agents,
@@ -1046,11 +1084,18 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     const slots = backgroundDrag.slots || []
     if (index === backgroundDrag.fromIndex) {
       const originSlot = slots[backgroundDrag.fromIndex]
-      const targetSlot = slots[backgroundDrag.toIndex]
-      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
+      // The held row follows the finger 1:1. `transition:none` keeps it
+      // pinned under the pointer with no easing lag; on release the style
+      // is dropped and the base CSS transition eases it into its slot.
+      const originTop = originSlot ? originSlot.top : 0
+      const raw = (backgroundPointerYRef.current - backgroundDrag.grabOffsetY) - originTop
+      const minOffset = slots.length ? slots[0].top - originTop : 0
+      const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
+      const offset = Math.max(minOffset, Math.min(maxOffset, raw))
       return {
-        transform: `translateY(${offset}px) scale(1.01)`,
-        zIndex: 2,
+        transform: `translateY(${offset}px) scale(1.02)`,
+        zIndex: 3,
+        transition: 'none',
       }
     }
     if (
@@ -1078,7 +1123,16 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const backgroundDropPosition = backgroundDrag?.toIndex < backgroundDrag?.fromIndex
     ? 'before'
     : 'after'
-  const showGeminiForm = !configured || geminiExpanded
+  // The chat model row's status line shows the current default rather
+  // than a connection dot ("Last model: Opus 4.8"). Resolve the label
+  // from the live registry so it reads the friendly name, falling back
+  // to the raw id, then to nothing when no default is set yet.
+  const defaultChatProvider = providerFromSettings(settingsQuery.data)
+  const defaultChatModelId = settingsQuery.data?.agent_settings?.model || ''
+  const lastModelLabel = defaultChatModelId
+    ? (modelsForProvider(defaultChatProvider).find(m => m.id === defaultChatModelId)?.label
+        || defaultChatModelId)
+    : ''
 
   return (
     <div className="settings">
@@ -1123,24 +1177,22 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                     onDone={onClaudeAuthDone}
                   />
                 </ProviderRow>
-              </div>
 
-              <div className="settings-agent-group">
-                <div className="settings-agent-group__head">
-                  <div>
-                    <h3 className="settings__agent-title">Chat model</h3>
-                    <p className="settings__subtext settings__subtext--tight">
-                      Manage which models appear in chat pickers.
-                    </p>
-                  </div>
-                  <button
-                    className="provider-row__action"
-                    type="button"
-                    onClick={() => setManageModelsOpen(true)}
-                  >
-                    Configure
-                  </button>
-                </div>
+                <ProviderRow
+                  id="chat-model"
+                  name="Chat model"
+                  showRadio={false}
+                  connected
+                  subtitle="Which models appear in chat pickers."
+                  statusNode={
+                    <StatusDot color="--muted">
+                      {lastModelLabel ? `Last model: ${lastModelLabel}` : 'No default yet'}
+                    </StatusDot>
+                  }
+                  actionLabel="Configure"
+                  expanded={false}
+                  onToggleExpand={() => setManageModelsOpen(true)}
+                />
               </div>
 
               <div
@@ -1150,13 +1202,25 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 tabIndex={-1}
               >
                 <div className="settings-agent-group__head">
-                  <div>
+                  <div className="settings-agent-group__title-row">
                     <h3 className="settings__agent-title">Background agents</h3>
-                    <p className="settings__subtext settings__subtext--tight">
-                      Priority order. Drag a logo to reorder; if quota or auth fails,
-                      Möbius tries the next enabled agent.
-                    </p>
+                    <button
+                      type="button"
+                      className="settings-agent-group__reorder"
+                      aria-pressed={backgroundReordering}
+                      onClick={() => {
+                        setBackgroundDrag(null)
+                        setBackgroundReordering(value => !value)
+                      }}
+                    >
+                      {backgroundReordering ? 'Done' : 'Reorder'}
+                    </button>
                   </div>
+                  <p className="settings__subtext settings__subtext--tight">
+                    {backgroundReordering
+                      ? 'Drag the handles, or use the arrow keys.'
+                      : 'Tried in order when quota or authentication fails.'}
+                  </p>
                 </div>
                 <div
                   className={`settings-bg-list${backgroundCommitting ? ' settings-bg-list--committing' : ''}`}
@@ -1174,15 +1238,23 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       }
                       dropPosition={backgroundDropPosition}
                       dragStyle={backgroundDragStyleForIndex(index)}
+                      reorderMode={backgroundReordering}
                       rowRef={(node) => {
                         backgroundRowRefs.current[index] = node
                       }}
-                      onModelChange={(model) => setBackgroundProviderChoice(row.provider, {
+                      onModelChange={(model, effort) => setBackgroundProviderChoice(row.provider, {
                         enabled: !!model,
                         model: model || defaultModel(row.provider),
+                        ...(effort ? { effort } : {}),
                       })}
                       onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
-                      onMove={(delta) => moveBackgroundProvider(index, index + delta)}
+                      onMove={(delta) => {
+                        // Keyboard reorder is disabled while a pointer drag
+                        // is live, so the two reorder paths can't interleave
+                        // and mutate the list from under each other.
+                        if (backgroundDrag) return
+                        moveBackgroundProvider(index, index + delta)
+                      }}
                       onReorderStart={startBackgroundReorder}
                     />
                   ))}
@@ -1238,59 +1310,60 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           tabIndex={-1}
         >
           <h2 className="settings__section-title">Image generation</h2>
-          <div className="settings-integration-row">
-            <div className="settings-integration-row__copy">
-              <span className="settings__label">
-                Gemini API key
-                {configured && <StatusDot color="--green">Configured</StatusDot>}
-              </span>
-              <p className="settings__subtext settings__subtext--tight">
-                Used for image generation. Get a key at{' '}
-                <TextLink href="https://aistudio.google.com/apikey" forceExternal>
-                  AI Studio
-                </TextLink>.
-              </p>
-            </div>
-            {configured && (
-              <button
-                className="provider-row__action"
-                type="button"
-                onClick={() => setGeminiExpanded(prev => !prev)}
-                aria-expanded={geminiExpanded}
-              >
-                {geminiExpanded ? 'Close' : 'Reconfigure'}
-              </button>
-            )}
-          </div>
-          {showGeminiForm && (
-            <form className="settings__form" onSubmit={handleSave}>
-              {/* The key is always pasted, never typed, so there's no reveal
-                  toggle — keep the field a plain masked paste target. */}
-              <input
-                className="settings__input"
-                type="password"
-                value={geminiKey}
-                onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
-                placeholder={configured ? '••••••••' : 'AIza...'}
-                autoComplete="off"
-                aria-label="Gemini API key"
-              />
-              {status === 'error' && (
-                <Alert
-                  color="danger"
-                  variant="soft"
-                  description={errorMsg}
+          {/* Same unified row as the providers + chat model above: tap the
+              action to reveal the key form (matching "Connect" on a provider).
+              statusNode carries "Configured" instead of "Connected". */}
+          <div className="settings__providers">
+            <ProviderRow
+              id="gemini"
+              name="Gemini API key"
+              showRadio={false}
+              connected={configured}
+              subtitle="Used for image generation."
+              statusNode={
+                <StatusDot color={configured ? '--green' : '--muted'}>
+                  {configured ? 'Configured' : 'Not configured'}
+                </StatusDot>
+              }
+              actionLabel={configured ? 'Reconfigure' : 'Add key'}
+              expanded={geminiExpanded}
+              onToggleExpand={() => setGeminiExpanded(prev => !prev)}
+            >
+              <form className="settings__form" onSubmit={handleSave}>
+                <p className="settings__subtext settings__subtext--tight">
+                  Get a key at{' '}
+                  <TextLink href="https://aistudio.google.com/apikey" forceExternal>
+                    AI Studio
+                  </TextLink>.
+                </p>
+                {/* The key is always pasted, never typed, so there's no reveal
+                    toggle — keep the field a plain masked paste target. */}
+                <input
+                  className="settings__input"
+                  type="password"
+                  value={geminiKey}
+                  onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
+                  placeholder={configured ? '••••••••' : 'AIza...'}
+                  autoComplete="off"
+                  aria-label="Gemini API key"
                 />
-              )}
-              <button
-                className="settings__btn"
-                type="submit"
-                disabled={saving || !geminiKey.trim()}
-              >
-                {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
-              </button>
-            </form>
-          )}
+                {status === 'error' && (
+                  <Alert
+                    color="danger"
+                    variant="soft"
+                    description={errorMsg}
+                  />
+                )}
+                <button
+                  className="settings__btn"
+                  type="submit"
+                  disabled={saving || !geminiKey.trim()}
+                >
+                  {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
+                </button>
+              </form>
+            </ProviderRow>
+          </div>
         </section>
 
         <section className="settings__section settings__section--compact">

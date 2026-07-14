@@ -1,21 +1,18 @@
 """Compiles JSX source strings to ES modules using esbuild."""
 
 import asyncio
+import json
 import os
-import re
 import tempfile
 from pathlib import Path
 
 from app import timeutil
+from app.app_compile_contract import (
+  ESBUILD_TIMEOUT_SECS,
+  esbuild_command,
+  esbuild_metafile_contract_error,
+)
 from app.config import get_settings
-from app.runtime_libs import RUNTIME_LIBS
-
-_ESBUILD_TIMEOUT_SECS = 30
-
-# `export default <anything>` with optional async/function/class/paren/identifier.
-# Covers: `export default function`, `export default class`, `export default App`,
-# `export default () =>`, `export default {...}`, etc.
-_EXPORT_DEFAULT_RE = re.compile(r"^\s*export\s+default\b", re.MULTILINE)
 
 
 class CompileError(RuntimeError):
@@ -76,6 +73,20 @@ def _restore_entry_source(
     pass
 
 
+def _remove_unsupported_outputs(out: Path, metafile: dict) -> None:
+  """Remove outputs esbuild wrote before metadata exposed a contract error."""
+  out.unlink(missing_ok=True)
+  outputs = metafile.get("outputs")
+  if not isinstance(outputs, dict):
+    return
+  for details in outputs.values():
+    if not isinstance(details, dict):
+      continue
+    css_bundle = details.get("cssBundle")
+    if isinstance(css_bundle, str):
+      Path(css_bundle).unlink(missing_ok=True)
+
+
 async def compile_jsx(
   app_id: int,
   jsx_source: str,
@@ -112,14 +123,6 @@ async def compile_jsx(
       "apps/<name>/index.jsx before registering."
     )
     raise CompileError(message, stderr=message, source_path=source_path)
-  if not _EXPORT_DEFAULT_RE.search(jsx_source):
-    message = (
-      "JSX source has no `export default` — mini-apps must export a "
-      "default React component. Add `export default function MyApp(...)` "
-      "or `export default ComponentName`."
-    )
-    raise CompileError(message, stderr=message, source_path=source_path)
-
   out = Path(out_path) if out_path is not None else _compiled_dir() / f"app-{app_id}.js"
 
   entry_path = Path(source_path) if source_path is not None else None
@@ -132,17 +135,15 @@ async def compile_jsx(
       tmp_path = f.name
     entry_path = Path(tmp_path)
 
+  metadata_fd, metadata_name = tempfile.mkstemp(
+    prefix="mobius-esbuild-", suffix=".json",
+  )
+  os.close(metadata_fd)
+  metadata_path = Path(metadata_name)
   try:
     try:
       proc = await asyncio.create_subprocess_exec(
-        "esbuild",
-        str(entry_path),
-        "--bundle",
-        "--format=esm",
-        "--jsx=automatic",
-        "--platform=browser",
-        *[f"--external:{lib}" for lib in RUNTIME_LIBS],
-        f"--outfile={out}",
+        *esbuild_command(entry_path, out, metafile=metadata_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
       )
@@ -154,13 +155,13 @@ async def compile_jsx(
       )
     try:
       _, stderr = await asyncio.wait_for(
-        proc.communicate(), timeout=_ESBUILD_TIMEOUT_SECS,
+        proc.communicate(), timeout=ESBUILD_TIMEOUT_SECS,
       )
     except asyncio.TimeoutError:
       proc.kill()
       await proc.communicate()
       raise RuntimeError(
-        f"esbuild timed out after {_ESBUILD_TIMEOUT_SECS} seconds"
+        f"esbuild timed out after {ESBUILD_TIMEOUT_SECS} seconds"
       )
     except asyncio.CancelledError:
       # The awaiting task was cancelled (a superseded debounced watcher
@@ -179,7 +180,18 @@ async def compile_jsx(
         stderr=decoded_stderr,
         source_path=entry_path,
       )
+    try:
+      metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+      raise RuntimeError(f"Could not read esbuild metadata: {exc}") from exc
+    contract_error = esbuild_metafile_contract_error(metadata)
+    if contract_error:
+      _remove_unsupported_outputs(out, metadata)
+      raise CompileError(
+        "Compilation failed.", stderr=contract_error, source_path=entry_path,
+      )
   finally:
+    metadata_path.unlink(missing_ok=True)
     if tmp_path is not None:
       os.unlink(tmp_path)
 

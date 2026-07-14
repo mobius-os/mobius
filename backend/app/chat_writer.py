@@ -35,7 +35,10 @@ resolution back inside a `with` block.
 from __future__ import annotations
 
 import asyncio
+import copy
 import enum
+import hashlib
+import json
 import logging
 import queue
 import secrets
@@ -45,11 +48,17 @@ import time
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import schemas
-from app.events import build_assistant_message, finalize_blocks, question_block_key
+from app.events import (
+  TOOL_OUTPUT_INLINE_THRESHOLD,
+  build_assistant_message,
+  excerpt_tool_output,
+  finalize_blocks,
+  question_block_key,
+)
 
 # Child of `moebius.chat` (NOT a sibling `moebius.chat_writer`) so the actor's
 # records PROPAGATE to the RotatingFileHandler that `chat._get_logger` attaches
@@ -203,6 +212,67 @@ class PersistSessionId(_Command):
   session_id: str = ""
 
 
+@dataclass
+class StashToolOutput(_Command):
+  """Fire-and-forget stash of a large tool output's FULL text (contract rule 6).
+
+  Writes the `tool_outputs` side table keyed by `(chat_id, tool_use_id)` as an
+  insert/upsert on the composite PK — NOT a read-modify-write of the shared
+  `Chat.messages` JSON blob — so it is IMMUNE to the lost-update race the actor
+  guardrail exists to close (two readers of the same snapshot clobbering each
+  other). It is routed through the actor anyway to keep a single DB writer, but
+  it is deliberately NOT a `_FENCE_COMMANDS` member and NOT coalescible: it
+  touches neither `messages` nor `pending_messages`, so it needs no snapshot
+  fence and takes the plain-enqueue path in `submit`.
+
+  Fire-and-forget like `PersistTranscript`: a dropped stash just 404s on expand
+  and the UI keeps showing the inline excerpt — no correctness loss."""
+
+  chat_id: str = ""
+  tool_use_id: str = ""
+  output: str = ""
+
+
+@dataclass
+class MigrateChat(_Command):
+  """One-shot forward-migration of ONE chat's transcript (card-221, B1+B2).
+
+  Owns the whole per-chat read-modify-write on the actor thread so it is
+  serialized with any live turn's commands. Two mutations in a single
+  transaction:
+
+  - B2: backfill `cid` on legacy user rows (in `messages` and
+    `pending_messages`) lacking one, to EXACTLY `legacy-<ts>` — byte-identical
+    to `cid_of` / the frontend `cidOf`, so a warm client and the migrated row
+    derive the same identity.
+  - B1: extract each fat inline tool output (`output` > the inline threshold,
+    not already reduced, no `tool_use_id`) into the `tool_outputs` side table
+    under a minted `legacy-<ts>-<i>` id and rewrite the block to a bounded
+    excerpt via `excerpt_tool_output` — the write-side twin of the live funnel's
+    `_reduce_tool_output`, so the legacy dual-read shims could be deleted once
+    every chat was migrated.
+
+  CROSS-PROCESS SAFETY: this command is invoked from a standalone migration
+  script that starts its OWN writer, so a second writer thread exists while the
+  live server's writer runs. The plain `_active_chat` re-read + commit the other
+  commands use is NOT cross-process safe (the lost-update race the guardrail
+  closes only holds WITHIN a single-actor process). So the write is an
+  optimistic compare-and-swap: `UPDATE ... WHERE run_status IS NULL AND
+  updated_at = <snapshot>`. Any concurrent live write (StartTurn sets
+  run_status; every row write bumps updated_at) makes the UPDATE match 0 rows,
+  so this command defers the chat instead of clobbering the turn. Idle-gating
+  keeps deferrals rare; the deferred chats are reported for a re-run.
+
+  Idempotent + dry-run: an already-migrated row/block is a no-op (a cid is
+  present, or a block already carries `output_truncated`); `dry_run` reports the
+  plan without any DB write. NOT a `_FENCE_COMMANDS` member — like
+  `StashToolOutput` it takes the plain-enqueue path (the migration process has
+  no coalescible transcript snapshots to fence)."""
+
+  chat_id: str = ""
+  dry_run: bool = False
+
+
 # -- queue + turn commands (the JSON-blob RMW the actor owns) ------------
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
@@ -289,7 +359,7 @@ class AppendSteeredUserMessage(_Command):
   run_token: str = ""
   user_msg: dict = field(default_factory=dict)
   user_msgs: list[dict] = field(default_factory=list)
-  consume_pending_ts: list[int] = field(default_factory=list)
+  consume_pending_cids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -317,16 +387,16 @@ class PromotePending(_Command):
 
 @dataclass
 class CancelPending(_Command):
-  """Remove a queued (not-yet-started) message by its `ts`.
+  """Remove a queued (not-yet-started) message by its stable `cid`.
 
-  Replicates the `DELETE /pending/{ts}` route: drops the entry whose `ts`
-  matches, stamps `updated_at` only when something changed, commits.
+  Replicates the `DELETE /pending/{cid}` route: drops the entry whose
+  `cid_of` matches, stamps `updated_at` only when something changed, commits.
   Returns `{"pending"}` — the remaining queue.
   """
 
   chat_id: str = ""
   run_token: str = ""
-  ts: int = 0
+  cid: str = ""
 
 
 @dataclass
@@ -344,25 +414,36 @@ class ClearPending(_Command):
 
 @dataclass
 class PersistCompaction(_Command):
-  """Append a compaction-summary block to the transcript as its own message.
+  """Append a legacy pre-switch briefing without changing providers.
 
-  Used by `POST /api/chats/{id}/compact` (feature 091's provider-switch
-  groundwork): a cross-provider switch loses the session, so a one-shot
-  summarize turn produces a portable plain-text briefing. That briefing is
-  stored here as a NEW assistant message — distinct from the streaming
-  snapshot path, which REPLACES the in-progress assistant message — so it
-  never clobbers a live turn's transcript and renders as its own block.
-
-  The stored message carries `kind="compaction"` and `content` set to the
-  briefing text (so provider seeding and any plain renderer still see it).
-  Its visible block is a tool-style record containing the endpoint command
-  plus the briefing output. Returns `{"stored"}` — the message as appended,
-  with its final ts.
+  Older frontends perform a bodyless ``POST /compact`` followed by a provider
+  ``PATCH``.  Keep that two-step protocol available during rolling upgrades,
+  but tag the marker so only the immediately following, same-source provider
+  PATCH can use it to cross an existing assistant transcript.
   """
 
   chat_id: str = ""
   run_token: str = ""
   summary: str = ""
+  expected_provider: str = ""
+  source_messages_hash: str = ""
+
+
+@dataclass
+class SwitchProviderWithCompaction(_Command):
+  """Atomically append the incoming handoff and change provider/session."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  switch_id: str = ""
+  expected_provider: str = ""
+  provider: str = ""
+  settings_patch: dict = field(default_factory=dict)
+  summary: str = ""
+  source_messages_hash: str = ""
+  source_summary_hash: str | None = None
+  data_dir: str = ""
+  request_fingerprint: str = ""
 
 
 @dataclass
@@ -391,6 +472,77 @@ class ClearRunStatus(_Command):
 
   chat_id: str = ""
   run_token: str = ""
+
+
+@dataclass
+class ParkRun(_Command):
+  """Park a turn that died on a provider rate/usage limit (design §2.4).
+
+  The identity-keyed sibling of `ClearRunStatus` for the limit exit: the
+  turn is over, so the per-chat marker (`Chat.run_status`) is cleared the
+  same way — but instead of closing the run's `chat_runs` row "completed",
+  the row moves to ``status="parked"`` carrying `parked_until` (the parsed
+  reset time, naive UTC) and `park_reason`. That parked row IS the
+  provider-parked signal the liveness exemptions and the reset sweep read;
+  no separate state enum exists. Same ownership discipline as
+  ClearRunStatus: a dying run whose marker was taken by a fresh turn still
+  closes its OWN row (as "completed", NOT parked — the owner already moved
+  on, so a stale park must not resurrect a notify) but leaves the fresh
+  marker and owner map untouched.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  parked_until: object = None
+  park_reason: str = ""
+
+
+@dataclass
+class ResolvePark(_Command):
+  """Move a parked/pending run to ``parked_notified``.
+
+  Submitted by the reset sweep AFTER `parked_until` elapses. Notify-only
+  parks resolve before their at-most-once push attempt; auto-resume parks first
+  pass through PrepareAutoResume so retries remain selectable without
+  re-notifying.
+  Not identity-keyed against `_run_token_owner`: the parked turn ended long
+  ago and ParkRun already dropped its ownership entry. Idempotent — a row
+  no longer parked is a no-op.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class PrepareAutoResume(_Command):
+  """Durably mark a due park as notified but still awaiting auto-resume.
+
+  The reset sweep must not consume its retry signal before the continuation is
+  actually scheduled. ``resume_pending`` is selected on later ticks,
+  but this command reports ``notify=False`` after the first transition so a
+  failed/raced resume retries without sending duplicate notifications.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class RollbackAutoResume(_Command):
+  """Undo a speculative auto-resume promote whose task could not spawn.
+
+  ``PromotePending`` must land before a continuation may run, but task creation
+  can still fail afterward.  This command reverses that narrow handoff: remove
+  the speculative run, put the exact promoted rows back at the head of the
+  queue, and re-upgrade the original park to ``resume_pending``.  Both run
+  identities are required so a stale rollback can never unwind a newer turn.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  promoted_run_token: str = ""
+  promoted_pending: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -445,6 +597,12 @@ class _TestPersist(_Command):
 # (reclaim the key's fence epoch once the unit of work for that
 # (chat_id, run_token) is done).  PersistTranscript is the ONLY
 # coalescible command and is deliberately absent.
+#
+# The two compaction commands are also deliberately absent: they are
+# conditional. Fencing at submit time would discard a live turn's pending
+# snapshot before the actor can discover that the operation must return a
+# busy/content conflict. Their idle-state and source-hash checks make a
+# successful commit safe without a pre-emptive fence.
 _FENCE_COMMANDS = (
   Finalize,
   PersistError,
@@ -453,12 +611,15 @@ _FENCE_COMMANDS = (
   StartTurn,
   AppendPending,
   AppendSteeredUserMessage,
-  PersistCompaction,
   PromotePending,
   CancelPending,
   ClearPending,
   ReplaceTranscript,
   ClearRunStatus,
+  ParkRun,
+  ResolvePark,
+  PrepareAutoResume,
+  RollbackAutoResume,
 )
 
 
@@ -1133,6 +1294,10 @@ class ChatWriterActor:
       return self._answer_question(db, cmd)
     if isinstance(cmd, PersistSessionId):
       return self._persist_session_id(db, cmd)
+    if isinstance(cmd, StashToolOutput):
+      return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, MigrateChat):
+      return self._migrate_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
     if isinstance(cmd, AppendPending):
@@ -1141,6 +1306,8 @@ class ChatWriterActor:
       return self._append_steered_user_message(db, cmd)
     if isinstance(cmd, PersistCompaction):
       return self._persist_compaction(db, cmd)
+    if isinstance(cmd, SwitchProviderWithCompaction):
+      return self._switch_provider_with_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
@@ -1151,6 +1318,14 @@ class ChatWriterActor:
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ClearRunStatus):
       return self._clear_run_status(db, cmd)
+    if isinstance(cmd, ParkRun):
+      return self._park_run(db, cmd)
+    if isinstance(cmd, ResolvePark):
+      return self._resolve_park(db, cmd)
+    if isinstance(cmd, PrepareAutoResume):
+      return self._prepare_auto_resume(db, cmd)
+    if isinstance(cmd, RollbackAutoResume):
+      return self._rollback_auto_resume(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
 
   # -- real DB dispatch (one method per command) -------------------------
@@ -1260,6 +1435,158 @@ class ChatWriterActor:
       raise _PersistFailed("PersistSessionId did not persist")
     return True
 
+  def _stash_tool_output(self, db, cmd: "StashToolOutput") -> bool:
+    """Insert/upsert a large tool output's full text into `tool_outputs`.
+
+    Keyed by the composite PK `(chat_id, tool_use_id)`, so a repeated stash for
+    the same tool (e.g. a streamed intermediate then the final aggregate)
+    overwrites in place — last write wins, which is correct (the final output is
+    authoritative). Does not touch `Chat.messages`, so it is outside the
+    lost-update guardrail. Fire-and-forget: raising on a dropped commit only
+    logs via the caller's done-callback; the UI keeps the inline excerpt."""
+    if not cmd.chat_id or not cmd.tool_use_id:
+      return False
+    from app.models import ToolOutput
+
+    row = db.query(ToolOutput).filter(
+      ToolOutput.chat_id == cmd.chat_id,
+      ToolOutput.tool_use_id == cmd.tool_use_id,
+    ).first()
+    if row is None:
+      db.add(ToolOutput(
+        chat_id=cmd.chat_id,
+        tool_use_id=cmd.tool_use_id,
+        output=cmd.output or "",
+      ))
+    else:
+      row.output = cmd.output or ""
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StashToolOutput did not persist")
+    return True
+
+  def _migrate_chat(self, db, cmd: "MigrateChat") -> dict:
+    """Forward-migrate one chat (card-221 B1+B2). See `MigrateChat`.
+
+    Returns a per-chat report dict the migration script aggregates. Raises
+    `_PersistFailed` only on a round-trip verification failure (a botched
+    extraction) so that ONE chat fails loudly and rolls back rather than
+    committing a block whose full text the side table can't reproduce — the
+    actor's `except` rolls the transaction back and keeps serving other chats.
+    """
+    from app.models import Chat, ToolOutput
+
+    cid = cmd.chat_id
+    row = db.execute(
+      select(
+        Chat.messages, Chat.pending_messages, Chat.run_status, Chat.updated_at
+      ).where(Chat.id == cid)
+    ).first()
+    if row is None:
+      return {"chat_id": cid, "status": "missing"}
+    messages, pending, run_status, snap_updated_at = row
+
+    # Never touch a chat with a live turn in flight: the durable run marker is
+    # set atomically with the turn's first write, so a "running" row is one a
+    # live actor owns right now. Defer + re-check after (the script re-runs the
+    # skipped set once).
+    if run_status is not None:
+      return {"chat_id": cid, "status": "skipped_active"}
+
+    plan = plan_chat_migration(messages or [], pending or [])
+
+    base = {
+      "chat_id": cid,
+      "backfilled": plan.backfilled,
+      "extracted": plan.extracted,
+      "bytes_moved": plan.bytes_moved,
+      "unfixable": plan.unfixable,
+    }
+    if cmd.dry_run:
+      return {**base, "status": "dry_run"}
+    if not plan.changed:
+      # Idempotent no-op: nothing to backfill or extract (already migrated, or
+      # only-unfixable rows). Do NOT write, so updated_at is left untouched.
+      return {**base, "status": "noop"}
+
+    from sqlalchemy.exc import OperationalError
+
+    # Stash the full text of every extracted block FIRST, then prove each row
+    # round-trips through the side table BEFORE the block rewrite is committed.
+    # The stash inserts and the blob rewrite share ONE transaction, so a
+    # verification failure (or a raced CAS) rolls BOTH back — a block is never
+    # left pointing at a stash that isn't there.
+    #
+    # The flush + CAS write can hit a transient SQLite lock (another process's
+    # actor commits between our snapshot and our write). Treat that like the
+    # commit-lock case below: roll back (dropping the flushed stashes too) and
+    # report deferred_locked so a re-run migrates the chat, instead of letting
+    # the OperationalError propagate as a hard failure (exit 1). A round-trip
+    # mismatch still raises _PersistFailed — only lock contention is caught here.
+    try:
+      for tool_use_id, full in plan.stashes:
+        existing = db.query(ToolOutput).filter(
+          ToolOutput.chat_id == cid,
+          ToolOutput.tool_use_id == tool_use_id,
+        ).first()
+        if existing is None:
+          db.add(ToolOutput(chat_id=cid, tool_use_id=tool_use_id, output=full))
+        else:
+          existing.output = full
+      db.flush()
+      self._verify_round_trip(db, cid, plan.stashes)
+
+      # Optimistic CAS: commit the rewritten blobs only while the chat is still
+      # idle AND unchanged since the snapshot. A concurrent live turn (another
+      # process's actor) sets run_status and/or bumps updated_at, matching 0 rows
+      # here — we roll back (dropping the flushed stashes too) and defer the chat.
+      result = db.execute(
+        update(Chat)
+        .where(
+          Chat.id == cid,
+          Chat.run_status.is_(None),
+          Chat.updated_at == snap_updated_at,
+        )
+        .values(messages=plan.new_messages, pending_messages=plan.new_pending)
+      )
+    except OperationalError:
+      db.rollback()
+      return {**base, "status": "deferred_locked"}
+    if result.rowcount != 1:
+      db.rollback()
+      return {**base, "status": "skipped_active"}
+    if not _commit_or_rollback(db):
+      # A transient SQLite lock dropped the commit. Report as deferred (a
+      # re-run migrates it) rather than raising — nothing was corrupted.
+      return {**base, "status": "deferred_locked"}
+    return {**base, "status": "migrated"}
+
+  def _verify_round_trip(self, db, chat_id: str, stashes: list) -> None:
+    """Prove every stashed full text reads back byte-identically from the side
+    table (length + SHA-256) BEFORE the block rewrite commits.
+
+    Runs after the inserts are flushed but before commit, so a mismatch (a
+    botched extraction) raises `_PersistFailed` and the whole per-chat
+    transaction rolls back — a block is never left excerpted with a stash that
+    can't reproduce its full text. A read-your-writes SELECT on the actor's own
+    connection sees the flushed-but-uncommitted rows.
+    """
+    from app.models import ToolOutput
+
+    for tool_use_id, full in stashes:
+      got = db.execute(
+        select(ToolOutput.output).where(
+          ToolOutput.chat_id == chat_id,
+          ToolOutput.tool_use_id == tool_use_id,
+        )
+      ).scalar_one_or_none()
+      if (got is None or len(got) != len(full)
+          or hashlib.sha256(got.encode("utf-8")).digest()
+          != hashlib.sha256(full.encode("utf-8")).digest()):
+        raise _PersistFailed(
+          f"tool-output round-trip verify failed chat={chat_id} "
+          f"tool_use_id={tool_use_id}"
+        )
+
   def _start_turn(self, db, cmd: StartTurn) -> dict:
     """Append the initial user message, set title/provider, mark the run.
 
@@ -1295,6 +1622,11 @@ class ChatWriterActor:
         content=cmd.user_msg.get("content", "") or "",
       )
     )
+    # Same monotonic-display-ts guarantee as every other append path: the
+    # client's batch insert/dedup still key ORDERING on ts, so a same-ms
+    # collision with the last transcript row must bump, never collide
+    # (identity is the cid and is untouched by the bump).
+    _ensure_unique_ts(cmd.user_msg, existing)
     existing.append(cmd.user_msg)
     chat.messages = existing
     if len(existing) == 1:
@@ -1348,6 +1680,24 @@ class ChatWriterActor:
     new_msg = dict(cmd.user_msg)
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    # Idempotent append: `cid` is untrusted client input, and a retried POST
+    # (flaky network, double-tap) carries the SAME cid. If that cid already
+    # names a durable row — queued OR already promoted into the transcript —
+    # treat this as a duplicate POST retry and return the existing row without
+    # appending a twin. The answer merge above still ran (harmless if already
+    # applied). cid is never an auth boundary — this only de-dups retries.
+    #
+    # Gate on a present cid: a client that sends none can't be deduped this way
+    # (and two of its distinct sends could share an optimistic ts), so this only
+    # ever fires for a genuine cid-carrying retry.
+    incoming_cid = new_msg.get("cid")
+    if incoming_cid is not None:
+      for existing in pending:
+        if cid_of(existing) == incoming_cid:
+          return {"stored": existing, "pending": pending}
+      for existing in list(chat.messages or []):
+        if existing.get("role") == "user" and cid_of(existing) == incoming_cid:
+          return {"stored": existing, "pending": pending}
     _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
     if cmd.front:
       pending.insert(0, new_msg)
@@ -1389,12 +1739,12 @@ class ChatWriterActor:
       raise _PersistFailed("AppendSteeredUserMessage had no user messages")
 
     pending = list(chat.pending_messages or [])
-    if cmd.consume_pending_ts:
-      pending_ts = {m.get("ts") for m in pending}
-      missing_ts = [
-        ts for ts in cmd.consume_pending_ts if ts not in pending_ts
+    if cmd.consume_pending_cids:
+      pending_cids = {cid_of(m) for m in pending}
+      missing_cids = [
+        cid for cid in cmd.consume_pending_cids if cid not in pending_cids
       ]
-      if missing_ts:
+      if missing_cids:
         # A row named for consumption is no longer in pending — a concurrent
         # Stop cleared the queue between the fast-forward's acceptance and this
         # (now runner-deferred) write. Do NOT raise: the steered rows were
@@ -1402,68 +1752,201 @@ class ChatWriterActor:
         # transcript, or the fast-forwarded message silently vanishes. Append
         # them anyway and consume whatever is still present. (Double-consume of
         # the SAME row is prevented upstream: the frontend guards against two
-        # fast-forwards of one ts, and the route validates against live
+        # fast-forwards of one cid, and the route validates against live
         # pending.)
         log.warning(
           "AppendSteeredUserMessage pending rows already gone chat_id=%s "
-          "ts=%s; appending steered rows anyway",
-          cmd.chat_id, ",".join(str(ts) for ts in missing_ts),
+          "cid=%s; appending steered rows anyway",
+          cmd.chat_id, ",".join(str(c) for c in missing_cids),
         )
     used_messages = msgs + pending
+
+    # Authoritative idempotency (defense-in-depth behind the runner-side dedup).
+    # A queued row must never become two durable transcript entries. A repeated
+    # force-steer of the same still-live pending row can deliver the same message
+    # more than once in a single drain; key on the stable `cid` so only a true
+    # re-delivery of one queued row is dropped. Genuinely distinct sends always
+    # carry a distinct cid — even two sends with identical text — so this can't
+    # drop a real message. Keying on cid rather than (ts, content) is what makes
+    # that hold: a (ts, content) key leans on the +1ms ts bump to tell two
+    # identical-text sends apart, which can disguise a real duplicate as
+    # distinct. Runs on the single-writer thread — no lost-update.
+    seen_cids = {
+      cid_of(m) for m in msgs if m.get("role") == "user"
+    }
     stored_messages: list[dict] = []
     for raw_msg in raw_user_msgs:
+      key = cid_of(raw_msg)
+      if key is not None and key in seen_cids:
+        log.warning(
+          "AppendSteeredUserMessage dropping duplicate steered row "
+          "chat_id=%s cid=%s", cmd.chat_id, key,
+        )
+        continue
+      if key is not None:
+        seen_cids.add(key)
       new_msg = dict(raw_msg)
       _ensure_unique_ts(new_msg, used_messages)
       msgs.append(new_msg)
       used_messages.append(new_msg)
       stored_messages.append(new_msg)
     chat.messages = msgs
-    if cmd.consume_pending_ts:
-      consumed = set(cmd.consume_pending_ts)
+    if cmd.consume_pending_cids:
+      consumed = set(cmd.consume_pending_cids)
       chat.pending_messages = [
-        m for m in pending if m.get("ts") not in consumed
+        m for m in pending if cid_of(m) not in consumed
       ]
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendSteeredUserMessage did not persist")
     return {
-      "stored": stored_messages[-1],
+      "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
       "pending": list(chat.pending_messages or []),
     }
 
-  def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
-    """Append the compaction briefing as a new assistant message; commit.
-
-    The briefing is its OWN message (appended, not a replace) so it can't
-    clobber a streaming snapshot, and it carries `kind="compaction"` so the
-    frontend renders it via the CompactionCard, which reads `content` first.
-    `content` is plain text — the sole field the card and the backend replay
-    (`_latest_compaction_brief`) read, and what provider seeding /
-    backward-compatible renderers consume. The `ts` is set strictly past
-    every message in the transcript and the pending queue (via
-    `next_message_ts`, so even an empty transcript gets a wall-clock ts)
-    so it can't collide with a sibling's React key.
-    """
+  def _switch_provider_with_compaction(
+    self, db, cmd: SwitchProviderWithCompaction,
+  ) -> dict:
+    """Commit a provider handoff if its source chat is still idle/current."""
     from datetime import UTC, datetime
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("PersistCompaction: chat not found or deleted")
-    msgs = list(chat.messages or [])
+      raise _PersistFailed(
+        "SwitchProviderWithCompaction: chat not found or deleted"
+      )
+    messages = list(chat.messages or [])
+    for message in reversed(messages):
+      if (
+        isinstance(message, dict)
+        and message.get("kind") == "compaction"
+        and message.get("switch_id") == cmd.switch_id
+      ):
+        if (
+          message.get("request_fingerprint")
+          and message.get("request_fingerprint") != cmd.request_fingerprint
+        ):
+          return {"status": "conflict", "reason": "request_mismatch"}
+        if (chat.provider or "claude") != cmd.provider:
+          return {"status": "conflict", "reason": "provider_changed"}
+        return {
+          "status": "already_committed",
+          "stored": message,
+          "provider": chat.provider,
+          "agent_settings_json": chat.agent_settings_json,
+        }
+
+    from app.models import ChatRun
+
+    has_running_row = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status == "running",
+    ).first() is not None
+    if chat.run_status is not None or chat.pending_messages or has_running_row:
+      return {"status": "conflict", "reason": "busy"}
+    if (chat.provider or "claude") != cmd.expected_provider:
+      return {"status": "conflict", "reason": "provider_changed"}
+    if messages_fingerprint(messages) != cmd.source_messages_hash:
+      return {"status": "conflict", "reason": "chat_changed"}
+    from app.compaction import load_cumulative_summary
+
+    latest_summary = load_cumulative_summary(cmd.data_dir, cmd.chat_id)
+    latest_summary_hash = (
+      hashlib.sha256(latest_summary.encode("utf-8")).hexdigest()
+      if latest_summary is not None
+      else None
+    )
+    if latest_summary_hash != cmd.source_summary_hash:
+      return {"status": "conflict", "reason": "summary_changed"}
+
     new_msg = {
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
-      "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
+      "switch_id": cmd.switch_id,
+      "request_fingerprint": cmd.request_fingerprint,
+      "from_provider": cmd.expected_provider,
+      "to_provider": cmd.provider,
+      "ts": next_message_ts(messages),
     }
-    msgs.append(new_msg)
-    chat.messages = msgs
+    messages.append(new_msg)
+    raw_settings = chat.agent_settings_json
+    if isinstance(raw_settings, dict):
+      settings = dict(raw_settings)
+    elif isinstance(raw_settings, str):
+      try:
+        parsed = json.loads(raw_settings)
+        settings = dict(parsed) if isinstance(parsed, dict) else {}
+      except (TypeError, ValueError):
+        settings = {}
+    else:
+      settings = {}
+    for key, value in cmd.settings_patch.items():
+      if value is None:
+        settings.pop(key, None)
+      else:
+        settings[key] = value
+
+    chat.messages = messages
+    chat.provider = cmd.provider
+    chat.session_id = None
+    chat.agent_settings_json = settings or None
+    chat.updated_at = datetime.now(UTC)
+    # A provider-limit park belongs to the outgoing runtime.  Retire it in
+    # the same transaction as the handoff so the reset sweep cannot later
+    # notify or auto-resume the old provider after the new provider owns the
+    # chat.  Already-resolved ``parked_notified`` rows remain historical.
+    for run in db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(("parked", "resume_pending")),
+    ).all():
+      run.status = "interrupted"
+      run.ended_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("SwitchProviderWithCompaction did not persist")
+    return {
+      "status": "committed",
+      "stored": new_msg,
+      "provider": chat.provider,
+      "agent_settings_json": chat.agent_settings_json,
+    }
+
+  def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
+    """Conditionally append one marker for the legacy two-call protocol."""
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("PersistCompaction: chat not found or deleted")
+    messages = list(chat.messages or [])
+    has_active_run = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(("running", "parked", "resume_pending")),
+    ).first() is not None
+    if chat.run_status is not None or chat.pending_messages or has_active_run:
+      return {"status": "conflict", "reason": "busy"}
+    if (chat.provider or "claude") != cmd.expected_provider:
+      return {"status": "conflict", "reason": "provider_changed"}
+    if messages_fingerprint(messages) != cmd.source_messages_hash:
+      return {"status": "conflict", "reason": "chat_changed"}
+    new_msg = {
+      "role": "assistant",
+      "kind": "compaction",
+      "content": cmd.summary,
+      "legacy_switch_ready": True,
+      "from_provider": cmd.expected_provider,
+      "ts": next_message_ts(messages + list(chat.pending_messages or [])),
+    }
+    messages.append(new_msg)
+    chat.messages = messages
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistCompaction did not persist")
-    return {"stored": new_msg}
+    return {"status": "committed", "stored": new_msg}
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
@@ -1494,15 +1977,20 @@ class ChatWriterActor:
     promoted_group = pending[:promote_count]
     remaining_pending = pending[promote_count:]
     agent_pending = _combine_pending_messages(promoted_group)
-    consumed_ts = agent_pending.pop("_consumed_ts", [])
+    consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
     stored_messages = _pending_messages_for_transcript(
       promoted_group, existing,
     )
     returned_promoted = {
       **agent_pending,
-      "_consumed_ts": consumed_ts,
+      "_consumed_cids": consumed_cids,
       "_messages": stored_messages,
+      # Exact pre-promote rows for the auto-resume scheduling rollback. Kept
+      # private so provider runners ignore it; ordinary continuations never
+      # inspect it. The rollback validates their stable cids against the
+      # transcript tail before reversing anything.
+      "_promoted_pending": promoted_group,
     }
     # Build the next-turn history as schemas.ChatMessage objects BEFORE
     # committing, exactly as chat_queue.promote_pending_messages_locked does —
@@ -1570,10 +2058,11 @@ class ChatWriterActor:
     }
 
   def _cancel_pending(self, db, cmd: CancelPending) -> dict:
-    """Remove the queued message whose `ts` matches; return the remainder.
+    """Remove the queued message whose `cid` matches; return the remainder.
 
-    Replicates the `DELETE /pending/{ts}` route: stamps `updated_at` and
-    commits only when something was removed.
+    Replicates the `DELETE /pending/{cid}` route: stamps `updated_at` and
+    commits only when something was removed. Matches on `cid_of` — the row's
+    explicit cid (client-minted, or a card-221 backfilled `legacy-<ts>`).
     """
     from datetime import UTC, datetime
 
@@ -1583,7 +2072,7 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("CancelPending: chat not found")
     pending = list(chat.pending_messages or [])
-    remaining = [m for m in pending if m.get("ts") != cmd.ts]
+    remaining = [m for m in pending if cid_of(m) != cmd.cid]
     if len(remaining) != len(pending):
       chat.pending_messages = remaining
       chat.updated_at = datetime.now(UTC)
@@ -1592,14 +2081,15 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
-    """Empty the pending queue; return the count + the cleared timestamps.
+    """Empty the pending queue; return the count + the cleared cids.
 
     Commits only when the queue was non-empty — clearing an already-empty
-    queue is a no-op and skips the commit. `cleared_ts` is the ts of every
-    message actually removed (empty when the queue was already empty), which
-    is how Stop tells apart a message it truly cleared from one the turn-end
-    drain already promoted into a continuation — see stop_chat_for and the
-    natural-finish-races-Stop guard in ChatView.handleStop.
+    queue is a no-op and skips the commit. `cleared_cids` is the stable `cid`
+    of every message actually removed (empty when the queue was already
+    empty), which is how Stop tells apart a message it truly cleared from one
+    the turn-end drain already promoted into a continuation — see
+    stop_chat_for and the natural-finish-races-Stop guard in
+    ChatView.handleStop.
     """
     from app.models import Chat
 
@@ -1607,13 +2097,13 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("ClearPending: chat not found")
     pending = list(chat.pending_messages or [])
-    cleared_ts = [m.get("ts") for m in pending if m.get("ts") is not None]
+    cleared_cids = [cid_of(m) for m in pending if cid_of(m) is not None]
     cleared = len(pending)
     if cleared:
       chat.pending_messages = []
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearPending did not persist")
-    return {"cleared": cleared, "cleared_ts": cleared_ts}
+    return {"cleared": cleared, "cleared_cids": cleared_cids}
 
   def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
     """Replace the whole `messages` blob (and optional title); commit.
@@ -1651,8 +2141,16 @@ class ChatWriterActor:
 
     from app.models import ChatRun
 
+    # "parked" rows (a provider-limit park, design §2.4) are superseded here
+    # too: a fresh StartTurn / PromotePending on a parked chat means the owner
+    # resumed it themselves (one-tap Resume, or any new send), so the stale
+    # park must be closed — otherwise it would fire a spurious reset notify /
+    # auto-resume later, and its parked_until could wrongly exempt the NEW
+    # live turn from the stall watchdog. "parked_notified" rows are already
+    # resolved and stay untouched.
     q = db.query(ChatRun).filter(
-      ChatRun.chat_id == chat_id, ChatRun.status == "running"
+      ChatRun.chat_id == chat_id,
+      ChatRun.status.in_(("running", "parked", "resume_pending")),
     )
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)
@@ -1722,6 +2220,170 @@ class ChatWriterActor:
       raise _PersistFailed("ClearRunStatus did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
     return None
+
+  def _park_run(self, db, cmd: ParkRun):
+    """Park the run's row on a provider limit + clear the per-chat marker.
+
+    Mirrors `_clear_run_status`'s ownership discipline exactly — the same
+    identity-keyed compare against `_run_token_owner` — with one difference:
+    when this token still owns the marker, its `chat_runs` row becomes
+    ``status="parked"`` (carrying `parked_until` + `park_reason`) instead of
+    "completed". A dying run whose marker a fresh turn already took closes
+    its own row "completed" WITHOUT parking: the owner has moved on, and a
+    stale park would fire a spurious reset notify later. The per-chat marker
+    (`Chat.run_status`) is cleared either way the marker is ours — the turn
+    IS over, so the chat must not look busy, must not be reaped by the
+    wedged sweep, and must not get a spurious "server restarted" note from
+    boot reconcile.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat, ChatRun
+
+    owner = self._run_token_owner.get(cmd.chat_id)
+    marker_is_ours = not (
+      cmd.run_token and owner is not None and owner != cmd.run_token
+    )
+    changed = False
+    if cmd.run_token:
+      run = (
+        db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+      )
+      if run is not None and run.status == "running":
+        if marker_is_ours:
+          run.status = "parked"
+          run.parked_until = cmd.parked_until
+          run.park_reason = (cmd.park_reason or None)
+        else:
+          run.status = "completed"
+        run.ended_at = datetime.now(UTC)
+        changed = True
+    if not marker_is_ours:
+      if changed and not _commit_or_rollback(db):
+        raise _PersistFailed("ParkRun did not persist")
+      return None
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is not None and (
+      chat.run_status is not None or chat.run_started_at is not None
+    ):
+      chat.run_status = None
+      chat.run_started_at = None
+      changed = True
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("ParkRun did not persist")
+    self._run_token_owner.pop(cmd.chat_id, None)
+    return None
+
+  def _resolve_park(self, db, cmd: ResolvePark):
+    """Move a parked/pending row to ``parked_notified``; idempotent."""
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+    if run is None or run.status not in ("parked", "resume_pending"):
+      return False
+    if not self._run_is_latest(db, run):
+      # A newer run already superseded this park. Retire the stale signal but
+      # report False so the sweep neither notifies nor claims it resolved.
+      run.status = "completed"
+      if run.ended_at is None:
+        run.ended_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("ResolvePark stale-run retire did not persist")
+      return False
+    run.status = "parked_notified"
+    if run.ended_at is None:
+      run.ended_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ResolvePark did not persist")
+    return True
+
+  def _prepare_auto_resume(self, db, cmd: PrepareAutoResume):
+    """Keep auto-resume retryable with one best-effort notify attempt."""
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+    if run is None or run.status not in ("parked", "resume_pending"):
+      return {"active": False, "notify": False}
+    if not self._run_is_latest(db, run):
+      run.status = "completed"
+      if run.ended_at is None:
+        run.ended_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed(
+          "PrepareAutoResume stale-run retire did not persist"
+        )
+      return {"active": False, "notify": False}
+    if run.status == "resume_pending":
+      return {"active": True, "notify": False}
+    run.status = "resume_pending"
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PrepareAutoResume did not persist")
+    return {"active": True, "notify": True}
+
+  @staticmethod
+  def _run_is_latest(db, run) -> bool:
+    """Whether ``run`` is the deterministic latest run for its chat."""
+    from app.models import ChatRun
+
+    latest = (
+      db.query(ChatRun.id)
+      .filter(ChatRun.chat_id == run.chat_id)
+      .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
+      .first()
+    )
+    latest_id = latest[0] if latest is not None else None
+    return latest_id == run.id
+
+  def _rollback_auto_resume(self, db, cmd: RollbackAutoResume) -> bool:
+    """Reverse only the exact unscheduled PromotePending handoff."""
+    from app.models import Chat, ChatRun
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    park = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+    promoted_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.promoted_run_token,
+    ).first()
+    if (
+      chat is None
+      or park is None
+      or promoted_run is None
+      or park.chat_id != cmd.chat_id
+      or promoted_run.chat_id != cmd.chat_id
+      or park.status != "completed"
+      or promoted_run.status != "running"
+      or not self._run_is_latest(db, promoted_run)
+      or self._run_token_owner.get(cmd.chat_id) != cmd.promoted_run_token
+      or chat.run_status != "running"
+    ):
+      return False
+
+    promoted_pending = [dict(row) for row in cmd.promoted_pending]
+    promoted_cids = [cid_of(row) for row in promoted_pending]
+    if not promoted_pending or any(cid is None for cid in promoted_cids):
+      return False
+    messages = list(chat.messages or [])
+    if len(messages) < len(promoted_pending):
+      return False
+    transcript_tail = messages[-len(promoted_pending):]
+    if [cid_of(row) for row in transcript_tail] != promoted_cids:
+      # A successor wrote after the promote. Never peel arbitrary transcript
+      # rows off the end; its turn owns recovery now.
+      return False
+
+    chat.messages = messages[:-len(promoted_pending)]
+    chat.pending_messages = promoted_pending + list(chat.pending_messages or [])
+    chat.run_status = None
+    chat.run_started_at = None
+    db.delete(promoted_run)
+    park.status = "resume_pending"
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RollbackAutoResume did not persist")
+    self._run_token_owner.pop(cmd.chat_id, None)
+    return True
 
   @staticmethod
   def _commit_snapshot(db, snapshot: dict):
@@ -1856,14 +2518,190 @@ class _PersistFailed(Exception):
 # dependency runs one way (chat.py -> chat_writer).
 
 
+def cid_of(msg: dict) -> str | None:
+  """The stable identity of a user message.
+
+  A `cid` is the canonical identity — React key, DOM pin target, queue cancel
+  key, steer dedup key. Current clients mint it (see schemas.SendMessage.cid);
+  card-221 backfilled `cid=legacy-<ts>` onto every legacy user row, so post-
+  migration every user row carries an explicit cid and no read-time derivation
+  is needed. `ts` is display/ordering metadata only. Returns None for a row
+  with no cid.
+  """
+  if not isinstance(msg, dict):
+    return None
+  return msg.get("cid") or None
+
+
+@dataclass
+class _MigrationPlan:
+  """The computed forward-migration for one chat's two JSON blobs (card-221).
+
+  Pure data: `new_messages` / `new_pending` are the rewritten blobs, `stashes`
+  the `(tool_use_id, full_text)` rows to insert into `tool_outputs`, and the
+  counters + `unfixable` list feed the run summary. `changed` is False for an
+  already-migrated (or only-unfixable) chat so the actor can skip the write.
+  """
+
+  new_messages: list
+  new_pending: list
+  stashes: list  # list[tuple[str, str]]
+  backfilled: int
+  extracted: int
+  bytes_moved: int
+  unfixable: list  # list[dict]
+  changed: bool
+
+
+def _collect_existing_tool_ids(*blob_lists) -> set[str]:
+  """Every `tool_use_id` already present on any tool block across the blobs.
+
+  Seeds the mint's uniqueness set so a synthetic `legacy-<ts>-<i>` id can never
+  collide with a real (runner-assigned) id already keying a `tool_outputs` row.
+  """
+  ids: set[str] = set()
+  for blob in blob_lists:
+    for m in blob:
+      if not isinstance(m, dict):
+        continue
+      for blk in m.get("blocks") or []:
+        if isinstance(blk, dict) and blk.get("tool_use_id"):
+          ids.add(blk["tool_use_id"])
+  return ids
+
+
+def _mint_unique_tool_id(base: str, used: set[str]) -> str:
+  """`base`, or `base-2`/`base-3`/… — the first not already in `used`.
+
+  Guarantees uniqueness within the chat even for ts-less blocks (whose base
+  discriminates on message index, not ts) or a base that collides with a real
+  id. Records the winner in `used` so the next mint sees it.
+  """
+  candidate = base
+  suffix = 2
+  while candidate in used:
+    candidate = f"{base}-{suffix}"
+    suffix += 1
+  used.add(candidate)
+  return candidate
+
+
+def _backfill_cids(msg_list: list, unfixable: list) -> int:
+  """B2: stamp `cid = legacy-<ts>` on every user row lacking one, in place.
+
+  Mirrors `cid_of` exactly: a row with a truthy `cid` is left alone (already
+  identified); a row with no cid but a `ts` (0 counts — `ts is not None`) gets
+  `legacy-<ts>`; a row with neither is UNFIXABLE (recorded, never guessed).
+  Returns the count backfilled.
+  """
+  backfilled = 0
+  for idx, m in enumerate(msg_list):
+    if not isinstance(m, dict) or m.get("role") != "user":
+      continue
+    if m.get("cid"):
+      continue
+    ts = m.get("ts")
+    if ts is not None:
+      m["cid"] = f"legacy-{ts}"
+      backfilled += 1
+    else:
+      unfixable.append({"kind": "user_no_cid_no_ts", "index": idx})
+  return backfilled
+
+
+def _extract_tool_outputs(
+  msg_list: list, used_ids: set[str],
+) -> tuple[int, int, list]:
+  """B1: extract fat inline tool outputs into stashes + rewrite blocks in place.
+
+  A block qualifies when its `output` is a string over
+  `TOOL_OUTPUT_INLINE_THRESHOLD`, it is NOT already reduced
+  (`output_truncated`), and it carries NO `tool_use_id` (a tagged block was
+  already stashed by the live funnel). The rewrite mirrors the live funnel's
+  `_reduce_tool_output` exactly — bounded excerpt via `excerpt_tool_output`,
+  plus `output_truncated`, `output_full_len`, `output_exit_code` (only when
+  non-None), and the minted `tool_use_id` (this is what makes the block fetch
+  its full text via the by-id endpoint). Returns
+  `(extracted, bytes_moved, stashes)`.
+  """
+  extracted = 0
+  bytes_moved = 0
+  stashes: list = []
+  for mi, m in enumerate(msg_list):
+    if not isinstance(m, dict):
+      continue
+    blocks = m.get("blocks")
+    if not isinstance(blocks, list):
+      continue
+    ts = m.get("ts")
+    for i, blk in enumerate(blocks):
+      if not isinstance(blk, dict) or blk.get("type") != "tool":
+        continue
+      if blk.get("output_truncated") or blk.get("tool_use_id"):
+        continue
+      output = blk.get("output")
+      if (not isinstance(output, str)
+          or len(output) <= TOOL_OUTPUT_INLINE_THRESHOLD):
+        continue
+      base = f"legacy-{ts}-{i}" if ts is not None else f"legacy-m{mi}-{i}"
+      tool_use_id = _mint_unique_tool_id(base, used_ids)
+      excerpt, full_len, exit_code = excerpt_tool_output(output)
+      blk["output"] = excerpt
+      blk["output_truncated"] = True
+      blk["output_full_len"] = full_len
+      if exit_code is not None:
+        blk["output_exit_code"] = exit_code
+      blk["tool_use_id"] = tool_use_id
+      stashes.append((tool_use_id, output))
+      extracted += 1
+      bytes_moved += full_len
+  return extracted, bytes_moved, stashes
+
+
+def plan_chat_migration(messages: list, pending_messages: list) -> _MigrationPlan:
+  """Compute the forward-migration for one chat (card-221 B1+B2), purely.
+
+  Deep-copies the inputs, so it never mutates the caller's lists and is safe to
+  call on a dry-run. Idempotent: an already-migrated chat plans no changes
+  (`changed == False`). The actor handler applies the plan under a CAS guard;
+  tests exercise this planner directly, no DB needed.
+  """
+  new_messages = copy.deepcopy(messages) if messages else []
+  new_pending = copy.deepcopy(pending_messages) if pending_messages else []
+  unfixable: list = []
+  backfilled = _backfill_cids(new_messages, unfixable)
+  backfilled += _backfill_cids(new_pending, unfixable)
+  # Seed the mint's collision set with every real id already in the chat.
+  used_ids = _collect_existing_tool_ids(new_messages, new_pending)
+  extracted, bytes_moved, stashes = _extract_tool_outputs(new_messages, used_ids)
+  # pending_messages hold queued USER rows (no blocks) in practice; scan anyway
+  # so a stray tool block there is not silently stranded fat.
+  p_extracted, p_bytes, p_stashes = _extract_tool_outputs(new_pending, used_ids)
+  extracted += p_extracted
+  bytes_moved += p_bytes
+  stashes.extend(p_stashes)
+  return _MigrationPlan(
+    new_messages=new_messages,
+    new_pending=new_pending,
+    stashes=stashes,
+    backfilled=backfilled,
+    extracted=extracted,
+    bytes_moved=bytes_moved,
+    unfixable=unfixable,
+    changed=bool(backfilled or extracted),
+  )
+
+
 def _ensure_unique_ts(new_msg: dict, others: list) -> None:
   """Bump `new_msg['ts']` so it's strictly greater than every ts in `others`.
 
-  Used by the `AppendPending` command — two sends in the same millisecond
-  would otherwise collide, producing duplicate React keys client-side and
-  ambiguous DELETE-by-ts.  Callers pass the union of pending + persisted
-  messages (so a queued ts can't equal a persisted assistant ts once it
-  promotes).
+  DEMOTED: `ts` is display/ordering metadata only — message identity is now
+  `cid` (React keys, DELETE-by-cid, steer dedup all key on it). This bump no
+  longer serves identity; it keeps the display `ts` strictly monotonic within
+  a chat so the timestamp tooltip stays sane and the ts-ordered transcript
+  batch inserts (`insertMessageBatchByTs`, `appendMessageBatch` seenTs) sort
+  deterministically. Callers pass the union of pending + persisted messages so
+  a queued ts stays past every persisted/assistant ts once it promotes.
   """
   if not others:
     return
@@ -1912,8 +2750,8 @@ def _combine_pending_messages(pending: list[dict]) -> dict:
     "role": "user",
     "content": "\n".join(contents),
     "ts": first.get("ts"),
-    "_consumed_ts": [
-      msg.get("ts") for msg in pending if msg.get("ts") is not None
+    "_consumed_cids": [
+      cid_of(msg) for msg in pending if cid_of(msg) is not None
     ],
   }
   if attachments:
@@ -1942,6 +2780,12 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
+    # Stamp the row's explicit cid onto the stored row. Post-card-221 every
+    # pending row carries a cid, so this is the identity as-is — stable across
+    # the `_ensure_unique_ts` bump below (cid never rides on ts), which keeps the
+    # stored row's identity byte-identical to the one the consume/steer paths
+    # recorded from the queue snapshot so cid-keyed dedup stays exact.
+    msg["cid"] = cid_of(msg)
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)
@@ -1969,6 +2813,15 @@ def _commit_or_rollback(db) -> bool:
     except Exception:
       pass
     return False
+
+
+def messages_fingerprint(messages: list) -> str:
+  """Stable source identity for a synthesized provider handoff."""
+  encoded = json.dumps(
+    messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    default=str,
+  ).encode("utf-8")
+  return hashlib.sha256(encoded).hexdigest()
 
 
 def next_message_ts(existing: list) -> int:

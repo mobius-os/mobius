@@ -80,6 +80,34 @@ _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
 _LEVELS = {"none": 0, "read": 1, "write": 2}
 
 
+def _require_shared_memory_read(
+  path: str,
+  principal: Principal,
+  db: Session,
+) -> None:
+  """Gate the optional Memory app's shared graph by its live contract."""
+  if path != "memory" and not path.startswith("memory/"):
+    return
+  if principal.app_id is None:
+    return
+  app = (
+    db.query(models.App)
+    .filter(
+      models.App.id == principal.app_id,
+      models.App.deleted_at.is_(None),
+    )
+    .first()
+  )
+  contract = app.capability_contract if app else None
+  data = contract.get("data") if isinstance(contract, dict) else None
+  level = data.get("shared_memory", "none") if isinstance(data, dict) else "none"
+  if _LEVELS.get(level, 0) < _LEVELS["read"]:
+    raise HTTPException(
+      status_code=403,
+      detail="This app did not declare shared-memory read access.",
+    )
+
+
 def _check_cross_app(
   db: Session, principal: Principal, target_app_id: int, mode: str
 ) -> models.App:
@@ -766,9 +794,11 @@ async def delete_app_file(
 @router.get("/shared/{path:path}")
 def read_shared_file(
   path: str,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   """Returns a file from the shared data directory."""
+  _require_shared_memory_read(path, principal, db)
   base = Path(get_settings().data_dir) / "shared"
   file_path = _resolve(base, path)
   # is_file() so a directory path 404s instead of 500-ing in _serve_file
@@ -940,7 +970,8 @@ def list_shared_dir(
   path: str,
   limit: int = _LIST_DEFAULT_LIMIT,
   cursor: str | None = None,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   """Lists the immediate children of a shared-storage directory.
 
@@ -952,6 +983,7 @@ def list_shared_dir(
   listing rather than 404, matching `apps-list` (enumerating a not-yet-
   created directory is a normal call).
   """
+  _require_shared_memory_read(path, principal, db)
   base = Path(get_settings().data_dir) / "shared"
   dir_path = base if path == "" else _resolve(base, path)
   if not dir_path.is_dir():

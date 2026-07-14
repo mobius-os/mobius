@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
+import useDialogFocus from '../../../hooks/useDialogFocus.js'
 
 /**
  * Full-screen lightbox overlay with pinch-zoom, pan, mouse-wheel zoom,
@@ -17,20 +18,13 @@ export default function ImageLightbox({ src, alt, onClose }) {
   const pinchRef = useRef(null)
   const panRef = useRef(null)
   const closeBtnRef = useRef(null)
+  const dialogRef = useRef(null)
 
-  // Move focus to the close button on open; restore focus to the previously
-  // focused element on close.
-  useEffect(() => {
-    const previously = document.activeElement
-    closeBtnRef.current?.focus()
-    return () => { previously?.focus?.() }
-  }, [])
-
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  useDialogFocus({
+    containerRef: dialogRef,
+    initialFocusRef: closeBtnRef,
+    onClose,
+  })
 
   // Pinch-to-zoom via touch events.
   // Handlers read transform via transformRef so this effect only needs to
@@ -144,11 +138,16 @@ export default function ImageLightbox({ src, alt, onClose }) {
     <div
       className="lightbox-overlay"
       onClick={handleOverlayClick}
-      role="dialog"
-      aria-modal="true"
-      aria-label={alt || 'Image viewer'}
+      role="presentation"
     >
-      <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="lightbox-content"
+        role="dialog"
+        aria-modal="true"
+        aria-label={alt || 'Image viewer'}
+        onClick={(e) => e.stopPropagation()}
+      >
         <img
           ref={imgRef}
           src={src}

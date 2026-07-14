@@ -111,9 +111,9 @@ The whole starter catalog under [github.com/mobius-os](https://github.com/mobius
 
 ## It improves itself for you
 
-The agent keeps a **Memory** — a knowledge graph of everything it has learned, separate from your chat transcripts. Notes link to related notes, the important ones are indexed, and the whole thing loads into the agent's context at the start of each session. Instead of re-reading ten old conversations to remember a gotcha, it reads one note.
+Every chat maintains its own name, one-paragraph Digest, and complete cumulative Summary. New chats receive only the recent Digests. The optional **Memory** system app adds an Obsidian-style graph of durable facts: when prior context matters, the chat agent sends a focused question to a read-only recall agent and gets back relevant text with file pointers. The graph is never loaded wholesale, and uninstalling Memory removes its instructions while leaving ordinary chat continuity intact.
 
-Every night the **Reflection** agent wakes up and tends it. It merges duplicate notes, drops stale ones, surfaces patterns that span multiple builds, and looks for things worth suggesting to you in the morning. It also audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast. It commits its changes to the same git history everything else uses, so a bad night's reorganization is recoverable.
+When Memory is installed, its own scheduled agent merges duplicate graph notes, drops stale ones, repairs links, and preserves provenance. Separately, the **Reflection** agent audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast — and looks for things worth suggesting in the morning. Both commit their changes to the same git history, so a bad reorganization is recoverable.
 
 The nightly loop is the same reflect-and-refactor cycle the developers run by hand when improving the agent. Reflection is that loop, scheduled, on your instance.
 
@@ -143,13 +143,13 @@ The trust model is explicit: this is single-owner software. The agent has full w
 
 ## Get started
 
-### <a href="https://railway.com/deploy/mobius?referralCode=5TQuhr"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="28"></a>
+### <a href="https://mobius.you"><img src="https://img.shields.io/badge/Launch_M%C3%B6bius-mobius.you-5A0FC8?style=for-the-badge&logo=railway&logoColor=white" alt="Launch Möbius on mobius.you" height="40"></a>
 
-Click **Deploy Now**, log in to Railway, and deploy. New accounts get a free month, then around $5/month. Once the deploy finishes, go to **Settings → Networking → Generate Domain** to get a URL like `xxx.up.railway.app`. Open it, and the setup wizard walks you through creating your account and connecting Codex or Claude.
+Click **Launch Möbius** and [mobius.you](https://mobius.you) takes it from there. It walks you through the three steps — create a Railway account (free for the first month, then around $5/month), connect it, and deploy — and hands you a public URL with a live usage dashboard when the build finishes. There's no manual domain setup. Open your URL and the wizard helps you create your account and connect Codex or Claude.
 
-Bookmark `https://xxx.up.railway.app/recover`. On your phone, save to home screen for the best experience.
+Bookmark your instance's `/recover` page. On your phone, save it to the home screen for the best experience.
 
-To update: **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys; chats, apps, credentials, and memory all survive.
+To update, open **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys, and your chats, apps, credentials, and memory all survive.
 
 ### Deploy self-hosted
 

@@ -61,6 +61,42 @@ if [ -n "$BASE" ]; then
   fi
 fi
 
+# 5. Private workspace roots anywhere in reachable history. A clean tip is not
+#    sufficient because an earlier add remains fetchable after a later delete.
+PRIVATE_COMMITS="$(git rev-list HEAD -- \
+  docs demo-logs .claude .pm AGENTS.md CLAUDE.md 2>/dev/null || true)"
+if [ -n "$PRIVATE_COMMITS" ]; then
+  err "private workspace paths occur in history reachable from HEAD:"
+  git log -n 8 --format='    %h %s' HEAD -- \
+    docs demo-logs .claude .pm AGENTS.md CLAUDE.md >&2
+  warn "purge the paths from reachable history; do not push or bypass privacy hooks"
+  FAILS=$((FAILS + 1))
+fi
+
+# 6. Hooks must be installed and current. A copied hook deliberately survives
+#    worktree removal, but that also means a pull cannot update it in place.
+HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/hooks"
+ACTIVE_HOOKS_DIR="$(git rev-parse --path-format=absolute --git-path hooks 2>/dev/null)"
+STALE_HOOKS=0
+for pair in \
+  "scripts/pre-commit.sh:$HOOKS_DIR/pre-commit" \
+  "scripts/githooks/pre-push:$HOOKS_DIR/pre-push"; do
+  source_path="${pair%%:*}"
+  installed_path="${pair#*:}"
+  if [ ! -x "$installed_path" ] || ! cmp -s "$source_path" "$installed_path"; then
+    STALE_HOOKS=$((STALE_HOOKS + 1))
+  fi
+done
+if [ "$ACTIVE_HOOKS_DIR" != "$HOOKS_DIR" ]; then
+  err "active core.hooksPath is $ACTIVE_HOOKS_DIR, expected $HOOKS_DIR"
+  STALE_HOOKS=$((STALE_HOOKS + 1))
+fi
+if [ "$STALE_HOOKS" -gt 0 ]; then
+  err "$STALE_HOOKS required git hook(s) are missing or stale"
+  warn "install with: scripts/install-hooks.sh"
+  FAILS=$((FAILS + 1))
+fi
+
 if [ "$FAILS" -eq 0 ]; then
   echo "[git-doctor] OK"
   exit 0

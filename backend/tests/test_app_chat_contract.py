@@ -44,6 +44,12 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   assert row is not None
   assert row.created_by_app_id == app_id
+  owner_view = client.get(
+    f"/api/chats/{chat_id}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert owner_view.status_code == 200
+  assert owner_view.json()["created_by_app_id"] == app_id
 
   # The app can send to its own chat (202 — accepted + runner spawned).
   r = client.post(
@@ -133,6 +139,52 @@ def test_app_chat_create_and_patch_store_custom_system_prompt(
   assert "model" not in row.agent_settings_json
 
 
+def test_app_chat_list_can_filter_by_scope(client, owner_token):
+  _, app_token = _make_app(client, owner_token, "scoped-chatter")
+  _, other_app_token = _make_app(client, owner_token, "other-scoped-chatter")
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  other_auth = {"Authorization": f"Bearer {other_app_token}"}
+
+  def create(title, scope, headers=app_auth):
+    r = client.post(
+      "/api/app-chats",
+      json={
+        "title": title,
+        "scope": scope,
+        "scope_label": "Session A",
+      },
+      headers=headers,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+  session_a_1 = create("Session A notes", "workout-session:session-a")
+  session_b = create("Session B notes", "workout-session:session-b")
+  session_a_2 = create("Session A follow-up", "workout-session:session-a")
+  foreign = create(
+    "Other app same scope", "workout-session:session-a", headers=other_auth,
+  )
+
+  owner_list = client.get(
+    "/api/app-chats",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert owner_list.status_code == 403, owner_list.text
+
+  scoped = client.get(
+    "/api/app-chats?scope=workout-session:session-a",
+    headers=app_auth,
+  )
+  assert scoped.status_code == 200, scoped.text
+  rows = scoped.json()
+  ids = {row["id"] for row in rows}
+  assert ids == {session_a_1, session_a_2}
+  assert session_b not in ids
+  assert foreign not in ids
+  assert all(row["scope"] == "workout-session:session-a" for row in rows)
+  assert all(row["scope_label"] == "Session A" for row in rows)
+
+
 def test_app_chat_create_stores_report_date_and_kind(client, owner_token, db):
   """An app opening a chat about one of its reports stores the link.
 
@@ -173,6 +225,18 @@ def test_app_chat_create_rejects_malformed_report_date(client, owner_token):
       headers={"Authorization": f"Bearer {app_token}"},
     )
     assert r.status_code == 422, f"{bad!r} should be rejected: {r.text}"
+
+
+def test_app_chat_create_rejects_provider_model_mismatch(
+  client, owner_token,
+):
+  _, app_token = _make_app(client, owner_token, "mismatched-model")
+  response = client.post(
+    "/api/app-chats",
+    json={"provider": "claude", "model": "gpt-5.4"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 422
 
 
 def test_app_chat_patch_can_set_provider_before_assistant_turns(
@@ -228,6 +292,37 @@ def test_app_chat_patch_rejects_provider_switch_after_assistant_turn(
   db.refresh(row)
   assert row.provider == "claude"
   assert row.session_id == "claude-session"
+
+
+def test_app_chat_patch_rejects_provider_switch_after_first_user_turn(
+  client, owner_token, db,
+):
+  _, app_token = _make_app(client, owner_token, "provider-first-turn")
+  response = client.post(
+    "/api/app-chats",
+    json={"title": "App conversation", "provider": "claude"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  chat_id = response.json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.messages = [{"role": "user", "content": "first request"}]
+  row.run_status = "running"
+  db.add(models.ChatRun(
+    id="app-first-live-turn",
+    chat_id=chat_id,
+    status="running",
+    provider="claude",
+  ))
+  db.commit()
+
+  response = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"provider": "codex"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 409
+  db.refresh(row)
+  assert row.provider == "claude"
 
 
 def test_app_cannot_touch_foreign_chat(client, owner_token, db):

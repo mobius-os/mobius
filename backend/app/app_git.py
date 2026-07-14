@@ -55,7 +55,9 @@ app with no source_dir has no `.git`.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -83,6 +85,9 @@ _GITIGNORE = "\n".join([
   "dist/",
   ".build/",
   "node_modules/",
+  "# Python app jobs compile beside source; bytecode is runtime cache, not source.",
+  "__pycache__/",
+  "*.py[cod]",
   "# Manifest static_assets are install-managed (re-fetched from the manifest,",
   "# tracked in .mobius-static-assets.json), not edited source — keep both the",
   "# prebuilt bundles/binaries AND the manifest that lists them out of per-app",
@@ -134,6 +139,8 @@ _MANAGED_RUNTIME_PATHS = (
   "reflection-brief-template.html",
   "fork-chat.sh",
   "fork-session.sh",
+  ":(glob)**/__pycache__/**",
+  ":(glob)**/*.py[cod]",
 )
 
 _EXCLUDE_BEGIN = "# BEGIN MOBIUS MANAGED IGNORE RULES"
@@ -332,6 +339,49 @@ def head_sha(source_dir: str | Path, branch: str) -> str:
   return _run(Path(source_dir), "rev-parse", branch).stdout.strip()
 
 
+def ref_exists(source_dir: str | Path, ref: str) -> bool:
+  """Whether `ref` resolves in this repo. Read-only; never raises.
+
+  Lets a caller tell "this app has a recorded upstream branch" apart from "the
+  branch was never recorded" before reading its tree — `read_ref_tree` would
+  raise on a missing ref, so the guard belongs here. `--verify --quiet` resolves
+  the ref without printing, exiting non-zero when it doesn't exist. A repo with
+  no `.git` is trivially false rather than a git error."""
+  if not is_repo(source_dir):
+    return False
+  proc = _run(
+    Path(source_dir), "rev-parse", "--verify", "--quiet", ref, check=False,
+  )
+  return proc.returncode == 0
+
+
+def restore_upstream_ref(source_dir: str | Path, expected_sha: str | None) -> bool:
+  """Put installer-owned ``upstream`` back on the DB-recorded commit.
+
+  ``install_from_manifest`` stores the pristine upstream commit in the App row
+  inside the SQL transaction, while the git ref lives outside that transaction.
+  If an update attempt advances the ref and then rolls the DB transaction back,
+  a retry must trust the DB row and restore the ref before doing another merge.
+
+  Returns True when the ref moved, False when it was already correct or the
+  expected commit is unavailable in the repo.
+  """
+  if not expected_sha or not is_repo(source_dir):
+    return False
+  repo = Path(source_dir)
+  exists = _run(repo, "cat-file", "-e", f"{expected_sha}^{{commit}}",
+                check=False)
+  if exists.returncode != 0:
+    return False
+  current = _run(
+    repo, "rev-parse", "--verify", UPSTREAM_BRANCH, check=False,
+  )
+  if current.returncode == 0 and current.stdout.strip() == expected_sha:
+    return False
+  _run(repo, "update-ref", f"refs/heads/{UPSTREAM_BRANCH}", expected_sha)
+  return True
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 
@@ -441,12 +491,19 @@ def fetch_upstream(source_dir: str | Path, ref: str) -> str:
   _run(repo, "fetch", "--depth", "1", "origin", ref)
   remote_ref = f"origin/{ref}"
   sha = _run(repo, "rev-parse", "--verify", remote_ref).stdout.strip()
+  # A depth-one fetch can re-graft even an unchanged tip. Repair based on the
+  # relationship the installer actually needs (local main ↔ fetched tip), not
+  # only on whether the remote SHA string changed.
+  _unshallow_if_no_merge_base(repo, LOCAL_BRANCH, remote_ref)
   if previous_sha and previous_sha != sha:
     related = _run(
       repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
     )
-    if related.returncode != 0 and (repo / ".git" / "shallow").exists():
-      _run(repo, "fetch", "--unshallow", "origin", ref)
+    if related.returncode != 0:
+      raise RuntimeError(
+        f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
+        "falling back to manifest-source update"
+      )
   _run(repo, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
   return sha
 
@@ -612,6 +669,26 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   unmerged = _run(repo, "ls-files", "-u").stdout.strip()
   if unmerged:
     return True
+  return has_conflict_markers(repo)
+
+
+def merge_in_progress(source_dir: str | Path) -> bool:
+  """Whether Git records an in-progress merge for this repository."""
+  repo = Path(source_dir)
+  if not is_repo(repo):
+    return False
+  git_path = _run(repo, "rev-parse", "--git-path", "MERGE_HEAD").stdout.strip()
+  path = Path(git_path)
+  if not path.is_absolute():
+    path = repo / path
+  return path.is_file()
+
+
+def has_conflict_markers(source_dir: str | Path) -> bool:
+  """Whether an in-progress merge's working tree still has text markers."""
+  repo = Path(source_dir)
+  if not (repo / ".git" / "MERGE_HEAD").exists():
+    return False
   # Scan tracked content for the labeled conflict boundaries. `git grep`
   # exits 0 when a line matches, 1 when none do. We match only `<<<<<<< ` and
   # `>>>>>>> ` (7 chars + the space before the ref that `git merge` writes),
@@ -619,6 +696,40 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   # legitimate content — see the docstring.
   markers = _run(repo, "grep", "-lE", r"^(<<<<<<< |>>>>>>> )", check=False)
   return markers.returncode == 0
+
+
+def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
+  """Keep binary conflicts gated until the resolver explicitly stages them.
+
+  Text conflicts can be proven resolved by removal of Git's marker boundaries,
+  after which ``commit_local`` safely stages them. Binary conflicts have no
+  markers, so an unmerged binary path is never auto-accepted.
+  """
+  repo = Path(source_dir)
+  if not (repo / ".git" / "MERGE_HEAD").exists():
+    return False
+  listing = _run(repo, "ls-files", "-u", "-z").stdout
+  paths = {
+    row.split("\t", 1)[1]
+    for row in listing.split("\0")
+    if "\t" in row
+  }
+  for rel in paths:
+    worktree = repo / rel
+    try:
+      if b"\0" in worktree.read_bytes():
+        return True
+    except OSError:
+      pass
+    for stage in (1, 2, 3):
+      blob = subprocess.run(
+        ["git", "-C", str(repo), "show", f":{stage}:{rel}"],
+        capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+        env=_git_env(repo),
+      )
+      if blob.returncode == 0 and b"\0" in blob.stdout:
+        return True
+  return False
 
 
 def commit_local(source_dir: str | Path, msg: str) -> str | None:
@@ -767,6 +878,49 @@ def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   return proc.returncode != 0
 
 
+def _unshallow_if_no_merge_base(
+  source_dir: str | Path,
+  left: str = LOCAL_BRANCH,
+  right: str = UPSTREAM_BRANCH,
+) -> None:
+  """Restore remote history when a shallow graft hides a real merge base.
+
+  Depth-one app fetches can make ``main`` and ``upstream`` appear unrelated
+  even though both came from the same origin. The update verdict and the
+  resolver's real merge both require that base, so they self-heal at their
+  entry points. A failed/offline fetch is best-effort and leaves refs and the
+  working tree untouched; the subsequent merge reports its normal error.
+  """
+  repo = Path(source_dir)
+  shallow_raw = _run(repo, "rev-parse", "--git-path", "shallow").stdout.strip()
+  shallow_path = Path(shallow_raw)
+  if not shallow_path.is_absolute():
+    shallow_path = repo / shallow_path
+  if not shallow_path.is_file():
+    return
+  if not ref_exists(repo, left) or not ref_exists(repo, right):
+    return
+  base = _run(repo, "merge-base", left, right, check=False)
+  if base.returncode == 0 and base.stdout.strip():
+    return
+  if not has_origin(repo):
+    raise RuntimeError(
+      f"no merge base between {left} and {right} in shallow repo without origin"
+    )
+  fetched = _run(
+    repo, "fetch", "--unshallow", "--no-tags", "origin", check=False,
+  )
+  if fetched.returncode != 0:
+    detail = fetched.stderr.strip() or fetched.stdout.strip()
+    raise RuntimeError(f"failed to restore app git history: {detail}")
+  base = _run(repo, "merge-base", left, right, check=False)
+  if base.returncode != 0 or not base.stdout.strip():
+    raise RuntimeError(
+      f"unrelated histories: no merge base between {left} and {right} "
+      "after unshallow"
+    )
+
+
 def merge_upstream(source_dir: str | Path) -> MergeResult:
   """Merges `upstream` into `main` and returns the verdict.
 
@@ -788,6 +942,7 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _unshallow_if_no_merge_base(repo)
   proc = _run(
     repo, "merge-tree", "--write-tree", "--name-only",
     LOCAL_BRANCH, UPSTREAM_BRANCH,
@@ -906,7 +1061,10 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
-  _run(repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False)
+  _unshallow_if_no_merge_base(repo)
+  merged = _run(
+    repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False,
+  )
   # Unmerged paths show in `git status --porcelain` with a U in either status
   # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
   status = _run(repo, "status", "--porcelain").stdout
@@ -915,6 +1073,9 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
     xy = line[:2]
     if "U" in xy or xy in ("AA", "DD"):
       conflict_paths.append(line[3:].strip())
+  if merged.returncode != 0 and not conflict_paths:
+    detail = merged.stderr.strip() or merged.stdout.strip()
+    raise RuntimeError(f"git merge failed (rc={merged.returncode}): {detail}")
   if not conflict_paths and (repo / ".git" / "MERGE_HEAD").exists():
     # Real merge resolved clean (vs the conflict verdict). Don't strand a
     # dangling --no-commit merge; abort back to the committed local state.
@@ -936,6 +1097,197 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
     return False
   _run(repo, "merge", "--abort", check=False)
   return True
+
+
+# A version identifier is never a semantic merge: when both the local edits and
+# the new release bump it, take-upstream is always correct. We recognise the two
+# forms real apps carry the label in — a JSON manifest's top-level `version` key
+# and an in-code `APP_VERSION` const — but the RECOGNITION alone never resolves:
+# the value is swapped to upstream's and the merge is re-proven, so a real edit
+# that shares the version's file (or line) can never be silently dropped.
+_JSON_MANIFESTS = frozenset({"mobius.json", "package.json"})
+
+# A top-level `const APP_VERSION = "x"` (optionally `export`ed / TS-annotated).
+# Anchored at column 0 so an indented `VERSION` inside a function, template
+# literal, or comment never matches; captures the value substring alone so only
+# the value — not the whole line — is swapped.
+_APP_VERSION_RE = re.compile(
+  rb'^((?:export\s+)?const\s+APP_VERSION\b[^=]*=\s*)(["\'])([^"\']*)(["\'])',
+)
+
+
+def _blob_at(repo: Path, ref: str, rel: str) -> bytes | None:
+  """Raw bytes of `rel` at `ref`, or None if the path is absent there."""
+  proc = subprocess.run(
+    ["git", "-C", str(repo), "cat-file", "-p", f"{ref}:{rel}"],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
+  )
+  return proc.stdout if proc.returncode == 0 else None
+
+
+def _resolve_json_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+  """Resolve a JSON-manifest conflict IFF the two sides differ ONLY in the
+  top-level `version` key — then take upstream's whole file.
+
+  Structured (not textual), so a nested `dependencies.version`, a non-version
+  local edit, or a minified layout can never be misread: any of those makes the
+  non-version content differ, which returns None → owner resolves it. `base` is
+  unused because the invariant (ours == theirs except `version`) already proves
+  no non-version local edit would be dropped.
+  """
+  try:
+    o = json.loads(ours)
+    t = json.loads(theirs)
+  except (ValueError, TypeError):
+    return None
+  if not isinstance(o, dict) or not isinstance(t, dict):
+    return None
+  if "version" not in o or "version" not in t or o["version"] == t["version"]:
+    return None
+  o_rest = {k: v for k, v in o.items() if k != "version"}
+  t_rest = {k: v for k, v in t.items() if k != "version"}
+  if o_rest != t_rest:
+    return None
+  return theirs
+
+
+def _resolve_source_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+  """Resolve a source-file conflict IFF it is confined to the `APP_VERSION`
+  value. Swaps ONLY the value substring (never the whole line) into ours, then
+  re-runs the three-way merge: if a real edit shares the version's line or file,
+  that re-merge conflicts and returns None instead of dropping the edit.
+  """
+  ours_lines = ours.splitlines(keepends=True)
+  theirs_lines = theirs.splitlines(keepends=True)
+  om = [
+    (i, m) for i, ln in enumerate(ours_lines)
+    if (m := _APP_VERSION_RE.match(ln)) and m.group(2) == m.group(4)
+  ]
+  tm = [
+    (i, m) for i, ln in enumerate(theirs_lines)
+    if (m := _APP_VERSION_RE.match(ln)) and m.group(2) == m.group(4)
+  ]
+  if len(om) != 1 or len(tm) != 1:
+    return None
+  oi, o_match = om[0]
+  _, t_match = tm[0]
+  if o_match.group(3) == t_match.group(3):
+    return None
+  line = ours_lines[oi]
+  ours_lines[oi] = line[:o_match.start(3)] + t_match.group(3) + line[o_match.end(3):]
+  return _three_way_merge_file(base, b"".join(ours_lines), theirs)
+
+
+def _resolve_version_only_file(
+  rel: str, base: bytes, ours: bytes, theirs: bytes
+) -> bytes | None:
+  """One conflicting file resolved to upstream's version, or None when the
+  conflict is not confined to the version identifier."""
+  if rel.rsplit("/", 1)[-1] in _JSON_MANIFESTS:
+    return _resolve_json_version(base, ours, theirs)
+  return _resolve_source_version(base, ours, theirs)
+
+
+def _three_way_merge_file(
+  base: bytes, ours: bytes, theirs: bytes
+) -> bytes | None:
+  """`git merge-file` on plain bytes: merged content if clean, else None.
+
+  merge-file returns 0 on a clean merge, the conflict count (>0) when markers
+  remain, and a negative code on error — every non-zero case is a real
+  (non-version) clash we refuse to auto-resolve.
+  """
+  with tempfile.TemporaryDirectory() as td:
+    d = Path(td)
+    (d / "ours").write_bytes(ours)
+    (d / "base").write_bytes(base)
+    (d / "theirs").write_bytes(theirs)
+    proc = subprocess.run(
+      ["git", "merge-file", "-p", str(d / "ours"), str(d / "base"),
+       str(d / "theirs")],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+@dataclass
+class VersionOnlyResolution:
+  """Result of auto-resolving a version-only conflict.
+
+  `tree` is the full merged source tree (repo-relative path -> bytes) with the
+  version taken from upstream; `tree_oid` is the merge-tree oid it was built
+  from, so the caller can read exec bits off the same tree the clean-merge path
+  uses (`read_tree_exec_paths`) rather than approximating from a branch.
+  """
+  tree: dict[str, bytes]
+  tree_oid: str
+
+
+def resolve_version_only_conflict(
+  source_dir: str | Path, conflict_paths: list[str]
+) -> VersionOnlyResolution | None:
+  """Full merged source tree with a VERSION-ONLY conflict resolved to upstream,
+  or None when the conflict is not confined to the version line.
+
+  Call only after `merge_upstream` verdicted a conflict. We PROVE the conflict
+  is version-only rather than assume it: for every conflicting file we normalise
+  ours's version line to upstream's and re-run the three-way FILE merge. If they
+  all merge clean, the version label was the sole conflict and we return the
+  whole merged tree (non-conflict files carry their clean three-way merge; the
+  conflicting files carry the version-normalised merge). If any file still
+  conflicts — a real code clash — we return None and the caller falls back to
+  the owner-resolver flow. Fail-safe by construction: a genuine local edit is
+  never silently dropped, because a residual conflict aborts the whole attempt.
+  """
+  repo = Path(source_dir)
+  if not conflict_paths:
+    return None
+  # merge-tree still writes a tree on conflict: non-conflict files are already
+  # cleanly three-way merged in it; only the conflict paths carry markers, which
+  # we overwrite below. rc must be 1 (conflict); 0 (clean) means the caller
+  # shouldn't be here and >1 is a real git error — bail either way. We parse the
+  # conflict paths from THIS run (not the caller's list) so the tree oid and the
+  # paths we overwrite are guaranteed to come from the same merge — a marker can
+  # never leak through a path mismatch.
+  proc = _run(
+    repo, "merge-tree", "--write-tree", "--name-only",
+    LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+  )
+  if proc.returncode != 1:
+    return None
+  lines = proc.stdout.splitlines()
+  tree_oid = lines[0].strip() if lines else ""
+  if not tree_oid:
+    return None
+  merge_conflicts: list[str] = []
+  for ln in lines[1:]:
+    if not ln.strip():
+      break  # blank line ends the path section; messages follow
+    merge_conflicts.append(ln)  # verbatim — a path may legitimately hold spaces
+  if not merge_conflicts:
+    return None
+  base_proc = _run(
+    repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+  )
+  base_ref = base_proc.stdout.strip()
+  if base_proc.returncode != 0 or not base_ref:
+    return None
+  resolved: dict[str, bytes] = {}
+  for rel in merge_conflicts:
+    ours = _blob_at(repo, LOCAL_BRANCH, rel)
+    theirs = _blob_at(repo, UPSTREAM_BRANCH, rel)
+    base_blob = _blob_at(repo, base_ref, rel)
+    # An add/add or delete conflict (a side missing the file) is not the
+    # version-bump shape; leave it to the owner.
+    if ours is None or theirs is None or base_blob is None:
+      return None
+    merged = _resolve_version_only_file(rel, base_blob, ours, theirs)
+    if merged is None:
+      return None
+    resolved[rel] = merged
+  full = read_merged_tree(repo, tree_oid)
+  full.update(resolved)
+  return VersionOnlyResolution(tree=full, tree_oid=tree_oid)
 
 
 # Smells

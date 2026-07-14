@@ -1,5 +1,13 @@
 # Reflection — the nightly run
 
+Memory is optional. Before any Memory-specific phase, read, or recommendation,
+check the live apps API for an installed app whose slug is `memory`. If it is
+absent, skip every Memory-specific instruction in this skill: do not read the
+lingering graph, `memory.md`, update logs, or memory cron logs, and do not edit
+graph files. Lingering files are user data, not proof that the capability is
+installed. Reflection still works from the always-on per-chat Digests/Summaries,
+interviews, app evidence, and ordinary activity data.
+
 Your goal and how-to for the nightly pass: triage the day's chats by their summaries and interview the agents whose day shows difficulties or learnings, improve your skills from what you learn (including THIS skill), review Memory's maintenance log for system-improvement signals, fix and harden the apps, research what the partner cares about, then write a brief. This file is the source of truth for the reflection run. You can edit it — adapt how you reflect as you learn what's worth doing.
 
 **Why you do this — the point is not just to *know* the partner, it's to make Möbius itself better for them, every night, in whatever way the day revealed.** Skills, apps, Memory's maintenance evidence, and what you research are all levers; pull whichever the day's signal points at. The real test is **anticipation**: when the partner wakes and asks tomorrow's question, you should *already* have prepared for it — improved the procedure that failed, fixed the app that broke, researched the thing they'll want next, or flagged the right decision in the brief. A good night means fewer cold-starts tomorrow: the partner asks, and you (or the next daytime agent) already has the context, the connection, or the app ready. Be **creative** about how — a recurring interest might deserve a brand-new app, a fresh batch of recommendations, a pre-staged answer, or a sharper skill. Capture everything worth keeping in the right owner: Memory owns memory facts and consolidation; Reflection owns the system-improvement loop and the morning report. **Anticipation is driven by signal, never invented** — every prepared item must trace to something the day actually surfaced and clear the anti-noise bar below; a night that surfaced nothing worth preparing prepares nothing, and an honest, quiet brief beats a speculative one.
@@ -120,11 +128,12 @@ Memory alone.
 
 Read, in this order:
 
-1. `/data/shared/memory/update-log/*.jsonl` — Memory's recent scheduled
+1. `/data/shared/memory/app-state/update-log/*.jsonl` — Memory's recent scheduled
    consolidation records. Prefer the latest few files.
-2. `/data/cron-logs/memory.log` and recent `cron_outcome` activity for the
-   Memory job — only enough to see whether Memory ran, failed, timed out, or
-   repeatedly reported the same followup.
+2. `/data/apps/<memory-app-id>/job-state/memory.log` (using the live app id
+   returned by the API) and the installed app's schedule state — only enough to
+   see whether Memory ran, failed, timed out, or repeatedly reported the same
+   followup.
 3. The interviews' Memory answers from phase 1 — complaints about missing,
    stale, misleading, or over-broad recall.
 
@@ -140,9 +149,9 @@ Then act on the **system** signal:
   partner, carry at most one or two high-value questions into the brief. The
   partner's answer becomes next-run input; Memory can then resolve the graph.
 - If several agents wished they had remembered the same thing but Memory's log
-  did not catch it, improve `/data/shared/skills/memory.md` surgically or note a
-  Memory-runner/platform improvement. Do not edit the graph itself unless the
-  fix is a trivial repair required to unblock the viewer.
+  did not catch it, propose a change to the Memory app's runner or app-owned
+  skill. Do not edit the installed skill or graph from Reflection; app update
+  and recovery must remain the only owners of those bytes.
 - If Memory is healthy and no interview raised a memory-system issue, write one
   sentence in your run notes and move on. Empty phase 3 is fine.
 

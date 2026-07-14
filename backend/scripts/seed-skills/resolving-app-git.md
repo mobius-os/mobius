@@ -86,35 +86,44 @@ result you decided on, **deleting the `<<<<<<<`, `=======`, `>>>>>>>` lines**.
 Re-read the surrounding code so the result is coherent, not just marker-free.
 
 **Finish by saving — the watcher does the rest.** Once every file is
-marker-free, just save. The watcher recompiles and, because a merge is in
-progress, its commit finalizes the merge for you. It deliberately refuses to
-finalize while ANY tracked file still holds markers — the conflict can live in
-a non-entry file (a job script, a sibling module), so resolve them all, not
-just `index.jsx`. (An earlier watcher silently missed edits on the data volume
-and stalled here routinely; that bug is fixed — a memory note saying
+marker-free, just save. The watcher first records the resolved source as a
+single-parent replay while the previous app remains live. It then verifies the
+pending release's exact fetched-artifact digest and runs the normal installer,
+which promotes source, bundle, static assets, version/capabilities, icon, seeds,
+cron, and skills as one lifecycle. It deliberately refuses to finalize while
+ANY tracked file still holds markers — the conflict can live in a non-entry
+file (a job script, a sibling module), so resolve them all, not just
+`index.jsx`. (An earlier watcher silently missed edits on the data volume and
+stalled here routinely; that bug is fixed — a memory note saying
 hand-finalizing is the norm predates the fix.)
 
-**Confirm it took — one check is enough.** The merge is finalized when
-`MERGE_HEAD` is gone and the tree is clean:
+**Confirm the whole update took.** `MERGE_HEAD` disappearing proves the source
+resolution committed; the pending receipt disappearing proves the complete app
+lifecycle also landed:
 
 ```bash
 GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> rev-parse -q --verify MERGE_HEAD; echo "merge_head_exit=$?"
 GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> status --porcelain
+test ! -e /data/apps/<slug>/.git/mobius-pending-update/receipt.json; echo "pending_receipt_absent=$?"
 ```
 
-`merge_head_exit=1` (MERGE_HEAD absent) **and** empty status = done. If
+`merge_head_exit=1`, empty status, **and** `pending_receipt_absent=0` = done. If
 `MERGE_HEAD` still resolves (exit 0), it hasn't finalized — almost always
 leftover markers in SOME tracked file. Hunt across the whole repo, not just the
 file you edited
 (`GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> grep -n '<<<<<<<'`),
-fix, save again.
+fix, save again. If `MERGE_HEAD` is gone but the receipt remains, the resolved
+source is safe and the previous app is still served; the exact installer replay
+failed (usually a transient fetch or a publisher changed bytes under a moving
+URL). Re-run Update or restart after checking the build-failure event/log. Do
+not delete the receipt.
 
 **Don't be alarmed the finalizing commit isn't a merge commit.** The watcher
 finalizes as a *single-parent replay* — it parents the new commit directly on
 the **upstream tip** and squashes the local side, so history stays linear
 (`A → B → X`) instead of fanning into a 2-parent merge. So `git log -1
 --pretty='%p'` prints exactly ONE short SHA (the upstream tip) and the subject
-reads `agent edit`, not `Merge`. That single parent *being* the upstream tip is
+reads `resolve app update`, not `Merge`. That single parent *being* the upstream tip is
 what advances the base so the next update won't re-conflict — a 2-parent merge
 here would mean something finalized it with a plain `git merge`, which is *not*
 what the platform wants.

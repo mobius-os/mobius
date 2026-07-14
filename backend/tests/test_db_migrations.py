@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine, inspect, text
 
+from app import models
 from app.database import run_migrations
 
 
@@ -27,3 +28,84 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   # Reversible-uninstall tombstone column is added on an existing apps table
   # (feature 110) — the path that runs on a real prod boot, not create_all.
   assert "deleted_at" in cols
+  assert "system_prompt_file" in cols
+
+
+def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
+  """A deployed DB has `chat_runs` WITHOUT the provider-park columns
+  (design §2.4) — create_all only covers fresh installs, so the ALTER path
+  must add them (idempotently) on a real boot."""
+  db_path = tmp_path / "legacy-runs.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    # run_migrations returns early without an `apps` table (fresh install).
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_runs ("
+      "id VARCHAR(64) PRIMARY KEY, "
+      "chat_id VARCHAR(64) NOT NULL, "
+      "status VARCHAR(16) NOT NULL DEFAULT 'running'"
+      ")"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  inspector = inspect(eng)
+  cols = {c["name"] for c in inspector.get_columns("chat_runs")}
+  assert "parked_until" in cols
+  assert "park_reason" in cols
+
+
+def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
+  db_path = tmp_path / "legacy-chats.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, title VARCHAR(255), updated_at DATETIME"
+      ")"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, title) VALUES ('legacy', 'Legacy')"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  cols = {
+    c["name"]: c for c in inspect(eng).get_columns("chats")
+  }
+  assert "auto_resume_on_limit" in cols
+  assert cols["auto_resume_on_limit"]["nullable"] is False
+  assert cols["auto_resume_on_limit"]["default"] is not None
+  with eng.connect() as conn:
+    value = conn.execute(text(
+      "SELECT auto_resume_on_limit FROM chats WHERE id = 'legacy'"
+    )).scalar_one()
+    conn.execute(text(
+      "INSERT INTO chats (id, title) VALUES ('new-after-upgrade', 'New')"
+    ))
+    future_value = conn.execute(text(
+      "SELECT auto_resume_on_limit FROM chats "
+      "WHERE id = 'new-after-upgrade'"
+    )).scalar_one()
+  assert value in (False, 0)
+  assert future_value in (False, 0)
+
+
+def test_fresh_chat_schema_has_database_auto_resume_default():
+  """Fresh create_all DDL must match the upgraded-table contract."""
+  column = models.Chat.__table__.c.auto_resume_on_limit
+
+  assert column.nullable is False
+  assert column.default is not None
+  assert column.server_default is not None
+  assert str(column.server_default.arg).lower() == "false"

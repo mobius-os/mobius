@@ -68,13 +68,29 @@ export function clearQueryCache() {
   return Promise.all([
     idbDel('mobius-query-cache').catch(() => {}),
     delOutboxDb().catch(() => {}),
+    delDatabase('mobius-signals', 'signal queue').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
 }
 
-// The offline outbox (mobius-runtime.js) is its OWN IndexedDB database,
-// not an idb-keyval key — so it must be dropped with deleteDatabase, not
-// idbDel. It holds owner-scoped queued writes AND the read-through cache
+// Remove browser-local queues and mirrors after an explicit app-data wipe.
+// Soft uninstall intentionally preserves these records so Undo can restore
+// offline work. The runtime owns the IndexedDB schemas, so keep the record
+// traversal there rather than duplicating it in bundled code.
+export async function clearAppRuntimeData(appId) {
+  try {
+    const runtimeUrl = `${BASE}/mobius-runtime.js`
+    const runtime = await import(/* @vite-ignore */ runtimeUrl)
+    await runtime.purgeAppRuntimeData?.(appId)
+  } catch {
+    // The server-side wipe already succeeded. Local cleanup is best-effort and
+    // the rotated installation nonce still prevents stale record reuse.
+  }
+}
+
+// The offline outbox and signal queue (mobius-runtime.js) are their OWN
+// IndexedDB databases, not idb-keyval keys — so both must be dropped with
+// deleteDatabase, not idbDel. The outbox holds queued writes and the read-through cache
 // mirror (the `cache` store in the same DB), both owner-scoped — clearing it
 // on logout keeps the next owner on a shared device from inheriting either.
 // `onblocked` does NOT mean done: an open runtime connection is holding the DB.
@@ -82,13 +98,17 @@ export function clearQueryCache() {
 // so a delete should not stay blocked; if it does we still resolve (logout must
 // not hang) but warn, rather than silently claiming a clean wipe.
 function delOutboxDb() {
+  return delDatabase('mobius-outbox', 'outbox')
+}
+
+function delDatabase(name, label) {
   return new Promise((resolve) => {
     try {
-      const req = indexedDB.deleteDatabase('mobius-outbox')
+      const req = indexedDB.deleteDatabase(name)
       req.onsuccess = req.onerror = () => resolve()
       req.onblocked = () => {
         // eslint-disable-next-line no-console
-        console.warn('mobius: outbox DB delete blocked by an open connection on logout')
+        console.warn(`mobius: ${label} DB delete blocked by an open connection on logout`)
         resolve()
       }
     } catch {

@@ -72,6 +72,7 @@ theme_router = _load("theme")
 self_reminders_router = _load("self_reminders")
 standalone_router = _load("standalone")
 client_error_router = _load("client_error")
+client_signal_router = _load("client_signal")
 platform_router = _load("platform")
 published_router = _load("published")
 
@@ -98,6 +99,7 @@ __all__ = [
   "self_reminders_router",
   "standalone_router",
   "client_error_router",
+  "client_signal_router",
   "platform_router",
   "published_router",
 ]

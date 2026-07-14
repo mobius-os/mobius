@@ -1,0 +1,192 @@
+const STORAGE_PREFIX = 'mobius:app-frame-storage:'
+const TOKEN_PREFIX = 'mobius:app-token:'
+const MAX_KEY_LENGTH = 256
+const MAX_VALUE_LENGTH = 2 * 1024 * 1024
+const SHARED_KEYS = new Set([
+  'mobius:setup-complete:v1',
+  'mobius:system-setup-ready:v1',
+])
+const THEME_KEYS = new Set(['mobius-theme', 'mobius-theme-bg'])
+const LEGACY_KEYS_BY_SLUG = {
+  cuberun: new Set([
+    'highscores', 'musicEnabled',
+    'cuberun:highscores', 'cuberun:musicEnabled',
+  ]),
+  tandem: new Set(['tn-split-ratio', 'tn-split-ratio-v2']),
+}
+
+function storageOrNull(storage) {
+  if (storage) return storage
+  try { return typeof localStorage !== 'undefined' ? localStorage : null } catch { return null }
+}
+
+function appPrefix(appId) {
+  return `${STORAGE_PREFIX}${encodeURIComponent(String(appId))}:`
+}
+
+function tokenKey(appId) {
+  return `${TOKEN_PREFIX}${encodeURIComponent(String(appId))}`
+}
+
+export function isSafeVirtualStorageKey(key) {
+  if (typeof key !== 'string' || !key || key.length > MAX_KEY_LENGTH) return false
+  const normalized = key.toLowerCase()
+  return normalized !== 'token' &&
+    !normalized.includes('access_token') &&
+    !normalized.includes('refresh_token') &&
+    !normalized.includes('authorization') &&
+    !normalized.startsWith(STORAGE_PREFIX) &&
+    !normalized.startsWith(TOKEN_PREFIX)
+}
+
+export function isSharedVirtualStorageKey(key) {
+  return SHARED_KEYS.has(key)
+}
+
+export function isLegacyFrameStorageKey(appId, appSlug, key) {
+  if (!isSafeVirtualStorageKey(key)) return false
+  if (isSharedVirtualStorageKey(key) || THEME_KEYS.has(key)) return true
+  if (LEGACY_KEYS_BY_SLUG[String(appSlug || '').toLowerCase()]?.has(key)) {
+    return true
+  }
+  const escapedId = String(appId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[:/_-])${escapedId}([:/_-]|$)`).test(key)
+}
+
+export function readAppFrameStorage(appId, storage, appSlug) {
+  const store = storageOrNull(storage)
+  if (!store) return {}
+  const snapshot = {}
+  try {
+    // Compatibility migration: old same-origin frames wrote app preferences
+    // directly into shell localStorage. Copy only shared theme/setup state,
+    // keys scoped to THIS numeric app id, and a tiny catalog legacy allowlist.
+    // A broad "anything except token" copy leaked shell navigation state (for
+    // example the active chat id) and sibling preferences into every frame.
+    // All future writes are isolated under this app's private prefix below.
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i)
+      if (!isLegacyFrameStorageKey(appId, appSlug, key)) continue
+      const value = store.getItem(key)
+      if (typeof value === 'string' && value.length <= MAX_VALUE_LENGTH) snapshot[key] = value
+    }
+    const prefix = appPrefix(appId)
+    for (let i = 0; i < store.length; i += 1) {
+      const physicalKey = store.key(i)
+      if (!physicalKey?.startsWith(prefix)) continue
+      let key
+      try { key = decodeURIComponent(physicalKey.slice(prefix.length)) } catch { continue }
+      if (!isSafeVirtualStorageKey(key)) continue
+      const value = store.getItem(physicalKey)
+      if (typeof value === 'string' && value.length <= MAX_VALUE_LENGTH) snapshot[key] = value
+    }
+  } catch { return {} }
+  return snapshot
+}
+
+export function setAppFrameStorage(appId, key, value, storage) {
+  if (!isSafeVirtualStorageKey(key) || typeof value !== 'string' || value.length > MAX_VALUE_LENGTH) return false
+  const store = storageOrNull(storage)
+  if (!store) return false
+  try {
+    const physicalKey = isSharedVirtualStorageKey(key)
+      ? key
+      : `${appPrefix(appId)}${encodeURIComponent(key)}`
+    store.setItem(physicalKey, value)
+    return true
+  } catch { return false }
+}
+
+export function removeAppFrameStorage(appId, key, storage) {
+  if (!isSafeVirtualStorageKey(key)) return false
+  const store = storageOrNull(storage)
+  if (!store) return false
+  try {
+    const physicalKey = isSharedVirtualStorageKey(key)
+      ? key
+      : `${appPrefix(appId)}${encodeURIComponent(key)}`
+    store.removeItem(physicalKey)
+    return true
+  } catch { return false }
+}
+
+export function clearAppFrameStorage(appId, storage) {
+  const store = storageOrNull(storage)
+  if (!store) return
+  const prefix = appPrefix(appId)
+  try {
+    const keys = []
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i)
+      if (key?.startsWith(prefix)) keys.push(key)
+    }
+    keys.forEach((key) => store.removeItem(key))
+  } catch {}
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const encoded = token.split('.')[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const json = typeof atob === 'function'
+      ? decodeURIComponent(Array.from(atob(padded), (c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join(''))
+      : Buffer.from(padded, 'base64').toString('utf8')
+    return JSON.parse(json)
+  } catch { return null }
+}
+
+export function readCachedAppToken(
+  appId,
+  storage,
+  now = Date.now(),
+  { allowExpired = false } = {},
+) {
+  const store = storageOrNull(storage)
+  if (!store) return undefined
+  try {
+    const token = store.getItem(tokenKey(appId))
+    const claims = token && decodeJwtPayload(token)
+    const exactApp = claims?.scope === 'app' &&
+      String(claims.app_id) === String(appId)
+    if (exactApp && allowExpired) return token
+    const unexpired = exactApp && Number.isFinite(Number(claims.exp)) &&
+      Number(claims.exp) * 1000 > now + 30_000
+    if (unexpired) return token
+    // An expired app-scoped token is still useful strictly offline: the service
+    // worker strips it from the cached module key, while its immutable app nonce
+    // keeps browser-local queues attributed to the right installation. Retain it
+    // for allowExpired callers; remove only malformed/cross-app credentials.
+    if (!exactApp) store.removeItem(tokenKey(appId))
+  } catch {}
+  return undefined
+}
+
+export function cacheAppToken(appId, token, storage) {
+  const store = storageOrNull(storage)
+  const claims = token && decodeJwtPayload(token)
+  if (!store || claims?.scope !== 'app' || String(claims.app_id) !== String(appId)) return false
+  try { store.setItem(tokenKey(appId), token); return true } catch { return false }
+}
+
+export function clearCachedAppToken(appId, storage) {
+  const store = storageOrNull(storage)
+  if (!store) return
+  try { store.removeItem(tokenKey(appId)) } catch {}
+}
+
+export function clearCachedAppTokens(storage) {
+  const store = storageOrNull(storage)
+  if (!store) return
+  try {
+    const keys = []
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i)
+      if (key?.startsWith(TOKEN_PREFIX)) keys.push(key)
+    }
+    keys.forEach((key) => store.removeItem(key))
+  } catch {}
+}
+
+export const _storagePrefixes = { STORAGE_PREFIX, TOKEN_PREFIX }

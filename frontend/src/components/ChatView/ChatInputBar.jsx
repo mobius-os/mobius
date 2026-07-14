@@ -99,6 +99,7 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *  base keeps geometry and box model stable across Send / Stop / Steer / Mic. */
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, canSteer,
+  submissionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
   if (sending && !hasInput && canSteer) {
@@ -116,7 +117,19 @@ function PrimaryAction({
   }
   if (sending && !hasInput) {
     return (
-      <button key="stop" className="chat__action chat__stop" type="button" onClick={onStop} aria-label="Stop">
+      <button
+        key="stop"
+        className="chat__action chat__stop"
+        type="button"
+        // Match Send's touch handling: the composer keeps focus on
+        // pointerdown, then dispatches the action on touchend instead of
+        // waiting for a synthesized click. Without this, a focused mobile
+        // textarea can eat the first Stop tap while the keyboard settles.
+        onPointerDown={(e) => e.preventDefault()}
+        onTouchEnd={(e) => { e.preventDefault(); onStop() }}
+        onClick={onStop}
+        aria-label="Stop"
+      >
         <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor">
           <rect width="12" height="12" rx="2" />
         </svg>
@@ -132,14 +145,14 @@ function PrimaryAction({
         // Keep the textarea focused until ChatView snapshots the scroll
         // position in doSend(). On touch browsers, the native focus shift from
         // textarea → button can collapse the keyboard before the handler runs;
-        // that changes the viewport geometry and can make an at-bottom send
-        // look scrolled-up, so the message fails to pin to the top. ChatView
-        // still explicitly blurs after the snapshot on touch-primary devices.
+        // that changes the viewport geometry and can invalidate an otherwise
+        // eligible FOLLOW_BOTTOM submit. ChatView snapshots the complete
+        // mode+geometry decision first, then explicitly blurs on touch devices.
         onPointerDown={(e) => e.preventDefault()}
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
         aria-label="Send"
-        disabled={hasUploading || offline}
+        disabled={hasUploading || offline || submissionBlocked}
       >
         <ArrowUp width={22} height={22} />
       </button>
@@ -153,6 +166,7 @@ function PrimaryAction({
       onTouchEnd={(e) => { e.preventDefault(); onToggleVoice() }}
       onClick={onToggleVoice}
       aria-label={listening ? 'Stop recording' : 'Voice input'}
+      disabled={submissionBlocked && !listening}
     >
       <Mic width={24} height={24} />
     </button>
@@ -291,6 +305,9 @@ function FileChips({ files, onRemove }) {
  *                        effect, so the parent (e.g. ComposerPopover)
  *                        can trigger the hidden <input type="file">
  *                        without the bar shipping a paperclip button.
+ *   submissionBlocked  — true while an atomic provider handoff owns the
+ *                        chat; drafting stays available but send/mic-start do
+ *                        not race the transition.
  *
  * The bar does NOT own send state — ChatView's doSend handles that.
  * The bar's only job: composition + the Send/Stop/Mic resolution.
@@ -309,6 +326,7 @@ export default function ChatInputBar({
   canSteer,
   canRequestSteer = canSteer,
   offline,
+  submissionBlocked = false,
   pendingFiles,
   onAddFiles,
   onRemoveFile,
@@ -396,7 +414,7 @@ export default function ChatInputBar({
       return
     }
     if (action === 'submit') {
-      onSubmit(e)
+      if (!submissionBlocked) onSubmit(e)
     }
   }
 
@@ -441,6 +459,7 @@ export default function ChatInputBar({
               hasUploading={hasUploading}
               offline={offline}
               canSteer={canSteer}
+              submissionBlocked={submissionBlocked}
               onSubmit={onSubmit}
               onStop={onStop}
               onSteer={onSteer}

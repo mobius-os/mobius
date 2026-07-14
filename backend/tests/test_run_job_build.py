@@ -60,8 +60,8 @@ def test_run_job_resolves_build_sh(client, auth):
   mock_popen.assert_called_once()
   args, kwargs = mock_popen.call_args
   argv = args[0]
-  # Exactly bash + build.sh path + app_id as positional arg.
-  assert argv == ["bash", str(build), str(app_id)]
+  assert argv[-2:] == [str(app_id), str(build)]
+  assert argv[1].endswith("app-job-runner.py")
   assert kwargs.get("cwd") == str(source_dir)
 
 
@@ -93,7 +93,7 @@ def test_run_job_honors_manifest_over_stale_sibling(client, auth):
   assert r.status_code == 202, r.text
   args, _ = mock_popen.call_args
   # generate.sh wins, NOT the stale job.sh the probe would have grabbed.
-  assert args[0] == ["bash", str(generate), str(app_id)]
+  assert args[0][-2:] == [str(app_id), str(generate)]
 
 
 def test_run_job_falls_back_to_probe_for_manifestless_app(client, auth):
@@ -114,4 +114,4 @@ def test_run_job_falls_back_to_probe_for_manifestless_app(client, auth):
 
   assert r.status_code == 202, r.text
   args, _ = mock_popen.call_args
-  assert args[0] == ["bash", str(fetch), str(app_id)]
+  assert args[0][-2:] == [str(app_id), str(fetch)]

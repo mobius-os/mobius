@@ -1,9 +1,66 @@
 <!doctype html>
 <html lang="en">
 <head>
+      <!-- Opaque-origin app frames cannot access the shell's localStorage. A
+           synchronous in-memory facade preserves existing app preferences;
+           AppCanvas hydrates it before module import and persists mutations in
+           an app-private namespace. No owner credential is ever included. -->
+      <script data-mobius-storage-shim>(function () {
+  try { void window.localStorage; return; } catch (e) {}
+  var values = Object.create(null);
+  var hydrating = false;
+  function keys() { return Object.keys(values); }
+  var storage = {
+    get length() { return keys().length; },
+    key: function (index) { return keys()[index] || null; },
+    getItem: function (key) {
+      key = String(key);
+      return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null;
+    },
+    setItem: function (key, value) {
+      key = String(key); value = String(value); values[key] = value;
+      if (!hydrating) window.parent.postMessage({ type: 'moebius:storage-set', key: key, value: value }, window.location.origin);
+    },
+    removeItem: function (key) {
+      key = String(key); delete values[key];
+      if (!hydrating) window.parent.postMessage({ type: 'moebius:storage-remove', key: key }, window.location.origin);
+    },
+    clear: function () {
+      values = Object.create(null);
+      if (!hydrating) window.parent.postMessage({ type: 'moebius:storage-clear' }, window.location.origin);
+    }
+  };
+  Object.defineProperty(window, 'localStorage', { value: storage, configurable: true });
+  window.__mobiusHydrateLocalStorage = function (snapshot) {
+    hydrating = true;
+    values = Object.create(null);
+    if (snapshot && typeof snapshot === 'object') {
+      Object.keys(snapshot).forEach(function (key) {
+        if (typeof snapshot[key] === 'string') values[key] = snapshot[key];
+      });
+    }
+    hydrating = false;
+  };
+  window.__mobiusSyncLocalStorage = function (key, value) {
+    key = String(key); hydrating = true;
+    if (typeof value === 'string') values[key] = value;
+    else delete values[key];
+    hydrating = false;
+    try {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: key, newValue: typeof value === 'string' ? value : null,
+      }));
+    } catch (e) {
+      var event = new Event('storage');
+      Object.defineProperty(event, 'key', { value: key });
+      Object.defineProperty(event, 'newValue', { value: value });
+      window.dispatchEvent(event);
+    }
+  };
+})();</script>
       <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
-           src/lib/applyTheme.js). The frame is SAME-ORIGIN, so it reads the
-           shell's localStorage; it also reads its own __mobius-theme__ slot
+           src/lib/applyTheme.js). The frame reads its injected theme slot and
+           may read the safe compatibility storage snapshot when available;
            when the server fills one. Resolves {css,bg,mode} (slot ->
            mobius-theme -> mobius-theme-bg -> dark default) and paints --bg /
            data-theme / color-scheme before <style> parses, so a stale/
@@ -147,8 +204,8 @@
   </script>
   <style>
     /* Fallback defaults — the frame self-themes via the pre-paint IIFE in
-       <head> (which reads the __mobius-theme__ slot + the shell's same-origin
-       localStorage and sets --bg / data-theme / color-scheme before this
+       <head> (which reads the __mobius-theme__ slot + safe virtual storage and
+       sets --bg / data-theme / color-scheme before this
        <style> parses), plus the live moebius:frame-theme postMessage. This
        :root is the no-signal floor: it shows when there is no slot, no
        persisted owner mode, and no postMessage yet (a raw file open, or a
@@ -374,16 +431,18 @@
     //      {type:'moebius:frame-init', token, themeCss, bg} on
     //      its iframe.onLoad handler.
     //   3. iframe applies theme, imports module with token, mounts.
-    //   4. iframe posts {type:'moebius:frame-mounted', appId} —
-    //      parent hides the loading overlay.
+    //   4. iframe posts {type:'moebius:frame-mounted', appId} AFTER the
+    //      first render COMMITS (MountSignal's effect, not render()-
+    //      returned) — parent hides the loading overlay / promotes the
+    //      buffered frame in a version swap.
     //   4b. on a terminal load failure instead of (4), iframe posts
     //      {type:'moebius:frame-error', appId} so the parent hides the
     //      overlay and this frame's error panel becomes visible.
     //   5. parent may later post {type:'moebius:frame-theme', ...}
     //      to update theme without reloading the iframe.
     //
-    // Origin check: the iframe rejects any message whose origin
-    // isn't window.location.origin (same-origin with the shell).
+    // Origin check: the opaque iframe still sees the parent shell's concrete
+    // origin on incoming postMessage events and rejects every other sender.
     // An attacker embedding this frame on their own page can read
     // the ready event but cannot inject a token — their reply has
     // the wrong origin.
@@ -391,17 +450,109 @@
     import { createElement, Fragment, useEffect } from 'react';
 
     let initialized = false;
+    let currentToken = null;
+    let tokenRefreshPromise = null;
+    let tokenRefreshResolve = null;
+    let mountedRoot = null;
+    let mountedComponent = null;
 
-    // Flips the post-mount error guard (handleFrameError above). Rendered
-    // as the FIRST sibling of the app component, so its passive effect is
-    // the first thing React runs after committing the initial render —
-    // i.e. the app's DOM is actually on screen. A component that throws
-    // DURING its first render aborts the commit, this effect never runs,
-    // and the error panel still shows (the pre-mount path). A throw in
-    // the app's own mount effects happens with committed, visible DOM, so
-    // counting it as post-mount (suppressed + logged) is correct.
+    function renderMountedComponent() {
+      if (!mountedRoot || !mountedComponent || !currentToken) return;
+      mountedRoot.render(
+        createElement(Fragment, null,
+          createElement(MountSignal),
+          createElement(mountedComponent, { appId: _FRAME_APP_ID, token: currentToken })
+        )
+      );
+    }
+
+    function tokenExpiresSoon(token, skewMs = 60000) {
+      try {
+        const encoded = String(token || '').split('.')[1];
+        if (!encoded) return true;
+        const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')));
+        return !Number.isFinite(payload.exp) || payload.exp * 1000 <= Date.now() + skewMs;
+      } catch (_) {
+        return true;
+      }
+    }
+
+    function tokenAppInstanceId(token) {
+      try {
+        const encoded = String(token || '').split('.')[1];
+        if (!encoded) return null;
+        const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')));
+        return typeof payload.app_nonce === 'string' ? payload.app_nonce : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function acceptToken(token) {
+      if (!token) return;
+      currentToken = token;
+      _reportToken = token;
+      // Preserve component state while keeping the legacy token prop aligned
+      // with the refreshable window.mobius credential.
+      renderMountedComponent();
+      if (tokenRefreshResolve) tokenRefreshResolve(token);
+      tokenRefreshResolve = null;
+      tokenRefreshPromise = null;
+    }
+
+    function requestFreshToken() {
+      if (tokenRefreshPromise) return tokenRefreshPromise;
+      tokenRefreshPromise = new Promise(function (resolve) {
+        tokenRefreshResolve = resolve;
+        window.parent.postMessage(
+          { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
+          window.location.origin
+        );
+        setTimeout(function () {
+          if (tokenRefreshResolve !== resolve) return;
+          tokenRefreshResolve = null;
+          tokenRefreshPromise = null;
+          resolve(currentToken);
+        }, 10000);
+      });
+      return tokenRefreshPromise;
+    }
+
+    async function runtimeToken(options) {
+      const forceRefresh = options && options.forceRefresh === true;
+      if (!forceRefresh && currentToken && !tokenExpiresSoon(currentToken)) return currentToken;
+      return requestFreshToken();
+    }
+
+    // Flips the post-mount error guard (handleFrameError above) AND tells the
+    // parent the app is mounted. Rendered as the FIRST sibling of the app
+    // component, so its passive effect is the first thing React runs after
+    // COMMITTING the initial render — i.e. the app's DOM is actually on
+    // screen. A component that throws DURING its first render aborts the
+    // commit, this effect never runs, and the error panel still shows (the
+    // pre-mount path). A throw in the app's own mount effects happens with
+    // committed, visible DOM, so counting it as post-mount (suppressed +
+    // logged) is correct.
+    //
+    // frame-mounted MUST be posted here and not after createRoot().render()
+    // in loadModule: render() only SCHEDULES the first render, so posting
+    // there claims "mounted" for a component that may still throw during
+    // that render. The parent's double-buffered swap (AppCanvas) PROMOTES
+    // the new frame and unmounts the old working one on this signal — a
+    // premature post would swap in a frame whose commit then aborts,
+    // stranding the owner on an error panel with the working frame already
+    // gone. Posting at commit makes "mounted" mean visible DOM for both the
+    // parent's overlay and the swap.
     function MountSignal() {
-      useEffect(() => { window.__frameMounted = true; }, []);
+      useEffect(() => {
+        window.__frameMounted = true;
+        window.parent.postMessage(
+          { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
+          window.location.origin
+        );
+      }, []);
       return null;
     }
 
@@ -528,19 +679,31 @@
       const last = _reportSeen.get(key);
       if (last && now - last < 60000) return;
       _reportSeen.set(key, now);
-      try {
-        fetch('/api/client-error', {
+      const body = JSON.stringify({
+        message: String(message).slice(0, 2000),
+        where: where,
+        stack: stack ? String(stack).slice(0, 8000) : undefined,
+        url: location.href,
+      });
+      runtimeToken().then(function (token) {
+        return fetch('/api/client-error', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _reportToken },
-          body: JSON.stringify({
-            message: String(message).slice(0, 2000),
-            where: where,
-            stack: stack ? String(stack).slice(0, 8000) : undefined,
-            url: location.href,
-          }),
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: body,
           keepalive: true,
-        }).catch(function () {});
-      } catch (e) {}
+        }).then(function (response) {
+          if (response.status !== 401) return;
+          return runtimeToken({ forceRefresh: true }).then(function (fresh) {
+            if (!fresh || fresh === token) return;
+            return fetch('/api/client-error', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + fresh },
+              body: body,
+              keepalive: true,
+            });
+          });
+        });
+      }).catch(function () {});
     }
     window.addEventListener('error', function (e) {
       if (!e.error && !e.message) return;
@@ -551,12 +714,12 @@
       reportAppError('app:unhandledrejection', (r && r.message) || String(r), r && r.stack);
     });
 
-    async function loadModule(token) {
+    async function loadModule() {
+      const token = currentToken;
       if (!token) {
         showErr('Configuration error', 'No token received from parent.');
         return;
       }
-      _reportToken = token;
       try {
         // Expose window.mobius BEFORE importing/rendering the app, so the
         // component sees it on mount — mirrors the standalone host
@@ -568,7 +731,11 @@
         // a runtime fetch failure must not block the app from rendering.
         try {
           const rt = await import('/mobius-runtime.js');
-          rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
+          rt.init({
+            appId: _FRAME_APP_ID,
+            appInstanceId: tokenAppInstanceId(currentToken),
+            getToken: runtimeToken,
+          });
         } catch (e) {}
         const frameVersion = new URLSearchParams(window.location.search).get('v') || '0';
         // &v on the module URL is the SW offline cache-buster: the server /module
@@ -668,21 +835,15 @@
           showErr('Module error', 'The app module has no default export.');
           return;
         }
-        createRoot(document.getElementById('root')).render(
-          createElement(Fragment, null,
-            createElement(MountSignal),
-            createElement(Component, { appId: _FRAME_APP_ID, token })
-          )
-        );
-        // Tell the parent we've kicked off the React render so it
-        // can hide the loading overlay. iframe.onLoad alone fires
-        // BEFORE this point (it's the document's load event, not the
-        // app's mount), so on a cold module fetch the parent would
-        // hide the spinner while the iframe is still blank.
-        window.parent.postMessage(
-          { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
-          window.location.origin
-        );
+        mountedRoot = createRoot(document.getElementById('root'));
+        mountedComponent = Component;
+        renderMountedComponent();
+        // frame-mounted is posted by MountSignal's passive effect (above),
+        // which runs only after React COMMITS this first render. Posting
+        // here would be premature: render() has merely been scheduled, and
+        // a component that throws during its first render would have
+        // already claimed "mounted" — the parent's double-buffered swap
+        // would promote a dead frame on that lie. See MountSignal.
       } catch (err) {
         showErr('Failed to load app', err.stack || err.message);
       }
@@ -700,10 +861,21 @@
         applyInsets(msg.insets);
         return;
       }
-      if (msg.type === 'moebius:frame-init' && !initialized) {
+      if (msg.type === 'moebius:storage-sync') {
+        if (typeof window.__mobiusSyncLocalStorage === 'function') {
+          window.__mobiusSyncLocalStorage(msg.key, msg.value);
+        }
+        return;
+      }
+      if (msg.type === 'moebius:frame-init') {
+        acceptToken(msg.token);
+        if (initialized) return;
         initialized = true;
+        if (typeof window.__mobiusHydrateLocalStorage === 'function') {
+          window.__mobiusHydrateLocalStorage(msg.storage);
+        }
         applyTheme(msg.themeCss, msg.bg);
-        loadModule(msg.token);
+        loadModule();
       }
     });
 

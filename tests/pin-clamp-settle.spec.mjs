@@ -12,7 +12,7 @@
  * offsetTop SHIFTS (content grew ABOVE it). A pure scrollTop clamp from
  * a layout settle BELOW the pin leaves offsetTop unchanged, so the old
  * RO branch is a no-op and the clamp is permanent. This is the
- * clamp-fix obligation in CLAUDE.md "Chat UX" constraint #2 — honored
+ * clamp-fix obligation in ARCHITECTURE.md's chat-scroll contract — honored
  * for FOLLOW_BOTTOM/ANCHOR_AT but missing for PIN_USER_MSG.
  *
  * The repro: a long first response pushes the second user message DEEP
@@ -21,8 +21,11 @@
  * exactly the shape where the settle-time clamp is never compensated by
  * content growth and the drift is permanent.
  *
- * RED on origin/main (message lands ~24px+ below top); GREEN after the
- * RO clamp-fix re-pins PIN_USER_MSG when scrollTop drifts below target.
+ * Invariant this locks in: after the settle, the ResizeObserver re-pins
+ * PIN_USER_MSG whenever scrollTop drifts below the pin target, so the message
+ * stays flush at the top instead of stranding ~24px+ down. This is the
+ * clamp-fix obligation for PIN_USER_MSG — already honored for
+ * FOLLOW_BOTTOM/ANCHOR_AT.
  *
  * Mirrors tests/second-send-pin.spec.mjs's route-mock SSE flow.
  */
@@ -118,6 +121,13 @@ async function measure(page) {
     }
   })
 }
+
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
 
 test('Deep second send pins flush to top after the post-send layout settle (no halfway clamp)', async ({ page }) => {
   await setup(page)

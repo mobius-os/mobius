@@ -2,7 +2,7 @@
 
 The full mini-app contract: component shape, `window.mobius.storage` and its traps, the app lifecycle (register-on-create only), offline, fetching, embedded app chats, back-navigation, and theming. `Read` this before building or updating any mini-app.
 
-Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and `token` props and persists through `window.mobius.storage`. The iframe is same-origin, so all browser storage works and `fetch('/api/...')` is free; this also means a mini-app can read the owner JWT — an accepted single-owner trade-off, not a license to be careless.
+Mini-apps are JSX components in opaque-origin sandboxed iframes. Each gets `appId` and an app-scoped `token` prop, and should use `window.mobius` for storage, navigation, chat, and supported shell capabilities. Do not assume access to the shell's DOM, owner credentials, cookies, or same-origin browser storage; communicate with the parent only through the documented runtime bridge.
 
 ---
 
@@ -20,7 +20,7 @@ When unsure, build local-first, but leave the app repo-ready.
 
 ## Start minimal — a functional core, designed to grow
 
-**Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next over the iterate turns — richer views, more entry types, automation — and you add it when they ask. Building takes three turns (propose → build → iterate); the iterate turns are where richness accrues, not the first build.
+**Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next — richer views, more entry types, automation — and you add it when they ask. Deliver progressively, but do not manufacture extra conversational turns when the request is already clear.
 
 This is a default, **not a ceiling**. Möbius apps are low-floor / high-ceiling: a small first cut keeps the floor low and reversible (less surface to break, easy to reshape), and the architecture here — split-on-concept modules, scoped CSS, a storage layer — exists so that ceiling stays open. Build for the expansion you can't see yet; don't wall it off with a sprawling v1.
 
@@ -38,10 +38,10 @@ For new mini-apps, get to an openable first layer quickly, then keep improving
 it while the partner can watch and try it:
 
 1. Create a coherent first layer: themed shell, primary layout, empty/loading/error states, storage paths, and one real functional slice. Do not register a blank "coming soon" stub unless the partner explicitly asked for a placeholder.
-2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration can show an open-preview affordance while the turn is still running, so the partner does not have to wait for the final handoff to try the app.
+2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration opens the app as a tab beside its owning chat without stealing focus, so the partner can keep talking while the preview becomes available. They can switch to that tab and watch it take shape while you keep working — every save the file watcher recompiles and refreshes it live. That makes registering the first coherent layer promptly worth even more: it is the moment the app becomes something to watch, not just a promise.
 3. Immediately smoke-check the shell preview before continuing: it renders coherently, has no missing imports/assets, and any storage-backed path used by the slice works.
 4. Continue in visible increments. Each save should leave the app in a coherent state; the file watcher recompiles source edits and an app open in the shell preview/canvas refreshes to the latest compiled bundle. Standalone `/apps/<slug>/` PWAs may need a manual refresh/reopen.
-5. Narrate milestones, not internals: "first layer is openable", "storage is wired", "mobile layout is fixed", "review pass is running." The partner should feel progress without reading raw tool logs.
+5. Signal each milestone with the build-phase helper so the chat renders a live progress rail — `python "$SCRIPTS_DIR/build_phase.py" "Storage wired"` as each lands ("first layer is openable", "storage is wired", "mobile layout is fixed", "review pass running"). The helper is best-effort (a failed signal never breaks a build) and carries the structure; a one-line prose note is now secondary, welcome for color, so the partner feels progress without reading raw tool logs.
 6. If the first visible layer will take more than a few minutes because of packaging, auth, data migration, or a risky dependency, say that early and explain the gating reason.
 
 Layered does **not** mean under-building. It means the first useful slice becomes
@@ -177,7 +177,7 @@ python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>
 
 `register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat. When run from a live building chat, it also emits the app-update signal that lets that chat surface the open-preview affordance.
 
-**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or source-like modules under `/data/apps/<slug>/` change (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). If the partner already has the app open in the shell preview/canvas, each successful recompile refreshes them onto the newest compiled bundle; standalone PWAs may need refresh/reopen. The helper patches the existing row when the `source_dir` is the same, but registering from a different folder or bypassing the helper can still create duplicates. If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
+**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or source-like modules under `/data/apps/<slug>/` change (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). If the partner already has the app open in the shell preview/canvas, each successful recompile refreshes them onto the newest compiled bundle; standalone PWAs may need refresh/reopen. The helper patches the existing row when the `source_dir` is the same, but registering from a different folder or bypassing the helper can still create duplicates. If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`. **Don't be fooled by a clean git tree:** the watcher auto-commits each recompile as an `agent edit` commit, so right after you save, `git -C /data/apps/<slug> status` is clean and `git add`/`git diff` show nothing — that is your edit having *landed*, not lost. Use `git log` to see the source commit — a landed edit advances BOTH `git log` and the `app-<id>.js` mtime (above); there is nothing to stage.
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
 
@@ -188,7 +188,8 @@ When the partner asks to share a local-first app as a repo, make the existing so
 1. Keep `mobius.json` at the repo root with stable `id`, `name`, `version`, `description`, `entry`, `icon`, complete `source_files`, any `static_assets`, permissions, and offline flags.
 2. Keep runtime data, tokens, logs, generated reports, and local caches out of the repo; source plus declared static assets only.
 3. Initialize git in the app source if needed: `git init -b main`, commit, push to GitHub, and keep the package at repo root on `main` or a tag. Root packages give the installer a real `origin` clone and clean PR-friendly diffs; repo subdirs and branch names with slashes fall back to synthetic upstream tracking.
-4. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
+4. Run `python3 /data/platform/backend/scripts/validate-app.py /data/apps/<name>` before push. It checks the declared source/import closure and bundles the real entry with the installer’s exact esbuild contract, catching missing files, missing default exports, and production-only compile failures locally.
+5. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
 
 **Don't hand-bump a version constant in app source.** If an app carries its released version inline (e.g. `const APP_VERSION = '1.2.0'`), leave that line alone — the catalog/installer sets it per release, not your edits. Bumping it locally guarantees a merge conflict on the *next* update: your bump and the new release's bump land on the same line, so every update stops to ask the owner to reconcile a version number. Git already tracks your edits — you never need a version bump to record them. (This is the single most common avoidable update conflict.)
 
@@ -243,7 +244,7 @@ imports `index.jsx`):
   ui/
     Chrome.jsx     # the shared `mobius-ui:` chrome (Header, Sheet, EmptyState, …) — all fenced
     <Feature>.jsx  # one file per view / feature
-  static/          # durable build assets (ignored by the watcher, not importable)
+  static/          # installer-owned assets; import logical x as ./static/x
 ```
 
 - **Keep the literal `export default` in `index.jsx`** — the compiler entry
@@ -304,7 +305,25 @@ window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes — for sync logic only, never rendered as UI
 ```
 
-Conflict policy is last-write-wins per path; where a lost edit would matter, store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber. `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
+Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
+
+### Concurrent writers — compare-and-swap, not last-write-wins
+
+`set()` is last-write-wins: the last PUT clips whatever landed between your read and your write. That silently drops edits on any file **several writers touch** — the agent (a chat turn) + cron + the open UI all appending to one `topics.txt`, `index.json`, or a per-day log. When more than one writer shares a mutable file, compare-and-swap instead:
+
+```jsx
+// read the value AND its server version, merge, then write conditionally
+const { value, version } = await window.mobius.storage.getWithVersion('index.json')
+const next = mergeInMyItem(value || [])   // YOUR merge — add your item, don't overwrite theirs
+try {
+  await window.mobius.storage.durableWrite('index.json', next, { ifMatch: version })
+} catch (e) {
+  if (e.code === 'conflict') { /* someone wrote first — re-read (getWithVersion) and retry */ }
+  else throw e
+}
+```
+
+`durableWrite({ ifMatch: version })` sends the version as an `If-Match`; the server rejects a stale write with a `DurableWriteError` whose `code === 'conflict'` (`retryable: true`). The runtime does NOT loop for you — you own the merge, so re-read and retry on conflict. For a create-only write pass `{ ifNoneMatch: true }` (conflicts if the path already exists). If the data is naturally per-record, one file per record sidesteps contention entirely — reach for CAS only when writers genuinely share one file. (A React list document can let `window.mobius.createUseDocument(React)`'s `useDocument(path, {mode:'cas'})` do the read-merge-retry for you.)
 
 **Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes (the Workout current-session card was the case). If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
 
@@ -347,7 +366,7 @@ Use a small structured object: `app`, `kind`, `created_at`, `signal`, `text`, an
 
 ## App analytics — emit signals for Reflection
 
-`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Reflection's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers in memory and flushes at most once per 5 seconds to `signals.jsonl` in the app's own storage.
+`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Reflection's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers briefly, then enters a dedicated offline telemetry queue. Signal batches do not coalesce, so simultaneous tabs do not overwrite one another. The queue retains the newest 500 events or 2 MiB per app and drops the oldest beyond that bound, so signals are guidance for Reflection—not an audit log or application state.
 
 **Every app must emit at minimum:**
 
@@ -382,16 +401,20 @@ window.mobius.signal('cron_summary', { status: 'error', message: err.message })
 
 ```jsx
 // Minimal app_ready example — add to your top-level useEffect after loading data
+const readySignalled = useRef(false)
 useEffect(() => {
   window.mobius.storage.subscribe('items.json', (v) => {
     const items = v || []
     setItems(items)
-    window.mobius.signal('app_ready', { item_count: items.length })
+    if (!readySignalled.current) {
+      readySignalled.current = true
+      window.mobius.signal('app_ready', { item_count: items.length })
+    }
   })
 }, [])
 ```
 
-Signals land in `signals.jsonl` in the app's own storage path, readable by Reflection via the storage API. Reflection's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages (`last_5_errors`) — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
+Signals land as app-attributed `app_signal` records in the platform activity stream. Each carries a stable client ID, its original `occurred_at` time, and a server-assigned ingestion time; Reflection deduplicates replayed IDs and uses the original time for its 24-hour window. During migration Reflection also reads legacy `signals.jsonl` files written by older cached runtimes. Its nightly `per-app-digest.json` counts signal names and surfaces the last five semantic error messages (`last_5_errors`); apps do not need to read the raw stream.
 
 **You don't have to catch everything yourself.** Uncaught errors — a thrown exception your code didn't handle, an unhandled promise rejection — are captured automatically: the app frame POSTs them to the platform, which records an `app_error` event that surfaces in the SAME digest as `app_errors_24h` + `recent_app_errors`. So `signal('error', …)` is for adding *semantic* context to a failure you DID catch (which operation, what the user was doing); the automatic capture is the safety net for the ones you didn't. Both reach Reflection.
 
@@ -757,6 +780,8 @@ useEffect(() => {
   window.mobius.chat({
     mount,
     persist: 'chat_id.json',   // create the app-chat ONCE, save its id here, reuse it forever
+    scope: 'workout-session:session-123', // optional: list/switch/new chats in this app-defined group
+    scopeLabel: 'Workout Jul 11', // optional label for the scoped chat picker
     systemPrompt,              // shapes the chat on create + re-applies on resume
     picker: false,             // hide the provider/effort picker inside the app sheet
     onTurnDone: () => refresh(),   // a turn finished — reload app state
@@ -770,6 +795,10 @@ useEffect(() => {
 - `persist` makes the helper create the chat the first time and **reuse the same
   one** on every later mount (PATCHing `systemPrompt` on resume) — the persistent
   transcript the user expects. Omit it only for a throwaway chat.
+- `scope` gives the embed a compact chat picker plus a new-chat button for that
+  app-defined group. Pair it with a scope-specific `persist` key when the app
+  wants one remembered chat per domain object, such as one chat per workout
+  session.
 - `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
   embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
 - **Viewer variant:** to display an EXISTING chat the app didn't create (e.g. a
@@ -851,13 +880,21 @@ uses device/browser back:
 const navRef = useRef(null)
 
 async function openDetail(item) {
+  navRef.current?.close()
   const handle = window.mobius.nav.open('app-detail', () => {
     navRef.current = null
     setSelected(null)
   })
   navRef.current = handle
-  await handle.ready
-  if (navRef.current !== handle) return
+  const { status } = await handle.outcome
+  if (navRef.current !== handle) {
+    handle.close()
+    return
+  }
+  if (status !== 'owned' && status !== 'standalone') {
+    navRef.current = null
+    return
+  }
   setSelected(item)
 }
 
@@ -868,9 +905,29 @@ function closeDetail() {
 }
 ```
 
+`outcome.status` tells the app what happened to the requested **shell back
+target**:
+
+- `owned` — the shell installed it; render the nested view.
+- `standalone` — there is no shell host; render the view, but provide your own
+  visible in-app back/close control.
+- `rejected` — the shell refused the request, so no back target exists; stay on
+  the current view.
+- `timeout` — shell ownership is unknown. Stay on the current view; the helper
+  keeps the request correlation briefly and removes a late-installed target.
+- `error` — the request could not be sent, so no back target exists; stay on the
+  current view.
+- `cancelled` — your code called `close()` before the shell answered; do not
+  render the abandoned view.
+
+Unknown future statuses should be treated like failure. `handle.ready` remains
+as a compatibility promise (`true` only for `owned`), but its historical
+`false` folded all other outcomes together. New code should use `outcome` so a
+standalone app continues to work without mistaking that fallback for rejection.
+
 ### Android back-preview — shell-mediated back protocol
 
-The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the shell-mediated protocol below; use the raw postMessage form only for legacy apps or custom choreography.
+The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the shell-mediated protocol below, including timeout and standalone handling; use the raw postMessage form only for shell-only legacy apps or custom choreography.
 
 ```jsx
 function navPushAndAwaitAck(label) {
@@ -883,7 +940,7 @@ function navPushAndAwaitAck(label) {
       if (e.data.type === 'moebius:nav-push-ack') {
         window.removeEventListener('message', onMsg); resolve()
       } else if (e.data.type === 'moebius:nav-push-rejected') {
-        window.removeEventListener('message', onMsg); reject(new Error('nav-push rejected (cap hit)'))
+        window.removeEventListener('message', onMsg); reject(new Error('nav-push rejected by shell'))
       }
     }
     window.addEventListener('message', onMsg)
@@ -919,7 +976,11 @@ The shell installs a back-sentinel in its own history on `nav-push`, so the OS s
 **Rules of the protocol:**
 
 - Pick ONE model per nested-view level — combining `iframe.history.pushState` with this protocol scrambles the back stack.
-- `nav-pop` and `nav-push` are a strict pair, like push/pop on a stack. Every code path that exits a nested view (including the in-app X button) MUST call `nav-pop`; skip it and the next back-gesture is silently consumed by the host.
+- With the runtime helper, every code path that exits a nested view (including
+  the in-app X button) MUST call its own `handle.close()`. The helper sends the
+  matching `nav-pop` only when it actually owns a shell entry. Raw-protocol
+  callers must pair `nav-push` and `nav-pop` themselves; skip the pop and the
+  next back gesture is silently consumed by the host.
 - The host caps pending sentinels at 20 per app. On overflow it responds `{type:'moebius:nav-push-rejected', requestId}` — the helper above rejects its promise, so you simply don't render the nested view. If you bypass the helper, treat a rejection as a hard "stay where you are" and do NOT increment your local counter, or your count drifts above the host's permanently and the next `nav-pop` consumes the wrong sentinel.
 - The `requestId` is optional on the wire (the shell echoes whatever you send), but use a fresh id per push when multiple can be in flight — a stale ack can otherwise resolve a later promise.
 

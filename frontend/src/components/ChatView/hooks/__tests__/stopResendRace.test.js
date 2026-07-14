@@ -14,13 +14,13 @@
  *
  * Sequence modelled (timeout branch of handleStop):
  *   1. snapshot the queue, then clear() it (Stop's pre-await clear).
- *   2. /chat/stop returns {stopped:false, cleared_pending_ts:[<ts>]} —
+ *   2. /chat/stop returns {stopped:false, cleared_pending_cids:[<cid>]} —
  *      the runner timed out; the backend cleared persisted pending.
  *   3. resolveStopResend → text to re-send (NOT empty, since the set is
  *      non-empty and matches the snapshot).
  *   4. doSend's queue path: add() the combined entry (marks it
  *      in-flight) and fire the queueOnly POST (modelled by a later
- *      swapOptimisticTs once it "commits").
+ *      confirmQueued once it "commits").
  *   5. the still-attached stream finalizes → onStreamEnd(continues:false)
  *      → fetchMessages({force:true}) → hydrate(server pending). Because
  *      the backend already CLEARED server pending, that list is EMPTY.
@@ -49,15 +49,15 @@ test('stop-timeout resend survives onStreamEnd hydrate([]) when the FETCH wins t
   q.clear()
   assert.deepEqual(q.list(), [])
 
-  // 2-3. /chat/stop timed out and reports it cleared ts 11. The shared
+  // 2-3. /chat/stop timed out and reports it cleared cid q1. The shared
   // resolver says to resend (non-empty cleared set, full match).
   const combined = { text: 'finish the task', attachments: [] }
-  const resend = resolveStopResend(snapshot, [11], combined)
+  const resend = resolveStopResend(snapshot, ['q1'], combined)
   assert.equal(resend.text, 'finish the task', 'timeout branch resends the cleared message')
 
   // 4. doSend's queue path: optimistic add (POST now in flight).
   const optimistic = queued({ cid: 'resend-cid', ts: 5000, content: resend.text })
-  q.add(optimistic)
+  q.add(optimistic, { inFlight: true })
   assert.equal(q.list().length, 1)
 
   // 5. FETCH WINS: onStreamEnd's refetch hydrates the (cleared) empty
@@ -67,7 +67,7 @@ test('stop-timeout resend survives onStreamEnd hydrate([]) when the FETCH wins t
   assert.equal(q.list()[0].content, 'finish the task')
 
   // POST then commits with the server ts → reconciles in place, cid stable.
-  q.swapOptimisticTs('resend-cid', 6001)
+  q.confirmQueued('resend-cid', { ts: 6001 })
   assert.equal(q.list().length, 1)
   assert.equal(q.list()[0].cid, 'resend-cid')
   assert.equal(q.list()[0].ts, 6001)
@@ -81,21 +81,21 @@ test('stop-timeout resend survives when the POST commits BEFORE the reconcile fe
   for (const m of snapshot) q.add(m)
   q.clear()
 
-  const resend = resolveStopResend(snapshot, [11], { text: 'finish the task', attachments: [] })
+  const resend = resolveStopResend(snapshot, ['q1'], { text: 'finish the task', attachments: [] })
   const optimistic = queued({ cid: 'resend-cid', ts: 5000, content: resend.text })
-  q.add(optimistic)
+  q.add(optimistic, { inFlight: true })
 
   // POST WINS: it commits first, so the entry now carries the server ts.
-  q.swapOptimisticTs('resend-cid', 6001)
-  // onStreamEnd's refetch now reflects the persisted message.
-  q.hydrate([{ role: 'user', content: 'finish the task', ts: 6001 }])
+  q.confirmQueued('resend-cid', { ts: 6001 })
+  // onStreamEnd's refetch now reflects the persisted message (server echoes cid).
+  q.hydrate([{ role: 'user', content: 'finish the task', ts: 6001, cid: 'resend-cid' }])
   assert.equal(q.list().length, 1, 'no duplicate, no drop')
-  assert.equal(q.list()[0].cid, 'resend-cid', 'reconcile reuses the local cid via ts match')
+  assert.equal(q.list()[0].cid, 'resend-cid', 'reconcile reuses the local cid by cid match')
 })
 
 test('stop-timeout with an ALREADY-DRAINED queue resends NOTHING (no duplicate)', () => {
   // The natural turn-end drain consumed the queued message right as Stop
-  // landed → cleared_pending_ts is []. resolveStopResend returns empty,
+  // landed → cleared_pending_cids is []. resolveStopResend returns empty,
   // so handleStop adds nothing; a subsequent hydrate([]) leaves an empty
   // tray. No phantom message, no duplicate follow-up run.
   const { result } = renderHook(usePendingQueue)
@@ -117,10 +117,10 @@ test('stop-timeout with an ALREADY-DRAINED queue resends NOTHING (no duplicate)'
 // Thin accessor so the test reads in handleStop's vocabulary.
 function usePendingQueueOps(result) {
   return {
-    add: (m) => result.current.add(m),
+    add: (m, opts) => result.current.add(m, opts),
     clear: () => result.current.clear(),
     hydrate: (s) => result.current.hydrate(s),
-    swapOptimisticTs: (cid, ts, pos) => result.current.swapOptimisticTs(cid, ts, pos),
+    confirmQueued: (cid, patch) => result.current.confirmQueued(cid, patch),
     list: () => result.current.pendingMessagesRef.current,
   }
 }

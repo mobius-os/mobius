@@ -75,13 +75,23 @@ def test_finalize_noop_on_truly_empty_turn(_patch_writer):
 
 
 def test_finalize_submits_blocks_normally(_patch_writer):
-  """finalize() submits a snapshot containing the accumulated blocks."""
+  """finalize() submits a snapshot containing the accumulated blocks.
+
+  A real assistant text block is {"type": "text", "content": ...} — the only
+  shape process_event ever produces (events.py) and the key both
+  blocks_have_renderable_content and build_assistant_message read. Since
+  0e0eaa82 the finalize gate is blocks_have_renderable_content, which treats a
+  text block with empty/whitespace `content` as a blank bubble and skips the
+  write, so a fixture keyed on the wrong `text` field would never submit.
+  """
   sink, _ = _make_sink()
-  sink.assistant_blocks = [{"type": "text", "text": "hello"}]
+  sink.assistant_blocks = [{"type": "text", "content": "hello"}]
   asyncio.run(sink.finalize())
   assert len(_patch_writer.submitted) == 1
   blocks = _patch_writer.submitted[0].get("blocks") or []
-  assert any(b.get("type") == "text" for b in blocks)
+  assert any(
+    b.get("type") == "text" and b.get("content") == "hello" for b in blocks
+  )
 
 
 def test_finalize_synthesizes_error_block_when_blocks_empty(_patch_writer):
@@ -139,7 +149,7 @@ def test_finalize_uses_blocks_not_last_error_when_both_present(_patch_writer):
   are used (no synthetic block injected — the error was already processed
   into the block list by process_event via the PersistError path)."""
   sink, bc = _make_sink()
-  sink.assistant_blocks = [{"type": "text", "text": "partial"}, {"type": "error", "message": "blip"}]
+  sink.assistant_blocks = [{"type": "text", "content": "partial"}, {"type": "error", "message": "blip"}]
   sink._last_error = "blip"  # set as if publish() ran
 
   asyncio.run(sink.finalize())

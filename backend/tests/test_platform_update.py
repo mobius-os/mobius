@@ -19,6 +19,7 @@ aborted on the next pass.
 
 import subprocess
 import textwrap
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +119,7 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setattr(pu, "SERVING_SHA_FILE", tmp_path / ".serving-sha")
   monkeypatch.setattr(pu, "CONFLICT_FLAG", tmp_path / ".conflict")
   monkeypatch.setattr(pu, "ROLLED_BACK_FLAG", tmp_path / ".rolled-back")
+  monkeypatch.setattr(pu, "RECONCILE_PRE_FLAG", tmp_path / ".reconcile-pre")
   monkeypatch.setattr(pu, "OFFLINE_FLAG", tmp_path / ".offline")
   monkeypatch.setattr(pu, "RECONCILE_LOCK", tmp_path / ".reconcile.lock")
   monkeypatch.setenv("BUILD_SHA", "test-sha")
@@ -282,6 +284,23 @@ def test_uncommitted_edits_committed_before_reconcile(clone_env):
   assert "LINE_C = 999" in served
 
 
+def test_detached_head_uncommitted_edit_survives_reconcile(clone_env):
+  origin, platform = clone_env
+  _git(platform, "checkout", "-q", "--detach", "HEAD")
+  (platform / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'DETACHED_DIRTY'"))
+  _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 1001")})
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "updated"
+  assert _git(platform, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+  served = (platform / "backend/app/main.py").read_text()
+  assert "LINE_A = 'DETACHED_DIRTY'" in served
+  assert "LINE_C = 1001" in served
+
+
 # --- crash-safety: a stale in-progress rebase is aborted --------------------
 
 def test_stale_rebase_aborted_on_next_pass(clone_env):
@@ -302,6 +321,42 @@ def test_stale_rebase_aborted_on_next_pass(clone_env):
   assert res.status == "conflict"
   assert _served_sha(platform) == pre
   assert not pu._rebase_in_progress(platform)
+
+
+def test_boot_guard_aborts_interrupted_rebase_before_serving(clone_env):
+  origin, platform = clone_env
+  pre = _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+  _git(platform, "fetch", "-q", "origin")
+  pu._write_reconcile_pre(pre)
+  rc = _git(platform, "rebase", new, "main", check=False).returncode
+  assert rc != 0 and pu._rebase_in_progress(platform)
+  assert "<<<<<<<" in (platform / "backend/app/main.py").read_text()
+
+  summary = pu.boot_guard_clean_served_tree(platform)
+
+  assert summary.startswith("boot_guard[reset]")
+  assert _served_sha(platform) == pre
+  assert not pu._rebase_in_progress(platform)
+  assert "<<<<<<<" not in (platform / "backend/app/main.py").read_text()
+  ok, err = pu._import_probe(platform)
+  assert ok, err
+  assert not pu.RECONCILE_PRE_FLAG.exists()
+
+
+def test_boot_guard_sync_propagates_failure(monkeypatch):
+  """The final boot gate must fail closed; callers need a non-zero process,
+  not an error-looking success string that the shell can accidentally ignore."""
+  monkeypatch.setattr(pu, "_reconcile_flock", lambda: nullcontext())
+  monkeypatch.setattr(
+    pu,
+    "boot_guard_clean_served_tree",
+    lambda _repo: (_ for _ in ()).throw(OSError("guard failed")),
+  )
+  with pytest.raises(OSError, match="guard failed"):
+    pu.boot_guard_sync()
 
 
 # --- status availability + up-to-date ---------------------------------------
@@ -344,16 +399,20 @@ def test_check_for_updates_fetches_then_reports_available(clone_env):
   assert _served_sha(platform) == before
 
 
-def test_check_for_updates_offline_is_safe_noop(clone_env):
+def test_check_for_updates_offline_is_explicit_error(clone_env):
   origin, platform = clone_env
   before = _served_sha(platform)
   _git(platform, "remote", "set-url", "origin",
        str(platform.parent / "does-not-exist.git"))
-  # An offline check must not raise and must leave the served tree + status intact.
-  status = pu.check_for_updates(platform)
-  assert status["available"] is False
-  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  # A stale remote-tracking ref cannot authoritatively mean "no updates".
+  with pytest.raises(pu.PlatformUpdateError, match="platform_fetch_failed"):
+    pu.check_for_updates(platform)
   assert _served_sha(platform) == before
+
+
+def test_check_for_updates_requires_a_fetchable_clone(tmp_path):
+  with pytest.raises(pu.PlatformUpdateError, match="platform_repo_missing"):
+    pu.check_for_updates(tmp_path / "missing")
 
 
 def test_check_for_updates_syncs_marker_when_local_already_contains_origin(clone_env):
@@ -387,21 +446,56 @@ def test_touched_frontend_detects_frontend_only_changes(clone_env):
 
 
 @pytest.mark.asyncio
-async def test_apply_rebuilds_frontend_when_update_touched_frontend(monkeypatch, clone_env):
+async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_only(
+  monkeypatch, clone_env,
+):
   origin, platform = clone_env
-  new = _advance_origin(origin, edits={"frontend/src/App.jsx": "export default 2\n"})
+  served = _served_sha(platform)  # captured BEFORE the frontend-only commit
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")  # the running uvicorn's sha
+  new = _local_commit(platform, edits={"frontend/src/App.jsx": "export default 2\n"})
   calls = []
 
   async def fake_rebuild(repo, res):
     calls.append((repo, res.new_sha))
 
   monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
-    pu.ReconcileResult("updated", _served_sha(platform), new, new)
+    pu.ReconcileResult("updated", served, new, new)
   ))
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
 
   res = await pu.apply_platform_update(SimpleNamespace(), platform)
 
+  # The frontend rebuilds into dist (served per-request), but the served uvicorn
+  # imports no frontend — so no restart is prompted. Owner's exact complaint.
+  assert res["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  assert res["needs_restart"] is False
+  assert calls == [(platform, new)]
+
+
+@pytest.mark.asyncio
+async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  new = _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 9"),
+    "frontend/src/App.jsx": "export default 3\n",
+  })
+  calls = []
+
+  async def fake_rebuild(repo, res):
+    calls.append((repo, res.new_sha))
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+    pu.ReconcileResult("updated", served, new, new)
+  ))
+  monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
+
+  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+
+  # A backend change (mixed with frontend) still restarts AND rebuilds.
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
   assert calls == [(platform, new)]
@@ -507,6 +601,94 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
   assert pu.RESTART_NEEDED_FLAG.read_text() == head
+
+
+# --- path-aware restart classifier (backend/app change → restart; else not) --
+
+def test_paths_need_restart_classifier():
+  assert pu._paths_need_restart(["backend/app/main.py"]) is True
+  assert pu._paths_need_restart(["backend/app/routes/apps.py", "docs/x.md"]) is True
+  # a backend RUNTIME file outside backend/app/ (root module, deps) also restarts
+  assert pu._paths_need_restart(["backend/config_helper.py"]) is True
+  assert pu._paths_need_restart(["backend/requirements.txt"]) is True
+  # a rename OUT of backend/app (with --no-renames the delete side shows) restarts
+  assert pu._paths_need_restart(
+    ["docs/admin.py", "backend/app/routes/admin.py"]) is True
+  # non-backend-runtime paths never force a restart of the served uvicorn
+  assert pu._paths_need_restart([
+    "frontend/src/App.jsx", "tests/foo.spec.mjs", "backend/tests/test_x.py",
+    "backend/scripts/memory_search.py", "backend/recovery/x.py",
+    "backend/memeval/systems.py", "docs/y.md", "README.md",
+  ]) is False
+  assert pu._paths_need_restart([]) is False
+  # a path merely CONTAINING backend/app/ but not under it is not runtime code
+  assert pu._paths_need_restart(["docs/backend/app/notes.md"]) is False
+
+
+def test_changed_paths_no_renames_surfaces_deleted_backend(clone_env):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  # git mv a runtime module out of backend/app/ — rename detection would hide
+  # that the served backend lost it; --no-renames must surface the delete side.
+  _git(platform, "mv", "backend/app/main.py", "moved_main.py")
+  _git(platform, "commit", "-q", "-m", "move main out of app")
+  after = _git(platform, "rev-parse", "HEAD").stdout.strip()
+
+  paths = pu._changed_paths(platform, before, after)
+  assert "backend/app/main.py" in paths  # delete side present
+  assert pu._tree_change_needs_restart(platform, before, after) is True
+
+
+def test_empty_commit_does_not_force_restart(clone_env):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  _git(platform, "commit", "-q", "--allow-empty", "-m", "empty")
+  after = _git(platform, "rev-parse", "HEAD").stdout.strip()
+
+  assert before != after
+  assert pu._changed_paths(platform, before, after) == []  # genuine empty diff
+  assert pu._tree_change_needs_restart(platform, before, after) is False
+
+
+def test_tree_change_needs_restart_fails_closed_on_missing_sha(clone_env):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  # one side unknown → can't prove no backend change → restart (fail closed)
+  assert pu._tree_change_needs_restart(platform, served, None) is True
+  assert pu._tree_change_needs_restart(platform, None, served) is True
+  # both missing / equal → nothing changed
+  assert pu._tree_change_needs_restart(platform, None, None) is False
+  assert pu._tree_change_needs_restart(platform, served, served) is False
+
+
+def test_status_no_restart_when_only_frontend_changed(clone_env):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  # HEAD advances past the served sha, but only a frontend file changed — the
+  # served uvicorn doesn't import frontend, so no restart prompt.
+  _local_commit(platform, edits={"frontend/src/App.jsx": "// changed\n"})
+
+  status = pu.platform_status(platform)
+
+  assert status["needs_restart"] is False
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+
+
+def test_status_no_restart_when_only_tests_changed(clone_env):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  # A test-only advance is the owner's exact complaint ("a single test file …
+  # offered a restart") — it must not.
+  _local_commit(platform, edits={"backend/tests/test_thing.py": "def test_x():\n  assert True\n"})
+
+  status = pu.platform_status(platform)
+
+  assert status["needs_restart"] is False
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
 
 
 # --- restart flag lifecycle -------------------------------------------------

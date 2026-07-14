@@ -2,8 +2,9 @@
 # init-cron-scaffold.sh — author a cron task for a mini-app that
 # SURVIVES container restart on Railway / Fly / Render / Docker.
 #
-# Why this exists: Möbius's entrypoint replays /data/apps/*/init-cron.sh
-# on every boot, because /var/spool/cron/crontabs/ is INSIDE the container
+# Why this exists: FastAPI lifespan reads each live app's durable
+# /data/apps/*/init-cron.sh declaration and rewrites it through the supervised
+# runner on boot, because /var/spool/cron/crontabs/ is INSIDE the container
 # (not on the persistent volume) and is wiped on every redeploy. An agent
 # that calls `crontab -u mobius` directly without also writing init-cron.sh
 # loses its cron entry on the next deploy with no warning. This scaffold
@@ -93,9 +94,10 @@ APP_BASE="${MOBIUS_APP_BASE:-/data/apps}"
 APP_DIR="${APP_BASE}/${SLUG}"
 JOB_PATH="${APP_DIR}/${JOB_NAME}"
 INIT_PATH="${APP_DIR}/init-cron.sh"
-# The command cron runs: the job path, plus the app id as $1 when known.
+# The command cron runs. Managed apps enter through the same supervised wrapper
+# as the Run now API, giving uninstall one revocable process-group lease.
 if [ -n "$APP_ID" ]; then
-  CRON_CMD="${JOB_PATH} ${APP_ID}"
+  CRON_CMD="python3 /app/scripts/app-job-runner.py ${APP_ID} ${JOB_PATH}"
 else
   CRON_CMD="${JOB_PATH}"
 fi
@@ -133,18 +135,18 @@ fi
 #    variable, and the script body is tiny + standardised.
 cat > "$INIT_PATH" <<INIT
 #!/bin/sh
-# Restores the cron entry for "$SLUG" on container restart.
+# Declares the cron entry for "$SLUG" across container restarts.
 # /var/spool/cron/crontabs/ lives inside the container, not on the
-# /data volume — so it is empty after every Railway redeploy. The
-# entrypoint replays every /data/apps/*/init-cron.sh as the mobius
-# user to put entries back.
+# /data volume — so it is empty after every Railway redeploy. FastAPI lifespan
+# parses ENTRY below without executing this app-owned script, then rewrites a
+# current supervised entry before cron is allowed to start.
 #
 # Drop any prior line for this job path, then re-add the canonical
 # entry. Idempotent (no duplicates) AND self-healing: a stale entry
 # written before the app id was appended is replaced, not skipped.
 # grep -vF on the full job path is prefix-safe (news vs news-2). A
 # contrived line that puts this exact path in ITS OWN args would be an
-# over-match, but it self-heals on the next boot replay; the install-side
+# over-match, but it self-heals on the next boot reconciliation; the install-side
 # delete path (_crontab_without_app) anchors on the command precisely.
 #
 # Capture the existing crontab ONCE and check rc. Piping a second live
@@ -167,8 +169,8 @@ if [ "\$RC" -eq 0 ]; then
   (printf '%s\\n' "\$EXISTING" | grep -vF "$JOB_PATH"; echo "\$ENTRY") \\
     | crontab -u mobius -
 elif grep -qi 'no crontab for' "\$ERRFILE"; then
-  # Genuinely no crontab yet — safe to install just this entry; the entrypoint
-  # replays every app's init-cron.sh, so each re-adds its own line.
+  # Genuinely no crontab yet — safe to install just this entry; lifespan
+  # reconciles every other live app declaration before cron starts.
   echo "\$ENTRY" | crontab -u mobius -
 else
   # A real read error (not "no crontab"): do NOT rewrite, or we'd drop every

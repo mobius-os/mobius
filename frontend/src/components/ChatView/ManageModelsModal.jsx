@@ -22,9 +22,10 @@
  * pattern (no separate overlay component — we paint our own).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { modelQueries } from '../../hooks/queries.js'
 import './ManageModelsModal.css'
 
@@ -57,6 +58,9 @@ export default function ManageModelsModal({
   // an inline "Discard changes?" row instead — same pattern as the
   // pendingSwitch confirm in ChatSettingsPanel.
   const [pendingClose, setPendingClose] = useState(false)
+  const dialogRef = useRef(null)
+  const closeRef = useRef(null)
+  const keepEditingRef = useRef(null)
 
   // Re-seed the draft when persisted prefs change underneath us
   // (e.g. another tab edited them). Skipping this would silently
@@ -91,13 +95,19 @@ export default function ManageModelsModal({
     onClose()
   }, [dirty, onClose])
 
-  // Escape-to-close. Mirrors ComposerPopover's escape handling so
-  // dismissal behavior is consistent across modals.
+  useDialogFocus({
+    containerRef: dialogRef,
+    initialFocusRef: closeRef,
+    onClose: tryClose,
+  })
+
+  // A guarded close becomes a decision inside the existing dialog. Move focus
+  // to the safe choice so keyboard and screen-reader users encounter it
+  // immediately rather than remaining in the model list above it.
   useEffect(() => {
-    function onKey(e) { if (e.key === 'Escape') tryClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [tryClose])
+    if (!pendingClose) return
+    queueMicrotask(() => keepEditingRef.current?.focus?.({ preventScroll: true }))
+  }, [pendingClose])
 
   const toggle = useCallback((modelId) => {
     setPendingClose(false)
@@ -165,15 +175,21 @@ export default function ManageModelsModal({
   return (
     <div
       className="mmm__overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="mmm-title"
+      role="presentation"
       onClick={tryClose}
     >
-      <div className="mmm" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="mmm"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mmm-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="mmm__head">
           <h2 id="mmm-title" className="mmm__title">Manage models</h2>
           <button
+            ref={closeRef}
             type="button"
             className="mmm__close"
             onClick={tryClose}
@@ -247,6 +263,7 @@ export default function ManageModelsModal({
                 Discard
               </button>
               <button
+                ref={keepEditingRef}
                 type="button"
                 className="mmm__btn"
                 onClick={() => setPendingClose(false)}

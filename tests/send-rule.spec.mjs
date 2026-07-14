@@ -1,24 +1,18 @@
 /**
  * The send-scroll rule (owner's words):
  *
- *   "When sending a new message, only move to top if it's the FIRST
- *    message OR if the user is already at the bottom (i.e. in
- *    autoscroll/follow mode). Otherwise the user is probably reading a
- *    message and perhaps has queued something up, so we should NOT move
- *    the scroll."
+ *   "The first message always pins. Later messages pin only from manual
+ *    auto-scroll at the bottom; every pin returns to hold."
  *
- * So on send: pin the new user message to the viewport top (PIN_USER_MSG)
- * only when it is the first user message OR the user is at the bottom
- * (gesture-gated FOLLOW_BOTTOM, or a short chat whose content does not
- * overflow). When the user is scrolled UP (reading, possibly with a
- * queued message), the send must be a no-op for scroll/spacer — the
- * reader stays exactly where they were; the message just appends.
+ * Direct, queued, and steered rows share that submit-time rule. Geometry alone
+ * is insufficient: a chat still in PIN_USER_MSG/ANCHOR_AT is hold even if its
+ * real content happens to be near the tail.
  *
  * "At bottom" is the gesture-gated follow flag, NOT a raw IO read — a
  * raw sentinel read at send time mis-classifies an at-bottom reader
  * because appending the assistant shell hides the sentinel before the
- * first follow-write. See shouldPinSend in useScrollMode.js and the
- * scroll-probe findings baked into CLAUDE.md "Chat UX".
+ * first follow-write. See shouldPinSend in useScrollMode.js and
+ * ARCHITECTURE.md "Chat scroll + steer contract".
  *
  * Mirrors the route-mock SSE flow of second-send-pin.spec.mjs.
  *
@@ -142,6 +136,13 @@ async function measure(page) {
 // First message — always pins
 // ───────────────────────────────────────────────────────────────────
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test('First message in a chat pins to the viewport top', async ({ page }) => {
   await setup(page)
   await newChat(page)
@@ -185,26 +186,26 @@ test('Send while at the bottom (following) pins to top, response grows below', a
 
   await routeStream(page, [
     { type: 'catch_up_done' },
-    { type: 'text', content: 'OK.' },
+    { type: 'text', content: 'Second response paragraph. '.repeat(120) },
     { type: 'done' },
   ])
   await sendMessage(page, 'Second from bottom')
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))))
+  await waitStreamDone(page)
 
   const m = await measure(page)
   expect(m.userMsgCount).toBe(2)
   expect(m.lastUserText).toBe('Second from bottom')
-  // The new message pinned to the top (response will grow below it).
+  // The new message pins, then stays in hold while the long response grows.
   expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-50)
   expect(m.lastUserVisualTop).toBeLessThanOrEqual(m.clientH / 3)
+  expect(m.scrollH - m.scrollTop - m.clientH).toBeGreaterThan(50)
 })
 
 // ───────────────────────────────────────────────────────────────────
-// Send while SCROLLED UP (reading) — does NOT move the scroll
+// Send while SCROLLED UP — preserves the reading anchor
 // ───────────────────────────────────────────────────────────────────
 
-test('Send while scrolled up (reading) does NOT move the scroll or pin', async ({ page }) => {
+test('Send while scrolled up preserves the exact reading position', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
@@ -229,8 +230,8 @@ test('Send while scrolled up (reading) does NOT move the scroll or pin', async (
   expect(gapBefore).toBeGreaterThan(50)
   const savedTop = before.scrollTop
 
-  // Send the second message while scrolled up. It must NOT yank the
-  // viewport — the reader stays put; the message just appends/queues.
+  // Send the second message while scrolled up. It reserves reply room but must
+  // not move the reader or infer auto-scroll from later layout.
   await routeStream(page, [
     { type: 'catch_up_done' },
     { type: 'text', content: 'Reply.' },
@@ -243,41 +244,29 @@ test('Send while scrolled up (reading) does NOT move the scroll or pin', async (
 
   const after = await measure(page)
   expect(after.lastUserText).toBe('Second while reading')
-  // CRITICAL: the scroll position did NOT jump. Tolerance covers the few
-  // px the appended user message can add at the very bottom of the list
-  // (it grows scrollHeight, not the reader's offset from the top).
   expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
-  // The owner contract is "always reserve enough space" even when scrolled up
-  // (the reader just isn't moved). Space MAY be reserved; the load-bearing
-  // guarantee is the scroll position above did not jump — not that the spacer
-  // is zero. (Earlier this asserted spacerH===0; that contradicted the
-  // always-reserve contract — see docs/chat-scroll-steer-contract.md R2.)
   expect(after.spacerH).toBeGreaterThanOrEqual(0)
 })
 
 // ───────────────────────────────────────────────────────────────────
-// Short chat (content fits) — back-to-back second send still pins
+// Short chat in hold — geometry alone does not authorize a second pin
 // ───────────────────────────────────────────────────────────────────
 
-test('Short chat (content fits viewport): second send still pins to top', async ({ page }) => {
+test('Short chat stays in hold until the user manually enters auto-scroll', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
-  // Short response — the chat does not overflow, so there is no
-  // scrolled-up reading position to preserve. The user is, by
-  // definition, at the bottom; a second send should pin (matches the
-  // pre-rule behavior for chats that fit on screen).
+  // The first send pins and therefore leaves the chat in hold. A short reply
+  // does not silently turn geometric proximity into FOLLOW_BOTTOM.
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Short reply.' }, { type: 'done' }])
   await sendMessage(page, 'First short')
   await waitStreamDone(page)
 
-  // The chat fits the viewport: the only thing past the content is the
-  // pin-spacer's empty room, so the user is at the bottom (gap ≈ 0) even
-  // though they never made a scroll gesture. A back-to-back send here
-  // should still pin.
+  // The chat fits the viewport, but no manual bottom gesture occurred.
   const fits = await measure(page)
   const fitsGap = fits.scrollH - fits.scrollTop - fits.clientH
   expect(fitsGap).toBeLessThan(50)
+  const savedTop = fits.scrollTop
 
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Another short.' }, { type: 'done' }])
   await sendMessage(page, 'Second short')
@@ -286,6 +275,6 @@ test('Short chat (content fits viewport): second send still pins to top', async 
 
   const m = await measure(page)
   expect(m.lastUserText).toBe('Second short')
-  expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
-  expect(m.lastUserVisualTop).toBeLessThanOrEqual(10)
+  expect(Math.abs(m.scrollTop - savedTop)).toBeLessThanOrEqual(8)
+  expect(m.lastUserVisualTop).toBeGreaterThan(10)
 })

@@ -69,13 +69,17 @@ export default function ComposerPopover({
   onChangeChatInfo,
   // Live-derived in the parent: `chatInfo.has_assistant_turns` is
   // set once on mount and never refreshed when the running turn
-  // finishes. Without the live override, the cross-provider lock
-  // in ChatSettingsPanel would stay disengaged after the first
-  // reply lands in the same session. Parent ORs the persisted
+  // finishes. Without the live override, cross-provider picks would
+  // skip the confirmation + handoff after the first reply lands in
+  // the same session. Parent ORs the persisted
   // flag with a `messages.some(m => m.role === 'assistant')`
   // check and passes the result down.
   hasAssistantTurns,
-  onCompactionStored,
+  autoResumeEnabled,
+  autoResumeSaving,
+  autoResumeError,
+  onAutoResumeChange,
+  providerSwitchState,
   onOpenInspector,
 }) {
   const [open, setOpen] = useState(false)
@@ -181,7 +185,7 @@ export default function ComposerPopover({
         <Plus width={26} height={26} />
       </button>
       {open && (
-        <div className="composer-popover" role="dialog">
+        <div className="composer-popover" role="dialog" aria-label="Chat options">
           <div className="composer-popover__section">
             <button
               type="button"
@@ -208,8 +212,12 @@ export default function ComposerPopover({
                 provider={chatInfo.provider}
                 effective={chatInfo.effective}
                 hasAssistantTurns={hasAssistantTurns}
+                autoResumeEnabled={autoResumeEnabled}
+                autoResumeSaving={autoResumeSaving}
+                autoResumeError={autoResumeError}
+                onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
-                onCompactionStored={onCompactionStored}
+                providerSwitchState={providerSwitchState}
                 reqIdRef={reqIdRef}
                 wasInputFocusedRef={wasInputFocusedRef}
               />

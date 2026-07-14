@@ -44,6 +44,14 @@
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 }
 
+/* Light theme: the dark-tuned drop shadows above read as harsh smudges on a
+   light surface. Soften to the same low-alpha ink the composer popover uses in
+   light mode (ChatView.css). */
+[data-theme="light"] .toast--info,
+[data-theme="light"] .toast--error {
+  box-shadow: 0 4px 16px rgba(15, 18, 25, 0.16);
+}
+
 .toast__message {
   flex: 1;
   overflow-wrap: anywhere;

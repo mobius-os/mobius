@@ -100,6 +100,13 @@ async function sendMessage(page, text) {
 // BUG 1: AskUserQuestion answerable
 // ─────────────────────────────────────────────────────────────────
 
+// These tests mock the network via page.route and assert no service-worker
+// behavior. The real SW claims the page ~1s after load and its fetch handler
+// bypasses page.route, silently un-mocking the API/stream contracts mid-test
+// (the app-canvas and steer-queued specs both hit this class). Block it so
+// the mocks stay authoritative for the whole test.
+test.use({ serviceWorkers: 'block' })
+
 test.describe('Bug 1: AskUserQuestion', () => {
 
   test('QuestionCard buttons are NOT disabled after the question event', async ({ page }) => {
@@ -305,13 +312,16 @@ test.describe('Bug 2/4: scroll state machine', () => {
   })
 
 
-  test('user messages carry data-ts (for PIN_USER_MSG resolution)', async ({ page }) => {
+  test('user messages carry data-cid (for PIN_USER_MSG resolution)', async ({ page }) => {
     await setupWithStreamMock(page, null)
     await newChat(page)
-    await sendMessage(page, 'Send with ts')
-    // First user msg should have data-ts set to its timestamp.
-    const userMsgs = await page.locator('.chat__msg--user[data-ts]').count()
-    expect(userMsgs).toBeGreaterThan(0)
+    await sendMessage(page, 'Send with cid')
+    // The pin resolves the user row by its stable cid (data-cid). data-ts is
+    // kept too, but only for the timestamp tooltip (display metadata).
+    const pinnable = await page.locator('.chat__msg--user[data-cid]').count()
+    expect(pinnable).toBeGreaterThan(0)
+    const withTs = await page.locator('.chat__msg--user[data-ts]').count()
+    expect(withTs).toBeGreaterThan(0)
   })
 
 

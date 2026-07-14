@@ -3,9 +3,11 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+  BaseModel, ConfigDict, Field, field_validator, model_validator,
+)
 
-from app.providers import PROVIDER_NAMES
+from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
 
 
 class SetupRequest(BaseModel):
@@ -88,6 +90,8 @@ class AppOut(BaseModel):
   manage_apps: bool = False
   # GitHub connection access — see models.App.github_access.
   github_access: bool = False
+  # Guarded owner-filesystem access — see models.App.filesystem_access.
+  filesystem_access: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
   # only for legacy rows from before the slug column existed; lazy-
   # backfilled on first access via standalone routes (see
@@ -112,6 +116,12 @@ class AppOut(BaseModel):
   # block was declared; otherwise the raw validated JSON object. Informational
   # for the agent + future store badge — no server-side enforcement.
   offline_contract: dict | None = None
+  # Root-level manifest file composed into the agent prompt while this app is
+  # live. Informational so install UIs can surface the privileged declaration.
+  system_prompt_file: str | None = None
+  system_app: bool = False
+  chat_log_access: Literal["none", "summary", "full"] = "none"
+  capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
 
@@ -132,6 +142,25 @@ class AppInstall(BaseModel):
   manifest_url: str | None = None
   manifest: dict | None = None
   raw_base: str | None = None
+  # Optional review binding supplied by an install UI. Direct owner/agent
+  # installs may omit it; when present, install must apply the exact capability
+  # contract the owner just reviewed or fail with 409 before mutating state.
+  reviewed_capability_digest: str | None = Field(
+    default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
+  # Optional binding for a pre-update source review. If the manifest or any
+  # executable source byte changes before Apply, install rejects before writes.
+  reviewed_source_digest: str | None = Field(
+    default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
+
+
+class AppPreviewOut(BaseModel):
+  manifest: dict
+  capability_contract: dict
+  capability_digest: str
+  installed_contract: dict | None = None
+  capability_diff: dict
 
 
 class AppInstallOut(AppOut):
@@ -195,6 +224,36 @@ class UpdatePreviewOut(BaseModel):
   conflict_paths: list[str] = Field(default_factory=list)
   conflicts: list[ConflictFile] = Field(default_factory=list)
   upstream_diff: str | None = None
+
+
+class UpdateCandidatePreviewOut(BaseModel):
+  """Incoming published source compared with the last installed upstream."""
+
+  app_id: int
+  upstream_version: str | None = None
+  # The installed upstream base used for the comparison. This is intentionally
+  # not the candidate's remote SHA: synthetic manifest installs have no remote
+  # commit, but both package shapes share the same source-diff contract.
+  upstream_commit: str | None = None
+  upstream_diff: str | None = None
+  source_digest: str = Field(
+    min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
+
+
+class UpdateCheckOut(BaseModel):
+  """Git-native update detection: fetched upstream source vs recorded upstream.
+
+  `update_available` is null (unknown) when a content compare can't run — no
+  manifest_url, no git repo, no recorded upstream branch, or the upstream fetch
+  failed — so the caller falls back to version comparison. It is a real
+  true/false only when a byte-level compare actually ran, so a push that changed
+  code WITHOUT bumping the version still reads as an update. The version strings
+  are display-only, never the detection signal."""
+  update_available: bool | None = None
+  upstream_version: str | None = None
+  local_version: str | None = None
+  checked_at: datetime
 
 
 class AppConflictResolverChatOut(BaseModel):
@@ -280,6 +339,10 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  # Per-chat opt-in to continuing a provider-limited turn at reset. This is
+  # intentionally absent from SettingsUpdate: background agents and other
+  # chats must never inherit it.
+  auto_resume_on_limit: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets
   # the name (unlock + drop to the first-message default; re-derived next turn).
@@ -295,17 +358,56 @@ class ChatPatch(BaseModel):
     return value
 
 
+class ChatProviderSwitch(BaseModel):
+  """Atomic cross-provider switch prepared by the incoming provider."""
+
+  provider: Literal["claude", "codex"]
+  agent_settings_json: AgentSettingsOverride
+  # Stable across a network retry so the writer can return the already-stored
+  # switch instead of appending a duplicate compaction marker.
+  switch_id: str = Field(min_length=1, max_length=128)
+
+  @model_validator(mode="after")
+  def validate_target_settings(self):
+    """Require a coherent target runtime instead of preserving old settings."""
+    model = (self.agent_settings_json.model or "").strip()
+    effort = self.agent_settings_json.effort
+    if not model or len(model) > 200:
+      raise ValueError("provider switches require a valid target model")
+    if _model_belongs_to_other_provider(model, self.provider):
+      raise ValueError("target model does not belong to target provider")
+    self.agent_settings_json.model = model
+    allowed_efforts = {
+      "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
+      "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
+    }
+    if effort not in allowed_efforts[self.provider]:
+      raise ValueError("target effort does not belong to target provider")
+    return self
+
+
 class SendMessage(BaseModel):
   content: str
   attachments: list[dict] | None = None
   timezone: str | None = None
   viewport: dict | None = None
   hidden: bool = False
+  # Client-minted stable identity for the user message, minted once at
+  # compose time and carried across the wire. It is the canonical row
+  # identity (React key, DOM pin target, queue cancel key, steer dedup
+  # key); `ts` is display/ordering metadata only. Untrusted client input:
+  # never an auth boundary — a duplicate cid is treated as a duplicate
+  # POST retry, not a security event.
+  cid: str | None = None
   # Internal UI hint: Stop can collapse already-queued messages and ask
   # the backend to steer them into the live turn even when the chat's
   # normal send-while-running behavior is queueing.
   force_steer: bool = False
-  consume_pending_ts: list[int] | None = None
+  # Which already-queued rows a force-steer should pull into the live
+  # turn, selected by their stable `cid` (the server still reconstructs
+  # the durable rows from Chat.pending_messages so the browser cannot
+  # forge transcript entries).
+  consume_pending_cids: list[str] | None = None
   # Optional UI hint for force-steering multiple already-queued messages.
   # The server still reconstructs the durable rows from Chat.pending_messages
   # so the browser cannot forge transcript entries; this only lets newer
@@ -387,6 +489,10 @@ class BackgroundAgentsUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
   """Owner-level settings updates."""
 
+  # Settings used to include a global auto-resume flag. Reject stale cached
+  # clients (and typos) instead of returning {ok: true} for an ignored field.
+  model_config = ConfigDict(extra="forbid")
+
   gemini_api_key: str | None = None
   provider: str | None = None
   # Legacy owner-level agent settings. Live chat surfaces should write
@@ -418,6 +524,11 @@ class ModelEntry(BaseModel):
   # fallback registry. Kept in the response shape for compatibility
   # with older clients that already read this field.
   available: bool = True
+  # Optional per-model capability metadata. Absent means "use the provider's
+  # default scale" so older registry producers and newly-discovered models keep
+  # working. A future model with a narrower/different scale can declare it here
+  # without teaching every picker about that model id.
+  effort_levels: list[str] | None = None
 
 
 class ModelRegistryResponse(BaseModel):

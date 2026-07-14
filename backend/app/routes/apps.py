@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -16,26 +17,27 @@ from datetime import datetime, UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, app_git, fs_locks, icon_cache, legacy_platform_apps, models, providers, schemas,
+  activity, app_git, app_jobs, fs_locks, icon_cache, legacy_platform_apps,
+  models, providers, schemas,
   source_dirs, theme,
 )
 from app.storage_io import delete_content_type_tree, read_capped_body
+from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
-from app.routes.notify import publish_app_built_to_owning_chat
 from app.compiler import compile_jsx, recompile_app_bundle
 from app.config import get_settings
-from app import core_app_suppress
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
   get_owner_or_app_with_manage_apps, reject_cross_site, resolve_owner_or_app,
 )
 from app.http_caching import strip_range
+from app.manifest_contract import ManifestContractError, validate_cron_expr
 from app.resource_access import live_app, live_app_or_404
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -201,14 +203,12 @@ def _drop_cron_and_rmtree(resolved: Path) -> None:
 
 
 def _disable_init_cron_replay(resolved: Path) -> None:
-  """Move a source tree's ``init-cron.sh`` aside so boot replay skips it.
+  """Move a source tree's durable cron declaration aside while tombstoned.
 
-  ``entrypoint.sh`` re-runs EVERY ``/data/apps/*/init-cron.sh`` on boot, which
-  would resurrect a tombstoned scheduled app's crontab entry that
-  ``_drop_cron_only`` just removed. Renaming the script to
-  ``init-cron.sh.tombstoned`` puts it outside the entrypoint's
-  ``*/init-cron.sh`` glob while keeping it on disk so ``recover`` can rename it
-  back and reinstall the schedule. Swallows ``OSError`` like its siblings.
+  The boot reconciler never executes app-owned scripts and excludes tombstoned
+  rows, but preserving the declaration under ``init-cron.sh.tombstoned`` makes
+  the disabled state explicit and lets ``recover`` restore the exact cadence.
+  Swallows ``OSError`` like its siblings.
   """
   try:
     os.replace(
@@ -219,23 +219,18 @@ def _disable_init_cron_replay(resolved: Path) -> None:
 
 
 def _reenable_init_cron_replay(resolved: Path) -> None:
-  """Re-arm a recovered app's cron: undo ``_disable_init_cron_replay``.
+  """Restore a recovered app's durable cron declaration without running it.
 
   Renames ``init-cron.sh.tombstoned`` back to ``init-cron.sh`` (so the next
-  boot replays it too) and runs it once now to reinstall the crontab entry the
-  tombstone dropped — recovery must re-establish every side-effect the delete
-  tore down. Swallows ``OSError``; the ``init-cron.sh`` run is best-effort
-  (``check=False``) and bounded.
+  boot can discover it too). The caller subsequently invokes
+  ``reconcile_app_cron_supervision`` to parse the effective schedule and write
+  a fresh supervised entry. Executing this preserved script directly would
+  let an app installed by an older release bypass the lease/sandbox gate at
+  recovery time while cron is already running.
   """
   try:
     os.replace(
       resolved / "init-cron.sh.tombstoned", resolved / "init-cron.sh"
-    )
-  except OSError:
-    return
-  try:
-    subprocess.run(
-      ["bash", str(resolved / "init-cron.sh")], timeout=10, check=False
     )
   except OSError:
     pass
@@ -247,8 +242,8 @@ def _drop_cron_only(resolved: Path) -> None:
   The soft-delete (tombstone) path: a tombstoned app must stop running its
   scheduled jobs, but its source — including the job.sh — has to survive so a
   reinstall/recover can re-register the schedule. Drops the live crontab entry
-  AND moves ``init-cron.sh`` aside (``_disable_init_cron_replay``) so the boot
-  replay in ``entrypoint.sh`` can't resurrect the schedule. Pure-filesystem so
+  AND moves ``init-cron.sh`` aside (``_disable_init_cron_replay``) so recovery
+  alone can reactivate the durable declaration. Pure-filesystem so
   it runs via ``asyncio.to_thread`` (``_unregister_cron`` shells out to
   crontab). Swallows errors like ``_drop_cron_and_rmtree``.
   """
@@ -329,6 +324,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(deleted_app_id)}
   )
+  from app.install import purge_app_skills
+  await purge_app_skills(deleted_app_id)
 
   if compiled_path:
     try:
@@ -453,6 +450,8 @@ def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
 def _schedule_from_crontab_text(
   source_dir: Path, text: str,
 ) -> tuple[str, str] | None:
+  from app.install import _crontab_command_path
+
   needle = f"{str(source_dir).rstrip('/')}/"
   for line in text.splitlines():
     entry_match = re.search(r"""^\s*ENTRY=(?:"([^"]+)"|'([^']+)')""", line)
@@ -461,7 +460,12 @@ def _schedule_from_crontab_text(
     parsed = _parse_cron_job_line(line)
     if parsed is None:
       continue
-    cron, command_path = parsed
+    cron, _ = parsed
+    # Managed entries launch Python first, then the common runner, then the
+    # real app job.  Resolve that indirection so schedule discovery remains
+    # stable after an entry is supervised (and can still migrate old direct
+    # entries on the next boot).
+    command_path = _crontab_command_path(line)
     if command_path.startswith(needle):
       return cron, Path(command_path).name
   return None
@@ -481,6 +485,58 @@ def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
     if schedule is not None:
       return schedule
   return _manifest_schedule(source_dir)
+
+
+def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
+  """Converge every live managed schedule through the common job runner.
+
+  Older ``init-cron.sh`` files wrote ``<source>/fetch.sh`` directly. Boot never
+  executes those files; cron is deliberately started only after FastAPI
+  lifespan completes. This reconciliation therefore gets a race-free window
+  to parse and preserve each effective cadence while rewriting both the live
+  crontab entry and its durable declaration via the current
+  scaffold. Tombstoned apps are excluded and source trees must be ordinary,
+  non-symlink direct children of ``/data/apps``.
+  """
+  from app.install import _register_cron
+
+  settings = get_settings()
+  apps_root = Path(settings.data_dir) / "apps"
+  try:
+    resolved_root = apps_root.resolve(strict=True)
+  except OSError:
+    return 0, [f"apps root unavailable: {apps_root}"]
+  live_crontab = _read_live_crontab()
+  reconciled = 0
+  warnings: list[str] = []
+  apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
+  for app in apps:
+    schedule = _app_schedule(app, live_crontab)
+    if schedule is None or not app.source_dir:
+      continue
+    source_dir = Path(app.source_dir)
+    try:
+      if source_dir.is_symlink():
+        raise ValueError("source directory is a symlink")
+      resolved_source = source_dir.resolve(strict=True)
+      if resolved_source.parent != resolved_root:
+        raise ValueError("source directory is not a direct app child")
+    except (OSError, RuntimeError, ValueError) as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    cron, job_name = schedule
+    job_path = resolved_source / job_name
+    try:
+      if job_path.is_symlink() or not job_path.is_file():
+        raise ValueError(f"job is missing or a symlink: {job_name}")
+      _register_cron(
+        resolved_source.name, cron, job_path, app.id,
+      )
+    except Exception as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    reconciled += 1
+  return reconciled, warnings
 
 
 @router.get("/", response_model=list[schemas.AppOut])
@@ -562,6 +618,51 @@ def list_app_schedules(
 
 
 @router.post(
+  "/preview",
+  response_model=schemas.AppPreviewOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def preview_app_install(
+  body: schemas.AppInstall,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Validate and normalize the capabilities an install would apply.
+
+  This intentionally fetches only the manifest.  The install endpoint repeats
+  the fetch and binds it to ``reviewed_capability_digest`` before fetching app
+  code or mutating durable state, closing the catalog-preview/install race.
+  """
+  from app import install
+
+  manifest, raw_base, contract, digest = (
+    await install.preview_manifest_capabilities(
+      manifest_url=body.manifest_url,
+      manifest=body.manifest,
+      raw_base=body.raw_base,
+    )
+  )
+  source = body.manifest_url if body.manifest_url is not None else raw_base
+  canonical = install._canonical_identity_key(source, manifest["id"])
+  existing = (
+    db.query(models.App)
+    .filter(
+      models.App.manifest_url == canonical,
+      models.App.deleted_at.is_(None),
+    )
+    .first()
+  )
+  installed_contract = existing.capability_contract if existing else None
+  return schemas.AppPreviewOut(
+    manifest=manifest,
+    capability_contract=contract,
+    capability_digest=digest,
+    installed_contract=installed_contract,
+    capability_diff=diff_contracts(installed_contract, contract),
+  )
+
+
+@router.post(
   "/install",
   response_model=schemas.AppInstallOut,
   status_code=201,
@@ -598,6 +699,8 @@ async def install_app(
         manifest=body.manifest,
         raw_base=body.raw_base,
         source="store",
+        reviewed_capability_digest=body.reviewed_capability_digest,
+        reviewed_source_digest=body.reviewed_source_digest,
       )
     )
   # Notify the Shell to refetch its app list so a new install (or an
@@ -610,9 +713,6 @@ async def install_app(
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app.id)}
   )
-  # Clean up any retired suppression marker left by older builds. Catalog apps
-  # are ordinary installs now, so this is compatibility cleanup only.
-  core_app_suppress.clear_suppressed(get_settings().data_dir, app.slug)
   # A conflicting update leaves the app on its current version with its source
   # files untouched. Whether to involve the agent is the owner's call, not ours:
   # the store surfaces the conflict (mode + conflict_paths, below) and the owner
@@ -636,12 +736,17 @@ async def install_app(
     embeds_agent=app.embeds_agent,
     manage_apps=app.manage_apps,
     github_access=app.github_access,
+    filesystem_access=app.filesystem_access,
     slug=app.slug,
     manifest_url=app.manifest_url,
     theme_color=app.theme_color,
     background_color=app.background_color,
     display=app.display,
     offline_contract=app.offline_contract,
+    system_prompt_file=app.system_prompt_file,
+    system_app=app.system_app,
+    chat_log_access=app.chat_log_access,
+    capability_contract=app.capability_contract,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,
@@ -700,6 +805,83 @@ def _upstream_version(repo: Path, upstream_commit: str | None) -> str | None:
     return None
   match = re.match(r"install v(.+) from .+", proc.stdout.strip())
   return match.group(1) if match else None
+
+
+def _write_preview_tree(root: Path, files: dict[str, bytes]) -> None:
+  """Materialize a trusted git/source tree below ``root`` for no-index diff.
+
+  Git tree paths and manifest ``source_files`` have already passed their
+  respective validators, but keep the containment check here as a final guard:
+  this helper writes attacker-controlled package paths into a temporary
+  directory and must never let ``..`` escape it.
+  """
+  resolved_root = root.resolve()
+  for rel, data in files.items():
+    destination = (root / rel).resolve()
+    if destination == resolved_root or resolved_root not in destination.parents:
+      raise HTTPException(400, "Update preview contains an invalid source path.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+
+
+def _diff_preview_trees(
+  previous: dict[str, bytes], candidate: dict[str, bytes],
+) -> str:
+  """Return a stable unified diff without touching the installed app repo."""
+  tmp_parent = Path(tempfile.mkdtemp(prefix="mobius-update-candidate-"))
+  old_root = tmp_parent / "old"
+  new_root = tmp_parent / "new"
+  old_root.mkdir()
+  new_root.mkdir()
+  try:
+    _write_preview_tree(old_root, previous)
+    _write_preview_tree(new_root, candidate)
+    proc = subprocess.run(
+      [
+        "git", "diff", "--no-index", "--binary", "--no-ext-diff",
+        "--src-prefix=a/", "--dst-prefix=b/", "old", "new",
+      ],
+      cwd=tmp_parent,
+      capture_output=True,
+      text=True,
+      timeout=30,
+      check=False,
+    )
+    if proc.returncode not in (0, 1):
+      raise HTTPException(500, "Could not build the update preview.")
+    # ``git diff --no-index old new`` includes the comparison-directory names
+    # in its paths. Strip only those generated prefixes so the client sees the
+    # same app-relative paths that will be updated.
+    return proc.stdout.replace("a/old/", "a/").replace("b/new/", "b/")
+  finally:
+    shutil.rmtree(tmp_parent, ignore_errors=True)
+
+
+def _fetched_source_tree(fetched) -> dict[str, bytes]:
+  """The runtime source subset fetched by ``fetch_upstream_source``."""
+  tree = {"index.jsx": fetched.entry_bytes, **fetched.source_files}
+  if fetched.job_name and fetched.job_bytes is not None:
+    tree[fetched.job_name] = fetched.job_bytes
+  return tree
+
+
+def _recorded_runtime_paths(previous_tree: dict[str, bytes]) -> set[str]:
+  """Recover the prior cloned package's declared runtime-source paths."""
+  paths = {"index.jsx"}
+  raw_manifest = previous_tree.get("mobius.json")
+  if raw_manifest is None:
+    return paths
+  try:
+    manifest = json.loads(raw_manifest)
+  except (UnicodeDecodeError, json.JSONDecodeError):
+    return paths
+  for rel in manifest.get("source_files") or []:
+    if isinstance(rel, str):
+      paths.add(rel)
+  schedule = manifest.get("schedule")
+  if isinstance(schedule, dict) and isinstance(schedule.get("job"), str):
+    paths.add(schedule["job"])
+  return paths
 
 
 def _git_path_exists(repo: Path, name: str) -> bool:
@@ -863,6 +1045,174 @@ def _materialize_conflict_files(
     shutil.rmtree(tmp_parent, ignore_errors=True)
 
 
+def _fetched_differs_from_upstream(
+  repo: Path,
+  fetched_tree: dict[str, bytes],
+  cloned: bool,
+  non_source: frozenset[str],
+) -> bool:
+  """Whether the freshly-fetched upstream source differs from what the app
+  recorded on its `upstream` branch — the git-native update signal.
+
+  Reads the pristine `upstream` tree via git cat-file (`read_ref_tree`), which
+  only reads objects — it never touches the index or working tree, so this is
+  safe to call on every store open. Any fetched file that is new (absent
+  upstream) or whose bytes changed means upstream moved, which catches a code
+  push that forgot to bump the version.
+
+  Removal is only inferable for a SYNTHETIC install: there the recorded upstream
+  tree is exactly the declared source set, so a source file present upstream but
+  gone from the fetch is a genuine removal. A CLONED (real-origin) repo's
+  upstream tree also holds repo-native non-source files (README, the manifest,
+  the repo's own .gitignore) that were never part of the fetched declared set,
+  so a raw set-diff there would false-flag every catalog app — only added and
+  changed content is compared for those.
+  """
+  upstream_tree = app_git.read_ref_tree(repo, app_git.UPSTREAM_BRANCH)
+  for rel, data in fetched_tree.items():
+    if upstream_tree.get(rel) != data:
+      return True
+  if not cloned:
+    upstream_source = {
+      rel for rel in upstream_tree if rel not in non_source
+    }
+    if upstream_source - set(fetched_tree):
+      return True
+  return False
+
+
+@router.get(
+  "/{app_id}/update-check",
+  response_model=schemas.UpdateCheckOut,
+)
+async def update_check(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read-only, git-native update detection for an installed app.
+
+  Content-compares the app's CURRENT upstream source (fetched the same way
+  install does) against the pristine `upstream` branch the last install
+  recorded, so a push that changed code WITHOUT bumping the version string
+  still surfaces as an update. Strictly read-only — no working-tree mutation,
+  no `record_upstream`, no DB write — which is what makes it safe to call on
+  every store open.
+
+  `update_available` is null (unknown) whenever the compare can't run — no
+  `manifest_url`, no git repo, no recorded upstream branch, or the upstream
+  fetch failed — and the caller then falls back to version comparison. A store
+  open must degrade, not error, so a network failure is a 200 with null rather
+  than a 5xx; only a genuinely invalid request (unknown app id) keeps its normal
+  HTTP error.
+  """
+  # Mirror update-preview's trust boundary exactly: an app token may check its
+  # OWN app; an App-Store-style manager token (manage_apps) may check other
+  # apps; the owner (app_id is None) may check any.
+  if principal.app_id is not None and principal.app_id != app_id:
+    caller = (
+      db.query(models.App)
+      .filter(models.App.id == principal.app_id)
+      .first()
+    )
+    if caller is None:
+      raise HTTPException(status_code=401, detail="App not found.")
+    if not bool(caller.manage_apps):
+      raise HTTPException(
+        status_code=403,
+        detail=(
+          "This app needs permissions.manage_apps=true in its manifest "
+          "to check updates for other apps."
+        ),
+      )
+  from app import install
+
+  app = live_app_or_404(db, app_id)
+  checked_at = datetime.now(UTC)
+  local_version = app.version
+  target_app_id = app.id
+  manifest_url = app.manifest_url
+  source_dir = app.source_dir
+  upstream_commit = app.upstream_commit
+
+  def _unknown() -> schemas.UpdateCheckOut:
+    # Null is "we can't tell git-natively" — NOT an error. The caller falls back
+    # to version comparison. Shared by every precondition-miss + fetch failure.
+    return schemas.UpdateCheckOut(
+      update_available=None,
+      upstream_version=None,
+      local_version=local_version,
+      checked_at=checked_at,
+    )
+
+  if not manifest_url or not source_dir:
+    return _unknown()
+
+  # Authentication and the target lookup have completed.  Release the request
+  # session before any upstream network or git work: App Store checks fan out,
+  # and keeping one connection checked out per slow fetch can exhaust the
+  # production pool and turn unrelated DB-backed requests into 500s.  All ORM
+  # values used below were deliberately copied to scalars above.
+  db.close()
+
+  repo = Path(source_dir)
+  if not app_git.is_repo(repo) or not app_git.ref_exists(
+    repo, app_git.UPSTREAM_BRANCH,
+  ):
+    return _unknown()
+
+  pending = install.read_pending_conflict_update_receipt(
+    repo, app_id=target_app_id, upstream_commit=upstream_commit,
+  )
+  if pending is not None:
+    # A resolver may have committed source while the final install replay was
+    # interrupted (network/restart). Keep Update visible so the owner can retry;
+    # the same receipt is also retried automatically by the watcher at startup.
+    return schemas.UpdateCheckOut(
+      update_available=True,
+      upstream_version=str(pending["manifest"].get("version") or "") or None,
+      local_version=local_version,
+      checked_at=checked_at,
+    )
+
+  # Reconstruct the fetchable manifest URL from the stored canonical identity
+  # key (`<base>#manifest-id=<id>`): the raw manifest lives at <base>/mobius.json,
+  # exactly where a store-driven update re-fetches it.
+  base = install._canonical_base(manifest_url)
+  fetch_manifest_url = base + "/mobius.json"
+  try:
+    fetched = await install.fetch_upstream_source(fetch_manifest_url)
+  except HTTPException:
+    # Upstream unreachable / rate-limited / now-invalid — degrade to unknown so
+    # a store open never errors on a transient network failure.
+    return _unknown()
+
+  # Build the fetched source tree the way install records it on `upstream`.
+  # The shared manifest contract makes index.jsx canonical for synthetic and
+  # cloned packages alike, so update comparison has one entry identity.
+  cloned = await asyncio.to_thread(app_git.has_origin, repo)
+  fetched_tree: dict[str, bytes] = {"index.jsx": fetched.entry_bytes}
+  fetched_tree.update(fetched.source_files)
+  if fetched.job_name and fetched.job_bytes is not None:
+    fetched_tree[fetched.job_name] = fetched.job_bytes
+
+  # Hold the source-dir lock only around the git read so a concurrent installer's
+  # record_upstream can't move the `upstream` ref mid-read. The read itself
+  # (read_ref_tree = ls-tree + cat-file) never touches the index or working tree.
+  async with fs_locks.source_dir_lock(str(repo)):
+    update_available = await asyncio.to_thread(
+      _fetched_differs_from_upstream,
+      repo, fetched_tree, cloned, install._MERGED_NON_SOURCE,
+    )
+
+  return schemas.UpdateCheckOut(
+    update_available=update_available,
+    upstream_version=fetched.manifest.get("version"),
+    local_version=local_version,
+    checked_at=checked_at,
+  )
+
+
 @router.get(
   "/{app_id}/update-preview",
   response_model=schemas.UpdatePreviewOut,
@@ -921,6 +1271,184 @@ async def update_preview(
     conflict_paths=conflict_paths,
     conflicts=conflicts,
     upstream_diff=upstream_diff,
+  )
+
+
+@router.get(
+  "/{app_id}/update-candidate-preview",
+  response_model=schemas.UpdateCandidatePreviewOut,
+)
+async def update_candidate_preview(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Preview the currently published app source before applying an update.
+
+  Unlike ``update-preview`` (which describes the upstream commit already
+  recorded on the instance for conflict resolution), this endpoint fetches the
+  live manifest/source and diffs it against the pristine source from the last
+  successful install. It never advances refs, writes the working tree, or
+  changes the App row, so opening the App Store review is genuinely read-only.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    caller = (
+      db.query(models.App)
+      .filter(models.App.id == principal.app_id)
+      .first()
+    )
+    if caller is None:
+      raise HTTPException(status_code=401, detail="App not found.")
+    if not bool(caller.manage_apps):
+      raise HTTPException(
+        status_code=403,
+        detail=(
+          "This app needs permissions.manage_apps=true in its manifest "
+          "to preview updates for other apps."
+        ),
+      )
+
+  from app import install
+
+  app = live_app_or_404(db, app_id)
+  manifest_url = app.manifest_url
+  source_dir = app.source_dir
+  upstream_commit = app.upstream_commit
+  if not manifest_url or not source_dir:
+    raise HTTPException(400, "App has no update source.")
+  repo = Path(source_dir)
+  if not app_git.is_repo(repo) or not app_git.ref_exists(
+    repo, app_git.UPSTREAM_BRANCH,
+  ):
+    raise HTTPException(400, "App is not a git-backed install.")
+
+  # Release the request session before upstream network I/O, matching the
+  # update-check route's connection-pool discipline.
+  db.close()
+  fetch_manifest_url = install._canonical_base(manifest_url) + "/mobius.json"
+  fetched = await install.fetch_upstream_source(fetch_manifest_url)
+  candidate_tree = _fetched_source_tree(fetched)
+  source_digest = install._source_review_digest(
+    manifest=fetched.manifest,
+    entry_bytes=fetched.entry_bytes,
+    bundled_job=fetched.job_bytes,
+    source_files=fetched.source_files,
+  )
+
+  async with fs_locks.source_dir_lock(str(repo)):
+    previous_tree = await asyncio.to_thread(
+      app_git.read_ref_tree, repo, app_git.UPSTREAM_BRANCH,
+    )
+    cloned = await asyncio.to_thread(app_git.has_origin, repo)
+  # Synthetic installs add one managed .gitignore that is not package source.
+  # For real-origin installs, restrict the comparison to the fetched runtime
+  # source set: the install UI reviews what Möbius actually compiles/executes,
+  # not repository-only README or workflow churn.
+  if cloned:
+    runtime_paths = set(candidate_tree) | _recorded_runtime_paths(previous_tree)
+    previous_source = {
+      rel: data for rel, data in previous_tree.items() if rel in runtime_paths
+    }
+  else:
+    previous_source = {
+      rel: data for rel, data in previous_tree.items() if rel != ".gitignore"
+    }
+  upstream_diff = await asyncio.to_thread(
+    _diff_preview_trees, previous_source, candidate_tree,
+  )
+  return schemas.UpdateCandidatePreviewOut(
+    app_id=app_id,
+    upstream_version=str(fetched.manifest.get("version") or "") or None,
+    upstream_commit=upstream_commit,
+    upstream_diff=upstream_diff,
+    source_digest=source_digest,
+  )
+
+
+# Keepalive cadence for the per-app event stream — matches the shell-level
+# /api/events/system so reverse proxies see one consistent traffic pattern.
+_APP_EVENT_KEEPALIVE = 30
+
+
+def _app_stream_should_forward(event: dict, app_id: int) -> bool:
+  """Whether a SystemBroadcast event is visible to app_id's scoped stream.
+
+  The least-privilege invariant behind the app-token event stream: an app
+  may see ONLY `app_updated` notifications for its OWN id. Every other
+  system event — another app's `app_updated`, and the owner-scoped
+  `theme_updated` / `shell_rebuild_*` / `chat_run_*` types — is dropped
+  server-side, so an app token cannot use this stream as a back door to
+  owner-visible platform state. The SystemBroadcast fans one queue out to
+  every subscriber, so the filter (not the subscription) is what keeps the
+  scope narrow.
+  """
+  if event.get("type") != "app_updated":
+    return False
+  return str(event.get("appId")) == str(app_id)
+
+
+@router.get("/{app_id}/events")
+async def stream_app_events(
+  app_id: int,
+  request: Request,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Per-app SSE stream of this app's own `app_updated` events.
+
+  This is what lets an installed standalone PWA (`/apps/<slug>/`) offer a
+  live "Updated — tap to refresh" pill: the standalone shell subscribes
+  with its app-scoped token and reloads onto the fresh bundle when its own
+  app is edited mid-build.
+
+  Auth boundary (least privilege): an app-scoped token may open ONLY its
+  own app's stream — a token whose `app_id` claim differs from the path id
+  is 403, never a way to watch a different app. The owner token (`app_id`
+  is None) may open any app's stream. Beyond opening, the generator filters
+  every event through `_app_stream_should_forward`, so even a broadened
+  SystemBroadcast can never leak theme/shell/other-app events onto an app's
+  stream. This deliberately does NOT grant the App-Store-style manage_apps
+  cross-app read that update-check/update-preview allow — the standalone
+  shell only ever needs to watch itself.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="An app token may only watch its own app's events.",
+    )
+  # 404 a missing/tombstoned app so an owner token can't open a stream for a
+  # nonexistent app (an app token already fails this in get_principal's
+  # scope check, which rejects a token whose app row is gone).
+  app = live_app_or_404(db, app_id)
+  # Release the pooled DB connection BEFORE the (possibly hours-long) stream
+  # loop, exactly as /api/events/system does — auth already ran against this
+  # session, so holding it open for the stream's lifetime would pin one
+  # connection per open standalone PWA.
+  db.close()
+  queue = get_system_broadcast().subscribe()
+
+  async def generate():
+    try:
+      yield f"data: {json.dumps({'type': 'app_stream_open'})}\n\n"
+      while True:
+        if await request.is_disconnected():
+          break
+        try:
+          event = await asyncio.wait_for(
+            queue.get(), timeout=_APP_EVENT_KEEPALIVE,
+          )
+        except asyncio.TimeoutError:
+          yield ": keepalive\n\n"
+          continue
+        if _app_stream_should_forward(event, app_id):
+          yield f"data: {json.dumps(event)}\n\n"
+    finally:
+      get_system_broadcast().unsubscribe(queue)
+
+  return StreamingResponse(
+    generate(),
+    media_type="text/event-stream",
+    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
   )
 
 
@@ -1086,17 +1614,14 @@ async def create_app(
       db.rollback()
       raise HTTPException(status_code=422, detail=str(exc))
     db.refresh(app)
-    get_system_broadcast().publish(
-      {"type": "app_updated", "appId": str(app.id)}
-    )
-    # Fire the chat-scoped `app_built` onto the owning chat's stream so the
-    # in-chat "Open <App>" CTA appears for the turn that built/edited it. The
-    # global `app_updated` above busts caches everywhere but never reaches the
-    # chat-scoped CTA gate. No-ops when the chat has no live broadcast (e.g.
-    # an out-of-band edit), so it never plants a spurious CTA. app_watcher
-    # emits the same event on a file-write recompile; the client upsert is
-    # idempotent (deduped by appId), so a double-emit is harmless.
-    publish_app_built_to_owning_chat(db, str(app.id))
+    event = {"type": "app_created", "appId": str(app.id)}
+    if app.chat_id is not None:
+      event["chatId"] = str(app.chat_id)
+    get_system_broadcast().publish(event)
+    # The in-chat "Open <App>" CTA is DERIVED on the frontend from the apps
+    # query's chat_id + updated_at. app_created triggers that refetch and also
+    # carries the durable relationship into the pane-neutral workspace
+    # placement path after the first successful compile.
   return app
 
 
@@ -1159,6 +1684,21 @@ async def update_app(
     fs_locks.app_storage_lock(app_id),
   ):
     app = live_app_or_404(db, app_id, populate=True)
+    from app import install
+    if body.jsx_source is not None and app.source_dir and (
+      await asyncio.to_thread(app_git.merge_in_progress, app.source_dir)
+      or (
+        Path(app.source_dir) / ".git" / install._PENDING_UPDATE_DIR
+        / "receipt.json"
+      ).is_file()
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "This app has a pending update resolution. Save the resolved files "
+          "in its source directory so the full update can finish."
+        ),
+      )
     if body.name is not None:
       app.name = body.name
     if body.description is not None:
@@ -1193,15 +1733,12 @@ async def update_app(
     get_system_broadcast().publish(
       {"type": "app_updated", "appId": str(app.id)}
     )
-    # Fire the chat-scoped `app_built` CTA ONLY on a real rebuild. A
-    # metadata-only PATCH (pin/rename/share toggles — `jsx_source is None`)
-    # still reaches here (it commits fields without recompiling), and emitting
-    # then would plant an "Open <App>" card on whatever turn the owning chat
-    # happens to be streaming — a correct link in the wrong turn. Gate on
-    # jsx_source so only an actual edit surfaces the CTA. The helper still
-    # no-ops without a live broadcast, and the client upsert dedupes by appId.
-    if body.jsx_source is not None:
-      publish_app_built_to_owning_chat(db, str(app.id))
+    # The in-chat "Open <App>" CTA is DERIVED on the frontend from the apps
+    # query's chat_id + updated_at, so app_updated alone surfaces it in the
+    # owning chat. A metadata-only PATCH still bumps updated_at, so a
+    # pin/rename can flash "Preview updated ✓" — sanctioned (see
+    # chatRuntimeState.builtAppPulseDecision), the wire carries no source-only
+    # version key to gate on.
   return app
 
 
@@ -1407,6 +1944,13 @@ async def delete_app(
     app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
+    # A job wrapper publishes its lease before checking the live row.  Now that
+    # the tombstone is durable, terminate every verified group; a wrapper that
+    # races in afterward observes the tombstone and exits before spawning work.
+    await asyncio.to_thread(app_jobs.terminate_app_jobs, app_id)
+    from app.install import deactivate_app_skills
+    for warning in await deactivate_app_skills(app_id):
+      log.warning("uninstall: %s", warning)
     # Logical uninstall — pairs with the app_install event so churn analysis
     # (and the nightly digest) sees removals, not just installs. Best-effort,
     # after the tombstone commit.
@@ -1482,13 +2026,15 @@ async def delete_app_data(
     # the path join), the sidecar analogue of removing the storage root.
     await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
     delete_content_type_tree(data_dir, Path("apps") / str(app.id), "")
-
-  # Advance updated_at so the iframe cache-buster (versionForApp reads
-  # app.updated_at) changes and a currently-open app remounts against its
-  # now-empty storage — the wipe touches no mapped column, so onupdate won't
-  # fire on its own. Naive UTC to match the App soft-delete write convention.
-  app.updated_at = now_naive_utc()
-  db.commit()
+    # Rotate the storage generation and commit it before releasing the SAME lock
+    # every writer re-checks. An old-token write that was already waiting cannot
+    # recreate the erased tree after the wipe, and a fresh runtime gets a clean
+    # browser-local generation instead of adopting an old outbox.
+    app.token_nonce = secrets.token_hex(16)
+    # Advance updated_at so the iframe cache-buster changes and a currently-open
+    # app remounts against its now-empty storage.
+    app.updated_at = now_naive_utc()
+    db.commit()
 
   # Refetch the drawer and bust any cached iframe so the app reloads against
   # its now-empty storage (Shell's app_updated handler refreshes the list).
@@ -1513,9 +2059,9 @@ async def recover_app(
   also be revived by reinstalling — the install reattaches by manifest_url. The
   id-keyed storage tree was never removed, so the revived app keeps its data.
   Cron IS re-registered on recover for any app that had a scheduled
-  ``init-cron.sh`` (the tombstoned replay script is restored and re-run under the
-  source-dir lock); reinstalling a store app also re-registers it. See feature
-  110.
+  ``init-cron.sh``: the tombstoned replay script is restored under the
+  source-dir lock, then its cadence is converged through the common supervised
+  runner. Reinstalling a store app also re-registers it. See feature 110.
 
   Held under install_uninstall_lock — the same lock the TTL purge takes — so a
   recover near the TTL boundary can't race the purge into reviving a row the
@@ -1539,17 +2085,13 @@ async def recover_app(
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
     app.deleted_at = None
     app_name = app.name
-    app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
-    # The owner brought this app back. Clear any retired suppression marker left
-    # by older builds so compatibility files do not linger forever.
-    core_app_suppress.clear_suppressed(get_settings().data_dir, app_slug)
 
-    # Re-arm the schedule the tombstone dropped: rename init-cron.sh back into
-    # the entrypoint's replay glob and run it once to reinstall the crontab
-    # entry. Recovery must re-establish every side-effect delete tore down.
-    # Off the loop under the per-source-dir lock (bash run can block).
+    # Restore the durable declaration the tombstone moved aside. Do not execute
+    # preserved scripts here: an older one may run the job directly. Once all
+    # replay locations are restored, the common reconciler below preserves the
+    # cadence while rewriting/installing the supervised command.
     settings = get_settings()
     resolved_source = _resolve_app_source_dir(
       app_source_dir, app_name, settings
@@ -1563,6 +2105,26 @@ async def recover_app(
     ):
       async with fs_locks.source_dir_lock(str(runtime_dir)):
         await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
+    def _reconcile_recovered_cron():
+      # The request Session belongs to FastAPI's dependency worker. Give the
+      # blocking subprocess reconciliation its own Session in its own thread.
+      from app.database import SessionLocal
+      cron_db = SessionLocal()
+      try:
+        return reconcile_app_cron_supervision(cron_db)
+      finally:
+        cron_db.close()
+
+    _cron_count, _cron_warnings = await asyncio.to_thread(
+      _reconcile_recovered_cron,
+    )
+    if _cron_count:
+      log.info("recover supervised %d app cron schedule(s)", _cron_count)
+    for warning in _cron_warnings:
+      log.warning("recover cron supervision skipped: %s", warning)
+    from app.install import restore_app_skills
+    for warning in await restore_app_skills(app_id):
+      log.warning("recover: %s", warning)
   # Refetch the drawer (app reappears) and bust any cached iframe for it.
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app_id)}
@@ -1675,14 +2237,39 @@ def run_app_job(
   # Non-blocking. stdout/stderr go to /dev/null so the subprocess
   # doesn't inherit the FastAPI worker's pipes; the job script itself
   # is expected to log to /data/cron-logs/.
-  subprocess.Popen(
-    ["bash", str(job_path), str(app_id)],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    cwd=str(source_dir),
-    close_fds=True,
-  )
+  app_jobs.launch_app_job(app_id, job_path, source_dir)
   return {"started_at": datetime.now(UTC).isoformat()}
+
+
+@router.get("/{app_id}/job-context")
+def get_app_job_context(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Return non-secret system agent choices to this app's job token.
+
+  Jobs should not import platform internals or read owner settings files.  This
+  narrow surface lets a short-lived app token inherit the owner's configured
+  background provider ordering without receiving credentials or unrelated
+  settings.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="App token can only read its own job context.",
+    )
+  app = live_app_or_404(db, app_id)
+  from app.background_agents import resolve_background_agents
+  choices = resolve_background_agents(get_settings().data_dir, {})
+  return {
+    "app_id": app_id,
+    "primary": choices.get("primary"),
+    "fallback": choices.get("fallback"),
+    # This is the same normalized, non-secret receipt the owner reviewed.
+    # The job supervisor uses it to construct declared filesystem mounts.
+    "capability_contract": app.capability_contract,
+  }
 
 
 @router.post(
@@ -1713,8 +2300,11 @@ def update_app_schedule(
     raise HTTPException(
       status_code=400, detail="App has no source_dir; cannot locate job.",
     )
-  from app.install import _register_cron, _validate_cron_expr
-  _validate_cron_expr(body.cron)
+  from app.install import _register_cron
+  try:
+    validate_cron_expr(body.cron)
+  except ManifestContractError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
   source_dir = Path(app.source_dir)
   job_name = body.job or "fetch.sh"
   if "/" in job_name or "\\" in job_name or not job_name.strip():
@@ -1760,7 +2350,6 @@ def _not_modified_if_match(
 def _frame_etag(
   app: models.App,
   frame_path: Path,
-  theme_token: str | None = "",
   frame_rev: str | None = None,
 ) -> str | None:
   """Validator for the `/frame` response, combining the app's
@@ -1782,14 +2371,6 @@ def _frame_etag(
   real content change that keeps its mtime) — the precise failure mode
   here. The frame file is small, so hashing per request is cheap.
 
-  `theme_token` is VESTIGIAL since theme-as-data: the frame no longer has
-  the theme server-injected (the client paints it from the __mobius-theme__
-  slot + localStorage), so the served frame bytes don't vary by theme and a
-  light/dark toggle no longer needs to bust the frame cache. get_frame now
-  passes theme_token=None; the parameter is kept (defaulting to "") only so
-  any other caller/test stays source-compatible. When non-empty it still
-  folds into the validator.
-
   `frame_rev`: the app-frame.html content hash, already computed once by
   `load_effective_theme` for the same request. Pass it so the frame file
   isn't hashed a SECOND time here — the theme bundle and this ETag share
@@ -1808,8 +2389,6 @@ def _frame_etag(
       pass
   elif frame_rev:
     parts.append(frame_rev)
-  if theme_token:
-    parts.append(theme_token)
   if not parts:
     return None
   return 'W/"' + "-".join(parts) + '"'
@@ -1879,10 +2458,10 @@ def get_frame(
   # <style>). So the validator keys only on app.updated_at + the
   # app-frame.html content hash — NOT the theme. A light/dark toggle no
   # longer needs to bust the frame cache, because the served frame bytes
-  # don't change with the theme. Compute the frame content hash directly
-  # (theme-independent) and pass theme_token=None.
+  # don't change with the theme. Compute the frame content hash and key the
+  # validator on it plus app.updated_at.
   frame_rev = theme.frame_content_rev(get_settings().data_dir)
-  etag = _frame_etag(app, frame_path, theme_token=None, frame_rev=frame_rev)
+  etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
   if etag:
     not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:

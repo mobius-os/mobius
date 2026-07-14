@@ -9,6 +9,14 @@
   -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
+  /* The scrim is a modal boundary, not a transparent continuation of the
+     chat/app beneath it. Without an explicit touch-action Chrome Android can
+     begin a pan on the scrim and scroll the inert background scroller. Close
+     gestures are handled on pointerdown in Drawer.jsx; direct pans must stay
+     owned by the scrim. Drawer list scrolling remains enabled because the
+     panel sits above this element and has its own scroll containers. */
+  touch-action: none;
+  overscroll-behavior: none;
   transition: opacity var(--transition-duration-basic, 220ms) var(--cubic-exit, ease);
 }
 

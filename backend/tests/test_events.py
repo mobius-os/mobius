@@ -251,6 +251,57 @@ def test_thinking_event_after_tool_starts_fresh_block():
   assert [b["duration_ms"] for b in thinking_blocks] == [0, 0]
 
 
+def test_thinking_survives_interleaved_unknown_event():
+  # A provider `ping` heartbeat is forwarded as an "unknown_sdk_event" and lands
+  # BETWEEN two thinking_delta chunks (it can even split mid-word). It must NOT
+  # close the thinking run, else one reasoning pass fragments into many tiny
+  # "Thought for 1 second" blocks. Regression guard for that exact bug.
+  blocks = []
+  process_event({"type": "thinking", "content": "The sl", "ts": 1000}, blocks)
+  process_event(
+    {"type": "unknown_sdk_event", "kind": "stream:ping", "raw": {}}, blocks
+  )
+  process_event({"type": "thinking", "content": "iders move", "ts": 2200}, blocks)
+
+  assert len(blocks) == 1
+  assert blocks[0]["type"] == "thinking"
+  assert blocks[0]["content"] == "The sliders move"
+  assert blocks[0]["duration_ms"] == 1200
+
+
+def test_thinking_survives_interleaved_usage_and_signature():
+  # The full bookkeeping set is transparent to thinking coalescing: a `usage`
+  # event and a signature-style unknown_sdk_event between thinking chunks still
+  # yield one block. Only a real new content block (text/tool_start/…) splits it.
+  blocks = []
+  process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
+  process_event({"type": "usage", "input_tokens": 5, "output_tokens": 7}, blocks)
+  process_event(
+    {"type": "unknown_sdk_event",
+     "kind": "stream:content_block_delta:signature_delta", "raw": {}},
+    blocks,
+  )
+  process_event({"type": "thinking", "content": "b", "ts": 1600}, blocks)
+
+  thinking_blocks = [b for b in blocks if b.get("type") == "thinking"]
+  assert len(thinking_blocks) == 1
+  assert thinking_blocks[0]["content"] == "ab"
+  assert thinking_blocks[0]["duration_ms"] == 600
+
+
+def test_thinking_split_by_text_boundary_then_text():
+  # The interrupting set is COMPLETE, not over-broad: a real text item between
+  # two thinking passes still splits them (thinking, text, thinking).
+  blocks = []
+  process_event({"type": "thinking", "content": "before", "ts": 1000}, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  process_event({"type": "text", "content": "answer"}, blocks)
+  process_event({"type": "thinking", "content": "after", "ts": 2000}, blocks)
+
+  assert [b["type"] for b in blocks] == ["thinking", "text", "thinking"]
+  assert [b["content"] for b in blocks] == ["before", "answer", "after"]
+
+
 def test_finalize_blocks_keeps_thinking_and_strips_transients():
   blocks = []
   process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
@@ -440,6 +491,75 @@ def test_process_error_event_coalesces_duplicates():
   assert error_blocks[0]["message"] == "second"
   # Text block preserved.
   assert any(b.get("type") == "text" for b in blocks)
+
+
+def test_process_error_event_carries_whitelisted_extras_on_append():
+  """The park/resume extras ride the error event onto the persisted block.
+
+  Item 4 could only mark notes resumable at boot reconcile because this path
+  stripped everything but `message`; the whitelist passthrough makes the
+  stalled/drain/limit notes live-resumable and the parked card live by
+  construction (design §2.4).
+  """
+  blocks = []
+  process_event({
+    "type": "error",
+    "message": "rate limited",
+    "resumable": True,
+    "pause": {"kind": "usage_limit", "resets_at": "2026-07-11T01:40:00+00:00"},
+  }, blocks)
+  err = next(b for b in blocks if b.get("type") == "error")
+  assert err["resumable"] is True
+  assert err["pause"] == {
+    "kind": "usage_limit", "resets_at": "2026-07-11T01:40:00+00:00",
+  }
+
+
+def test_process_error_event_extras_are_whitelist_only():
+  """An unexpected event key must NOT leak into the durable transcript."""
+  blocks = []
+  process_event({
+    "type": "error",
+    "message": "boom",
+    "resumable": True,
+    "surprise_key": "nope",
+  }, blocks)
+  err = next(b for b in blocks if b.get("type") == "error")
+  assert err["resumable"] is True
+  assert "surprise_key" not in err
+
+
+def test_process_error_event_coalesce_latest_event_wins():
+  """Coalescing is latest-event-wins for the whitelisted extras: a later
+  error event REPLACES the block's extras wholesale — keys it omits are
+  removed. A park error followed by a different terminal error must degrade
+  to a plain error, not keep rendering a stale "resets at …" card for a
+  park that never got scheduled (or was superseded)."""
+  blocks = []
+  process_event({
+    "type": "error",
+    "message": "rate limited",
+    "resumable": True,
+    "pause": {"kind": "usage_limit", "resets_at": "2026-07-11T01:40:00+00:00"},
+  }, blocks)
+  process_event({
+    "type": "error", "message": "final text", "resumable": True,
+  }, blocks)
+  error_blocks = [b for b in blocks if b.get("type") == "error"]
+  assert len(error_blocks) == 1
+  assert error_blocks[0]["message"] == "final text"
+  # The follow-up carried `resumable` and nothing else: pause descriptor gone.
+  assert error_blocks[0]["resumable"] is True
+  assert "pause" not in error_blocks[0]
+  # A fully bare error strips everything whitelisted.
+  process_event({"type": "error", "message": "bare"}, blocks)
+  assert "resumable" not in error_blocks[0]
+  # And a later event can re-establish extras it explicitly carries.
+  process_event({
+    "type": "error", "message": "again", "pause": {"kind": "rate_limit"},
+  }, blocks)
+  assert error_blocks[0]["pause"] == {"kind": "rate_limit"}
+  assert "resumable" not in error_blocks[0]
 
 
 def test_immediate_save_types_are_event_types():

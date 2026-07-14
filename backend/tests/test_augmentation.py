@@ -145,15 +145,15 @@ def test_send_while_running_queues_message(client, db, auth, chat):
   try:
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "second message"},
+      json={"content": "second message", "cid": "c-second"},
       headers=auth,
     )
     assert resp.status_code == 202
     data = resp.json()
     assert data["status"] == "queued"
     assert data["position"] == 1
-    # The server must return the assigned ts so the frontend can
-    # replace its optimistic ts and DELETE-by-ts works.
+    # The server returns the assigned ts as display/ordering metadata;
+    # row identity (and DELETE /pending/{cid}) is the client-minted cid.
     assert "ts" in data and isinstance(data["ts"], int)
 
     # Verify message saved to pending_messages in DB with the same ts.
@@ -162,9 +162,9 @@ def test_send_while_running_queues_message(client, db, auth, chat):
     assert chat.pending_messages[0]["content"] == "second message"
     assert chat.pending_messages[0]["ts"] == data["ts"]
 
-    # Cancel by the server-returned ts must actually remove the message.
+    # Cancel by the row's stable cid must actually remove the message.
     cancel = client.delete(
-      f"/api/chats/{chat.id}/pending/{data['ts']}", headers=auth,
+      f"/api/chats/{chat.id}/pending/c-second", headers=auth,
     )
     assert cancel.status_code == 200
     assert cancel.json()["pending_messages"] == []
@@ -209,10 +209,10 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   with the new message."""
   from app.runner_registry import registry
 
-  # Seed stale pending (simulating crash recovery).
+  # Seed stale pending (simulating crash recovery) with backfilled legacy cids.
   chat.pending_messages = [
-    {"role": "user", "content": "stale 1", "ts": 100},
-    {"role": "user", "content": "stale 2", "ts": 200},
+    {"role": "user", "content": "stale 1", "ts": 100, "cid": "legacy-100"},
+    {"role": "user", "content": "stale 2", "ts": 200, "cid": "legacy-200"},
   ]
   db.commit()
 
@@ -222,7 +222,7 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   with patch("app.chat.run_chat", new=fake_run_chat):
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "new send"},
+      json={"content": "new send", "cid": "c-new"},
       headers=auth,
     )
 
@@ -231,8 +231,8 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     data = resp.json()
     assert data["status"] == "started"
     assert data["message"]["content"] == "stale 1\nstale 2\nnew send"
-    assert data["message"]["_consumed_ts"][:2] == [100, 200]
-    assert len(data["message"]["_consumed_ts"]) == 3
+    assert data["message"]["_consumed_cids"][:2] == ["legacy-100", "legacy-200"]
+    assert len(data["message"]["_consumed_cids"]) == 3
     db.refresh(chat)
     # Stale pending plus the new send were promoted as separate ordered rows
     # (the provider-facing combined text is data["message"]["content"] above).
@@ -252,7 +252,8 @@ def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
   from app.runner_registry import registry
 
   chat.pending_messages = [
-    {"role": "user", "content": "secret reminder", "ts": 100, "hidden": True},
+    {"role": "user", "content": "secret reminder", "ts": 100, "hidden": True,
+     "cid": "legacy-100"},
   ]
   db.commit()
 
@@ -262,7 +263,7 @@ def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
   with patch("app.chat.run_chat", new=fake_run_chat):
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
-      json={"content": "new visible send"},
+      json={"content": "new visible send", "cid": "c-visible"},
       headers=auth,
     )
 
@@ -274,7 +275,7 @@ def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
     assert data["position"] == 1
     assert data["message"]["content"] == "secret reminder"
     assert data["message"]["hidden"] is True
-    assert data["message"]["_consumed_ts"] == [100]
+    assert data["message"]["_consumed_cids"] == ["legacy-100"]
 
     db.refresh(chat)
     assert chat.messages[-1]["content"] == "secret reminder"
@@ -394,8 +395,8 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
 
   # Seed two queued messages.
   chat.pending_messages = [
-    {"role": "user", "content": "keep", "ts": 100},
-    {"role": "user", "content": "cancel me", "ts": 200},
+    {"role": "user", "content": "keep", "ts": 100, "cid": "c-keep"},
+    {"role": "user", "content": "cancel me", "ts": 200, "cid": "c-cancel"},
   ]
   db.commit()
 
@@ -418,7 +419,7 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
       from app.deps import get_current_owner
       owner = s.query(models.Owner).first()
       await cancel_pending_message(
-        chat_id=chat.id, ts=200, _=owner, db=s,
+        chat_id=chat.id, cid="c-cancel", _=owner, db=s,
       )
     finally:
       s.close()
@@ -439,8 +440,12 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
 
 
 def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
-  """Two queued sends within the same ms must get distinct ts values
-  so DELETE-by-ts targets exactly one entry and React keys stay unique."""
+  """Two queued sends within the same ms must still get distinct ts values.
+
+  ts is DEMOTED to display/ordering metadata (identity is cid now), but
+  `_ensure_unique_ts` is kept so the display ts stays strictly monotonic and
+  the ts-ordered transcript batch inserts sort deterministically. The cancel
+  below targets exactly one entry by its cid."""
   from unittest.mock import MagicMock, patch
 
   mock_proc = MagicMock()
@@ -453,11 +458,11 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
     with patch("app.routes.chats_stream.time.time", return_value=1.234):
       r1 = client.post(
         f"/api/chats/{chat.id}/messages",
-        json={"content": "a"}, headers=auth,
+        json={"content": "a", "cid": "c-a"}, headers=auth,
       )
       r2 = client.post(
         f"/api/chats/{chat.id}/messages",
-        json={"content": "b"}, headers=auth,
+        json={"content": "b", "cid": "c-b"}, headers=auth,
       )
     assert r1.status_code == 202 and r2.status_code == 202
     ts1 = r1.json()["ts"]
@@ -466,8 +471,8 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
     db.refresh(chat)
     assert {m["ts"] for m in chat.pending_messages} == {ts1, ts2}
 
-    # Cancel ts1 removes only that one.
-    client.delete(f"/api/chats/{chat.id}/pending/{ts1}", headers=auth)
+    # Cancel the first row by its cid removes only that one.
+    client.delete(f"/api/chats/{chat.id}/pending/c-a", headers=auth)
     db.refresh(chat)
     assert [m["ts"] for m in chat.pending_messages] == [ts2]
   finally:
@@ -762,7 +767,7 @@ def test_stop_chat_for_clears_pending_queue(db):
   global path test). Backend Stop is purely interrupt; frontend
   owns the collapse-and-resend.
 
-  Also asserts the returned cleared_pending_ts reports exactly the ts it
+  Also asserts the returned cleared_pending_cids reports exactly the cids it
   removed — the signal the frontend resends by (PM 115).
   """
   import asyncio
@@ -774,27 +779,27 @@ def test_stop_chat_for_clears_pending_queue(db):
     title="t",
     messages=[],
     pending_messages=[
-      {"role": "user", "content": "q1", "ts": 1},
-      {"role": "user", "content": "q2", "ts": 2},
+      {"role": "user", "content": "q1", "ts": 1, "cid": "c-q1"},
+      {"role": "user", "content": "q2", "ts": 2, "cid": "c-q2"},
     ],
   )
   db.add(chat)
   db.commit()
 
   try:
-    stopped, cleared_ts = asyncio.run(stop_chat_for("stop-for-clears", db=db))
+    stopped, cleared_cids = asyncio.run(stop_chat_for("stop-for-clears", db=db))
     db.refresh(chat)
     assert chat.pending_messages == []
-    assert cleared_ts == [1, 2]
+    assert cleared_cids == ["c-q1", "c-q2"]
   finally:
     registry.forget("stop-for-clears")
 
 
-def test_stop_chat_for_empty_pending_reports_no_cleared_ts(db):
+def test_stop_chat_for_empty_pending_reports_no_cleared_cids(db):
   """When the queue is already empty at Stop time — the natural-finish race
   where the turn-end drain already promoted the queued message into a
-  continuation — cleared_pending_ts is []. The frontend resends only
-  cleared_pending_ts, so it does NOT re-send the already-promoted message,
+  continuation — cleared_pending_cids is []. The frontend resends only
+  cleared_pending_cids, so it does NOT re-send the already-promoted message,
   closing the double-send (PM 115).
   """
   import asyncio
@@ -808,14 +813,14 @@ def test_stop_chat_for_empty_pending_reports_no_cleared_ts(db):
   db.commit()
 
   try:
-    stopped, cleared_ts = asyncio.run(stop_chat_for("stop-for-empty", db=db))
-    assert cleared_ts == []
+    stopped, cleared_cids = asyncio.run(stop_chat_for("stop-for-empty", db=db))
+    assert cleared_cids == []
   finally:
     registry.forget("stop-for-empty")
 
 
-def test_chat_stop_route_returns_cleared_pending_ts(client, db, auth):
-  """POST /api/chat/stop surfaces cleared_pending_ts so handleStop can resend
+def test_chat_stop_route_returns_cleared_pending_cids(client, db, auth):
+  """POST /api/chat/stop surfaces cleared_pending_cids so handleStop can resend
   only what Stop actually removed (PM 115)."""
   from app import models
 
@@ -823,7 +828,9 @@ def test_chat_stop_route_returns_cleared_pending_ts(client, db, auth):
     id="stop-route-clears",
     title="t",
     messages=[],
-    pending_messages=[{"role": "user", "content": "queued", "ts": 7}],
+    pending_messages=[
+      {"role": "user", "content": "queued", "ts": 7, "cid": "c-queued"},
+    ],
   )
   db.add(chat)
   db.commit()
@@ -834,14 +841,14 @@ def test_chat_stop_route_returns_cleared_pending_ts(client, db, auth):
     )
     assert res.status_code == 200, res.text
     body = res.json()
-    assert "cleared_pending_ts" in body
-    assert body["cleared_pending_ts"] == [7]
+    assert "cleared_pending_cids" in body
+    assert body["cleared_pending_cids"] == ["c-queued"]
   finally:
     registry.forget("stop-route-clears")
 
 
-def test_cancel_pending_message_by_ts(client, db, auth):
-  """DELETE /chats/{id}/pending/{ts} removes a queued message."""
+def test_cancel_pending_message_by_cid(client, db, auth):
+  """DELETE /chats/{id}/pending/{cid} removes a queued message by its cid."""
   from app import models
 
   c = models.Chat(
@@ -849,15 +856,15 @@ def test_cancel_pending_message_by_ts(client, db, auth):
     title="t",
     messages=[],
     pending_messages=[
-      {"role": "user", "content": "keep", "ts": 100},
-      {"role": "user", "content": "cancel me", "ts": 200},
-      {"role": "user", "content": "keep too", "ts": 300},
+      {"role": "user", "content": "keep", "ts": 100, "cid": "c-keep"},
+      {"role": "user", "content": "cancel me", "ts": 200, "cid": "c-cancel"},
+      {"role": "user", "content": "keep too", "ts": 300, "cid": "c-keep2"},
     ],
   )
   db.add(c)
   db.commit()
 
-  resp = client.delete("/api/chats/cancel-test/pending/200", headers=auth)
+  resp = client.delete("/api/chats/cancel-test/pending/c-cancel", headers=auth)
   assert resp.status_code == 200
   data = resp.json()
   assert len(data["pending_messages"]) == 2
@@ -867,40 +874,67 @@ def test_cancel_pending_message_by_ts(client, db, auth):
   assert [m["ts"] for m in c.pending_messages] == [100, 300]
 
 
+def test_cancel_pending_row_by_backfilled_legacy_cid(client, db, auth):
+  """A card-221-backfilled row carries an explicit `legacy-<ts>` cid; cancelling
+  by that value removes it (the value is stored now, not derived at read time)."""
+  from app import models
+
+  c = models.Chat(
+    id="cancel-legacy",
+    title="t",
+    messages=[],
+    pending_messages=[
+      {"role": "user", "content": "keep", "ts": 100, "cid": "legacy-100"},
+      {"role": "user", "content": "cancel me", "ts": 200, "cid": "legacy-200"},
+    ],
+  )
+  db.add(c)
+  db.commit()
+
+  resp = client.delete("/api/chats/cancel-legacy/pending/legacy-200", headers=auth)
+  assert resp.status_code == 200
+  db.refresh(c)
+  assert [m["ts"] for m in c.pending_messages] == [100]
+
+
 def test_cancel_pending_message_rejects_cross_site_request(client, db, auth):
-  """DELETE /chats/{id}/pending/{ts} rejects cross-site requests."""
+  """DELETE /chats/{id}/pending/{cid} rejects cross-site requests."""
   from app import models
 
   c = models.Chat(
     id="cancel-cross-site",
     title="t",
     messages=[],
-    pending_messages=[{"role": "user", "content": "cancel me", "ts": 200}],
+    pending_messages=[
+      {"role": "user", "content": "cancel me", "ts": 200, "cid": "c-cancel"},
+    ],
   )
   db.add(c)
   db.commit()
 
   cross = client.delete(
-    "/api/chats/cancel-cross-site/pending/200",
+    "/api/chats/cancel-cross-site/pending/c-cancel",
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
 
 
-def test_cancel_pending_missing_ts_noop(client, db, auth):
-  """DELETE with a ts not in the queue returns the unchanged queue."""
+def test_cancel_pending_missing_cid_noop(client, db, auth):
+  """DELETE with a cid not in the queue returns the unchanged queue."""
   from app import models
 
   c = models.Chat(
     id="cancel-noop",
     title="t",
     messages=[],
-    pending_messages=[{"role": "user", "content": "x", "ts": 100}],
+    pending_messages=[
+      {"role": "user", "content": "x", "ts": 100, "cid": "c-x"},
+    ],
   )
   db.add(c)
   db.commit()
 
-  resp = client.delete("/api/chats/cancel-noop/pending/999", headers=auth)
+  resp = client.delete("/api/chats/cancel-noop/pending/nope", headers=auth)
   assert resp.status_code == 200
   assert len(resp.json()["pending_messages"]) == 1
 
