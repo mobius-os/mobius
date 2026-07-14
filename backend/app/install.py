@@ -1843,7 +1843,12 @@ async def install_from_manifest(
           f"Manifest has too many storage_seeds (max {_SEEDS_COUNT_MAX}).",
         )
       if _seed_value_is_inline(value):
-        data = json.dumps(value).encode("utf-8")
+        # Canonical bytes keep a deferred conflict receipt stable after its
+        # manifest is serialized/reloaded (JSON object key order is semantic-
+        # free and must not make an unchanged candidate look different).
+        data = json.dumps(
+          value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
       else:
         data = await _http_get(cli, raw_base + value, _SEED_MAX_BYTES)
       seeds_total += len(data)
