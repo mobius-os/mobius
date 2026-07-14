@@ -630,22 +630,32 @@ test.describe('Drawer close paths converge through handleBack', () => {
   // prevents the navStack pop. These tests lock in that contract for
   // each close path independently.
 
-  test('22. Tap overlay closes drawer (does not navigate)', async ({ page }) => {
+  test('22. Pointer-down on overlay closes drawer (does not navigate)', async ({ page }) => {
     await setup(page)
     await openDrawer(page)
     await navigateToSettings(page)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
     await openDrawer(page)
     expect((await getNavState(page)).drawerOpen).toBe(true)
-    // Tap the drawer overlay (.drawer-overlay element).
-    await page.evaluate(() => {
-      const overlay = document.querySelector('.drawer-overlay')
-      if (overlay) overlay.click()
-    })
+    // Use a real pointer sequence rather than HTMLElement.click(). The drawer
+    // dismisses on pointerdown so a touch that moves enough for Chrome to
+    // suppress the later synthetic click still closes reliably.
+    await page.locator('.drawer-overlay').click({ position: { x: 400, y: 300 } })
     await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
     expect((await getNavState(page)).drawerOpen).toBe(false)
     // Still on settings — overlay tap did not navigate.
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('22b. Drawer scrim owns touch pans instead of the background', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    const contract = await page.locator('.drawer-overlay').evaluate((overlay) => ({
+      touchAction: getComputedStyle(overlay).touchAction,
+      overscrollBehavior: getComputedStyle(overlay).overscrollBehavior,
+    }))
+    expect(contract.touchAction).toBe('none')
+    expect(contract.overscrollBehavior).toBe('none')
   })
 
   test('23. X-button (toggle) closes drawer (does not navigate, even from deep view)', async ({ page }) => {

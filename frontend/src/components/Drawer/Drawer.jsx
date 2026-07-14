@@ -123,8 +123,7 @@ export default function Drawer({
   // wrap the state setter and update the ref inline.
   // `overlayCancelRef` is set by the overlay's pointerdown when a
   // rename is active; read by the rename-submit callback to skip
-  // the PATCH (overlay-tap = cancel, not commit) and by the
-  // overlay's click to suppress the drawer-close.
+  // the PATCH (overlay-tap = cancel, not commit).
   const renamingRef = useRef(null)
   const overlayCancelRef = useRef(false)
   const renaming = renamingState
@@ -133,19 +132,23 @@ export default function Drawer({
     setRenamingState(next)
   }
 
-  function handleOverlayPointerDown() {
-    if (renamingRef.current) overlayCancelRef.current = true
-  }
-  function handleOverlayClick() {
+  function handleOverlayPointerDown(e) {
+    // Pointerdown is the canonical dismiss event. Waiting for `click` is
+    // unreliable on touchscreens: even a tiny pan can suppress the synthetic
+    // click, leaving the drawer visibly open while the gesture scrolls the
+    // content underneath. Primary pointerdown both acknowledges the outside
+    // tap immediately and pairs with the scrim's touch-action:none contract.
+    if (e.button !== 0 || !e.isPrimary) return
     if (renamingRef.current || overlayCancelRef.current) {
-      // Overlay was tapped during a rename. The blur has already
-      // fired → onRenameSubmit will see overlayCancelRef and skip
-      // the PATCH. Here we just suppress the drawer-close.
+      // Defensive fallback for browsers that reach the overlay before the
+      // rename row's document-capture listener. Cancel the rename and let this
+      // same outside gesture close the drawer; one tap should never be needed
+      // merely to clear an intermediate drawer state.
+      overlayCancelRef.current = true
       renamingRef.current = null
-      overlayCancelRef.current = false
       setRenaming(null)
-      return
     }
+    e.preventDefault()
     onClose?.()
   }
 
@@ -396,7 +399,6 @@ export default function Drawer({
       <div
         className={`drawer-overlay ${open ? 'drawer-overlay--visible' : ''}`}
         onPointerDown={handleOverlayPointerDown}
-        onClick={handleOverlayClick}
       />
       {/* React 19 reflects the boolean `inert` prop to the boolean
           attribute (present when true, absent when false), so a closed
@@ -611,10 +613,11 @@ function DrawerRow({
   }, [menuOpen])
 
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
-  // pointerdown AND click anywhere outside the rename input call
-  // preventDefault + stopPropagation so the tapped element (overlay,
-  // another row, Settings, New chat) does NOT fire its own click —
-  // the rename just exits without selecting anything else.
+  // pointerdown AND click anywhere outside the rename input normally call
+  // preventDefault + stopPropagation so another row, Settings, or New chat
+  // does NOT fire its own click — the rename just exits. The scrim is the one
+  // exception: it remains a reliable drawer-close surface, so a scrim tap
+  // cancels the rename and continues to Drawer.handleOverlayPointerDown.
   // Both events are needed: pointerdown prevents focus shift,
   // click is a separate event that some browsers fire regardless.
   // `cancelingRef` tells `commitRename` to bail when the impending
@@ -628,11 +631,12 @@ function DrawerRow({
     function onOutsidePointer(e) {
       const inputEl = inputRef.current
       if (!inputEl || inputEl.contains(e.target)) return
+      cancelingRef.current = true
+      onRenameCancel()
+      if (e.target?.closest?.('.drawer-overlay')) return
       e.preventDefault()
       e.stopPropagation()
-      cancelingRef.current = true
       swallowClickRef.current = true
-      onRenameCancel()
     }
     function onOutsideClick(e) {
       if (!swallowClickRef.current) return
