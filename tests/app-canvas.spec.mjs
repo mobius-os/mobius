@@ -281,17 +281,32 @@ async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
   return { getAppsFetches: () => appsFetches }
 }
 
+/** Wait for the browser frame behind an iframe element, not just the DOM node.
+ * React can commit the iframe before Chromium attaches its Frame; a one-shot
+ * contentFrame() call in that window returns null. Re-querying the element also
+ * survives a keyed iframe replacement while the app canvas settles. */
+async function waitForContentFrame(page, selector, timeout = 10000) {
+  let frame = null
+  await expect.poll(async () => {
+    const element = await page.$(selector)
+    frame = element ? await element.contentFrame() : null
+    return frame !== null
+  }, {
+    timeout,
+    message: `browser frame did not attach for ${selector}`,
+  }).toBe(true)
+  return frame
+}
+
 async function postFromOpaqueCanvasFrame(page, data) {
-  const handle = await page.evaluateHandle(() => {
+  await page.evaluate(() => {
     const frame = document.createElement('iframe')
     frame.className = 'canvas canvas--test-sender'
     frame.setAttribute('sandbox', 'allow-scripts')
     frame.srcdoc = '<!doctype html><script>window.__ready = true<\/script>'
     document.body.appendChild(frame)
-    return frame
   })
-  const element = handle.asElement()
-  const frame = await element.contentFrame()
+  const frame = await waitForContentFrame(page, 'iframe.canvas--test-sender')
   await frame.waitForFunction(() => window.__ready === true)
   await frame.evaluate((message) => {
     window.parent.postMessage(message, '*')
@@ -338,8 +353,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // execute inside the frame, so wait for its own load state and dispatch the
     // deterministic test signal there. postMounted then reaches the parent with
     // the real frame as event.source and the opaque `null` event.origin.
-    const frameElement = await page.waitForSelector('iframe.canvas')
-    const frame = await frameElement.contentFrame()
+    const frame = await waitForContentFrame(page, 'iframe.canvas')
     await frame.waitForLoadState('load')
     await frame.evaluate(() => {
       window.dispatchEvent(new MessageEvent('message', {
@@ -367,8 +381,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
 
-    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
-    const frame = await frameElement.contentFrame()
+    const frame = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await frame.evaluate(() => {
       window.__navBacks = 0
       window.__navAcks = []
@@ -414,8 +427,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       localStorage.setItem('moebius_active_app', String(id))
     }, appId)
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
-    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
-    const frame = await frameElement.contentFrame()
+    const frame = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await frame.evaluate(() => {
       window.__navBacks = 0
       window.__navAck = false
@@ -458,8 +470,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       localStorage.setItem('moebius_active_app', String(id))
     }, appId)
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
-    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
-    const frame = await frameElement.contentFrame()
+    const frame = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await frame.evaluate(() => {
       window.__navBacks = 0
       window.__navAck = false
@@ -503,8 +514,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       localStorage.setItem('moebius_active_app', String(id))
     }, appId)
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
-    const frameElement = await page.waitForSelector(`iframe[data-app-id="${appId}"]`, { timeout: 10000 })
-    const frame = await frameElement.contentFrame()
+    const frame = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await frame.evaluate(() => {
       window.__navBacks = 0
       window.__navAck = false
@@ -735,10 +745,10 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // open-app target refetches once before giving up) — the bumped updated_at
     // starts the swap and mounts the hidden incoming frame.
     swapArmed = true
-    const settledLiveEl = await page.waitForSelector(
+    const settledLiveFrame = await waitForContentFrame(
+      page,
       'iframe.canvas--live[data-frame-version="1000"]',
     )
-    const settledLiveFrame = await settledLiveEl.contentFrame()
     await settledLiveFrame.evaluate(() => {
       window.parent.postMessage(
         { type: 'moebius:open-app', appId: 'no-such-app' },
@@ -746,13 +756,13 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       )
     })
     // state:'attached', not 'visible' — the incoming frame is visibility:hidden.
-    const incomingEl = await page.waitForSelector('iframe.canvas--incoming', {
+    await page.waitForSelector('iframe.canvas--incoming', {
       state: 'attached', timeout: 8000,
     })
 
     // Crash report from the HIDDEN incoming frame → swallowed: no chat
     // create, no navigation away from the canvas.
-    const incomingFrame = await incomingEl.contentFrame()
+    const incomingFrame = await waitForContentFrame(page, 'iframe.canvas--incoming')
     await incomingFrame.evaluate((id) => {
       window.parent.postMessage(
         { type: 'moebius:app-error', appId: String(id), error: 'hidden-frame crash' },
@@ -765,10 +775,10 @@ test.describe('AppCanvas: iframe-mount contract', () => {
 
     // Crash report from the LIVE frame → forwarded: Shell routes it to a new
     // chat with the report as a reviewable draft (not auto-sent).
-    const liveEl = await page.waitForSelector('iframe.canvas--live', {
+    await page.waitForSelector('iframe.canvas--live', {
       state: 'attached', timeout: 4000,
     })
-    const liveFrame = await liveEl.contentFrame()
+    const liveFrame = await waitForContentFrame(page, 'iframe.canvas--live')
     await liveFrame.evaluate((id) => {
       window.parent.postMessage(
         { type: 'moebius:app-error', appId: String(id), error: 'live-frame crash' },

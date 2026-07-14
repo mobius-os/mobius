@@ -11,6 +11,13 @@ fail() {
   exit 1
 }
 
+# Private workspace roots must not be sent to the Docker daemon either. Exact
+# root patterns cover both directories and the local symlinks used here.
+for path in docs demo-logs .claude .pm AGENTS.md CLAUDE.md; do
+  grep -Fxq "$path" "$ROOT/.dockerignore" \
+    || fail ".dockerignore missed $path"
+done
+
 repo="$TMP/repo"
 git init -q "$repo"
 git -C "$repo" config user.name Privacy-Test
