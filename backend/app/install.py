@@ -33,7 +33,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import warnings as _warnings_mod
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -786,70 +785,31 @@ def stage_pending_conflict_update(
   raw_base: str,
   capability_digest: str,
   candidate_digest: str,
-  static_assets: dict[str, bytes],
 ) -> None:
   """Persist everything the watcher needs to finish a resolved update.
 
   A conflict deliberately returns before install materialization. The resolver
-  may run minutes later (or after a restart), so the candidate manifest and
-  already-validated static bytes must outlive the request. They live under
-  ``.git``: outside app source and ignored by commits, but coupled to the exact
-  repo/upstream commit whose markers the agent resolves.
+  may run minutes later (or after a restart), so its exact identity must
+  outlive the request. The digest binds every fetched source/static/icon/seed
+  byte; replay refetches and refuses to promote if any byte moved. The receipt
+  lives under ``.git`` and is replaced atomically, so a restart sees either the
+  previous complete candidate or the new complete candidate, never a gap.
   """
   repo = Path(source_dir)
   git_dir = repo / ".git"
   target = git_dir / _PENDING_UPDATE_DIR
-  staging = Path(tempfile.mkdtemp(prefix=f".{_PENDING_UPDATE_DIR}-", dir=git_dir))
-  try:
-    assets_root = staging / "assets"
-    for rel, content in static_assets.items():
-      out = (assets_root / rel).resolve()
-      if assets_root.resolve() not in out.parents:
-        raise ValueError("pending static asset path escapes staging directory")
-      out.parent.mkdir(parents=True, exist_ok=True)
-      atomic_write(out, content)
-    atomic_write(staging / "receipt.json", json.dumps({
-      "schema": 1,
-      "app_id": app_id,
-      "upstream_commit": upstream_commit,
-      "manifest": manifest,
-      "raw_base": raw_base,
-      "capability_digest": capability_digest,
-      "candidate_digest": candidate_digest,
-      "static_assets": sorted(static_assets),
-    }, ensure_ascii=False, sort_keys=True) + "\n")
-    shutil.rmtree(target, ignore_errors=True)
-    os.replace(staging, target)
-  finally:
-    shutil.rmtree(staging, ignore_errors=True)
-
-
-def load_pending_conflict_update(
-  source_dir: str | Path, *, app_id: int, upstream_commit: str | None,
-) -> tuple[dict, dict[str, bytes]] | None:
-  """Load a receipt only when it belongs to this app and upstream tip."""
-  root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
-  receipt = read_pending_conflict_update_receipt(
-    source_dir, app_id=app_id, upstream_commit=upstream_commit,
-  )
-  if receipt is None:
-    return None
-  assets: dict[str, bytes] = {}
-  assets_root_path = root / "assets"
-  if assets_root_path.is_symlink():
-    return None
-  assets_root = assets_root_path.resolve()
-  for rel in receipt["static_assets"]:
-    if not isinstance(rel, str):
-      return None
-    path = (assets_root / rel).resolve()
-    if assets_root not in path.parents or path.is_symlink():
-      return None
-    try:
-      assets[rel] = path.read_bytes()
-    except OSError:
-      return None
-  return receipt, assets
+  if target.is_symlink():
+    raise ValueError("pending update path must not be a symlink")
+  target.mkdir(parents=True, exist_ok=True)
+  atomic_write(target / "receipt.json", json.dumps({
+    "schema": 1,
+    "app_id": app_id,
+    "upstream_commit": upstream_commit,
+    "manifest": manifest,
+    "raw_base": raw_base,
+    "capability_digest": capability_digest,
+    "candidate_digest": candidate_digest,
+  }, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def read_pending_conflict_update_receipt(
@@ -874,7 +834,6 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
-    or not isinstance(receipt.get("static_assets"), list)
   ):
     return None
   return receipt
@@ -2707,7 +2666,6 @@ async def install_from_manifest(
             raw_base=raw_base,
             capability_digest=fetched_capability_digest,
             candidate_digest=candidate_digest,
-            static_assets=static_assets_fetched,
           )
 
       # The disk-write phase runs INSIDE the same held lock for the git path so

@@ -7,6 +7,7 @@ tuples per URL so we can drive the install paths deterministically
 and force failure modes.
 """
 
+import asyncio
 import io
 import json
 import subprocess
@@ -2624,6 +2625,52 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   assert update.json()["update_available"] is True
   assert update.json()["upstream_version"] == "2.0.0"
 
+  bypass = client.patch(
+    f"/api/apps/{payload['id']}",
+    headers=auth,
+    json={"jsx_source": "export default function App(){return <div>bypass</div>}"},
+  )
+  assert bypass.status_code == 409, bypass.text
+
+  # One Resolve click materializes a real merge. Saving marker-free text (no
+  # manual git add/commit) must run the complete installer replay exactly once.
+  resolver = client.post(
+    f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
+  )
+  assert resolver.status_code == 200, resolver.text
+  assert (app_dir / ".git" / "MERGE_HEAD").is_file()
+  resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
+  jsx_file.write_text(resolved)
+
+  replay_responses = {
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+
+  async def _run_watcher():
+    from app.app_watcher import _JsxHandler
+    handler = _JsxHandler(asyncio.get_running_loop())
+    await handler._recompile(str(jsx_file), force_rebuild=True)
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(replay_responses),
+  ):
+    asyncio.run(_run_watcher())
+
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "on-conflict").first()
+    assert app.version == "2.0.0"
+    assert app.jsx_source == resolved
+  finally:
+    db.close()
+  assert jsx_file.read_text() == resolved
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+  assert not pending.exists()
+
 
 def test_version_only_conflict_auto_resolves_to_upstream(
   client, auth, bypass_url_validation,
@@ -2653,6 +2700,172 @@ def test_version_only_conflict_auto_resolves_to_upstream(
   payload = r2.json()
   assert payload["mode"] == "update", payload  # auto-resolved, no conflict chat
   assert 'APP_VERSION = "2.0.0"' in jsx_file.read_text()  # upstream version won
+
+
+def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
+  client, auth, bypass_url_validation,
+):
+  """A moving URL cannot mix release-C artifacts into a release-B resolve."""
+  from app.models import App
+  from app.database import SessionLocal
+
+  base = "https://resolve-digest.test/repo/"
+  manifest_v1 = {**MANIFEST_NEWS, "id": "resolve-digest"}
+  installed = _install_v1(client, auth, base, manifest_v1, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  app_dir = data_dir / "apps" / "resolve-digest"
+  jsx_file = app_dir / "index.jsx"
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  conflicted = _update_v2(
+    client, auth, base, {**manifest_v1, "version": "2.0.0"}, jsx_v2,
+  )
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+
+  resolver = client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+  )
+  assert resolver.status_code == 200, resolver.text
+  resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
+  jsx_file.write_text(resolved)
+  pending = app_dir / ".git" / "mobius-pending-update" / "receipt.json"
+  bundle = data_dir / "compiled" / f"app-{app_id}.js"
+  old_bundle = bundle.read_bytes()
+
+  # Only a seed byte moved at the same URL/version. The replay must reject the
+  # whole candidate before changing any DB/static/live-bundle state.
+  changed_responses = {
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"release C changed this byte"),
+    base + "fetch.sh": (200, b""),
+  }
+
+  async def _run_watcher():
+    from app.app_watcher import _JsxHandler
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(jsx_file), force_rebuild=True,
+    )
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(changed_responses),
+  ):
+    asyncio.run(_run_watcher())
+
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.id == app_id).first()
+    assert app.version == "1.0.0"
+    assert app.jsx_source == JSX_MULTI
+  finally:
+    db.close()
+  assert bundle.read_bytes() == old_bundle
+  assert pending.is_file(), "journal must survive for restart/user retry"
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+  assert jsx_file.read_text() == resolved
+
+
+def test_resolved_conflict_converges_static_metadata_and_bundle_once(
+  client, auth, bypass_url_validation,
+):
+  """CubeRun-class add/drop assets land with source and manifest metadata."""
+  from app.models import App
+  from app.database import SessionLocal
+
+  base = "https://resolve-static.test/repo/"
+  manifest_v1 = {
+    **MANIFEST_NEWS,
+    "id": "resolve-static",
+    "icon": None,
+    "storage_seeds": {},
+    "schedule": None,
+    "static_assets": {"old.js": "build/old.js"},
+  }
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
+    base + "index.jsx": (200, JSX_MULTI.encode()),
+    base + "build/old.js": (200, b"window.release='v1'"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  app_dir = data_dir / "apps" / "resolve-static"
+  jsx_file = app_dir / "index.jsx"
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE"))
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  manifest_v2 = {
+    **manifest_v1,
+    "version": "2.0.0",
+    "offline_capable": True,
+    "static_assets": {"new.js": "build/new.js"},
+  }
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "build/new.js": (200, b"window.release='v2'"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    conflicted = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+  assert (app_dir / "static" / "old.js").read_bytes() == b"window.release='v1'"
+  assert not (app_dir / "static" / "new.js").exists()
+
+  resolver = client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+  )
+  assert resolver.status_code == 200, resolver.text
+  resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
+  jsx_file.write_text(resolved)
+
+  replay_responses = {
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "build/new.js": (200, b"window.release='v2'"),
+  }
+
+  async def _run_watcher():
+    from app.app_watcher import _JsxHandler
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(jsx_file), force_rebuild=True,
+    )
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(replay_responses),
+  ):
+    asyncio.run(_run_watcher())
+
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.id == app_id).first()
+    assert app.version == "2.0.0"
+    assert app.offline_capable is True
+    assert app.jsx_source == resolved
+  finally:
+    db.close()
+  assert not (app_dir / "static" / "old.js").exists()
+  assert (app_dir / "static" / "new.js").read_bytes() == b"window.release='v2'"
+  assert not (app_dir / ".git" / "mobius-pending-update").exists()
 
 
 def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(

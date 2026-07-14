@@ -194,7 +194,6 @@ async def test_resolved_conflict_keeps_old_live_state_until_full_replay(
     raw_base="https://example.invalid/app/",
     capability_digest="a" * 64,
     candidate_digest="b" * 64,
-    static_assets={"runtime.js": b"export const version = 'v2'\n"},
   )
   app_git.start_conflict_merge(src)
   assert _source_dir_for_changed_path(src / "fetch.sh") == src

@@ -910,7 +910,10 @@ def _unshallow_if_no_merge_base(
     raise RuntimeError(f"failed to restore app git history: {detail}")
   base = _run(repo, "merge-base", left, right, check=False)
   if base.returncode != 0 or not base.stdout.strip():
-    raise RuntimeError(f"no merge base between {left} and {right} after unshallow")
+    raise RuntimeError(
+      f"unrelated histories: no merge base between {left} and {right} "
+      "after unshallow"
+    )
 
 
 def merge_upstream(source_dir: str | Path) -> MergeResult:
