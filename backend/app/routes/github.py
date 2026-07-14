@@ -244,6 +244,22 @@ def _safe_repo_path(raw: object) -> Path:
   )
 
 
+def _cleanup_terminal_staging_checkout(record: dict) -> bool:
+  """Remove only disposable contribution clones for terminal records."""
+  if record.get("status") not in {"merged", "closed"}:
+    return False
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repo = _safe_repo_path(plan.get("repo_path"))
+  data_dir = Path(get_settings().data_dir).resolve()
+  roots = (data_dir / "contrib", data_dir / "contributions")
+  if not any(repo.is_relative_to(root) for root in roots):
+    return False
+  if not (repo / ".git").exists():
+    return False
+  shutil.rmtree(repo)
+  return True
+
+
 def _validate_repo_slug(value: object) -> str:
   repo = str(value or "")
   if not _GITHUB_REPO.match(repo):
@@ -758,6 +774,198 @@ def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str
   return final_slug
 
 
+def _inspect_owner_fork_default_branch(
+  repo: Path,
+  fork_slug: str,
+  *,
+  upstream_branch: str,
+  upstream_sha: str,
+) -> dict:
+  """Inspect a reusable PR fork without mutating its default branch.
+
+  GitHub rejects an OAuth push that would introduce a new or changed Actions
+  workflow to a repository unless the token also has the broad `workflow`
+  scope. The same restriction applies to GitHub's merge-upstream endpoint, so
+  a public_repo-only connection cannot refresh a stale fork that crossed a
+  workflow change. Instead, a strictly-behind fork is handled by preparing the
+  reviewed change on its existing tip; the fork's default branch stays put.
+
+  A current fork (or one containing upstream) can receive the reviewed branch
+  normally. A diverged default branch is left untouched and stops submission.
+  """
+  upstream_branch = _validate_branch(upstream_branch)
+  if not _GIT_SHA.match(str(upstream_sha or "")):
+    raise ContributionSubmitError(
+      "Could not resolve the upstream tip before inspecting the PR fork."
+    )
+  fork_branch = _upstream_default_branch(repo, fork_slug)
+  fork_url = f"https://github.com/{fork_slug}.git"
+  ref_key = hashlib.sha256(
+    f"{fork_slug}\0{fork_branch}\0{time.time_ns()}".encode("utf-8")
+  ).hexdigest()[:24]
+  fork_ref = f"refs/mobius-submit/fork-{ref_key}"
+  patch = {
+    "last_submit_fork_branch": fork_branch,
+    "last_submit_upstream_branch": upstream_branch,
+  }
+
+  def fetch_fork_tip() -> str:
+    fetched = _git(
+      repo,
+      "fetch", "--no-tags", "--force",
+      fork_url,
+      f"+refs/heads/{fork_branch}:{fork_ref}",
+      check=False,
+    )
+    if fetched.returncode != 0:
+      raise ContributionSubmitError(
+        "Could not inspect the GitHub fork before pushing this PR. Try Send "
+        "again, or leave feedback if it keeps failing.",
+        record_patch=patch,
+      ) from None
+    fork_sha = _git(
+      repo, "rev-parse", "--verify", f"{fork_ref}^{{commit}}",
+    ).stdout.strip()
+    if not _GIT_SHA.match(fork_sha):
+      raise ContributionSubmitError(
+        "Could not resolve the GitHub fork's default branch before pushing.",
+        record_patch=patch,
+      )
+    return fork_sha
+
+  def is_ancestor(older: str, newer: str) -> bool:
+    result = _git(
+      repo, "merge-base", "--is-ancestor", older, newer, check=False,
+    )
+    if result.returncode not in (0, 1):
+      raise ContributionSubmitError(
+        "Could not compare the GitHub fork with current upstream.",
+        record_patch=patch,
+      )
+    return result.returncode == 0
+
+  try:
+    fork_sha = fetch_fork_tip()
+    patch["last_submit_fork_sha"] = fork_sha
+    if fork_sha == upstream_sha:
+      return {**patch, "last_submit_fork_sync": "current"}
+    if is_ancestor(upstream_sha, fork_sha):
+      return {**patch, "last_submit_fork_sync": "contains-upstream"}
+    if not is_ancestor(fork_sha, upstream_sha):
+      raise ContributionSubmitError(
+        f"Your PR fork's {fork_branch} branch has diverged from upstream, so "
+        "Contribute left it untouched. Review that fork on GitHub or leave "
+        "feedback for your agent before trying again.",
+        record_patch={**patch, "last_submit_fork_sync": "diverged"},
+      )
+    return {**patch, "last_submit_fork_sync": "strictly-behind"}
+  finally:
+    _git(repo, "update-ref", "-d", fork_ref, check=False)
+
+
+def _build_fork_compatible_topic_commit(
+  repo: Path,
+  *,
+  branch: str,
+  fork_sha: str,
+  upstream_sha: str,
+  diff_path: Path,
+  expected_diff: str,
+  author_name: str,
+  author_email: str,
+) -> str:
+  """Re-parent an exact reviewed change onto a strictly-behind fork tip.
+
+  The fork default branch is never changed. The temporary topic commit is
+  accepted only when merging it into current upstream produces the exact
+  reviewed source diff byte-for-byte. This avoids OAuth's workflow restriction
+  without weakening review or silently changing the contribution.
+  """
+  message = _git(repo, "log", "-1", "--format=%B", branch).stdout
+  if _COAUTHOR_TRAILER not in message:
+    raise ContributionSubmitError(
+      "This staged commit is missing the Möbius Agent co-author trailer. "
+      "Leave feedback so your agent can prepare it again."
+    )
+
+  message_path = None
+  detached = False
+  try:
+    with tempfile.NamedTemporaryFile(
+      "w", encoding="utf-8", delete=False,
+    ) as message_file:
+      message_file.write(message)
+      message_path = message_file.name
+
+    _git(repo, "checkout", "-q", "--detach", fork_sha)
+    detached = True
+    applied = _git(
+      repo,
+      "apply", "--index", "--3way", "--binary", str(diff_path),
+      check=False,
+    )
+    if applied.returncode != 0:
+      raise ContributionSubmitError(
+        "The reviewed change cannot be placed safely on this stale PR fork. "
+        "Leave feedback so your agent can refresh the contribution."
+      )
+
+    workflows = _git(
+      repo, "diff", "--cached", "--name-only", "--", ".github/workflows",
+    ).stdout.strip()
+    if workflows:
+      raise ContributionSubmitError(
+        "This reviewed contribution changes a GitHub Actions workflow. "
+        "Reconnect GitHub with a classic token granting public_repo and "
+        "workflow, then try Send again."
+      )
+
+    _git(
+      repo,
+      "-c", f"user.name={author_name}",
+      "-c", f"user.email={author_email}",
+      "commit", "--no-gpg-sign", "-F", message_path,
+    )
+    push_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    if not _GIT_SHA.match(push_sha):
+      raise ContributionSubmitError(
+        "Could not prepare the reviewed branch for this stale PR fork."
+      )
+
+    merged = _git(
+      repo, "merge-tree", "--write-tree", upstream_sha, push_sha,
+      check=False,
+    )
+    merged_tree = (merged.stdout or "").strip().splitlines()[0:1]
+    if (
+      merged.returncode != 0
+      or not merged_tree
+      or not _GIT_SHA.match(merged_tree[0])
+    ):
+      raise ContributionSubmitError(
+        "The stale-fork branch no longer merges cleanly with upstream. Leave "
+        "feedback so your agent can refresh the contribution."
+      )
+    merged_hash = hashlib.sha256(
+      _reviewed_branch_diff(repo, upstream_sha, merged_tree[0])
+    ).hexdigest()
+    if merged_hash != expected_diff:
+      raise ContributionSubmitError(
+        "Adapting this branch to the stale PR fork would change the reviewed "
+        "result, so Contribute stopped before pushing anything."
+      )
+    return push_sha
+  finally:
+    if message_path:
+      try:
+        os.unlink(message_path)
+      except OSError:
+        pass
+    if detached:
+      _git(repo, "reset", "--hard", fork_sha, check=False)
+      _git(repo, "checkout", "-q", branch, check=False)
+
+
 def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -822,11 +1030,41 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
       raise _merge_error_patch(exc, record_patch) from exc
     record_patch = _record_patch_with(record_patch, {"head_repository": fork_slug})
 
+    try:
+      fork_sync_patch = _inspect_owner_fork_default_branch(
+        repo,
+        fork_slug,
+        upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+        upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+      )
+      record_patch = _record_patch_with(record_patch, fork_sync_patch)
+    except ContributionSubmitError as exc:
+      raise _merge_error_patch(exc, record_patch) from exc
+
+    push_source = "HEAD"
+    if fork_sync_patch.get("last_submit_fork_sync") == "strictly-behind":
+      try:
+        push_source = _build_fork_compatible_topic_commit(
+          repo,
+          branch=branch,
+          fork_sha=str(fork_sync_patch["last_submit_fork_sha"]),
+          upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+          diff_path=diff_path,
+          expected_diff=expected_diff,
+          author_name=author_name,
+          author_email=author_email,
+        )
+        record_patch = _record_patch_with(record_patch, {
+          "last_submit_fork_sync": "stale-base-compatible",
+          "last_submit_push_sha": push_source,
+        })
+      except ContributionSubmitError as exc:
+        raise _merge_error_patch(exc, record_patch) from exc
+
     last_push_error = None
     for _ in range(_PUSH_RETRIES):
       proc = _git(
-        repo,
-        "push", "fork", f"HEAD:refs/heads/{branch}",
+        repo, "push", "fork", f"{push_source}:refs/heads/{branch}",
         check=False,
       )
       if proc.returncode == 0:
@@ -1207,6 +1445,30 @@ async def submit_contribution(
       record_patch=record_patch,
     )
   return {"record": submitted, "url": pr_url, "number": number}
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/cleanup-staging",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def cleanup_contribution_staging(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Delete a terminal contribution's disposable local clone only."""
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    record_path, _ = _record_paths(app_id, record_id)
+    record = _read_record(record_path)
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repo = _safe_repo_path(plan.get("repo_path"))
+  async with fs_locks.source_dir_lock(str(repo)):
+    cleaned = await asyncio.to_thread(_cleanup_terminal_staging_checkout, record)
+  return {"cleaned": cleaned}
 
 
 # --- contribution CI feedback (checks refresh + classification) -------
