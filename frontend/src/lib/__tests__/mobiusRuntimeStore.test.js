@@ -25,7 +25,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
-import { freshEnv, waitFor } from './mobiusRuntimeHarness.mjs'
+import { freshEnv, recordSubscription, waitFor } from './mobiusRuntimeHarness.mjs'
 
 // makeStorage is imported lazily inside each test AFTER freshEnv() installs the
 // browser globals it reads at construction time. A top-level import would run
@@ -63,7 +63,7 @@ test('an opaque sandbox without IndexedDB still reads and writes online', async 
   server.seed('saved.json', { survives: true })
 
   assert.deepEqual(await s.get('saved.json'), { survives: true })
-  assert.deepEqual(await s.list(''), []) // harness has no list route; must not touch IDB
+  assert.deepEqual((await s.list('')).map((entry) => entry.name), ['saved.json'])
   assert.deepEqual(await s.set('new.json', { writes: true }), { synced: true })
   assert.deepEqual(server.serverValue('new.json'), { writes: true })
   assert.equal(await s.pendingCount(), 0)
@@ -71,6 +71,41 @@ test('an opaque sandbox without IndexedDB still reads and writes online', async 
   server.setOnline(false)
   assert.equal(await s.get('saved.json'), null)
   await assert.rejects(s.set('offline.json', { no: 'phantom queue' }), /offline saving is unavailable/)
+})
+
+test('opaque-frame direct storage preserves text, blob, delete, CAS, and subscriptions', async () => {
+  const { server } = freshEnv()
+  globalThis.indexedDB = { open() { throw new DOMException('denied', 'SecurityError') } }
+  const s = await newStorage()
+
+  const observed = recordSubscription((cb) => s.subscribeText('note.txt', cb))
+  await s.setText('note.txt', 'hello', { contentType: 'text/markdown' })
+  await waitFor(() => observed.values.includes('hello'))
+  assert.equal(await s.getText('note.txt'), 'hello')
+
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+  assert.deepEqual(await s.setBlob('image.bin', blob), { synced: true })
+  const loaded = await s.getBlob('image.bin')
+  assert.equal(loaded.type, 'image/png')
+  assert.deepEqual([...new Uint8Array(await loaded.arrayBuffer())], [1, 2, 3])
+
+  const first = await s.durableWrite('cas.json', { n: 1 }, { ifNoneMatch: true })
+  assert.equal(first.durability, 'synced')
+  assert.ok(first.version)
+  const versioned = await s.getWithVersion('cas.json')
+  assert.deepEqual(versioned.value, { n: 1 })
+  const second = await s.durableWrite('cas.json', { n: 2 }, { ifMatch: versioned.version })
+  assert.equal(second.durability, 'synced')
+  assert.ok(second.version)
+  await assert.rejects(
+    s.durableWrite('cas.json', { n: 3 }, { ifMatch: versioned.version }),
+    (error) => error.status === 412,
+  )
+
+  assert.deepEqual(await s.remove('note.txt'), { synced: true })
+  await waitFor(() => observed.values.at(-1) === null)
+  assert.equal(server.serverHas('note.txt'), false)
+  observed.unsub()
 })
 
 async function renderUseDocument(storage, path, opts) {

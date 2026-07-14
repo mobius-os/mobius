@@ -106,6 +106,27 @@ export function makeServer() {
       signalEvents.push(...(body.signals || []))
       return res(204)
     }
+    const listMatch = url.match(/\/api\/storage\/apps-list\/[^/]+\/(.*?)(?:\?.*)?$/)
+    if (method === 'GET' && listMatch) {
+      const prefix = decodeURIComponent(listMatch[1] || '').replace(/^\/+|\/+$/g, '')
+      const base = prefix ? `${prefix}/` : ''
+      const byName = new Map()
+      for (const [storedPath, rec] of files) {
+        if (base && !storedPath.startsWith(base)) continue
+        const rest = base ? storedPath.slice(base.length) : storedPath
+        if (!rest) continue
+        const [name, ...tail] = rest.split('/')
+        if (!byName.has(name)) {
+          byName.set(name, {
+            name,
+            path: `${base}${name}`,
+            type: tail.length ? 'directory' : 'file',
+            ...(tail.length ? {} : { mime_type: rec.contentType }),
+          })
+        }
+      }
+      return res(200, { entries: [...byName.values()], next_cursor: null })
+    }
     const m = url.match(/\/api\/storage\/apps\/[^/]+\/(.+?)(\?.*)?$/)
     const path = m ? decodeURIComponent(m[1]) : null
 
