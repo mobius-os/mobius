@@ -50,19 +50,16 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 /** Navigate to a new empty chat. */
 async function newChat(page) {
   // Create a worker-tagged chat via the API so cleanupWorkerChats
-  // can find and delete it after the spec finishes.
-  await createTaggedChat(page)
-  // Click new-chat button via DOM (works even if drawer is hidden).
-  await page.evaluate(() => {
-    document.querySelector('.drawer__item--new')?.click()
-  })
-  // If that didn't work (drawer off-screen), reload.
-  const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('.chat__empty-wrap')
-  )
-  if (!hasEmpty) {
-    await page.goto(BASE)
-  }
+  // can find and delete it after the spec finishes. Navigate to that exact
+  // chat on the next shell mount. Clicking the drawer's New-chat action here
+  // races its cached chat list: it can reuse an older empty chat or create an
+  // untagged second row, which makes retries stateful and defeats cleanup.
+  const chat = await createTaggedChat(page)
+  if (!chat?.id) throw new Error('failed to create tagged test chat')
+  await page.evaluate((chatId) => {
+    localStorage.setItem('moebius_active_chat', chatId)
+  }, chat.id)
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
@@ -424,10 +421,10 @@ test.describe('Short responses', () => {
 
     // Reload to simulate returning to the chat.
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await page.waitForFunction(
-      () => !!document.querySelector('.chat__scroll'),
-      { timeout: 15000 }
-    )
+    // ChatView intentionally keeps a restored transcript hidden while its
+    // quiet-layout pass sizes the reservation. Waiting only for DOM presence
+    // races that pass and can sample the spacer's pre-reveal 0px bootstrap.
+    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 15000 })
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
