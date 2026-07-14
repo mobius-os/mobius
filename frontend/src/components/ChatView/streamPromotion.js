@@ -264,11 +264,12 @@ export function chooseActiveAssistantSurface(msg, items) {
 export function chooseActiveAssistantMirrorIndex({
   bridgeMsgIdx,
   trailingAssistantPartialIdx,
+  bridgeFollowedByVisibleUser = false,
   hasLivePayload,
   bridgeSurface,
   surface,
 }) {
-  if (bridgeMsgIdx >= 0) {
+  if (bridgeMsgIdx >= 0 && !bridgeFollowedByVisibleUser) {
     // The mount bridge is captured before the authoritative chat fetch can
     // refresh an in-memory cache. If a new turn starts in that window, the
     // captured row can be the COMPLETED answer from the previous turn. Never

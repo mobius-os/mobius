@@ -3057,6 +3057,9 @@ export default function ChatView({
     : -1
   const hasLiveAssistantPayload = turnActive && streamItems.length > 0
   const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
+  const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
+    .slice(bridgeMsgIdx + 1)
+    .some(msg => msg?.role === 'user' && !msg.hidden)
   const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
     ? messages[trailingAssistantPartialIdx]
     : null
@@ -3074,6 +3077,7 @@ export default function ChatView({
   const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
     bridgeMsgIdx,
     trailingAssistantPartialIdx,
+    bridgeFollowedByVisibleUser,
     hasLivePayload: hasLiveAssistantPayload,
     bridgeSurface: bridgeAssistantSurface,
     surface: trailingAssistantSurface,
