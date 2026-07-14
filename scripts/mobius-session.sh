@@ -37,6 +37,10 @@ if [[ ! -f docker-compose.test.yml ]]; then
   exit 2
 fi
 
+# Refresh the shared hooks before creating a worktree. One install covers all
+# current and future worktrees attached to this clone.
+scripts/install-hooks.sh
+
 worktree=".claude/worktrees/${slug}"
 branch="session-${slug}"
 

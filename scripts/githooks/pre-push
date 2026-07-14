@@ -10,7 +10,7 @@
 # CI is the backstop for anything skipped (e.g. from a deps-less worktree).
 #
 # Install: scripts/install-hooks.sh (copies this into the shared hooks
-# dir, so every worktree is covered). Bypass once: `git push --no-verify`.
+# dir, so every worktree is covered). Privacy failures must never be bypassed.
 #
 # Design note: this is a GATE, not a full CI replacement. It mirrors the
 # fast CI jobs (frontend-unit, syntax) so a red push is caught in seconds
@@ -48,6 +48,7 @@ PP_TMP="$(mktemp -d "${TMPDIR:-/tmp}/mobius-pp.XXXXXX")" || exit 1
 trap 'rm -rf "$PP_TMP"' EXIT
 
 FAIL=0
+PRIVACY_FAIL=0
 c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_err=$'\033[1;31m'; c_off=$'\033[0m'
 ok()   { printf '%s[pre-push]%s %s\n' "$c_ok"  "$c_off" "$*"; }
 warn() { printf '%s[pre-push]%s %s\n' "$c_warn" "$c_off" "$*"; }
@@ -117,30 +118,38 @@ if [ "${POLLUTION:-0}" -gt 0 ]; then
   FAIL=1
 fi
 
-# 1c. Internal docs must never reach the PUBLIC repo. `docs/` is gitignored
-#     ("internal planning — not for public release"), but gitignore only
-#     blocks UNtracked files — a `git add -f` makes a doc track forever and
-#     bypasses the rule. So decision/design docs keep creeping into origin
-#     (untracked by hand more than once: bb97fd74, 5c176b21 — and they came
-#     back). This blocks any tracked docs/ path at the tip. Decision records
-#     stay LOCAL: they live on disk under the gitignored docs/, just not in
-#     git. A doc that genuinely belongs in the repo goes in ARCHITECTURE.md.
-#     To publish a specific doc, add its path regex to DOCS_ALLOWLIST.
-DOCS_ALLOWLIST=''   # newline-separated regex(es) of docs/ paths allowed public; empty = none
-TRACKED_DOCS="$(git ls-tree -r --name-only HEAD -- docs 2>/dev/null || true)"
-if [ -n "$DOCS_ALLOWLIST" ]; then
-  TRACKED_DOCS="$(printf '%s\n' "$TRACKED_DOCS" | grep -vE "$DOCS_ALLOWLIST" || true)"
+# 1c. Private workspace paths must never reach the PUBLIC repo. Gitignore only
+#     protects untracked files; `git add -f` bypasses it. Inspect every local
+#     object named on pre-push stdin, not only HEAD: `git push other:remote`
+#     otherwise bypasses a HEAD-only gate. Exact root names also catch symlinks.
+PRIVATE_PATHS=(docs demo-logs .claude .pm AGENTS.md CLAUDE.md)
+PRIVATE_TIPS="$PP_TMP/private-tips"
+: >"$PRIVATE_TIPS"
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  [ "$local_sha" = "$ZERO" ] && continue
+  printf '%s\t%s\n' "$local_sha" "$remote_ref" >>"$PRIVATE_TIPS"
+done <"$PUSH_REFS"
+
+# Direct/manual invocation has no pre-push stdin. Check HEAD so the hook stays
+# useful as a diagnostic command and in the repository's regression tests.
+if [ ! -s "$PRIVATE_TIPS" ]; then
+  printf '%s\t%s\n' "$(git rev-parse HEAD)" HEAD >>"$PRIVATE_TIPS"
 fi
-if [ -n "$TRACKED_DOCS" ]; then
-  err "refusing to push tracked files under docs/ (internal, gitignored):"
-  printf '%s\n' "$TRACKED_DOCS" | sed 's/^/    /' >&2
-  err "docs/ is LOCAL-ONLY. Untrack (the file stays on disk):"
-  err "    git rm --cached <path>   # then commit + re-push"
-  err "A design decision that belongs in the repo goes in ARCHITECTURE.md, not docs/."
-  err "To publish one doc, add its path to DOCS_ALLOWLIST in scripts/githooks/pre-push."
-  FAIL=1
-else
-  ok "no tracked docs/ (internal docs stay local)"
+
+while IFS=$'\t' read -r tip destination; do
+  private_commits="$(git rev-list "$tip" -- "${PRIVATE_PATHS[@]}" 2>/dev/null || true)"
+  if [ -n "$private_commits" ]; then
+    err "refusing to push history containing private workspace paths to ${destination}:"
+    git log -n 8 --format='    %h %s' "$tip" -- "${PRIVATE_PATHS[@]}" >&2
+    err "removing a path in a later commit is insufficient; purge it from reachable history"
+    err "do not bypass this privacy gate"
+    FAIL=1
+    PRIVACY_FAIL=1
+  fi
+done <"$PRIVATE_TIPS"
+if [ "$PRIVACY_FAIL" -eq 0 ]; then
+  ok "no private workspace paths in pushed histories"
 fi
 
 # 2. Python syntax on changed .py files (instant; no deps beyond python3).
@@ -255,7 +264,11 @@ if changed_match '^backend/'; then
 fi
 
 if [ "$FAIL" -ne 0 ]; then
-  err "push blocked. Fix the above, or bypass with:  git push --no-verify"
+  if [ "$PRIVACY_FAIL" -ne 0 ]; then
+    err "push blocked by the privacy gate. Do not use --no-verify; remove the private paths."
+  else
+    err "push blocked. Fix the above, or bypass only if the non-privacy failure is understood."
+  fi
   exit 1
 fi
 ok "all gate checks passed — pushing"
