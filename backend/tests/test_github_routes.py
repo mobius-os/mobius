@@ -19,6 +19,7 @@ import os
 import stat
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -164,6 +165,32 @@ def test_connect_start_returns_user_code(client, auth, monkeypatch):
   assert body["verification_uri"] == "https://github.com/login/device"
   assert body["interval"] == 5
   assert github_auth.get_device_flow()["device_code"] == "DEV"
+
+
+def test_connect_start_can_explicitly_request_workflow_scope(
+  client, auth, monkeypatch,
+):
+  _set_client_id(monkeypatch, "cid-123")
+  seen = {}
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      seen.update(parse_qs(request.content.decode()))
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "WXYZ-1234",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  r = client.post(
+    "/api/github/connect/start", headers=auth, json={"workflow": True},
+  )
+
+  assert r.status_code == 200, r.text
+  assert seen["scope"] == ["public_repo workflow"]
+  assert r.json()["requested_scopes"] == ["public_repo", "workflow"]
 
 
 def test_connect_start_app_with_github_access(
@@ -385,6 +412,8 @@ def test_status_disconnected(client, auth, monkeypatch):
   assert body["scopes"] == []
   assert body["token_source"] is None
   assert body["device_flow_available"] is True
+  assert "scopes=public_repo" in body["classic_token_url"]
+  assert "workflow" in body["classic_workflow_token_url"]
   assert "gh_version" in body
   assert "token" not in body
 
@@ -798,7 +827,52 @@ def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
   assert patch["last_submit_fork_sync"] == "strictly-behind"
   assert patch["last_submit_fork_sha"] == stale
   assert gh_calls == []
-  assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
+  assert sum(call[:1] == ("fetch",) for call in git_calls) == 2
+
+
+def test_inspect_owner_fork_accepts_updated_topic_as_upstream_carrier(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _inspect_owner_fork_default_branch
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  stale = "c" * 40
+  upstream = "d" * 40
+  carrier_tip = "e" * 40
+
+  monkeypatch.setattr(
+    "app.routes.github._upstream_default_branch",
+    lambda _repo, _slug: "main",
+  )
+
+  def fake_git(repo_path, *args, check=True):
+    if args[:2] == ("rev-parse", "--verify"):
+      return _cp(stale + "\n")
+    if args[:2] == ("merge-base", "--is-ancestor"):
+      if args[2:] == (upstream, stale):
+        return _cp(returncode=1)
+      if args[2:] == (stale, upstream):
+        return _cp(returncode=0)
+      if args[2:] == (upstream, carrier_tip):
+        return _cp(returncode=0)
+    if args[:2] == ("for-each-ref", "--format=%(refname)%00%(objectname)"):
+      prefix = args[2].rstrip("/")
+      return _cp(f"{prefix}/fix/review\x00{carrier_tip}\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+
+  patch = _inspect_owner_fork_default_branch(
+    repo,
+    "octocat/app-demo",
+    upstream_branch="main",
+    upstream_sha=upstream,
+  )
+
+  assert patch["last_submit_fork_sync"] == "contains-upstream"
+  assert patch["last_submit_fork_carrier_branch"] == "fix/review"
+  assert patch["last_submit_fork_carrier_sha"] == carrier_tip
 
 
 def test_inspect_owner_fork_leaves_diverged_default_branch_untouched(
@@ -893,6 +967,44 @@ def test_inspect_owner_fork_reports_current_or_ahead_branch(
   assert current["last_submit_fork_sync"] == "current"
   assert ahead["last_submit_fork_sync"] == "contains-upstream"
   assert gh_calls == []
+
+
+def test_sync_owner_fork_with_workflow_scope_verifies_fast_forward(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _sync_owner_fork_with_workflow_scope
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  gh_calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    gh_calls.append(args)
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  monkeypatch.setattr(
+    "app.routes.github._inspect_owner_fork_default_branch",
+    lambda *_args, **_kwargs: {
+      "last_submit_fork_branch": "main",
+      "last_submit_fork_sha": "d" * 40,
+      "last_submit_fork_sync": "current",
+    },
+  )
+
+  patch = _sync_owner_fork_with_workflow_scope(
+    repo,
+    "octocat/app-demo",
+    upstream_branch="main",
+    upstream_sha="d" * 40,
+  )
+
+  assert gh_calls == [(
+    "api", "--method", "POST",
+    "repos/octocat/app-demo/merge-upstream",
+    "-f", "branch=main",
+  )]
+  assert patch["last_submit_fork_sync"] == "fast-forwarded"
 
 
 def test_build_fork_compatible_topic_preserves_exact_reviewed_merge(tmp_path):

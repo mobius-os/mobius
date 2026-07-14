@@ -106,10 +106,18 @@ _CLASSIC_TOKEN_URL = (
   "https://github.com/settings/tokens/new"
   "?scopes=public_repo&description=Mobius%20Contribute"
 )
+_CLASSIC_WORKFLOW_TOKEN_URL = (
+  "https://github.com/settings/tokens/new"
+  "?scopes=public_repo,workflow&description=Mobius%20Contribute"
+)
 
 
 class GithubTokenRequest(BaseModel):
   token: str
+
+
+class GithubConnectStartRequest(BaseModel):
+  workflow: bool = False
 
 
 class GraphqlRequest(BaseModel):
@@ -810,6 +818,7 @@ def _inspect_owner_fork_default_branch(
     f"{fork_slug}\0{fork_branch}\0{time.time_ns()}".encode("utf-8")
   ).hexdigest()[:24]
   fork_ref = f"refs/mobius-submit/fork-{ref_key}"
+  fork_heads_prefix = f"refs/mobius-submit/fork-heads-{ref_key}"
   patch = {
     "last_submit_fork_branch": fork_branch,
     "last_submit_upstream_branch": upstream_branch,
@@ -864,9 +873,49 @@ def _inspect_owner_fork_default_branch(
         "feedback for your agent before trying again.",
         record_patch={**patch, "last_submit_fork_sync": "diverged"},
       )
+
+    # GitHub's own "Update branch" action can merge current upstream into a
+    # topic branch while leaving the reusable fork's default branch stale. In
+    # that case the workflow-bearing upstream commits already exist in the
+    # fork, so a public_repo-only token may safely create another reviewed
+    # topic ref without introducing workflow history. Discover that carrier
+    # branch before asking for broader workflow access.
+    fetched_heads = _git(
+      repo,
+      "fetch", "--no-tags", "--force",
+      fork_url,
+      f"+refs/heads/*:{fork_heads_prefix}/*",
+      check=False,
+    )
+    if fetched_heads.returncode == 0:
+      refs = _git(
+        repo,
+        "for-each-ref", "--format=%(refname)%00%(objectname)",
+        f"{fork_heads_prefix}/",
+      ).stdout.splitlines()
+      for row in refs:
+        ref, separator, tip = row.partition("\0")
+        if not separator or not _GIT_SHA.match(tip):
+          continue
+        if is_ancestor(upstream_sha, tip):
+          carrier = ref.removeprefix(f"{fork_heads_prefix}/")
+          return {
+            **patch,
+            "last_submit_fork_sync": "contains-upstream",
+            "last_submit_fork_carrier_branch": carrier,
+            "last_submit_fork_carrier_sha": tip,
+          }
     return {**patch, "last_submit_fork_sync": "strictly-behind"}
   finally:
     _git(repo, "update-ref", "-d", fork_ref, check=False)
+    refs = _git(
+      repo,
+      "for-each-ref", "--format=%(refname)", f"{fork_heads_prefix}/",
+      check=False,
+    )
+    if refs.returncode == 0:
+      for ref in (refs.stdout or "").splitlines():
+        _git(repo, "update-ref", "-d", ref, check=False)
 
 
 def _build_fork_compatible_topic_commit(
@@ -972,6 +1021,44 @@ def _build_fork_compatible_topic_commit(
       _git(repo, "checkout", "-q", branch, check=False)
 
 
+def _sync_owner_fork_with_workflow_scope(
+  repo: Path,
+  fork_slug: str,
+  *,
+  upstream_branch: str,
+  upstream_sha: str,
+) -> dict:
+  """Fast-forward a proven-behind fork when the owner granted workflow scope."""
+  synced = _gh(
+    repo,
+    "api", "--method", "POST",
+    f"repos/{fork_slug}/merge-upstream",
+    "-f", f"branch={_validate_branch(upstream_branch)}",
+    check=False,
+  )
+  if synced.returncode != 0:
+    detail = (synced.stderr or synced.stdout or "").strip()
+    raise ContributionSubmitError(
+      detail[:400] or "GitHub could not bring the PR fork up to date."
+    )
+
+  verified = _inspect_owner_fork_default_branch(
+    repo,
+    fork_slug,
+    upstream_branch=upstream_branch,
+    upstream_sha=upstream_sha,
+  )
+  if verified.get("last_submit_fork_sync") not in {
+    "current", "contains-upstream",
+  }:
+    raise ContributionSubmitError(
+      "GitHub did not finish refreshing the PR fork, so Contribute stopped "
+      "before pushing the reviewed branch.",
+      record_patch=verified,
+    )
+  return {**verified, "last_submit_fork_sync": "fast-forwarded"}
+
+
 def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -1065,7 +1152,29 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
           "last_submit_push_sha": push_source,
         })
       except ContributionSubmitError as exc:
-        raise _merge_error_patch(exc, record_patch) from exc
+        granted_scopes = set(state.get("scopes") or [])
+        if "workflow" not in granted_scopes:
+          raise ContributionSubmitError(
+            "This reviewed change depends on newer code in a stale PR fork. "
+            "In Contribute, enable optional workflow access, then try Send "
+            "again; Contribute will fast-forward only that fork's default "
+            "branch before pushing the reviewed topic branch.",
+            record_patch=_record_patch_with(record_patch, {
+              "last_submit_requires_workflow_scope": True,
+              "last_submit_compatible_error": exc.message,
+            }),
+          ) from exc
+        try:
+          synced_patch = _sync_owner_fork_with_workflow_scope(
+            repo,
+            fork_slug,
+            upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+            upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+          )
+          record_patch = _record_patch_with(record_patch, synced_patch)
+          push_source = "HEAD"
+        except ContributionSubmitError as sync_exc:
+          raise _merge_error_patch(sync_exc, record_patch) from sync_exc
 
     last_push_error = None
     for _ in range(_PUSH_RETRIES):
@@ -1168,6 +1277,7 @@ async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
 @_limiter.limit("3/minute")
 async def connect_start(
   request: Request,
+  body: GithubConnectStartRequest | None = None,
   _: models.Owner = Depends(get_owner_or_app_with_github_access),
 ):
   """Starts the GitHub device flow; returns the code the owner enters."""
@@ -1182,10 +1292,11 @@ async def connect_start(
       ),
     )
   try:
+    scopes = "public_repo workflow" if body and body.workflow else "public_repo"
     async with httpx.AsyncClient(timeout=15.0) as client:
       r = await client.post(
         _DEVICE_CODE_URL,
-        data={"client_id": client_id, "scope": "public_repo"},
+        data={"client_id": client_id, "scope": scopes},
         headers={"Accept": "application/json"},
       )
   except httpx.HTTPError:
@@ -1220,6 +1331,7 @@ async def connect_start(
     "verification_uri": payload["verification_uri"],
     "expires_in": expires_in,
     "interval": interval,
+    "requested_scopes": scopes.split(),
   }
 
 
@@ -1357,6 +1469,8 @@ async def github_status(
     "scopes": (state.get("scopes") or []) if connected else [],
     "token_source": state.get("token_source") if connected else None,
     "device_flow_available": bool(get_settings().github_oauth_client_id),
+    "classic_token_url": _CLASSIC_TOKEN_URL,
+    "classic_workflow_token_url": _CLASSIC_WORKFLOW_TOKEN_URL,
     "gh_version": github_auth.gh_version(),
   }
 
