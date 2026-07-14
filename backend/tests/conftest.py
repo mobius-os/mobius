@@ -68,7 +68,11 @@ def _isolate_git_env(monkeypatch):
     monkeypatch.delenv(var, raising=False)
   monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
   monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-  monkeypatch.setenv("GIT_CEILING_DIRECTORIES", tempfile.gettempdir())
+  repo_root = _Path(__file__).resolve().parents[2]
+  monkeypatch.setenv(
+    "GIT_CEILING_DIRECTORIES",
+    os.pathsep.join((tempfile.gettempdir(), str(repo_root))),
+  )
 
 
 @pytest.fixture(autouse=True)

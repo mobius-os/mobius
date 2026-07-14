@@ -127,12 +127,21 @@ services:
       # metadata from another revision; repo-root tests then resolved `/` and
       # produced a large false-failure cluster.
       - ./:/workspace
+    tmpfs:
+      # The baked runtime vendor tree is not part of a source-checkout CI run.
+      # Mask it so frontend watcher tests compare only their fixture builds.
+      - /app/static/vendor
     environment:
       - SECRET_KEY=test-secret-key-at-least-32-characters-long
       - DATABASE_URL=sqlite:////tmp/test.db
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
       - MOBIUS_BUILD_INFO_PATH=/workspace/.test-build-info-does-not-exist.json
+      # This may be a linked git worktree whose .git file points to a host-only
+      # common dir. Tests create and query explicit temporary repos; prevent an
+      # unrelated `git ls-remote` from failing while discovering the broken
+      # outer worktree pointer first.
+      - GIT_CEILING_DIRECTORIES=/workspace
       # Bootstrap fetches the curated store manifest from GitHub on
       # first boot. Tests must not depend on outbound network — set
       # this so ensure_store_installed() returns immediately.
