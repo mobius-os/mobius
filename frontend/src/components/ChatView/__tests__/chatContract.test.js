@@ -36,6 +36,13 @@ const pinnedEnv = {
   fullViewH: 700,
 }
 
+test('pin registry summary matches owner-authoritative R2 geometry', () => {
+  const rule = CHAT_CONTRACT.find(entry => entry.id === 'pin-on-send')
+  assert.ok(rule)
+  assert.match(rule.summary, /DOM snapshot.*real-content tail/)
+  assert.doesNotMatch(rule.summary, /gesture-entered auto-scroll/)
+})
+
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {
   const s = snapshotChatUX(pinnedEnv)
   assert.equal(s.scrollTop, 996)

@@ -99,13 +99,16 @@ from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
 
 
-def _thinking_event(content: str) -> dict:
-  """Build the provider-agnostic reasoning event with runner time."""
-  return {
+def _thinking_event(content: str, segment_id: str | None = None) -> dict:
+  """Build a reasoning delta, preserving its content-block identity."""
+  event = {
     "type": "thinking",
     "content": content,
     "ts": int(time.time() * 1000),
   }
+  if segment_id:
+    event["segment_id"] = segment_id
+  return event
 
 
 def _claude_thinking_config(model: str | None) -> dict[str, str] | None:
@@ -679,7 +682,12 @@ def dispatch_sdk_message(
       if delta_type == "thinking_delta":
         thinking = delta.get("thinking") or delta.get("text") or ""
         if thinking:
-          bc.publish(_thinking_event(thinking))
+          block_index = event.get("index")
+          segment_id = (
+            f"claude:content:{block_index}"
+            if block_index is not None else None
+          )
+          bc.publish(_thinking_event(thinking, segment_id))
         return current_session_id, None
       _emit_unknown(bc, f"stream:content_block_delta:{delta_type}", delta)
       return current_session_id, None

@@ -1,8 +1,10 @@
 /**
  * chatContract — the machine-checkable subset of the owner-authoritative
- * invariants in ARCHITECTURE.md "Chat scroll + steer contract". One pure
- * module, three consumers: node unit tests, Playwright `page.evaluate`, and
- * (later) a runtime monitor on prod.
+ * invariants in ARCHITECTURE.md "Chat scroll + steer contract". This pure
+ * module is currently exercised by node unit tests and is deliberately safe
+ * to import from Playwright `page.evaluate` or a future runtime monitor. Those
+ * browser/runtime consumers are not implemented yet; do not count them as
+ * present contract coverage until tracked callers exist.
  *
  * Purity is the whole point. No React import, no `window` / `document`, no DOM
  * queries: every input arrives as an argument (a real element or a plain object
@@ -53,8 +55,8 @@ export const CHAT_CONTRACT = [
     title: 'Pin eligible sends to top',
     summary:
       'The first user message always pins. A subsequent direct, queued, or '
-      + 'steered message pins only when submitted from gesture-entered '
-      + 'auto-scroll at the real-content tail.',
+      + 'steered message pins when its action-time DOM snapshot is at the '
+      + 'real-content tail; stale internal mode never overrides geometry.',
   },
   {
     id: 'pin-holds-streaming',

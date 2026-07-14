@@ -77,13 +77,35 @@ from app.tool_sources import normalize_tool_sources
 log = logging.getLogger("moebius.chat")
 
 
-def _thinking_event(content: str) -> dict:
-  """Build the provider-agnostic reasoning event with runner time."""
-  return {
+def _thinking_event(content: str, segment_id: str | None = None) -> dict:
+  """Build a reasoning delta, preserving its provider semantic segment.
+
+  Deltas within one segment are token fragments and concatenate verbatim.
+  Distinct summary/content indices are separate thoughts and need a paragraph
+  boundary. Keeping that identity on the wire lets both live and durable
+  reducers make the distinction without guessing from Markdown text.
+  """
+  event = {
     "type": "thinking",
     "content": content,
     "ts": int(time.time() * 1000),
   }
+  if segment_id:
+    event["segment_id"] = segment_id
+  return event
+
+
+def _codex_thinking_segment_id(payload: Any) -> str | None:
+  item_id = getattr(payload, "item_id", None)
+  if not item_id:
+    return None
+  summary_index = getattr(payload, "summary_index", None)
+  if summary_index is not None:
+    return f"codex:{item_id}:summary:{summary_index}"
+  content_index = getattr(payload, "content_index", None)
+  if content_index is not None:
+    return f"codex:{item_id}:content:{content_index}"
+  return f"codex:{item_id}"
 
 
 class _BridgeError(Exception):
@@ -1087,7 +1109,10 @@ async def run_codex_sdk_turn(
           ),
         ):
           if payload.delta:
-            bc.publish(_thinking_event(payload.delta))
+            bc.publish(_thinking_event(
+              payload.delta,
+              _codex_thinking_segment_id(payload),
+            ))
           continue
 
         if isinstance(

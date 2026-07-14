@@ -1,18 +1,12 @@
 /**
  * The send-scroll rule (owner's words):
  *
- *   "The first message always pins. Later messages pin only from manual
- *    auto-scroll at the bottom; every pin returns to hold."
+ *   "The first message always pins. Later messages pin when the reader is
+ *    actually at the real-content bottom; every pin returns to hold."
  *
- * Direct, queued, and steered rows share that submit-time rule. Geometry alone
- * is insufficient: a chat still in PIN_USER_MSG/ANCHOR_AT is hold even if its
- * real content happens to be near the tail.
- *
- * "At bottom" is the gesture-gated follow flag, NOT a raw IO read — a
- * raw sentinel read at send time mis-classifies an at-bottom reader
- * because appending the assistant shell hides the sentinel before the
- * first follow-write. See shouldPinSend in useScrollMode.js and
- * ARCHITECTURE.md "Chat scroll + steer contract".
+ * Direct, queued, and steered rows share that submit-time rule. The pre-append
+ * real-content geometry is authoritative; internal mode can lag input/layout
+ * by a frame and must not make an identical bottom send intermittent.
  *
  * Mirrors the route-mock SSE flow of second-send-pin.spec.mjs.
  *
@@ -249,24 +243,23 @@ test('Send while scrolled up preserves the exact reading position', async ({ pag
 })
 
 // ───────────────────────────────────────────────────────────────────
-// Short chat in hold — geometry alone does not authorize a second pin
+// Short chat at its real-content tail — the second send pins too
 // ───────────────────────────────────────────────────────────────────
 
-test('Short chat stays in hold until the user manually enters auto-scroll', async ({ page }) => {
+test('Short chat at the real-content tail pins the next send', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
-  // The first send pins and therefore leaves the chat in hold. A short reply
-  // does not silently turn geometric proximity into FOLLOW_BOTTOM.
+  // The first send pins and its short reply leaves a permanent reservation.
+  // The content itself still fits: the reader is at its real-content tail.
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Short reply.' }, { type: 'done' }])
   await sendMessage(page, 'First short')
   await waitStreamDone(page)
 
-  // The chat fits the viewport, but no manual bottom gesture occurred.
+  // The chat fits the viewport, so its real-content bottom is already visible.
   const fits = await measure(page)
   const fitsGap = fits.scrollH - fits.scrollTop - fits.clientH
   expect(fitsGap).toBeLessThan(50)
-  const savedTop = fits.scrollTop
 
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Another short.' }, { type: 'done' }])
   await sendMessage(page, 'Second short')
@@ -275,6 +268,6 @@ test('Short chat stays in hold until the user manually enters auto-scroll', asyn
 
   const m = await measure(page)
   expect(m.lastUserText).toBe('Second short')
-  expect(Math.abs(m.scrollTop - savedTop)).toBeLessThanOrEqual(8)
-  expect(m.lastUserVisualTop).toBeGreaterThan(10)
+  expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(m.lastUserVisualTop).toBeLessThanOrEqual(10)
 })

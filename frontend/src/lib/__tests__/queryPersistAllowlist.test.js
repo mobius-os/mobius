@@ -15,7 +15,13 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { shouldPersistQueryKey } from '../../queryClient.js'
+import { QueryClient } from '@tanstack/react-query'
+import { indexedDB } from 'fake-indexeddb'
+import { get } from 'idb-keyval'
+import {
+  flushPersistedQueryCache,
+  shouldPersistQueryKey,
+} from '../../queryClient.js'
 
 test('top-level domains persist by head segment', () => {
   for (const head of ['chats', 'chat-messages', 'theme', 'apps']) {
@@ -50,4 +56,28 @@ test('unrelated keys do not persist', () => {
   assert.equal(shouldPersistQueryKey(['models', 'registry']), false)
   assert.equal(shouldPersistQueryKey(['app-token', 'some-app']), false)
   assert.equal(shouldPersistQueryKey(['owner', 'walkthrough']), false)
+})
+
+test('explicit reload handoff flushes the latest allowlisted chat cache', async () => {
+  const previousIndexedDb = globalThis.indexedDB
+  globalThis.indexedDB = indexedDB
+  try {
+    const client = new QueryClient()
+    client.setQueryData(['chat-messages', 'chat-1'], {
+      messages: [{ role: 'assistant', content: 'terminal line' }],
+    })
+    client.setQueryData(['models', 'registry'], { mustNotPersist: true })
+
+    await flushPersistedQueryCache(client)
+    const raw = await get('mobius-query-cache')
+    const persisted = JSON.parse(raw)
+    const keys = persisted.clientState.queries.map(q => q.queryKey)
+    assert.deepEqual(keys, [['chat-messages', 'chat-1']])
+    assert.equal(
+      persisted.clientState.queries[0].state.data.messages[0].content,
+      'terminal line',
+    )
+  } finally {
+    globalThis.indexedDB = previousIndexedDb
+  }
 })

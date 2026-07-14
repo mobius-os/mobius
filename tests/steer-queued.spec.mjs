@@ -261,7 +261,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
 
-  test('a steer preserves the live stream and held scroll position', async ({ page }) => {
+  test('a steer while reading above the tail preserves the live stream and held position', async ({ page }) => {
     // Regression for bug #1: a force_steer must inject into the LIVE turn,
     // not trigger the fresh-send reset. The old code ran sendMessage's
     // "new turn" reset (setStreamItems([]) + setIsStreaming + reconnect) for
@@ -370,6 +370,19 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       (t) => document.body.textContent?.includes(t),
       PRE_STEER, { timeout: 5000 },
     )
+
+    // Explicit fast-forward snapshots the reader position when pressed. Put
+    // this case unambiguously above the tail so it exercises the HOLD branch;
+    // the complementary at-bottom branch is the normal shouldPinSend contract.
+    await page.evaluate(() => {
+      const scroll = document.querySelector('.chat__scroll')
+      if (!scroll) return
+      const assistant = document.querySelector('.chat__msg--assistant')
+      if (assistant) assistant.style.minHeight = '1600px'
+      scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
+    })
+    await page.waitForTimeout(350)
 
     // Queue + steer.
     await sendMessage(page, QUEUED_TEXT)

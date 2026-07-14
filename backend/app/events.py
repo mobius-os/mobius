@@ -112,6 +112,7 @@ def _persisted_block(block: dict) -> dict:
   persisted = dict(block)
   persisted.pop("_thinking_start_ts", None)
   persisted.pop("_thinking_closed", None)
+  persisted.pop("_thinking_segment_id", None)
   return persisted
 
 
@@ -280,6 +281,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     if not content:
       return False
     ts = _event_ts_ms(event)
+    segment_id = event.get("segment_id") or None
     last = assistant_blocks[-1] if assistant_blocks else None
     if (
       last
@@ -290,7 +292,17 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       if start_ts is None and ts is not None:
         start_ts = ts - int(last.get("duration_ms") or 0)
         last["_thinking_start_ts"] = start_ts
-      last["content"] += content
+      previous_segment_id = last.get("_thinking_segment_id")
+      if (
+        segment_id is not None
+        and previous_segment_id is not None
+        and segment_id != previous_segment_id
+      ):
+        last["content"] += "\n\n" + content
+      else:
+        last["content"] += content
+      if segment_id is not None:
+        last["_thinking_segment_id"] = segment_id
       if start_ts is not None and ts is not None:
         last["duration_ms"] = max(0, ts - int(start_ts))
     else:
@@ -301,6 +313,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       }
       if ts is not None:
         block["_thinking_start_ts"] = ts
+      if segment_id is not None:
+        block["_thinking_segment_id"] = segment_id
       assistant_blocks.append(block)
     return True
 

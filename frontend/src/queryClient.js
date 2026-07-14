@@ -17,9 +17,12 @@
  * that window), gcTime 24h means it's kept on disk for a day after
  * last use. Tweak per-query via the queryKey/queryFn config.
  */
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, dehydrate } from '@tanstack/react-query'
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
 import { get, set, del } from 'idb-keyval'
+
+const QUERY_CACHE_KEY = 'mobius-query-cache'
+const QUERY_CACHE_BUSTER = 'v1'
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -41,14 +44,14 @@ const idbStorage = {
 
 export const queryPersister = createAsyncStoragePersister({
   storage: idbStorage,
-  key: 'mobius-query-cache',
+  key: QUERY_CACHE_KEY,
   throttleTime: 1000,
 })
 
 export const persistOptions = {
   persister: queryPersister,
   maxAge: 24 * 60 * 60 * 1000,
-  buster: 'v1',
+  buster: QUERY_CACHE_BUSTER,
   dehydrateOptions: {
     shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
   },
@@ -77,4 +80,23 @@ export function shouldPersistQueryKey(queryKey) {
     return true
   }
   return PERSISTED_FULL_KEYS.has(JSON.stringify(queryKey))
+}
+
+/** Force the current in-memory cache to IndexedDB before an intentional shell
+ * reload. Normal persistence is deliberately throttled because live streams
+ * update the chat cache frequently. A deferred shell rebuild can become idle
+ * in the sub-second interval after terminal promotion, however; reloading in
+ * that window used to hydrate the previous partial and make the final response
+ * disappear until the chat remounted/refetched. This explicit terminal
+ * handoff snapshots the same allowlisted cache without changing steady-state
+ * throttling. */
+export async function flushPersistedQueryCache(client = queryClient) {
+  const persistedClient = {
+    buster: QUERY_CACHE_BUSTER,
+    timestamp: Date.now(),
+    clientState: dehydrate(client, {
+      shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
+    }),
+  }
+  await idbStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(persistedClient))
 }

@@ -254,18 +254,34 @@ export function chooseActiveAssistantSurface(msg, items) {
 
 
 // Decide whether an existing DB assistant row belongs in the stable active
-// shell. A captured bridge always does. After that gate retires, a trailing
-// assistant stays in the shell while the active turn has no live items, then
-// remains there only if surface selection relates it to the returning stream.
-// This closes the empty→nonempty reconnect/question gap without swallowing an
-// unrelated completed assistant from the previous turn.
+// shell. A captured bridge does while the live payload is empty or proves it
+// is the same answer; an unrelated payload releases a stale cached bridge and
+// falls through to the actual trailing partial. A trailing assistant stays in
+// the shell while the active turn has no live items, then remains there only
+// if surface selection relates it to the returning stream. This closes the
+// empty→nonempty reconnect/question gap without swallowing an unrelated
+// completed assistant from the previous turn.
 export function chooseActiveAssistantMirrorIndex({
   bridgeMsgIdx,
   trailingAssistantPartialIdx,
   hasLivePayload,
+  bridgeSurface,
   surface,
 }) {
-  if (bridgeMsgIdx >= 0) return bridgeMsgIdx
+  if (bridgeMsgIdx >= 0) {
+    // The mount bridge is captured before the authoritative chat fetch can
+    // refresh an in-memory cache. If a new turn starts in that window, the
+    // captured row can be the COMPLETED answer from the previous turn. Never
+    // suppress it merely because its timestamp was once a bridge candidate:
+    // once live payload exists, the payload must prove that the row is the
+    // same answer. Otherwise fall through to the actual trailing DB partial
+    // (if any) or render the new stream on its own.
+    if (!hasLivePayload
+        || bridgeSurface?.hideMessage
+        || bridgeSurface?.suppressStream) {
+      return bridgeMsgIdx
+    }
+  }
   if (trailingAssistantPartialIdx < 0) return -1
   if (!hasLivePayload) return trailingAssistantPartialIdx
   return surface?.hideMessage || surface?.suppressStream

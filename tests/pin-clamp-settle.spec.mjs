@@ -58,6 +58,41 @@ async function routeStream(page, events) {
     }))
 }
 
+/** Install a deterministic, genuinely chunked SSE source before navigation.
+ *  `page.route().fulfill({body})` delivers the whole body atomically, which
+ *  cannot exercise a keyboard-close event BETWEEN the final text frame and
+ *  `done`. Each array entry is one stream connection; each tuple is
+ *  [delayMs, event]. Normal fetch remains untouched for every other route. */
+async function installChunkedStreams(page, streams) {
+  await page.addInitScript((streamSpecs) => {
+    const realFetch = window.fetch.bind(window)
+    let streamIndex = 0
+    window.fetch = (input, init) => {
+      const url = String(input?.url || input)
+      if (!/\/api\/chats\/[^/]+\/stream$/.test(url)) {
+        return realFetch(input, init)
+      }
+      const spec = streamSpecs[streamIndex++] || []
+      const encoder = new TextEncoder()
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          for (const [delayMs, event] of spec) {
+            setTimeout(() => {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+              )
+              if (event.type === 'done') controller.close()
+            }, delayMs)
+          }
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }))
+    }
+  }, streams)
+}
+
 async function newChat(page) {
   await page.evaluate(() => {
     const btn = document.querySelector('[aria-expanded]')
@@ -122,6 +157,27 @@ async function measure(page) {
   })
 }
 
+async function measureStreamingGeometry(page) {
+  return page.evaluate(() => {
+    const scroll = document.querySelector('.chat__scroll')
+    const users = document.querySelectorAll('.chat__msg--user')
+    const user = users[users.length - 1]
+    const spacer = document.querySelector('.spacer-dynamic')
+    if (!scroll || !user || !spacer) return { error: 'missing element' }
+    const sr = scroll.getBoundingClientRect()
+    const ur = user.getBoundingClientRect()
+    const spacerH = spacer.offsetHeight
+    return {
+      scrollTop: Math.round(scroll.scrollTop),
+      userVisualTop: Math.round(ur.top - sr.top),
+      spacerH,
+      realContentGap: Math.round(
+        scroll.scrollHeight - spacerH - scroll.scrollTop - scroll.clientHeight,
+      ),
+    }
+  })
+}
+
 // These tests mock the network via page.route and assert no service-worker
 // behavior. The real SW claims the page ~1s after load and its fetch handler
 // bypasses page.route, silently un-mocking the API/stream contracts mid-test
@@ -172,4 +228,137 @@ test('Deep second send pins flush to top after the post-send layout settle (no h
   // below the top (a permanent clamp the RO never compensates).
   expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
   expect(m.lastUserVisualTop).toBeLessThanOrEqual(10)
+})
+
+test('Keyboard close cannot retire a pin before a short stream settles', async ({ page }) => {
+  await installChunkedStreams(page, [
+    [
+      [0, { type: 'catch_up_done' }],
+      [40, { type: 'text', content: 'First response line. '.repeat(90) }],
+      [400, { type: 'done' }],
+    ],
+    [
+      [0, { type: 'catch_up_done' }],
+      [60, { type: 'text', content: 'OK.' }],
+      // Keep the short live frame open long enough to close the simulated
+      // keyboard before terminal promotion swaps live → settled markup.
+      [1500, { type: 'done' }],
+    ],
+  ])
+  await setup(page, { width: 426, height: 860 })
+  await newChat(page)
+
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  await gestureToBottom(page)
+
+  // Match the real mobile order: the composer opens the keyboard (short
+  // viewport), send pins there, then blur closes the keyboard while the reply
+  // is still streaming. The grow-only fullViewH reservation intentionally
+  // makes the pin look away from the PHYSICAL bottom while the keyboard is
+  // open; that temporary geometry must not be mistaken for reader intent.
+  await page.setViewportSize({ width: 426, height: 560 })
+  await sendMessage(page, 'Second deep message')
+  await expect(page.locator('.chat__cursor')).toBeVisible({ timeout: 5000 })
+
+  const pinnedWithKeyboard = await measure(page)
+  expect(pinnedWithKeyboard.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(pinnedWithKeyboard.lastUserVisualTop).toBeLessThanOrEqual(10)
+
+  await page.setViewportSize({ width: 426, height: 860 })
+  const pinnedAfterKeyboardClose = await measure(page)
+  expect(pinnedAfterKeyboardClose.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(pinnedAfterKeyboardClose.lastUserVisualTop).toBeLessThanOrEqual(10)
+
+  await waitStreamDone(page)
+  const settled = await measure(page)
+  expect(settled.lastUserText).toBe('Second deep message')
+  expect(settled.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(settled.lastUserVisualTop).toBeLessThanOrEqual(10)
+})
+
+test('A live pin holds while spacer remains, then follows only after it is filled', async ({ page }) => {
+  await installChunkedStreams(page, [[
+    [0, { type: 'catch_up_done' }],
+    [80, { type: 'text', content: 'EARLY_MARKER short opening.' }],
+    [900, { type: 'text', content: ' Fill the reserved response room.'.repeat(100) }],
+    [1700, { type: 'text', content: ' TAIL_MARKER'.repeat(80) }],
+    [2600, { type: 'done' }],
+  ]])
+  await setup(page, { width: 426, height: 860 })
+  await newChat(page)
+  await sendMessage(page, 'Keep this prompt still, then follow')
+
+  // The first small frame must consume blank reservation without moving the
+  // pinned prompt. This is the owner-observed regression: following from the
+  // first token makes the whole chat move while blank reply room still exists.
+  await expect(page.getByText(/EARLY_MARKER/)).toBeVisible({ timeout: 5000 })
+  const early = await measureStreamingGeometry(page)
+  expect(early.userVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(early.userVisualTop).toBeLessThanOrEqual(10)
+  expect(early.spacerH).toBeGreaterThan(20)
+
+  // Once response content has consumed the exact reservation, the state
+  // machine performs its one automatic pin→follow handoff. Further streamed
+  // content stays at the real-content tail (spacer excluded), with no timer or
+  // token-count heuristic involved.
+  await page.waitForFunction(() => (
+    (document.querySelector('.spacer-dynamic')?.offsetHeight ?? 999) <= 1
+  ), { timeout: 10000 })
+  await expect(page.getByText(/TAIL_MARKER/)).toBeVisible({ timeout: 10000 })
+  await page.waitForFunction(() => {
+    const s = document.querySelector('.chat__scroll')
+    const spacerH = document.querySelector('.spacer-dynamic')?.offsetHeight || 0
+    if (!s) return false
+    const gap = s.scrollHeight - spacerH - s.scrollTop - s.clientHeight
+    return Math.abs(gap) <= 4
+  }, { timeout: 10000 })
+  const following = await measureStreamingGeometry(page)
+  expect(following.spacerH).toBeLessThanOrEqual(1)
+  expect(following.scrollTop).toBeGreaterThan(early.scrollTop)
+  expect(Math.abs(following.realContentGap)).toBeLessThanOrEqual(4)
+})
+
+test('Reader gesture owns scroll and spacer geometry while a reply is streaming', async ({ page }) => {
+  await installChunkedStreams(page, [[
+    [0, { type: 'catch_up_done' }],
+    [80, { type: 'text', content: 'Opening line.' }],
+    [300, { type: 'text', content: ' Fill the reservation.'.repeat(120) }],
+    [900, { type: 'text', content: ' A later streamed layout change.'.repeat(12) }],
+    [1700, { type: 'done' }],
+  ]])
+  await setup(page, { width: 426, height: 860 })
+  await newChat(page)
+  await sendMessage(page, 'Let me scroll while this runs')
+  await expect(page.getByText(/Opening line/)).toBeVisible({ timeout: 5000 })
+
+  await page.waitForFunction(() => (
+    (document.querySelector('.spacer-dynamic')?.offsetHeight ?? 999) <= 1
+  ), { timeout: 10000 })
+  const before = await measureStreamingGeometry(page)
+  expect(before.spacerH).toBeLessThanOrEqual(1)
+
+  // Start a touch gesture just before the next stream-driven ResizeObserver
+  // pass. Both explicit scrollTop writes and indirect spacer shrink must yield
+  // until the gesture window closes. This locks the pre-scroll race where the
+  // stream used to throw the reader back to the pin before `scroll` landed.
+  await page.evaluate(() => {
+    const s = document.querySelector('.chat__scroll')
+    if (!s) return
+    s.dispatchEvent(new Event('touchstart', { bubbles: true }))
+    s.dispatchEvent(new Event('touchmove', { bubbles: true }))
+    s.scrollTop = Math.max(0, s.scrollTop - 120)
+  })
+  const gestureTop = await page.evaluate(
+    () => Math.round(document.querySelector('.chat__scroll')?.scrollTop || 0),
+  )
+  await page.waitForFunction(() => document.body.textContent.includes('later streamed'))
+  const during = await measureStreamingGeometry(page)
+  expect(Math.abs(during.scrollTop - gestureTop)).toBeLessThanOrEqual(4)
+
+  // Deferred geometry catches up after ownership returns; it must not revive
+  // the old PIN/FOLLOW mode or undo the gesture-owned anchor.
+  await page.waitForTimeout(350)
+  const after = await measureStreamingGeometry(page)
+  expect(Math.abs(after.scrollTop - gestureTop)).toBeLessThanOrEqual(4)
 })

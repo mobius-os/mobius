@@ -9,22 +9,27 @@
  *
  * Modes:
  *   { kind: 'INITIAL' }           — pre-restore default; no-op
- *   { kind: 'PIN_USER_MSG', cid }  — user msg at top (post-send), keyed
- *                                    on the stable client `cid` (data-cid)
+ *   { kind: 'PIN_USER_MSG', cid, followWhenFilled? }
+ *                                  — user msg at top (post-send), keyed on
+ *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
  *   { kind: 'ANCHOR_AT', key, offset }  — anchored at a specific msg
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
- * first visible user message always pins; every later message pins only when
- * the reader is already in FOLLOW_BOTTOM and still at the real-content tail
- * at submit time. A pin always leaves FOLLOW_BOTTOM. The dynamic pin spacer
- * is reserved room, not message content.
+ * first visible user message always pins; every later message pins when the
+ * reader is at the real-content tail at submit time. DOM geometry is the
+ * authority; ScrollMode is only a fallback when no scroll element exists.
+ * A live pin leaves FOLLOW_BOTTOM while its dynamic spacer is
+ * being consumed, then hands off to FOLLOW_BOTTOM exactly when that
+ * reservation reaches zero. A short reply never reaches the handoff and
+ * remains pinned after settle. The dynamic pin spacer is reserved room, not
+ * message content.
  * The IntersectionObserver on a sentinel at the end of `.chat__scroll` is
  * used only for the gesture-driven mode transition (engaging
  * FOLLOW_BOTTOM when the user scrolls to the physical bottom), not for the
  * send-pin decision.
  *
- * User-gesture detection: pointerdown/wheel/touchstart/keydown open a
+ * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown open a
  * 250ms window in which scroll events are user-driven and can
  * transition the mode. Outside the window, scrolls come from our
  * applyMode or browser clamps and are ignored.
@@ -45,7 +50,7 @@ import { cidOf } from './chatRuntimeState.js'
 const REVEAL_CAP_MS = 1500
 
 // User gesture window — scroll events fired within this window of a
-// pointerdown/wheel/touchstart/keydown are treated as user-driven.
+// pointerdown/wheel/touchstart/touchmove/keydown are treated as user-driven.
 // Outside the window, scrolls are our own applyMode or browser
 // clamps and MUST NOT mutate mode.
 const GESTURE_WINDOW_MS = 250
@@ -188,7 +193,12 @@ function _validateSavedMode(saved, messages, scrollEl) {
     if (saved.cid == null) return holdCurrent()
     const lastUserMsg = [...messages].reverse()
       .find(m => m.role === 'user' && !m.hidden)
-    return cidOf(lastUserMsg) === saved.cid ? saved : holdCurrent()
+    // Automatic pin→follow is live-turn state, never restoration state. Strip
+    // the armed flag even if a pagehide captured it mid-stream; mount/return
+    // must not manufacture tail-follow from saved geometry.
+    return cidOf(lastUserMsg) === saved.cid
+      ? settledPinMode(saved)
+      : holdCurrent()
   }
   if (saved.kind === 'ANCHOR_AT') {
     const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
@@ -235,32 +245,29 @@ export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
 }
 
 
-// "Near the bottom" tolerance for verifying that an existing FOLLOW_BOTTOM
-// intent is still at the real-content tail. Geometry never creates follow.
+// "Near the bottom" tolerance for the submit-time real-content snapshot.
 const NEAR_BOTTOM_PX = 50
 
 /** The single submit-time rule used by direct, queued, and steered user rows.
  *  A row moves to the top (PIN_USER_MSG) only when it was the first visible
- *  user message, or the reader was already auto-scrolling at the real-content
- *  tail when they submitted it.
+ *  user message, or the reader was at the real-content tail when submitted.
  *
- *  Eligibility is the conjunction of gesture-entered FOLLOW_BOTTOM and a
- *  position within NEAR_BOTTOM_PX of the real-content tail before append.
  *  The dynamic spacer is excluded from that geometry because it is reserved
- *  reply room, not content. A stale FOLLOW_BOTTOM whose viewport has been
- *  clamped away from the tail does not pin; a hold mode near the tail does not
- *  pin either.
+ *  reply room, not content. This deliberately does not consult ScrollMode when
+ *  the DOM exists: mode transitions lag input/layout by a frame, which made an
+ *  identical bottom send pin only sometimes. The measured reader position is
+ *  the single submit-time authority. ScrollMode is a DOM-less fallback only.
  */
 export function shouldPinSend({
   scrollEl,
   mode,
   isFirstUserMsg,
-  wasAutoScrollAtBottom = null,
+  wasAtContentBottom = null,
 }) {
   if (isFirstUserMsg) return true
-  if (typeof wasAutoScrollAtBottom === 'boolean') return wasAutoScrollAtBottom
-  if (mode?.kind !== 'FOLLOW_BOTTOM') return false
-  return scrollEl ? isNearContentBottom(scrollEl) : true
+  if (typeof wasAtContentBottom === 'boolean') return wasAtContentBottom
+  if (scrollEl) return isNearContentBottom(scrollEl)
+  return mode?.kind === 'FOLLOW_BOTTOM'
 }
 
 
@@ -288,16 +295,50 @@ export function isNearScrollBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
 
 
 /** visualViewport resize/scroll is a browser viewport clamp, not a user
- *  reading gesture, so it must never CREATE FOLLOW_BOTTOM. Existing follow
- *  intent may survive while it remains at the tail; PIN/hold modes freeze to
- *  the current anchor when possible. Only the gesture-gated scroll handler may
- *  enter FOLLOW_BOTTOM. */
+ *  reading gesture, so it must never CREATE FOLLOW_BOTTOM or retire a valid
+ *  PIN_USER_MSG. Existing follow intent may survive while it remains at the
+ *  tail; an ordinary hold freezes to the current anchor when possible.
+ *
+ *  PIN_USER_MSG must keep its identity through the whole keyboard cycle. The
+ *  open keyboard deliberately leaves the permanent full-height reservation in
+ *  place, so the pinned scrollTop is no longer at the physical bottom while
+ *  the viewport is short. If keyboard-close used that temporary geometry to
+ *  demote PIN_USER_MSG to ANCHOR_AT, a short reply's terminal live-to-settled
+ *  height change could clamp scrollTop with no pin left to restore it. Only the
+ *  gesture-gated scroll handler may retire a pin: a real reader scroll stamps
+ *  FOLLOW_BOTTOM or ANCHOR_AT before any viewport event sees the mode. */
 export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = null) {
+  if (mode?.kind === 'PIN_USER_MSG') return mode
   if (mode?.kind === 'FOLLOW_BOTTOM') {
     return wasNearScrollBottom ? mode : (anchorMode || mode)
   }
-  if (mode?.kind === 'PIN_USER_MSG' && anchorMode) return anchorMode
   return mode
+}
+
+
+/** Advance an armed live pin to tail-follow exactly when its reserved reply
+ * room is exhausted. Settled/restored pins omit `followWhenFilled`, so later
+ * viewport or lazy-layout changes cannot manufacture follow intent. */
+export function modeAfterSpacerResize(mode, spacerH) {
+  if (mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) return mode
+  return spacerH <= 1 ? { kind: 'FOLLOW_BOTTOM' } : mode
+}
+
+
+/** A short stream ended before filling its reservation: retain the pin
+ * identity but retire its live-only automatic-follow handoff. */
+export function settledPinMode(mode) {
+  if (mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) return mode
+  return { kind: 'PIN_USER_MSG', cid: mode.cid }
+}
+
+
+/** Layout observers may own scrollTop only outside the gesture-intent window.
+ * Input events precede the browser's first `scroll` event; without this gate,
+ * a streaming ResizeObserver can re-pin/follow in that gap and throw the
+ * reader back before onScroll has a chance to stamp ANCHOR_AT. */
+export function layoutMayOwnScroll(gestureWindowUntil, now) {
+  return now >= gestureWindowUntil
 }
 
 
@@ -323,6 +364,14 @@ export function modeForChatExit(scrollEl) {
 }
 
 
+/** A queued send changes composer/footer layout but does not add a transcript
+ * row. Freeze the visible anchor before that reflow; its separately-captured
+ * submit intent still decides what happens when the row is later promoted. */
+export function modeForQueuedSubmission(scrollEl, currentMode) {
+  return anchorModeFromScroll(scrollEl) || currentMode
+}
+
+
 /**
  * Hook that owns the chat scroll subsystem.
  *
@@ -335,13 +384,14 @@ export function modeForChatExit(scrollEl) {
  *     sessionStorage. Also re-entered when the layout effect sees
  *     a new chatId (defensive — key={chatId} normally remounts).
  *
- *   {kind: 'PIN_USER_MSG', cid: string}
+ *   {kind: 'PIN_USER_MSG', cid: string, followWhenFilled?: boolean}
  *     Pin the user message with the given stable `cid` (matched via
  *     `data-cid`) to the top of the viewport (PIN_OFFSET=4 px of
  *     breathing room). Set only for the first visible user row or a
- *     later send submitted from gesture-entered FOLLOW_BOTTOM at the
- *     real-content tail; applyMode scrolls to
- *     `userMsgEl.offsetTop - PIN_OFFSET`. Pinning enters hold.
+ *     later send submitted at the real-content tail; applyMode scrolls to
+ *     `userMsgEl.offsetTop - PIN_OFFSET`. Pinning enters hold while the reply
+ *     consumes the reservation; an armed live pin hands off to FOLLOW_BOTTOM
+ *     only when that reservation reaches zero.
  *
  *   {kind: 'FOLLOW_BOTTOM'}
  *     Sticky-bottom for streaming. applyMode sets scrollTop =
@@ -360,7 +410,8 @@ export function modeForChatExit(scrollEl) {
  *   - Mutate `modeRef.current = {...}` on lifecycle events:
  *     * PIN_USER_MSG{cid} only when the shared submit-time rule allows it
  *     * INITIAL only for pre-restore setup; FOLLOW_BOTTOM is entered by this
- *       hook's gesture-gated scroll handler, not by callers
+ *       hook's gesture-gated scroll handler or its armed live-pin handoff,
+ *       not by callers
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
  *   - Apply `revealed` as `style={revealed ? undefined : {visibility:
@@ -387,13 +438,14 @@ export function modeForChatExit(scrollEl) {
  * @returns {{
  *   modeRef: React.MutableRefObject<
  *     | {kind: 'INITIAL'}
- *     | {kind: 'PIN_USER_MSG', cid: string}
+ *     | {kind: 'PIN_USER_MSG', cid: string, followWhenFilled?: boolean}
  *     | {kind: 'FOLLOW_BOTTOM'}
  *     | {kind: 'ANCHOR_AT', key: string, offset: number}
  *   >,
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
  *   userScrollIntentVersionRef: React.MutableRefObject<number>,
  *   revealed: boolean,
+ *   settleStreamingPin: () => void,
  * }}
  */
 export default function useScrollMode({
@@ -418,8 +470,9 @@ export default function useScrollMode({
   // Monotonic counter for actual user scroll intent. Send/steer code captures
   // this at submit time and honors a delayed pin only if the user did not
   // scroll after submitting. Programmatic applyMode scrolls must not increment
-  // it, so it is bumped from pointer/wheel/touch/key input on the scroll pane,
-  // not from every scroll event.
+  // it. Input only opens the pre-scroll ownership gate; the counter is bumped
+  // by an actual gesture-driven scroll event, so tapping a disclosure cannot
+  // accidentally cancel a queued/steered send's pin intent.
   const userScrollIntentVersionRef = useRef(0)
   const fullViewHRef = useRef(0)
   // Lives outside the layout effect so it survives StrictMode's
@@ -536,6 +589,22 @@ export default function useScrollMode({
     // above) so it survives the layout effect re-running, including
     // React 19 StrictMode's dev-time double-invoke.
 
+    const layoutOwnsScroll = () => layoutMayOwnScroll(
+      gestureWindowUntilRef.current,
+      performance.now(),
+    )
+    let deferredGestureLayoutTimer = 0
+    const deferLayoutUntilReaderYields = () => {
+      clearTimeout(deferredGestureLayoutTimer)
+      const delay = Math.max(
+        0,
+        gestureWindowUntilRef.current - performance.now(),
+      ) + 1
+      deferredGestureLayoutTimer = setTimeout(() => {
+        if (scrollRef.current === scrollEl) syncLayout()
+      }, delay)
+    }
+
     function sizeSpacer() {
       // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
       // the layout-effect entry and the RO callback start (the other two grow
@@ -566,7 +635,23 @@ export default function useScrollMode({
       const h = _computeSpacerH(
         scrollEl, listEl, lastUserEl, fullViewHRef.current,
       )
+      if (!layoutOwnsScroll()) {
+        // Spacer height is itself scroll geometry: shrinking it can make the
+        // browser clamp scrollTop even though we never assign scrollTop. Hold
+        // both direct and indirect scroll writes for the whole gesture, then
+        // run one deterministic layout pass when ownership returns.
+        deferLayoutUntilReaderYields()
+        return spacerEl.offsetHeight || 0
+      }
       spacerEl.style.height = `${h}px`
+      // A wheel/touch/key gesture begins before the browser emits its first
+      // scroll event. Do not let spacer geometry perform pin→follow in that
+      // interval; the gesture-driven onScroll owns the next transition.
+      const advanced = modeAfterSpacerResize(modeRef.current, h)
+      if (advanced !== modeRef.current) {
+        modeRef.current = advanced
+        persistMode()
+      }
     }
 
     function maybeApplyMode() {
@@ -603,6 +688,13 @@ export default function useScrollMode({
     function syncLayout({ forceApply = false, viewportChange = false } = {}) {
       const preserveBottom = viewportChange && nearScrollBottomRef.current
       sizeSpacer()
+      // Input precedes the browser's first `scroll` event. Every layout entry
+      // point shares this gate so streaming, footer reflow, keyboard resize,
+      // and catch-up cannot race the reader and throw the viewport elsewhere.
+      if (!layoutOwnsScroll()) {
+        nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+        return
+      }
       if (viewportChange) {
         const anchor = preserveBottom ? null : anchorModeFromScroll(scrollEl)
         modeRef.current = modeForViewportChange(
@@ -687,11 +779,13 @@ export default function useScrollMode({
       }
       sizeSpacer()
       const k = modeRef.current.kind
-      if (k === 'FOLLOW_BOTTOM'
-          || (k === 'ANCHOR_AT' && !revealedOnce)) {
+      const mayWriteScroll = layoutOwnsScroll()
+      if (mayWriteScroll && (
+        k === 'FOLLOW_BOTTOM' || (k === 'ANCHOR_AT' && !revealedOnce)
+      )) {
         applyMode(scrollEl, modeRef.current)
         nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
-      } else if (k === 'PIN_USER_MSG') {
+      } else if (k === 'PIN_USER_MSG' && mayWriteScroll) {
         // Re-pin in two cases, both of which leave the message off its
         // intended top position with no user action:
         //
@@ -712,9 +806,10 @@ export default function useScrollMode({
         //       (scrollHeight grew back enough); re-applying then lands the
         //       message at the top instead of futilely re-clamping.
         //
-        // Neither case fights the user: a manual scroll flips the mode away
-        // from PIN_USER_MSG, and streaming content BELOW the message with a
-        // tall-enough scrollHeight already keeps the pin satisfied (no
+        // Neither case fights the user: reader input immediately suspends
+        // layout-owned scroll writes, then its first scroll event flips the
+        // mode away from PIN_USER_MSG. Streaming content BELOW the message
+        // with a tall-enough scrollHeight already keeps the pin satisfied (no
         // clamp, no offsetTop shift) — so this stays a no-op there and does
         // NOT reintroduce the May-2026 re-pin-every-RO-firing jitter.
         // Reachability is measured against the TARGET, not "is there any
@@ -738,10 +833,13 @@ export default function useScrollMode({
     // User-gesture detection.
     const onUserInput = () => {
       gestureWindowUntilRef.current = performance.now() + GESTURE_WINDOW_MS
-      userScrollIntentVersionRef.current += 1
     }
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
+    // A long touch can pause beyond the initial 250ms before moving. Refresh
+    // intent on touchmove so the pre-scroll race stays closed for the whole
+    // gesture rather than only quick flicks.
+    scrollEl.addEventListener('touchmove', onUserInput, { passive: true })
     scrollEl.addEventListener('wheel', onUserInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
 
@@ -753,6 +851,7 @@ export default function useScrollMode({
       if (loadingOlderRef.current) return
       const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 4
       if (!overflows) return
+      userScrollIntentVersionRef.current += 1
 
       // Synchronous bottom check. bottomVisibleRef is updated by the
       // IntersectionObserver with a 50ms debounce — but a fast scroll
@@ -813,11 +912,13 @@ export default function useScrollMode({
       clearTimeout(ioBounceTimer)
       clearTimeout(safetyReveal)
       clearTimeout(revealTimer)
+      clearTimeout(deferredGestureLayoutTimer)
       io?.disconnect()
       ro.disconnect()
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)
       scrollEl.removeEventListener('touchstart', onUserInput)
+      scrollEl.removeEventListener('touchmove', onUserInput)
       scrollEl.removeEventListener('wheel', onUserInput)
       scrollEl.removeEventListener('keydown', onUserInput)
       if (vvHandler && typeof window !== 'undefined' && window.visualViewport) {
@@ -839,11 +940,45 @@ export default function useScrollMode({
     if (!revealedRef.current) return
     const scrollEl = scrollRef.current
     if (!scrollEl) return
+    if (!layoutMayOwnScroll(
+      gestureWindowUntilRef.current,
+      performance.now(),
+    )) return
     const k = modeRef.current.kind
     if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT') {
       applyMode(scrollEl, modeRef.current)
     }
   }, [scrollRef])
+
+  // Terminal stream promotion and spacer sizing land in different browser
+  // phases. Wait for the next committed frame, then either honor a terminal
+  // fill that crossed the boundary in the final buffered text, or disarm a
+  // short reply's live-only handoff. This is a render handshake, not a delay.
+  const settleStreamingPin = useCallback(() => {
+    requestAnimationFrame(() => {
+      const scrollEl = scrollRef.current
+      const mode = modeRef.current
+      if (!scrollEl || mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) {
+        return
+      }
+      const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
+      const advanced = modeAfterSpacerResize(mode, spacerH)
+      const mayWriteScroll = layoutMayOwnScroll(
+        gestureWindowUntilRef.current,
+        performance.now(),
+      )
+      if (!mayWriteScroll) {
+        // Terminal promotion can land between input and the first scroll
+        // event. The reader wins that race: freeze what is visible and retire
+        // the live handoff without issuing a final scroll write.
+        modeRef.current = anchorModeFromScroll(scrollEl) || settledPinMode(mode)
+      } else {
+        modeRef.current = advanced === mode ? settledPinMode(mode) : advanced
+        applyMode(scrollEl, modeRef.current)
+      }
+      persistMode()
+    })
+  }, [chatId, scrollRef])
 
   return {
     modeRef,
@@ -851,5 +986,6 @@ export default function useScrollMode({
     userScrollIntentVersionRef,
     revealed,
     reapplyActiveMode,
+    settleStreamingPin,
   }
 }

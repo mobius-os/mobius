@@ -177,7 +177,13 @@ export function attachToolSources(prev, sources) {
  * reasoning stays in emit-order. Empty content is a no-op. The caller
  * is responsible for flushing any pending typewriter text first.
  */
-export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
+export function appendThinkingChunk(
+  prev,
+  chunk,
+  at = Date.now(),
+  ts = null,
+  segmentId = null,
+) {
   if (!chunk) return prev
   const last = prev[prev.length - 1]
   const eventTs = Number.isFinite(ts) ? ts : null
@@ -185,6 +191,9 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
     const startedAt = Number.isFinite(last.startedAt) ? last.startedAt : at
     const firstTs = Number.isFinite(last.firstTs) ? last.firstTs : eventTs
     const updated = [...prev]
+    const segmentChanged = segmentId != null
+      && last.segmentId != null
+      && segmentId !== last.segmentId
     updated[updated.length - 1] = {
       ...last,
       startedAt,
@@ -193,7 +202,11 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
       // runner-measured span up to here), this lets the live ticker survive a
       // reconnect/catch-up replay — see thinkingElapsedMs.
       lastAt: at,
-      content: last.content + chunk,
+      // Token deltas inside one provider segment concatenate verbatim. A new
+      // summary/content index is a semantic paragraph, not another token.
+      // Legacy events have no identity and keep the old raw-concat behavior.
+      content: last.content + (segmentChanged ? '\n\n' : '') + chunk,
+      ...(segmentId != null ? { segmentId } : {}),
       duration_ms: Number.isFinite(firstTs) && Number.isFinite(eventTs)
         ? Math.max(0, eventTs - firstTs)
         : Math.max(0, at - startedAt),
@@ -207,7 +220,16 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
     firstTs: eventTs,
     lastAt: at,
     duration_ms: 0,
+    ...(segmentId != null ? { segmentId } : {}),
   }]
+}
+
+/** Render-time repair for already-persisted reasoning from clients that lost
+ * provider segment identity. Adjacent bold summary headings were stored as
+ * `****`; restore only that unambiguous Markdown seam. New events carry
+ * segment_id and are separated before persistence, so this is legacy-only. */
+export function thinkingContentForDisplay(content) {
+  return String(content || '').replaceAll('****', '**\n\n**')
 }
 
 /**

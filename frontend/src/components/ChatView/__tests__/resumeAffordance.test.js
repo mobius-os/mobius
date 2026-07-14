@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { sameMessageList } from '../chatMessageList.js'
 
 // The one-tap Resume affordance (design §2.2): a turn paused by a drain-gated
 // restart (or interrupted by a crash) persists a `resumable` error note; the
@@ -78,20 +79,22 @@ test('ariaStatus announces the recovery state instead of "Response ready."', () 
     'the recovery status takes precedence over the "Response ready." fallback')
 })
 
-test('sameBlock compares the error-card fields (stale-red-card guard)', () => {
+test('message equality compares the error-card fields (stale-red-card guard)', () => {
   // A warm DB refresh can deliver a message differing ONLY in the error-card
   // fields (boot reconcile stamps resumable + a pause descriptor onto an
-  // existing drain note). If sameBlock ignores them, commitMessages skips
+  // existing drain note). If equality ignores them, commitMessages skips
   // setMessages and a stale red card stays on screen until a remount. The
-  // pause is compared by sub-field (kind + resets_at), not object reference,
-  // which a refetch always recreates.
-  const fn = chatView.match(/function sameBlock[\s\S]*?\n\}/)?.[0] ?? ''
-  assert.match(fn, /a\.message === b\.message/,
-    'sameBlock must compare the error message text')
-  assert.match(fn, /a\.resumable === b\.resumable/,
-    'sameBlock must compare resumable')
-  assert.match(fn, /a\.pause\?\.kind === b\.pause\?\.kind/,
-    'sameBlock must compare pause.kind')
-  assert.match(fn, /a\.pause\?\.resets_at === b\.pause\?\.resets_at/,
-    'sameBlock must compare pause.resets_at')
+  // refreshed JSON object must therefore compare unequal.
+  const oldRows = [{
+    role: 'assistant', content: '',
+    blocks: [{ type: 'error', message: 'Interrupted', resumable: false }],
+  }]
+  const recoveredRows = [{
+    role: 'assistant', content: '',
+    blocks: [{
+      type: 'error', message: 'Paused', resumable: true,
+      pause: { kind: 'rate_limit', resets_at: '2026-07-15T00:00:00Z' },
+    }],
+  }]
+  assert.equal(sameMessageList(oldRows, recoveredRows), false)
 })

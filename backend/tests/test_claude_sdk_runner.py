@@ -647,11 +647,13 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
   monkeypatch.setattr(claude_sdk_runner.time, "time", lambda: 1.234)
   bus = _Bus()
   msg = _stream_delta("thinking_delta", thinking="planning...")
+  msg.event["index"] = 2
   dispatch_sdk_message(msg, bus, None)
   assert bus.events == [{
     "type": "thinking",
     "content": "planning...",
     "ts": 1234,
+    "segment_id": "claude:content:2",
   }]
 
 

@@ -60,11 +60,92 @@ export function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
   })
 }
 
+function durableMessageIdentity(message) {
+  if (!message) return null
+  if (message.id != null) return `id:${message.id}`
+  if (message.cid != null) return `cid:${message.cid}`
+  if (message.ts != null) return `ts:${message.role || ''}:${message.ts}`
+  return null
+}
+
+/**
+ * Refresh the server-authoritative recent page without discarding an already
+ * loaded older prefix. ChatView persists that wider window so R4 can restore
+ * an ANCHOR_AT row after navigating away. Replacing it with the default last
+ * 20 rows removes the anchor from the DOM and lets the browser clamp the
+ * restored viewport toward the top.
+ *
+ * Offsets establish where the two windows overlap; durable row identities
+ * verify that the history was only appended/updated rather than rewritten.
+ * Any gap or identity mismatch fails closed to the recent server page.
+ */
+export function mergeRecentMessagesIntoLoadedWindow({
+  loadedMessages,
+  loadedOffset,
+  recentMessages,
+  recentOffset,
+}) {
+  const recent = Array.isArray(recentMessages) ? recentMessages : []
+  const fallback = {
+    messages: recent,
+    offset: Number.isInteger(recentOffset) ? recentOffset : 0,
+  }
+  if (!Array.isArray(loadedMessages) || loadedMessages.length === 0) {
+    return fallback
+  }
+  if (!Number.isInteger(loadedOffset) || !Number.isInteger(recentOffset)) {
+    return fallback
+  }
+
+  const prefixLength = recentOffset - loadedOffset
+  if (prefixLength <= 0 || prefixLength > loadedMessages.length || recent.length === 0) {
+    return fallback
+  }
+
+  const overlapLength = Math.min(
+    loadedMessages.length - prefixLength,
+    recent.length,
+  )
+  if (overlapLength <= 0) return fallback
+  for (let index = 0; index < overlapLength; index += 1) {
+    const loadedId = durableMessageIdentity(loadedMessages[prefixLength + index])
+    const recentId = durableMessageIdentity(recent[index])
+    if (!loadedId || loadedId !== recentId) return fallback
+  }
+
+  return {
+    messages: [...loadedMessages.slice(0, prefixLength), ...recent],
+    offset: loadedOffset,
+  }
+}
+
 export function canFastForwardQueue(pendingMessages, turnActive) {
   return !!turnActive
     && Array.isArray(pendingMessages)
     && pendingMessages.length > 0
     && pendingMessages.every(m => typeof m?.ts === 'number' && m.serverTs === true)
+}
+
+// An in-process AskUserQuestion answer resumes the assistant turn that owns
+// the card. Only the recovery path (the original runner disappeared after the
+// card was persisted) starts a distinct hidden continuation. ChatView uses
+// this boundary to decide whether the active DB/live bridge still owns the
+// next stream promotion.
+export function answerTurnDisposition(response) {
+  if (response?.answer_turn === 'same') return 'same'
+  if (response?.answer_turn === 'new') return 'new'
+  if (response?.answer_turn != null) return 'unknown'
+
+  // Rolling-update compatibility: older backends shipped the same semantic
+  // distinction only through `status`. Once both sides carry answer_turn,
+  // future status names cannot silently change row ownership.
+  if (response?.status === 'answer_delivered') return 'same'
+  if (response?.status === 'started') return 'new'
+  return 'unknown'
+}
+
+export function answerKeepsCurrentTurn(response) {
+  return answerTurnDisposition(response) === 'same'
 }
 
 export function shouldShowOpenAppCta(builtApp) {

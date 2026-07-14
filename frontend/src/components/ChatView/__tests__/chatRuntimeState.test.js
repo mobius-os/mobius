@@ -2,10 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  answerKeepsCurrentTurn,
+  answerTurnDisposition,
   builtAppPulseDecision,
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
+  mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
@@ -18,6 +21,97 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+
+test('an in-process question answer keeps ownership of the active assistant turn', () => {
+  assert.equal(answerTurnDisposition({
+    status: 'answer_delivered',
+    answer_turn: 'same',
+  }), 'same')
+  assert.equal(answerKeepsCurrentTurn({
+    status: 'answer_delivered',
+    answer_turn: 'same',
+  }), true)
+})
+
+test('only a recovered question answer starts a new hidden turn', () => {
+  assert.equal(answerTurnDisposition({
+    status: 'started',
+    answer_turn: 'new',
+  }), 'new')
+  assert.equal(answerKeepsCurrentTurn({
+    status: 'started',
+    answer_turn: 'new',
+  }), false)
+  assert.equal(answerKeepsCurrentTurn(null), false)
+})
+
+test('answer turn ownership stays compatible with older backends', () => {
+  assert.equal(answerTurnDisposition({ status: 'answer_delivered' }), 'same')
+  assert.equal(answerTurnDisposition({ status: 'started' }), 'new')
+})
+
+test('an unknown explicit answer-turn value fails closed to a separate boundary', () => {
+  assert.equal(answerTurnDisposition({
+    status: 'started',
+    answer_turn: 'future-mode',
+  }), 'unknown')
+  assert.equal(answerKeepsCurrentTurn({
+    status: 'started',
+    answer_turn: 'future-mode',
+  }), false)
+})
+
+test('R4: a recent-page refresh preserves the loaded prefix containing the return anchor', () => {
+  const loaded = Array.from({ length: 40 }, (_, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    cid: index % 2 ? undefined : `message-cid-${index + 5}`,
+    ts: 1700000000000 + index + 5,
+    content: `Loaded ${index + 5}`,
+  }))
+  const recent = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    cid: index % 2 ? undefined : `message-cid-${index + 25}`,
+    ts: 1700000000000 + index + 25,
+    content: `Fresh ${index + 25}`,
+  }))
+
+  const restored = mergeRecentMessagesIntoLoadedWindow({
+    loadedMessages: loaded,
+    loadedOffset: 5,
+    recentMessages: recent,
+    recentOffset: 25,
+  })
+
+  assert.equal(restored.offset, 5)
+  assert.equal(restored.messages.length, 40)
+  assert.equal(restored.messages[0].content, 'Loaded 5',
+    'the older row that can own the saved ANCHOR_AT remains mounted')
+  assert.equal(restored.messages[20].content, 'Fresh 25',
+    'the overlapping recent page still refreshes from server truth')
+})
+
+test('R4: a non-overlapping or rewritten recent page replaces stale loaded history', () => {
+  const loaded = Array.from({ length: 20 }, (_, index) => ({
+    id: `old-${index}`,
+    role: 'assistant',
+    content: `Old ${index}`,
+  }))
+  const recent = Array.from({ length: 20 }, (_, index) => ({
+    id: `new-${index}`,
+    role: 'assistant',
+    content: `New ${index}`,
+  }))
+
+  assert.deepEqual(mergeRecentMessagesIntoLoadedWindow({
+    loadedMessages: loaded,
+    loadedOffset: 0,
+    recentMessages: recent,
+    recentOffset: 20,
+  }), {
+    messages: recent,
+    offset: 20,
+  })
+})
 
 test('cidOf returns the row cid, else null (no read-time derivation)', () => {
   // Post-card-221 every user row carries an explicit cid (client-minted, or a

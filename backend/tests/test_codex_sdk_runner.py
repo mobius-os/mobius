@@ -678,12 +678,16 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   opted in.
   """
   class ReasoningTextDeltaNotification:
-    def __init__(self, delta: str):
+    def __init__(self, delta: str, item_id=None, content_index=None):
       self.delta = delta
+      self.item_id = item_id
+      self.content_index = content_index
 
   class ReasoningSummaryTextDeltaNotification:
-    def __init__(self, delta: str):
+    def __init__(self, delta: str, item_id=None, summary_index=None):
       self.delta = delta
+      self.item_id = item_id
+      self.summary_index = summary_index
 
   class AgentMessageDeltaNotification:
     def __init__(self, delta: str):
@@ -693,11 +697,11 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   notifications = [
     SimpleNamespace(
       method="item/reasoning/textDelta",
-      payload=ReasoningTextDeltaNotification("plotting"),
+      payload=ReasoningTextDeltaNotification("plotting", "reason-1", 0),
     ),
     SimpleNamespace(
       method="item/reasoning/summaryTextDelta",
-      payload=ReasoningSummaryTextDeltaNotification(" the route"),
+      payload=ReasoningSummaryTextDeltaNotification(" the route", "reason-1", 1),
     ),
     SimpleNamespace(
       method="item/reasoning/textDelta",
@@ -754,8 +758,10 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   assert thread.turn_kwargs["summary"] == "auto"
   assert bc.events == [
     {"type": "session_init", "session_id": "thread-1"},
-    {"type": "thinking", "content": "plotting", "ts": 3250},
-    {"type": "thinking", "content": " the route", "ts": 3250},
+    {"type": "thinking", "content": "plotting", "ts": 3250,
+     "segment_id": "codex:reason-1:content:0"},
+    {"type": "thinking", "content": " the route", "ts": 3250,
+     "segment_id": "codex:reason-1:summary:1"},
     {"type": "text", "content": "answer"},
   ]
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None

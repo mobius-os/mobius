@@ -10,7 +10,8 @@
  *      no popup — and the live turn keeps rendering.
  *   2. a shell_rebuilt that lands mid-turn reloads exactly ONCE at the idle
  *      boundary (the hold-until-idle recheck fires after the turn reaches
- *      `done`), and does not loop.
+ *      `done`), carries the terminal transcript across that reload, and does
+ *      not loop.
  *   3. shell_rebuilt delivered on the GLOBAL system stream while idle applies
  *      immediately (reloads once; the dedup window prevents a loop).
  *   4. after a REAL SW update (a genuinely new, WAITING worker), an idle apply
@@ -191,6 +192,23 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // that lets single-bus delivery need no client dedup.
     let armRebuilt
     const armed = new Promise(resolve => { armRebuilt = resolve })
+    let releasePostReloadChatRead
+    const postReloadChatReadReleased = new Promise(resolve => {
+      releasePostReloadChatRead = resolve
+    })
+    let holdChatReads = false
+    // The route-mocked SSE is intentionally not persisted by the backend. Hold
+    // the post-reload authoritative GET so this test observes the reload
+    // handoff itself: the terminal assistant row must hydrate from the cache
+    // Shell explicitly flushed before navigation. Without that flush, the last
+    // streamed line disappears until a later remount/refetch — the production
+    // regression this assertion locks in.
+    await page.route(/\/api\/chats\/[0-9a-f-]+(?:\?.*)?$/, async route => {
+      if (route.request().method() === 'GET' && holdChatReads) {
+        await postReloadChatReadReleased
+      }
+      return route.continue()
+    })
     let streamConnects = 0
     await setup(page, {
       streamRoute: async route => {
@@ -225,6 +243,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // The send marks the chat streaming synchronously (onMessageStart), so
     // arming here delivers the rebuilt while the turn is live.
     armRebuilt()
+    holdChatReads = true
 
     // Reloads once when the turn goes idle. The recheck interval (6s) + reload
     // delay put this a few seconds after `done`; allow generous headroom.
@@ -232,6 +251,8 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
       { timeout: 20000 },
     )
+    await expect(page.getByText('shell rebuilt')).toBeVisible({ timeout: 1500 })
+    releasePostReloadChatRead()
     // And does NOT loop: the reloaded page's system reconnect gets only the
     // hello (no replay), so nothing re-applies.
     await page.waitForTimeout(2000)

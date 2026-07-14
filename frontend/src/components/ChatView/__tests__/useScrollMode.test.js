@@ -7,9 +7,13 @@ import {
   applyMode,
   isNearContentBottom,
   isNearScrollBottom,
+  layoutMayOwnScroll,
   modeForChatExit,
   modeForForegroundReturn,
+  modeForQueuedSubmission,
   modeForViewportChange,
+  modeAfterSpacerResize,
+  settledPinMode,
   shouldPinSend,
 } from '../useScrollMode.js'
 import {
@@ -56,7 +60,7 @@ test('shouldPinSend can use a complete pre-blur auto-scroll snapshot on mobile s
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'ANCHOR_AT', key: 'old', offset: 0 },
     isFirstUserMsg: false,
-    wasAutoScrollAtBottom: true,
+    wasAtContentBottom: true,
   }), true)
 })
 
@@ -73,7 +77,7 @@ test('shouldPinSend holds delayed insertion when submit-time intent is unavailab
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'FOLLOW_BOTTOM' },
     isFirstUserMsg: false,
-    wasAutoScrollAtBottom: false,
+    wasAtContentBottom: false,
   }), false)
 })
 
@@ -109,7 +113,7 @@ test('shouldPinSend still refuses to pin when real content gap is large', () => 
   }), false)
 })
 
-test('shouldPinSend refuses a geometrically-at-bottom reader who is still in hold', () => {
+test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () => {
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 1000,
@@ -120,7 +124,33 @@ test('shouldPinSend refuses a geometrically-at-bottom reader who is still in hol
     scrollEl,
     mode: { kind: 'PIN_USER_MSG', cid: 'c-123' },
     isFirstUserMsg: false,
-  }), false)
+  }), true)
+})
+
+test('layout writes yield from the first input event until its gesture window closes', () => {
+  assert.equal(layoutMayOwnScroll(1250, 1000), false)
+  assert.equal(layoutMayOwnScroll(1250, 1249), false)
+  assert.equal(layoutMayOwnScroll(1250, 1250), true)
+})
+
+test('queued submission freezes the visible row before footer reflow', () => {
+  const item = {
+    offsetTop: 720,
+    offsetHeight: 120,
+    dataset: { key: 'assistant-live' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 660,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+  assert.deepEqual(
+    modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
+    { kind: 'ANCHOR_AT', key: 'assistant-live', offset: 60 },
+  )
 })
 
 test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
@@ -218,6 +248,37 @@ test('viewport resize never turns a pin into auto-scroll without a gesture', () 
   assert.equal(
     modeForViewportChange(stalePin, true),
     stalePin,
+  )
+})
+
+test('an armed live pin holds until its exact spacer is filled, then follows', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.equal(modeAfterSpacerResize(livePin, 320), livePin)
+  assert.equal(modeAfterSpacerResize(livePin, 2), livePin)
+  assert.deepEqual(modeAfterSpacerResize(livePin, 1), { kind: 'FOLLOW_BOTTOM' })
+  assert.deepEqual(modeAfterSpacerResize(livePin, 0), { kind: 'FOLLOW_BOTTOM' })
+})
+
+test('a short settled pin retires automatic follow but keeps its identity', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  const settled = settledPinMode(livePin)
+  assert.deepEqual(settled, { kind: 'PIN_USER_MSG', cid: 'c-123' })
+  assert.equal(modeAfterSpacerResize(settled, 0), settled,
+    'later layout changes cannot manufacture follow after stream settle')
+})
+
+test('keyboard close preserves pin identity even when keyboard-open geometry is away from the physical bottom', () => {
+  const pin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
+  const temporaryAnchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: 4 }
+
+  assert.equal(
+    modeForViewportChange(pin, false, temporaryAnchor),
+    pin,
+    'only a real reader scroll may retire PIN_USER_MSG',
   )
 })
 

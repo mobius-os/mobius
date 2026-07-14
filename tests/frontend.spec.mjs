@@ -752,6 +752,104 @@ test.describe('Scroll position', () => {
     expect(Math.abs(restored.scrollTop - scrollBefore)).toBeLessThan(50)
     expect(restored.bottomGap).toBeGreaterThan(100)
   })
+
+  test('10c. A paginated return anchor survives the latest-page refresh', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
+
+    const allMessages = Array.from({ length: 45 }, (_, index) => {
+      const role = index % 2 === 0 ? 'user' : 'assistant'
+      const content = `History row ${index}. ${'Restorable content. '.repeat(8)}`
+      return {
+        cid: role === 'user' ? `history-cid-${index}` : undefined,
+        role,
+        ts: 1700000200000 + index,
+        content,
+        blocks: role === 'assistant' ? [{ type: 'text', content }] : [],
+      }
+    })
+    let recentFetches = 0
+
+    await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      const url = new URL(route.request().url())
+      const limit = Number(url.searchParams.get('limit') || 20)
+      const beforeParam = url.searchParams.get('before')
+      const before = beforeParam == null ? allMessages.length : Number(beforeParam)
+      const start = Math.max(0, before - limit)
+      if (beforeParam == null) recentFetches += 1
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: allMessages.slice(start, before),
+          total: allMessages.length,
+          offset: start,
+          running: false,
+          pending_messages: [],
+        }),
+      })
+    })
+
+    await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('button', { name: 'Load earlier messages' }))
+      .toBeVisible({ timeout: 10000 })
+    await page.getByRole('button', { name: 'Load earlier messages' }).click()
+    await page.waitForFunction(
+      () => document.querySelector('[data-key="user-1700000200010"]'),
+      { timeout: 5000 },
+    )
+
+    // Read an older row that is outside the server's default newest-20 page.
+    // The pointerdown makes the ensuing scroll an owner gesture, so R4 saves
+    // this exact row+offset rather than a programmatic position.
+    await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      const target = document.querySelector('[data-key="user-1700000200010"]')
+      if (!el || !target) throw new Error('missing paginated anchor target')
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      el.scrollTop = target.offsetTop + 12
+    })
+    await page.waitForFunction(
+      id => JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.key
+        === 'user-1700000200010',
+      chatId,
+      { timeout: 3000 },
+    )
+
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+
+    await page.evaluate(() => history.back())
+    await expect.poll(() => recentFetches, { timeout: 10000 }).toBeGreaterThan(1)
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.chat__scroll')
+        return !!el && getComputedStyle(el).visibility !== 'hidden'
+      },
+      { timeout: 10000 },
+    )
+    await page.evaluate(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))))
+
+    const restored = await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      const target = document.querySelector('[data-key="user-1700000200010"]')
+      return {
+        keyStillMounted: !!target,
+        offset: target && el ? target.offsetTop - el.scrollTop : null,
+        scrollTop: el?.scrollTop ?? null,
+      }
+    })
+    expect(restored.keyStillMounted).toBe(true)
+    expect(Math.abs(restored.offset - (-12))).toBeLessThanOrEqual(2)
+    expect(restored.scrollTop).toBeGreaterThan(0)
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ import {
   isQuestionTool,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
+  thinkingContentForDisplay,
   thinkingElapsedMs,
   attachToolSources,
   reconcileStreamItems,
@@ -409,6 +410,24 @@ test('appendThinkingChunk coalesces consecutive deltas into one item', () => {
     lastAt: 2600,
     duration_ms: 1600,
   })
+})
+
+test('appendThinkingChunk separates provider reasoning segments but not token deltas', () => {
+  let items = []
+  items = appendThinkingChunk(items, '**Planning ', 1000, 10000, 'summary:0')
+  items = appendThinkingChunk(items, 'the fix**', 1100, 10100, 'summary:0')
+  items = appendThinkingChunk(items, '**Writing tests**', 1200, 10200, 'summary:1')
+  assert.equal(items.length, 1)
+  assert.equal(items[0].content, '**Planning the fix**\n\n**Writing tests**')
+  assert.equal(items[0].segmentId, 'summary:1')
+})
+
+test('thinkingContentForDisplay repairs legacy glued bold summary headings', () => {
+  assert.equal(
+    thinkingContentForDisplay('**Planning****Testing****Finishing**'),
+    '**Planning**\n\n**Testing**\n\n**Finishing**',
+  )
+  assert.equal(thinkingContentForDisplay('token fragments'), 'token fragments')
 })
 
 test('appendThinkingChunk keeps replay duration from runner timestamps', () => {
