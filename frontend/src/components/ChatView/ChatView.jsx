@@ -13,7 +13,6 @@ import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   shouldPinSend,
   anchorModeFromScroll,
-  isNearContentBottom,
   modeForForegroundReturn,
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
@@ -820,6 +819,18 @@ export default function ChatView({
     inlineSteerPinIntentRef.current = null
   }
 
+  // The first-message exception is shared by every direct/promotion/steer
+  // path. Stream promotion can render a user row one React commit before
+  // messagesRef catches up, so state alone is not authoritative. A row is
+  // first only when both the state mirror and rendered transcript are empty.
+  function isFirstVisibleUserMessage() {
+    const stateHasUser = messagesRef.current.some(
+      m => m.role === 'user' && !m.hidden,
+    )
+    const domHasUser = !!scrollRef.current?.querySelector('.chat__msg--user')
+    return !stateHasUser && !domHasUser
+  }
+
   // The ONE place a send/steer/promote arms the pin. Owns intent-staleness (a
   // real user scroll after submit wins) and the PIN-vs-settle mode write. The pin
   // targets the stable `cid`, which the DOM row already carries from mint, so
@@ -1033,15 +1044,16 @@ export default function ChatView({
           // before the append. When not pinning, leave the reader where
           // the previous turn left them — the continuation just appears
           // below without moving the scroll.
-          const contIsFirstUser = !messagesRef.current.some(
-            m => m.role === 'user' && !m.hidden,
-          )
+          const contIsFirstUser = isFirstVisibleUserMessage()
           const pinCid = cidOf(promotedRows[0])
           const fallbackWillPin = () => shouldPinSend({
             scrollEl: scrollRef.current,
             mode: modeRef.current,
             isFirstUserMsg: contIsFirstUser,
-            respectFollowMode: false,
+            // The original submit-time intent is unavailable (for example
+            // after a remount). Never infer a delayed pin from the reader's
+            // later position; only the first-message exception remains.
+            wasAutoScrollAtBottom: false,
           })
           const contWillPin = continuationPinIntent
             ? continuationPinIntent.willPin
@@ -1123,13 +1135,12 @@ export default function ChatView({
       // segment into `messages`, then append the steered user row, then let
       // future text deltas build a fresh streaming assistant block.
       //
-      // It still follows the USER-SEND scroll rule: if the reader was at the
-      // bottom when they tapped fast-forward, the steered message pins to the
-      // top and gets the same bottom spacer as a normal send. If the reader
-      // was scrolled up, leave them anchored. Earlier code treated steering
-      // as generic content growth and never armed the spacer, so fast-forward
-      // could work while the message stayed low in the viewport with no
-      // reserved room below it.
+      // It still follows the one USER-SEND scroll rule. The queued row keeps
+      // its original submit-time decision: first row always pins; a later row
+      // pins only if it was submitted from gesture-entered FOLLOW_BOTTOM at
+      // the real-content tail. Tapping fast-forward never recomputes intent
+      // from the reader's later position. Whether it pins or holds, the row
+      // receives the same permanent bottom reservation as a normal send.
       //
       // Current backends carry a non-empty `messages` array, each row with its
       // stable cid (card-221: every row carries one). During rolling deploys an
@@ -1155,14 +1166,14 @@ export default function ChatView({
         || takeQueuedPinIntent(pinCid)
       inlineSteerPinIntentRef.current = null
       promoteStreamToMessages({ keepTurnOpen: true })
-      const steeredIsFirstUser = !messagesRef.current.some(
-        m => m.role === 'user' && !m.hidden,
-      )
+      const steeredIsFirstUser = isFirstVisibleUserMessage()
       const fallbackWillPin = () => shouldPinSend({
         scrollEl: scrollRef.current,
         mode: modeRef.current,
         isFirstUserMsg: steeredIsFirstUser,
-        respectFollowMode: false,
+        // A missing submit-time intent must degrade to hold, not infer a pin
+        // from wherever the reader happens to be when the SSE event arrives.
+        wasAutoScrollAtBottom: false,
       })
       const steerWillPin = pinIntent ? pinIntent.willPin : fallbackWillPin()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
@@ -1728,10 +1739,10 @@ export default function ChatView({
   }
 
 
-  // `opts.pin` controls whether the new user message pins to the top
-  // of the viewport (the standard ChatGPT/Claude.ai send UX). Defaults
-  // to true for normal user-initiated sends. Pass `pin: false` from
-  // synthetic-send paths where pinning would be surprising:
+  // `opts.pin` allows the shared submit-time rule to pin the message. Normal
+  // user sends opt in, but still pin only when first-or-already-following at
+  // the bottom. Pass `pin: false` from synthetic-send paths where pinning
+  // would be surprising:
   //   - handleStop's queue-collapse: the user clicked Stop, not Send;
   //     pinning the auto-generated combined message would yank the
   //     viewport away from whatever the user was reading (the partial
@@ -1748,14 +1759,18 @@ export default function ChatView({
     // after we clear it.
     if (listeningRef.current) stopVoiceRef.current?.()
 
-    // Capture bottom intent BEFORE blurring the textarea. On mobile,
-    // blur collapses the soft keyboard and can resize/clamp the visual
-    // viewport before we compute the send rule; if we measure after
-    // blur, a reader who was genuinely at the bottom can be misread as
-    // scrolled up and the new user message won't pin to the top.
-    const wasNearContentBottomAtSubmit = scrollRef.current
-      ? isNearContentBottom(scrollRef.current)
-      : null
+    // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
+    // textarea. Pin only for the first visible user message, or when the reader
+    // is already in gesture-entered FOLLOW_BOTTOM and remains at the real
+    // content tail. Mobile blur can resize/clamp the viewport, so the complete
+    // decision (mode + geometry) must be captured before it.
+    const isFirstUserMsgAtSubmit = isFirstVisibleUserMessage()
+    const willPinAtSubmit = pin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg: isFirstUserMsgAtSubmit,
+    })
+    const sendPinIntent = makeSendPinIntent(willPinAtSubmit)
 
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
@@ -1815,8 +1830,8 @@ export default function ChatView({
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
       pendingQueue.add(queuedMsg, { inFlight: true })
-      // Capture the send rule's inputs AT SEND TIME, before the POST. If
-      // this queued send is promoted into the active turn (the backend
+      // The shared send decision was captured AT SEND TIME, before blur or the
+      // POST. If this queued send is promoted into the active turn (the backend
       // returns started, either as `queued+started` or the `started` race),
       // it becomes a new visible user message and must follow the same pin
       // rule as a fresh send. The at-bottom / following decision and the
@@ -1824,16 +1839,8 @@ export default function ChatView({
       // AFTER `await streamSend(...)` lets a scroll during the POST flip the
       // decision. The user-scroll intent version lets us detect such a scroll
       // and yield to it (a user-driven scroll after send is the newer intent).
-      const queuedIsFirstUser = !messagesRef.current.some(
-        m => m.role === 'user' && !m.hidden,
-      )
-      const queuedWillPin = pin && shouldPinSend({
-        scrollEl: scrollRef.current,
-        mode: modeRef.current,
-        isFirstUserMsg: queuedIsFirstUser,
-        wasNearScrollBottom: wasNearContentBottomAtSubmit,
-      })
-      const queuedPinIntent = makeSendPinIntent(queuedWillPin)
+      const queuedWillPin = willPinAtSubmit
+      const queuedPinIntent = sendPinIntent
       rememberQueuedPinIntent(cid, queuedPinIntent)
       inlineSteerPinIntentRef.current = queuedPinIntent
       setInput('')
@@ -2002,18 +2009,15 @@ export default function ChatView({
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
 
-    // A deliberate fresh send always lifts its user row to the viewport top.
-    // This is the primary chat-reading seam: the reply grows below the prompt,
-    // regardless of where the previous answer ended. `pin` remains the caller
-    // opt-out for synthetic sends such as handleStop's queue collapse. Queued
-    // and steered rows keep their separate delayed-insertion rule above so they
-    // cannot yank a reader long after the original tap.
-    const willPin = pin
+    // Direct sends use the same submit-time decision as queued/steered sends.
+    // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth
+    // stays below the prompt until the user manually scrolls to the bottom.
+    const willPin = willPinAtSubmit
     // The send-time pin intent, carried across the async POST so a user scroll
     // that lands during it can still win. The pinned row's identity is the
     // minted `cid`, which the optimistic row and the confirmed server row
     // share — so the pin never needs to be retargeted across a ts swap.
-    const freshPinIntent = makeSendPinIntent(willPin)
+    const freshPinIntent = sendPinIntent
 
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
@@ -2632,20 +2636,23 @@ export default function ChatView({
       if (!content) return
 
       try {
-        const wasNearContentBottomAtSteer = scrollRef.current
-          ? isNearContentBottom(scrollRef.current)
-          : null
-        const steerIsFirstUser = !messagesRef.current.some(
-          m => m.role === 'user' && !m.hidden,
-        )
-        const steerWillPin = shouldPinSend({
+        const steerIsFirstUser = isFirstVisibleUserMessage()
+        // Fast-forward promotes rows that were already submitted. Preserve
+        // the head row's original submit-time decision; do not recompute it
+        // from the reader's later fast-forward position. After a remount the
+        // in-memory intent may be unavailable, in which case hold is the safe
+        // default (except for the first-message rule).
+        const headQueuedIntent = queuedPinIntentByCidRef.current.get(
+          consumePendingCids[0],
+        ) || null
+        const fallbackSteerWillPin = shouldPinSend({
           scrollEl: scrollRef.current,
           mode: modeRef.current,
           isFirstUserMsg: steerIsFirstUser,
-          respectFollowMode: false,
-          wasNearScrollBottom: wasNearContentBottomAtSteer,
+          wasAutoScrollAtBottom: false,
         })
-        steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+        steerPinIntentRef.current = headQueuedIntent
+          || makeSendPinIntent(fallbackSteerWillPin)
         // The queued tray is part of the footer height. If it stays visible
         // until after the steered row is inserted, the scroll system pins with
         // one layout and then immediately reflows when the tray disappears — the
@@ -2706,12 +2713,10 @@ export default function ChatView({
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
   // backgrounded-then-resumed streaming chat doesn't snap away from where the
-  // user was reading. Owner rule: a turn that was STREAMING when the app
-  // backgrounded must return the reader to exactly where they were — never to a
-  // NEW tail that grew while hidden. This handler only runs when the turn is
-  // live (guarded below), so pass streaming:true to freeze the position as an
-  // anchor even at the tail; keeping FOLLOW_BOTTOM there would yank the reader
-  // to the grown bottom. No-op when the turn isn't active or the tab is hidden.
+  // user was reading. A chat must return to exactly where it was — never to a
+  // NEW tail that grew while hidden, even if it had been following before it
+  // left. Returning freezes hold; only a later manual bottom gesture can
+  // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
   // (The fast-forward affordance is computed separately at `canSteer` below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
@@ -2722,7 +2727,7 @@ export default function ChatView({
         return
       }
       if (!turnActive) return
-      const nextMode = modeForForegroundReturn(scrollRef.current, { streaming: true })
+      const nextMode = modeForForegroundReturn(scrollRef.current)
       if (nextMode) modeRef.current = nextMode
     }
 

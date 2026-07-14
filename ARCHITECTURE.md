@@ -445,29 +445,50 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
 `backend/tests/test_chats_stream_steer`) encode this:
 
-- **R0 — Two modes.** A chat is either in **auto-scroll** (following the tail as the
-  reply streams) or **hold** (staying put — the just-sent message pinned at the top,
-  or a frozen reading position). A new or reopened chat starts in **hold**, even
-  after its first message. Auto-scroll engages ONLY when the user manually scrolls to
-  within 50px of the bottom (`NEAR_BOTTOM_PX`), and it does NOT survive leaving the
-  chat (see R4).
+- **R0 — Two modes; one auto-scroll entrance.** A chat is either in **auto-scroll**
+  (`FOLLOW_BOTTOM`, following the real-content tail as the reply streams) or **hold**
+  (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
+  position). Auto-scroll engages ONLY through the gesture-gated scroll handler after
+  the user manually scrolls to the physical bottom. A send, viewport/keyboard change,
+  foreground return, mount, or chat restoration must never create auto-scroll.
 - **R1 — Permanent exact reservation.** Every non-empty chat keeps enough dynamic
   bottom spacer for its latest visible user message to reach the viewport top,
   including after leaving and reopening the chat. The reservation is exact — no
   extra scrollable blank beyond that target — and shrinks as the reply fills it.
   `FOLLOW_BOTTOM` follows real conversation content, excluding the reservation, so
   a short restored chat cannot open on an empty viewport.
-- **R2 — Every deliberate fresh send pins.** A normal user send always lifts its new
-  user row to the viewport top, regardless of the previous reading/auto-scroll mode;
-  the reply then grows below it. `pin:false` remains only for synthetic sends such as
-  Stop's queue collapse. Owner decision 2026-07-14, superseding the mode-gated
-  2026-07-12 rule after repeated production failures placed subsequent sends in the
-  middle of the viewport. Lock-in: `tests/send-rule.spec.mjs` + `spacer.spec.mjs` #26.
-- **R3** Queued/steered messages keep the delayed-insertion mode gate: they reserve
-  room immediately, but a later promotion does not yank a reader who moved after the
-  original tap.
-- **R4** Leave-and-return restores the same scroll position, even mid-stream
-  (hide-then-reveal + the versioned snapshot cache).
+- **R2 — One send rule everywhere.** The first visible user message always pins to
+  the viewport top. Every subsequent direct, queued, promoted, or steered message
+  pins only when its submit-time snapshot says the reader was already in
+  `FOLLOW_BOTTOM` at the real-content tail. Merely being geometrically near the tail
+  while in hold is not enough. A user scroll after submission invalidates a delayed
+  queued/steered pin. Missing delayed intent degrades to hold, never to an inferred
+  pin.
+- **R3 — Pin means hold.** A legitimate pin transitions to `PIN_USER_MSG`, not
+  `FOLLOW_BOTTOM`; the response grows below the prompt without moving it. Auto-scroll
+  resumes only after the user manually scrolls to the physical bottom. A non-pinning
+  send preserves the exact reading anchor.
+- **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
+  same visible anchor, even if the chat had been auto-scrolling and content grew while
+  it was inactive. Return never jumps to the new tail and does not restore
+  auto-scroll; the user must manually reach the bottom again.
+
+The transition table is intentionally exhaustive; adding a new send or lifecycle
+path means routing it through the same entries rather than inventing another rule:
+
+| Event | Before | After | Scroll write |
+|---|---|---|---|
+| First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
+| Later send submitted while manually entered `FOLLOW_BOTTOM` and still at real-content tail | `FOLLOW_BOTTOM` | `PIN_USER_MSG` | New row to top |
+| Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
+| Reader scrolls manually to physical bottom | any | `FOLLOW_BOTTOM` | User-owned |
+| Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
+| Reply/layout grows while pinned or anchored | hold | same hold | Reapply only the held target |
+| Viewport/keyboard changes | any | same follow, or hold anchor | Never creates follow |
+| Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
+
+Every visible user row also makes R1's reservation current, whether or not that row
+pins. Reservation lifetime and pin decisions are independent.
 - **Steer = separate rows, one turn.** Steered queued messages render as separate
   transcript rows in send order (`insertMessageBatchByTs`), never one stranded
   after the reply. The agent receives them joined by `\n\n` (clean paragraphs,
@@ -551,7 +572,7 @@ context is preserved.
 
 This section is the **owner-authoritative source of truth** for chat UX; the
 gitignored `CLAUDE.md` / `docs/*` copies must not diverge from it (when they do, this
-wins — see the `CLAUDE.md` "fresh send always pins" note under R2). Alignment is held
+wins). Alignment is held
 by the lock-in Playwright specs above **plus** three harnesses tracked in `.pm/` that
 exist specifically to keep prod matching this contract: a runtime chat-contract
 monitor on the live shell (`208`), a deterministic chat-states gallery with geometry

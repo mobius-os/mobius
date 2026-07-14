@@ -261,7 +261,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
 
-  test('a steer does NOT wipe the live stream (pre-steer text survives, no reconnect flash)', async ({ page }) => {
+  test('a steer preserves the live stream and held scroll position', async ({ page }) => {
     // Regression for bug #1: a force_steer must inject into the LIVE turn,
     // not trigger the fresh-send reset. The old code ran sendMessage's
     // "new turn" reset (setStreamItems([]) + setIsStreaming + reconnect) for
@@ -274,7 +274,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     //   - no second /stream connection is opened (no reconnect flash),
     //   - after the steered_into_turn SSE event the steered user row renders
     //     inline and the pre-steer text is sealed as an assistant message.
-    const QUEUE_TS = 990001
+    const QUEUE_TS = Date.now() + 60_000
     const QUEUED_TEXT = 'steer me in'
     const PRE_STEER = 'thinking out loud before the steer'
     const POST_STEER = 'continuing after the steered message'
@@ -375,6 +375,19 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await sendMessage(page, QUEUED_TEXT)
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
+    const heldBeforeSteer = await page.evaluate(() => {
+      const scroll = document.querySelector('.chat__scroll')
+      const firstUser = document.querySelector('.chat__msg--user')
+      if (!scroll || !firstUser) return null
+      return {
+        scrollTop: scroll.scrollTop,
+        clientHeight: scroll.clientHeight,
+        anchorKey: firstUser.dataset.key,
+        firstUserVisualTop: firstUser.getBoundingClientRect().top
+          - scroll.getBoundingClientRect().top,
+      }
+    })
+    expect(heldBeforeSteer).not.toBeNull()
     await steerBtn.click()
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
@@ -407,6 +420,28 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       { queuedText: QUEUED_TEXT, postSteer: POST_STEER },
       { timeout: 5000 },
     )
+    const heldAfterSteer = await page.evaluate((anchorKey) => {
+      const scroll = document.querySelector('.chat__scroll')
+      const users = document.querySelectorAll('.chat__msg--user')
+      if (!scroll || users.length < 2) return null
+      const scrollTop = scroll.getBoundingClientRect().top
+      const heldUser = Array.from(users).find(el => el.dataset.key === anchorKey)
+      const steeredUser = Array.from(users).find(el => el !== heldUser)
+      if (!heldUser || !steeredUser) return null
+      return {
+        scrollTop: scroll.scrollTop,
+        clientHeight: scroll.clientHeight,
+        anchorVisualTop: heldUser.getBoundingClientRect().top - scrollTop,
+        steeredUserVisualTop: steeredUser.getBoundingClientRect().top - scrollTop,
+      }
+    }, heldBeforeSteer.anchorKey)
+    expect(heldAfterSteer).not.toBeNull()
+    expect(
+      Math.abs(heldAfterSteer.anchorVisualTop - heldBeforeSteer.firstUserVisualTop),
+      JSON.stringify({ heldBeforeSteer, heldAfterSteer }),
+    )
+      .toBeLessThanOrEqual(8)
+    expect(heldAfterSteer.steeredUserVisualTop).toBeGreaterThan(10)
     streamConnections = await page.evaluate(
       () => window.__steerQueuedStreamMock?.connections || 0,
     )

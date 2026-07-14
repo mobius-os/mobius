@@ -4,8 +4,8 @@
  * them and yank the scroll position (CLS).
  *
  * The chat scroll contract disables Chrome's scroll anchoring
- * (`overflow-anchor: none` on `.chat__scroll`, see CLAUDE.md "Chat UX —
- * non-negotiable constraints") so the browser does NOT compensate for a
+ * (`overflow-anchor: none` on `.chat__scroll`, see ARCHITECTURE.md's
+ * "Chat scroll + steer contract") so the browser does NOT compensate for a
  * height change above the viewport. That makes any image that changes height
  * after first layout a visible jump. Two mechanisms keep image height stable:
  *
@@ -106,7 +106,7 @@ describe('chat messages must NOT use content-visibility (it clamps the pin-scrol
   // scroll write (useScrollMode) is clamped and the 2nd+ user message lands
   // mid-screen instead of pinned to the top. Added as a phone-scroll perf hint
   // (2459dff), it regressed the pin both times it was present. The pin is a
-  // non-negotiable chat-UX invariant (CLAUDE.md), so the hint stays out.
+  // non-negotiable architecture contract, so the hint stays out.
   test('ChatView.css declares no content-visibility on chat messages', () => {
     // strip CSS comments so the prose explaining the removal does not count
     const cssNoComments = chatViewCss.replace(/\/\*[\s\S]*?\*\//g, '')

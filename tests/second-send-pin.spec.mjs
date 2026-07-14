@@ -133,7 +133,7 @@ async function measure(page) {
 // the mocks stay authoritative for the whole test.
 test.use({ serviceWorkers: 'block' })
 
-test('Second send through full SSE flow: new user msg pins to viewport top', async ({ page }) => {
+test('Second send from auto-scroll pins to viewport top through the full SSE flow', async ({ page }) => {
   // Mock a long streamed response so the chat has real content
   // through React's promoteStreamToMessages path (the user's actual
   // production flow). Direct DOM injection (spacer test 10) doesn't

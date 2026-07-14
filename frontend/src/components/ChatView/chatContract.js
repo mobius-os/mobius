@@ -1,8 +1,8 @@
 /**
- * chatContract — the machine-checkable definition of the chat-UX invariants
- * that CLAUDE.md declares "non-negotiable" (see "Chat UX — non-negotiable
- * constraints"). One pure module, three consumers: node unit tests, Playwright
- * `page.evaluate`, and (later) a runtime monitor on prod.
+ * chatContract — the machine-checkable subset of the owner-authoritative
+ * invariants in ARCHITECTURE.md "Chat scroll + steer contract". One pure
+ * module, three consumers: node unit tests, Playwright `page.evaluate`, and
+ * (later) a runtime monitor on prod.
  *
  * Purity is the whole point. No React import, no `window` / `document`, no DOM
  * queries: every input arrives as an argument (a real element or a plain object
@@ -43,18 +43,18 @@ export const PIN_OFFSET = 4
 export const PIN_BOTTOM_ROOM = 0
 
 /**
- * The geometry-checkable subset of the CLAUDE.md constraints. Each id is the
+ * The geometry-checkable subset of the architecture contract. Each id is the
  * `id` a predicate stamps on its result, so a violation is traceable back to
  * the owner law it broke.
  */
 export const CHAT_CONTRACT = [
   {
     id: 'pin-on-send',
-    title: 'Pin to top on send',
+    title: 'Pin eligible sends to top',
     summary:
-      'A new user message scrolls flush to the top of the viewport so the '
-      + 'reply streams in below it, terminal-style. The owner calls this pin '
-      + '"holy".',
+      'The first user message always pins. A subsequent direct, queued, or '
+      + 'steered message pins only when submitted from gesture-entered '
+      + 'auto-scroll at the real-content tail.',
   },
   {
     id: 'pin-holds-streaming',
@@ -67,8 +67,8 @@ export const CHAT_CONTRACT = [
     id: 'no-scroll-on-read-send',
     title: 'No scroll movement on not-at-bottom send/steer',
     summary:
-      'Auto-follow is OFF after every send. A send or steer while the reader is '
-      + 'scrolled up must leave scrollTop untouched — never yank the reader.',
+      'A subsequent send or steer submitted outside auto-scroll must leave '
+      + 'scrollTop untouched — never yank the reader.',
   },
   {
     id: 'spacer-reserves-room',

@@ -1,16 +1,18 @@
 /**
  * The send-scroll rule (owner's words):
  *
- *   "When sending a new message, move it to the top."
+ *   "The first message always pins. Later messages pin only from manual
+ *    auto-scroll at the bottom; every pin returns to hold."
  *
- * A deliberate fresh send always pins the new user message to the viewport
- * top. Queued/steered messages have a separate delayed-insertion rule.
+ * Direct, queued, and steered rows share that submit-time rule. Geometry alone
+ * is insufficient: a chat still in PIN_USER_MSG/ANCHOR_AT is hold even if its
+ * real content happens to be near the tail.
  *
  * "At bottom" is the gesture-gated follow flag, NOT a raw IO read — a
  * raw sentinel read at send time mis-classifies an at-bottom reader
  * because appending the assistant shell hides the sentinel before the
- * first follow-write. See shouldPinSend in useScrollMode.js and the
- * scroll-probe findings baked into CLAUDE.md "Chat UX".
+ * first follow-write. See shouldPinSend in useScrollMode.js and
+ * ARCHITECTURE.md "Chat scroll + steer contract".
  *
  * Mirrors the route-mock SSE flow of second-send-pin.spec.mjs.
  *
@@ -184,26 +186,26 @@ test('Send while at the bottom (following) pins to top, response grows below', a
 
   await routeStream(page, [
     { type: 'catch_up_done' },
-    { type: 'text', content: 'OK.' },
+    { type: 'text', content: 'Second response paragraph. '.repeat(120) },
     { type: 'done' },
   ])
   await sendMessage(page, 'Second from bottom')
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))))
+  await waitStreamDone(page)
 
   const m = await measure(page)
   expect(m.userMsgCount).toBe(2)
   expect(m.lastUserText).toBe('Second from bottom')
-  // The new message pinned to the top (response will grow below it).
+  // The new message pins, then stays in hold while the long response grows.
   expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-50)
   expect(m.lastUserVisualTop).toBeLessThanOrEqual(m.clientH / 3)
+  expect(m.scrollH - m.scrollTop - m.clientH).toBeGreaterThan(50)
 })
 
 // ───────────────────────────────────────────────────────────────────
-// Send while SCROLLED UP — a deliberate fresh send still pins
+// Send while SCROLLED UP — preserves the reading anchor
 // ───────────────────────────────────────────────────────────────────
 
-test('Send while scrolled up still pins the deliberate fresh message to top', async ({ page }) => {
+test('Send while scrolled up preserves the exact reading position', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
@@ -228,8 +230,8 @@ test('Send while scrolled up still pins the deliberate fresh message to top', as
   expect(gapBefore).toBeGreaterThan(50)
   const savedTop = before.scrollTop
 
-  // Send the second message while scrolled up. A deliberate fresh send starts
-  // the next reading seam, so it must lift the prompt to the top.
+  // Send the second message while scrolled up. It reserves reply room but must
+  // not move the reader or infer auto-scroll from later layout.
   await routeStream(page, [
     { type: 'catch_up_done' },
     { type: 'text', content: 'Reply.' },
@@ -242,35 +244,29 @@ test('Send while scrolled up still pins the deliberate fresh message to top', as
 
   const after = await measure(page)
   expect(after.lastUserText).toBe('Second while reading')
-  expect(after.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
-  expect(after.lastUserVisualTop).toBeLessThanOrEqual(10)
-  expect(Math.abs(after.scrollTop - savedTop)).toBeGreaterThan(8)
+  expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
   expect(after.spacerH).toBeGreaterThanOrEqual(0)
 })
 
 // ───────────────────────────────────────────────────────────────────
-// Short chat (content fits) — back-to-back second send still pins
+// Short chat in hold — geometry alone does not authorize a second pin
 // ───────────────────────────────────────────────────────────────────
 
-test('Short chat (content fits viewport): second send still pins to top', async ({ page }) => {
+test('Short chat stays in hold until the user manually enters auto-scroll', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
-  // Short response — the chat does not overflow, so there is no
-  // scrolled-up reading position to preserve. The user is, by
-  // definition, at the bottom; a second send should pin (matches the
-  // pre-rule behavior for chats that fit on screen).
+  // The first send pins and therefore leaves the chat in hold. A short reply
+  // does not silently turn geometric proximity into FOLLOW_BOTTOM.
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Short reply.' }, { type: 'done' }])
   await sendMessage(page, 'First short')
   await waitStreamDone(page)
 
-  // The chat fits the viewport: the only thing past the content is the
-  // pin-spacer's empty room, so the user is at the bottom (gap ≈ 0) even
-  // though they never made a scroll gesture. A back-to-back send here
-  // should still pin.
+  // The chat fits the viewport, but no manual bottom gesture occurred.
   const fits = await measure(page)
   const fitsGap = fits.scrollH - fits.scrollTop - fits.clientH
   expect(fitsGap).toBeLessThan(50)
+  const savedTop = fits.scrollTop
 
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Another short.' }, { type: 'done' }])
   await sendMessage(page, 'Second short')
@@ -279,6 +275,6 @@ test('Short chat (content fits viewport): second send still pins to top', async 
 
   const m = await measure(page)
   expect(m.lastUserText).toBe('Second short')
-  expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
-  expect(m.lastUserVisualTop).toBeLessThanOrEqual(10)
+  expect(Math.abs(m.scrollTop - savedTop)).toBeLessThanOrEqual(8)
+  expect(m.lastUserVisualTop).toBeGreaterThan(10)
 })

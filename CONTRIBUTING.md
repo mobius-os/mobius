@@ -69,6 +69,17 @@ npm test           # = test:lib + test:hooks (two separate ESM loaders)
 The two scripts can't be merged: `test:lib` rewrites `import.meta.env`; `test:hooks`
 aliases `react` to a hook-only shim (see `frontend/package.json` scripts).
 
+**Chat scroll contract.** Before changing `ChatView`, read `ARCHITECTURE.md`
+"Chat scroll + steer contract" and run the send/spacer browser specs. The first
+visible user message always pins. A later direct, queued, promoted, or steered
+message pins only when it was submitted from gesture-entered auto-scroll at the
+real-content tail; every pin returns to hold until the user manually reaches the
+bottom again. Every visible user message gets a persistent reply-space
+reservation, even after a short reply finishes or the chat remounts. Leaving or
+returning always preserves the exact visible anchor and never restores
+auto-scroll to a newer tail. New send and lifecycle paths must use the shared
+state machine rather than deriving intent from geometry alone.
+
 **End-to-end (Playwright).** From the repo root, against a running `mobius-test`
 container on port 8001 (the suite defaults to `http://localhost:8001`, owner
 `admin/admin`):

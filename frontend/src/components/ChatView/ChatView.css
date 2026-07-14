@@ -144,8 +144,8 @@
 
 /* Chat scroll: always hidden, never reveals on scroll. Mirrors the
    global default in index.css after the on-scroll reveal mechanism
-   was retired. ALL chat-scroll invariants in CLAUDE.md ("Chat UX —
-   non-negotiable constraints") still hold: overflow, spacer math,
+   was retired. ALL invariants in ARCHITECTURE.md's "Chat scroll + steer
+   contract" still hold: overflow, spacer math,
    scrollTop, overflow-anchor, useScrollMode listeners are untouched. */
 .chat__scroll { scrollbar-width: none; }
 .chat__scroll::-webkit-scrollbar { width: 0; height: 0; }
