@@ -50,6 +50,29 @@ async function runtimeExports() {
   return import('../../../public/mobius-runtime.js')
 }
 
+test('an opaque sandbox without IndexedDB still reads and writes online', async () => {
+  const { server } = freshEnv()
+  globalThis.indexedDB = {
+    open() {
+      const err = new Error('IndexedDB is denied in an opaque origin')
+      err.name = 'SecurityError'
+      throw err
+    },
+  }
+  const s = await newStorage()
+  server.seed('saved.json', { survives: true })
+
+  assert.deepEqual(await s.get('saved.json'), { survives: true })
+  assert.deepEqual(await s.list(''), []) // harness has no list route; must not touch IDB
+  assert.deepEqual(await s.set('new.json', { writes: true }), { synced: true })
+  assert.deepEqual(server.serverValue('new.json'), { writes: true })
+  assert.equal(await s.pendingCount(), 0)
+
+  server.setOnline(false)
+  assert.equal(await s.get('saved.json'), null)
+  await assert.rejects(s.set('offline.json', { no: 'phantom queue' }), /offline saving is unavailable/)
+})
+
 async function renderUseDocument(storage, path, opts) {
   const stateSlots = []
   const refSlots = []
