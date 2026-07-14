@@ -320,6 +320,61 @@ def test_dead_claude_falls_back_to_complete_local_note(tmp_path, monkeypatch):
   assert "assistant: hello" in note
 
 
+def test_codex_uses_hardened_tool_free_summarizer(monkeypatch):
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "_configured_provider", lambda: "codex")
+  captured = {}
+
+  def summarize(prompt):
+    captured["prompt"] = prompt
+    return _valid_note("semantic codex", "distilled state")
+
+  monkeypatch.setattr(cn, "_run_codex_tool_free", summarize)
+  note = cn._summarize("user: hi\n\nassistant: hello", "")
+  assert "description: semantic codex" in note
+  assert "distilled state" in note
+  assert "user: hi" in captured["prompt"]
+  assert "SUMMARY NOTE" in captured["prompt"]
+  assert "untrusted conversation data" in captured["prompt"]
+
+
+def test_codex_wrapper_reuses_compaction_runner(tmp_path, monkeypatch):
+  cn = _load_chat_note()
+  from app import compaction
+
+  captured = {}
+
+  async def run(prompt, **kwargs):
+    captured["prompt"] = prompt
+    captured.update(kwargs)
+    return "semantic note"
+
+  monkeypatch.setattr(compaction, "_run_codex_summarize_turn", run)
+  monkeypatch.setattr(cn, "DATA_DIR", tmp_path)
+  monkeypatch.setattr(cn, "MODEL", "gpt-test")
+  assert cn._run_codex_tool_free("summarize this") == "semantic note"
+  assert captured == {
+    "prompt": "summarize this",
+    "data_dir": str(tmp_path),
+    "model": "gpt-test",
+    "effort": None,
+  }
+
+
+def test_dead_codex_falls_back_to_complete_local_note(monkeypatch):
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "_configured_provider", lambda: "codex")
+
+  def fail(_prompt):
+    raise RuntimeError("provider unavailable")
+
+  monkeypatch.setattr(cn, "_run_codex_tool_free", fail)
+  note = cn._summarize("user: hi\n\nassistant: hello", "")
+  assert cn._looks_like_note(note)
+  assert "user: hi" in note
+  assert "assistant: hello" in note
+
+
 def _snapshot_db(cn, tmp_path):
   db_path = tmp_path / "ultimate.db"
   con = sqlite3.connect(db_path)

@@ -604,9 +604,271 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
     args[2].startswith("refs/mobius-submit/upstream-")
   ):
     return _cp(_UPSTREAM_SHA + "\n")
+  if (
+    len(args) >= 3 and
+    args[:2] == ("rev-parse", "--verify") and
+    args[2].startswith("refs/mobius-submit/fork-")
+  ):
+    # Existing submit tests model a fork that is already current. Dedicated
+    # sync tests below exercise stale, ahead, and diverged fork tips.
+    return _cp(_UPSTREAM_SHA + "\n")
   if args[:1] == ("merge-tree",):
     return _cp(returncode=1 if merge_conflict else 0)
   return None
+
+
+def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _inspect_owner_fork_default_branch
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  stale = "c" * 40
+  current = "d" * 40
+  git_calls = []
+  gh_calls = []
+
+  monkeypatch.setattr(
+    "app.routes.github._upstream_default_branch",
+    lambda _repo, _slug: "main",
+  )
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if args[:2] == ("rev-parse", "--verify"):
+      return _cp(stale + "\n")
+    if args[:2] == ("merge-base", "--is-ancestor"):
+      if args[2:] == (current, stale):
+        return _cp(returncode=1)
+      if args[2:] == (stale, current):
+        return _cp(returncode=0)
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr(
+    "app.routes.github._gh",
+    lambda _repo, *args, **kwargs: gh_calls.append(args) or _cp(""),
+  )
+
+  patch = _inspect_owner_fork_default_branch(
+    repo,
+    "octocat/app-demo",
+    upstream_branch="main",
+    upstream_sha=current,
+  )
+
+  assert patch["last_submit_fork_sync"] == "strictly-behind"
+  assert patch["last_submit_fork_sha"] == stale
+  assert gh_calls == []
+  assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
+
+
+def test_inspect_owner_fork_leaves_diverged_default_branch_untouched(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import (
+    ContributionSubmitError,
+    _inspect_owner_fork_default_branch,
+  )
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  fork_sha = "c" * 40
+  upstream_sha = "d" * 40
+  gh_calls = []
+
+  monkeypatch.setattr(
+    "app.routes.github._upstream_default_branch",
+    lambda _repo, _slug: "main",
+  )
+
+  def fake_git(repo_path, *args, check=True):
+    if args[:2] == ("rev-parse", "--verify"):
+      return _cp(fork_sha + "\n")
+    if args[:2] == ("merge-base", "--is-ancestor"):
+      return _cp(returncode=1)
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr(
+    "app.routes.github._gh",
+    lambda _repo, *args, **kwargs: gh_calls.append(args) or _cp(""),
+  )
+
+  with pytest.raises(ContributionSubmitError) as exc:
+    _inspect_owner_fork_default_branch(
+      repo,
+      "octocat/app-demo",
+      upstream_branch="main",
+      upstream_sha=upstream_sha,
+    )
+
+  assert "diverged" in exc.value.message
+  assert exc.value.record_patch["last_submit_fork_sync"] == "diverged"
+  assert gh_calls == []
+
+
+def test_inspect_owner_fork_reports_current_or_ahead_branch(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _inspect_owner_fork_default_branch
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  upstream_sha = "d" * 40
+  ahead_sha = "e" * 40
+  tips = iter((upstream_sha, ahead_sha))
+  gh_calls = []
+
+  monkeypatch.setattr(
+    "app.routes.github._upstream_default_branch",
+    lambda _repo, _slug: "main",
+  )
+
+  def fake_git(repo_path, *args, check=True):
+    if args[:2] == ("rev-parse", "--verify"):
+      return _cp(next(tips) + "\n")
+    if args[:2] == ("merge-base", "--is-ancestor"):
+      assert args[2:] == (upstream_sha, ahead_sha)
+      return _cp(returncode=0)
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr(
+    "app.routes.github._gh",
+    lambda _repo, *args, **kwargs: gh_calls.append(args) or _cp(""),
+  )
+
+  current = _inspect_owner_fork_default_branch(
+    repo,
+    "octocat/app-demo",
+    upstream_branch="main",
+    upstream_sha=upstream_sha,
+  )
+  ahead = _inspect_owner_fork_default_branch(
+    repo,
+    "octocat/app-demo",
+    upstream_branch="main",
+    upstream_sha=upstream_sha,
+  )
+
+  assert current["last_submit_fork_sync"] == "current"
+  assert ahead["last_submit_fork_sync"] == "contains-upstream"
+  assert gh_calls == []
+
+
+def test_build_fork_compatible_topic_preserves_exact_reviewed_merge(tmp_path):
+  from app.routes.github import (
+    _build_fork_compatible_topic_commit,
+    _reviewed_branch_diff,
+  )
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+
+  def git(*args, input_text=None):
+    return subprocess.run(
+      ["git", "-C", str(repo), *args],
+      input=input_text,
+      capture_output=True,
+      text=True,
+      check=True,
+    ).stdout.strip()
+
+  git("init", "-b", "main")
+  (repo / ".github" / "workflows").mkdir(parents=True)
+  (repo / ".github" / "workflows" / "test.yml").write_text("old workflow\n")
+  (repo / "app.py").write_text("old\n")
+  git("add", ".")
+  git(
+    "-c", "user.name=owner", "-c", "user.email=owner@example.com",
+    "commit", "-m", "fork base",
+  )
+  fork_sha = git("rev-parse", "HEAD")
+
+  (repo / ".github" / "workflows" / "test.yml").write_text("new workflow\n")
+  git("add", ".github/workflows/test.yml")
+  git(
+    "-c", "user.name=owner", "-c", "user.email=owner@example.com",
+    "commit", "-m", "upstream workflow change",
+  )
+  upstream_sha = git("rev-parse", "HEAD")
+  git("checkout", "-b", "reviewed")
+  (repo / "app.py").write_text("reviewed\n")
+  git("add", "app.py")
+  git(
+    "-c", "user.name=owner", "-c", "user.email=owner@example.com",
+    "commit", "-m", "Reviewed fix", "-m", (
+      "Co-authored-by: Möbius Agent "
+      "<mobius-agent@users.noreply.github.com>"
+    ),
+  )
+  reviewed_sha = git("rev-parse", "HEAD")
+  reviewed_diff = _reviewed_branch_diff(repo, upstream_sha, reviewed_sha)
+  diff_path = tmp_path / "reviewed.diff"
+  diff_path.write_bytes(reviewed_diff)
+  expected_diff = hashlib.sha256(reviewed_diff).hexdigest()
+
+  push_sha = _build_fork_compatible_topic_commit(
+    repo,
+    branch="reviewed",
+    fork_sha=fork_sha,
+    upstream_sha=upstream_sha,
+    diff_path=diff_path,
+    expected_diff=expected_diff,
+    author_name="owner",
+    author_email="owner@example.com",
+  )
+
+  assert git("rev-parse", "--abbrev-ref", "HEAD") == "reviewed"
+  assert git("rev-parse", f"{push_sha}^") == fork_sha
+  assert git("diff", "--name-only", f"{fork_sha}..{push_sha}") == "app.py"
+  merged_tree = git("merge-tree", "--write-tree", upstream_sha, push_sha)
+  assert hashlib.sha256(
+    _reviewed_branch_diff(repo, upstream_sha, merged_tree)
+  ).hexdigest() == expected_diff
+  assert git("status", "--porcelain") == ""
+
+
+def test_build_fork_compatible_topic_does_not_reset_if_detach_fails(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import (
+    ContributionSubmitError,
+    _build_fork_compatible_topic_commit,
+  )
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    calls.append(args)
+    if args[:3] == ("log", "-1", "--format=%B"):
+      return _cp(
+        "Reviewed fix\n\nCo-authored-by: Möbius Agent "
+        "<mobius-agent@users.noreply.github.com>\n"
+      )
+    if args[:3] == ("checkout", "-q", "--detach"):
+      raise ContributionSubmitError("detach failed")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+
+  with pytest.raises(ContributionSubmitError, match="detach failed"):
+    _build_fork_compatible_topic_commit(
+      repo,
+      branch="reviewed",
+      fork_sha="a" * 40,
+      upstream_sha="b" * 40,
+      diff_path=tmp_path / "reviewed.diff",
+      expected_diff="c" * 64,
+      author_name="owner",
+      author_email="owner@example.com",
+    )
+
+  assert not any(call[:2] == ("reset", "--hard") for call in calls)
 
 
 def test_safe_repo_path_accepts_durable_contribution_roots():
@@ -662,6 +924,30 @@ def test_safe_repo_path_rejects_non_durable_locations(tmp_path):
   link.symlink_to(outside)
   with pytest.raises(ContributionSubmitError):
     _safe_repo_path(str(link))
+
+
+def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  disposable = data_dir / "contrib" / "terminal-cleanup" / "repo"
+  (disposable / ".git").mkdir(parents=True)
+  (disposable / "index.jsx").write_text("hello")
+  record = {
+    "status": "open",
+    "plan": {"repo_path": str(disposable)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is False
+  assert disposable.exists()
+  record["status"] = "merged"
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not disposable.exists()
+
+  live_repo = data_dir / "apps" / "terminal-cleanup-live"
+  (live_repo / ".git").mkdir(parents=True)
+  record["plan"]["repo_path"] = str(live_repo)
+  assert _cleanup_terminal_staging_checkout(record) is False
+  assert live_repo.exists()
 
 
 def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
