@@ -2,6 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  answerKeepsCurrentTurn,
+  answerTurnDisposition,
   builtAppPulseDecision,
   canFastForwardQueue,
   cidOf,
@@ -18,6 +20,45 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+
+test('an in-process question answer keeps ownership of the active assistant turn', () => {
+  assert.equal(answerTurnDisposition({
+    status: 'answer_delivered',
+    answer_turn: 'same',
+  }), 'same')
+  assert.equal(answerKeepsCurrentTurn({
+    status: 'answer_delivered',
+    answer_turn: 'same',
+  }), true)
+})
+
+test('only a recovered question answer starts a new hidden turn', () => {
+  assert.equal(answerTurnDisposition({
+    status: 'started',
+    answer_turn: 'new',
+  }), 'new')
+  assert.equal(answerKeepsCurrentTurn({
+    status: 'started',
+    answer_turn: 'new',
+  }), false)
+  assert.equal(answerKeepsCurrentTurn(null), false)
+})
+
+test('answer turn ownership stays compatible with older backends', () => {
+  assert.equal(answerTurnDisposition({ status: 'answer_delivered' }), 'same')
+  assert.equal(answerTurnDisposition({ status: 'started' }), 'new')
+})
+
+test('an unknown explicit answer-turn value fails closed to a separate boundary', () => {
+  assert.equal(answerTurnDisposition({
+    status: 'started',
+    answer_turn: 'future-mode',
+  }), 'unknown')
+  assert.equal(answerKeepsCurrentTurn({
+    status: 'started',
+    answer_turn: 'future-mode',
+  }), false)
+})
 
 test('cidOf returns the row cid, else null (no read-time derivation)', () => {
   // Post-card-221 every user row carries an explicit cid (client-minted, or a

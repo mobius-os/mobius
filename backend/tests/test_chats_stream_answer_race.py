@@ -160,6 +160,7 @@ def test_answer_delivers_immediately_when_pending_registered(
 
     assert res.status_code == 202, res.text
     assert res.json()["status"] == "answer_delivered"
+    assert res.json()["answer_turn"] == "same"
     # Future resolved with the submitted answers.
     assert fut.done()
     assert fut.result() == {"Pick one": "a"}
@@ -221,6 +222,7 @@ def test_answer_recovers_durable_question_without_live_pending(
 
     assert res.status_code == 202, res.text
     assert res.json()["status"] == "started"
+    assert res.json()["answer_turn"] == "new"
     assert scheduled, "recovered answer should start a hidden continuation"
     assert scheduled[0]["next_user"]["hidden"] is True
     assert scheduled[0]["next_user"]["content"] == "- Pick one: b"
@@ -333,6 +335,7 @@ def test_answer_delivers_after_late_registration_within_grace(
 
     assert res.status_code == 202, res.text
     assert res.json()["status"] == "answer_delivered"
+    assert res.json()["answer_turn"] == "same"
     # Future resolved with the submitted answers.
     fut = future_holder["future"]
     assert fut.done()

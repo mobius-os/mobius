@@ -1223,6 +1223,9 @@ export default function useStreamConnection(chatId, {
       if (data.status === 'not_steered') return data
       // AskUserQuestion answer was delivered in-process to the parked
       // future — the runner resumes the EXISTING turn with the answer.
+      // The response also declares `answer_turn: "same"`; ChatView consumes
+      // that semantic field for row ownership instead of inferring it from
+      // this transport/status branch.
       // No new stream connection needed; the existing SSE keeps
       // streaming whatever the runner emits next. Returning here
       // prevents a redundant reconnect that would close the live
@@ -1230,6 +1233,8 @@ export default function useStreamConnection(chatId, {
       if (data.status === 'answer_delivered') return data
       // A recovered AskUserQuestion answer (the process restarted after
       // persisting the question block) starts a fresh hidden continuation.
+      // Its response declares `answer_turn: "new"` for ChatView's bridge
+      // decision; status remains the rolling-update compatibility signal.
       // That is a NEW stream, unlike the in-process answer_delivered path
       // above, so initialize the same reconnect state a visible fresh send
       // would use.
