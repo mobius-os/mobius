@@ -303,6 +303,8 @@
       text-align: left;
       max-height: 200px;
       overflow-y: auto;
+      -webkit-user-select: text;
+      user-select: text;
     }
     .error-actions { display: flex; gap: 10px; margin-top: 4px; }
     .error-btn {
@@ -330,7 +332,7 @@
     <div class="error-detail" id="error-detail"></div>
     <div class="error-actions">
       <button class="error-btn error-btn--reload" onclick="location.reload()">Reload app</button>
-      <button class="error-btn error-btn--report" id="report-btn" onclick="reportError()">Tell agent to fix</button>
+      <button class="error-btn error-btn--report" id="report-btn" onclick="reportError()">Report to agent</button>
     </div>
   </div>
 
@@ -342,7 +344,15 @@
     var capturedError = ''
     var capturedErrorOnce = false  // only the first error is reported (root cause)
 
+    function redactErrorCredentials(detail) {
+      return String(detail || '').replace(
+        /([?&]token=)[^&\s"'<>]+/gi,
+        '$1[redacted]'
+      )
+    }
+
     function showErr(title, detail) {
+      detail = redactErrorCredentials(detail)
       if (!capturedErrorOnce) { capturedError = detail; capturedErrorOnce = true; }
       document.getElementById('error-title').textContent = title
       document.getElementById('error-detail').textContent = detail
