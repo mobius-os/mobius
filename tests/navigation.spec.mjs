@@ -342,6 +342,29 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect((await getNavState(page)).drawerOpen).toBe(true)
   })
 
+  test('Brand button is the only header drawer trigger', async ({ page }) => {
+    await setup(page)
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    const header = page.locator('.shell__bar')
+    await expect(toggle).toHaveAttribute('type', 'button')
+    await expect(toggle).toHaveAttribute('aria-controls', 'navigation-drawer')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    const [toggleBox, headerBox] = await Promise.all([toggle.boundingBox(), header.boundingBox()])
+    expect(toggleBox).not.toBeNull()
+    expect(headerBox).not.toBeNull()
+    expect(toggleBox.width).toBeLessThan(headerBox.width / 2)
+
+    // A tap in the intentionally empty part of the toolbar must not open the drawer.
+    await page.mouse.click(headerBox.x + headerBox.width - 12, headerBox.y + headerBox.height / 2)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await toggle.focus()
+    await page.keyboard.press('Space')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  })
+
   test('12. closeDrawer when drawer already closed is a no-op', async ({ page }) => {
     // Defensive guard against wiring extra close calls.
     await setup(page)

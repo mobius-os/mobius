@@ -1617,22 +1617,20 @@ export default function Shell() {
           a no-op because React 19 normalizes the known boolean attribute and
           an empty string serializes as falsy, so it never applied. */}
       <header className="shell__bar" inert={drawerOpen}>
-        {/* The brand area (logo + wordmark) below is the drawer toggle: it is
-            a role=button with aria-label + aria-expanded + Enter/Space
-            handling, so it serves touch, pointer, keyboard, and AT alike. A
-            standalone visible hamburger was redundant next to it. */}
-        <div
+        {/* The brand area (logo + wordmark) is the only drawer trigger. A
+            native button provides pointer, keyboard, and assistive-technology
+            behavior without recreating it with a role and key handler. */}
+        <button
+          type="button"
           className="shell__brand"
-          role="button"
-          tabIndex="0"
           aria-label="Toggle navigation"
+          aria-controls="navigation-drawer"
           aria-expanded={drawerOpen}
           onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
-          onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (drawerOpen ? closeDrawer() : openDrawer())}
         >
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
-        </div>
+        </button>
         {!online && (
           <span className="shell__offline" role="status" aria-live="polite">
             Offline
