@@ -145,10 +145,10 @@ async def test_watcher_holds_prior_bundle_while_non_entry_conflict_unresolved(
 
 
 @pytest.mark.asyncio
-async def test_resolved_conflict_materializes_static_then_replays_full_update(
+async def test_resolved_conflict_keeps_old_live_state_until_full_replay(
   client, owner_token, monkeypatch,
 ):
-  """Resolution compiles against candidate assets and resumes install phases."""
+  """Resolution holds old artifacts until the canonical install replay."""
   import asyncio
   import app.models as models
   from app.app_watcher import _JsxHandler, _source_dir_for_changed_path
@@ -193,6 +193,7 @@ async def test_resolved_conflict_materializes_static_then_replays_full_update(
     manifest={"id": "watchresolved", "version": "2.0.0"},
     raw_base="https://example.invalid/app/",
     capability_digest="a" * 64,
+    candidate_digest="b" * 64,
     static_assets={"runtime.js": b"export const version = 'v2'\n"},
   )
   app_git.start_conflict_merge(src)
@@ -202,10 +203,19 @@ async def test_resolved_conflict_materializes_static_then_replays_full_update(
   replays = []
 
   async def fake_reapply(db, **kwargs):
-    assert (src / "static" / "runtime.js").read_bytes().endswith(b"'v2'\n")
+    # The watcher must not expose any candidate artifact before the canonical
+    # installer reaches its own complete commit/promotion boundary.
+    assert not (src / "static" / "runtime.js").exists()
     assert kwargs["manifest"]["version"] == "2.0.0"
+    assert kwargs["expected_app_id"] == app_id
+    assert kwargs["expected_upstream_commit"] == upstream
+    assert kwargs["expected_candidate_digest"] == "b" * 64
     replays.append(kwargs)
     row = db.query(models.App).filter(models.App.id == app_id).first()
+    (src / "static").mkdir(exist_ok=True)
+    (src / "static" / "runtime.js").write_bytes(
+      b"export const version = 'v2'\n"
+    )
     install.clear_pending_conflict_update(src)
     return row, "update", [], kwargs["manifest"], [], "clean_merge"
 

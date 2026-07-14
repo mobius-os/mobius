@@ -893,16 +893,19 @@ def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
   assert (repo / "index.jsx").read_text() == local_before
 
 
-def test_merge_entry_points_unshallow_when_depth_one_hides_base(tmp_path):
+@pytest.mark.parametrize("entrypoint", ["verdict", "resolver"])
+def test_merge_entry_points_unshallow_when_depth_one_hides_base(
+  tmp_path, entrypoint,
+):
   """A depth-one update must not strand verdict or resolver as unrelated."""
-  fixture = tmp_path / "fixture"
-  bare = tmp_path / "fixture.git"
+  fixture = tmp_path / f"fixture-{entrypoint}"
+  bare = tmp_path / f"fixture-{entrypoint}.git"
   subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
   _write(fixture, "shared\n")
   _commit_all(fixture, "v1")
   subprocess.run(["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True)
 
-  repo = tmp_path / "app"
+  repo = tmp_path / f"app-{entrypoint}"
   repo.mkdir()
   app_git.clone_upstream(repo, bare.as_uri(), "main")
   _write(repo, "local\n")
@@ -922,11 +925,48 @@ def test_merge_entry_points_unshallow_when_depth_one_hides_base(tmp_path):
     check=False,
   ).returncode != 0
 
-  merge = app_git.merge_upstream(repo)
-  assert merge.status == "conflict"
+  if entrypoint == "verdict":
+    assert app_git.merge_upstream(repo).status == "conflict"
+  else:
+    assert "index.jsx" in app_git.start_conflict_merge(repo)
+    assert (repo / ".git" / "MERGE_HEAD").exists()
   assert not (repo / ".git" / "shallow").exists()
-  assert "index.jsx" in app_git.start_conflict_merge(repo)
-  assert (repo / ".git" / "MERGE_HEAD").exists()
+
+
+def test_fetch_upstream_repairs_same_tip_depth_one_regraft(tmp_path):
+  """Retrying the same SHA must repair a merge base hidden by depth=1."""
+  fixture = tmp_path / "same-tip-fixture"
+  bare = tmp_path / "same-tip-fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  _write(fixture, "shared\n")
+  _commit_all(fixture, "v1")
+  subprocess.run(["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True)
+
+  repo = tmp_path / "same-tip-app"
+  repo.mkdir()
+  app_git.clone_upstream(repo, bare.as_uri(), "main")
+  _write(repo, "local\n")
+  app_git.commit_local(repo, "local edit")
+
+  _write(fixture, "upstream\n")
+  _commit_all(fixture, "v2")
+  subprocess.run(
+    ["git", "-C", str(fixture), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(fixture),
+  )
+  app_git._run(repo, "fetch", "--depth", "1", "origin", "main")
+  app_git._run(repo, "branch", "-f", app_git.UPSTREAM_BRANCH, "origin/main")
+  poisoned_tip = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  assert app_git._run(
+    repo, "merge-base", app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+    check=False,
+  ).returncode != 0
+
+  assert app_git.fetch_upstream(repo, "main") == poisoned_tip
+  assert app_git._run(
+    repo, "merge-base", app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+  ).stdout.strip()
+  assert not (repo / ".git" / "shallow").exists()
 
 
 def test_resolved_conflict_commit_advances_base(tmp_path):
