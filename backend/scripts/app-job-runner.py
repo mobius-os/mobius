@@ -151,14 +151,16 @@ def _sandboxed_command(
         "--bind" if shared_level == "write" else "--ro-bind",
         str(shared), str(shared),
       ]
-  providers = {
-    value.get("provider")
-    for value in (context.get("primary"), context.get("fallback"))
-    if isinstance(value, dict) and isinstance(value.get("provider"), str)
-  }
+  # The owner-reviewed background-agent capability grants access to connected
+  # provider credentials, while the app's own settings may select a provider
+  # at runtime (Memory is one such app). job-context deliberately excludes app
+  # storage settings, so restricting mounts to the system primary/fallback
+  # silently breaks a valid app-level override. Mount every supported provider
+  # directory that actually exists; the masked /data tree still exposes no
+  # other owner/platform state and ordinary app jobs never take this path.
   auth_root = DATA_DIR / "cli-auth"
   auth_mounts = []
-  for provider in sorted(providers & {"claude", "codex"}):
+  for provider in ("claude", "codex"):
     auth = auth_root / provider
     if auth.is_dir() and not auth.is_symlink():
       auth_mounts.append(auth)

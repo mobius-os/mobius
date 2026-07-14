@@ -186,6 +186,8 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
   job = source / "fetch.sh"
   job.write_text("#!/bin/sh\n")
   (data_dir / "cli-auth" / "claude").mkdir(parents=True)
+  (data_dir / "cli-auth" / "codex").mkdir(parents=True)
+  (data_dir / "cli-auth" / "unreviewed-provider").mkdir(parents=True)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/bwrap")
   context = {
@@ -206,6 +208,8 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
   assert f"--bind {data_dir / 'apps' / '57'} {data_dir / 'apps' / '57'}" in joined
   assert f"--bind {data_dir / 'shared' / 'memory'}" in joined
   assert f"--bind {data_dir / 'cli-auth' / 'claude'}" in joined
+  assert f"--bind {data_dir / 'cli-auth' / 'codex'}" in joined
+  assert str(data_dir / "cli-auth" / "unreviewed-provider") not in joined
   assert "service-token" not in joined
   assert str(data_dir / "db") not in joined
 
