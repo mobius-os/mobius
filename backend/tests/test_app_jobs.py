@@ -190,6 +190,11 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
   (data_dir / "cli-auth" / "unreviewed-provider").mkdir(parents=True)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner.shutil, "which", lambda name: f"/usr/bin/{name}")
+  # Exercise the production supervisor path explicitly. GitHub Actions runs
+  # pytest as an unrelated non-root uid, for which the command builder
+  # correctly fails closed instead of pretending it can drop to mobius.
+  monkeypatch.setattr(runner.os, "geteuid", lambda: 0)
+  monkeypatch.setattr(runner.os, "getegid", lambda: 0)
   context = {
     "primary": {"provider": "claude"},
     "fallback": None,
