@@ -154,6 +154,13 @@ jobs:
           context: .
           load: true
           tags: mobius-test:ci
+          # The runtime seeds /data/platform from the image's baked clone and
+          # its warm frontend watcher immediately builds from that checkout.
+          # Pin the clone to this exact push/PR merge; leaving BUILD_SHA at its
+          # `unknown` default silently seeds origin/main, so Playwright runs the
+          # checked-out PR's tests against main's backend and rebuilt frontend.
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
           cache-from: type=gha
           # A transient GHA cache-service miss must not turn a successfully
           # built and loaded image into a red build. The image itself remains
@@ -171,6 +178,21 @@ jobs:
             done
           '
           echo "Container is healthy"
+
+          # Fail before Playwright if the running platform drifted from the
+          # checkout under test. Checking both the baked identity and the
+          # actively served clone prevents a future seed/fallback change from
+          # reintroducing false-green or false-red PR checks.
+          curl -fsS http://localhost:8001/api/version | python3 -c '
+          import json, os, sys
+          version = json.load(sys.stdin)
+          expected = os.environ["GITHUB_SHA"]
+          fields = ("sha", "served_sha", "platform_sha")
+          wrong = {name: version.get(name) for name in fields if version.get(name) != expected}
+          if wrong:
+              raise SystemExit(f"runtime identity mismatch: expected {expected}; got {wrong}")
+          print(f"Runtime identity matches checkout: {expected}")
+          '
 
       - name: Set up Node with npm cache
         uses: actions/setup-node@v5
