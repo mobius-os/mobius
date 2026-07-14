@@ -451,38 +451,21 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   after its first message. Auto-scroll engages ONLY when the user manually scrolls to
   within 50px of the bottom (`NEAR_BOTTOM_PX`), and it does NOT survive leaving the
   chat (see R4).
-- **R1 — Reserve on every send.** Every user message — fresh, queued, or steered —
-  activates the dynamic bottom spacer so the message CAN sit at the viewport top,
-  unless the message is taller than the viewport (`max(0, …)`). Reservation is
-  independent of whether the viewport actually moves.
-- **R2 — Pin gates on MODE, not turn-state.** The viewport lifts the new message to
-  the top iff it is the chat's **first message** OR the chat is in **auto-scroll** (at
-  the bottom) at submit time; a send while in **hold / scrolled-up** reserves space
-  but must NOT move the reader (the load-bearing guarantee is "don't move a reading
-  user", not "spacer is zero"). At-bottom is read from `scrollTop` before the append
-  (`shouldPinSend`/`isNearScrollBottom` in `useScrollMode.js`), not a sentinel.
-  **This narrows the earlier "every fresh send lifts the new message to the top" rule
-  (commit `9b9ab86b`):** a fresh send made while you are reading earlier history is
-  treated like a mid-turn send — reserve, but don't yank you down. The only
-  unconditional pins are the first message and an at-bottom (auto-scroll) send. Owner
-  decision 2026-07-12; `CLAUDE.md`/`AGENTS.md` constraint #1 has been updated to
-  match. **Do not re-flip without a new owner decision** — this rule has already
-  ping-ponged (now its 4th revision). `9b9ab86b` was itself a fix for a "messages
-  don't go to the top" report (a new turn started after a tall reply is never near
-  the tail, so the mode-gate didn't lift it); the owner has weighed that and accepts
-  the tradeoff — a fresh send while scrolled up won't auto-lift; the reader scrolls
-  down to follow. Lock-in: `tests/send-rule.spec.mjs` + `spacer.spec.mjs` #26 both
-  assert "no pin when scrolled up," and `ChatView.jsx`'s fresh-send `willPin` gates
-  on `shouldPinSend` (same call the queue/steer paths use).
-  **At-bottom is geometric, not gesture-gated (owner ruling 2026-07-13):** a chat
-  whose content fits the viewport counts as at-bottom, so a second send in a short
-  chat pins even though the user never scrolled ("if the chat is short and we sent
-  a new message, the message should pin, even if we didn't enter auto scroll
-  mode"). This resolves the question that had parked the strict pure-state engine
-  (`session-scroll-v2`, gesture-only AUTO): that reading is rejected. Lock-in:
-  `send-rule.spec.mjs` "Short chat (content fits viewport): second send still pins
-  to top".
-- **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
+- **R1 — Permanent exact reservation.** Every non-empty chat keeps enough dynamic
+  bottom spacer for its latest visible user message to reach the viewport top,
+  including after leaving and reopening the chat. The reservation is exact — no
+  extra scrollable blank beyond that target — and shrinks as the reply fills it.
+  `FOLLOW_BOTTOM` follows real conversation content, excluding the reservation, so
+  a short restored chat cannot open on an empty viewport.
+- **R2 — Every deliberate fresh send pins.** A normal user send always lifts its new
+  user row to the viewport top, regardless of the previous reading/auto-scroll mode;
+  the reply then grows below it. `pin:false` remains only for synthetic sends such as
+  Stop's queue collapse. Owner decision 2026-07-14, superseding the mode-gated
+  2026-07-12 rule after repeated production failures placed subsequent sends in the
+  middle of the viewport. Lock-in: `tests/send-rule.spec.mjs` + `spacer.spec.mjs` #26.
+- **R3** Queued/steered messages keep the delayed-insertion mode gate: they reserve
+  room immediately, but a later promotion does not yank a reader who moved after the
+  original tap.
 - **R4** Leave-and-return restores the same scroll position, even mid-stream
   (hide-then-reveal + the versioned snapshot cache).
 - **Steer = separate rows, one turn.** Steered queued messages render as separate
@@ -676,8 +659,8 @@ and renders each leaf pane's active tab.
 
 1. **Never remount ChatView to re-measure.** Pane resizing must imperatively
    reset its grow-only `fullViewHRef` in `useScrollMode` while preserving
-   `spacerActive` and `FOLLOW_BOTTOM`. Folding pane size into a React key
-   collapses send reservation and freezes live follow behavior. Each pane owns
+   `FOLLOW_BOTTOM`. Folding pane size into a React key freezes live follow
+   behavior. Each pane owns
    its own height ref; keyboard resizing is pane-local.
 2. **Never reparent keyed app iframes, and keep the global cap.** Visible app
    panes count against `APP_CACHE_MAX` (currently four). Preserve id-sorted

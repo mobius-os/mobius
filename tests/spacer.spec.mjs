@@ -436,7 +436,14 @@ test.describe('Short responses', () => {
     // No `if (!afterReturn.error)` guard — when state pollution
     // landed us on the wrong chat the older form silently passed.
     expect(afterReturn.error).toBeUndefined()
+    expect(afterReturn.spacerH).toBeGreaterThan(0)
     assertSpacerReasonable(afterReturn)
+    // The restored reservation is exact: max scroll equals the latest user
+    // row's pin target, so it can reach the top but there is no extra blank.
+    expect(Math.abs(
+      (afterReturn.scrollH - afterReturn.clientH)
+      - Math.max(0, afterReturn.lastUserTop - 4)
+    )).toBeLessThanOrEqual(2)
   })
 
   test('10. New send after short response — old spacer replaced', async ({ page }) => {
@@ -972,15 +979,9 @@ test.describe('Scroll edge cases', () => {
     expect(afterGap).toBeLessThan(50)
   })
 
-  test('26. Fresh second send while scrolled up does NOT pin (R2: pin gates on mode)', async ({ page }) => {
-    // R2 of the committed chat-UX contract (ARCHITECTURE.md "Chat scroll +
-    // steer contract", owner decision 2026-07-12 — the FOURTH revision of
-    // this rule; ARCHITECTURE.md is authoritative): the pin gates on MODE,
-    // not send-kind. Only the chat's first message and an at-bottom
-    // (auto-scroll) send lift to the top; a fresh send made while reading
-    // earlier history reserves spacer room but must not move the reader.
-    // send-rule.spec.mjs asserts the position-preservation half; this spec
-    // locks in "no pin when scrolled up".
+  test('26. Fresh second send while scrolled up still pins to top', async ({ page }) => {
+    // A deliberate fresh send always establishes the next reading seam at the
+    // viewport top. This is independent from auto-scroll/follow mode.
     //
     // Uses the REAL SSE path (not injectContent) so the long first
     // response PERSISTS across the second send — DOM-injected content
@@ -1035,11 +1036,11 @@ test.describe('Scroll edge cases', () => {
     })
     expect(userMsgs).toContain('Second message')
 
-    // CRITICAL: NOT pinned — the message is not flush at the top, and the
-    // scroll did not jump there. The reader stays put (R2).
+    // CRITICAL: pinned flush to the top even though the prior position was a
+    // reading anchor in earlier history.
     const after = await measure(page)
-    expect(after.userVisualTop).toBeGreaterThan(50)
-    expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
+    assertUserMsgAtTop(after)
+    expect(Math.abs(after.scrollTop - savedTop)).toBeGreaterThan(8)
   })
 
   test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {

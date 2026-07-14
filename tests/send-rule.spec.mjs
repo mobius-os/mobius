@@ -1,18 +1,10 @@
 /**
  * The send-scroll rule (owner's words):
  *
- *   "When sending a new message, only move to top if it's the FIRST
- *    message OR if the user is already at the bottom (i.e. in
- *    autoscroll/follow mode). Otherwise the user is probably reading a
- *    message and perhaps has queued something up, so we should NOT move
- *    the scroll."
+ *   "When sending a new message, move it to the top."
  *
- * So on send: pin the new user message to the viewport top (PIN_USER_MSG)
- * only when it is the first user message OR the user is at the bottom
- * (gesture-gated FOLLOW_BOTTOM, or a short chat whose content does not
- * overflow). When the user is scrolled UP (reading, possibly with a
- * queued message), the send must be a no-op for scroll/spacer — the
- * reader stays exactly where they were; the message just appends.
+ * A deliberate fresh send always pins the new user message to the viewport
+ * top. Queued/steered messages have a separate delayed-insertion rule.
  *
  * "At bottom" is the gesture-gated follow flag, NOT a raw IO read — a
  * raw sentinel read at send time mis-classifies an at-bottom reader
@@ -208,10 +200,10 @@ test('Send while at the bottom (following) pins to top, response grows below', a
 })
 
 // ───────────────────────────────────────────────────────────────────
-// Send while SCROLLED UP (reading) — does NOT move the scroll
+// Send while SCROLLED UP — a deliberate fresh send still pins
 // ───────────────────────────────────────────────────────────────────
 
-test('Send while scrolled up (reading) does NOT move the scroll or pin', async ({ page }) => {
+test('Send while scrolled up still pins the deliberate fresh message to top', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
@@ -236,8 +228,8 @@ test('Send while scrolled up (reading) does NOT move the scroll or pin', async (
   expect(gapBefore).toBeGreaterThan(50)
   const savedTop = before.scrollTop
 
-  // Send the second message while scrolled up. It must NOT yank the
-  // viewport — the reader stays put; the message just appends/queues.
+  // Send the second message while scrolled up. A deliberate fresh send starts
+  // the next reading seam, so it must lift the prompt to the top.
   await routeStream(page, [
     { type: 'catch_up_done' },
     { type: 'text', content: 'Reply.' },
@@ -250,15 +242,9 @@ test('Send while scrolled up (reading) does NOT move the scroll or pin', async (
 
   const after = await measure(page)
   expect(after.lastUserText).toBe('Second while reading')
-  // CRITICAL: the scroll position did NOT jump. Tolerance covers the few
-  // px the appended user message can add at the very bottom of the list
-  // (it grows scrollHeight, not the reader's offset from the top).
-  expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
-  // The owner contract is "always reserve enough space" even when scrolled up
-  // (the reader just isn't moved). Space MAY be reserved; the load-bearing
-  // guarantee is the scroll position above did not jump — not that the spacer
-  // is zero. (Earlier this asserted spacerH===0; that contradicted the
-  // always-reserve contract — see docs/chat-scroll-steer-contract.md R2.)
+  expect(after.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(after.lastUserVisualTop).toBeLessThanOrEqual(10)
+  expect(Math.abs(after.scrollTop - savedTop)).toBeGreaterThan(8)
   expect(after.spacerH).toBeGreaterThanOrEqual(0)
 })
 

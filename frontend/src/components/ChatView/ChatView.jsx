@@ -683,11 +683,6 @@ export default function ChatView({
   }))
   const bridgeHook = useBridgePartial(bridgeMountInputs)
 
-  // Spacer "active" CSS state — keeps min-height: 0 on the list while
-  // the spacer is in play, preventing the elastic-overscroll
-  // min-height: calc(100% + 1px) from inflating offsetHeight and
-  // breaking the spacer formula.
-  const [spacerActive, setSpacerActive] = useState(false)
   // Ref mirror of `sending`. Read by doSend's queue-vs-fresh-send
   // guard (and by fetchMessages). Reading state directly would
   // capture a render-time value in doSend's closure — stale when
@@ -786,7 +781,6 @@ export default function ChatView({
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
-    spacerActive,
   })
 
   function makeSendPinIntent(willPin) {
@@ -826,15 +820,13 @@ export default function ChatView({
     inlineSteerPinIntentRef.current = null
   }
 
-  // The ONE place a send/steer/promote arms the pin. Owns spacer arming (the
-  // reservation is always armed on a visible send), intent-staleness (a real
-  // user scroll after submit wins), and the PIN-vs-settle mode write. The pin
+  // The ONE place a send/steer/promote arms the pin. Owns intent-staleness (a
+  // real user scroll after submit wins) and the PIN-vs-settle mode write. The pin
   // targets the stable `cid`, which the DOM row already carries from mint, so
   // the pin lands on the first apply — no ts-swap retarget, ever. Spacer HEIGHT
   // belongs to the layout effect's sizeSpacer; this never zeroes it (zeroing
   // would clamp scrollTop with no guaranteed re-run to re-pin).
   function pinSentMessage(cid, { willPin, intent } = {}) {
-    setSpacerActive(true)
     if (intent && !pinIntentStillCurrent(intent)) {
       // A real user scroll landed after submit — the reader wins. Leave
       // scrollTop where they put it; retire any stale PIN/FOLLOW to their
@@ -2010,24 +2002,13 @@ export default function ChatView({
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
 
-    // The send rule is R2 of the committed chat-UX contract
-    // (ARCHITECTURE.md "Chat scroll + steer contract", owner decision
-    // 2026-07-12): the pin gates on MODE, not on send-kind. Lift the new
-    // message to the top iff it is the chat's first message OR the reader is
-    // in auto-scroll (at the bottom) at submit time; a fresh send made while
-    // reading earlier history reserves spacer room but must NOT yank the
-    // reader. The load-bearing guarantee is "don't move a reading user".
-    // `pin` stays the caller opt-out (handleStop's queue-collapse passes
-    // pin:false).
-    const freshIsFirstUser = !messagesRef.current.some(
-      m => m.role === 'user' && !m.hidden,
-    )
-    const willPin = pin && shouldPinSend({
-      scrollEl: scrollRef.current,
-      mode: modeRef.current,
-      isFirstUserMsg: freshIsFirstUser,
-      wasNearScrollBottom: wasNearContentBottomAtSubmit,
-    })
+    // A deliberate fresh send always lifts its user row to the viewport top.
+    // This is the primary chat-reading seam: the reply grows below the prompt,
+    // regardless of where the previous answer ended. `pin` remains the caller
+    // opt-out for synthetic sends such as handleStop's queue collapse. Queued
+    // and steered rows keep their separate delayed-insertion rule above so they
+    // cannot yank a reader long after the original tap.
+    const willPin = pin
     // The send-time pin intent, carried across the async POST so a user scroll
     // that lands during it can still win. The pinned row's identity is the
     // minted `cid`, which the optimistic row and the confirmed server row
@@ -3241,7 +3222,10 @@ export default function ChatView({
         onScroll={handleScroll}
         style={revealed ? undefined : { visibility: 'hidden' }}
       >
-        <ul className="chat__list" style={spacerActive ? { minHeight: 0 } : undefined}>
+        {/* The reservation is a permanent geometry invariant for every
+            non-empty chat, including after unmount/remount. Keep the list's
+            elastic min-height out of the spacer formula at all times. */}
+        <ul className="chat__list" style={{ minHeight: 0 }}>
           {hasMore && (
             <li className="chat__older">
               <button onClick={loadOlderMessages}>Load earlier messages</button>

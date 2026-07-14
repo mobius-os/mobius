@@ -14,11 +14,10 @@
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
  *   { kind: 'ANCHOR_AT', key, offset }  — anchored at a specific msg
  *
- * Bottom detection: the load-bearing at-bottom decision for
- * send-pinning is scrollHeight math (`shouldPinSend` →
- * `isNearContentBottom`, read from `scrollTop` before the append). The
- * dynamic pin spacer is reserved room, not message content: if the reader is
- * at the bottom of the real conversation, the next send should still pin.
+ * Bottom detection: delayed queued/steered insertion uses scrollHeight math
+ * (`shouldPinSend` → `isNearContentBottom`, read from `scrollTop` before the
+ * append). A deliberate fresh send always pins. The dynamic pin spacer is
+ * reserved room, not message content.
  * The IntersectionObserver on a sentinel at the end of `.chat__scroll` is
  * used only for the gesture-driven mode transition (engaging
  * FOLLOW_BOTTOM when the user scrolls to the physical bottom), not for the
@@ -136,10 +135,18 @@ export function applyMode(scrollEl, mode) {
       return
     }
     case 'FOLLOW_BOTTOM':
-      // No-op when content doesn't overflow — otherwise we'd lock
-      // scroll-up. The user can scroll freely on a short chat.
-      if (scrollEl.scrollHeight > scrollEl.clientHeight + 4) {
-        scrollEl.scrollTop = scrollEl.scrollHeight
+      // Follow the bottom of REAL conversation content, not the reservable
+      // spacer below it. The spacer exists so the latest user row can be
+      // lifted to the top; treating that blank reservation as content made a
+      // short restored chat open on an empty viewport. Long content normally
+      // has a zero-height spacer, so this is identical to the usual bottom
+      // follow there.
+      {
+        const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
+        const realContentH = scrollEl.scrollHeight - spacerH
+        if (realContentH > scrollEl.clientHeight + 4) {
+          scrollEl.scrollTop = Math.max(0, realContentH - scrollEl.clientHeight)
+        }
       }
       return
     case 'ANCHOR_AT': {
@@ -209,11 +216,11 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  Reservation is intentionally independent from pinning. The send rule
- *  decides whether to move scrollTop (first message / already at bottom).
- *  This function always reserves enough bottom room for the latest visible
- *  user message, so keyboard open/close and later manual scrolls don't make
- *  that message lose its reachable "top of screen" position.
+ *  Reservation is intentionally independent from pinning and component
+ *  lifetime. This function always reserves enough bottom room for the latest
+ *  visible user message, so leaving/reopening a chat, keyboard open/close, and
+ *  later manual scrolls never make that message lose its reachable "top of
+ *  screen" position.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
@@ -226,33 +233,15 @@ export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
 }
 
 
-/** The height actually written to the spacer node. `_computeSpacerH` is the
- *  pure geometry; this wraps it with the one owner rule raw geometry cannot
- *  express: the reservation exists ONLY to serve a pin/send. A chat mounted
- *  idle (restored, nothing sent this session) must carry no phantom spacer —
- *  otherwise FOLLOW_BOTTOM's scroll-to-scrollHeight lands past the real
- *  content and a short completed chat sits entirely above the fold (the
- *  blank-screen-on-open bug). `active` is ChatView's spacerActive: armed by
- *  the first visible send of the session, never at mount.
- */
-export function reservedSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH, {
-  active = true,
-} = {}) {
-  if (!active) return 0
-  return _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH)
-}
-
-
 // "Near the bottom" tolerance for the send rule, matching the
 // auto-follow engage threshold in CLAUDE.md "Chat UX" constraint #2. A
 // reader within this many pixels of the bottom is treated as at-bottom.
 const NEAR_BOTTOM_PX = 50
 
-/** The send rule: a new user message moves to the top (PIN_USER_MSG)
- *  ONLY when it is the first message in the chat, or the user is
- *  already at the bottom (following the stream). When the user is
- *  scrolled up they are probably reading — possibly with something
- *  queued — so the send must leave their scroll position alone.
+/** The delayed-insertion rule used by queued/steered user rows. A row that
+ *  appears later moves to the top (PIN_USER_MSG) only when it was the first
+ *  message or the reader was already at the bottom when they submitted it.
+ *  A deliberate fresh send does not use this helper: it always pins.
  *
  *  "At the bottom" is decided two ways, neither a raw IntersectionObserver
  *  read (appending the assistant shell hides the bottom sentinel before
@@ -438,10 +427,6 @@ export default function useScrollMode({
   messagesRef,
   pendingMessagesLength,
   loadingOlderRef,
-  // True once a visible message has been sent in this chat this session. The
-  // spacer reservation serves a pin/send, so a chat mounted idle (no send)
-  // reserves nothing — otherwise FOLLOW_BOTTOM scrolls past the real content.
-  spacerActive = false,
 }) {
   const [revealed, setRevealed] = useState(false)
   // Synchronous mirror of `revealed` for reapplyActiveMode, which is called
@@ -600,9 +585,8 @@ export default function useScrollMode({
       // so reserving from it keeps the pin target reachable the instant the row
       // exists. Null only when there is genuinely no user message → spacer 0.
       const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
-      const h = reservedSpacerH(
+      const h = _computeSpacerH(
         scrollEl, listEl, lastUserEl, fullViewHRef.current,
-        { active: spacerActive },
       )
       spacerEl.style.height = `${h}px`
     }
@@ -862,10 +846,7 @@ export default function useScrollMode({
         window.visualViewport.removeEventListener('scroll', vvHandler)
       }
     }
-    // spacerActive is a dep so the spacer re-sizes the moment the first send
-    // of the session arms the reservation (the send also changes `messages`,
-    // but the flip is an explicit trigger, not an inferred one).
-  }, [messages, pendingMessagesLength, chatId, spacerActive])
+  }, [messages, pendingMessagesLength, chatId])
 
   // Re-hold the reading position after an atomic catch-up commit lands
   // post-reveal (contract v2 item 2, lever 3 — cloak the commit). The in-place

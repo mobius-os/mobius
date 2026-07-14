@@ -10,7 +10,6 @@ import {
   modeForChatExit,
   modeForForegroundReturn,
   modeForViewportChange,
-  reservedSpacerH,
   shouldPinSend,
 } from '../useScrollMode.js'
 import {
@@ -495,49 +494,33 @@ test('F1: a collapse-clamped pin is recovered by the settle once the spacer rest
 
 
 // ---------------------------------------------------------------------------
-// F2 — a chat mounted idle (restored, no send this session) must reserve NO
-// spacer. Otherwise FOLLOW_BOTTOM's scroll-to-scrollHeight includes the phantom
-// spacer and a short completed chat mounts with every message above the fold.
+// F2 — spacer reservation survives remount. FOLLOW_BOTTOM must ignore that
+// reservable room rather than deleting it to avoid an empty restored viewport.
 // ---------------------------------------------------------------------------
 
-test('F2: an idle-mounted chat (no send this session) reserves no spacer; an armed chat reserves room', () => {
+test('F2: an idle-mounted chat still reserves exactly enough room for its last user row to reach the top', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 915 })
   const listEl = { offsetHeight: 260 }        // 2-message short chat, fits the viewport
-  const lastUserMsgEl = { offsetTop: 8 }
-  assert.ok(
-    reservedSpacerH(scrollEl, listEl, lastUserMsgEl, 915, { active: true }) > 500,
-    'an armed chat reserves room to serve a pin',
-  )
-  assert.equal(
-    reservedSpacerH(scrollEl, listEl, lastUserMsgEl, 915, { active: false }),
-    0,
-    'no send this session -> no phantom spacer',
-  )
+  const lastUserMsgEl = { offsetTop: 200 }
+  const spacerH = _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 915)
+  const maxScrollTop = listEl.offsetHeight + spacerH - scrollEl.clientHeight
+  assert.equal(maxScrollTop, lastUserMsgEl.offsetTop - PIN_OFFSET,
+    'remount keeps exactly enough room to lift the last user row, with no excess')
 })
 
-test('F2: with no spacer FOLLOW_BOTTOM leaves a short completed chat on-screen (the un-gated spacer pushed it above the fold)', () => {
+test('F2: FOLLOW_BOTTOM ignores permanent spacer room so a short restored chat stays on-screen', () => {
   const userTop = 8
   const shortList = 260
   const clientHeight = 915
-
-  // Fix: idle mount reserves 0 -> content does not overflow -> FOLLOW is a no-op.
-  const fixed = makePinnableScrollEl({ listH: shortList, spacerH: 0, clientHeight, userTop, cid: 'c-1' })
-  applyMode(fixed, { kind: 'FOLLOW_BOTTOM' })
-  assert.equal(fixed.scrollTop, 0, 'no overflow -> no scroll -> messages at the top')
-  assert.ok(userTop - fixed.scrollTop >= 0, 'the message is on-screen')
-
-  // Bug: reserving the full spacer while idle overflows the viewport, so FOLLOW
-  // scrolls to scrollHeight and the chat's earlier messages sit above the fold.
-  // The last user row sits lower here (a short exchange, not a first message),
-  // which is the shape that visibly blanked the screen on open.
   const lowUserTop = 200
-  const buggySpacer = _computeSpacerH(
+  const spacerH = _computeSpacerH(
     { clientHeight }, { offsetHeight: shortList }, { offsetTop: lowUserTop }, clientHeight,
   )
-  const buggy = makePinnableScrollEl({ listH: shortList, spacerH: buggySpacer, clientHeight, userTop: lowUserTop, cid: 'c-1' })
-  applyMode(buggy, { kind: 'FOLLOW_BOTTOM' })
-  const firstMsgTop = 8
-  assert.ok(firstMsgTop - buggy.scrollTop < 0, 'the un-gated spacer scrolls earlier messages above the fold')
+  const restored = makePinnableScrollEl({ listH: shortList, spacerH, clientHeight, userTop: lowUserTop, cid: 'c-1' })
+  applyMode(restored, { kind: 'FOLLOW_BOTTOM' })
+  assert.equal(restored.scrollTop, 0,
+    'short real content does not scroll merely because reservable room exists')
+  assert.ok(userTop - restored.scrollTop >= 0, 'the restored conversation is on-screen')
 })
 
 
