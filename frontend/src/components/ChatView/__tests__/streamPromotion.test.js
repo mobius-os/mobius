@@ -143,6 +143,46 @@ test('promoteAssistantStream carries persisted question answers by identity', ()
   assert.deepEqual(next[0].blocks[0].answers, { Pick: 'A' })
 })
 
+test('same-turn answer settlement keeps the question and all pre/post-answer output in one row', () => {
+  const messages = [{
+    role: 'assistant',
+    ts: 9,
+    content: 'Before the question',
+    blocks: [
+      { type: 'text', content: 'Before the question' },
+      { type: 'tool', tool: 'Bash', status: 'done', output: 'before-output' },
+      {
+        type: 'question',
+        question_id: 'q-1',
+        questions: [{ id: 'choice', question: 'Continue?' }],
+        answers: { 'Continue?': 'Yes' },
+      },
+    ],
+  }]
+  const items = [
+    { type: 'text', content: 'Before the question' },
+    { type: 'tool', tool: 'Bash', status: 'done', output: 'before-output' },
+    {
+      type: 'question',
+      question_id: 'q-1',
+      questions: [{ id: 'choice', question: 'Continue?' }],
+    },
+    { type: 'tool', tool: 'Read', status: 'done', output: 'after-output' },
+    { type: 'text', content: 'After the answer' },
+  ]
+
+  const next = promoteAssistantStream(messages, { items, bridgeTs: 9 })
+
+  assert.equal(next.length, 1, 'same-turn settlement replaces the active row')
+  assert.deepEqual(next[0].blocks.map(block => block.type), [
+    'text', 'tool', 'question', 'tool', 'text',
+  ])
+  assert.deepEqual(next[0].blocks[2].answers, { 'Continue?': 'Yes' })
+  assert.equal(next[0].blocks[1].output, 'before-output')
+  assert.equal(next[0].blocks[3].output, 'after-output')
+  assert.equal(next[0].blocks[4].content, 'After the answer')
+})
+
 
 test('assistantMessageText reads persisted text blocks', () => {
   assert.equal(assistantMessageText({

@@ -36,6 +36,20 @@ test('streaming deltas are flags on the shared active markdown tree', () => {
     'cursor insertion must toggle behind isStreaming instead of selecting another renderer')
 })
 
+test('R6: answering in-process keeps the active bridge through settlement', () => {
+  const start = chatViewSource.indexOf('const doSendSilent = useCallback')
+  const end = chatViewSource.indexOf('\n  function handleSubmit', start)
+  const answerPath = chatViewSource.slice(start, end)
+  const sendIndex = answerPath.indexOf('const response = await streamSend')
+  const retireIndex = answerPath.indexOf('if (!answerKeepsCurrentTurn(response))')
+  const markIndex = answerPath.indexOf('bridgeHook.markBridged()', retireIndex)
+
+  assert.ok(sendIndex >= 0 && retireIndex > sendIndex && markIndex > retireIndex,
+    'the bridge may retire only after the backend says recovery started a new turn')
+  assert.doesNotMatch(answerPath.slice(0, sendIndex), /bridgeHook\.markBridged\(\)/,
+    'an in-process answer must not retire the same-turn bridge before its POST result')
+})
+
 // ---------------------------------------------------------------------------
 // Fix 1: lastGoodItemsRef preservation across reconnect resets
 // ---------------------------------------------------------------------------

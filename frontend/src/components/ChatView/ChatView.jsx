@@ -50,6 +50,7 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
+  answerKeepsCurrentTurn,
   builtAppPulseDecision,
   canFastForwardQueue,
   cidOf,
@@ -2256,14 +2257,6 @@ export default function ChatView({
 
     setSending(true)
     setServerRunningState(true)
-    // doSendSilent starts a NEW hidden turn (the answer-followup).
-    // The bridge gate may still be live if mount kept a DB partial
-    // and the user submitted an answer before that partial's done
-    // event arrived. The new turn is NOT a bridge — its promote
-    // should append a fresh assistant message, not replace the
-    // question-block message (which already has answers), so retire
-    // the gate now.
-    bridgeHook.markBridged()
     // Hidden answer is a continuation, NOT a new visible send. The
     // user may be reading somewhere else; don't yank them with a
     // PIN. The agent's response builds into the existing assistant
@@ -2276,12 +2269,25 @@ export default function ChatView({
       const silentCid = (typeof crypto !== 'undefined' && crypto.randomUUID)
         ? crypto.randomUUID()
         : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-      await streamSend(text, undefined, {
+      const response = await streamSend(text, undefined, {
         hidden: true,
         cid: silentCid,
         answers: resolvedAnswers,
         question_id: questionId,
       })
+      // `answer_delivered` resumes the SAME assistant turn. Keep its bridge
+      // alive so terminal promotion replaces/extends the active row rather
+      // than dropping the question and pre-answer output during the
+      // live-to-durable source handoff. Only a recovered answer returns
+      // `started`: the original runner is gone and the hidden continuation is
+      // genuinely a new turn, so that path must append instead.
+      // Unknown future modes also retire the bridge: preserving the completed
+      // question row and appending is safer than overwriting it with output
+      // from a turn whose ownership semantics this client does not know.
+      if (!answerKeepsCurrentTurn(response)) {
+        bridgeHook.markBridged()
+        activeAssistantDataKeyRef.current = null
+      }
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
     } catch (err) {
       setSending(false)
