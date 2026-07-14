@@ -771,6 +771,7 @@ export default function ChatView({
     userScrollIntentVersionRef,
     revealed,
     reapplyActiveMode,
+    settlePinnedStream,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -1084,6 +1085,7 @@ export default function ChatView({
         if (pendingQueue.pendingMessagesRef.current.length > 0) {
           fetchMessages({ force: true })
         }
+        settlePinnedStream()
       }
       onStreamEnd?.({ continues })
     },

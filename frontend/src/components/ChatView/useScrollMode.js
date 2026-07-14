@@ -402,6 +402,7 @@ export function modeForChatExit(scrollEl) {
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
  *   userScrollIntentVersionRef: React.MutableRefObject<number>,
  *   revealed: boolean,
+ *   settlePinnedStream: () => void,
  * }}
  */
 export default function useScrollMode({
@@ -853,11 +854,27 @@ export default function useScrollMode({
     }
   }, [scrollRef])
 
+  // Stream completion promotes the live assistant surface into settled
+  // message markup. That terminal commit can change scrollHeight after the
+  // viewport/keyboard handler has already restored the pin, causing the
+  // browser to clamp scrollTop one last time. Re-apply on the next committed
+  // frame: a render handshake, not a timing guess. The strict mode check means
+  // a reader gesture that retired the pin before completion always wins.
+  const settlePinnedStream = useCallback(() => {
+    requestAnimationFrame(() => {
+      const scrollEl = scrollRef.current
+      if (!scrollEl || modeRef.current?.kind !== 'PIN_USER_MSG') return
+      applyMode(scrollEl, modeRef.current)
+      persistMode()
+    })
+  }, [chatId, scrollRef])
+
   return {
     modeRef,
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
     reapplyActiveMode,
+    settlePinnedStream,
   }
 }
