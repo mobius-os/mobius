@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   isMobiusNavState,
+  isVisibleAppOwner,
+  navEntryId,
+  navTraversalDirection,
   pushNavEntry,
   replaceNavEntry,
+  updateCurrentNavEntry,
 } from '../lib/navHistory.js'
 import { resolveInitialNav } from '../lib/resolveInitialNav.js'
 
@@ -24,6 +28,14 @@ function _anyAppHasSentinels(map) {
     if (n > 0) return true
   }
   return false
+}
+
+function navRoute(view, chatId, appId) {
+  return { view, chatId: chatId ?? null, appId: appId ?? null }
+}
+
+function isRestorableRoute(route) {
+  return route && ['chat', 'canvas', 'settings'].includes(route.view)
 }
 
 // Last active chat id, read defensively (private-mode / disabled storage throws).
@@ -159,6 +171,7 @@ export default function useNavigation() {
   // Guards the one-shot HOME seed against a StrictMode double-mount / any
   // remount (pushNavEntry is not idempotent). See the mount effect below.
   const seededHomeRef = useRef(false)
+  const historyInitializedRef = useRef(false)
 
   const navStackRef = useRef([])
   const activeChatIdRef = useRef(activeChatId)
@@ -191,6 +204,29 @@ export default function useNavigation() {
   const appLocalPopInFlightRef = useRef(false)
   const appLocalPopInFlightEntryRef = useRef(null)
   const drawerOpenAfterLocalPopRef = useRef(false)
+  // Last tagged entry reached by the shell. popstate does not expose its source
+  // entry, so this is the fallback browser's direction cursor. It deliberately
+  // stays put while traversing iframe-created phantom entries; the next tagged
+  // destination can then still be compared with the last shell position.
+  const currentNavStateRef = useRef(null)
+  // An app-local level is destructive: Back tells the iframe to close it, and
+  // Forward cannot recreate it. Remember the unique physical entry so a later
+  // Forward -> Back traversal is absorbed instead of over-popping shell state.
+  const consumedAppEntryIdsRef = useRef(new Set())
+
+  const snapshotRoute = useCallback(() => navRoute(
+    activeViewRef.current,
+    activeChatIdRef.current,
+    activeAppIdRef.current,
+  ), [])
+
+  const pushShellEntry = useCallback((kind, route) => {
+    const state = pushNavEntry(kind, route, {
+      currentState: currentNavStateRef.current,
+    })
+    currentNavStateRef.current = state
+    return state
+  }, [])
 
   function openDrawer() {
     // Do not let a just-issued app history traversal consume a drawer entry
@@ -200,7 +236,7 @@ export default function useNavigation() {
       drawerOpenAfterLocalPopRef.current = true
       return
     }
-    pushNavEntry('drawer')
+    pushShellEntry('drawer', snapshotRoute())
     drawerPushedRef.current = true
     setDrawerOpen(true)
   }
@@ -239,31 +275,47 @@ export default function useNavigation() {
   // shell's, and its next `nav-pop` would consume someone else's
   // legit sentinel (which back-fires hard).
   //
-  // Wrapped in useCallback with [] deps because Shell passes this
-  // function down to AppCanvas, and AppCanvas's message-listener
+  // Kept referentially stable because Shell passes this function down to
+  // AppCanvas, and AppCanvas's message-listener
   // useEffect depends on it. Without the stable identity, the
   // listener tears down + re-registers on every Shell render
   // (every SSE event, every queue update, every toast). The
   // teardown→register window can drop a frame-mounted message →
   // stuck loading spinner. All state we read is via refs, so the
-  // empty dep array is correct.
+  // dependencies below are themselves stable callbacks over refs.
   const appNavPush = useCallback((appId) => {
     if (appId == null) return false
+    // A cached iframe remains mounted after the shell leaves its canvas. It may
+    // finish an async callback while hidden, but must never install a sentinel
+    // above the visible chat/settings/other-app history entry.
+    if (!isVisibleAppOwner(
+      activeViewRef.current,
+      activeAppIdRef.current,
+      appId,
+    )) return false
+    const ownerId = String(appId)
     const m = appSentinelCountsRef.current
-    const current = m.get(appId) || 0
+    const current = m.get(ownerId) || 0
     if (current >= MAX_APP_SENTINELS) {
       return false
     }
-    try { pushNavEntry('app') } catch { return false }
-    m.set(appId, current + 1)
+    try {
+      pushShellEntry('app', snapshotRoute())
+    } catch { return false }
+    m.set(ownerId, current + 1)
     return true
-  }, [])
+  }, [pushShellEntry, snapshotRoute])
 
   const pumpLocalAppPop = useCallback(() => {
     if (appLocalPopInFlightRef.current) return
     if (drawerOpenRef.current) return
+    if (!isVisibleAppOwner(
+      activeViewRef.current,
+      activeAppIdRef.current,
+      activeAppIdRef.current,
+    )) return
     const next = appLocalPopsRef.current.find(
-      (entry) => entry.appId === activeAppIdRef.current,
+      (entry) => entry.appId === String(activeAppIdRef.current),
     )
     if (!next) return
     // Select the active app's oldest close rather than the global queue head.
@@ -300,10 +352,11 @@ export default function useNavigation() {
    *  state as a user gesture. */
   const appNavPop = useCallback((appId) => {
     if (appId == null) return
+    const ownerId = String(appId)
     const m = appSentinelCountsRef.current
-    const n = m.get(appId) || 0
+    const n = m.get(ownerId) || 0
     if (n <= 0) return
-    appLocalPopsRef.current.push({ appId, phase: null })
+    appLocalPopsRef.current.push({ appId: ownerId, phase: null })
     pumpLocalAppPop()
   }, [pumpLocalAppPop])
 
@@ -321,7 +374,8 @@ export default function useNavigation() {
    *  native handling (no-op, eventually exits the PWA). */
   const appNavReset = useCallback((appId) => {
     if (appId == null) return
-    appSentinelCountsRef.current.set(appId, 0)
+    const ownerId = String(appId)
+    appSentinelCountsRef.current.delete(ownerId)
     // Retire queued closes for an evicted/reset frame so they cannot trap Back
     // or block another app. Keep a traversal that has already started: its
     // eventual popstate still needs to be absorbed rather than reinterpreted
@@ -330,7 +384,7 @@ export default function useNavigation() {
       ? appLocalPopInFlightEntryRef.current
       : null
     appLocalPopsRef.current = appLocalPopsRef.current.filter(
-      (entry) => entry.appId !== appId || entry === inFlight,
+      (entry) => entry.appId !== ownerId || entry === inFlight,
     )
   }, [])
 
@@ -368,16 +422,27 @@ export default function useNavigation() {
     // No BFCache concern in the closed-drawer push path: there's no
     // drawer animation in flight when we pushState, so Chrome's
     // snapshot of the entry-being-left captures the clean view.
+    const previousRoute = snapshotRoute()
+    const nextRoute = navRoute(
+      view,
+      'chatId' in opts ? opts.chatId : activeChatIdRef.current,
+      view === 'canvas'
+        ? ('appId' in opts ? opts.appId : activeAppIdRef.current)
+        : null,
+    )
     if (drawerPushedRef.current) {
       drawerPushedRef.current = false
+      // The physical entry began life as a drawer sentinel. Once a drawer
+      // selection changes the view it is a semantic navigation destination;
+      // retag it so Forward restores the destination instead of reopening the
+      // drawer after the user has backed away.
+      currentNavStateRef.current = updateCurrentNavEntry(nextRoute, { kind: 'nav' })
     } else {
-      try { pushNavEntry('nav') } catch { /* ignore */ }
+      try {
+        pushShellEntry('nav', nextRoute)
+      } catch { /* ignore */ }
     }
-    navStackRef.current.push({
-      view: activeViewRef.current,
-      chatId: activeChatIdRef.current,
-      appId: activeAppIdRef.current,
-    })
+    navStackRef.current.push(previousRoute)
     drawerOpenRef.current = false
     setDrawerOpen(false)
     // Order matters: set view-payload state (chatId, appId) BEFORE
@@ -388,7 +453,8 @@ export default function useNavigation() {
     // guarantees the conditional rendering only flips when the
     // payload is correct.
     if ('chatId' in opts) setActiveChatId(opts.chatId)
-    if ('appId' in opts) setActiveAppId(opts.appId)
+    if (view !== 'canvas') setActiveAppId(null)
+    else if ('appId' in opts) setActiveAppId(opts.appId)
     setActiveView(view)
   }
 
@@ -399,7 +465,19 @@ export default function useNavigation() {
     // start_url is /shell/ would land at /shell/ → 308 → /shell/ →
     // SPA mount → rewrite back to / → Chromium sees "page outside
     // scope" and may refuse the next manifest update in-place.
-    replaceNavEntry('base', '/shell/')
+    const initialRoute = snapshotRoute()
+    const baseRoute = initialNav.seedHome
+      ? navRoute('chat', activeChatIdRef.current, null)
+      : initialRoute
+    if (!historyInitializedRef.current) {
+      historyInitializedRef.current = true
+      currentNavStateRef.current = replaceNavEntry('base', '/shell/', baseRoute)
+    } else {
+      // StrictMode re-runs effect setup. Do not replace the already-pushed deep
+      // destination with another base entry; that would duplicate its index and
+      // make the first genuine Back look like a same-position traversal.
+      currentNavStateRef.current = history.state
+    }
 
     // Seed HOME as the back-stack root when this load booted into a deep
     // destination (resolveInitialNav.seedHome). Push ONE tagged history entry
@@ -418,15 +496,73 @@ export default function useNavigation() {
     // sits under a chat we're already on, so the first Back is a harmless no-op
     // and the second exits. Rare + cosmetic; not worth coupling Shell's demote
     // to the nav seed to shave one Back press.
-    if (initialNav.seedHome && !seededHomeRef.current) {
+    if (historyInitializedRef.current
+        && initialNav.seedHome
+        && !seededHomeRef.current) {
       seededHomeRef.current = true
       try {
-        pushNavEntry('nav')
+        pushShellEntry('nav', initialRoute)
         navStackRef.current = [{ view: 'chat', chatId: null, appId: null, homeSeed: true }]
       } catch { /* history unavailable — leave navStack empty */ }
     }
 
-    function handleBack() {
+    function restoreRoute(route) {
+      if (!isRestorableRoute(route)) return
+      setActiveChatId(route.homeSeed ? activeChatIdRef.current : route.chatId)
+      setActiveAppId(route.view === 'canvas' ? route.appId : null)
+      setActiveView(route.view)
+    }
+
+    function handleForward(destination, sourceRoute) {
+      const route = destination?.route
+      // A nav entry represents a shell-level transition. Back destructively
+      // removed its source from navStack, so Forward rebuilds that one edge.
+      // App entries do not: they represent nested iframe state that the host
+      // cannot recreate once the app consumed moebius:nav-back.
+      if (destination?.kind === 'nav' && isRestorableRoute(sourceRoute)) {
+        navStackRef.current.push(sourceRoute)
+      }
+      restoreRoute(route)
+      if (destination?.kind === 'drawer') {
+        drawerPushedRef.current = true
+        drawerOpenRef.current = true
+        setDrawerOpen(true)
+      } else {
+        drawerPushedRef.current = false
+        drawerOpenRef.current = false
+        setDrawerOpen(false)
+      }
+    }
+
+    function finishPhantomLocalPop() {
+      if (!appLocalPopInFlightRef.current) return
+      setTimeout(() => {
+        const localPop = appLocalPopInFlightEntryRef.current
+        appLocalPopInFlightRef.current = false
+        appLocalPopInFlightEntryRef.current = null
+        if (localPop?.phase === 'consume') {
+          appLocalPopsRef.current = appLocalPopsRef.current.filter(
+            (entry) => entry !== localPop,
+          )
+          const m = appSentinelCountsRef.current
+          const n = m.get(localPop.appId) || 0
+          if (n > 0) m.set(localPop.appId, n - 1)
+        }
+        resumeLocalAppPops()
+      }, 0)
+    }
+
+    function isConsumedAppEntry(state) {
+      const id = state?.kind === 'app' ? navEntryId(state) : null
+      return !!(id && consumedAppEntryIdsRef.current.has(id))
+    }
+
+    function markConsumedAppEntry(state) {
+      const id = state?.kind === 'app' ? navEntryId(state) : null
+      if (id) consumedAppEntryIdsRef.current.add(id)
+    }
+
+    function handleBack(destination, source) {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
       // Defer the React state flip that toggles the .drawer--open class
@@ -463,6 +599,10 @@ export default function useNavigation() {
         setTimeout(resumeLocalAppPops, 0)
         return
       }
+      // Forward revisited an app entry whose nested iframe level was already
+      // consumed. The physical traversal is real, but there is no semantic app
+      // state to close a second time and no shell edge to pop.
+      if (isConsumedAppEntry(source)) return
       // Local-app-pop-first: the app already mutated its own state and asked us
       // to remove the matching shell sentinel. Consume exactly that sentinel,
       // but do not send moebius:nav-back — doing so would close two levels for
@@ -487,6 +627,7 @@ export default function useNavigation() {
         const m = appSentinelCountsRef.current
         const n = m.get(localPop.appId) || 0
         if (n > 0) m.set(localPop.appId, n - 1)
+        markConsumedAppEntry(source)
         setTimeout(resumeLocalAppPops, 0)
         return
       }
@@ -496,11 +637,13 @@ export default function useNavigation() {
       // the shell's navStack. Forward moebius:nav-back to the iframe
       // and decrement the count. The shell view does NOT change.
       const appId = activeAppIdRef.current
-      if (appId != null) {
+      if (isVisibleAppOwner(activeViewRef.current, appId, appId)) {
+        const ownerId = String(appId)
         const m = appSentinelCountsRef.current
-        const n = m.get(appId) || 0
+        const n = m.get(ownerId) || 0
         if (n > 0) {
-          m.set(appId, n - 1)
+          if (n === 1) m.delete(ownerId)
+          else m.set(ownerId, n - 1)
           const iframe = document.querySelector(
             `iframe[data-app-id="${appId}"]`
           )
@@ -510,6 +653,7 @@ export default function useNavigation() {
               '*',
             )
           }
+          markConsumedAppEntry(source)
           return
         }
       }
@@ -537,9 +681,13 @@ export default function useNavigation() {
         // was seeded with chatId:null (so chat-delete scrubbing can't strip it),
         // so resolve it to the freshest active chat at Back-time. A null there
         // (zero-chat instance) is filled by Shell's chat-restore effect.
-        setActiveChatId(entry.homeSeed ? activeChatIdRef.current : entry.chatId)
-        setActiveAppId(entry.appId)
-        setActiveView(entry.view)
+        restoreRoute(entry)
+      } else if (isRestorableRoute(destination?.route)) {
+        // The route payload is a compatibility/fault-tolerance fallback for a
+        // tagged entry whose in-memory stack was lost (for example a future
+        // history migration). Normal Back paths still use navStack so drawer
+        // and app-sentinel precedence remains unchanged.
+        restoreRoute(destination.route)
       }
     }
 
@@ -550,30 +698,42 @@ export default function useNavigation() {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
+        const destination = e.destination.getState()
+        const sourceEntry = navigation.currentEntry
+        const source = sourceEntry?.getState?.()
+          || currentNavStateRef.current
+        const direction = navTraversalDirection(source, destination, {
+          currentEntryIndex: sourceEntry?.index,
+          destinationEntryIndex: e.destination?.index,
+        })
+        const sourceRoute = snapshotRoute()
         // Phantom-entry guard: ignore a traversal landing on an UNTAGGED
         // entry — one a sandboxed app/preview iframe pushed onto the shared
         // session history. Treating it as our sentinel over-pops navStack.
-        if (!isMobiusNavState(e.destination.getState())) {
+        if (!isMobiusNavState(destination)) {
           // A serialized local pop may have traversed onto a phantom entry.
           // Complete a consume traversal (its tagged app source is gone), or
           // keep seeking until the sentinel itself is current. Do this after
           // the traversal commits so history.state describes the destination.
-          if (appLocalPopInFlightRef.current) {
-            setTimeout(() => {
-              const localPop = appLocalPopInFlightEntryRef.current
-              appLocalPopInFlightRef.current = false
-              appLocalPopInFlightEntryRef.current = null
-              if (localPop?.phase === 'consume') {
-                appLocalPopsRef.current = appLocalPopsRef.current.filter(
-                  (entry) => entry !== localPop,
-                )
-                const m = appSentinelCountsRef.current
-                const n = m.get(localPop.appId) || 0
-                if (n > 0) m.set(localPop.appId, n - 1)
-              }
-              resumeLocalAppPops()
-            }, 0)
+          if (appLocalPopInFlightEntryRef.current?.phase === 'consume') {
+            markConsumedAppEntry(source)
           }
+          finishPhantomLocalPop()
+          return
+        }
+        if (direction === 'forward') {
+          e.intercept({ handler() {
+            currentNavStateRef.current = destination
+            handleForward(destination, sourceRoute)
+          } })
+          return
+        }
+        if (direction === 'same') return
+        if (direction === 'unknown') {
+          e.intercept({ handler() {
+            currentNavStateRef.current = destination
+            restoreRoute(destination.route)
+          } })
           return
         }
         // Nothing to go back to — let the browser handle it (exits PWA).
@@ -585,8 +745,12 @@ export default function useNavigation() {
         if (navStackRef.current.length === 0
             && !drawerOpenRef.current
             && !_anyAppHasSentinels(appSentinelCountsRef.current)
-            && appLocalPopsRef.current.length === 0) return
-        e.intercept({ handler() { handleBack() } })
+            && appLocalPopsRef.current.length === 0
+            && !isConsumedAppEntry(source)) return
+        e.intercept({ handler() {
+          currentNavStateRef.current = destination
+          handleBack(destination, source)
+        } })
       }
       navigation.addEventListener('navigate', onNavigate)
       return () => navigation.removeEventListener('navigate', onNavigate)
@@ -594,33 +758,36 @@ export default function useNavigation() {
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
+      const destination = history.state
+      const source = currentNavStateRef.current
+      const direction = navTraversalDirection(source, destination)
+      const sourceRoute = snapshotRoute()
       // Phantom-entry guard: a pop landing on an UNTAGGED entry is a
       // phantom pushed onto the shared session history by a sandboxed
       // app/preview iframe, not one of our sentinels — ignore it.
-      if (!isMobiusNavState(history.state)) {
-        if (appLocalPopInFlightRef.current) {
-          setTimeout(() => {
-            const localPop = appLocalPopInFlightEntryRef.current
-            appLocalPopInFlightRef.current = false
-            appLocalPopInFlightEntryRef.current = null
-            if (localPop?.phase === 'consume') {
-              appLocalPopsRef.current = appLocalPopsRef.current.filter(
-                (entry) => entry !== localPop,
-              )
-              const m = appSentinelCountsRef.current
-              const n = m.get(localPop.appId) || 0
-              if (n > 0) m.set(localPop.appId, n - 1)
-            }
-            resumeLocalAppPops()
-          }, 0)
+      if (!isMobiusNavState(destination)) {
+        if (appLocalPopInFlightEntryRef.current?.phase === 'consume') {
+          markConsumedAppEntry(source)
         }
+        finishPhantomLocalPop()
+        return
+      }
+      currentNavStateRef.current = destination
+      if (direction === 'forward') {
+        handleForward(destination, sourceRoute)
+        return
+      }
+      if (direction === 'same') return
+      if (direction === 'unknown') {
+        restoreRoute(destination.route)
         return
       }
       if (navStackRef.current.length === 0
             && !drawerOpenRef.current
             && !_anyAppHasSentinels(appSentinelCountsRef.current)
-            && appLocalPopsRef.current.length === 0) return
-      handleBack()
+            && appLocalPopsRef.current.length === 0
+            && !isConsumedAppEntry(source)) return
+      handleBack(destination, source)
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
@@ -628,11 +795,30 @@ export default function useNavigation() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Keep the current physical entry self-contained. Normal navigation supplies
+  // its destination route synchronously; this also covers the few bootstrap,
+  // recovery, and emergency paths that still update hook state directly.
+  useEffect(() => {
+    if (!isMobiusNavState(history.state)) return
+    const routeAppId = activeView === 'canvas' ? activeAppId : null
+    const kind = history.state.kind === 'drawer' && !drawerPushedRef.current
+      ? 'nav'
+      : history.state.kind
+    currentNavStateRef.current = updateCurrentNavEntry(
+      navRoute(activeView, activeChatId, routeAppId),
+      { kind },
+    )
+    // A few Shell-owned emergency/bootstrap paths set the view directly rather
+    // than going through navTo. Preserve the same ownership invariant there:
+    // outside canvas there is no active app, only cached apps.
+    if (activeView !== 'canvas' && activeAppId != null) setActiveAppId(null)
+  }, [activeView, activeChatId, activeAppId])
+
   // A queued close from a hidden cached app becomes safe once shell Back
   // restores that app and its sentinel to the current tagged entry.
   useEffect(() => {
     resumeLocalAppPops()
-  }, [activeAppId, resumeLocalAppPops])
+  }, [activeView, activeAppId, resumeLocalAppPops])
 
   // Fade back in after shell-reload.
   useEffect(() => {

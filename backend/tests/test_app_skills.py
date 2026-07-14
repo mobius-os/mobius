@@ -442,26 +442,15 @@ def test_clone_install_missing_skill_file_warns(
   assert not (_skills_dir() / "contributing.md").exists()
 
 
-# --- clone path: entry generalization + the dead-cron warning ---------------
+# --- clone path: canonical entry + the dead-cron warning --------------------
 
 
-NON_ROOT_ENTRY = (
-  "import { LABEL } from './cards.js'\n"
-  "export default function App() { return <div>{LABEL}</div> }\n"
-)
-NON_ROOT_CARDS = "export const LABEL = 'FROM_CLONE'\n"
-
-
-def test_clone_install_with_non_index_entry(
+def test_clone_install_rejects_non_index_entry(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """A manifest whose entry is not the root index.jsx still clones: the entry
-  is read back from the clone under its own name, siblings bundle from the
-  real tree, and no synthetic index.jsx is materialized."""
+  """Clone-eligible packages still use the platform's canonical index.jsx."""
   base = "https://raw.githubusercontent.com/acme/app-entry/main/"
-  _, bare = _make_repo(tmp_path, {
-    "app.jsx": NON_ROOT_ENTRY, "cards.js": NON_ROOT_CARDS,
-  })
+  _, bare = _make_repo(tmp_path, {"app.jsx": JSX})
   m = {
     "id": "custom-entry",
     "name": "Custom Entry",
@@ -472,110 +461,10 @@ def test_clone_install_with_non_index_entry(
   }
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
-    base + "app.jsx": (200, NON_ROOT_ENTRY.encode()),
+    base + "app.jsx": (200, JSX.encode()),
   }, bare)
-  assert r.status_code == 201, r.text
-  assert r.json()["mode"] == "install"
-  src = Path(get_settings().data_dir) / "apps" / "custom-entry"
-  # Cloned, not the synthetic fallback: origin present, no root index.jsx.
-  assert app_git.has_origin(src)
-  assert (src / "app.jsx").read_text() == NON_ROOT_ENTRY
-  assert not (src / "index.jsx").exists()
-  # The compile keyed off the real entry and bundled the sibling import.
-  compiled = Path(get_settings().data_dir) / "compiled"
-  bundle = compiled / f"app-{r.json()['id']}.js"
-  assert "FROM_CLONE" in bundle.read_text()
-
-
-def _non_index_manifest(app_id: str, **over):
-  m = {
-    "id": app_id,
-    "name": app_id,
-    "version": "1.0.0",
-    "description": "Non-root entry",
-    "entry": "app.jsx",
-    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
-  }
-  m.update(over)
-  return m
-
-
-def test_clone_update_fast_forward_with_non_index_entry(
-  client, auth, tmp_path, bypass_url_validation,
-):
-  """A no-local-edit update of a non-index-entry cloned app fast-forwards:
-  the update path's entry check keys off the manifest entry, not a
-  hardcoded root index.jsx."""
-  base = "https://raw.githubusercontent.com/acme/app-entry-ff/main/"
-  work, bare = _make_repo(tmp_path, {
-    "app.jsx": NON_ROOT_ENTRY, "cards.js": NON_ROOT_CARDS,
-  })
-  m = _non_index_manifest("entry-ff")
-  r1 = _install_clone(client, auth, base, m, {
-    base + "mobius.json": (200, json.dumps(m).encode()),
-    base + "app.jsx": (200, NON_ROOT_ENTRY.encode()),
-  }, bare)
-  assert r1.status_code == 201, r1.text
-
-  entry_v2 = NON_ROOT_ENTRY.replace("{LABEL}", "{LABEL}{'V2'}")
-  cards_v2 = NON_ROOT_CARDS.replace("FROM_CLONE", "FROM_CLONE_V2")
-  _push_repo(work, bare, {"app.jsx": entry_v2, "cards.js": cards_v2})
-  m2 = _non_index_manifest("entry-ff", version="2.0.0")
-  r2 = _install_clone(client, auth, base, m2, {
-    base + "mobius.json": (200, json.dumps(m2).encode()),
-    base + "app.jsx": (200, entry_v2.encode()),
-  }, bare)
-
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "fast_forward"
-  src = Path(get_settings().data_dir) / "apps" / "entry-ff"
-  assert (src / "app.jsx").read_text() == entry_v2
-  assert (src / "cards.js").read_text() == cards_v2
-  assert not (src / "index.jsx").exists()
-  compiled = Path(get_settings().data_dir) / "compiled"
-  assert "FROM_CLONE_V2" in (compiled / f"app-{r2.json()['id']}.js").read_text()
-
-
-def test_clone_update_clean_merge_with_non_index_entry(
-  client, auth, tmp_path, bypass_url_validation,
-):
-  """A diverged update of a non-index-entry cloned app merges cleanly:
-  local entry edits survive, upstream sibling changes land, and no
-  synthetic index.jsx appears."""
-  base = "https://raw.githubusercontent.com/acme/app-entry-cm/main/"
-  work, bare = _make_repo(tmp_path, {
-    "app.jsx": NON_ROOT_ENTRY, "cards.js": NON_ROOT_CARDS,
-  })
-  m = _non_index_manifest("entry-cm")
-  r1 = _install_clone(client, auth, base, m, {
-    base + "mobius.json": (200, json.dumps(m).encode()),
-    base + "app.jsx": (200, NON_ROOT_ENTRY.encode()),
-  }, bare)
-  assert r1.status_code == 201, r1.text
-  src = Path(get_settings().data_dir) / "apps" / "entry-cm"
-  local_entry = NON_ROOT_ENTRY.replace(
-    "return <div>{LABEL}</div>", "return <main>{LABEL}</main>",
-  )
-  (src / "app.jsx").write_text(local_entry, encoding="utf-8")
-
-  cards_v2 = NON_ROOT_CARDS.replace("FROM_CLONE", "FROM_CLONE_V2")
-  _push_repo(work, bare, {"app.jsx": NON_ROOT_ENTRY, "cards.js": cards_v2})
-  m2 = _non_index_manifest("entry-cm", version="2.0.0")
-  r2 = _install_clone(client, auth, base, m2, {
-    base + "mobius.json": (200, json.dumps(m2).encode()),
-    base + "app.jsx": (200, NON_ROOT_ENTRY.encode()),
-  }, bare)
-
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "clean_merge"
-  merged = (src / "app.jsx").read_text()
-  assert "<main>" in merged and "<<<<<<<" not in merged
-  assert (src / "cards.js").read_text() == cards_v2
-  assert not (src / "index.jsx").exists()
-  compiled = Path(get_settings().data_dir) / "compiled"
-  assert "FROM_CLONE_V2" in (compiled / f"app-{r2.json()['id']}.js").read_text()
+  assert r.status_code == 400, r.text
+  assert "index.jsx" in r.json()["detail"]
 
 
 JOB_SH = "#!/bin/sh\necho ok\n"

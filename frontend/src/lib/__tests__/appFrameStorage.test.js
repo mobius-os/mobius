@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  cacheAppToken, clearAppFrameStorage, isSafeVirtualStorageKey,
+  cacheAppToken, clearAppFrameStorage, clearCachedAppToken, isSafeVirtualStorageKey,
   isLegacyFrameStorageKey, readAppFrameStorage, readCachedAppToken,
   removeAppFrameStorage,
   setAppFrameStorage,
@@ -75,7 +75,7 @@ test('legacy unscoped preferences are limited to their catalog app', () => {
   assert.equal(isLegacyFrameStorageKey(7, 'news', 'moebius_active_chat'), false)
 })
 
-test('cached app token must be unexpired and match the exact app id', () => {
+test('cached app token must match the exact app id and may be retained for offline boot', () => {
   const now = Date.parse('2026-07-13T00:00:00Z')
   const storage = new MemoryStorage()
   const valid = jwt({ scope: 'app', app_id: 7, exp: now / 1000 + 3600 })
@@ -86,5 +86,11 @@ test('cached app token must be unexpired and match the exact app id', () => {
   const expired = jwt({ scope: 'app', app_id: 7, exp: now / 1000 - 1 })
   assert.equal(cacheAppToken(7, expired, storage), true)
   assert.equal(readCachedAppToken(7, storage, now), undefined)
+  assert.equal(
+    readCachedAppToken(7, storage, now, { allowExpired: true }),
+    expired,
+  )
+  clearCachedAppToken(7, storage)
+  assert.equal(readCachedAppToken(7, storage, now, { allowExpired: true }), undefined)
   assert.equal(cacheAppToken(8, valid, storage), false)
 })

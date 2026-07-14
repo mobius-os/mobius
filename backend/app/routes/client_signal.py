@@ -33,20 +33,21 @@ _RATE_EVENTS_MAX = 200
 _RATE_BYTES_MAX = 1024 * 1024
 _rate_lock = threading.Lock()
 _ingest_lock = threading.Lock()
-_recent_by_app: dict[int, deque[tuple[object, float, int, int]]] = {}
-_seen_ids_by_app: dict[int, dict[str, float]] = {}
+_AppInstanceKey = tuple[int, str | None]
+_recent_by_app: dict[_AppInstanceKey, deque[tuple[object, float, int, int]]] = {}
+_seen_ids_by_app: dict[_AppInstanceKey, dict[str, float]] = {}
 
 
 def _reserve_rate(
-  app_id: int, signal_sizes: list[tuple[str, int]],
-) -> tuple[object, set[str]] | None:
+  app_key: _AppInstanceKey, signal_sizes: list[tuple[str, int]],
+) -> tuple[object, set[str]] | float:
   now = time.monotonic()
   cutoff = now - _RATE_WINDOW_SECONDS
   with _rate_lock:
-    recent = _recent_by_app.setdefault(app_id, deque())
+    recent = _recent_by_app.setdefault(app_key, deque())
     while recent and recent[0][1] < cutoff:
       recent.popleft()
-    seen = _seen_ids_by_app.setdefault(app_id, {})
+    seen = _seen_ids_by_app.setdefault(app_key, {})
     for signal_id, accepted_at in list(seen.items()):
       if accepted_at < cutoff:
         del seen[signal_id]
@@ -65,7 +66,22 @@ def _reserve_rate(
       count_used + len(novel) > _RATE_EVENTS_MAX
       or bytes_used + batch_bytes > _RATE_BYTES_MAX
     ):
-      return None
+      # Tell the durable client when enough of the rolling window has actually
+      # expired for THIS batch, rather than making it probe every five minutes
+      # for up to a day.
+      remaining_count = count_used
+      remaining_bytes = bytes_used
+      retry_after = float(_RATE_WINDOW_SECONDS)
+      for _, accepted_at, count, byte_count in recent:
+        remaining_count -= count
+        remaining_bytes -= byte_count
+        if (
+          remaining_count + len(novel) <= _RATE_EVENTS_MAX
+          and remaining_bytes + batch_bytes <= _RATE_BYTES_MAX
+        ):
+          retry_after = max(1.0, accepted_at + _RATE_WINDOW_SECONDS - now)
+          break
+      return retry_after
     token = object()
     recent.append((token, now, len(novel), batch_bytes))
     for signal_id, _ in novel:
@@ -73,12 +89,14 @@ def _reserve_rate(
     return token, {signal_id for signal_id, _ in novel}
 
 
-def _rollback_rate(app_id: int, token: object, signal_ids: set[str]) -> None:
+def _rollback_rate(
+  app_key: _AppInstanceKey, token: object, signal_ids: set[str],
+) -> None:
   with _rate_lock:
-    recent = _recent_by_app.get(app_id)
+    recent = _recent_by_app.get(app_key)
     if recent is not None:
-      _recent_by_app[app_id] = deque(row for row in recent if row[0] is not token)
-    seen = _seen_ids_by_app.get(app_id, {})
+      _recent_by_app[app_key] = deque(row for row in recent if row[0] is not token)
+    seen = _seen_ids_by_app.get(app_key, {})
     for signal_id in signal_ids:
       seen.pop(signal_id, None)
 
@@ -91,6 +109,12 @@ def _reset_for_tests() -> None:
 
 class ClientSignal(BaseModel):
   id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
+  # Immutable app-row identity. Optional only for cached pre-contract runtimes;
+  # new runtimes stamp it from the app token so a reused SQLite integer id can
+  # never inherit and upload the deleted app's queued telemetry.
+  app_instance_id: str | None = Field(
+    default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$",
+  )
   occurred_at: datetime
   name: str = Field(min_length=1, max_length=80)
   payload: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -158,16 +182,24 @@ def report_client_signals(
   """
   if principal.app_id is None:
     raise HTTPException(403, "Client signals require an app-scoped token.")
+  for signal in body.signals:
+    if signal.app_instance_id != principal.app_instance_id:
+      raise HTTPException(409, "Signal belongs to a different app instance.")
   # Serialize reserve → durable append → committed-ID visibility. A concurrent
   # replay cannot receive a dedupe 204 while the first copy is still capable of
   # failing its append and rolling back.
   with _ingest_lock:
+    app_key = (principal.app_id, principal.app_instance_id)
     reservation = _reserve_rate(
-      principal.app_id,
+      app_key,
       [(signal.id, signal.serialized_size()) for signal in body.signals],
     )
-    if reservation is None:
-      raise HTTPException(429, "App signal rate limit exceeded; retry later.")
+    if isinstance(reservation, float):
+      raise HTTPException(
+        429,
+        "App signal rate limit exceeded; retry later.",
+        headers={"Retry-After": str(max(1, math.ceil(reservation)))},
+      )
     token, novel_ids = reservation
     if not novel_ids:
       return
@@ -176,5 +208,5 @@ def report_client_signals(
       for signal in body.signals if signal.id in novel_ids
     ]
     if not activity.log_events(events, durable=True):
-      _rollback_rate(principal.app_id, token, novel_ids)
+      _rollback_rate(app_key, token, novel_ids)
       raise HTTPException(503, "Signal activity storage is temporarily unavailable.")

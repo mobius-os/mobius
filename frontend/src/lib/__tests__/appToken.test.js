@@ -16,6 +16,7 @@ import {
   liveAppToken,
   latchedAppToken,
   resolveLatchedToken,
+  appTokenRefreshInterval,
   _resetLatchStore,
 } from '../appToken.js'
 
@@ -23,6 +24,23 @@ beforeEach(() => { _resetLatchStore() })
 
 const CACHED = 'cached-app-scoped-tok'
 const APP = 'app-scoped-tok'
+
+function tokenWithExpiry(exp) {
+  const payload = Buffer.from(JSON.stringify({ exp })).toString('base64url')
+  return `header.${payload}.signature`
+}
+
+test('app token refresh follows JWT expiry with a five-minute safety window', () => {
+  const now = Date.UTC(2026, 6, 13, 12, 0, 0)
+  const expires = now + 8 * 60 * 60_000
+  assert.equal(appTokenRefreshInterval(tokenWithExpiry(expires / 1000), now), 7 * 60 * 60_000 + 55 * 60_000)
+})
+
+test('app token refresh is bounded for nearly-expired and malformed tokens', () => {
+  const now = Date.UTC(2026, 6, 13, 12, 0, 0)
+  assert.equal(appTokenRefreshInterval(tokenWithExpiry((now + 60_000) / 1000), now), 30_000)
+  assert.equal(appTokenRefreshInterval('not-a-jwt', now), 5 * 60_000)
+})
 
 test('liveAppToken: app-scoped token always wins', () => {
   assert.equal(liveAppToken(APP, true, CACHED), APP)

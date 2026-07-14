@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -303,6 +304,34 @@ def test_read_events_spans_rotated_archives():
   ))
   ids = [e["app_id"] for e in events]
   assert ids == [1, 2, 3], f"got {ids}"
+
+
+def test_read_events_keeps_snapshotted_active_inode_across_rotation(monkeypatch):
+  """Rotation after source enumeration must not make the old active file vanish.
+
+  This injects a write in the exact historical gap: the reader has opened its
+  source snapshot, but has not consumed the active file yet. The write rotates
+  that pathname and creates a new active file. The reader must still consume
+  the already-open old inode.
+  """
+  old_ts = datetime.now(timezone.utc) - timedelta(days=8)
+  activity.log_event(
+    "app_open", ts=old_ts.isoformat(), app_id=1, slug="before-rotation",
+  )
+  original_snapshot = activity._event_source_snapshot
+
+  @contextmanager
+  def rotate_after_snapshot(active):
+    with original_snapshot(active) as sources:
+      activity.log_event("app_open", app_id=2, slug="rotation-trigger")
+      yield sources
+
+  monkeypatch.setattr(activity, "_event_source_snapshot", rotate_after_snapshot)
+  events = list(activity.read_events(
+    since=old_ts - timedelta(minutes=1),
+    until=datetime.now(timezone.utc) + timedelta(minutes=1),
+  ))
+  assert [event["slug"] for event in events] == ["before-rotation"]
 
 
 def test_read_events_archive_only_window():

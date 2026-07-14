@@ -14,11 +14,10 @@ from unittest.mock import patch, MagicMock
 from urllib.parse import urlparse
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import create_engine, inspect, text
 
-from app.install import _validate_manifest_offline
 from app.database import run_migrations
+from app.manifest_contract import ManifestContractError, validate_manifest_offline
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -121,14 +120,14 @@ def bypass_url_validation():
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestValidateManifestOffline:
-  """Unit tests for _validate_manifest_offline — no DB, no HTTP."""
+  """Unit tests for the shared pure validator — no DB, no HTTP."""
 
   def test_none_is_accepted(self):
     """Absent offline block is always valid (most manifests omit it)."""
-    _validate_manifest_offline(None)  # must not raise
+    validate_manifest_offline(None)  # must not raise
 
   def test_full_valid_block_accepted(self):
-    _validate_manifest_offline({
+    validate_manifest_offline({
       "reads": True,
       "writes": "queued",
       "execution": "full",
@@ -136,63 +135,57 @@ class TestValidateManifestOffline:
     })
 
   def test_minimal_empty_dict_accepted(self):
-    _validate_manifest_offline({})
+    validate_manifest_offline({})
 
   def test_not_a_dict_rejected(self):
-    with pytest.raises(HTTPException) as exc:
-      _validate_manifest_offline("full")
-    assert exc.value.status_code == 400
+    with pytest.raises(ManifestContractError):
+      validate_manifest_offline("full")
 
   def test_reads_must_be_bool(self):
-    with pytest.raises(HTTPException) as exc:
-      _validate_manifest_offline({"reads": "yes"})
-    assert exc.value.status_code == 400
-    assert "reads" in str(exc.value.detail)
+    with pytest.raises(ManifestContractError) as exc:
+      validate_manifest_offline({"reads": "yes"})
+    assert "reads" in str(exc.value)
 
   def test_writes_invalid_value_rejected(self):
-    with pytest.raises(HTTPException) as exc:
-      _validate_manifest_offline({"writes": "async"})
-    assert exc.value.status_code == 400
-    assert "writes" in str(exc.value.detail)
+    with pytest.raises(ManifestContractError) as exc:
+      validate_manifest_offline({"writes": "async"})
+    assert "writes" in str(exc.value)
 
   def test_writes_valid_values_accepted(self):
     for v in ("queued", "none"):
-      _validate_manifest_offline({"writes": v})  # must not raise
+      validate_manifest_offline({"writes": v})  # must not raise
 
   def test_execution_invalid_value_rejected(self):
-    with pytest.raises(HTTPException) as exc:
-      _validate_manifest_offline({"execution": "maybe"})
-    assert exc.value.status_code == 400
-    assert "execution" in str(exc.value.detail)
+    with pytest.raises(ManifestContractError) as exc:
+      validate_manifest_offline({"execution": "maybe"})
+    assert "execution" in str(exc.value)
 
   def test_execution_valid_values_accepted(self):
     for v in ("full", "partial", "none"):
-      _validate_manifest_offline({"execution": v})
+      validate_manifest_offline({"execution": v})
 
   def test_precache_must_be_list(self):
-    with pytest.raises(HTTPException) as exc:
-      _validate_manifest_offline({"precache": "index.html"})
-    assert exc.value.status_code == 400
-    assert "precache" in str(exc.value.detail)
+    with pytest.raises(ManifestContractError) as exc:
+      validate_manifest_offline({"precache": "index.html"})
+    assert "precache" in str(exc.value)
 
   def test_precache_items_must_be_relative_paths(self):
-    # Absolute path should be rejected by _validate_repo_relative_path.
-    with pytest.raises(HTTPException):
-      _validate_manifest_offline({"precache": ["/etc/passwd"]})
+    with pytest.raises(ManifestContractError):
+      validate_manifest_offline({"precache": ["/etc/passwd"]})
 
   def test_precache_traversal_rejected(self):
-    with pytest.raises(HTTPException):
-      _validate_manifest_offline({"precache": ["../sibling/secret.txt"]})
+    with pytest.raises(ManifestContractError):
+      validate_manifest_offline({"precache": ["../sibling/secret.txt"]})
 
   def test_precache_valid_paths_accepted(self):
-    _validate_manifest_offline({"precache": ["assets/logo.png", "index.html"]})
+    validate_manifest_offline({"precache": ["assets/logo.png", "index.html"]})
 
   def test_reads_false_accepted(self):
-    _validate_manifest_offline({"reads": False})
+    validate_manifest_offline({"reads": False})
 
   def test_extra_keys_tolerated(self):
     """Manifest may contain forward-compatible fields we don't recognise yet."""
-    _validate_manifest_offline({"reads": True, "future_key": "anything"})
+    validate_manifest_offline({"reads": True, "future_key": "anything"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────

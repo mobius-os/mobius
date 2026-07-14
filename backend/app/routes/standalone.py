@@ -788,7 +788,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // shell NEVER auto-reloads (active use is sacred - the pill is the offer,
       // the tap is the apply).
       let liveUpdatesStarted = false;
-      function startLiveUpdates(appToken) {{
+      function startLiveUpdates(getAppToken) {{
         // Guard the retry path: loadAndRender can run twice (transient-failure
         // auto-retry / manual Try again), but the subscription starts once.
         if (liveUpdatesStarted) return;
@@ -858,14 +858,22 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           clearReconnect();
           controller = new AbortController();
           try {{
+            const streamToken = await getAppToken();
+            if (gen !== generation) return;
             const res = await fetch('/api/apps/' + APP_ID + '/events', {{
-              headers: {{ Authorization: 'Bearer ' + appToken }},
+              headers: {{ Authorization: 'Bearer ' + streamToken }},
               signal: controller.signal,
             }});
             if (gen !== generation) return;  // superseded while awaiting
-            // A 401 means the app token is stale; retrying it would loop
-            // forever. A genuine relaunch mints a fresh token, so stop here.
-            if (res.status === 401) {{ stopped = true; return; }}
+            if (res.status === 401) {{
+              const refreshed = await getAppToken({{ forceRefresh: true }});
+              if (gen !== generation) return;
+              if (!refreshed || refreshed === streamToken) {{
+                throw new Error('events authentication unavailable');
+              }}
+              backoffMs = 1000;
+              throw new Error('events token refreshed');
+            }}
             if (!res.ok || !res.body) throw new Error('events ' + res.status);
             backoffMs = 1000;  // reset on a clean connect
             const reader = res.body.getReader();
@@ -948,6 +956,39 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         connect();
       }}
 
+      const APP_TOKEN_CACHE_KEY = 'mobius:app-token:' + encodeURIComponent(String(APP_ID));
+
+      function decodeTokenClaims(value) {{
+        try {{
+          const encoded = String(value || '').split('.')[1];
+          if (!encoded) return null;
+          const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+          return JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')));
+        }} catch (e) {{ return null; }}
+      }}
+
+      function scopedAppTokenOrNull(value) {{
+        const claims = decodeTokenClaims(value);
+        return claims && claims.scope === 'app' && String(claims.app_id) === String(APP_ID)
+          ? value : null;
+      }}
+
+      function readCachedScopedAppToken() {{
+        try {{
+          const value = localStorage.getItem(APP_TOKEN_CACHE_KEY);
+          const scoped = scopedAppTokenOrNull(value);
+          if (!scoped && value) localStorage.removeItem(APP_TOKEN_CACHE_KEY);
+          return scoped;
+        }} catch (e) {{ return null; }}
+      }}
+
+      function cacheScopedAppToken(value) {{
+        const scoped = scopedAppTokenOrNull(value);
+        if (!scoped) return null;
+        try {{ localStorage.setItem(APP_TOKEN_CACHE_KEY, scoped); }} catch (e) {{}}
+        return scoped;
+      }}
+
       // Module load can fail transiently during PWA install transitions,
       // SW state swaps, and minibrowser-overlay contexts — wrap so we
       // can silently auto-retry once, then surface a Retry button for
@@ -957,9 +998,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         // not return a non-ok response. Degrade instead of failing the
         // whole boot, so an offline-capable app whose code is cached
         // still renders — theme falls back to the inline default
-        // palette, the app token falls back to the owner JWT (which
-        // authenticates as owner against /api/storage; offline that
-        // call queues anyway via window.mobius).
+        // palette. App authority never falls back to the owner JWT: a cached
+        // scoped token may boot the service-worker-cached module offline, while
+        // an unavailable scoped token surfaces the ordinary Retry UI.
         const [themeRes, tokenRes] = await Promise.all([
           fetch('/api/theme', {{ headers: {{ Authorization: 'Bearer ' + token }} }}).catch(function(){{ return null }}),
           fetch('/api/auth/app-token', {{
@@ -980,28 +1021,64 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           }}
           if (theme.bg) document.documentElement.style.setProperty('--bg', theme.bg);
         }}
-        let appToken = (tokenRes && tokenRes.ok) ? (await tokenRes.json()).token : token;
-        async function runtimeToken() {{
-          if (appToken !== token) return appToken;
+        let appToken = null;
+        if (tokenRes && tokenRes.ok) {{
+          appToken = cacheScopedAppToken((await tokenRes.json()).token);
+        }}
+        if (!appToken) appToken = readCachedScopedAppToken();
+        if (!appToken) throw new Error('App access is unavailable offline. Reconnect and retry.');
+        let renderWithToken = null;
+        let tokenRefresh = null;
+        function tokenExpiresSoon(value, skewMs) {{
           try {{
-            const refreshed = await fetch('/api/auth/app-token', {{
-              method: 'POST',
-              headers: {{
-                'Content-Type': 'application/json',
-                Authorization: 'Bearer ' + token,
-              }},
-              body: JSON.stringify({{ app_id: APP_ID }}),
-            }});
-            if (refreshed.ok) appToken = (await refreshed.json()).token;
-          }} catch (e) {{}}
-          return appToken;
+            const payload = decodeTokenClaims(value);
+            if (!payload) return true;
+            return !Number.isFinite(payload.exp) || payload.exp * 1000 <= Date.now() + (skewMs || 60000);
+          }} catch (e) {{ return true; }}
+        }}
+        function tokenAppInstanceId(value) {{
+          try {{
+            const payload = decodeTokenClaims(value);
+            if (!payload) return null;
+            return typeof payload.app_nonce === 'string' ? payload.app_nonce : null;
+          }} catch (e) {{ return null; }}
+        }}
+        async function runtimeToken(options) {{
+          const forceRefresh = options && options.forceRefresh === true;
+          if (!forceRefresh && appToken !== token && !tokenExpiresSoon(appToken)) return appToken;
+          if (tokenRefresh) return tokenRefresh;
+          tokenRefresh = (async function() {{
+            try {{
+              const refreshed = await fetch('/api/auth/app-token', {{
+                method: 'POST',
+                headers: {{
+                  'Content-Type': 'application/json',
+                  Authorization: 'Bearer ' + token,
+                }},
+                body: JSON.stringify({{ app_id: APP_ID }}),
+              }});
+              if (refreshed.ok) {{
+                const nextToken = cacheScopedAppToken((await refreshed.json()).token);
+                if (nextToken) {{
+                  appToken = nextToken;
+                  if (renderWithToken) renderWithToken(appToken);
+                }}
+              }}
+            }} catch (e) {{}}
+            return appToken;
+          }})().finally(function() {{ tokenRefresh = null; }});
+          return tokenRefresh;
         }}
         // Expose window.mobius (offline storage queue + sync on
         // reconnect, Tier 4b) before rendering so the component sees it
         // on mount. Precached, so the import resolves offline.
         try {{
           const rt = await import('/mobius-runtime.js');
-          rt.init({{ appId: APP_ID, getToken: runtimeToken }});
+          rt.init({{
+            appId: APP_ID,
+            appInstanceId: tokenAppInstanceId(appToken),
+            getToken: runtimeToken,
+          }});
         }} catch (e) {{}}
         const bust = cacheBust ? '&_=' + Date.now() : '';
         // &v=APP_VERSION is REQUIRED as the SW offline cache-buster: the server
@@ -1017,10 +1094,13 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const React = await import('react');
         const {{ createRoot }} = await import('react-dom/client');
         const root = createRoot(document.getElementById('root'));
-        root.render(React.createElement(Component, {{ appId: APP_ID, token: appToken }}));
+        renderWithToken = function(currentToken) {{
+          root.render(React.createElement(Component, {{ appId: APP_ID, token: currentToken }}));
+        }};
+        renderWithToken(appToken);
         document.getElementById('loading').classList.add('hidden');
         // Offer live updates once the app is actually on screen.
-        startLiveUpdates(appToken);
+        startLiveUpdates(runtimeToken);
       }}
 
       function paintLoadError(err, allowRetry) {{

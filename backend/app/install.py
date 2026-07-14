@@ -58,13 +58,13 @@ from app.manifest_contract import (
   SEEDS_COUNT_MAX as _CONTRACT_SEEDS_COUNT_MAX,
   SEEDS_TOTAL_MAX as _CONTRACT_SEEDS_TOTAL_MAX,
   SKILL_MAX_BYTES as _CONTRACT_SKILL_MAX_BYTES,
-  SOURCE_FILES_COUNT_MAX as _CONTRACT_SOURCE_FILES_COUNT_MAX,
   SOURCE_FILES_TOTAL_MAX as _CONTRACT_SOURCE_FILES_TOTAL_MAX,
   STATIC_ASSET_MAX_BYTES as _CONTRACT_STATIC_ASSET_MAX_BYTES,
   STATIC_ASSETS_COUNT_MAX as _CONTRACT_STATIC_ASSETS_COUNT_MAX,
   STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
   SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
   ManifestContractError,
+  static_asset_entries,
   validate_manifest_contract,
   validate_storage_destination,
 )
@@ -163,30 +163,13 @@ _STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
-# (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. Bounds
-# mirror the static-asset guards: cap the count here, cap the summed bytes at
-# fetch time. Each module reuses the entry cap per file.
-_SOURCE_FILES_COUNT_MAX = _CONTRACT_SOURCE_FILES_COUNT_MAX
+# (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. The shared
+# manifest contract caps the count; fetch additionally caps the summed bytes.
 _SOURCE_FILES_TOTAL_MAX = _CONTRACT_SOURCE_FILES_TOTAL_MAX
-
-# Install-managed path prefixes a `source_files` entry must never claim. These
-# are written/owned by other phases (static_assets under static/, the cron
-# scaffold's init-cron.sh, build output, the .bak snapshots, the integer-id
-# storage tree) — a manifest that listed one as a source file would have the
-# source-write loop fight the phase that owns it. Mirrors the app_git
-# `_GITIGNORE` set conceptually so the per-app git model and the installer agree
-# on what is hand-written source versus generated/managed artifact.
-_SOURCE_FILES_MANAGED_PREFIXES = (
-  "static/", "dist/", ".build/", "node_modules/",
-)
-_SOURCE_FILES_MANAGED_EXACT = frozenset((
-  "index.jsx", ".gitignore", "init-cron.sh", _STATIC_ASSETS_MANIFEST,
-))
 
 # Shared skill files an app declares via manifest `skills`: each entry is a
 # root-level `source_files` basename the post-commit sync phase copies into
 # /data/shared/skills/. Small caps — skills are instruction prose, not data.
-_SKILLS_COUNT_MAX = 5
 _SKILL_MAX_BYTES = _CONTRACT_SKILL_MAX_BYTES
 
 # A system-prompt fragment is more privileged than a skill because it is read
@@ -224,54 +207,6 @@ _MAX_REDIRECTS = 5
 # `/data/apps/<slug>/` and doesn't accept the test's `/tmp/testdata`).
 CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
 
-# Cron field grammar: minute hour dom month dow, allowing the
-# standard wildcards / ranges / lists / step values. Deliberately
-# rejects every shell metacharacter — no `;`, no `$`, no backtick,
-# no quotes. Per-field count check below enforces 5 columns.
-_CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
-
-_REQUIRED_FIELDS = ("id", "name", "version", "description", "entry")
-
-# Slugs are also used as cron-script path components; init-cron-scaffold.sh
-# rejects anything outside this set, so reject at the boundary too.
-_SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
-
-
-def _validate_slug_field(value, field: str) -> None:
-  """Apply the manifest-id slug rules to `value`, raising HTTPException(400).
-
-  Both `id` and `previous_id` become a /data/apps/<slug> path component and a
-  cron-script argv, so they share one charset + shape contract. Factored out so
-  the two checks can't drift (and so a renamed app's old id is held to the same
-  bar its new id was held to when it first installed).
-  """
-  if not isinstance(value, str) or not value:
-    raise HTTPException(400, f"Manifest `{field}` must be a non-empty string.")
-  if any(ch not in _SLUG_OK for ch in value):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` {value!r} contains invalid chars "
-      "(allow a-z, 0-9, -, _).",
-    )
-  # Reject leading `-` / `_` to prevent the slug from being smuggled
-  # as an argv flag into init-cron-scaffold.sh (or any other tool we
-  # hand it to). The scaffold uses `$1` directly so this is defense-
-  # in-depth — the real concern is future callers that do use getopt.
-  if value[0] in "-_":
-    raise HTTPException(
-      400, f"Manifest `{field}` must not start with '-' or '_', got {value!r}",
-    )
-  # A purely-numeric id becomes the slug and source dir /data/apps/<id>,
-  # which collides with the numeric-id storage tree another app writes to
-  # (storage uses /data/apps/<integer app id>). Reserve bare integers for
-  # storage.
-  if value.isdigit():
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` {value!r} must not be purely numeric — bare "
-      "integers are reserved for the per-app storage path /data/apps/<id>.",
-    )
-
 
 def _validate_manifest(m: dict) -> None:
   """Raises HTTPException(400) with a precise message on any issue."""
@@ -283,329 +218,6 @@ def _validate_manifest(m: dict) -> None:
   # contract used by both installation and pre-publication validation. Keep the
   # adapter here limited to translating its exception into the HTTP boundary.
   return
-  missing = [k for k in _REQUIRED_FIELDS if not m.get(k)]
-  if missing:
-    raise HTTPException(
-      400,
-      f"Manifest is missing required fields: {', '.join(missing)}",
-    )
-  mid = m["id"]
-  _validate_slug_field(mid, "id")
-  # `previous_id` is the optional predecessor identity an app declares when it
-  # renames (or adopts a baked predecessor). It must pass the SAME slug rules as
-  # `id` and name a DIFFERENT app — pointing it at its own id is a no-op that
-  # would only confuse the rename migration below.
-  prev_id = m.get("previous_id")
-  if prev_id is not None:
-    _validate_slug_field(prev_id, "previous_id")
-    if prev_id == mid:
-      raise HTTPException(
-        400, "Manifest `previous_id` must differ from `id`.",
-      )
-  if not isinstance(m.get("name"), str):
-    raise HTTPException(400, "Manifest `name` must be a string.")
-  if not isinstance(m.get("entry"), str):
-    raise HTTPException(400, "Manifest `entry` must be a string.")
-  _validate_repo_relative_path(m["entry"], "entry")
-  if m.get("icon") is not None:
-    _validate_repo_relative_path(m["icon"], "icon")
-  perms = m.get("permissions", {})
-  if not isinstance(perms, dict):
-    raise HTTPException(400, "Manifest `permissions` must be an object.")
-  for key in ("cross_app_access", "share_with_apps"):
-    val = perms.get(key, "none")
-    if val not in ("none", "read", "write"):
-      raise HTTPException(
-        400,
-        f"Manifest `permissions.{key}` must be one of none/read/write.",
-      )
-  # chat_log_access has its own value space (the redaction tiers), not
-  # the storage read/write/none ladder. 'full' is reserved but the read
-  # API rejects it until a concrete consumer lands (design §2) — we
-  # accept it in the manifest so the column round-trips, and surface the
-  # "deferred" gap at request time rather than install time.
-  log_access = perms.get("chat_log_access", "none")
-  if log_access not in ("none", "summary", "full"):
-    raise HTTPException(
-      400,
-      "Manifest `permissions.chat_log_access` must be one of "
-      "none/summary/full.",
-    )
-  if "manage_apps" in perms and not isinstance(perms["manage_apps"], bool):
-    raise HTTPException(
-      400, "Manifest `permissions.manage_apps` must be a boolean.",
-    )
-  if "github_access" in perms and not isinstance(perms["github_access"], bool):
-    raise HTTPException(
-      400, "Manifest `permissions.github_access` must be a boolean.",
-    )
-  if "filesystem_access" in perms and not isinstance(perms["filesystem_access"], bool):
-    raise HTTPException(
-      400, "Manifest `permissions.filesystem_access` must be a boolean.",
-    )
-  # Optional `offline` block — declares the app's offline contract.
-  # Schema only (P1-D): accepted, validated, and stored on the App row as JSON;
-  # no store badge built yet. The block is informational for the SW/agent but
-  # shapes no server-side enforcement — design philosophy §4 ("code empowers
-  # the agent; it does not police it").
-  _validate_manifest_offline(m.get("offline"))
-  seeds = m.get("storage_seeds", {})
-  if seeds is not None and not isinstance(seeds, dict):
-    raise HTTPException(400, "Manifest `storage_seeds` must be an object.")
-  for sub, value in (seeds or {}).items():
-    if not isinstance(sub, str) or not sub:
-      raise HTTPException(400, "Manifest `storage_seeds` keys must be paths.")
-    if isinstance(value, str):
-      _validate_repo_relative_path(value, f"storage_seeds.{sub}")
-  static_assets = m.get("static_assets", {})
-  if static_assets is not None and not isinstance(static_assets, (dict, list)):
-    raise HTTPException(
-      400, "Manifest `static_assets` must be an object or array.",
-    )
-  for dest, src in _static_asset_entries(static_assets).items():
-    _validate_repo_relative_path(dest, f"static_assets.{dest}")
-    _validate_repo_relative_path(src, f"static_assets.{dest}")
-  # Optional sibling modules a multi-file app imports from `index.jsx`. Each is
-  # a repo-relative path the installer fetches and writes next to the entry so
-  # esbuild can bundle the import graph. `entry` is declared separately and the
-  # managed `.gitignore` is never author-supplied, so both are rejected here.
-  source_files = m.get("source_files")
-  if source_files is not None:
-    if not isinstance(source_files, list):
-      raise HTTPException(400, "Manifest `source_files` must be an array.")
-    if len(source_files) > _SOURCE_FILES_COUNT_MAX:
-      raise HTTPException(
-        400,
-        "Manifest has too many source_files "
-        f"(max {_SOURCE_FILES_COUNT_MAX}).",
-      )
-    # The schedule job script is written to the source-dir root under its bare
-    # filename, so a source file naming it would collide with the job-write
-    # phase. Pull the declared job name here so the loop can reject that too.
-    job_sched = m.get("schedule")
-    declared_job = (
-      job_sched.get("job") if isinstance(job_sched, dict) else None
-    )
-    for i, rel in enumerate(source_files):
-      _validate_repo_relative_path(rel, f"source_files[{i}]")
-      # Reject any entry that collides with an install-managed path. `entry`
-      # (index.jsx) is declared separately, and the rest (.gitignore, the cron
-      # script, the static-asset manifest, the static_assets / build-output /
-      # storage trees, the declared job script) are written and owned by other
-      # install phases — a source file there would have the source-write loop
-      # fight the owning phase.
-      if (
-        rel in _SOURCE_FILES_MANAGED_EXACT
-        or rel == declared_job
-        or rel.endswith(".bak")
-        or rel[0].isdigit()
-        or any(rel.startswith(p) for p in _SOURCE_FILES_MANAGED_PREFIXES)
-      ):
-        raise HTTPException(
-          400,
-          f"Manifest `source_files[{i}]` {rel!r} collides with an "
-          "install-managed path (entry, .gitignore, static/, dist/, .build/, "
-          "node_modules/, the cron/job scripts, .bak snapshots, or the "
-          "numeric-id storage tree).",
-        )
-  # Shared skill files the app ships (`skills`). Shape only here; the
-  # subset-of-source_files rule is the existence guarantee — skill bytes ride
-  # the source tree on every install path (synthetic fetch, clone, clone
-  # fallback), so the sync phase can read them from the final on-disk tree.
-  # The size cap is enforced there too, where the final bytes are known.
-  skills = m.get("skills")
-  if skills is not None:
-    if not isinstance(skills, list):
-      raise HTTPException(400, "Manifest `skills` must be an array.")
-    if len(skills) > _SKILLS_COUNT_MAX:
-      raise HTTPException(
-        400, f"Manifest has too many skills (max {_SKILLS_COUNT_MAX}).",
-      )
-    root_sources = {
-      rel for rel in (source_files or [])
-      if isinstance(rel, str) and "/" not in rel
-    }
-    for i, rel in enumerate(skills):
-      if not isinstance(rel, str) or not rel.endswith(".md") or rel == ".md":
-        raise HTTPException(
-          400, f"Manifest `skills[{i}]` must be a `<name>.md` filename.",
-        )
-      if "/" in rel or "\\" in rel or ".." in rel or rel.startswith("."):
-        raise HTTPException(
-          400,
-          f"Manifest `skills[{i}]` {rel!r} must be a bare .md basename — "
-          "no directories, no traversal, no dotfiles (dotfiles in the "
-          "skills dir are installer-owned).",
-        )
-      if rel not in root_sources:
-        raise HTTPException(
-          400,
-          f"Manifest `skills[{i}]` {rel!r} must also be listed in "
-          "`source_files` as a root-level file — the installer reads skill "
-          "bytes from the installed source tree, so a skill that is not a "
-          "source file has nothing to install.",
-        )
-  # A manifest may contribute one mandatory prompt fragment while the app is
-  # installed. The file stays in the app source tree; live-row DB composition
-  # is the activation/teardown mechanism, so uninstall needs no file deletion.
-  system_prompt = m.get("system_prompt")
-  if system_prompt is not None:
-    if (
-      not isinstance(system_prompt, str)
-      or not system_prompt.endswith(".md")
-      or system_prompt == ".md"
-      or "/" in system_prompt
-      or "\\" in system_prompt
-      or ".." in system_prompt
-      or system_prompt.startswith(".")
-    ):
-      raise HTTPException(
-        400,
-        "Manifest `system_prompt` must be a bare `<name>.md` filename — "
-        "no directories, traversal, or dotfiles.",
-      )
-    root_sources = {
-      rel for rel in (source_files or [])
-      if isinstance(rel, str) and "/" not in rel
-    }
-    if system_prompt not in root_sources:
-      raise HTTPException(
-        400,
-        "Manifest `system_prompt` must also be listed in `source_files` as "
-        "a root-level file.",
-      )
-  sched = m.get("schedule")
-  if sched is not None:
-    if not isinstance(sched, dict):
-      raise HTTPException(400, "Manifest `schedule` must be an object.")
-    expr = sched.get("default")
-    if expr is not None:
-      _validate_cron_expr(expr)
-    job = sched.get("job")
-    if job is not None and (
-      not isinstance(job, str) or "/" in job or ".." in job
-    ):
-      raise HTTPException(
-        400,
-        "Manifest `schedule.job` must be a bare filename (no path "
-        "separators): cron registration and the run-job endpoint both use "
-        "only the basename, so a nested path would silently register/run a "
-        "different file than the manifest names.",
-      )
-    if job is not None:
-      _validate_repo_relative_path(job, "schedule.job")
-
-
-def _validate_manifest_offline(offline) -> None:
-  """Validate the optional `offline` block in a manifest.
-
-  Accepted shape:
-    {
-      "reads":     bool,              # app reads storage offline (optional)
-      "writes":    "queued" | "none", # write strategy (optional)
-      "execution": "full" | "partial" | "none", # compute capability (optional)
-      "precache":  [str, ...]         # extra repo-relative paths to precache (optional)
-    }
-
-  All keys are optional; an empty dict {} is valid. The block is stored as JSON
-  on the App row and forwarded in AppOut. It is informational — no field gates
-  server behaviour (the offline_capable flag on the App row is the runtime gate).
-  """
-  if offline is None:
-    return
-  if not isinstance(offline, dict):
-    raise HTTPException(400, "Manifest `offline` must be an object.")
-  if "reads" in offline and not isinstance(offline["reads"], bool):
-    raise HTTPException(400, "Manifest `offline.reads` must be a boolean.")
-  if "writes" in offline:
-    if offline["writes"] not in ("queued", "none"):
-      raise HTTPException(
-        400,
-        "Manifest `offline.writes` must be one of queued/none.",
-      )
-  if "execution" in offline:
-    if offline["execution"] not in ("full", "partial", "none"):
-      raise HTTPException(
-        400,
-        "Manifest `offline.execution` must be one of full/partial/none.",
-      )
-  precache = offline.get("precache")
-  if precache is not None:
-    if not isinstance(precache, list):
-      raise HTTPException(400, "Manifest `offline.precache` must be an array.")
-    for i, p in enumerate(precache):
-      _validate_repo_relative_path(p, f"offline.precache[{i}]")
-
-
-def _validate_repo_relative_path(path: str, field: str) -> None:
-  """Reject manifest asset paths that are not repo-relative.
-
-  The public schema says entry/icon/job/string storage seeds are paths within
-  the manifest repo. Enforcing that here keeps community-manifest mistakes as
-  clean 400s instead of fetching odd concatenated URLs or surfacing later 500s.
-
-  For `storage_seeds` the rejection also names the contract: a string value is
-  a path, a non-string is an inline JSON literal. Authors routinely reach for a
-  string to inline file content (HTML/CSS/JS), which trips this check on the
-  first scheme/fragment in the markup — a bare "must be a relative path" then
-  reads as a typo rather than the wrong shape. The hint teaches the fork.
-  """
-  seed_hint = (
-    " For storage_seeds, a string value is a repo-relative path that the"
-    " installer fetches, not inline content. To seed literal text, put it in"
-    " a repo file and point this key at that path; to store an inline JSON"
-    " value, use a non-string (object/array/number/bool/null)."
-  ) if field.startswith("storage_seeds.") else ""
-  if not isinstance(path, str) or not path:
-    raise HTTPException(
-      400, f"Manifest `{field}` must be a non-empty string.{seed_hint}"
-    )
-  parsed = urlparse(path)
-  if (
-    parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or
-    path.startswith("/") or "\\" in path
-  ):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` must be a relative path inside the app repo."
-      f"{seed_hint}",
-    )
-  parts = [unquote(part) for part in path.split("/")]
-  if any(part in ("", ".", "..") for part in parts):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` must not contain empty, '.', or '..' segments."
-      f"{seed_hint}",
-    )
-  if any("/" in part or "\\" in part for part in parts):
-    raise HTTPException(
-      400,
-      f"Manifest `{field}` must not contain encoded path separators."
-      f"{seed_hint}",
-    )
-
-
-def _validate_cron_expr(expr: str) -> None:
-  """5-field cron grammar, no shell metacharacters. Prevents the
-  schedule expression from being smuggled past the argv barrier into
-  whatever cron interpreter the scaffold installs it under."""
-  if not isinstance(expr, str):
-    raise HTTPException(400, "schedule.default must be a string.")
-  if not expr or expr[0] in "-":
-    raise HTTPException(
-      400, f"schedule.default must not be empty or start with '-': {expr!r}",
-    )
-  if not _CRON_FIELD_OK.match(expr):
-    raise HTTPException(
-      400,
-      f"schedule.default contains disallowed characters: {expr!r}. "
-      "Allowed: digits, *, /, ,, -, whitespace.",
-    )
-  if len(expr.split()) < 5:
-    raise HTTPException(
-      400,
-      f"schedule.default must have at least 5 cron fields, got {expr!r}",
-    )
 
 
 def _derive_raw_base(manifest_url: str) -> str:
@@ -943,27 +555,6 @@ def _seed_value_is_inline(value) -> bool:
   """`storage_seeds` values: a string is a repo-relative path; anything
   else (dict, list, bool, number) is an inline JSON literal."""
   return not isinstance(value, str)
-
-
-def _static_asset_entries(value) -> dict[str, str]:
-  """Normalize manifest.static_assets into dest -> source repo paths."""
-  if not value:
-    return {}
-  if isinstance(value, list):
-    return {path: path for path in value}
-  if isinstance(value, dict):
-    entries: dict[str, str] = {}
-    for dest, src in value.items():
-      if not isinstance(dest, str) or not isinstance(src, str):
-        raise HTTPException(
-          400,
-          "Manifest `static_assets` entries must map paths to paths.",
-        )
-      entries[dest] = src
-    return entries
-  raise HTTPException(
-    400, "Manifest `static_assets` must be an object or array.",
-  )
 
 
 def _assert_within(root: Path, target: Path, field: str) -> None:
@@ -1623,22 +1214,23 @@ def _check_source_completeness(
   The caller invokes this only on the synthetic-fetch path, where
   ``source_tree`` IS the whole declared tree (entry + every fetched
   ``source_files`` entry + the job script), so it is the sole source of bytes.
-  Static-asset dests are recorded as empty-content keys so a relative import
-  onto one (``import logo from './static/x.png'``) resolves instead of tripping
-  a false "missing import".
+  Static-asset dests are recorded below their installer-owned ``static/``
+  directory so source checks see the exact path compilation sees. For example,
+  logical destination ``logo.js`` is importable as ``./static/logo.js``.
   """
   files: dict[str, str] = {
     rel: data.decode("utf-8", "replace") for rel, data in source_tree.items()
   }
-  for dest in static_dests:
-    files.setdefault(dest, "")
+  static_source_paths = [f"static/{dest}" for dest in static_dests]
+  for path in static_source_paths:
+    files.setdefault(path, "")
 
   result = check_app_source(
     files,
     entry=entry_key,
     source_files=manifest.get("source_files") or [],
     job=job_name,
-    static_assets=list(static_dests),
+    static_assets=static_source_paths,
   )
   for warning in result.warnings:
     log.warning(
@@ -1658,11 +1250,8 @@ class FetchedUpstream:
   """The manifest + source bytes install would record, fetched read-only.
 
   `source_files` and `job_bytes` mirror what `install_from_manifest` records on
-  the per-app `upstream` branch — the entry, its declared sibling modules, and
-  the schedule job script. The entry name the manifest declares is carried
-  separately in `manifest["entry"]` so the caller can key the entry the way the
-  recorded tree does (synthetic installs record it as "index.jsx"; a cloned
-  repo keys it by its repo path)."""
+  the per-app `upstream` branch — canonical ``index.jsx``, its declared sibling
+  modules, and the schedule job script."""
   manifest: dict
   entry_bytes: bytes
   source_files: dict[str, bytes]
@@ -1834,7 +1423,7 @@ async def install_from_manifest(
 
     static_assets_fetched: dict[str, bytes] = {}
     static_assets_total = 0
-    for dest, src in _static_asset_entries(
+    for dest, src in static_asset_entries(
       manifest.get("static_assets") or {},
     ).items():
       if len(static_assets_fetched) >= _STATIC_ASSETS_COUNT_MAX:
@@ -2123,12 +1712,9 @@ async def install_from_manifest(
   # phase consumes this explicit diff so local-only tracked siblings are not
   # mistaken for files the manifest intentionally removed.
   dropped_source_paths: set[str] = set()
-  # The `source_tree` key that carries the entry's bytes — and, on every path
-  # that writes or compiles from disk, the entry's on-disk name. Fetched/
-  # synthetic trees always key the entry as the root "index.jsx" they
-  # materialize (whatever the manifest calls it); a real origin-backed tree
-  # (cloned install or update) keys files by their repo names, so there the
-  # entry sits under manifest["entry"]. The clone branches below reassign it.
+  # One canonical entry identity across fetched and origin-backed trees. The
+  # editor and watcher use the same path, so compilation never branches on
+  # package provenance.
   entry_key = "index.jsx"
   # True once `source_tree` is the MERGED tree (a clean merge or forced
   # take-upstream): the post-write commit then replays the result on the
@@ -2444,10 +2030,6 @@ async def install_from_manifest(
                 app_git.fetch_upstream, git_source_dir, ref,
               )
               cloned_update = True
-              # Real origin trees key files by their repo names — the entry
-              # lives under the manifest's own name, not a synthetic root
-              # index.jsx.
-              entry_key = manifest["entry"]
             except Exception as exc:
               log.warning(
                 "install: fetch from origin at %s failed; falling back to "
@@ -2508,16 +2090,12 @@ async def install_from_manifest(
             if merge.status == "conflict":
               if force_core_store_update:
                 # Core App Store self-update: published upstream wins, keep the
-                # fetched `source_tree` and apply it like a fast-forward. The
-                # fetched tree keys its entry as the root index.jsx, so the
-                # entry key reverts with it (a cloned fetch above may have
-                # pointed it at the repo's own entry name).
+                # fetched `source_tree` and apply it like a fast-forward.
                 warnings.append(
                   "core App Store self-update replaced local edits with upstream"
                 )
                 divergence = "fast_forward"
                 merge_applied = True
-                entry_key = "index.jsx"
               else:
                 # Before routing to the owner, auto-resolve a conflict CONFINED
                 # to the version identifier: a version label is never a semantic
@@ -2595,25 +2173,19 @@ async def install_from_manifest(
           # for a new raw-GitHub catalog install, prefer a REAL clone so the
           # source tree carries origin/<ref> and the app's own .gitignore. If
           # cloning fails (private repo, renamed repo, offline git access), fall
-          # back to the existing synthetic-upstream path unchanged. The entry
-          # is read back from the clone under whatever name the manifest
-          # declares — the repo's bytes, not the HTTP fetch, are canonical on
-          # this path. `source_tree` keys it by that same repo name and
-          # `entry_key` tracks it, so every downstream consumer (entry_source,
-          # the compile) reads the right file and no synthetic root index.jsx
-          # is ever materialized for a cloned tree (the write loop is skipped;
-          # the on-disk file keeps the repo's name).
+          # back to the existing synthetic-upstream path unchanged. Canonical
+          # index.jsx is read back from the clone — the repo's bytes, not the
+          # HTTP fetch, are authoritative on this path.
           if not existing and repo_ref is not None:
             repo_url, ref = repo_ref
             try:
               app.upstream_commit = await asyncio.to_thread(
                 app_git.clone_upstream, git_source_dir, repo_url, ref,
               )
-              entry_bytes = (git_source_dir / manifest["entry"]).read_bytes()
+              entry_bytes = (git_source_dir / "index.jsx").read_bytes()
               jsx_source = entry_bytes.decode("utf-8")
               upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
-              source_tree = {manifest["entry"]: entry_bytes}
-              entry_key = manifest["entry"]
+              source_tree = {"index.jsx": entry_bytes}
               cloned_install = True
             except Exception as exc:
               log.warning(

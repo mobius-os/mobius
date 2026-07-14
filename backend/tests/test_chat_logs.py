@@ -216,14 +216,14 @@ def test_chat_logs_excludes_soft_deleted_chats(client, owner_token, db):
   assert one.status_code == 404
 
 
-def test_chat_logs_install_validates_chat_log_access_value(client, owner_token):
+def test_chat_logs_install_validates_chat_log_access_value():
   """install.py rejects an out-of-range chat_log_access tier."""
-  import asyncio
   from fastapi import HTTPException
   from app.install import _validate_manifest
 
   good = {
-    "id": "x", "name": "X", "version": "1", "description": "d", "entry": "i.jsx",
+    "id": "x", "name": "X", "version": "1", "description": "d",
+    "entry": "index.jsx",
     "permissions": {"chat_log_access": "summary"},
   }
   _validate_manifest(good)  # no raise

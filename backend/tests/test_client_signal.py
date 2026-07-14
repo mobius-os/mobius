@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from app.config import get_settings
-from app import activity
+from app import activity, auth
 
 
 def _activity_lines() -> list[dict]:
@@ -37,6 +37,13 @@ def _app_token(client, owner_token, app_id) -> str:
   return response.json()["token"]
 
 
+def _batch(token: str, signals: list[dict]) -> dict:
+  nonce = auth.decode_access_token(token).get("app_nonce")
+  return {"signals": [
+    {**signal, "app_instance_id": nonce} for signal in signals
+  ]}
+
+
 def test_app_signal_batch_is_attributed_and_keeps_server_ingestion_time(
   client, owner_token,
 ):
@@ -46,7 +53,7 @@ def test_app_signal_batch_is_attributed_and_keeps_server_ingestion_time(
 
   response = client.post(
     "/api/client-signal",
-    json={"signals": [
+    json=_batch(token, [
       {
         "id": "signal-one",
         "occurred_at": occurred_at,
@@ -59,7 +66,7 @@ def test_app_signal_batch_is_attributed_and_keeps_server_ingestion_time(
         "name": "item_created",
         "payload": {"type": "note"},
       },
-    ]},
+    ]),
     headers={"Authorization": f"Bearer {token}"},
   )
   assert response.status_code == 204, response.text
@@ -86,6 +93,42 @@ def test_owner_token_cannot_emit_an_unattributed_app_signal(client, owner_token)
   assert not [event for event in _activity_lines() if event.get("ev") == "app_signal"]
 
 
+def test_signal_installation_identity_must_match_app_token(client, owner_token):
+  app_id = _make_app(client, owner_token)
+  token = _app_token(client, owner_token, app_id)
+  app_nonce = auth.decode_access_token(token)["app_nonce"]
+  base = {
+    "id": "instance-bound",
+    "occurred_at": "2026-07-13T12:34:56Z",
+    "name": "app_ready",
+  }
+  headers = {"Authorization": f"Bearer {token}"}
+
+  mismatch = client.post(
+    "/api/client-signal",
+    json={"signals": [{**base, "app_instance_id": "another-install"}]},
+    headers=headers,
+  )
+  assert mismatch.status_code == 409
+
+  missing = client.post(
+    "/api/client-signal",
+    json={"signals": [base]},
+    headers=headers,
+  )
+  assert missing.status_code == 409
+
+  accepted = client.post(
+    "/api/client-signal",
+    json={"signals": [{**base, "app_instance_id": app_nonce}]},
+    headers=headers,
+  )
+  assert accepted.status_code == 204
+  events = [event for event in _activity_lines() if event.get("id") == "instance-bound"]
+  assert len(events) == 1
+  assert events[0]["app_instance_id"] == app_nonce
+
+
 def test_signal_batch_and_payload_are_bounded(client, owner_token):
   app_id = _make_app(client, owner_token)
   token = _app_token(client, owner_token, app_id)
@@ -98,14 +141,14 @@ def test_signal_batch_and_payload_are_bounded(client, owner_token):
 
   too_many = client.post(
     "/api/client-signal",
-    json={"signals": [{**base, "id": f"signal-{i}"} for i in range(101)]},
+    json=_batch(token, [{**base, "id": f"signal-{i}"} for i in range(101)]),
     headers=headers,
   )
   assert too_many.status_code == 422
 
   oversized_value = client.post(
     "/api/client-signal",
-    json={"signals": [{**base, "payload": {"message": "x" * 501}}]},
+    json=_batch(token, [{**base, "payload": {"message": "x" * 501}}]),
     headers=headers,
   )
   assert oversized_value.status_code == 422
@@ -113,7 +156,7 @@ def test_signal_batch_and_payload_are_bounded(client, owner_token):
 
   duplicate_ids = client.post(
     "/api/client-signal",
-    json={"signals": [base, base]},
+    json=_batch(token, [base, base]),
     headers=headers,
   )
   assert duplicate_ids.status_code == 422
@@ -128,11 +171,11 @@ def test_signal_ingest_returns_retryable_failure_when_activity_write_fails(
 
   response = client.post(
     "/api/client-signal",
-    json={"signals": [{
+    json=_batch(token, [{
       "id": "retry-me",
       "occurred_at": "2026-07-13T12:34:56Z",
       "name": "app_ready",
-    }]},
+    }]),
     headers={"Authorization": f"Bearer {token}"},
   )
   assert response.status_code == 503
@@ -154,16 +197,17 @@ def test_signal_rate_limit_bounds_one_app_without_trusting_the_client(
   for page in range(2):
     response = client.post(
       "/api/client-signal",
-      json={"signals": [{**event, "id": f"{page}-{event['id']}"} for event in batch]},
+      json=_batch(token, [{**event, "id": f"{page}-{event['id']}"} for event in batch]),
       headers=headers,
     )
     assert response.status_code == 204
   response = client.post(
     "/api/client-signal",
-    json={"signals": [{**batch[0], "id": "over-limit"}]},
+    json=_batch(token, [{**batch[0], "id": "over-limit"}]),
     headers=headers,
   )
   assert response.status_code == 429
+  assert int(response.headers["Retry-After"]) > 23 * 3600
 
 
 def test_failed_append_rolls_back_rate_budget(client, owner_token, monkeypatch):
@@ -178,11 +222,11 @@ def test_failed_append_rolls_back_rate_budget(client, owner_token, monkeypatch):
     return calls > 1
 
   monkeypatch.setattr(activity, "log_events", fail_once)
-  body = {"signals": [{
+  body = _batch(token, [{
     "id": f"rollback-{i}",
     "occurred_at": "2026-07-13T12:34:56Z",
     "name": "item_created",
-  } for i in range(100)]}
+  } for i in range(100)])
   assert client.post("/api/client-signal", json=body, headers=headers).status_code == 503
   assert client.post("/api/client-signal", json=body, headers=headers).status_code == 204
 
@@ -193,11 +237,11 @@ def test_replayed_ids_are_acknowledged_without_duplicate_append(
   app_id = _make_app(client, owner_token)
   token = _app_token(client, owner_token, app_id)
   headers = {"Authorization": f"Bearer {token}"}
-  body = {"signals": [{
+  body = _batch(token, [{
     "id": "stable-replay",
     "occurred_at": "2026-07-13T12:34:56Z",
     "name": "app_ready",
-  }]}
+  }])
   assert client.post("/api/client-signal", json=body, headers=headers).status_code == 204
   assert client.post("/api/client-signal", json=body, headers=headers).status_code == 204
   events = [event for event in _activity_lines() if event.get("id") == "stable-replay"]
@@ -210,17 +254,17 @@ def test_signal_serialized_bytes_and_future_timestamp_are_bounded(
   app_id = _make_app(client, owner_token)
   token = _app_token(client, owner_token, app_id)
   headers = {"Authorization": f"Bearer {token}"}
-  oversized = client.post("/api/client-signal", json={"signals": [{
+  oversized = client.post("/api/client-signal", json=_batch(token, [{
     "id": "too-wide",
     "occurred_at": "2026-07-13T12:34:56Z",
     "name": "error",
     "payload": {f"field-{i}": "🙂" * 500 for i in range(20)},
-  }]}, headers=headers)
+  }]), headers=headers)
   assert oversized.status_code == 422
 
-  future = client.post("/api/client-signal", json={"signals": [{
+  future = client.post("/api/client-signal", json=_batch(token, [{
     "id": "future",
     "occurred_at": "2099-01-01T00:00:00Z",
     "name": "app_ready",
-  }]}, headers=headers)
+  }]), headers=headers)
   assert future.status_code == 422

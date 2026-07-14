@@ -107,8 +107,8 @@ def validate_cron_expr(expr: str) -> None:
       f"schedule.default contains disallowed characters: {expr!r}. "
       "Allowed: digits, *, /, ,, -, whitespace."
     )
-  if len(expr.split()) < 5:
-    _fail(f"schedule.default must have at least 5 cron fields, got {expr!r}")
+  if len(expr.split()) != 5:
+    _fail(f"schedule.default must have exactly 5 cron fields, got {expr!r}")
 
 
 def validate_manifest_offline(offline) -> None:
@@ -177,8 +177,11 @@ def validate_manifest_contract(manifest) -> None:
       _fail("Manifest `previous_id` must differ from `id`.")
 
   validate_repo_relative_path(manifest["entry"], "entry")
-  if "/" in manifest["entry"]:
-    _fail("Manifest `entry` must be a root-level filename (no directories).")
+  if manifest["entry"] != "index.jsx":
+    _fail(
+      "Manifest `entry` must be `index.jsx`; the editor, watcher, and "
+      "recompile lifecycle use that canonical entrypoint."
+    )
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")
 

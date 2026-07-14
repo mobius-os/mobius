@@ -30,9 +30,20 @@ import { freshEnv, waitFor } from './mobiusRuntimeHarness.mjs'
 // makeStorage is imported lazily inside each test AFTER freshEnv() installs the
 // browser globals it reads at construction time. A top-level import would run
 // before the globals exist.
-async function newStorage(appId = '1') {
+function appToken(appId, nonce = null, rev = '1') {
+  const payload = Buffer.from(JSON.stringify({
+    scope: 'app', app_id: appId, ...(nonce ? { app_nonce: nonce } : {}), rev,
+  })).toString('base64url')
+  return `header.${payload}.signature`
+}
+
+async function newStorage(appId = '1', { appInstanceId = null, getToken } = {}) {
   const { makeStorage } = await import('../../../public/mobius-runtime.js')
-  return makeStorage({ appId, getToken: async () => 'test-token' })
+  return makeStorage({
+    appId,
+    appInstanceId,
+    getToken: getToken || (async () => appToken(appId, appInstanceId)),
+  })
 }
 
 async function runtimeExports() {
@@ -165,6 +176,183 @@ test('offline signal batches from separate runtimes do not coalesce', async () =
   assert.deepEqual(server.signalEvents.map((event) => event.id), ['first', 'second'])
 })
 
+test('signal queues are isolated by immutable app installation identity', async () => {
+  const { server } = freshEnv()
+  const oldInstall = await newStorage('7', { appInstanceId: 'install-old' })
+  const newInstall = await newStorage('7', { appInstanceId: 'install-new' })
+  server.setOnline(false)
+
+  await oldInstall._queueSignals([{ id: 'old', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await newInstall._queueSignals([{ id: 'new', occurred_at: '2026-07-13T10:00:01Z', name: 'app_ready', payload: {} }])
+  assert.equal(await oldInstall._pendingSignalCount(), 1)
+  assert.equal(await newInstall._pendingSignalCount(), 1)
+
+  server.setOnline(true)
+  await newInstall._drainSignals()
+  assert.deepEqual(server.signalEvents.map((event) => event.id), ['new'])
+  assert.equal(await oldInstall._pendingSignalCount(), 1)
+})
+
+test('storage queues and caches are isolated by exact installation identity', async () => {
+  const { server } = freshEnv()
+  const legacy = await newStorage('7')
+  const current = await newStorage('7', { appInstanceId: 'install-current' })
+  server.setOnline(false)
+
+  await legacy.set('legacy.json', { owner: 'legacy' })
+  await current.set('current.json', { owner: 'current' })
+
+  assert.equal(await legacy.pendingCount(), 1)
+  assert.equal(await current.pendingCount(), 1)
+  assert.equal(await legacy.get('current.json'), null)
+  assert.equal(await current.get('legacy.json'), null)
+})
+
+test('an old runtime cannot refresh across a rotated storage generation', async () => {
+  const { server } = freshEnv()
+  let nonce = 'generation-old'
+  const storage = await newStorage('7', {
+    appInstanceId: 'generation-old',
+    getToken: async () => appToken('7', nonce),
+  })
+  server.setOnline(false)
+  await storage.set('wiped.json', { mustNotReturn: true })
+
+  // DELETE /apps/{id}/data rotates the nonce before releasing the server's
+  // storage lock. Even if the host can now mint the new token, this old runtime
+  // remains bound to its init identity and cannot replay the pre-wipe write.
+  nonce = 'generation-new'
+  server.setOnline(true)
+  await storage._drain()
+  assert.equal(server.serverHas('wiped.json'), false)
+  assert.equal(await storage.pendingCount(), 1)
+})
+
+test('nonce-aware signal runtime ignores ambiguous legacy records after ID reuse', async () => {
+  const { server } = freshEnv()
+  const legacy = await newStorage('7')
+  server.setOnline(false)
+  await legacy._queueSignals([{ id: 'legacy', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+
+  const replacement = await newStorage('7', { appInstanceId: 'replacement-install' })
+  assert.equal(await replacement._pendingSignalCount(), 0)
+  server.setOnline(true)
+  await replacement._drainSignals()
+  assert.deepEqual(server.signalEvents, [])
+})
+
+test('a 401 refreshes the app token and retries a storage write once', async () => {
+  const { server } = freshEnv()
+  const calls = []
+  const storage = await newStorage('7', {
+    appInstanceId: 'install-one',
+    getToken: async (options = {}) => {
+      calls.push(options)
+      return appToken('7', 'install-one', options.forceRefresh ? 'fresh' : 'stale')
+    },
+  })
+  server.forceWrite('refresh.json', 401)
+
+  assert.deepEqual(await storage.set('refresh.json', { saved: true }), { synced: true })
+  assert.ok(calls.some((options) => options.forceRefresh === true))
+  assert.deepEqual(server.serverValue('refresh.json'), { saved: true })
+})
+
+test('signal rollout 404 is retryable and preserves the durable queue', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7', { appInstanceId: 'install-one' })
+  server.setSignalStatus(404)
+  await storage._queueSignals([{ id: 'rollout', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await storage._drainSignals()
+  assert.equal(await storage._pendingSignalCount(), 1)
+})
+
+test('a forbidden signal batch is poison and does not retry forever', async () => {
+  const { server } = freshEnv()
+  const storage = await newStorage('7', { appInstanceId: 'install-one' })
+  server.setSignalStatus(403)
+  await storage._queueSignals([{ id: 'forbidden', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+
+  await storage._drainSignals()
+
+  assert.equal(await storage._pendingSignalCount(), 0)
+  assert.deepEqual(server.signalEvents, [])
+})
+
+test('init reuses one runtime per installation and updates its token broker', async () => {
+  const { server } = freshEnv()
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  const windowListeners = new Map()
+  const documentListeners = new Map()
+  const track = (registry, type, cb) => {
+    if (!registry.has(type)) registry.set(type, new Set())
+    registry.get(type).add(cb)
+  }
+  const untrack = (registry, type, cb) => registry.get(type)?.delete(cb)
+  globalThis.window = {
+    location: { origin: 'https://mobius.test' },
+    parent: { postMessage() {} },
+    addEventListener(type, cb) { track(windowListeners, type, cb) },
+    removeEventListener(type, cb) { untrack(windowListeners, type, cb) },
+  }
+  globalThis.document = {
+    visibilityState: 'visible',
+    addEventListener(type, cb) { track(documentListeners, type, cb) },
+    removeEventListener(type, cb) { untrack(documentListeners, type, cb) },
+  }
+  try {
+    const runtime = await import(`../../../public/mobius-runtime.js?init-once=${Date.now()}`)
+    const firstToken = appToken('7', 'install-one', 'first')
+    const secondToken = appToken('7', 'install-one', 'second')
+    const first = runtime.init({
+      appId: '7',
+      appInstanceId: 'install-one',
+      getToken: async () => firstToken,
+    })
+    const listenerCounts = () => ({
+      window: [...windowListeners].map(([type, callbacks]) => [type, callbacks.size]),
+      document: [...documentListeners].map(([type, callbacks]) => [type, callbacks.size]),
+    })
+    const before = listenerCounts()
+
+    const second = runtime.init({
+      appId: '7',
+      appInstanceId: 'install-one',
+      getToken: async () => secondToken,
+    })
+
+    assert.equal(second, first)
+    assert.deepEqual(listenerCounts(), before)
+    await second.storage.set('uses-latest-token.json', { ok: true })
+    const write = server.log.find((entry) => entry.method === 'PUT' && entry.url.includes('uses-latest-token.json'))
+    assert.equal(write.headers.Authorization, `Bearer ${secondToken}`)
+    second.signal._destroy()
+    second.storage._destroy()
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+  }
+})
+
+test('explicit data wipe purges one app runtime state without touching another', async () => {
+  const { server } = freshEnv()
+  const removed = await newStorage('7', { appInstanceId: 'removed-install' })
+  const retained = await newStorage('8', { appInstanceId: 'retained-install' })
+  server.setOnline(false)
+  await removed.set('note.json', { text: 'remove me' })
+  await removed._queueSignals([{ id: 'removed', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+  await retained.set('note.json', { text: 'keep me' })
+  await retained._queueSignals([{ id: 'retained', occurred_at: '2026-07-13T10:00:00Z', name: 'app_ready', payload: {} }])
+
+  const { purgeAppRuntimeData } = await runtimeExports()
+  await purgeAppRuntimeData('7')
+  assert.equal(await removed.pendingCount(), 0)
+  assert.equal(await removed._pendingSignalCount(), 0)
+  assert.equal(await retained.pendingCount(), 1)
+  assert.equal(await retained._pendingSignalCount(), 1)
+})
+
 test('a failing signal endpoint cannot block or dead-letter user storage writes', async () => {
   const { server } = freshEnv()
   const storage = await newStorage('7')
@@ -210,6 +398,25 @@ test('the offline signal queue is bounded by serialized bytes as well as count',
   await storage._queueSignals(events)
   assert.ok(await storage._pendingSignalCount() < 300)
   assert.ok(await storage._pendingSignalCount() > 0)
+})
+
+test('the shared signal database has an owner-wide cap across many apps', async () => {
+  const { server } = freshEnv()
+  server.setOnline(false)
+  const storages = await Promise.all(Array.from({ length: 5 }, (_, index) => (
+    newStorage(String(index + 1), { appInstanceId: `install-${index + 1}` })
+  )))
+  for (let appIndex = 0; appIndex < storages.length; appIndex += 1) {
+    await storages[appIndex]._queueSignals(Array.from({ length: 500 }, (_, eventIndex) => ({
+      id: `${appIndex}-${eventIndex}`,
+      occurred_at: '2026-07-13T10:00:00Z',
+      name: 'item_created',
+      payload: {},
+    })))
+  }
+  const counts = await Promise.all(storages.map((storage) => storage._pendingSignalCount()))
+  assert.equal(counts.reduce((sum, count) => sum + count, 0), 2000)
+  assert.ok(counts.every((count) => count <= 500))
 })
 
 test('a transient failure on the head op stops the drain and preserves order', async () => {

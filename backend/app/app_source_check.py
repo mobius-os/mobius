@@ -208,16 +208,18 @@ def _resolve(importer: str, spec: str, keys: Collection[str]) -> str | None:
   return None
 
 
-def _static_dests(value) -> list[str]:
-  """Normalize a manifest ``static_assets`` block into the on-disk dest paths
-  (list form -> the paths themselves; object form -> the keys). Shape errors
-  are the install validator's job, not this lint's — tolerate and skip."""
+def _static_source_paths(value) -> list[str]:
+  """Map logical static destinations to their installed source-tree paths.
+
+  The installer serves logical destination ``x.js`` from ``static/x.js`` on
+  disk. Shape errors are the manifest validator's job; tolerate and skip them.
+  """
   if not value:
     return []
   if isinstance(value, list):
-    return [p for p in value if isinstance(p, str)]
+    return [f"static/{p}" for p in value if isinstance(p, str)]
   if isinstance(value, dict):
-    return [d for d in value if isinstance(d, str)]
+    return [f"static/{d}" for d in value if isinstance(d, str)]
   return []
 
 
@@ -242,7 +244,7 @@ def check_app_source(
     source_files: The manifest's declared ``source_files``.
     job: The manifest's ``schedule.job`` bare filename, if any. It is a root of
       the import graph but is intentionally NOT part of ``source_files``.
-    static_assets: The manifest's static-asset dest paths — allowed import
+    static_assets: Static assets' installed source-tree paths — allowed import
       targets that the installer writes separately from ``source_files``.
 
   Returns:
@@ -362,9 +364,9 @@ def check_manifest_tree(
 ) -> SourceCheckResult:
   """Convenience wrapper: derive the check inputs from a raw manifest dict.
 
-  Used by the CLI and any caller holding a parsed ``mobius.json``. The
-  install path calls ``check_app_source`` directly because its on-disk entry
-  name can differ from ``manifest['entry']``.
+  Used by the CLI and any caller holding a parsed ``mobius.json``. The install
+  path calls ``check_app_source`` directly because it already has the fetched
+  tree and can report findings before materialization.
   """
   sched = manifest.get("schedule")
   job = sched.get("job") if isinstance(sched, Mapping) else None
@@ -373,5 +375,5 @@ def check_manifest_tree(
     entry=manifest.get("entry") or "index.jsx",
     source_files=manifest.get("source_files") or [],
     job=job,
-    static_assets=_static_dests(manifest.get("static_assets")),
+    static_assets=_static_source_paths(manifest.get("static_assets")),
   )

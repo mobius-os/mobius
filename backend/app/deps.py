@@ -86,6 +86,7 @@ class Principal:
   """
   owner: models.Owner
   app_id: int | None
+  app_instance_id: str | None = None
 
 
 def _resolve_owner(
@@ -308,7 +309,11 @@ def get_principal(
   """
   owner, payload = _resolve_owner(token, db)
   app_id = _enforce_app_scope(payload, db)
-  return Principal(owner=owner, app_id=app_id)
+  return Principal(
+    owner=owner,
+    app_id=app_id,
+    app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+  )
 
 
 # Ordered tiers for permission keys whose values form a ladder. Each

@@ -36,11 +36,11 @@ per-token chat deltas — high-frequency, low-signal UI noise that would
 drown the events that matter against the 90-day retention. `app_open`
 already captures which apps got used; `chat_sent` captures user turns.
 
-Rotation: weekly. On each write we check the active file's mtime; if
-older than 7 days we rename it to activity.YYYY-WW.jsonl and start a
-fresh activity.jsonl. After rotation we sweep activity.*.jsonl files
-older than 90 days. This keeps the working set bounded without any
-external scheduler.
+Rotation: weekly. On each write we check the timestamp of the active
+file's first parseable event; if it is older than 7 days we rename the
+file to activity.YYYY-WW.jsonl and start a fresh activity.jsonl. After
+rotation we sweep activity.*.jsonl files older than 90 days. This keeps
+the working set bounded without any external scheduler.
 
 Disabling: set MOBIUS_ACTIVITY_LOG=off. Tests that don't need the
 log (most of them) use this so they don't litter /data/logs/.
@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import threading
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -366,34 +367,70 @@ def _candidate_files(active: Path) -> list[Path]:
   return result
 
 
-def _yield_events_from(path: Path):
+@contextmanager
+def _event_source_snapshot(active: Path):
+  """Open a stable snapshot of every activity source.
+
+  Rotation renames ``activity.jsonl``. Merely snapshotting its pathname leaves
+  a gap: if a writer rotates after candidate enumeration but before the reader
+  opens the active path, the reader opens the new file and the just-rotated
+  archive was never in its candidate list. Open all source inodes while holding
+  the same lock rotation uses, then stream them after releasing the lock. Open
+  descriptors remain valid across a later rename or retention unlink.
+  """
+  stack = ExitStack()
+  sources = []
+  try:
+    with _write_lock:
+      for path in _candidate_files(active):
+        try:
+          source = stack.enter_context(path.open("r", encoding="utf-8"))
+        except OSError as exc:
+          log.warning("activity log snapshot open failed for %s: %s", path, exc)
+          continue
+        sources.append((path, source))
+    yield sources
+  finally:
+    stack.close()
+
+
+def _yield_events_from_source(path: Path, source):
   """Iterates parsed event dicts from one JSONL file. Malformed lines
   are skipped silently — the log is sidecar data, not a database, and
   a single bad line must not block the rest from reaching the consumer.
   Missing `ts` or non-string `ts` likewise drops the line."""
   try:
-    with path.open("r", encoding="utf-8") as f:
-      for line in f:
-        line = line.strip()
-        if not line:
-          continue
-        try:
-          ev = json.loads(line)
-        except json.JSONDecodeError:
-          continue
-        ts_str = ev.get("ts")
-        if not isinstance(ts_str, str):
-          continue
-        try:
-          ts = datetime.fromisoformat(ts_str)
-        except ValueError:
-          continue
-        # Naive timestamps are treated as UTC — _now_iso always
-        # writes tz-aware, so this fallback only matters for
-        # hand-crafted test inputs.
-        if ts.tzinfo is None:
-          ts = ts.replace(tzinfo=timezone.utc)
-        yield ev, ts
+    for line in source:
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        ev = json.loads(line)
+      except json.JSONDecodeError:
+        continue
+      ts_str = ev.get("ts")
+      if not isinstance(ts_str, str):
+        continue
+      try:
+        ts = datetime.fromisoformat(ts_str)
+      except ValueError:
+        continue
+      # Naive timestamps are treated as UTC — _now_iso always
+      # writes tz-aware, so this fallback only matters for
+      # hand-crafted test inputs.
+      if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+      yield ev, ts
+  except OSError as exc:
+    log.warning("activity log read failed for %s: %s", path, exc)
+    return
+
+
+def _yield_events_from(path: Path):
+  """Path-opening compatibility wrapper for focused tests and tooling."""
+  try:
+    with path.open("r", encoding="utf-8") as source:
+      yield from _yield_events_from_source(path, source)
   except OSError as exc:
     log.warning("activity log read failed for %s: %s", path, exc)
     return
@@ -431,16 +468,17 @@ def most_used_skills(
   """
   counts: dict[str, int] = {}
   active = _activity_path()
-  for path in _candidate_files(active):
-    for ev, ts in _yield_events_from(path):
-      if ts < since or ts > until:
-        continue
-      if ev.get("ev") != "skill_loaded":
-        continue
-      skill = ev.get("skill")
-      if not isinstance(skill, str) or not skill:
-        continue
-      counts[skill] = counts.get(skill, 0) + 1
+  with _event_source_snapshot(active) as sources:
+    for path, source in sources:
+      for ev, ts in _yield_events_from_source(path, source):
+        if ts < since or ts > until:
+          continue
+        if ev.get("ev") != "skill_loaded":
+          continue
+        skill = ev.get("skill")
+        if not isinstance(skill, str) or not skill:
+          continue
+        counts[skill] = counts.get(skill, 0) + 1
   ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
   return [{"skill": skill, "count": count} for skill, count in ranked]
 
@@ -461,18 +499,19 @@ def read_events(
   alone dropped that window — fixed by enumerating archives via
   `_candidate_files` and chaining through them in mtime order.
 
-  Generator so a large window doesn't buffer events into memory:
-  files are opened one at a time, each line filtered and yielded as
-  it's parsed. Worst case (90-day retention, weekly rotation) is
-  ~13 archive files plus active — bounded.
+  Generator so a large window doesn't buffer events into memory. Source
+  descriptors are opened together for a rotation-safe snapshot, then each file
+  is line-filtered and yielded in turn. Worst case (90-day retention, weekly
+  rotation) is ~13 archive descriptors plus active — bounded.
 
   Malformed lines (corrupt JSON, missing ts) are skipped silently.
   """
   active = _activity_path()
-  for path in _candidate_files(active):
-    for ev, ts in _yield_events_from(path):
-      if ts < since or ts > until:
-        continue
-      if app_id is not None and ev.get("app_id") != app_id:
-        continue
-      yield ev
+  with _event_source_snapshot(active) as sources:
+    for path, source in sources:
+      for ev, ts in _yield_events_from_source(path, source):
+        if ts < since or ts > until:
+          continue
+        if app_id is not None and ev.get("app_id") != app_id:
+          continue
+        yield ev

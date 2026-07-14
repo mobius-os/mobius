@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +35,7 @@ from app.deps import (
   get_owner_or_app_with_manage_apps, reject_cross_site, resolve_owner_or_app,
 )
 from app.http_caching import strip_range
+from app.manifest_contract import ManifestContractError, validate_cron_expr
 from app.resource_access import live_app, live_app_or_404
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -976,13 +978,11 @@ async def update_check(
     # a store open never errors on a transient network failure.
     return _unknown()
 
-  # Build the fetched source tree the way install records it on `upstream`. A
-  # synthetic install keys the entry as "index.jsx" regardless of the manifest's
-  # entry name; a cloned (real-origin) repo keys files by their repo paths, so
-  # the entry sits under manifest["entry"] there.
+  # Build the fetched source tree the way install records it on `upstream`.
+  # The shared manifest contract makes index.jsx canonical for synthetic and
+  # cloned packages alike, so update comparison has one entry identity.
   cloned = await asyncio.to_thread(app_git.has_origin, repo)
-  entry_key = fetched.manifest["entry"] if cloned else "index.jsx"
-  fetched_tree: dict[str, bytes] = {entry_key: fetched.entry_bytes}
+  fetched_tree: dict[str, bytes] = {"index.jsx": fetched.entry_bytes}
   fetched_tree.update(fetched.source_files)
   if fetched.job_name and fetched.job_bytes is not None:
     fetched_tree[fetched.job_name] = fetched.job_bytes
@@ -1704,13 +1704,15 @@ async def delete_app_data(
     # the path join), the sidecar analogue of removing the storage root.
     await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
     delete_content_type_tree(data_dir, Path("apps") / str(app.id), "")
-
-  # Advance updated_at so the iframe cache-buster (versionForApp reads
-  # app.updated_at) changes and a currently-open app remounts against its
-  # now-empty storage — the wipe touches no mapped column, so onupdate won't
-  # fire on its own. Naive UTC to match the App soft-delete write convention.
-  app.updated_at = now_naive_utc()
-  db.commit()
+    # Rotate the storage generation and commit it before releasing the SAME lock
+    # every writer re-checks. An old-token write that was already waiting cannot
+    # recreate the erased tree after the wipe, and a fresh runtime gets a clean
+    # browser-local generation instead of adopting an old outbox.
+    app.token_nonce = secrets.token_hex(16)
+    # Advance updated_at so the iframe cache-buster changes and a currently-open
+    # app remounts against its now-empty storage.
+    app.updated_at = now_naive_utc()
+    db.commit()
 
   # Refetch the drawer and bust any cached iframe so the app reloads against
   # its now-empty storage (Shell's app_updated handler refreshes the list).
@@ -1931,8 +1933,11 @@ def update_app_schedule(
     raise HTTPException(
       status_code=400, detail="App has no source_dir; cannot locate job.",
     )
-  from app.install import _register_cron, _validate_cron_expr
-  _validate_cron_expr(body.cron)
+  from app.install import _register_cron
+  try:
+    validate_cron_expr(body.cron)
+  except ManifestContractError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
   source_dir = Path(app.source_dir)
   job_name = body.job or "fetch.sh"
   if "/" in job_name or "\\" in job_name or not job_name.strip():

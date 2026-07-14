@@ -30,18 +30,14 @@ from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.restart_util import restart_this_worker
 
-# Event names the emit endpoint will accept. Restricting at the
-# boundary keeps the file's vocabulary closed (a typo or stray
-# event-name from a future caller can't sneak in and silently grow
-# the schema). Read endpoint doesn't filter on this — old log lines
-# survive a future schema bump.
+# Event names the admin emit endpoint will accept. This is intentionally not
+# the complete activity vocabulary: ``app_signal`` has its own app-scoped,
+# schema-validated, rate-limited ingest route and must not bypass it through an
+# owner-authored generic emit. Read endpoints do not filter on this allowlist.
 _KNOWN_EVENTS = {
   "app_open", "app_install", "app_uninstall", "storage_write",
   "cron_outcome", "memory_load", "skill_loaded",
-  # In-process emitters (Python `log_event`, never POSTed to /emit) — listed
-  # so the vocabulary lives in one place and a future cron-emit can use them.
-  # The allowlist gates the WRITE/emit endpoint only; the read endpoint
-  # surfaces every event regardless.
+  # In-process emitters that are also safe for a future admin/cron emit.
   "app_error", "chat_sent", "chat_created", "provider_switch",
   "chat_log_read", "slug_collision",
 }

@@ -73,6 +73,21 @@ export function clearQueryCache() {
   ])
 }
 
+// Remove browser-local queues and mirrors after an explicit app-data wipe.
+// Soft uninstall intentionally preserves these records so Undo can restore
+// offline work. The runtime owns the IndexedDB schemas, so keep the record
+// traversal there rather than duplicating it in bundled code.
+export async function clearAppRuntimeData(appId) {
+  try {
+    const runtimeUrl = `${BASE}/mobius-runtime.js`
+    const runtime = await import(/* @vite-ignore */ runtimeUrl)
+    await runtime.purgeAppRuntimeData?.(appId)
+  } catch {
+    // The server-side wipe already succeeded. Local cleanup is best-effort and
+    // the rotated installation nonce still prevents stale record reuse.
+  }
+}
+
 // The offline outbox and signal queue (mobius-runtime.js) are their OWN
 // IndexedDB databases, not idb-keyval keys — so both must be dropped with
 // deleteDatabase, not idbDel. The outbox holds queued writes and the read-through cache

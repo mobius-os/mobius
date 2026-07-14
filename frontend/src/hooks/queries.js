@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
+import { appTokenRefreshInterval } from '../lib/appToken.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -122,6 +123,11 @@ function useAppTokenQuery(appId) {
     enabled: !!appId,
     queryFn: () => fetchAppToken(appId),
     staleTime: 5 * 60_000,
+    // Mounted canvases stay alive in the shell's LRU for many hours. Refresh
+    // before the app-token's JWT expiry even while the canvas is hidden, then
+    // AppCanvas forwards the new token into the existing frame without remounting.
+    refetchInterval: (query) => appTokenRefreshInterval(query.state.data),
+    refetchIntervalInBackground: true,
     // Belt: server tokens expire at 8h. Cap gc below that expiry so a
     // re-opened app that sat idle overnight fetches a fresh token rather
     // than serving a long-cached (possibly expired) one. 7 hours keeps

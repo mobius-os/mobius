@@ -450,6 +450,81 @@
     import { createElement, Fragment, useEffect } from 'react';
 
     let initialized = false;
+    let currentToken = null;
+    let tokenRefreshPromise = null;
+    let tokenRefreshResolve = null;
+    let mountedRoot = null;
+    let mountedComponent = null;
+
+    function renderMountedComponent() {
+      if (!mountedRoot || !mountedComponent || !currentToken) return;
+      mountedRoot.render(
+        createElement(Fragment, null,
+          createElement(MountSignal),
+          createElement(mountedComponent, { appId: _FRAME_APP_ID, token: currentToken })
+        )
+      );
+    }
+
+    function tokenExpiresSoon(token, skewMs = 60000) {
+      try {
+        const encoded = String(token || '').split('.')[1];
+        if (!encoded) return true;
+        const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')));
+        return !Number.isFinite(payload.exp) || payload.exp * 1000 <= Date.now() + skewMs;
+      } catch (_) {
+        return true;
+      }
+    }
+
+    function tokenAppInstanceId(token) {
+      try {
+        const encoded = String(token || '').split('.')[1];
+        if (!encoded) return null;
+        const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')));
+        return typeof payload.app_nonce === 'string' ? payload.app_nonce : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function acceptToken(token) {
+      if (!token) return;
+      currentToken = token;
+      _reportToken = token;
+      // Preserve component state while keeping the legacy token prop aligned
+      // with the refreshable window.mobius credential.
+      renderMountedComponent();
+      if (tokenRefreshResolve) tokenRefreshResolve(token);
+      tokenRefreshResolve = null;
+      tokenRefreshPromise = null;
+    }
+
+    function requestFreshToken() {
+      if (tokenRefreshPromise) return tokenRefreshPromise;
+      tokenRefreshPromise = new Promise(function (resolve) {
+        tokenRefreshResolve = resolve;
+        window.parent.postMessage(
+          { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
+          window.location.origin
+        );
+        setTimeout(function () {
+          if (tokenRefreshResolve !== resolve) return;
+          tokenRefreshResolve = null;
+          tokenRefreshPromise = null;
+          resolve(currentToken);
+        }, 10000);
+      });
+      return tokenRefreshPromise;
+    }
+
+    async function runtimeToken(options) {
+      const forceRefresh = options && options.forceRefresh === true;
+      if (!forceRefresh && currentToken && !tokenExpiresSoon(currentToken)) return currentToken;
+      return requestFreshToken();
+    }
 
     // Flips the post-mount error guard (handleFrameError above) AND tells the
     // parent the app is mounted. Rendered as the FIRST sibling of the app
@@ -604,19 +679,31 @@
       const last = _reportSeen.get(key);
       if (last && now - last < 60000) return;
       _reportSeen.set(key, now);
-      try {
-        fetch('/api/client-error', {
+      const body = JSON.stringify({
+        message: String(message).slice(0, 2000),
+        where: where,
+        stack: stack ? String(stack).slice(0, 8000) : undefined,
+        url: location.href,
+      });
+      runtimeToken().then(function (token) {
+        return fetch('/api/client-error', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _reportToken },
-          body: JSON.stringify({
-            message: String(message).slice(0, 2000),
-            where: where,
-            stack: stack ? String(stack).slice(0, 8000) : undefined,
-            url: location.href,
-          }),
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: body,
           keepalive: true,
-        }).catch(function () {});
-      } catch (e) {}
+        }).then(function (response) {
+          if (response.status !== 401) return;
+          return runtimeToken({ forceRefresh: true }).then(function (fresh) {
+            if (!fresh || fresh === token) return;
+            return fetch('/api/client-error', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + fresh },
+              body: body,
+              keepalive: true,
+            });
+          });
+        });
+      }).catch(function () {});
     }
     window.addEventListener('error', function (e) {
       if (!e.error && !e.message) return;
@@ -627,12 +714,12 @@
       reportAppError('app:unhandledrejection', (r && r.message) || String(r), r && r.stack);
     });
 
-    async function loadModule(token) {
+    async function loadModule() {
+      const token = currentToken;
       if (!token) {
         showErr('Configuration error', 'No token received from parent.');
         return;
       }
-      _reportToken = token;
       try {
         // Expose window.mobius BEFORE importing/rendering the app, so the
         // component sees it on mount — mirrors the standalone host
@@ -644,7 +731,11 @@
         // a runtime fetch failure must not block the app from rendering.
         try {
           const rt = await import('/mobius-runtime.js');
-          rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
+          rt.init({
+            appId: _FRAME_APP_ID,
+            appInstanceId: tokenAppInstanceId(currentToken),
+            getToken: runtimeToken,
+          });
         } catch (e) {}
         const frameVersion = new URLSearchParams(window.location.search).get('v') || '0';
         // &v on the module URL is the SW offline cache-buster: the server /module
@@ -744,12 +835,9 @@
           showErr('Module error', 'The app module has no default export.');
           return;
         }
-        createRoot(document.getElementById('root')).render(
-          createElement(Fragment, null,
-            createElement(MountSignal),
-            createElement(Component, { appId: _FRAME_APP_ID, token })
-          )
-        );
+        mountedRoot = createRoot(document.getElementById('root'));
+        mountedComponent = Component;
+        renderMountedComponent();
         // frame-mounted is posted by MountSignal's passive effect (above),
         // which runs only after React COMMITS this first render. Posting
         // here would be premature: render() has merely been scheduled, and
@@ -779,13 +867,15 @@
         }
         return;
       }
-      if (msg.type === 'moebius:frame-init' && !initialized) {
+      if (msg.type === 'moebius:frame-init') {
+        acceptToken(msg.token);
+        if (initialized) return;
         initialized = true;
         if (typeof window.__mobiusHydrateLocalStorage === 'function') {
           window.__mobiusHydrateLocalStorage(msg.storage);
         }
         applyTheme(msg.themeCss, msg.bg);
-        loadModule(msg.token);
+        loadModule();
       }
     });
 

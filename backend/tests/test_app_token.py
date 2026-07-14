@@ -2,6 +2,8 @@
 
 import io
 
+from app import auth as token_auth
+
 
 def test_app_token_rejects_cross_site_request(client, auth):
   """An owner Bearer is not the opaque app-frame exception."""
@@ -33,6 +35,8 @@ def test_create_app_token(client, owner_token):
   }, headers={"Authorization": f"Bearer {owner_token}"})
   assert r.status_code == 200
   assert "token" in r.json()
+  claims = token_auth.decode_access_token(r.json()["token"])
+  assert claims["app_nonce"]
 
 
 def test_app_token_cannot_access_settings(client, owner_token):

@@ -223,7 +223,16 @@ export default function AppCanvas({
   // `token` undefined → the `if (!token)` branch rendered blank below despite
   // the app being fully cached. See lib/appToken.js for the full rationale and
   // the on-device-confirmed flap bug the latch fixes.
-  const cachedAppToken = readCachedAppToken(appId)
+  // Expiry is an online authorization boundary, not an offline cache boundary.
+  // The cached module key excludes the token and reconnect mints a fresh one;
+  // keeping the expired scoped token offline preserves the installation nonce
+  // without ever falling back to the long-lived owner credential.
+  const cachedAppToken = readCachedAppToken(
+    appId,
+    undefined,
+    Date.now(),
+    { allowExpired: !online },
+  )
   const liveToken = liveAppToken(appToken, online, cachedAppToken)
 
   useEffect(() => {
@@ -523,7 +532,10 @@ export default function AppCanvas({
       // top-level history sentinel so Android's swipe-back has something to
       // snapshot, and routes back-gestures to the iframe via moebius:nav-back.
       if (msg.type === 'moebius:nav-push') {
-        const ok = onNavPush?.(appId)
+        // A cached frame remains mounted while another app/chat/settings is
+        // visible. It may retire an entry it already owns, but it must never
+        // install a NEW top-level history entry over somebody else's view.
+        const ok = activeRef.current ? onNavPush?.(appId) : false
         // Echo the iframe's optional requestId on both ack and reject so the app
         // can correlate when multiple nav-pushes are in flight. Apps that don't
         // pass a requestId get undefined back (backwards compatible).

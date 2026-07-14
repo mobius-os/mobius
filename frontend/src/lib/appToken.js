@@ -35,6 +35,27 @@
  */
 import { clearCachedAppTokens } from './appFrameStorage.js'
 
+const APP_TOKEN_REFRESH_SKEW_MS = 5 * 60_000
+const APP_TOKEN_MIN_REFRESH_MS = 30_000
+const APP_TOKEN_FALLBACK_REFRESH_MS = 5 * 60_000
+
+// React Query calls this after every successful mint. Refresh shortly before
+// the JWT's actual expiry instead of relying on a fixed cache lifetime; hidden
+// AppCanvas siblings can remain mounted for days in the shell LRU.
+export function appTokenRefreshInterval(token, now = Date.now()) {
+  try {
+    const encoded = String(token || '').split('.')[1]
+    if (!encoded) return APP_TOKEN_FALLBACK_REFRESH_MS
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+    const expiresAt = Number(payload.exp) * 1000
+    if (!Number.isFinite(expiresAt)) return APP_TOKEN_FALLBACK_REFRESH_MS
+    return Math.max(APP_TOKEN_MIN_REFRESH_MS, expiresAt - now - APP_TOKEN_REFRESH_SKEW_MS)
+  } catch {
+    return APP_TOKEN_FALLBACK_REFRESH_MS
+  }
+}
+
 
 /**
  * The live (un-latched) token choice for this render.

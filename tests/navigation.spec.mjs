@@ -127,6 +127,11 @@ async function goBack(page) {
   await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 }
 
+async function goForward(page) {
+  await page.evaluate(() => history.forward())
+  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -466,6 +471,92 @@ test.describe('Drawer state machine — extended invariants', () => {
     // Toggle close: no history change, drawer closed.
     expect(afterToggle).toBe(beforeToggle)
     expect((await getNavState(page)).drawerOpen).toBe(false)
+  })
+
+  test('20. Back and Forward restore shell routes without reversing semantic direction', async ({ page }) => {
+    await setup(page)
+    const startId = (await getNavState(page)).activeChatId
+
+    // Build chat -> settings -> chat. The final chat may have the same id as
+    // the first; the view transition itself is the history edge under test.
+    await openDrawer(page)
+    await navigateToSettings(page)
+    await openDrawer(page)
+    await navigateToChat(page, 0)
+
+    const destinationState = await page.evaluate(() => history.state)
+    expect(destinationState).toMatchObject({
+      __mobiusNav: true,
+      kind: 'nav',
+      route: { view: 'chat' },
+    })
+    expect(Number.isInteger(destinationState.index)).toBe(true)
+
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+    expect((await getNavState(page)).activeChatId).toBe(startId)
+
+    // Before the indexed history model this first Forward either did nothing
+    // or called handleBack again and moved the visible UI farther backward.
+    await goForward(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+    await goForward(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
+
+    // Forward rebuilt the semantic edges, so Back works again normally.
+    await goBack(page)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('20b. Forward to an unconsumed drawer sentinel reopens the drawer', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await goBack(page)
+    expect((await getNavState(page)).drawerOpen).toBe(false)
+
+    await goForward(page)
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+
+    await goBack(page)
+    expect((await getNavState(page)).drawerOpen).toBe(false)
+  })
+
+  test('20c. revisiting a consumed app entry does not close nested state twice', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    await navigateToApp(page, 0)
+    const iframe = page.locator('iframe[data-app-id]').first()
+    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
+    const appId = await iframe.getAttribute('data-app-id')
+    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
+    if (!appFrame) test.skip(true, 'app frame did not load')
+
+    // Drive the same wire protocol a nested app route uses, while recording
+    // how many semantic closes the shell sends back to that exact frame.
+    await appFrame.evaluate((ownerId) => {
+      window.__mobiusBackCount = 0
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:nav-back') window.__mobiusBackCount += 1
+      })
+      window.parent.postMessage({ type: 'moebius:nav-push', appId: ownerId }, '*')
+    }, appId)
+    await page.waitForFunction(() => history.state?.kind === 'app')
+
+    await goBack(page) // consumes the app-local level
+    expect((await getNavState(page)).hasCanvas).toBe(true)
+    expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
+
+    await goForward(page) // physical entry returns; nested level cannot
+    await goBack(page) // must absorb, not close it again or over-pop the shell
+    expect((await getNavState(page)).hasCanvas).toBe(true)
+    expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
+
+    await goBack(page)
+    expect((await getNavState(page)).hasChat).toBe(true)
   })
 })
 

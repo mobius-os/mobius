@@ -244,7 +244,7 @@ imports `index.jsx`):
   ui/
     Chrome.jsx     # the shared `mobius-ui:` chrome (Header, Sheet, EmptyState, …) — all fenced
     <Feature>.jsx  # one file per view / feature
-  static/          # durable build assets (ignored by the watcher, not importable)
+  static/          # installer-owned assets; import logical x as ./static/x
 ```
 
 - **Keep the literal `export default` in `index.jsx`** — the compiler entry

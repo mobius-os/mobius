@@ -333,6 +333,46 @@ def test_install_static_site_assets_route_css_fonts_and_chunks(
   assert "text/html" not in bad_font_path.headers.get("content-type", "")
 
 
+def test_install_bundles_static_module_from_logical_destination(
+  client, auth, bypass_url_validation,
+):
+  """Logical static destination x is compiled from source path static/x."""
+  base = "https://static-module.test/repo/"
+  entry = (
+    "import label from './static/generated.js';\n"
+    "export default function App(){ return <div>{label}</div> }"
+  )
+  manifest = {
+    **MANIFEST_NEWS,
+    "id": "static-module",
+    "icon": None,
+    "storage_seeds": {},
+    "schedule": None,
+    "source_files": [],
+    "static_assets": {"generated.js": "build/generated.js"},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, entry.encode()),
+    base + "build/generated.js": (200, b"export default 'STATIC_MODULE_OK'"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    result = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert result.status_code == 201, result.text
+  bundle = (
+    Path(get_settings().data_dir)
+    / "compiled"
+    / f"app-{result.json()['id']}.js"
+  )
+  assert "STATIC_MODULE_OK" in bundle.read_text()
+
+
 def test_static_site_asset_update_removes_old_manifest_owned_files(
   client, auth, bypass_url_validation,
 ):
@@ -1534,6 +1574,7 @@ def test_install_rejects_slug_with_leading_dash(client, auth, bypass_url_validat
   "`whoami`",           # backtick command substitution
   "-flag */10 * * * *", # leading dash
   "0 10",               # too few cron fields
+  "0 0 * * * *",        # sixth field would be parsed as the command
 ])
 def test_install_rejects_malformed_cron(client, auth, bypass_url_validation, bad_expr):
   base = "https://x.test/cron/"

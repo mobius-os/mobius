@@ -137,18 +137,28 @@ function decodeJwtPayload(token) {
   } catch { return null }
 }
 
-export function readCachedAppToken(appId, storage, now = Date.now()) {
+export function readCachedAppToken(
+  appId,
+  storage,
+  now = Date.now(),
+  { allowExpired = false } = {},
+) {
   const store = storageOrNull(storage)
   if (!store) return undefined
   try {
     const token = store.getItem(tokenKey(appId))
     const claims = token && decodeJwtPayload(token)
-    const valid = claims?.scope === 'app' &&
-      String(claims.app_id) === String(appId) &&
-      Number.isFinite(Number(claims.exp)) &&
+    const exactApp = claims?.scope === 'app' &&
+      String(claims.app_id) === String(appId)
+    if (exactApp && allowExpired) return token
+    const unexpired = exactApp && Number.isFinite(Number(claims.exp)) &&
       Number(claims.exp) * 1000 > now + 30_000
-    if (valid) return token
-    store.removeItem(tokenKey(appId))
+    if (unexpired) return token
+    // An expired app-scoped token is still useful strictly offline: the service
+    // worker strips it from the cached module key, while its immutable app nonce
+    // keeps browser-local queues attributed to the right installation. Retain it
+    // for allowExpired callers; remove only malformed/cross-app credentials.
+    if (!exactApp) store.removeItem(tokenKey(appId))
   } catch {}
   return undefined
 }
@@ -158,6 +168,12 @@ export function cacheAppToken(appId, token, storage) {
   const claims = token && decodeJwtPayload(token)
   if (!store || claims?.scope !== 'app' || String(claims.app_id) !== String(appId)) return false
   try { store.setItem(tokenKey(appId), token); return true } catch { return false }
+}
+
+export function clearCachedAppToken(appId, storage) {
+  const store = storageOrNull(storage)
+  if (!store) return
+  try { store.removeItem(tokenKey(appId)) } catch {}
 }
 
 export function clearCachedAppTokens(storage) {

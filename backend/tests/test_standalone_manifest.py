@@ -308,6 +308,12 @@ def test_standalone_shell_wires_live_update_pill(client, owner_token):
   assert "'/api/apps/' + APP_ID + '/events'" in html
   assert "/api/events/system" not in html
   assert "startLiveUpdates" in html
+  assert "startLiveUpdates(runtimeToken)" in html
+  assert "getAppToken({ forceRefresh: true })" in html
+  assert "if (renderWithToken) renderWithToken(appToken)" in html
+  assert "mobius:app-token:" in html
+  assert "cacheScopedAppToken" in html
+  assert ": token;" not in html
   # The apply is a user tap that busts the ?v= cache key; the shell never
   # auto-reloads.
   assert "location.replace" in html

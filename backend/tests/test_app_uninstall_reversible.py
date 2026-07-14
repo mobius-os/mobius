@@ -284,6 +284,10 @@ def test_delete_app_data_wipes_storage_and_keeps_app(
   the app is still listed, and only the runtime data is gone."""
   app = _install(client, auth)
   app_id = app["id"]
+  old_token = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
+  ).json()["token"]
+  old_nonce = db.query(models.App).filter(models.App.id == app_id).one().token_nonce
   data_file = _seed_data(app_id, body="wipe-me")
   storage_dir = Path(get_settings().data_dir) / "apps" / str(app_id)
   assert data_file.exists()
@@ -300,6 +304,12 @@ def test_delete_app_data_wipes_storage_and_keeps_app(
   row = db.query(models.App).filter(models.App.id == app_id).first()
   assert row is not None
   assert row.deleted_at is None
+  assert row.token_nonce != old_nonce
+  assert client.put(
+    f"/api/storage/apps/{app_id}/stale.json",
+    json={"stale": True},
+    headers={"Authorization": f"Bearer {old_token}"},
+  ).status_code == 401
 
   # Still listed and still reachable (unlike an uninstall, the app stays).
   listed = client.get("/api/apps/", headers=auth).json()

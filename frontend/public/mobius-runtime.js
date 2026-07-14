@@ -75,6 +75,11 @@ const SIGNAL_DB_VERSION = 1
 const MAX_WRITE_OUTCOMES = 200
 const MAX_PENDING_SIGNALS = 500
 const MAX_PENDING_SIGNAL_BYTES = 2 * 1024 * 1024
+// The database is shared by every installed app. Per-app limits alone still
+// let a large catalog multiply origin usage without bound, so retain a second
+// owner-wide ceiling and evict the oldest telemetry across apps when needed.
+const MAX_GLOBAL_PENDING_SIGNALS = 2000
+const MAX_GLOBAL_PENDING_SIGNAL_BYTES = 8 * 1024 * 1024
 const SIGNAL_SEND_BATCH = 100
 
 // Per-blob ceiling for setBlob: rejected BEFORE any IDB/outbox/network write, so
@@ -110,6 +115,27 @@ function fetchBounded(url, init) {
   let timer
   if (ctrl) timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
   return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
+}
+
+// App-token fetch with one bounded refresh retry. Hosts implement
+// getToken({forceRefresh:true}) differently (the shell asks AppCanvas; the
+// standalone host remints with its owner token), while every runtime subsystem
+// gets the same auth lifecycle and never invents its own stale-token cache.
+async function fetchWithAppToken(getToken, url, init = {}, fetcher = fetch) {
+  const run = async (token) => {
+    if (!token) throw new Error('mobius: app token unavailable')
+    return fetcher(url, {
+      ...init,
+      headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` },
+    })
+  }
+  const token = await getToken()
+  let response = await run(token)
+  if (response.status !== 401) return response
+  const refreshed = await getToken({ forceRefresh: true })
+  if (!refreshed || refreshed === token) return response
+  response = await run(refreshed)
+  return response
 }
 
 export class DurableWriteError extends Error {
@@ -248,16 +274,43 @@ async function withStores(storeNames, mode, fn) {
 // fake-indexeddb + a mocked fetch/navigator under node:test
 // (mobiusRuntimeStore.test.js), the same way overlayPending exposes the
 // PURE read-your-writes logic. `init()` is the only production caller.
-export function makeStorage({ appId, getToken }) {
+export function makeStorage({ appId, appInstanceId = null, getToken }) {
+  const hostGetToken = getToken
+  getToken = async (options) => {
+    const token = await hostGetToken(options)
+    return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null
+  }
   const deadLetterListeners = new Set()
+  const instanceKey = appInstanceId || 'legacy'
+  // Generation identity is exact. A legacy record has no proof that it belongs
+  // to the current row after SQLite reuses a numeric id, while a legacy runtime
+  // must never see/delete nonce-stamped records from a newer installation.
+  // Quarantine ambiguity instead of guessing from client clocks or timestamps.
+  const belongsToInstance = (record) => (
+    record && record.appId === appId
+    && (appInstanceId
+      ? record.appInstanceId === appInstanceId
+      : !record.appInstanceId)
+  )
+  // Telemetry is non-load-bearing, so prefer dropping an ambiguous legacy
+  // record over attributing it to a different installation after SQLite reuses
+  // an app ID. Cached old runtimes can still drain their own legacy records;
+  // once a nonce-aware runtime loads it only handles nonce-stamped telemetry.
+  const belongsToSignalInstance = (record) => (
+    record && record.appId === appId
+    && (appInstanceId
+      ? record.appInstanceId === appInstanceId
+      : !record.appInstanceId)
+  )
 
-  function outcomeKey(writeId) { return appId + ':' + String(writeId) }
+  function outcomeKey(writeId) { return appId + ':' + instanceKey + ':' + String(writeId) }
 
   function outcomeFromOp(op, state, extra = {}) {
     const writeId = op.ver || op.seq
     return {
       key: outcomeKey(writeId),
       appId,
+      appInstanceId,
       state,
       path: op.path,
       seq: op.seq,
@@ -280,7 +333,7 @@ export function makeStorage({ appId, getToken }) {
       const cursor = e.target.result
       if (cursor) {
         const v = cursor.value
-        if (v && v.appId === appId) seen.push({ key: v.key, ts: v.ts || 0 })
+        if (belongsToInstance(v)) seen.push({ key: v.key, ts: v.ts || 0 })
         cursor.continue()
         return
       }
@@ -337,7 +390,7 @@ export function makeStorage({ appId, getToken }) {
         const cursor = e.target.result
         if (!cursor) return
         const rec = cursor.value
-        if (rec && rec.appId === appId && rec.state === 'rejected' && !rec.consumed) {
+        if (belongsToInstance(rec) && rec.state === 'rejected' && !rec.consumed) {
           try {
             cb({ path: rec.path, status: rec.status, refusedValue: rec.refusedValue, writeId: rec.writeId, ts: rec.ts })
             cursor.update({ ...rec, consumed: true })
@@ -374,7 +427,7 @@ export function makeStorage({ appId, getToken }) {
           return
         }
         const v = cursor.value
-        if (v.appId === appId && v.path === path) {
+        if (belongsToInstance(v) && v.path === path) {
           putOutcomeInStore(outcomeStore, outcomeFromOp(v, 'superseded'))
           cursor.delete()
         }
@@ -389,7 +442,7 @@ export function makeStorage({ appId, getToken }) {
   // still preserved — drainInner walks `seq` in order.)
   function enqueue(op) {
     return purgePath(op.path, (store, box) => {
-      const queued = { ...op, appId, ts: Date.now() }
+      const queued = { ...op, appId, appInstanceId, ts: Date.now() }
       const r = store.add(queued)
       r.onsuccess = () => { box.value = { ...queued, seq: r.result } }
     })
@@ -401,7 +454,7 @@ export function makeStorage({ appId, getToken }) {
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
         if (!cursor) return
-        if (cursor.value.appId === appId) box.value.push(cursor.value)
+        if (belongsToInstance(cursor.value)) box.value.push(cursor.value)
         cursor.continue()
       }
     })
@@ -417,7 +470,7 @@ export function makeStorage({ appId, getToken }) {
   // `${appId}:${path}` so one shared DB holds every app's mirror. `present`
   // distinguishes a cached null/404 (key exists, value null) from "never
   // fetched" (no key) — so offline we don't claim a value we never had.
-  function cacheKey(path) { return appId + ':' + path }
+  function cacheKey(path) { return appId + ':' + instanceKey + ':' + path }
 
   function cacheGet(path) {
     return withStore(CACHE_STORE, 'readonly', (store, box) => {
@@ -443,7 +496,7 @@ export function makeStorage({ appId, getToken }) {
   // or a native Blob (IndexedDB stores Blobs via structured clone).
   function cachePut(path, data, kind = 'json', contentType = null, ver = nextVer()) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, data, kind, contentType, present: data !== null, ver, ts: Date.now() })
+      store.put({ key: cacheKey(path), path, appId, appInstanceId, data, kind, contentType, present: data !== null, ver, ts: Date.now() })
     })
   }
 
@@ -452,7 +505,7 @@ export function makeStorage({ appId, getToken }) {
   // re-delete re-reads with the right type) + stamp a `ver` for the CAS.
   function cacheDelete(path, kind = null, ver = nextVer()) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, data: null, kind, contentType: null, present: false, ver, ts: Date.now() })
+      store.put({ key: cacheKey(path), path, appId, appInstanceId, data: null, kind, contentType: null, present: false, ver, ts: Date.now() })
     })
   }
 
@@ -478,7 +531,7 @@ export function makeStorage({ appId, getToken }) {
       g.onsuccess = () => {
         const cur = g.result
         if (cur && expectedVer != null && cur.ver === expectedVer) {
-          store.put({ key: cacheKey(path), path, appId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
+          store.put({ key: cacheKey(path), path, appId, appInstanceId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
           box.value = true
         }
       }
@@ -495,7 +548,7 @@ export function makeStorage({ appId, getToken }) {
       g.onsuccess = () => {
         const cur = g.result
         if (!cur || cur.ver == null) {
-          store.put({ key: cacheKey(path), path, appId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
+          store.put({ key: cacheKey(path), path, appId, appInstanceId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
           box.value = true
         }
       }
@@ -637,9 +690,8 @@ export function makeStorage({ appId, getToken }) {
   // throw 'AUTH' so the drain stops WITHOUT discarding the op (a fresh
   // token on the next trigger retries it).
   async function send(op) {
-    const token = await getToken()
     const url = `/api/storage/apps/${appId}/${op.path}`
-    const init = { method: op.method, headers: { Authorization: `Bearer ${token}` } }
+    const init = { method: op.method, headers: {} }
     if (op.method === 'PUT') {
       if (op.ifMatch) init.headers['If-Match'] = op.ifMatch
       if (op.ifNoneMatch) init.headers['If-None-Match'] = '*'
@@ -655,7 +707,7 @@ export function makeStorage({ appId, getToken }) {
         init.body = JSON.stringify(op.data)
       }
     }
-    const res = await fetch(url, init)   // network failure throws -> transient
+    const res = await fetchWithAppToken(getToken, url, init) // network failure throws -> transient
     const version = res.headers && typeof res.headers.get === 'function'
       ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
       : undefined
@@ -778,12 +830,14 @@ export function makeStorage({ appId, getToken }) {
     return _drainChain
   }
 
-  for (const ev of ['online', 'focus', 'pageshow']) {
-    window.addEventListener(ev, () => { drain(); drainSignals() })
-  }
-  document.addEventListener('visibilitychange', () => {
+  const drainOnWake = () => { drain(); drainSignals() }
+  const drainOnVisible = () => {
     if (document.visibilityState === 'visible') { drain(); drainSignals() }
-  })
+  }
+  for (const ev of ['online', 'focus', 'pageshow']) {
+    window.addEventListener(ev, drainOnWake)
+  }
+  document.addEventListener('visibilitychange', drainOnVisible)
 
   // The value the caller should see for a path RIGHT NOW: a pending outbox
   // write wins over the server/cache (read-your-writes), else the cache mirror,
@@ -848,7 +902,7 @@ export function makeStorage({ appId, getToken }) {
           box.value.sort((a, b) => a.queuedAt - b.queuedAt)
           return
         }
-        if (cursor.value.appId === appId) box.value.push(cursor.value)
+        if (belongsToSignalInstance(cursor.value)) box.value.push(cursor.value)
         cursor.continue()
       }
     })
@@ -876,8 +930,9 @@ export function makeStorage({ appId, getToken }) {
       if (Number.isFinite(seconds)) delay = Math.max(delay, seconds * 1000)
       else if (Number.isFinite(dateDelay)) delay = Math.max(delay, dateDelay)
     }
-    delay = Math.min(Math.max(delay, 1000), 5 * 60 * 1000)
-    _signalRetryDelay = Math.min(delay * 2, 5 * 60 * 1000)
+    const backoffDelay = Math.min(Math.max(_signalRetryDelay, 1000), 5 * 60 * 1000)
+    delay = Math.min(Math.max(delay, backoffDelay), 24 * 60 * 60 * 1000)
+    _signalRetryDelay = Math.min(backoffDelay * 2, 5 * 60 * 1000)
     _signalNextAttemptAt = Date.now() + delay
     _signalRetryTimer = setTimeout(() => {
       _signalRetryTimer = null
@@ -888,11 +943,9 @@ export function makeStorage({ appId, getToken }) {
 
   async function deliverSignalRecords(records) {
     try {
-      const token = await getToken()
-      const response = await fetch('/api/client-signal', {
+      const response = await fetchWithAppToken(getToken, '/api/client-signal', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ signals: records.map((record) => record.event) }),
@@ -903,9 +956,17 @@ export function makeStorage({ appId, getToken }) {
         _signalNextAttemptAt = 0
         return true
       }
-      if ([401, 403, 408, 429].includes(response.status) || response.status >= 500) {
+      // 404/405 are deployment-compatibility failures, not poison events: the
+      // platform serves rebuilt frontend assets before a backend restart, so a
+      // new runtime can briefly reach an old process without this route. Keep
+      // the durable queue instead of bisecting and deleting every singleton.
+      if ([401, 404, 405, 408, 429].includes(response.status) || response.status >= 500) {
         scheduleSignalRetry(response)
         return false
+      }
+      if (response.status === 403) {
+        await deleteSignals(records)
+        return true
       }
       // Isolate a poison/future-schema record instead of dropping an otherwise
       // valid 100-event batch. Only the irreducible rejected record is removed.
@@ -956,34 +1017,53 @@ export function makeStorage({ appId, getToken }) {
       for (const event of signals) {
         const serialized = JSON.stringify(event)
         store.put({
-          key: `${appId}:${event.id}`,
+          key: `${appId}:${appInstanceId || 'legacy'}:${event.id}`,
           appId,
+          appInstanceId,
           event,
           bytes: new Blob([serialized]).size,
           queuedAt: queuedAt++,
         })
       }
       const records = []
+      const ownRecords = []
       store.openCursor().onsuccess = (cursorEvent) => {
         const cursor = cursorEvent.target.result
         if (cursor) {
-          if (cursor.value.appId === appId) records.push(cursor.value)
+          records.push(cursor.value)
+          if (belongsToSignalInstance(cursor.value)) ownRecords.push(cursor.value)
           cursor.continue()
           return
         }
-        records.sort((a, b) => a.queuedAt - b.queuedAt)
-        let totalBytes = records.reduce((sum, record) => sum + (record.bytes || 0), 0)
-        let removeCount = Math.max(0, records.length - MAX_PENDING_SIGNALS)
+        const oldestFirst = (a, b) => (a.queuedAt || 0) - (b.queuedAt || 0)
+        const deleteKeys = new Set()
+
+        ownRecords.sort(oldestFirst)
+        let removeCount = Math.max(0, ownRecords.length - MAX_PENDING_SIGNALS)
+        let totalBytes = ownRecords.slice(removeCount)
+          .reduce((sum, record) => sum + (record.bytes || 0), 0)
         while (
-          removeCount < records.length
+          removeCount < ownRecords.length
           && totalBytes > MAX_PENDING_SIGNAL_BYTES
         ) {
-          totalBytes -= records[removeCount].bytes || 0
+          totalBytes -= ownRecords[removeCount].bytes || 0
           removeCount += 1
         }
-        for (const record of records.slice(0, removeCount)) {
-          store.delete(record.key)
+        for (const record of ownRecords.slice(0, removeCount)) deleteKeys.add(record.key)
+
+        const retained = records.filter((record) => !deleteKeys.has(record.key)).sort(oldestFirst)
+        let globalRemoveCount = Math.max(0, retained.length - MAX_GLOBAL_PENDING_SIGNALS)
+        let globalBytes = retained.slice(globalRemoveCount)
+          .reduce((sum, record) => sum + (record.bytes || 0), 0)
+        while (
+          globalRemoveCount < retained.length
+          && globalBytes > MAX_GLOBAL_PENDING_SIGNAL_BYTES
+        ) {
+          globalBytes -= retained[globalRemoveCount].bytes || 0
+          globalRemoveCount += 1
         }
+        for (const record of retained.slice(0, globalRemoveCount)) deleteKeys.add(record.key)
+        for (const key of deleteKeys) store.delete(key)
       }
     })
     drainSignals().catch(() => {})
@@ -997,14 +1077,15 @@ export function makeStorage({ appId, getToken }) {
   // bounds a pathological/looping cursor.
   async function listServer(prefix) {
     try {
-      const token = await getToken()
       const entries = []
       let cursor = null
       for (let guard = 0; guard < 10000; guard++) {
         const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
-        const res = await fetchBounded(
+        const res = await fetchWithAppToken(
+          getToken,
           `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          {},
+          fetchBounded,
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = await res.json()
@@ -1031,7 +1112,7 @@ export function makeStorage({ appId, getToken }) {
         const cursor = e.target.result
         if (!cursor) return
         const v = cursor.value
-        if (v.appId === appId && v.present) {
+        if (belongsToInstance(v) && v.present) {
           box.value.push({ path: v.path, kind: v.kind, contentType: v.contentType })
         }
         cursor.continue()
@@ -1107,10 +1188,14 @@ export function makeStorage({ appId, getToken }) {
   // any other non-OK → throw (transient/auth — the caller keeps the mirror).
   // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
   async function fetchValueWithVersion(path, kind = 'json', wantVersion = false) {
-    const token = await getToken()
-    const headers = { Authorization: `Bearer ${token}` }
+    const headers = {}
     if (wantVersion) headers['X-Mobius-Version'] = '1'
-    const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, { headers })
+    const res = await fetchWithAppToken(
+      getToken,
+      `/api/storage/apps/${appId}/${path}`,
+      { headers },
+      fetchBounded,
+    )
     const version = res.headers && typeof res.headers.get === 'function'
       ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
       : undefined
@@ -1409,7 +1494,42 @@ export function makeStorage({ appId, getToken }) {
     _drainSignals: drainSignals,
     _drain: drain,
     _notify: notify,
+    _destroy() {
+      for (const ev of ['online', 'focus', 'pageshow']) {
+        window.removeEventListener(ev, drainOnWake)
+      }
+      document.removeEventListener('visibilitychange', drainOnVisible)
+      if (_signalRetryTimer !== null) {
+        clearTimeout(_signalRetryTimer)
+        _signalRetryTimer = null
+      }
+      subscribers.clear()
+      deadLetterListeners.clear()
+    },
   }
+}
+
+// Explicit data wipe is the destructive lifecycle boundary for browser-local
+// app state. Soft uninstall deliberately does NOT call this: its server row,
+// nonce, storage tree, and Undo window all remain the same installation.
+export async function purgeAppRuntimeData(appId) {
+  const sameApp = (record) => record && String(record.appId) === String(appId)
+  const deleteMatching = (store) => {
+    store.openCursor().onsuccess = (event) => {
+      const cursor = event.target.result
+      if (!cursor) return
+      if (sameApp(cursor.value)) cursor.delete()
+      cursor.continue()
+    }
+  }
+  await Promise.all([
+    withStores([STORE, CACHE_STORE, OUTCOME_STORE], 'readwrite', (stores) => {
+      deleteMatching(stores[STORE])
+      deleteMatching(stores[CACHE_STORE])
+      deleteMatching(stores[OUTCOME_STORE])
+    }),
+    withSignalStore('readwrite', (store) => { deleteMatching(store) }),
+  ])
 }
 
 function stableStringify(value) {
@@ -1630,13 +1750,14 @@ function _signalServerBytes(value) {
   return bytes
 }
 
-export function makeSignal(appId, storage) {
+export function makeSignal(appId, storage, appInstanceId = null) {
   if (!storage || !appId || typeof storage._queueSignals !== 'function') return () => {}
 
   let _buf = []
   let _flushTimer = null
   let _flushInFlight = false
   let _flushAgain = false
+  let _visibilityHandler = null
 
   function _signalId() {
     try {
@@ -1653,6 +1774,9 @@ export function makeSignal(appId, storage) {
       occurred_at: new Date().toISOString(),
       name: name.trim().slice(0, SIGNAL_NAME_MAX),
       payload: {},
+    }
+    if (typeof appInstanceId === 'string' && appInstanceId) {
+      entry.app_instance_id = appInstanceId.slice(0, 64)
     }
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
       for (const [rawKey, rawValue] of Object.entries(payload).slice(0, SIGNAL_PAYLOAD_KEYS_MAX)) {
@@ -1730,9 +1854,10 @@ export function makeSignal(appId, storage) {
     _hooksRegistered = true
     try {
       window.addEventListener('pagehide', _flushNow)
-      document.addEventListener('visibilitychange', () => {
+      _visibilityHandler = () => {
         if (document.visibilityState === 'hidden') _flushNow()
-      })
+      }
+      document.addEventListener('visibilitychange', _visibilityHandler)
     } catch (e) {}
   }
 
@@ -1747,6 +1872,23 @@ export function makeSignal(appId, storage) {
     } catch (e) {
       // signal() must never propagate exceptions
     }
+  }
+
+  signal._destroy = () => {
+    if (_flushTimer !== null) {
+      clearTimeout(_flushTimer)
+      _flushTimer = null
+    }
+    if (_hooksRegistered) {
+      try { window.removeEventListener('pagehide', _flushNow) } catch (e) {}
+      try {
+        if (_visibilityHandler) {
+          document.removeEventListener('visibilitychange', _visibilityHandler)
+        }
+      } catch (e) {}
+    }
+    _hooksRegistered = false
+    _visibilityHandler = null
   }
 
   return signal
@@ -1857,43 +1999,11 @@ function makeChat({ appId, getToken, storage }) {
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
   // The ordinary /api/chats create route is owner-only and intentionally
   // leaves created_by_app_id NULL.
-  // /api/app-chats is APP-TOKEN-ONLY: the create + the resume PATCH both 403 an
-  // owner JWT ("Use POST /api/chats for owner-created chats." / "App chat
-  // metadata may only be changed by an app token."). The in-shell app frame's
-  // getToken returns the OWNER JWT (app-frame.html posts the shell token), so
-  // calling /api/app-chats with it 403d — surfacing as the embedded chat's
-  // "create/update failed (403)". Mint a short-lived app-scoped token for THIS
-  // app (the owner JWT is allowed to mint one for any of its apps via
-  // /api/auth/app-token) and use it for the whole app-chat lifecycle. A
-  // STANDALONE host's getToken already returns an app token; if the mint fails
-  // there we fall back to it (still app-scoped, so app-chats accepts it).
-  // Cached; re-minted on a 401 (the 8-hour app token expired mid-session).
-  let _appChatToken = null
-  async function appChatToken(refresh) {
-    if (_appChatToken && !refresh) return _appChatToken
-    const owner = await getToken()
-    try {
-      const res = await fetch('/api/auth/app-token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${owner}` },
-        body: JSON.stringify({ app_id: Number(appId) }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        if (data && data.token) { _appChatToken = data.token; return _appChatToken }
-      }
-    } catch (e) { /* fall through to the host token */ }
-    return owner
-  }
-
-  // Call an /api/app-chats endpoint with the app-scoped token, re-minting once on
-  // a 401 (the app token expired mid-session). init.headers is merged so the
-  // caller sets Content-Type without clobbering Authorization.
+  // Hosts now expose one refreshable app-token broker. Keep app-chat on that
+  // same authority instead of trying to mint an app token with another app
+  // token (the owner-only mint endpoint correctly rejects that with 403).
   async function appChatFetch(url, init = {}) {
-    const withAuth = (t) => ({ ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${t}` } })
-    let res = await fetch(url, withAuth(await appChatToken()))
-    if (res.status === 401) res = await fetch(url, withAuth(await appChatToken(true)))
-    return res
+    return fetchWithAppToken(getToken, url, init)
   }
 
   async function listChats(opts = {}) {
@@ -2762,9 +2872,51 @@ if (typeof window !== 'undefined') {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function init({ appId, getToken }) {
-  const storage = makeStorage({ appId, getToken })
-  window.mobius = {
+function appTokenClaims(token) {
+  try {
+    const encoded = String(token || '').split('.')[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+  } catch (e) {
+    return null
+  }
+}
+
+function tokenMatchesRuntime(token, appId, appInstanceId) {
+  const claims = appTokenClaims(token)
+  if (!claims || claims.scope !== 'app' || String(claims.app_id) !== String(appId)) {
+    return false
+  }
+  const tokenInstance = typeof claims.app_nonce === 'string' && claims.app_nonce
+    ? claims.app_nonce
+    : null
+  return appInstanceId ? tokenInstance === appInstanceId : tokenInstance === null
+}
+
+let _runtimeContext = null
+
+export function init({ appId, appInstanceId = null, getToken }) {
+  const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
+  if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
+    // Hosts may replace their token broker after a refresh. Keep one runtime and
+    // one listener set, but route future requests through the newest function.
+    _runtimeContext.tokenRef.current = getToken
+    return _runtimeContext.api
+  }
+  if (_runtimeContext) {
+    _runtimeContext.signal?._destroy?.()
+    _runtimeContext.storage?._destroy?.()
+  }
+
+  const tokenRef = { current: getToken }
+  const scopedToken = async (options) => {
+    const token = await tokenRef.current(options)
+    return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null
+  }
+  const storage = makeStorage({ appId, appInstanceId, getToken: scopedToken })
+  const signal = makeSignal(appId, storage, appInstanceId)
+  const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
     // In the in-shell iframe AppCanvas forwards the shell's /api/health probe
@@ -2790,11 +2942,13 @@ export function init({ appId, getToken }) {
     // the React they already import — `const useDocument =
     // window.mobius.createUseDocument(React)`.
     createUseDocument: (React) => createUseDocument(storage, React),
-    signal: makeSignal(appId, storage),
-    chat: makeChat({ appId, getToken, storage }),
+    signal,
+    chat: makeChat({ appId, getToken: scopedToken, storage }),
     nav: makeNav(),
     split: makeSplit(),
   }
+  window.mobius = api
+  _runtimeContext = { identityKey, tokenRef, storage, signal, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive
@@ -2805,7 +2959,7 @@ export function init({ appId, getToken }) {
       navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {})
     }
   } catch (e) {}
-  return window.mobius
+  return api
 }
 
 // # Smells / notes
@@ -2817,11 +2971,9 @@ export function init({ appId, getToken }) {
 //   logout clears `mobius-*` CacheStorage but the OUTBOX/CACHE IndexedDB is a
 //   separate DB — confirm logout also deletes it (delOutboxDb handles the
 //   outbox DB; the cache store rides the same DB, so it's covered).
-// - The standalone host passes a getToken that returns the boot-time
-//   app token (or owner JWT fallback). On a long offline window the app
-//   token can expire; the owner JWT fallback still authenticates as
-//   owner, so the drain succeeds, but a future refinement could re-mint
-//   the app token at drain time.
+// - The standalone and in-shell hosts both provide a refreshable app-token
+//   broker. Runtime fetches retry one 401 through getToken({forceRefresh:true});
+//   queued writes remain intact if refresh is temporarily offline.
 // - setBlob enforces a per-blob size cap (MAX_BLOB_BYTES) BEFORE any IDB/outbox
 //   write, but the read-through cache has NO total-size eviction yet. A true LRU
 //   needs a lastAccessed field + index the cache store lacks (cacheGet never

@@ -7,10 +7,10 @@ import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, apiFetch, BASE } from '../../api/client.js'
+import { api, apiFetch, BASE, clearAppRuntimeData } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
-import { pushNavEntry, replaceNavEntry } from '../../lib/navHistory.js'
+import { replaceNavEntry } from '../../lib/navHistory.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
@@ -19,6 +19,7 @@ import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
+import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
@@ -1373,22 +1374,7 @@ export default function Shell() {
       }
     }
 
-    // Push nav stack so back returns to the previous view (skip
-    // automatic calls — bootstrap or chat-deletion-induced re-create).
-    // If the drawer was open, its sentinel becomes this nav's back-
-    // target (no new pushState needed). Otherwise, push our own
-    // sentinel so back returns to the previous view rather than
-    // exiting the PWA.
-    if (draft || forceNew || drawerPushedRef.current) {
-      if (!drawerPushedRef.current) pushNavEntry('nav')
-      drawerPushedRef.current = false
-      navStackRef.current.push({
-        view: activeViewRef.current,
-        chatId: activeChatIdRef.current,
-        appId: activeAppIdRef.current,
-      })
-    }
-    closeDrawer()
+    const recordsHistory = !!(draft || forceNew || drawerPushedRef.current)
     if (draft) {
       const draftText = String(draft)
       try {
@@ -1403,8 +1389,15 @@ export default function Shell() {
         }
       } catch {}
     }
-    setActiveView('chat')
-    setActiveChatId(chatId)
+    // Keep history writes inside useNavigation so the entry gets its route,
+    // unique identity, and monotonic cursor synchronously. The former direct
+    // push left an immediate Back/Forward race before React's route effect ran.
+    if (recordsHistory) navTo('chat', { chatId })
+    else {
+      closeDrawer()
+      setActiveView('chat')
+      setActiveChatId(chatId)
+    }
     if (focusComposer) requestComposerFocus(chatId)
   }
   // Keep the latest-newChat ref current so handleAppError's crash-report
@@ -1559,6 +1552,14 @@ export default function Shell() {
       showToast("Couldn't delete app data.", { variant: 'error' })
       return
     }
+    // The server rotated this app's immutable storage generation under the
+    // write lock. Unmount the old runtime before clearing its local mirror and
+    // token so no old-generation queue can refresh into the empty generation.
+    setAppCache(prev => prev.filter(cachedId => cachedId !== id))
+    clearAppFrameStorage(id)
+    clearCachedAppToken(id)
+    await clearAppRuntimeData(id)
+    await appQueries.token.invalidate(queryClient, id)
     await refreshApps()
     showToast('App data deleted')
   }
