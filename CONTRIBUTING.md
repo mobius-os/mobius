@@ -28,6 +28,17 @@ CI is `.github/workflows/test.yml`; the commands below mirror it.
 
 ## Landing a session branch
 
+Install the repository's shared privacy and quality gates once after cloning,
+and re-run the installer after pulling hook changes:
+
+```bash
+scripts/install-hooks.sh
+```
+
+The roots `docs`, `demo-logs`, `.claude`, `.pm`, `AGENTS.md`, and `CLAUDE.md`
+are private workspace state. Keep them outside the public clone (local symlinks
+are ignored), never force-add them, and never bypass a privacy hook failure.
+
 Parallel work should land through `scripts/land.sh` from the session worktree.
 It refuses dirty or detached checkouts, backs up the branch tip under
 `origin/preserve/session-*`, rebases onto the latest `origin/main`, then pushes

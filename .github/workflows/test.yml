@@ -23,6 +23,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Reject private workspace paths
+        run: scripts/check-private-paths.sh
+      - name: Test local privacy gates
+        run: scripts/test-git-privacy-gates.sh
+
   backend:
     runs-on: ubuntu-latest
     # The full backend suite is now large enough that cold hosted runners can
