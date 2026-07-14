@@ -121,26 +121,23 @@ services:
     image: ${MOBIUS_IMAGE:-mobius-test:ci}
     profiles: ["test"]
     volumes:
-      - ./backend/app:/app/app
-      - ./backend/tests:/app/tests
-      # memeval/ is the package the test_memeval_* suites import; mount it so the
-      # compose pytest path matches CI (which runs `cd backend && pytest`).
-      - ./backend/memeval:/app/memeval
-      # describe-tree.py + entrypoint + register_app are imported by
-      # tests; mount the live scripts dir so renames/new scripts are
-      # picked up without rebuilding the image.
-      - ./backend/scripts:/app/scripts
-      - ./frontend/public/app-frame.html:/app/app-frame.html
+      # Mount one coherent checkout at a non-runtime path and run exactly like
+      # CI (`cd backend && pytest`). Mounting only app/tests/scripts at /app
+      # mixed live tests with baked recovery, frontend, root scripts, and build
+      # metadata from another revision; repo-root tests then resolved `/` and
+      # produced a large false-failure cluster.
+      - ./:/workspace
     environment:
       - SECRET_KEY=test-secret-key-at-least-32-characters-long
       - DATABASE_URL=sqlite:////tmp/test.db
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
+      - MOBIUS_BUILD_INFO_PATH=/workspace/.test-build-info-does-not-exist.json
       # Bootstrap fetches the curated store manifest from GitHub on
       # first boot. Tests must not depend on outbound network — set
       # this so ensure_store_installed() returns immediately.
       - MOEBIUS_SKIP_BOOTSTRAP=1
-    working_dir: /app
+    working_dir: /workspace/backend
     entrypoint: ["python", "-m", "pytest", "tests/", "-v"]
 
 volumes:
