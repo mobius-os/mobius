@@ -517,6 +517,89 @@ _platform_bootstrap() {
   echo "Platform layer: clone complete; serving /data/platform/backend."
 }
 
+_platform_seed_test_checkout() {
+  # docker-compose.test.yml mounts the checkout read-only at /workspace. The
+  # image may have been built without a BUILD_SHA (notably build-push-action),
+  # so its baked clone can legitimately point at origin/main instead of the PR
+  # merge under test. Seed the disposable test volume from the mounted checkout
+  # before normal platform selection, making backend imports and the warm
+  # frontend watcher use the same revision as the tests.
+  [ "${MOBIUS_TEST_RUNTIME:-0}" = "1" ] || return 0
+  _test_source=${MOBIUS_TEST_PLATFORM_SOURCE:-}
+  case "$_test_source" in
+    /*) ;;
+    *)
+      echo "TEST RUNTIME FATAL: MOBIUS_TEST_PLATFORM_SOURCE must be an absolute path." >&2
+      return 1
+      ;;
+  esac
+  if [ ! -d "$_test_source/.git" ] || [ ! -d "$_test_source/backend/app" ]; then
+    echo "TEST RUNTIME FATAL: $_test_source is not a complete git checkout." >&2
+    return 1
+  fi
+  _test_head=$(git -c safe.directory="$_test_source" -C "$_test_source" \
+    rev-parse --verify HEAD 2>/dev/null) || {
+    echo "TEST RUNTIME FATAL: cannot resolve mounted checkout HEAD." >&2
+    return 1
+  }
+  _expected_sha=${BUILD_SHA:-unknown}
+  if printf '%s' "$_expected_sha" | grep -Eq '^[0-9a-fA-F]{40}$' &&
+     [ "$_test_head" != "$_expected_sha" ]; then
+    echo "TEST RUNTIME FATAL: mounted HEAD $_test_head != BUILD_SHA $_expected_sha." >&2
+    return 1
+  fi
+
+  rm -rf /data/platform.test-seeding.* 2>/dev/null || true
+  _test_seeding="/data/platform.test-seeding.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  _test_archive="${_test_seeding}.tar"
+  mkdir -p "$_test_seeding"
+  # Copy only the committed tree (not host node_modules/build output), then the
+  # real git metadata so /api/version and runtime git operations see exact HEAD.
+  if ! git -c safe.directory="$_test_source" -C "$_test_source" \
+       archive --format=tar -o "$_test_archive" HEAD ||
+     ! tar -xf "$_test_archive" -C "$_test_seeding"; then
+    echo "TEST RUNTIME FATAL: could not copy mounted checkout tree." >&2
+    rm -rf "$_test_seeding" "$_test_archive" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$_test_archive"
+  if ! cp -a "$_test_source/.git" "$_test_seeding/.git"; then
+    echo "TEST RUNTIME FATAL: could not copy mounted checkout metadata." >&2
+    rm -rf "$_test_seeding" 2>/dev/null || true
+    return 1
+  fi
+  chown -R mobius:mobius "$_test_seeding" 2>/dev/null || true
+  su -s /bin/sh mobius -c "
+    cd '$_test_seeding/frontend' || exit 1
+    [ -e node_modules ] || [ -L node_modules ] ||
+      ln -s /app/shell-src/node_modules node_modules
+    mkdir -p dist
+    cp -a /app/static/. dist/
+    printf '%s\n' '$_test_head' > '$_test_seeding/.baked-sha'
+    git -C '$_test_seeding' rev-parse --verify HEAD >/dev/null
+  " || {
+    echo "TEST RUNTIME FATAL: copied checkout setup failed." >&2
+    rm -rf "$_test_seeding" 2>/dev/null || true
+    return 1
+  }
+  if ! _platform_import_probe_dir "$_test_seeding/backend"; then
+    echo "TEST RUNTIME FATAL: copied checkout failed the import probe." >&2
+    rm -rf "$_test_seeding" 2>/dev/null || true
+    return 1
+  fi
+
+  # This path is reachable only in the explicitly disposable test runtime.
+  # Replace rather than reuse the named volume so a prior run cannot leak an
+  # older platform checkout into this test run.
+  rm -rf /data/platform
+  if ! mv -T "$_test_seeding" /data/platform; then
+    echo "TEST RUNTIME FATAL: could not install copied checkout." >&2
+    rm -rf "$_test_seeding" 2>/dev/null || true
+    return 1
+  fi
+  echo "Test runtime: seeded /data/platform at $_test_head."
+}
+
 _platform_use_direct() {
   _use_platform=1
   _serve_source=platform
@@ -543,6 +626,13 @@ _platform_use_baked() {
   ln -sfn "$_baked_app" /app/app
   _restore_baked_dir_if_symlink /app/scripts "$_baked_scripts"
 }
+
+if [ "${MOBIUS_TEST_RUNTIME:-0}" = "1" ]; then
+  _platform_seed_test_checkout || exit 1
+elif [ -n "${MOBIUS_TEST_PLATFORM_SOURCE:-}" ]; then
+  echo "TEST RUNTIME FATAL: source override requires MOBIUS_TEST_RUNTIME=1." >&2
+  exit 1
+fi
 
 chown -R mobius:mobius /data/platform 2>/dev/null || true
 
@@ -572,7 +662,7 @@ printf '%s\n' "$_serve_source" > /tmp/serving-source
 printf '%s\n' "$_served_sha" > /tmp/serving-sha
 chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
-if [ "$_use_platform" -eq 1 ]; then
+if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # Slice B deploy=rebase reconcile. A deploy ships a new image AND advances
   # canonical origin/main; fetch origin and replay the local edits onto the new
   # version NOW, before uvicorn imports the code, so the update goes live this
