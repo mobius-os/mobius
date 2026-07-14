@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
+import {
+  DRAWER_CLOSE_FALLBACK_MS,
+  clearDrawerGestureStyles,
+} from '../../lib/drawerLifecycle.js'
 import InstallSheet from './InstallSheet.jsx'
 import './Drawer.css'
 
@@ -283,6 +287,41 @@ export default function Drawer({
   // Movement (px) beyond which a gesture is a swipe, not a tap.
   const SWIPE_THRESHOLD = 10
 
+  // The panel's swipe position is an imperative, frame-by-frame DOM write.
+  // React's `open` prop remains authoritative: if navigation closes the drawer
+  // before the browser delivers touchend/touchcancel, clear that stale write in
+  // a layout effect (before paint). Otherwise the inline translateX can keep a
+  // now-inert drawer visibly stranded over the live app forever.
+  useLayoutEffect(() => {
+    if (open) return
+    clearDrawerGestureStyles(drawerRef.current)
+    dragStart.current = null
+    swipingRef.current = false
+  }, [open])
+
+  // Keep the scrim hit-testable while the panel is sliding away. `open` flips
+  // false at the START of the 250ms close transition; dropping pointer-events
+  // in that same render exposes the chat/app while drawer pixels are still on
+  // screen. transitionend is the normal release, with a timeout fallback for
+  // reduced-motion or an interrupted compositor transition.
+  const [scrimBlocking, setScrimBlocking] = useState(open)
+  useLayoutEffect(() => {
+    if (open) setScrimBlocking(true)
+  }, [open])
+  useEffect(() => {
+    if (open || !scrimBlocking) return undefined
+    const timer = setTimeout(
+      () => setScrimBlocking(false),
+      DRAWER_CLOSE_FALLBACK_MS,
+    )
+    return () => clearTimeout(timer)
+  }, [open, scrimBlocking])
+
+  function handleDrawerTransitionEnd(e) {
+    if (open || e.target !== e.currentTarget || e.propertyName !== 'transform') return
+    setScrimBlocking(false)
+  }
+
   function onTouchStart(e) {
     if (!open || e.touches.length !== 1) return
     swipingRef.current = false
@@ -397,7 +436,7 @@ export default function Drawer({
   return (
     <>
       <div
-        className={`drawer-overlay ${open ? 'drawer-overlay--visible' : ''}`}
+        className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
         onPointerDown={handleOverlayPointerDown}
       />
       {/* React 19 reflects the boolean `inert` prop to the boolean
@@ -417,6 +456,7 @@ export default function Drawer({
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
         onTouchCancel={onTouchCancel}
+        onTransitionEnd={handleDrawerTransitionEnd}
       >
         <div className="drawer__body">
 
