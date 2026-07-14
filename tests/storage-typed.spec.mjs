@@ -10,6 +10,14 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8030'
 
+function stubAppToken(appId) {
+  const claims = Buffer.from(JSON.stringify({
+    scope: 'app',
+    app_id: String(appId),
+  })).toString('base64url')
+  return `stub.${claims}.stub`
+}
+
 // Install an in-memory /api/storage backend: PUT stores {body,ct} by path; GET
 // returns it (404 if absent); DELETE removes. `mode` lets a test force offline
 // (abort) or a fatal 422. Returns handles to flip mode + inspect.
@@ -69,11 +77,12 @@ async function installStore(page, opts = {}) {
 
 async function initRuntime(page, appId) {
   await page.goto(`${BASE}/shell/`)
-  await page.evaluate(async (id) => {
+  const token = stubAppToken(appId)
+  await page.evaluate(async ({ appId, token }) => {
     await new Promise((res) => { const r = indexedDB.deleteDatabase('mobius-outbox'); r.onsuccess = r.onerror = r.onblocked = () => res() })
     const rt = await import('/mobius-runtime.js')
-    rt.init({ appId: id, getToken: async () => 'stub-token' })
-  }, appId)
+    rt.init({ appId, getToken: async () => token })
+  }, { appId, token })
 }
 
 test('json round-trip + back-compat get/set', async ({ page }) => {
