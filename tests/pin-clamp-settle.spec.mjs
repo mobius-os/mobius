@@ -58,6 +58,41 @@ async function routeStream(page, events) {
     }))
 }
 
+/** Install a deterministic, genuinely chunked SSE source before navigation.
+ *  `page.route().fulfill({body})` delivers the whole body atomically, which
+ *  cannot exercise a keyboard-close event BETWEEN the final text frame and
+ *  `done`. Each array entry is one stream connection; each tuple is
+ *  [delayMs, event]. Normal fetch remains untouched for every other route. */
+async function installChunkedStreams(page, streams) {
+  await page.addInitScript((streamSpecs) => {
+    const realFetch = window.fetch.bind(window)
+    let streamIndex = 0
+    window.fetch = (input, init) => {
+      const url = String(input?.url || input)
+      if (!/\/api\/chats\/[^/]+\/stream$/.test(url)) {
+        return realFetch(input, init)
+      }
+      const spec = streamSpecs[streamIndex++] || []
+      const encoder = new TextEncoder()
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          for (const [delayMs, event] of spec) {
+            setTimeout(() => {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+              )
+              if (event.type === 'done') controller.close()
+            }, delayMs)
+          }
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }))
+    }
+  }, streams)
+}
+
 async function newChat(page) {
   await page.evaluate(() => {
     const btn = document.querySelector('[aria-expanded]')
@@ -172,4 +207,51 @@ test('Deep second send pins flush to top after the post-send layout settle (no h
   // below the top (a permanent clamp the RO never compensates).
   expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
   expect(m.lastUserVisualTop).toBeLessThanOrEqual(10)
+})
+
+test('Keyboard close cannot retire a pin before a short stream settles', async ({ page }) => {
+  await installChunkedStreams(page, [
+    [
+      [0, { type: 'catch_up_done' }],
+      [40, { type: 'text', content: 'First response line. '.repeat(90) }],
+      [400, { type: 'done' }],
+    ],
+    [
+      [0, { type: 'catch_up_done' }],
+      [60, { type: 'text', content: 'OK.' }],
+      // Keep the short live frame open long enough to close the simulated
+      // keyboard before terminal promotion swaps live → settled markup.
+      [1500, { type: 'done' }],
+    ],
+  ])
+  await setup(page, { width: 426, height: 860 })
+  await newChat(page)
+
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  await gestureToBottom(page)
+
+  // Match the real mobile order: the composer opens the keyboard (short
+  // viewport), send pins there, then blur closes the keyboard while the reply
+  // is still streaming. The grow-only fullViewH reservation intentionally
+  // makes the pin look away from the PHYSICAL bottom while the keyboard is
+  // open; that temporary geometry must not be mistaken for reader intent.
+  await page.setViewportSize({ width: 426, height: 560 })
+  await sendMessage(page, 'Second deep message')
+  await expect(page.locator('.chat__cursor')).toBeVisible({ timeout: 5000 })
+
+  const pinnedWithKeyboard = await measure(page)
+  expect(pinnedWithKeyboard.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(pinnedWithKeyboard.lastUserVisualTop).toBeLessThanOrEqual(10)
+
+  await page.setViewportSize({ width: 426, height: 860 })
+  const pinnedAfterKeyboardClose = await measure(page)
+  expect(pinnedAfterKeyboardClose.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(pinnedAfterKeyboardClose.lastUserVisualTop).toBeLessThanOrEqual(10)
+
+  await waitStreamDone(page)
+  const settled = await measure(page)
+  expect(settled.lastUserText).toBe('Second deep message')
+  expect(settled.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(settled.lastUserVisualTop).toBeLessThanOrEqual(10)
 })
