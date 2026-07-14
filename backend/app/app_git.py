@@ -85,6 +85,9 @@ _GITIGNORE = "\n".join([
   "dist/",
   ".build/",
   "node_modules/",
+  "# Python app jobs compile beside source; bytecode is runtime cache, not source.",
+  "__pycache__/",
+  "*.py[cod]",
   "# Manifest static_assets are install-managed (re-fetched from the manifest,",
   "# tracked in .mobius-static-assets.json), not edited source — keep both the",
   "# prebuilt bundles/binaries AND the manifest that lists them out of per-app",
@@ -136,6 +139,8 @@ _MANAGED_RUNTIME_PATHS = (
   "reflection-brief-template.html",
   "fork-chat.sh",
   "fork-session.sh",
+  ":(glob)**/__pycache__/**",
+  ":(glob)**/*.py[cod]",
 )
 
 _EXCLUDE_BEGIN = "# BEGIN MOBIUS MANAGED IGNORE RULES"

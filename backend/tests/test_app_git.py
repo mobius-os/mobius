@@ -199,6 +199,12 @@ def test_origin_repo_refresh_preserves_custom_info_exclude(tmp_path):
   (source_dir / "README.md.mobius-drop-bak").write_text("old\n", encoding="utf-8")
   app_git._run(source_dir, "add", "-f", "README.md.mobius-drop-bak")
   app_git._run(source_dir, "commit", "-q", "-m", "old tracked backup")
+  pycache = source_dir / "__pycache__"
+  pycache.mkdir()
+  bytecode = pycache / "memory_store.cpython-312.pyc"
+  bytecode.write_bytes(b"runtime bytecode\0")
+  app_git._run(source_dir, "add", "-f", str(bytecode.relative_to(source_dir)))
+  app_git._run(source_dir, "commit", "-q", "-m", "old tracked bytecode")
   (source_dir / "api.js").write_text("export const api = true\n", encoding="utf-8")
 
   app_git.commit_local(source_dir, "local edit")
@@ -210,10 +216,16 @@ def test_origin_repo_refresh_preserves_custom_info_exclude(tmp_path):
   assert (source_dir / ".gitignore").read_text(encoding="utf-8") == "node_modules/\n"
   assert (source_dir / "last-run.json").read_text(encoding="utf-8") == "{}\n"
   assert (source_dir / "README.md.mobius-drop-bak").read_text(encoding="utf-8") == "old\n"
+  assert bytecode.read_bytes() == b"runtime bytecode\0"
   tracked = set(app_git._run(source_dir, "ls-files").stdout.split())
   assert "api.js" in tracked
   assert "last-run.json" not in tracked
   assert "README.md.mobius-drop-bak" not in tracked
+  assert str(bytecode.relative_to(source_dir)) not in tracked
+  assert app_git._run(
+    source_dir, "check-ignore", str(bytecode.relative_to(source_dir)),
+    check=False,
+  ).returncode == 0
 
 
 def test_origin_repo_refresh_drops_stale_managed_gitignore(tmp_path):
