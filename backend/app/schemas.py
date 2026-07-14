@@ -148,6 +148,11 @@ class AppInstall(BaseModel):
   reviewed_capability_digest: str | None = Field(
     default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
   )
+  # Optional binding for a pre-update source review. If the manifest or any
+  # executable source byte changes before Apply, install rejects before writes.
+  reviewed_source_digest: str | None = Field(
+    default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
 
 
 class AppPreviewOut(BaseModel):
@@ -219,6 +224,21 @@ class UpdatePreviewOut(BaseModel):
   conflict_paths: list[str] = Field(default_factory=list)
   conflicts: list[ConflictFile] = Field(default_factory=list)
   upstream_diff: str | None = None
+
+
+class UpdateCandidatePreviewOut(BaseModel):
+  """Incoming published source compared with the last installed upstream."""
+
+  app_id: int
+  upstream_version: str | None = None
+  # The installed upstream base used for the comparison. This is intentionally
+  # not the candidate's remote SHA: synthetic manifest installs have no remote
+  # commit, but both package shapes share the same source-diff contract.
+  upstream_commit: str | None = None
+  upstream_diff: str | None = None
+  source_digest: str = Field(
+    min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+  )
 
 
 class UpdateCheckOut(BaseModel):

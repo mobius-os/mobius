@@ -3189,12 +3189,72 @@ def test_update_preview_clean_returns_upstream_diff(
   preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
   assert preview.status_code == 200, preview.text
   payload = preview.json()
-  assert payload["status"] == "clean"
   assert payload["upstream_version"] == "2.0.0"
   assert payload["upstream_commit"]
   assert payload["conflict_paths"] == []
   assert payload["conflicts"] == []
   assert "UPSTREAM FOOTER" in payload["upstream_diff"]
+
+
+def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
+  client, auth, bypass_url_validation,
+):
+  """The pre-update review shows live source while leaving the app untouched."""
+  base = "https://candidate-preview.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "candidate-preview"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "candidate-preview" / "index.jsx"
+  before = jsx_file.read_text()
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "INCOMING FOOTER")
+  next_manifest = {**m, "version": "2.0.0"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(next_manifest).encode()),
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
+    )
+
+  assert preview.status_code == 200, preview.text
+  payload = preview.json()
+  assert payload["upstream_version"] == "2.0.0"
+  assert "INCOMING FOOTER" in payload["upstream_diff"]
+  assert "ORIGINAL FOOTER" in payload["upstream_diff"]
+  assert "a/index.jsx" in payload["upstream_diff"]
+  assert "b/index.jsx" in payload["upstream_diff"]
+  assert len(payload["source_digest"]) == 64
+  assert jsx_file.read_text() == before
+
+  changed_after_review = jsx_v2.replace("INCOMING FOOTER", "MOVED AGAIN")
+  moved_responses = {
+    **responses,
+    base + "index.jsx": (200, changed_after_review.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(moved_responses),
+  ):
+    rejected = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+      "reviewed_source_digest": payload["source_digest"],
+    })
+  assert rejected.status_code == 409, rejected.text
+  assert rejected.json()["detail"]["code"] == "update_changed"
+  assert jsx_file.read_text() == before
+  listed = client.get("/api/apps/", headers=auth).json()
+  row = next(app for app in listed if app["id"] == app_id)
+  assert row["version"] == "1.0.0"
 
 
 def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(

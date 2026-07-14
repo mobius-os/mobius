@@ -892,6 +892,39 @@ def _install_candidate_digest(
   return digest.hexdigest()
 
 
+def _source_review_digest(
+  *,
+  manifest: dict,
+  entry_bytes: bytes,
+  bundled_job: bytes | None,
+  source_files: dict[str, bytes],
+) -> str:
+  """Bind an owner-reviewed diff to the manifest and executable source bytes."""
+  digest = hashlib.sha256()
+
+  def add(label: str, value: bytes) -> None:
+    label_bytes = label.encode("utf-8")
+    digest.update(len(label_bytes).to_bytes(4, "big"))
+    digest.update(label_bytes)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+  add(
+    "manifest",
+    json.dumps(
+      manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"),
+  )
+  add("entry", entry_bytes)
+  add("job-present", b"1" if bundled_job is not None else b"0")
+  if bundled_job is not None:
+    add("job", bundled_job)
+  for rel in sorted(source_files):
+    add("source-path", rel.encode("utf-8"))
+    add("source-bytes", source_files[rel])
+  return digest.hexdigest()
+
+
 def clear_pending_conflict_update(source_dir: str | Path) -> None:
   shutil.rmtree(
     Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,
@@ -1698,6 +1731,7 @@ async def install_from_manifest(
   raw_base: str | None,
   source: str = "url",
   reviewed_capability_digest: str | None = None,
+  reviewed_source_digest: str | None = None,
   expected_app_id: int | None = None,
   expected_upstream_commit: str | None = None,
   expected_candidate_digest: str | None = None,
@@ -1869,6 +1903,26 @@ async def install_from_manifest(
     source_files=source_files_fetched,
     seeds=seeds_fetched,
   )
+  source_review_digest = _source_review_digest(
+    manifest=manifest,
+    entry_bytes=entry_bytes,
+    bundled_job=bundled_job,
+    source_files=source_files_fetched,
+  )
+  if (
+    reviewed_source_digest is not None
+    and source_review_digest != reviewed_source_digest
+  ):
+    raise HTTPException(
+      409,
+      {
+        "code": "update_changed",
+        "message": (
+          "The app source changed after it was reviewed. "
+          "Refresh the update preview and try again."
+        ),
+      },
+    )
   replay_fields = (
     expected_app_id,
     expected_upstream_commit,

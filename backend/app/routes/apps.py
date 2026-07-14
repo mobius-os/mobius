@@ -700,6 +700,7 @@ async def install_app(
         raw_base=body.raw_base,
         source="store",
         reviewed_capability_digest=body.reviewed_capability_digest,
+        reviewed_source_digest=body.reviewed_source_digest,
       )
     )
   # Notify the Shell to refetch its app list so a new install (or an
@@ -804,6 +805,83 @@ def _upstream_version(repo: Path, upstream_commit: str | None) -> str | None:
     return None
   match = re.match(r"install v(.+) from .+", proc.stdout.strip())
   return match.group(1) if match else None
+
+
+def _write_preview_tree(root: Path, files: dict[str, bytes]) -> None:
+  """Materialize a trusted git/source tree below ``root`` for no-index diff.
+
+  Git tree paths and manifest ``source_files`` have already passed their
+  respective validators, but keep the containment check here as a final guard:
+  this helper writes attacker-controlled package paths into a temporary
+  directory and must never let ``..`` escape it.
+  """
+  resolved_root = root.resolve()
+  for rel, data in files.items():
+    destination = (root / rel).resolve()
+    if destination == resolved_root or resolved_root not in destination.parents:
+      raise HTTPException(400, "Update preview contains an invalid source path.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+
+
+def _diff_preview_trees(
+  previous: dict[str, bytes], candidate: dict[str, bytes],
+) -> str:
+  """Return a stable unified diff without touching the installed app repo."""
+  tmp_parent = Path(tempfile.mkdtemp(prefix="mobius-update-candidate-"))
+  old_root = tmp_parent / "old"
+  new_root = tmp_parent / "new"
+  old_root.mkdir()
+  new_root.mkdir()
+  try:
+    _write_preview_tree(old_root, previous)
+    _write_preview_tree(new_root, candidate)
+    proc = subprocess.run(
+      [
+        "git", "diff", "--no-index", "--binary", "--no-ext-diff",
+        "--src-prefix=a/", "--dst-prefix=b/", "old", "new",
+      ],
+      cwd=tmp_parent,
+      capture_output=True,
+      text=True,
+      timeout=30,
+      check=False,
+    )
+    if proc.returncode not in (0, 1):
+      raise HTTPException(500, "Could not build the update preview.")
+    # ``git diff --no-index old new`` includes the comparison-directory names
+    # in its paths. Strip only those generated prefixes so the client sees the
+    # same app-relative paths that will be updated.
+    return proc.stdout.replace("a/old/", "a/").replace("b/new/", "b/")
+  finally:
+    shutil.rmtree(tmp_parent, ignore_errors=True)
+
+
+def _fetched_source_tree(fetched) -> dict[str, bytes]:
+  """The runtime source subset fetched by ``fetch_upstream_source``."""
+  tree = {"index.jsx": fetched.entry_bytes, **fetched.source_files}
+  if fetched.job_name and fetched.job_bytes is not None:
+    tree[fetched.job_name] = fetched.job_bytes
+  return tree
+
+
+def _recorded_runtime_paths(previous_tree: dict[str, bytes]) -> set[str]:
+  """Recover the prior cloned package's declared runtime-source paths."""
+  paths = {"index.jsx"}
+  raw_manifest = previous_tree.get("mobius.json")
+  if raw_manifest is None:
+    return paths
+  try:
+    manifest = json.loads(raw_manifest)
+  except (UnicodeDecodeError, json.JSONDecodeError):
+    return paths
+  for rel in manifest.get("source_files") or []:
+    if isinstance(rel, str):
+      paths.add(rel)
+  schedule = manifest.get("schedule")
+  if isinstance(schedule, dict) and isinstance(schedule.get("job"), str):
+    paths.add(schedule["job"])
+  return paths
 
 
 def _git_path_exists(repo: Path, name: str) -> bool:
@@ -1193,6 +1271,97 @@ async def update_preview(
     conflict_paths=conflict_paths,
     conflicts=conflicts,
     upstream_diff=upstream_diff,
+  )
+
+
+@router.get(
+  "/{app_id}/update-candidate-preview",
+  response_model=schemas.UpdateCandidatePreviewOut,
+)
+async def update_candidate_preview(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Preview the currently published app source before applying an update.
+
+  Unlike ``update-preview`` (which describes the upstream commit already
+  recorded on the instance for conflict resolution), this endpoint fetches the
+  live manifest/source and diffs it against the pristine source from the last
+  successful install. It never advances refs, writes the working tree, or
+  changes the App row, so opening the App Store review is genuinely read-only.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    caller = (
+      db.query(models.App)
+      .filter(models.App.id == principal.app_id)
+      .first()
+    )
+    if caller is None:
+      raise HTTPException(status_code=401, detail="App not found.")
+    if not bool(caller.manage_apps):
+      raise HTTPException(
+        status_code=403,
+        detail=(
+          "This app needs permissions.manage_apps=true in its manifest "
+          "to preview updates for other apps."
+        ),
+      )
+
+  from app import install
+
+  app = live_app_or_404(db, app_id)
+  manifest_url = app.manifest_url
+  source_dir = app.source_dir
+  upstream_commit = app.upstream_commit
+  if not manifest_url or not source_dir:
+    raise HTTPException(400, "App has no update source.")
+  repo = Path(source_dir)
+  if not app_git.is_repo(repo) or not app_git.ref_exists(
+    repo, app_git.UPSTREAM_BRANCH,
+  ):
+    raise HTTPException(400, "App is not a git-backed install.")
+
+  # Release the request session before upstream network I/O, matching the
+  # update-check route's connection-pool discipline.
+  db.close()
+  fetch_manifest_url = install._canonical_base(manifest_url) + "/mobius.json"
+  fetched = await install.fetch_upstream_source(fetch_manifest_url)
+  candidate_tree = _fetched_source_tree(fetched)
+  source_digest = install._source_review_digest(
+    manifest=fetched.manifest,
+    entry_bytes=fetched.entry_bytes,
+    bundled_job=fetched.job_bytes,
+    source_files=fetched.source_files,
+  )
+
+  async with fs_locks.source_dir_lock(str(repo)):
+    previous_tree = await asyncio.to_thread(
+      app_git.read_ref_tree, repo, app_git.UPSTREAM_BRANCH,
+    )
+    cloned = await asyncio.to_thread(app_git.has_origin, repo)
+  # Synthetic installs add one managed .gitignore that is not package source.
+  # For real-origin installs, restrict the comparison to the fetched runtime
+  # source set: the install UI reviews what Möbius actually compiles/executes,
+  # not repository-only README or workflow churn.
+  if cloned:
+    runtime_paths = set(candidate_tree) | _recorded_runtime_paths(previous_tree)
+    previous_source = {
+      rel: data for rel, data in previous_tree.items() if rel in runtime_paths
+    }
+  else:
+    previous_source = {
+      rel: data for rel, data in previous_tree.items() if rel != ".gitignore"
+    }
+  upstream_diff = await asyncio.to_thread(
+    _diff_preview_trees, previous_source, candidate_tree,
+  )
+  return schemas.UpdateCandidatePreviewOut(
+    app_id=app_id,
+    upstream_version=str(fetched.manifest.get("version") or "") or None,
+    upstream_commit=upstream_commit,
+    upstream_diff=upstream_diff,
+    source_digest=source_digest,
   )
 
 
