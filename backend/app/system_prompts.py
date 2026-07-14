@@ -1,10 +1,11 @@
-"""Compose the base agent prompt with live installed-app fragments.
+"""Capture immutable per-chat prompts from installed-app fragments.
 
 An app opts into this privileged surface by declaring a root-level
 ``system_prompt`` markdown file in its manifest.  The installer stores only the
-validated basename; composition reads the bytes from the app's installed source
-tree and, critically, selects only live rows.  Soft-uninstall therefore removes
-the fragment by construction even though the app source and user data remain.
+validated basename. At chat start, composition reads the bytes from live app
+rows and stores the exact result as a content-addressed snapshot. Installation,
+update, and soft-uninstall therefore affect chats started afterwards; an
+already-started chat keeps the prompt it began with.
 
 Möbius is single-owner software: installing an app is the trust decision.  This
 module does not invent a second allowlist that can drift from the owner's app
@@ -15,11 +16,14 @@ continue to make the declaration visible.
 from __future__ import annotations
 
 import logging
+import hashlib
 import os
 import stat
 from pathlib import Path
+from typing import Callable
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app import models
 from app.config import get_settings
@@ -121,3 +125,98 @@ def compose_system_prompt(base: str, db: Session) -> str:
   if not fragments:
     return base
   return base.rstrip() + "\n\n" + "\n\n".join(fragments) + "\n"
+
+
+def read_prompt_snapshot(chat: models.Chat, db: Session) -> str | None:
+  """Return the immutable prompt already selected for ``chat``, if any."""
+  snapshot_id = chat.system_prompt_snapshot_id
+  if not snapshot_id:
+    return None
+  row = db.get(models.SystemPromptSnapshot, snapshot_id)
+  if row is None:
+    # Recomposition here would silently change an established chat's
+    # instructions. Treat a broken reference as durable-state corruption.
+    raise RuntimeError(
+      f"missing system prompt snapshot {snapshot_id} for chat {chat.id}"
+    )
+  content = row.content
+  if hashlib.sha256(content.encode("utf-8")).hexdigest() != snapshot_id:
+    raise RuntimeError(
+      f"corrupt system prompt snapshot {snapshot_id} for chat {chat.id}"
+    )
+  return content
+
+
+def prompt_for_chat(
+  chat: models.Chat,
+  base: str,
+  db: Session,
+  *,
+  persist: bool,
+) -> str:
+  """Return a chat-stable prompt, capturing live app fragments once.
+
+  Empty/unstarted chats have no snapshot yet. ``persist=False`` is a read-only
+  preview for observability; the first real turn passes ``persist=True`` and
+  records the exact composed bytes before invoking a provider.
+  """
+  existing = read_prompt_snapshot(chat, db)
+  if existing is not None:
+    return existing
+  composed = compose_system_prompt(base, db)
+  if not persist:
+    return composed
+  digest = hashlib.sha256(composed.encode("utf-8")).hexdigest()
+  if db.get(models.SystemPromptSnapshot, digest) is None:
+    try:
+      # Different chats can start concurrently with identical prompt bytes.
+      # A SAVEPOINT contains the unique-key race without rolling back the chat
+      # turn's outer transaction; the winner's row is then reused below.
+      with db.begin_nested():
+        db.add(models.SystemPromptSnapshot(id=digest, content=composed))
+        db.flush()
+    except IntegrityError:
+      pass
+  row = db.get(models.SystemPromptSnapshot, digest)
+  if row is None or row.content != composed:
+    raise RuntimeError("could not persist immutable system prompt snapshot")
+  chat.system_prompt_snapshot_id = digest
+  db.flush()
+  return composed
+
+
+def backfill_started_chat_prompt_snapshots(
+  db: Session,
+  base_for_chat: Callable[[models.Chat], str],
+) -> int:
+  """Freeze the effective prompt for chats started before this schema landed.
+
+  New chats snapshot inside the turn transition. During the rollout only,
+  established rows initially have a NULL snapshot; capturing them at boot
+  prevents a later app install/uninstall from changing those existing chats
+  before their next message. Empty drafts deliberately remain live previews.
+  """
+  run_chat_ids = {
+    row[0]
+    for row in db.query(models.ChatRun.chat_id).distinct().all()
+  }
+  rows = (
+    db.query(models.Chat)
+    .filter(models.Chat.system_prompt_snapshot_id.is_(None))
+    .order_by(models.Chat.created_at.asc(), models.Chat.id.asc())
+    .all()
+  )
+  captured = 0
+  for chat in rows:
+    started = bool(
+      chat.messages
+      or chat.pending_messages
+      or chat.session_id
+      or chat.run_status
+      or chat.id in run_chat_ids
+    )
+    if not started:
+      continue
+    prompt_for_chat(chat, base_for_chat(chat), db, persist=True)
+    captured += 1
+  return captured

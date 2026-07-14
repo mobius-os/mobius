@@ -839,16 +839,21 @@ def get_chat_agent_context(
     _custom_system_prompt,
     _latest_compaction_brief,
     _read_skill_text,
-    _with_system_app_prompts,
   )
   from app.compaction import load_cumulative_summary
   from app.providers import get_skill_origin
+  from app.system_prompts import prompt_for_chat
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
   overrides = _chat_settings_dict(chat)
   custom = _custom_system_prompt(overrides)
-  system_prompt = _with_system_app_prompts(custom) if custom else _read_skill_text()
+  system_prompt = prompt_for_chat(
+    chat,
+    custom if custom else _read_skill_text(),
+    db,
+    persist=False,
+  )
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
@@ -867,7 +872,10 @@ def get_chat_agent_context(
   recent_chats = recent_chat_block.text or None
   return {
     "system_prompt": system_prompt,
-    "system_prompt_source": "custom" if custom else "skill",
+    "system_prompt_source": (
+      "snapshot" if chat.system_prompt_snapshot_id
+      else ("custom_preview" if custom else "skill_preview")
+    ),
     "system_prompt_origin": "custom" if custom else get_skill_origin(),
     # `memory_block` remains as a compatibility alias for an older shell. The
     # owner-facing name is now precise: this is only bounded recent-chat
@@ -1601,8 +1609,9 @@ async def patch_app_chat(
 ):
   """Updates runtime metadata for a chat owned by the calling app.
 
-  This lets an embedded app re-assert its custom system prompt for an
-  already-created saved chat, instead of relying on a one-time create body.
+  An embedded app may configure its custom base prompt while the chat is still
+  empty. Once the first turn starts, the complete platform + system-app prompt
+  is immutable for that chat; changing it requires a new chat.
   """
   if principal.app_id is None:
     raise HTTPException(
@@ -1613,6 +1622,26 @@ async def patch_app_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    if body.system_prompt is not None:
+      active_run = db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+      ).first()
+      if (
+        chat.system_prompt_snapshot_id
+        or chat.run_status
+        or chat.messages
+        or chat.pending_messages
+        or chat.session_id
+        or active_run is not None
+      ):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Cannot change a system prompt after a chat has started. "
+            "Create a new app chat instead."
+          ),
+        )
     target_provider = body.provider or chat.provider or "claude"
     if (
       body.model

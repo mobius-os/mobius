@@ -9,10 +9,13 @@ from fastapi import HTTPException
 import pytest
 
 from app import models
-from app import chat
 from app.config import get_settings
 from app.install import _validate_manifest
-from app.system_prompts import compose_system_prompt
+from app.system_prompts import (
+  backfill_started_chat_prompt_snapshots,
+  compose_system_prompt,
+  prompt_for_chat,
+)
 from tests.test_apps_install import (  # noqa: F401
   JSX,
   _bypass_cron_scaffold,
@@ -128,14 +131,129 @@ def test_install_persists_system_prompt_capability(
   assert "RETRIEVE ON DEMAND" in compose_system_prompt("BASE", db)
 
 
-def test_system_app_suffix_also_applies_to_custom_chat_prompts(monkeypatch):
+def test_system_app_suffix_also_applies_to_custom_chat_prompts(monkeypatch, db):
   monkeypatch.setattr(
     "app.system_prompts.compose_system_prompt",
     lambda base, db: base + "\n\n<!-- installed system app: memory -->\nRECALL\n",
   )
-  assert chat._with_system_app_prompts("CUSTOM") == (
+  row = models.Chat(id="custom", title="Custom", messages=[])
+  db.add(row)
+  db.commit()
+
+  assert prompt_for_chat(row, "CUSTOM", db, persist=True) == (
     "CUSTOM\n\n<!-- installed system app: memory -->\nRECALL\n"
   )
+
+
+def test_chat_prompt_is_content_addressed_and_stable_after_uninstall(db):
+  source = Path(get_settings().data_dir) / "apps" / "memory"
+  source.mkdir(parents=True)
+  fragment = source / "memory-core.md"
+  fragment.write_text("MEMORY V1", encoding="utf-8")
+  app = models.App(
+    name="Memory", slug="memory", source_dir=str(source),
+    system_prompt_file="memory-core.md", system_app=True,
+  )
+  first = models.Chat(id="first", title="First", messages=[])
+  second = models.Chat(id="second", title="Second", messages=[])
+  db.add_all([app, first, second])
+  db.commit()
+
+  captured = prompt_for_chat(first, "BASE", db, persist=True)
+  db.commit()
+  assert "MEMORY V1" in captured
+  digest = first.system_prompt_snapshot_id
+  assert digest
+
+  fragment.write_text("MEMORY V2", encoding="utf-8")
+  app.deleted_at = datetime.now(UTC)
+  db.commit()
+
+  # Existing chat resolves the immutable bytes; a chat starting after the
+  # uninstall sees only the base prompt.
+  assert prompt_for_chat(first, "CHANGED BASE", db, persist=True) == captured
+  assert first.system_prompt_snapshot_id == digest
+  assert prompt_for_chat(second, "BASE", db, persist=True) == "BASE"
+  db.commit()
+
+
+def test_system_app_update_changes_only_chats_started_after_update(db):
+  source = Path(get_settings().data_dir) / "apps" / "updated-memory"
+  source.mkdir(parents=True)
+  fragment = source / "memory-core.md"
+  fragment.write_text("MEMORY V1", encoding="utf-8")
+  app = models.App(
+    name="Memory", slug="updated-memory", source_dir=str(source),
+    system_prompt_file="memory-core.md", system_app=True,
+  )
+  first = models.Chat(id="before-update", title="Before", messages=[])
+  second = models.Chat(id="after-update", title="After", messages=[])
+  db.add_all([app, first, second])
+  db.commit()
+
+  before = prompt_for_chat(first, "BASE", db, persist=True)
+  db.commit()
+  fragment.write_text("MEMORY V2", encoding="utf-8")
+
+  after = prompt_for_chat(second, "BASE", db, persist=True)
+  db.commit()
+
+  assert "MEMORY V1" in before and "MEMORY V2" not in before
+  assert "MEMORY V2" in after and "MEMORY V1" not in after
+  assert prompt_for_chat(first, "CHANGED", db, persist=False) == before
+  assert first.system_prompt_snapshot_id != second.system_prompt_snapshot_id
+
+
+def test_identical_chat_prompts_share_one_snapshot_row(db):
+  first = models.Chat(id="first-shared", title="First", messages=[])
+  second = models.Chat(id="second-shared", title="Second", messages=[])
+  db.add_all([first, second])
+  db.commit()
+
+  assert prompt_for_chat(first, "BASE", db, persist=True) == "BASE"
+  assert prompt_for_chat(second, "BASE", db, persist=True) == "BASE"
+  db.commit()
+
+  assert first.system_prompt_snapshot_id == second.system_prompt_snapshot_id
+  assert db.query(models.SystemPromptSnapshot).count() == 1
+
+
+def test_unstarted_chat_context_preview_does_not_freeze_live_fragments(db):
+  source = Path(get_settings().data_dir) / "apps" / "preview-memory"
+  source.mkdir(parents=True)
+  fragment = source / "memory-core.md"
+  fragment.write_text("V1", encoding="utf-8")
+  app = models.App(
+    name="Memory", slug="preview-memory", source_dir=str(source),
+    system_prompt_file="memory-core.md", system_app=True,
+  )
+  row = models.Chat(id="preview", title="Preview", messages=[])
+  db.add_all([app, row])
+  db.commit()
+
+  assert "V1" in prompt_for_chat(row, "BASE", db, persist=False)
+  assert row.system_prompt_snapshot_id is None
+  fragment.write_text("V2", encoding="utf-8")
+  assert "V2" in prompt_for_chat(row, "BASE", db, persist=False)
+
+
+def test_rollout_backfill_freezes_started_chats_but_not_empty_drafts(db):
+  started = models.Chat(
+    id="legacy-started", title="Started", messages=[{"role": "user", "text": "hi"}],
+  )
+  empty = models.Chat(id="legacy-empty", title="Empty", messages=[])
+  db.add_all([started, empty])
+  db.commit()
+
+  count = backfill_started_chat_prompt_snapshots(
+    db, lambda row: "CUSTOM" if row.id == "legacy-started" else "BASE",
+  )
+  db.commit()
+
+  assert count == 1
+  assert started.system_prompt_snapshot_id
+  assert prompt_for_chat(started, "CHANGED", db, persist=False) == "CUSTOM"
+  assert empty.system_prompt_snapshot_id is None
 
 
 def test_non_system_app_fragment_is_inert(db):

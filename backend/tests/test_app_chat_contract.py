@@ -149,6 +149,30 @@ def test_app_chat_create_and_patch_store_custom_system_prompt(
   assert "model" not in row.agent_settings_json
 
 
+def test_app_chat_cannot_change_system_prompt_after_it_started(
+  client, owner_token, db,
+):
+  _, app_token = _make_app(client, owner_token, "fixed-prompt")
+  created = client.post(
+    "/api/app-chats",
+    json={"system_prompt": "FIRST"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert created.status_code == 201, created.text
+  chat_id = created.json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.messages = [{"role": "user", "content": "started"}]
+  db.commit()
+
+  changed = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"system_prompt": "SECOND"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert changed.status_code == 409
+  assert "new app chat" in changed.json()["detail"]
+
+
 def test_app_chat_list_can_filter_by_scope(client, owner_token):
   _, app_token = _make_app(client, owner_token, "scoped-chatter")
   _, other_app_token = _make_app(client, owner_token, "other-scoped-chatter")

@@ -723,40 +723,26 @@ def is_draining() -> bool:
   return draining
 
 
-def _with_system_app_prompts(base: str) -> str:
-  """Append currently-live system-app fragments to one turn's prompt."""
-  try:
-    from app.database import SessionLocal
-    from app.system_prompts import compose_system_prompt
-    with SessionLocal() as db:
-      return compose_system_prompt(base, db)
-  except Exception:
-    _get_logger().warning(
-      "could not compose installed-app system prompts", exc_info=True
-    )
-    return base
-
-
 def _read_skill_text() -> str:
-  """Return the cached platform constitution plus live app fragments.
+  """Return only the cached platform constitution.
 
-  The tracked platform constitution has a process-lifetime cache. App-owned
-  fragments are composed from live rows for every turn, so install, update,
-  and uninstall take effect on the next turn without a platform restart.
-  An edit to `skill/core.md` is picked up on the next server restart; platform
-  update status treats that tracked file as restart-worthy. If the live
-  platform checkout is unavailable, resolution falls back to the image-baked
-  constitution for degraded boot.
+  App-owned fragments are composed and snapshotted separately when a chat
+  starts its first turn. Installing, updating, or uninstalling a system app
+  therefore affects chats started afterwards, never an existing conversation.
+  The tracked platform constitution has a process-lifetime cache, so an edit
+  or platform update takes effect after server restart. If the live checkout
+  is unavailable, resolution falls back to the image-baked constitution for
+  degraded boot.
   """
   global _SKILL_TEXT_CACHE
   if _SKILL_TEXT_CACHE is not None:
-    return _with_system_app_prompts(_SKILL_TEXT_CACHE)
+    return _SKILL_TEXT_CACHE
   skill_path = get_skill_path()
   if skill_path is not None:
     try:
       text = skill_path.read_text(encoding="utf-8")
       _SKILL_TEXT_CACHE = text
-      return _with_system_app_prompts(text)
+      return text
     except (OSError, FileNotFoundError):
       pass
   # No skill file found — cache the empty fallback so subsequent calls
@@ -770,7 +756,7 @@ def _read_skill_text() -> str:
     "without a system prompt"
   )
   _SKILL_TEXT_CACHE = ""
-  return _with_system_app_prompts("")
+  return ""
 
 
 def current_run_generation(chat_id: str) -> int | float:
@@ -4276,19 +4262,43 @@ async def _run_chat_impl_with_db(
         )
         db.rollback()
 
-  # A per-chat custom prompt replaces the base constitution, but installed
-  # system-app contributions still append to it: system apps apply to every
-  # chat, including embedded/custom-prompt app chats.
+  # A per-chat custom prompt replaces the base constitution, but system-app
+  # contributions are still part of the ONE prompt snapshot selected when the
+  # chat starts. Provider SDKs receive those same immutable bytes on every
+  # request; live app state is never recomposed for an established chat.
   runner_agent_settings = agent_settings
   custom_prompt = _custom_system_prompt(chat_overrides)
-  system_prompt = (
-    _with_system_app_prompts(custom_prompt) if custom_prompt
-    else _read_skill_text()
-  )
+  from app.system_prompts import prompt_for_chat
+  try:
+    system_prompt = prompt_for_chat(
+      chat_row,
+      custom_prompt if custom_prompt else _read_skill_text(),
+      db,
+      persist=True,
+    )
+    db.commit()
+  except Exception:
+    log.exception("failed to snapshot system prompt chat_id=%s", chat_id)
+    db.rollback()
+    bc.publish({
+      "type": "error",
+      "message": "Could not preserve this chat's system prompt snapshot.",
+    })
+    disposition = await _terminal_setup_error_cleanup(
+      chat_id, run_token or "", run_gen,
+    )
+    bc.publish({"type": "done"})
+    clear_active_broadcast_if(bc)
+    bc.mark_completed()
+    if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
+      _publish_chat_run_finished(chat_id)
+    db.close()
+    return disposition
+
   # A close() below detaches chat_row. Precompute the only provider-time value
   # that still reads it (the bounded Claude fallback for a missing CLI
   # transcript) while the Session can refresh attributes expired by the
-  # first-send settings commit.
+  # prompt/settings snapshot commits.
   resumed_context_fallback = (
     _build_resumed_context(chat_row)
     if provider.name == "Claude Code" and session_id
