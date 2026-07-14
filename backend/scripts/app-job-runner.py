@@ -18,6 +18,8 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 TOKEN_FILE = DATA_DIR / "service-token.txt"
+MOBIUS_UID = 1000
+MOBIUS_GID = 1000
 
 
 def _start_ticks(pid: int) -> int:
@@ -130,11 +132,15 @@ def _sandboxed_command(
   command = [
     bwrap,
     "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    # The supervisor is root so it can build the namespace, but app agents must
+    # write durable shared/app state as the same user that owns /data and runs
+    # pm-commit. Root-owned mode-0600 Memory traces made Reflection's snapshot
+    # fail at git-add time even though the agent turn itself reported success.
+    "--uid", str(MOBIUS_UID), "--gid", str(MOBIUS_GID),
     "--ro-bind", "/", "/",
     "--tmpfs", str(DATA_DIR),
     "--tmpfs", "/home", "--tmpfs", "/root", "--tmpfs", "/run",
     "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-    "--dir", "/tmp/home",
     "--dir", str(DATA_DIR / "apps"),
     "--ro-bind", str(resolved.parent), str(resolved.parent),
     "--bind", str(storage), str(storage),
@@ -231,7 +237,9 @@ def run() -> int:
     if isinstance(context.get("capability_contract"), dict):
       background = context["capability_contract"].get("background")
       if isinstance(background, dict) and background.get("agent") is True:
-        child_env["HOME"] = "/tmp/home"
+        # /tmp is the namespace's writable tmpfs. /tmp/home is created by bwrap
+        # as root and is not writable after the deliberate uid drop above.
+        child_env["HOME"] = "/tmp"
     child = subprocess.Popen(
       command,
       cwd=str(resolved.parent),

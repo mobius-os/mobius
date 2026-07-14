@@ -203,6 +203,7 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
 
   assert command[0] == "/usr/bin/bwrap"
   joined = " ".join(command)
+  assert "--uid 1000 --gid 1000" in joined
   assert f"--tmpfs {data_dir}" in joined
   assert f"--ro-bind {source} {source}" in joined
   assert f"--bind {data_dir / 'apps' / '57'} {data_dir / 'apps' / '57'}" in joined
@@ -237,6 +238,10 @@ def test_background_agent_sandbox_enforces_reviewed_mounts(monkeypatch):
       "printf confined >\"$DATA_DIR/apps/57/proof.txt\"\n",
       encoding="utf-8",
     )
+    if os.geteuid() == 0:
+      # Match production's /data ownership before the sandbox drops root.
+      for path in (data_dir, data_dir / "apps", storage, data_dir / "shared", shared):
+        os.chown(path, 1000, 1000)
     monkeypatch.setattr(runner, "DATA_DIR", data_dir)
     context = {
       "primary": None,
@@ -260,6 +265,7 @@ def test_background_agent_sandbox_enforces_reviewed_mounts(monkeypatch):
 
     assert result.returncode == 0, result.stderr
     assert (storage / "proof.txt").read_text(encoding="utf-8") == "confined"
+    assert (storage / "proof.txt").stat().st_uid == 1000
 
 
 def _db_app(db, name):
