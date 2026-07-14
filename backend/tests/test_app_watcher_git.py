@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app import app_git
+from app import app_git, install
 from app.config import get_settings
 
 
@@ -142,3 +142,79 @@ async def test_watcher_holds_prior_bundle_while_non_entry_conflict_unresolved(
     assert row.jsx_source == base_jsx
   finally:
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_resolved_conflict_materializes_static_then_replays_full_update(
+  client, owner_token, monkeypatch,
+):
+  """Resolution compiles against candidate assets and resumes install phases."""
+  import asyncio
+  import app.models as models
+  from app.app_watcher import _JsxHandler, _source_dir_for_changed_path
+  from app.database import SessionLocal
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "watch-resolved-update"
+  src.mkdir(parents=True, exist_ok=True)
+  base_jsx = "export default function App(){ return <div>V0</div> }"
+  app_id = client.post("/api/apps/", json={
+    "name": "watchresolved",
+    "description": "x",
+    "jsx_source": base_jsx,
+    "source_dir": str(src),
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+
+  app_git.ensure_repo(src)
+  app_git.record_upstream(
+    src,
+    {"index.jsx": base_jsx.encode(), "fetch.sh": b"base\n"},
+    "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(src)
+  (src / "fetch.sh").write_text("local\n")
+  app_git.commit_local(src, "local edit")
+  upstream = app_git.record_upstream(
+    src,
+    {"index.jsx": base_jsx.encode(), "fetch.sh": b"upstream\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    row.upstream_commit = upstream
+    db.commit()
+  finally:
+    db.close()
+  install.stage_pending_conflict_update(
+    src,
+    app_id=app_id,
+    upstream_commit=upstream,
+    manifest={"id": "watchresolved", "version": "2.0.0"},
+    raw_base="https://example.invalid/app/",
+    capability_digest="a" * 64,
+    static_assets={"runtime.js": b"export const version = 'v2'\n"},
+  )
+  app_git.start_conflict_merge(src)
+  assert _source_dir_for_changed_path(src / "fetch.sh") == src
+  (src / "fetch.sh").write_text("local + upstream\n")
+
+  replays = []
+
+  async def fake_reapply(db, **kwargs):
+    assert (src / "static" / "runtime.js").read_bytes().endswith(b"'v2'\n")
+    assert kwargs["manifest"]["version"] == "2.0.0"
+    replays.append(kwargs)
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    install.clear_pending_conflict_update(src)
+    return row, "update", [], kwargs["manifest"], [], "clean_merge"
+
+  monkeypatch.setattr(install, "install_from_manifest", fake_reapply)
+  await _JsxHandler(asyncio.get_running_loop())._recompile(
+    str(src / "fetch.sh"), force_rebuild=True,
+  )
+
+  assert len(replays) == 1
+  assert not (src / ".git" / "MERGE_HEAD").exists()
+  assert not (src / ".git" / install._PENDING_UPDATE_DIR).exists()
+  assert (src / "static" / "runtime.js").read_bytes().endswith(b"'v2'\n")

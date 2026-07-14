@@ -2601,6 +2601,8 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   assert served == local
   assert "<<<<<<<" not in served and ">>>>>>>" not in served
   assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+  pending = app_dir / ".git" / "mobius-pending-update" / "receipt.json"
+  assert pending.is_file()
 
   # The DB row is NOT stamped with the upstream bytes — served version stays
   # local/old until the agent resolves; the new upstream is recorded for it.
@@ -2614,6 +2616,13 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
     assert app.upstream_commit
   finally:
     db.close()
+
+  # The unresolved/resumable receipt is itself an update signal. This check is
+  # local and must not depend on another upstream fetch.
+  update = client.get(f"/api/apps/{payload['id']}/update-check", headers=auth)
+  assert update.status_code == 200, update.text
+  assert update.json()["update_available"] is True
+  assert update.json()["upstream_version"] == "2.0.0"
 
 
 def test_version_only_conflict_auto_resolves_to_upstream(
@@ -4643,6 +4652,35 @@ def test_update_check_network_failure_degrades_to_null(
     side_effect=_fake_async_client({}),
   ):
     res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  assert res.status_code == 200, res.text
+  assert res.json()["update_available"] is None
+
+
+def test_update_check_releases_db_connection_before_remote_fetch(
+  client, auth, bypass_url_validation,
+):
+  """A slow fan-out check must not pin one pooled connection per request."""
+  from fastapi import HTTPException
+  from app.database import engine
+
+  base = "https://uc-pool.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "uc-pool"}
+  installed = _install_v1(client, auth, base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  baseline = engine.pool.checkedout()
+
+  async def _slow_remote_fetch(_url):
+    assert engine.pool.checkedout() == baseline, (
+      "update-check kept its request DB connection checked out while "
+      "starting remote work"
+    )
+    raise HTTPException(status_code=502, detail="synthetic upstream outage")
+
+  with patch("app.install.fetch_upstream_source", new=_slow_remote_fetch):
+    res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+
   assert res.status_code == 200, res.text
   assert res.json()["update_available"] is None
 

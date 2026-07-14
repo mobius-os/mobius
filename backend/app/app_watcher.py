@@ -130,8 +130,6 @@ def _source_roots() -> list[Path]:
 def _source_dir_for_changed_path(path: str | Path) -> Path | None:
   """Returns the immediate source-tree owner for a source edit."""
   p = Path(path)
-  if p.suffix not in _SOURCE_SUFFIXES:
-    return None
   try:
     resolved = p.resolve()
   except (OSError, RuntimeError):
@@ -151,7 +149,17 @@ def _source_dir_for_changed_path(path: str | Path) -> Path | None:
       return None
     if rel.name.startswith("."):
       return None
-    return root / rel.parts[0]
+    source_dir = root / rel.parts[0]
+    # Ordinary rebuilds only care about importable source. During a real
+    # update merge, however, the conflict may be in fetch.sh, mobius.json, or
+    # any other tracked file. Let every safe in-tree file wake the resolver
+    # finalizer while MERGE_HEAD exists; the unresolved-marker gate below still
+    # prevents a premature bundle swap.
+    if p.suffix not in _SOURCE_SUFFIXES and not (
+      source_dir / ".git" / "MERGE_HEAD"
+    ).exists():
+      return None
+    return source_dir
   return None
 
 
@@ -242,6 +250,9 @@ class _JsxHandler(FileSystemEventHandler):
     index_path = source_dir_path / _INDEX_JSX
     changed_is_entry = p.resolve() == index_path.resolve()
     skip_unchanged_entry = changed_is_entry and not force_rebuild
+    has_pending_update = (
+      source_dir_path / ".git" / "mobius-pending-update" / "receipt.json"
+    ).is_file()
     try:
       jsx_source = index_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -276,7 +287,10 @@ class _JsxHandler(FileSystemEventHandler):
         if app is None or app.deleted_at is not None:
           return  # No such app, or it's tombstoned — don't recompile/revive
           # a soft-deleted app's source touched during the recovery window.
-        if skip_unchanged_entry and app.jsx_source == jsx_source:
+        has_pending_update = (
+          source_dir_path / ".git" / "mobius-pending-update" / "receipt.json"
+        ).is_file()
+        if skip_unchanged_entry and app.jsx_source == jsx_source and not has_pending_update:
           return  # Already compiled — nothing to do.
         app_id = app.id
         async with (
@@ -295,13 +309,16 @@ class _JsxHandler(FileSystemEventHandler):
           )
           if app is None or app.deleted_at is not None or app.source_dir != source_dir:
             return
+          has_pending_update = (
+            source_dir_path / ".git" / "mobius-pending-update" / "receipt.json"
+          ).is_file()
           try:
             jsx_source = index_path.read_text(encoding="utf-8")
           except FileNotFoundError:
             return
           if not jsx_source.strip():
             return
-          if skip_unchanged_entry and app.jsx_source == jsx_source:
+          if skip_unchanged_entry and app.jsx_source == jsx_source and not has_pending_update:
             return
           # Hold the PRIOR version entirely while a conflicting update is
           # unresolved. `index.jsx` may well compile (the conflict can be in
@@ -311,26 +328,71 @@ class _JsxHandler(FileSystemEventHandler):
           # that an update finalizes (recompile/swap AND commit) only when no
           # tracked file has unresolved conflicts. commit_local refuses the
           # commit on its own; bailing here also blocks the bundle swap.
-          if (
-            app_git.is_repo(source_dir)
-            and await asyncio.to_thread(
+          merge_in_progress = (
+            source_dir_path / ".git" / "MERGE_HEAD"
+          ).exists()
+          if app_git.is_repo(source_dir):
+            if merge_in_progress:
+              # Marker-free text is a positive resolution signal; commit_local
+              # stages it and performs the final all-tracked marker scan. Binary
+              # conflicts have no marker proof and remain gated until the agent
+              # explicitly stages them.
+              if await asyncio.to_thread(
+                app_git.has_conflict_markers, source_dir,
+              ) or await asyncio.to_thread(
+                app_git.has_unresolved_binary_conflicts, source_dir,
+              ):
+                return
+            elif await asyncio.to_thread(
               app_git.has_unresolved_conflicts, source_dir,
+            ):
+              return
+          pending_update = None
+          static_created: list[Path] = []
+          static_rollback = []
+          static_commit = []
+          if app_git.is_repo(source_dir) and (merge_in_progress or has_pending_update):
+            # A resolver is finishing a previously blocked Store update. Load
+            # the exact receipt staged by that install request. Static assets
+            # must be present BEFORE the first compile because source may import
+            # them; the full installer is replayed after the merge commit to
+            # converge version/capabilities, cron, seeds, icon, and skills.
+            from app import install
+            pending_update = install.load_pending_conflict_update(
+              source_dir,
+              app_id=app.id,
+              upstream_commit=app.upstream_commit,
             )
-          ):
-            return
+            if pending_update is not None:
+              _receipt, pending_assets = pending_update
+              install._write_static_assets(
+                source_dir_path,
+                pending_assets,
+                static_created,
+                static_rollback,
+                static_commit,
+              )
           try:
             await recompile_app_bundle(db, app, jsx_source)
             if app_git.is_repo(source_dir):
               try:
-                await asyncio.to_thread(
+                committed = await asyncio.to_thread(
                   app_git.commit_local, source_dir, "agent edit",
                 )
+                if pending_update is not None and merge_in_progress and committed is None:
+                  raise RuntimeError("resolved update did not finalize its merge commit")
               except subprocess.CalledProcessError as exc:
                 log.info(
                   "auto-recompile: git commit skipped for %s: %s",
                   changed_path, exc,
                 )
+            for action in static_commit:
+              action()
           except RuntimeError as exc:
+            if pending_update is not None:
+              from app import install
+              install._run_rollback_actions(static_rollback)
+              install._cleanup(static_created)
             summary = _summarize_app_build_failure(exc)
             failure = {
               "app_id": app.id,
@@ -343,6 +405,27 @@ class _JsxHandler(FileSystemEventHandler):
             db.rollback()
             _publish_app_build_failed(**failure)
             return
+        if pending_update is not None:
+          # Re-enter the canonical installer while the lifecycle lock is still
+          # held but the inner app/source locks are released. Because main now
+          # descends from the recorded upstream, this pass is conflict-free and
+          # completes every phase the original conflict intentionally skipped.
+          from app import install
+          receipt, _pending_assets = pending_update
+          reapplied, reapplied_mode, reapply_warnings, *_ = (
+            await install.install_from_manifest(
+              db,
+              manifest_url=None,
+              manifest=receipt["manifest"],
+              raw_base=receipt["raw_base"],
+              source="store",
+              reviewed_capability_digest=receipt["capability_digest"],
+            )
+          )
+          if reapplied.id != app.id or reapplied_mode != "update":
+            raise RuntimeError("resolved update replay targeted the wrong app")
+          for warning in reapply_warnings:
+            log.warning("resolved update %s: %s", app.id, warning)
         log.info(
           "auto-recompiled app id=%s name=%s", app.id, app.name,
         )
@@ -366,7 +449,7 @@ class _JsxHandler(FileSystemEventHandler):
         # chat with no separate app_built event to publish here.
       except Exception:
         # Watcher must keep running across any single-event failure.
-        log.exception("auto-recompile unexpected error for %s", path)
+        log.exception("auto-recompile unexpected error for %s", changed_path)
         try:
           db.rollback()
         except Exception:
@@ -399,5 +482,20 @@ def start_watcher(
       observer.schedule(handler, str(root), recursive=True)
       watched.append(str(root))
   observer.start()
+  # A process restart can happen after the agent saved a marker-free
+  # resolution but before the debounce fired. Polling establishes its baseline
+  # from the already-resolved bytes and would never emit that old change, so
+  # explicitly revisit every in-progress merge once at startup. Unresolved
+  # merges safely no-op at the hard gate; resolved ones finish and replay their
+  # pending install receipt.
+  for root in _source_roots():
+    if not root.is_dir():
+      continue
+    for repo in root.iterdir():
+      if (
+        (repo / ".git" / "MERGE_HEAD").exists()
+        or (repo / ".git" / "mobius-pending-update" / "receipt.json").is_file()
+      ):
+        handler._schedule(str(repo / _INDEX_JSX))
   log.info("app watcher started on %s", ", ".join(watched))
   return observer, handler

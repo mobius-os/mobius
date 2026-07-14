@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import warnings as _warnings_mod
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -162,6 +163,7 @@ _STATIC_ASSET_MAX_BYTES = _CONTRACT_STATIC_ASSET_MAX_BYTES
 _STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
 _STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_PENDING_UPDATE_DIR = "mobius-pending-update"
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
 # (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. The shared
@@ -773,6 +775,113 @@ def _write_static_assets(
     commit_actions.append(
       lambda d=backup_root: shutil.rmtree(d, ignore_errors=True)
     )
+
+
+def stage_pending_conflict_update(
+  source_dir: str | Path,
+  *,
+  app_id: int,
+  upstream_commit: str,
+  manifest: dict,
+  raw_base: str,
+  capability_digest: str,
+  static_assets: dict[str, bytes],
+) -> None:
+  """Persist everything the watcher needs to finish a resolved update.
+
+  A conflict deliberately returns before install materialization. The resolver
+  may run minutes later (or after a restart), so the candidate manifest and
+  already-validated static bytes must outlive the request. They live under
+  ``.git``: outside app source and ignored by commits, but coupled to the exact
+  repo/upstream commit whose markers the agent resolves.
+  """
+  repo = Path(source_dir)
+  git_dir = repo / ".git"
+  target = git_dir / _PENDING_UPDATE_DIR
+  staging = Path(tempfile.mkdtemp(prefix=f".{_PENDING_UPDATE_DIR}-", dir=git_dir))
+  try:
+    assets_root = staging / "assets"
+    for rel, content in static_assets.items():
+      out = (assets_root / rel).resolve()
+      if assets_root.resolve() not in out.parents:
+        raise ValueError("pending static asset path escapes staging directory")
+      out.parent.mkdir(parents=True, exist_ok=True)
+      atomic_write(out, content)
+    atomic_write(staging / "receipt.json", json.dumps({
+      "schema": 1,
+      "app_id": app_id,
+      "upstream_commit": upstream_commit,
+      "manifest": manifest,
+      "raw_base": raw_base,
+      "capability_digest": capability_digest,
+      "static_assets": sorted(static_assets),
+    }, ensure_ascii=False, sort_keys=True) + "\n")
+    shutil.rmtree(target, ignore_errors=True)
+    os.replace(staging, target)
+  finally:
+    shutil.rmtree(staging, ignore_errors=True)
+
+
+def load_pending_conflict_update(
+  source_dir: str | Path, *, app_id: int, upstream_commit: str | None,
+) -> tuple[dict, dict[str, bytes]] | None:
+  """Load a receipt only when it belongs to this app and upstream tip."""
+  root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
+  receipt = read_pending_conflict_update_receipt(
+    source_dir, app_id=app_id, upstream_commit=upstream_commit,
+  )
+  if receipt is None:
+    return None
+  assets: dict[str, bytes] = {}
+  assets_root_path = root / "assets"
+  if assets_root_path.is_symlink():
+    return None
+  assets_root = assets_root_path.resolve()
+  for rel in receipt["static_assets"]:
+    if not isinstance(rel, str):
+      return None
+    path = (assets_root / rel).resolve()
+    if assets_root not in path.parents or path.is_symlink():
+      return None
+    try:
+      assets[rel] = path.read_bytes()
+    except OSError:
+      return None
+  return receipt, assets
+
+
+def read_pending_conflict_update_receipt(
+  source_dir: str | Path, *, app_id: int, upstream_commit: str | None,
+) -> dict | None:
+  """Read validated pending metadata without loading potentially large assets."""
+  root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
+  receipt_path = root / "receipt.json"
+  if root.is_symlink() or receipt_path.is_symlink():
+    return None
+  try:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return None
+  if (
+    not isinstance(receipt, dict)
+    or receipt.get("schema") != 1
+    or receipt.get("app_id") != app_id
+    or not upstream_commit
+    or receipt.get("upstream_commit") != upstream_commit
+    or not isinstance(receipt.get("manifest"), dict)
+    or not isinstance(receipt.get("raw_base"), str)
+    or not isinstance(receipt.get("capability_digest"), str)
+    or not isinstance(receipt.get("static_assets"), list)
+  ):
+    return None
+  return receipt
+
+
+def clear_pending_conflict_update(source_dir: str | Path) -> None:
+  shutil.rmtree(
+    Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,
+    ignore_errors=True,
+  )
 
 
 def _process_icon(raw: bytes) -> bytes:
@@ -2465,7 +2574,18 @@ async def install_from_manifest(
           # `app.jsx_source` stays the LOCAL source and the upstream provenance
           # (upstream_commit / upstream_jsx_sha, set above) persists for the
           # later resolution.
-          pass
+          if not app.upstream_commit:
+            raise RuntimeError("conflicting update has no recorded upstream commit")
+          await asyncio.to_thread(
+            stage_pending_conflict_update,
+            git_source_dir,
+            app_id=app.id,
+            upstream_commit=app.upstream_commit,
+            manifest=manifest,
+            raw_base=raw_base,
+            capability_digest=fetched_capability_digest,
+            static_assets=static_assets_fetched,
+          )
 
       # The disk-write phase runs INSIDE the same held lock for the git path so
       # no watcher commit interleaves between the merge decision and the write; a
@@ -2739,6 +2859,8 @@ async def install_from_manifest(
         action()
       except OSError as exc:
         log.warning("install: post-commit cleanup failed — %s", exc)
+    if app.source_dir:
+      clear_pending_conflict_update(app.source_dir)
 
   except CompileError as exc:
     app_name = str(

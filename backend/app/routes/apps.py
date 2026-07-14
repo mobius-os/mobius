@@ -1052,6 +1052,8 @@ async def update_check(
   app = live_app_or_404(db, app_id)
   checked_at = datetime.now(UTC)
   local_version = app.version
+  manifest_url = app.manifest_url
+  source_dir = app.source_dir
 
   def _unknown() -> schemas.UpdateCheckOut:
     # Null is "we can't tell git-natively" — NOT an error. The caller falls back
@@ -1063,18 +1065,40 @@ async def update_check(
       checked_at=checked_at,
     )
 
-  if not app.manifest_url or not app.source_dir:
+  if not manifest_url or not source_dir:
     return _unknown()
-  repo = Path(app.source_dir)
+
+  # Authentication and the target lookup have completed.  Release the request
+  # session before any upstream network or git work: App Store checks fan out,
+  # and keeping one connection checked out per slow fetch can exhaust the
+  # production pool and turn unrelated DB-backed requests into 500s.  All ORM
+  # values used below were deliberately copied to scalars above.
+  db.close()
+
+  repo = Path(source_dir)
   if not app_git.is_repo(repo) or not app_git.ref_exists(
     repo, app_git.UPSTREAM_BRANCH,
   ):
     return _unknown()
 
+  pending = install.read_pending_conflict_update_receipt(
+    repo, app_id=app.id, upstream_commit=app.upstream_commit,
+  )
+  if pending is not None:
+    # A resolver may have committed source while the final install replay was
+    # interrupted (network/restart). Keep Update visible so the owner can retry;
+    # the same receipt is also retried automatically by the watcher at startup.
+    return schemas.UpdateCheckOut(
+      update_available=True,
+      upstream_version=str(pending["manifest"].get("version") or "") or None,
+      local_version=local_version,
+      checked_at=checked_at,
+    )
+
   # Reconstruct the fetchable manifest URL from the stored canonical identity
   # key (`<base>#manifest-id=<id>`): the raw manifest lives at <base>/mobius.json,
   # exactly where a store-driven update re-fetches it.
-  base = install._canonical_base(app.manifest_url)
+  base = install._canonical_base(manifest_url)
   fetch_manifest_url = base + "/mobius.json"
   try:
     fetched = await install.fetch_upstream_source(fetch_manifest_url)

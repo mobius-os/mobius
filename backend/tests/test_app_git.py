@@ -893,6 +893,42 @@ def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
   assert (repo / "index.jsx").read_text() == local_before
 
 
+def test_merge_entry_points_unshallow_when_depth_one_hides_base(tmp_path):
+  """A depth-one update must not strand verdict or resolver as unrelated."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  _write(fixture, "shared\n")
+  _commit_all(fixture, "v1")
+  subprocess.run(["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True)
+
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.clone_upstream(repo, bare.as_uri(), "main")
+  _write(repo, "local\n")
+  app_git.commit_local(repo, "local edit")
+
+  _write(fixture, "upstream\n")
+  _commit_all(fixture, "v2")
+  subprocess.run(
+    ["git", "-C", str(fixture), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(fixture),
+  )
+  app_git._run(repo, "fetch", "--depth", "1", "origin", "main")
+  app_git._run(repo, "branch", "-f", app_git.UPSTREAM_BRANCH, "origin/main")
+  assert (repo / ".git" / "shallow").exists()
+  assert app_git._run(
+    repo, "merge-base", app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+    check=False,
+  ).returncode != 0
+
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert not (repo / ".git" / "shallow").exists()
+  assert "index.jsx" in app_git.start_conflict_merge(repo)
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+
+
 def test_resolved_conflict_commit_advances_base(tmp_path):
   """After start_conflict_merge, resolving the markers + commit_local
   finalizes a single-parent replay (linear) so upstream becomes an ancestor

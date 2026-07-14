@@ -665,6 +665,14 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   unmerged = _run(repo, "ls-files", "-u").stdout.strip()
   if unmerged:
     return True
+  return has_conflict_markers(repo)
+
+
+def has_conflict_markers(source_dir: str | Path) -> bool:
+  """Whether an in-progress merge's working tree still has text markers."""
+  repo = Path(source_dir)
+  if not (repo / ".git" / "MERGE_HEAD").exists():
+    return False
   # Scan tracked content for the labeled conflict boundaries. `git grep`
   # exits 0 when a line matches, 1 when none do. We match only `<<<<<<< ` and
   # `>>>>>>> ` (7 chars + the space before the ref that `git merge` writes),
@@ -672,6 +680,40 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   # legitimate content — see the docstring.
   markers = _run(repo, "grep", "-lE", r"^(<<<<<<< |>>>>>>> )", check=False)
   return markers.returncode == 0
+
+
+def has_unresolved_binary_conflicts(source_dir: str | Path) -> bool:
+  """Keep binary conflicts gated until the resolver explicitly stages them.
+
+  Text conflicts can be proven resolved by removal of Git's marker boundaries,
+  after which ``commit_local`` safely stages them. Binary conflicts have no
+  markers, so an unmerged binary path is never auto-accepted.
+  """
+  repo = Path(source_dir)
+  if not (repo / ".git" / "MERGE_HEAD").exists():
+    return False
+  listing = _run(repo, "ls-files", "-u", "-z").stdout
+  paths = {
+    row.split("\t", 1)[1]
+    for row in listing.split("\0")
+    if "\t" in row
+  }
+  for rel in paths:
+    worktree = repo / rel
+    try:
+      if b"\0" in worktree.read_bytes():
+        return True
+    except OSError:
+      pass
+    for stage in (1, 2, 3):
+      blob = subprocess.run(
+        ["git", "-C", str(repo), "show", f":{stage}:{rel}"],
+        capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+        env=_git_env(repo),
+      )
+      if blob.returncode == 0 and b"\0" in blob.stdout:
+        return True
+  return False
 
 
 def commit_local(source_dir: str | Path, msg: str) -> str | None:
@@ -820,6 +862,28 @@ def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   return proc.returncode != 0
 
 
+def _unshallow_if_no_merge_base(source_dir: str | Path) -> None:
+  """Restore remote history when a shallow graft hides a real merge base.
+
+  Depth-one app fetches can make ``main`` and ``upstream`` appear unrelated
+  even though both came from the same origin. The update verdict and the
+  resolver's real merge both require that base, so they self-heal at their
+  entry points. A failed/offline fetch is best-effort and leaves refs and the
+  working tree untouched; the subsequent merge reports its normal error.
+  """
+  repo = Path(source_dir)
+  if not (repo / ".git" / "shallow").exists():
+    return
+  if not ref_exists(repo, LOCAL_BRANCH) or not ref_exists(repo, UPSTREAM_BRANCH):
+    return
+  base = _run(repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False)
+  if base.returncode == 0 and base.stdout.strip():
+    return
+  if not has_origin(repo):
+    return
+  _run(repo, "fetch", "--unshallow", "--no-tags", "origin", check=False)
+
+
 def merge_upstream(source_dir: str | Path) -> MergeResult:
   """Merges `upstream` into `main` and returns the verdict.
 
@@ -841,6 +905,7 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _unshallow_if_no_merge_base(repo)
   proc = _run(
     repo, "merge-tree", "--write-tree", "--name-only",
     LOCAL_BRANCH, UPSTREAM_BRANCH,
@@ -959,6 +1024,7 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _unshallow_if_no_merge_base(repo)
   _run(repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False)
   # Unmerged paths show in `git status --porcelain` with a U in either status
   # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
