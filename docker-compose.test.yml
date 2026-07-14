@@ -40,15 +40,26 @@ services:
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
       - AGENT_BROWSER_STREAM_PORT=9225
+      # E2E must run the checkout that owns the tests, not the default branch
+      # cloned into an image whose BUILD_SHA was left unstamped. GitHub exposes
+      # GITHUB_SHA to Compose automatically; local runs still seed their current
+      # checkout and validate it against its own HEAD.
+      - MOBIUS_TEST_RUNTIME=1
+      - MOBIUS_TEST_PLATFORM_SOURCE=/workspace
+      - BUILD_SHA=${GITHUB_SHA:-unknown}
     volumes:
       - test_data:/data
+      - ./:/workspace:ro
     # Port is TEST_PORT (default 8001). Uses the !override tag so a custom
     # TEST_PORT REPLACES the default rather than merge-appending it (a plain
     # second `ports:` entry would keep 8001:8000 AND add the new one, colliding
     # with a concurrent default run).
     ports: !override ["${TEST_PORT:-8001}:8000"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      # Includes ordinary API health plus a fail-closed checkout identity test.
+      # A healthy container therefore proves Playwright will exercise this
+      # checkout's backend and the frontend watcher rooted in the same clone.
+      test: ["CMD", "python3", "/app/scripts/verify_test_runtime.py"]
       interval: 10s
       timeout: 5s
       retries: 3
