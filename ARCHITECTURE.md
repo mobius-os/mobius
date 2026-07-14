@@ -470,7 +470,9 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   send preserves the exact reading anchor. `PIN_USER_MSG` survives the complete
   mobile-keyboard open/close cycle even though the full-height reservation makes its
   scroll position temporarily look away from the physical bottom; viewport geometry
-  is not reader intent, so only a gesture-gated reader scroll may retire the pin.
+  is not reader intent, so only a gesture-gated reader scroll may retire the pin. The
+  terminal live-to-settled render is an explicit handshake: on its next committed
+  frame, the pin is re-applied once so a final scroll-range clamp cannot move it.
 - **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
   same visible anchor, even if the chat had been auto-scrolling and content grew while
   it was inactive. Return never jumps to the new tail and does not restore
@@ -487,6 +489,7 @@ path means routing it through the same entries rather than inventing another rul
 | Reader scrolls manually to physical bottom | any | `FOLLOW_BOTTOM` | User-owned |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply/layout grows while pinned or anchored | hold | same hold | Reapply only the held target |
+| Live reply becomes settled markup while pinned | pin hold | same pin hold | Reapply on the next committed frame |
 | Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
 | Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
