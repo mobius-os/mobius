@@ -20,6 +20,16 @@ services:
     # back up. With `restart: "no"` the recovery flow bricks the test
     # container exactly where we exercise it.
     restart: unless-stopped
+    # Match production's nested-bwrap boundary so live container tests exercise
+    # the real background-agent sandbox rather than skipping on Docker's default
+    # namespace restrictions. These grants apply only to the app service.
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     environment:
       # Pin a fixed test SECRET_KEY so the test container never inherits a
       # prod-shaped value from the host shell. Do NOT use this value anywhere

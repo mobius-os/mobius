@@ -28,6 +28,12 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # to /opt/agent-browser so both root and the mobius user share a single
 # Chromium copy via the symlinks below (~/.agent-browser is where
 # agent-browser looks by default).
+#
+# Background-agent jobs run as the unprivileged mobius user, but bwrap must
+# create mount/PID namespaces inside the outer Docker container. Debian's
+# audited setuid mode retains only bwrap's small setup capability set and drops
+# it before execing the job. docker-compose.yml supplies the three required
+# capabilities absent from Docker's default bounding set.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cron curl ca-certificates git sudo procps bubblewrap \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
@@ -40,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
+    && chmod 4755 /usr/bin/bwrap \
+    && test "$(stat -c '%a' /usr/bin/bwrap)" = 4755 \
     && git_version="$(git --version | awk '{print $3}')" \
     && [ "$(printf '%s\n' "2.38" "$git_version" | sort -V | head -n1)" = "2.38" ] \
     && apt-get autoremove -y \
