@@ -189,7 +189,7 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
   (data_dir / "cli-auth" / "codex").mkdir(parents=True)
   (data_dir / "cli-auth" / "unreviewed-provider").mkdir(parents=True)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
-  monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/bwrap")
+  monkeypatch.setattr(runner.shutil, "which", lambda name: f"/usr/bin/{name}")
   context = {
     "primary": {"provider": "claude"},
     "fallback": None,
@@ -201,10 +201,13 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
 
   command = runner._sandboxed_command(57, job.resolve(), context)
 
-  assert command[0] == "/usr/bin/bwrap"
+  assert command[:7] == [
+    "/usr/bin/setpriv",
+    "--reuid", "1000", "--regid", "1000", "--clear-groups",
+    "/usr/bin/bwrap",
+  ]
   joined = " ".join(command)
-  assert "--unshare-user" in command
-  assert "--uid 1000 --gid 1000" in joined
+  assert "--unshare-user" not in command
   assert f"--tmpfs {data_dir}" in joined
   assert f"--ro-bind {source} {source}" in joined
   assert f"--bind {data_dir / 'apps' / '57'} {data_dir / 'apps' / '57'}" in joined
@@ -214,6 +217,12 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
   assert str(data_dir / "cli-auth" / "unreviewed-provider") not in joined
   assert "service-token" not in joined
   assert str(data_dir / "db") not in joined
+
+  monkeypatch.setattr(runner.os, "geteuid", lambda: 1000)
+  monkeypatch.setattr(runner.os, "getegid", lambda: 1000)
+  unprivileged_command = runner._sandboxed_command(57, job.resolve(), context)
+  assert unprivileged_command[0] == "/usr/bin/bwrap"
+  assert "/usr/bin/setpriv" not in unprivileged_command
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap unavailable")
@@ -241,7 +250,10 @@ def test_background_agent_sandbox_enforces_reviewed_mounts(monkeypatch):
     )
     if os.geteuid() == 0:
       # Match production's /data ownership before the sandbox drops root.
-      for path in (data_dir, data_dir / "apps", storage, data_dir / "shared", shared):
+      for path in (
+        Path(raw), data_dir, data_dir / "apps", source, storage,
+        data_dir / "shared", shared,
+      ):
         os.chown(path, 1000, 1000)
     monkeypatch.setattr(runner, "DATA_DIR", data_dir)
     context = {
@@ -261,7 +273,11 @@ def test_background_agent_sandbox_enforces_reviewed_mounts(monkeypatch):
       text=True,
       timeout=20,
     )
-    if result.returncode != 0 and "Operation not permitted" in result.stderr:
+    namespace_denied = (
+      "Operation not permitted" in result.stderr
+      or "No permissions to create new namespace" in result.stderr
+    )
+    if result.returncode != 0 and namespace_denied:
       pytest.skip("host kernel disables unprivileged bubblewrap")
 
     assert result.returncode == 0, result.stderr

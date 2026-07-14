@@ -127,17 +127,34 @@ def _sandboxed_command(
   bwrap = shutil.which("bwrap")
   if not bwrap:
     return None
+  if os.geteuid() == 0:
+    setpriv = shutil.which("setpriv")
+    if not setpriv:
+      return None
+    privilege_prefix = [
+      setpriv,
+      "--reuid", str(MOBIUS_UID), "--regid", str(MOBIUS_GID),
+      "--clear-groups",
+    ]
+  elif os.geteuid() == MOBIUS_UID and os.getegid() == MOBIUS_GID:
+    # Run-now is launched by uvicorn, which already runs as mobius. Repeating
+    # setpriv --clear-groups without root authority fails even though no drop is
+    # needed; launch the same unprivileged Bubblewrap boundary directly.
+    privilege_prefix = []
+  else:
+    return None
   storage = DATA_DIR / "apps" / str(app_id)
   storage.mkdir(parents=True, exist_ok=True)
   command = [
+    # The supervisor is root, but durable app/shared state must be written by
+    # the same user that owns /data and runs pm-commit. Drop privileges before
+    # Bubblewrap: its --uid/--gid mode requires an explicit user namespace,
+    # which cannot mount /proc in our nested production container. Starting
+    # bwrap as mobius lets it create the supported unprivileged namespace and
+    # prevents root-owned mode-0600 Memory traces at the source.
+    *privilege_prefix,
     bwrap,
-    "--die-with-parent", "--unshare-user", "--unshare-pid", "--unshare-ipc",
-    "--unshare-uts",
-    # The supervisor is root so it can build the namespace, but app agents must
-    # write durable shared/app state as the same user that owns /data and runs
-    # pm-commit. Root-owned mode-0600 Memory traces made Reflection's snapshot
-    # fail at git-add time even though the agent turn itself reported success.
-    "--uid", str(MOBIUS_UID), "--gid", str(MOBIUS_GID),
+    "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
     "--ro-bind", "/", "/",
     "--tmpfs", str(DATA_DIR),
     "--tmpfs", "/home", "--tmpfs", "/root", "--tmpfs", "/run",
