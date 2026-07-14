@@ -347,85 +347,116 @@ class _JsxHandler(FileSystemEventHandler):
               app_git.has_unresolved_conflicts, source_dir,
             ):
               return
-          pending_update = None
-          static_created: list[Path] = []
-          static_rollback = []
-          static_commit = []
+          pending_receipt = None
           if app_git.is_repo(source_dir) and (merge_in_progress or has_pending_update):
-            # A resolver is finishing a previously blocked Store update. Load
-            # the exact receipt staged by that install request. Static assets
-            # must be present BEFORE the first compile because source may import
-            # them; the full installer is replayed after the merge commit to
-            # converge version/capabilities, cron, seeds, icon, and skills.
+            # A resolver is finishing a previously blocked Store update. It may
+            # commit the resolved source, but it must not publish a new bundle,
+            # static tree, or DB metadata piecemeal. The canonical installer
+            # below promotes all of those together after verifying the receipt.
             from app import install
-            pending_update = install.load_pending_conflict_update(
+            pending_receipt = install.read_pending_conflict_update_receipt(
               source_dir,
               app_id=app.id,
               upstream_commit=app.upstream_commit,
             )
-            if pending_update is not None:
-              _receipt, pending_assets = pending_update
-              install._write_static_assets(
-                source_dir_path,
-                pending_assets,
-                static_created,
-                static_rollback,
-                static_commit,
+            if pending_receipt is None:
+              summary = "Pending update receipt is missing or no longer matches."
+              db.rollback()
+              _publish_app_build_failed(
+                app_id=app.id, app_name=app.name, summary=summary,
               )
-          try:
-            await recompile_app_bundle(db, app, jsx_source)
-            if app_git.is_repo(source_dir):
+              return
+            if merge_in_progress:
               try:
                 committed = await asyncio.to_thread(
-                  app_git.commit_local, source_dir, "agent edit",
+                  app_git.commit_local, source_dir, "resolve app update",
                 )
-                if pending_update is not None and merge_in_progress and committed is None:
-                  raise RuntimeError("resolved update did not finalize its merge commit")
-              except subprocess.CalledProcessError as exc:
-                log.info(
-                  "auto-recompile: git commit skipped for %s: %s",
+              except Exception as exc:
+                log.warning(
+                  "auto-recompile: resolved update commit failed for %s: %s",
                   changed_path, exc,
                 )
-            for action in static_commit:
-              action()
-          except RuntimeError as exc:
-            if pending_update is not None:
-              from app import install
-              install._run_rollback_actions(static_rollback)
-              install._cleanup(static_created)
-            summary = _summarize_app_build_failure(exc)
-            failure = {
-              "app_id": app.id,
-              "app_name": app.name,
-              "summary": summary,
-            }
-            log.warning(
-              "auto-recompile: compile failed for %s: %s", changed_path, exc,
-            )
-            db.rollback()
-            _publish_app_build_failed(**failure)
-            return
-        if pending_update is not None:
+                _publish_app_build_failed(
+                  app_id=app.id,
+                  app_name=app.name,
+                  summary=_summarize_app_build_failure(exc),
+                )
+                return
+              if committed is None or await asyncio.to_thread(
+                app_git.merge_in_progress, source_dir,
+              ):
+                _publish_app_build_failed(
+                  app_id=app.id,
+                  app_name=app.name,
+                  summary="Resolved update could not finalize its source merge.",
+                )
+                return
+          if pending_receipt is None:
+            try:
+              await recompile_app_bundle(db, app, jsx_source)
+              if app_git.is_repo(source_dir):
+                try:
+                  await asyncio.to_thread(
+                    app_git.commit_local, source_dir, "agent edit",
+                  )
+                except subprocess.CalledProcessError as exc:
+                  log.info(
+                    "auto-recompile: git commit skipped for %s: %s",
+                    changed_path, exc,
+                  )
+            except RuntimeError as exc:
+              summary = _summarize_app_build_failure(exc)
+              failure = {
+                "app_id": app.id,
+                "app_name": app.name,
+                "summary": summary,
+              }
+              log.warning(
+                "auto-recompile: compile failed for %s: %s", changed_path, exc,
+              )
+              db.rollback()
+              _publish_app_build_failed(**failure)
+              return
+          replay_app_id = app.id
+          replay_app_name = app.name
+          replay_upstream_commit = app.upstream_commit
+        if pending_receipt is not None:
           # Re-enter the canonical installer while the lifecycle lock is still
-          # held but the inner app/source locks are released. Because main now
-          # descends from the recorded upstream, this pass is conflict-free and
-          # completes every phase the original conflict intentionally skipped.
+          # held but the inner app/source locks are released. The old DB source,
+          # bundle, static files, icon, and capabilities remain live until this
+          # exact-candidate replay reaches its normal commit/promotion boundary.
           from app import install
-          receipt, _pending_assets = pending_update
-          reapplied, reapplied_mode, reapply_warnings, *_ = (
-            await install.install_from_manifest(
-              db,
-              manifest_url=None,
-              manifest=receipt["manifest"],
-              raw_base=receipt["raw_base"],
-              source="store",
-              reviewed_capability_digest=receipt["capability_digest"],
+          try:
+            reapplied, reapplied_mode, reapply_warnings, *_ = (
+              await install.install_from_manifest(
+                db,
+                manifest_url=None,
+                manifest=pending_receipt["manifest"],
+                raw_base=pending_receipt["raw_base"],
+                source="store",
+                reviewed_capability_digest=pending_receipt["capability_digest"],
+                expected_app_id=replay_app_id,
+                expected_upstream_commit=replay_upstream_commit,
+                expected_candidate_digest=pending_receipt["candidate_digest"],
+              )
             )
-          )
-          if reapplied.id != app.id or reapplied_mode != "update":
+          except Exception as exc:
+            db.rollback()
+            log.warning(
+              "resolved update replay failed for app %s: %s",
+              replay_app_id, exc,
+            )
+            _publish_app_build_failed(
+              app_id=replay_app_id,
+              app_name=replay_app_name,
+              summary=_summarize_app_build_failure(exc),
+            )
+            return
+          if reapplied.id != replay_app_id or reapplied_mode != "update":
             raise RuntimeError("resolved update replay targeted the wrong app")
           for warning in reapply_warnings:
-            log.warning("resolved update %s: %s", app.id, warning)
+            log.warning("resolved update %s: %s", replay_app_id, warning)
+          app = reapplied
         log.info(
           "auto-recompiled app id=%s name=%s", app.id, app.name,
         )

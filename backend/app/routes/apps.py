@@ -1052,8 +1052,10 @@ async def update_check(
   app = live_app_or_404(db, app_id)
   checked_at = datetime.now(UTC)
   local_version = app.version
+  target_app_id = app.id
   manifest_url = app.manifest_url
   source_dir = app.source_dir
+  upstream_commit = app.upstream_commit
 
   def _unknown() -> schemas.UpdateCheckOut:
     # Null is "we can't tell git-natively" — NOT an error. The caller falls back
@@ -1082,7 +1084,7 @@ async def update_check(
     return _unknown()
 
   pending = install.read_pending_conflict_update_receipt(
-    repo, app_id=app.id, upstream_commit=app.upstream_commit,
+    repo, app_id=target_app_id, upstream_commit=upstream_commit,
   )
   if pending is not None:
     # A resolver may have committed source while the final install replay was
@@ -1513,6 +1515,21 @@ async def update_app(
     fs_locks.app_storage_lock(app_id),
   ):
     app = live_app_or_404(db, app_id, populate=True)
+    from app import install
+    if body.jsx_source is not None and app.source_dir and (
+      await asyncio.to_thread(app_git.merge_in_progress, app.source_dir)
+      or (
+        Path(app.source_dir) / ".git" / install._PENDING_UPDATE_DIR
+        / "receipt.json"
+      ).is_file()
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "This app has a pending update resolution. Save the resolved files "
+          "in its source directory so the full update can finish."
+        ),
+      )
     if body.name is not None:
       app.name = body.name
     if body.description is not None:

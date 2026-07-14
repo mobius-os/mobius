@@ -486,15 +486,14 @@ def fetch_upstream(source_dir: str | Path, ref: str) -> str:
   _run(repo, "fetch", "--depth", "1", "origin", ref)
   remote_ref = f"origin/{ref}"
   sha = _run(repo, "rev-parse", "--verify", remote_ref).stdout.strip()
+  # A depth-one fetch can re-graft even an unchanged tip. Repair based on the
+  # relationship the installer actually needs (local main ↔ fetched tip), not
+  # only on whether the remote SHA string changed.
+  _unshallow_if_no_merge_base(repo, LOCAL_BRANCH, remote_ref)
   if previous_sha and previous_sha != sha:
     related = _run(
       repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
     )
-    if related.returncode != 0 and (repo / ".git" / "shallow").exists():
-      _run(repo, "fetch", "--unshallow", "origin", ref)
-      related = _run(
-        repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
-      )
     if related.returncode != 0:
       raise RuntimeError(
         f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
@@ -666,6 +665,18 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   if unmerged:
     return True
   return has_conflict_markers(repo)
+
+
+def merge_in_progress(source_dir: str | Path) -> bool:
+  """Whether Git records an in-progress merge for this repository."""
+  repo = Path(source_dir)
+  if not is_repo(repo):
+    return False
+  git_path = _run(repo, "rev-parse", "--git-path", "MERGE_HEAD").stdout.strip()
+  path = Path(git_path)
+  if not path.is_absolute():
+    path = repo / path
+  return path.is_file()
 
 
 def has_conflict_markers(source_dir: str | Path) -> bool:
@@ -862,7 +873,11 @@ def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   return proc.returncode != 0
 
 
-def _unshallow_if_no_merge_base(source_dir: str | Path) -> None:
+def _unshallow_if_no_merge_base(
+  source_dir: str | Path,
+  left: str = LOCAL_BRANCH,
+  right: str = UPSTREAM_BRANCH,
+) -> None:
   """Restore remote history when a shallow graft hides a real merge base.
 
   Depth-one app fetches can make ``main`` and ``upstream`` appear unrelated
@@ -872,16 +887,30 @@ def _unshallow_if_no_merge_base(source_dir: str | Path) -> None:
   working tree untouched; the subsequent merge reports its normal error.
   """
   repo = Path(source_dir)
-  if not (repo / ".git" / "shallow").exists():
+  shallow_raw = _run(repo, "rev-parse", "--git-path", "shallow").stdout.strip()
+  shallow_path = Path(shallow_raw)
+  if not shallow_path.is_absolute():
+    shallow_path = repo / shallow_path
+  if not shallow_path.is_file():
     return
-  if not ref_exists(repo, LOCAL_BRANCH) or not ref_exists(repo, UPSTREAM_BRANCH):
+  if not ref_exists(repo, left) or not ref_exists(repo, right):
     return
-  base = _run(repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False)
+  base = _run(repo, "merge-base", left, right, check=False)
   if base.returncode == 0 and base.stdout.strip():
     return
   if not has_origin(repo):
-    return
-  _run(repo, "fetch", "--unshallow", "--no-tags", "origin", check=False)
+    raise RuntimeError(
+      f"no merge base between {left} and {right} in shallow repo without origin"
+    )
+  fetched = _run(
+    repo, "fetch", "--unshallow", "--no-tags", "origin", check=False,
+  )
+  if fetched.returncode != 0:
+    detail = fetched.stderr.strip() or fetched.stdout.strip()
+    raise RuntimeError(f"failed to restore app git history: {detail}")
+  base = _run(repo, "merge-base", left, right, check=False)
+  if base.returncode != 0 or not base.stdout.strip():
+    raise RuntimeError(f"no merge base between {left} and {right} after unshallow")
 
 
 def merge_upstream(source_dir: str | Path) -> MergeResult:
@@ -1025,7 +1054,9 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
   repo = Path(source_dir)
   ensure_repo(repo)
   _unshallow_if_no_merge_base(repo)
-  _run(repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False)
+  merged = _run(
+    repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False,
+  )
   # Unmerged paths show in `git status --porcelain` with a U in either status
   # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
   status = _run(repo, "status", "--porcelain").stdout
@@ -1034,6 +1065,9 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
     xy = line[:2]
     if "U" in xy or xy in ("AA", "DD"):
       conflict_paths.append(line[3:].strip())
+  if merged.returncode != 0 and not conflict_paths:
+    detail = merged.stderr.strip() or merged.stdout.strip()
+    raise RuntimeError(f"git merge failed (rc={merged.returncode}): {detail}")
   if not conflict_paths and (repo / ".git" / "MERGE_HEAD").exists():
     # Real merge resolved clean (vs the conflict verdict). Don't strand a
     # dangling --no-commit merge; abort back to the committed local state.

@@ -785,6 +785,7 @@ def stage_pending_conflict_update(
   manifest: dict,
   raw_base: str,
   capability_digest: str,
+  candidate_digest: str,
   static_assets: dict[str, bytes],
 ) -> None:
   """Persist everything the watcher needs to finish a resolved update.
@@ -814,6 +815,7 @@ def stage_pending_conflict_update(
       "manifest": manifest,
       "raw_base": raw_base,
       "capability_digest": capability_digest,
+      "candidate_digest": candidate_digest,
       "static_assets": sorted(static_assets),
     }, ensure_ascii=False, sort_keys=True) + "\n")
     shutil.rmtree(target, ignore_errors=True)
@@ -871,10 +873,64 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("manifest"), dict)
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
+    or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
     or not isinstance(receipt.get("static_assets"), list)
   ):
     return None
   return receipt
+
+
+def _install_candidate_digest(
+  *,
+  manifest: dict,
+  raw_base: str,
+  entry_bytes: bytes,
+  icon_processed: bytes | None,
+  bundled_job: bytes | None,
+  static_assets: dict[str, bytes],
+  source_files: dict[str, bytes],
+  seeds: dict[str, bytes],
+) -> str:
+  """Bind a deferred conflict resolution to the exact fetched candidate.
+
+  A resolver can finish long after the first install request. Its replay may
+  fetch through a moving branch URL, so manifest/version equality alone is not
+  enough: publishers can replace static, seed, icon, or source bytes without a
+  version bump. Length-prefixed fields make this digest unambiguous while
+  streaming large assets instead of base64-encoding them into the receipt.
+  """
+  digest = hashlib.sha256()
+
+  def add(label: str, value: bytes) -> None:
+    label_bytes = label.encode("utf-8")
+    digest.update(len(label_bytes).to_bytes(4, "big"))
+    digest.update(label_bytes)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+  add(
+    "manifest",
+    json.dumps(
+      manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"),
+  )
+  add("raw_base", raw_base.encode("utf-8"))
+  add("entry", entry_bytes)
+  add("icon-present", b"1" if icon_processed is not None else b"0")
+  if icon_processed is not None:
+    add("icon", icon_processed)
+  add("job-present", b"1" if bundled_job is not None else b"0")
+  if bundled_job is not None:
+    add("job", bundled_job)
+  for group, values in (
+    ("source", source_files),
+    ("static", static_assets),
+    ("seed", seeds),
+  ):
+    for rel in sorted(values):
+      add(f"{group}-path", rel.encode("utf-8"))
+      add(f"{group}-bytes", values[rel])
+  return digest.hexdigest()
 
 
 def clear_pending_conflict_update(source_dir: str | Path) -> None:
@@ -1683,6 +1739,9 @@ async def install_from_manifest(
   raw_base: str | None,
   source: str = "url",
   reviewed_capability_digest: str | None = None,
+  expected_app_id: int | None = None,
+  expected_upstream_commit: str | None = None,
+  expected_candidate_digest: str | None = None,
 ) -> tuple[models.App, str, list[str], dict, list[str], str]:
   """Returns `(app, mode, warnings, manifest, conflict_paths, divergence)`.
 
@@ -1835,6 +1894,34 @@ async def install_from_manifest(
           f"Manifest storage_seeds exceed {_SEEDS_TOTAL_MAX} bytes total.",
         )
       seeds_fetched[sub] = data
+
+  candidate_digest = _install_candidate_digest(
+    manifest=manifest,
+    raw_base=raw_base,
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    bundled_job=bundled_job,
+    static_assets=static_assets_fetched,
+    source_files=source_files_fetched,
+    seeds=seeds_fetched,
+  )
+  replay_fields = (
+    expected_app_id,
+    expected_upstream_commit,
+    expected_candidate_digest,
+  )
+  if any(value is not None for value in replay_fields) and not all(
+    value is not None for value in replay_fields
+  ):
+    raise RuntimeError("resolved update replay identity is incomplete")
+  if (
+    expected_candidate_digest is not None
+    and candidate_digest != expected_candidate_digest
+  ):
+    raise HTTPException(
+      409,
+      "The pending update's fetched artifacts changed; start the update again.",
+    )
 
   # --- Phase 3: decide install vs update -------------------------------
   # Match by manifest_url, NOT by slug. Slug is now a routing concern
@@ -2000,6 +2087,10 @@ async def install_from_manifest(
         existing = platform_row
         adopt_kind = "legacy-catalog"
   mode = "update" if existing else "install"
+  if expected_app_id is not None and (
+    existing is None or existing.id != expected_app_id
+  ):
+    raise HTTPException(409, "Pending update no longer matches this app.")
   legacy_platform_migration = adopt_kind == "legacy-platform"
   if (
     existing
@@ -2323,6 +2414,13 @@ async def install_from_manifest(
         )
         if merge_existing_source:
           prev_upstream_commit = app.upstream_commit
+          if (
+            expected_upstream_commit is not None
+            and prev_upstream_commit != expected_upstream_commit
+          ):
+            raise HTTPException(
+              409, "Pending update no longer matches the recorded upstream.",
+            )
           restored_upstream = await asyncio.to_thread(
             app_git.restore_upstream_ref,
             git_source_dir, prev_upstream_commit,
@@ -2341,9 +2439,17 @@ async def install_from_manifest(
           # source corruption). The newer update supersedes the abandoned one
           # and re-merges against the latest upstream; the resolver chat is
           # deduped so this doesn't pile up chats.
-          await asyncio.to_thread(
-            app_git.abort_in_progress_merge, git_source_dir,
-          )
+          if expected_upstream_commit is not None:
+            if await asyncio.to_thread(
+              app_git.merge_in_progress, git_source_dir,
+            ):
+              raise HTTPException(
+                409, "Resolve and save every conflict before replaying update.",
+              )
+          else:
+            await asyncio.to_thread(
+              app_git.abort_in_progress_merge, git_source_dir,
+            )
           # Update of an app already on the git model. First capture any
           # uncommitted on-disk local edits onto `main` (the watcher may
           # not have committed the agent's latest save yet) so the
@@ -2375,7 +2481,18 @@ async def install_from_manifest(
               git_source_dir, prev_upstream_commit,
             )
           )
-          if repo_ref is not None and await asyncio.to_thread(
+          if expected_upstream_commit is not None:
+            current_upstream = await asyncio.to_thread(
+              app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+            )
+            if current_upstream != expected_upstream_commit:
+              raise HTTPException(
+                409, "Pending update upstream ref changed before replay.",
+              )
+            cloned_update = await asyncio.to_thread(
+              app_git.has_origin, git_source_dir,
+            )
+          elif repo_ref is not None and await asyncio.to_thread(
             app_git.has_origin, git_source_dir,
           ):
             _, ref = repo_ref
@@ -2390,7 +2507,12 @@ async def install_from_manifest(
                 "fetched source path — %r",
                 ref, exc,
               )
-          if not cloned_update:
+          if expected_upstream_commit is not None:
+            new_upstream_paths = await asyncio.to_thread(
+              _read_upstream_source_paths, git_source_dir,
+              app_git.UPSTREAM_BRANCH,
+            )
+          elif not cloned_update:
             await asyncio.to_thread(
               app_git.record_upstream,
               git_source_dir, source_tree, canonical_manifest_url, version,
@@ -2584,6 +2706,7 @@ async def install_from_manifest(
             manifest=manifest,
             raw_base=raw_base,
             capability_digest=fetched_capability_digest,
+            candidate_digest=candidate_digest,
             static_assets=static_assets_fetched,
           )
 
