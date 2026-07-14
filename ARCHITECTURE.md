@@ -831,8 +831,10 @@ Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell
 
 Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.7, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
-Shell rebuilds apply on idle: `Shell.jsx` defers `shell_rebuilt` while any chat is
-streaming, then performs the controlled SW handoff/reload. The idle boundary alone
+Shell rebuilds apply on idle: `Shell.jsx` defers `shell_rebuilt` while the chat the
+owner is actively viewing is streaming, then performs the controlled SW handoff/reload.
+Background chat runs are server-owned and reconnect after the reload; they must not
+strand a repaired shell indefinitely when several agents are working. The idle boundary alone
 is not a transcript-persistence boundary—terminal promotion updates the in-memory
 TanStack cache synchronously while its normal IndexedDB mirror is throttled. Before
 the intentional reload, `flushPersistedQueryCache()` writes the current allowlisted
