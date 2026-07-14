@@ -67,6 +67,28 @@ export function canFastForwardQueue(pendingMessages, turnActive) {
     && pendingMessages.every(m => typeof m?.ts === 'number' && m.serverTs === true)
 }
 
+// An in-process AskUserQuestion answer resumes the assistant turn that owns
+// the card. Only the recovery path (the original runner disappeared after the
+// card was persisted) starts a distinct hidden continuation. ChatView uses
+// this boundary to decide whether the active DB/live bridge still owns the
+// next stream promotion.
+export function answerTurnDisposition(response) {
+  if (response?.answer_turn === 'same') return 'same'
+  if (response?.answer_turn === 'new') return 'new'
+  if (response?.answer_turn != null) return 'unknown'
+
+  // Rolling-update compatibility: older backends shipped the same semantic
+  // distinction only through `status`. Once both sides carry answer_turn,
+  // future status names cannot silently change row ownership.
+  if (response?.status === 'answer_delivered') return 'same'
+  if (response?.status === 'started') return 'new'
+  return 'unknown'
+}
+
+export function answerKeepsCurrentTurn(response) {
+  return answerTurnDisposition(response) === 'same'
+}
+
 export function shouldShowOpenAppCta(builtApp) {
   return Boolean(builtApp?.id)
 }

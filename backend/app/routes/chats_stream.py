@@ -153,7 +153,11 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
   with the answer; no new turn is queued."""
   return JSONResponse(
     status_code=202,
-    content={"status": "answer_delivered", "chat_id": chat_id},
+    content={
+      "status": "answer_delivered",
+      "answer_turn": "same",
+      "chat_id": chat_id,
+    },
   )
 
 
@@ -627,7 +631,11 @@ async def send_message(
 
       return JSONResponse(
         status_code=202,
-        content={"status": "started", "message": started_message},
+        content={
+          "status": "started",
+          "answer_turn": "new",
+          "message": started_message,
+        },
       )
 
   # Serialize an ordinary send with the provider-switch synthesis/commit.
