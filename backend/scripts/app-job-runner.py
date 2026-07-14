@@ -131,7 +131,8 @@ def _sandboxed_command(
   storage.mkdir(parents=True, exist_ok=True)
   command = [
     bwrap,
-    "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--die-with-parent", "--unshare-user", "--unshare-pid", "--unshare-ipc",
+    "--unshare-uts",
     # The supervisor is root so it can build the namespace, but app agents must
     # write durable shared/app state as the same user that owns /data and runs
     # pm-commit. Root-owned mode-0600 Memory traces made Reflection's snapshot

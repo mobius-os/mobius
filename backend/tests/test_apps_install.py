@@ -2576,7 +2576,16 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   the new upstream is recorded for the click-gated resolver. (Per-app git is
   unconditional now — no enabler needed.)"""
   base = "https://on3.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "on-conflict"}
+  m = {
+    **MANIFEST_NEWS,
+    "id": "on-conflict",
+    # Receipt serialization sorts nested manifest keys. The candidate digest
+    # must treat equivalent inline JSON as the same bytes on replay.
+    "storage_seeds": {
+      **MANIFEST_NEWS["storage_seeds"],
+      "unordered.json": {"z": 1, "a": 2},
+    },
+  }
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
   assert r1.status_code == 201, r1.text
   data_dir = Path(get_settings().data_dir)

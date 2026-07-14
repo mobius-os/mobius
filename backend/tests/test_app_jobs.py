@@ -203,6 +203,7 @@ def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
 
   assert command[0] == "/usr/bin/bwrap"
   joined = " ".join(command)
+  assert "--unshare-user" in command
   assert "--uid 1000 --gid 1000" in joined
   assert f"--tmpfs {data_dir}" in joined
   assert f"--ro-bind {source} {source}" in joined
