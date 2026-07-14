@@ -145,9 +145,9 @@ function PrimaryAction({
         // Keep the textarea focused until ChatView snapshots the scroll
         // position in doSend(). On touch browsers, the native focus shift from
         // textarea → button can collapse the keyboard before the handler runs;
-        // that changes the viewport geometry and can make an at-bottom send
-        // look scrolled-up, so the message fails to pin to the top. ChatView
-        // still explicitly blurs after the snapshot on touch-primary devices.
+        // that changes the viewport geometry and can invalidate an otherwise
+        // eligible FOLLOW_BOTTOM submit. ChatView snapshots the complete
+        // mode+geometry decision first, then explicitly blurs on touch devices.
         onPointerDown={(e) => e.preventDefault()}
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}

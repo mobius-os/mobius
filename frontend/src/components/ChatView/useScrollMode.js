@@ -14,10 +14,11 @@
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
  *   { kind: 'ANCHOR_AT', key, offset }  — anchored at a specific msg
  *
- * Bottom detection: delayed queued/steered insertion uses scrollHeight math
- * (`shouldPinSend` → `isNearContentBottom`, read from `scrollTop` before the
- * append). A deliberate fresh send always pins. The dynamic pin spacer is
- * reserved room, not message content.
+ * Send pinning has one rule for direct, queued, and steered messages: the
+ * first visible user message always pins; every later message pins only when
+ * the reader is already in FOLLOW_BOTTOM and still at the real-content tail
+ * at submit time. A pin always leaves FOLLOW_BOTTOM. The dynamic pin spacer
+ * is reserved room, not message content.
  * The IntersectionObserver on a sentinel at the end of `.chat__scroll` is
  * used only for the gesture-driven mode transition (engaging
  * FOLLOW_BOTTOM when the user scrolls to the physical bottom), not for the
@@ -174,26 +175,27 @@ export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
 }
 
 
-/** Validates a saved ScrollMode against current state.
- *  Degrades to FOLLOW_BOTTOM if the anchor no longer exists. */
+/** Validates a saved ScrollMode against current state. Restoration is not a
+ *  user gesture, so it always degrades to a hold anchor — never to
+ *  FOLLOW_BOTTOM. */
 function _validateSavedMode(saved, messages, scrollEl) {
-  if (!saved || !saved.kind) return { kind: 'FOLLOW_BOTTOM' }
-  if (saved.kind === 'FOLLOW_BOTTOM') return saved
+  const holdCurrent = () => anchorModeFromScroll(scrollEl) || { kind: 'INITIAL' }
+  if (!saved || !saved.kind) return holdCurrent()
+  if (saved.kind === 'FOLLOW_BOTTOM') return holdCurrent()
   if (saved.kind === 'PIN_USER_MSG') {
     // A save without a cid (malformed, or written by pre-cid code) can't
-    // resolve a pin target — degrade instead of pinning nothing.
-    if (saved.cid == null) return { kind: 'FOLLOW_BOTTOM' }
+    // resolve a pin target — freeze the currently visible row instead.
+    if (saved.cid == null) return holdCurrent()
     const lastUserMsg = [...messages].reverse()
       .find(m => m.role === 'user' && !m.hidden)
-    return cidOf(lastUserMsg) === saved.cid ? saved : { kind: 'FOLLOW_BOTTOM' }
+    return cidOf(lastUserMsg) === saved.cid ? saved : holdCurrent()
   }
   if (saved.kind === 'ANCHOR_AT') {
     const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
       ? CSS.escape(saved.key) : saved.key}"]`
-    return scrollEl?.querySelector(sel)
-      ? saved : { kind: 'FOLLOW_BOTTOM' }
+    return scrollEl?.querySelector(sel) ? saved : holdCurrent()
   }
-  return { kind: 'FOLLOW_BOTTOM' }
+  return holdCurrent()
 }
 
 
@@ -233,49 +235,32 @@ export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
 }
 
 
-// "Near the bottom" tolerance for the send rule, matching the
-// auto-follow engage threshold in CLAUDE.md "Chat UX" constraint #2. A
-// reader within this many pixels of the bottom is treated as at-bottom.
+// "Near the bottom" tolerance for verifying that an existing FOLLOW_BOTTOM
+// intent is still at the real-content tail. Geometry never creates follow.
 const NEAR_BOTTOM_PX = 50
 
-/** The delayed-insertion rule used by queued/steered user rows. A row that
- *  appears later moves to the top (PIN_USER_MSG) only when it was the first
- *  message or the reader was already at the bottom when they submitted it.
- *  A deliberate fresh send does not use this helper: it always pins.
+/** The single submit-time rule used by direct, queued, and steered user rows.
+ *  A row moves to the top (PIN_USER_MSG) only when it was the first visible
+ *  user message, or the reader was already auto-scrolling at the real-content
+ *  tail when they submitted it.
  *
- *  "At the bottom" is decided two ways, neither a raw IntersectionObserver
- *  read (appending the assistant shell hides the bottom sentinel before
- *  the first follow-write, so a sentinel read at send time would
- *  mis-classify an at-bottom reader):
- *
- *    1. The scroll position is within NEAR_BOTTOM_PX of the bottom of the
- *       real message content right now, measured from scrollTop BEFORE the
- *       new message appends. This is a position computation, not a sentinel
- *       read, and it covers a chat short enough to fit the viewport and a
- *       reader sitting at the visible tail without having made the bottom
- *       gesture. Reserved pin-spacer room is excluded for this purpose:
- *       empty room below the last message should not make the next send land
- *       mid-screen when the user is visually at the bottom of the chat.
- *
- *    2. FOLLOW_BOTTOM is only a fallback when the scroll element is not
- *       available. It is deliberately NOT authoritative when scrollEl
- *       exists: mobile browsers can move/clamp the viewport during keyboard
- *       and restore transitions without a user-gesture scroll event, leaving
- *       modeRef stale as FOLLOW_BOTTOM while the reader is visibly in the
- *       middle. The actual scroll position wins.
+ *  Eligibility is the conjunction of gesture-entered FOLLOW_BOTTOM and a
+ *  position within NEAR_BOTTOM_PX of the real-content tail before append.
+ *  The dynamic spacer is excluded from that geometry because it is reserved
+ *  reply room, not content. A stale FOLLOW_BOTTOM whose viewport has been
+ *  clamped away from the tail does not pin; a hold mode near the tail does not
+ *  pin either.
  */
 export function shouldPinSend({
   scrollEl,
   mode,
   isFirstUserMsg,
-  respectFollowMode = true,
-  wasNearScrollBottom = null,
+  wasAutoScrollAtBottom = null,
 }) {
   if (isFirstUserMsg) return true
-  if (typeof wasNearScrollBottom === 'boolean') return wasNearScrollBottom
-  if (scrollEl) return isNearContentBottom(scrollEl)
-  if (respectFollowMode && mode && mode.kind === 'FOLLOW_BOTTOM') return true
-  return false
+  if (typeof wasAutoScrollAtBottom === 'boolean') return wasAutoScrollAtBottom
+  if (mode?.kind !== 'FOLLOW_BOTTOM') return false
+  return scrollEl ? isNearContentBottom(scrollEl) : true
 }
 
 
@@ -303,36 +288,26 @@ export function isNearScrollBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
 
 
 /** visualViewport resize/scroll is a browser viewport clamp, not a user
- *  reading gesture. If the reader was at the true scroll bottom before the
- *  keyboard moved, preserve that bottom intent. Otherwise, retire stale
- *  bottom/pin modes to the current anchor when possible so opening/closing the
- *  keyboard preserves the reader's chosen position inside reserved space. */
+ *  reading gesture, so it must never CREATE FOLLOW_BOTTOM. Existing follow
+ *  intent may survive while it remains at the tail; PIN/hold modes freeze to
+ *  the current anchor when possible. Only the gesture-gated scroll handler may
+ *  enter FOLLOW_BOTTOM. */
 export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = null) {
-  if (wasNearScrollBottom) return { kind: 'FOLLOW_BOTTOM' }
-  if (
-    anchorMode
-    && (mode?.kind === 'FOLLOW_BOTTOM' || mode?.kind === 'PIN_USER_MSG')
-  ) {
-    return anchorMode
+  if (mode?.kind === 'FOLLOW_BOTTOM') {
+    return wasNearScrollBottom ? mode : (anchorMode || mode)
   }
+  if (mode?.kind === 'PIN_USER_MSG' && anchorMode) return anchorMode
   return mode
 }
 
 
 /** Foreground return (visibilitychange/pageshow/online) is not a reading
- *  gesture, so preserve the physical position the browser is already showing.
- *
- *  Owner rule: if a turn is STREAMING when the app backgrounds, the reader must
- *  come back to exactly where they were — never re-glued to a NEW tail that
- *  grew while the tab was hidden. So when `streaming`, freeze the topmost
- *  visible message as an ANCHOR_AT even at the tail: keeping FOLLOW_BOTTOM there
- *  would let the next applyMode snap to the grown bottom and yank the reader.
- *  Keep-follow-at-tail is only correct for an IDLE chat, where nothing grew
- *  while backgrounded. */
-export function modeForForegroundReturn(scrollEl, { streaming = false } = {}) {
+ *  gesture. Freeze the exact visible anchor even when the chat was following
+ *  before it left: content may have grown while inactive, and returning must
+ *  never jump to that newer tail. Manual scrolling to the bottom re-enables
+ *  FOLLOW_BOTTOM afterward. */
+export function modeForForegroundReturn(scrollEl) {
   if (!scrollEl) return null
-  if (streaming) return anchorModeFromScroll(scrollEl)
-  if (isNearScrollBottom(scrollEl)) return { kind: 'FOLLOW_BOTTOM' }
   return anchorModeFromScroll(scrollEl)
 }
 
@@ -345,7 +320,6 @@ export function modeForForegroundReturn(scrollEl, { streaming = false } = {}) {
 export function modeForChatExit(scrollEl) {
   if (!scrollEl) return null
   return anchorModeFromScroll(scrollEl)
-    || (isNearScrollBottom(scrollEl) ? { kind: 'FOLLOW_BOTTOM' } : null)
 }
 
 
@@ -364,8 +338,10 @@ export function modeForChatExit(scrollEl) {
  *   {kind: 'PIN_USER_MSG', cid: string}
  *     Pin the user message with the given stable `cid` (matched via
  *     `data-cid`) to the top of the viewport (PIN_OFFSET=4 px of
- *     breathing room). Set on user send; applyMode scrolls to
- *     `userMsgEl.offsetTop - PIN_OFFSET`.
+ *     breathing room). Set only for the first visible user row or a
+ *     later send submitted from gesture-entered FOLLOW_BOTTOM at the
+ *     real-content tail; applyMode scrolls to
+ *     `userMsgEl.offsetTop - PIN_OFFSET`. Pinning enters hold.
  *
  *   {kind: 'FOLLOW_BOTTOM'}
  *     Sticky-bottom for streaming. applyMode sets scrollTop =
@@ -376,13 +352,15 @@ export function modeForChatExit(scrollEl) {
  *   {kind: 'ANCHOR_AT', key: string, offset: number}
  *     Anchored at a specific message (`data-key="<key>"`) with
  *     `offset` pixels above the viewport top. Set when the user
- *     scrolls to a non-bottom position; degrades to FOLLOW_BOTTOM
- *     on _validateSavedMode if the anchor message no longer exists.
+ *     scrolls to a non-bottom position and when lifecycle restoration
+ *     freezes the current position. A missing saved anchor degrades to
+ *     the current visible hold anchor, never FOLLOW_BOTTOM.
  *
  * The caller is expected to:
  *   - Mutate `modeRef.current = {...}` on lifecycle events:
- *     * PIN_USER_MSG{cid} when the user sends a new visible message
- *     * Reset to INITIAL / FOLLOW_BOTTOM as needed
+ *     * PIN_USER_MSG{cid} only when the shared submit-time rule allows it
+ *     * INITIAL only for pre-restore setup; FOLLOW_BOTTOM is entered by this
+ *       hook's gesture-gated scroll handler, not by callers
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
  *   - Apply `revealed` as `style={revealed ? undefined : {visibility:
@@ -727,9 +705,10 @@ export default function useScrollMode({
         //       the initial apply and now, so the browser clamped the
         //       scroll position down, leaving the message a chunk BELOW the
         //       top (the owner-reported "sent it and it only went halfway").
-        //       This is the clamp-fix obligation in CLAUDE.md "Chat UX"
-        //       constraint #2 — already honored for FOLLOW_BOTTOM/ANCHOR_AT,
-        //       missing here. We only act when the target is now reachable
+        //       This is the clamp-fix obligation in ARCHITECTURE.md's
+        //       "Chat scroll + steer contract" — already honored for
+        //       FOLLOW_BOTTOM/ANCHOR_AT, missing here. We only act when the
+        //       target is now reachable
         //       (scrollHeight grew back enough); re-applying then lands the
         //       message at the top instead of futilely re-clamping.
         //

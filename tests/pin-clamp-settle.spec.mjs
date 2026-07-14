@@ -12,7 +12,7 @@
  * offsetTop SHIFTS (content grew ABOVE it). A pure scrollTop clamp from
  * a layout settle BELOW the pin leaves offsetTop unchanged, so the old
  * RO branch is a no-op and the clamp is permanent. This is the
- * clamp-fix obligation in CLAUDE.md "Chat UX" constraint #2 — honored
+ * clamp-fix obligation in ARCHITECTURE.md's chat-scroll contract — honored
  * for FOLLOW_BOTTOM/ANCHOR_AT but missing for PIN_USER_MSG.
  *
  * The repro: a long first response pushes the second user message DEEP

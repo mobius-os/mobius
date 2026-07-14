@@ -48,7 +48,7 @@ test('shouldPinSend trusts actual scroll position over stale FOLLOW_BOTTOM mode'
   }), false)
 })
 
-test('shouldPinSend can use a pre-blur bottom snapshot on mobile submit', () => {
+test('shouldPinSend can use a complete pre-blur auto-scroll snapshot on mobile submit', () => {
   // Mobile send blurs the textarea, which can resize/clamp the viewport before
   // the pin decision runs. A true pre-blur bottom snapshot must win over the
   // post-blur geometry so send-at-bottom still pins the new user row.
@@ -56,7 +56,7 @@ test('shouldPinSend can use a pre-blur bottom snapshot on mobile submit', () => 
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'ANCHOR_AT', key: 'old', offset: 0 },
     isFirstUserMsg: false,
-    wasNearScrollBottom: true,
+    wasAutoScrollAtBottom: true,
   }), true)
 })
 
@@ -68,16 +68,16 @@ test('shouldPinSend uses FOLLOW_BOTTOM only when no scroll element is available'
   }), true)
 })
 
-test('shouldPinSend can ignore stale follow mode for delayed queued insertion', () => {
+test('shouldPinSend holds delayed insertion when submit-time intent is unavailable', () => {
   assert.equal(shouldPinSend({
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'FOLLOW_BOTTOM' },
     isFirstUserMsg: false,
-    respectFollowMode: false,
+    wasAutoScrollAtBottom: false,
   }), false)
 })
 
-test('shouldPinSend treats the bottom of real content as at-bottom, ignoring dynamic pin spacer', () => {
+test('shouldPinSend pins a following reader at the real-content bottom, ignoring dynamic spacer', () => {
   // Raw gap is 440px, but 400px is phantom spacer left by a previous pin.
   // Real content gap is 40px: visually, the reader is at the conversation
   // tail. The next send should pin to the top even though the physical scroll
@@ -90,7 +90,7 @@ test('shouldPinSend treats the bottom of real content as at-bottom, ignoring dyn
   })
   assert.equal(shouldPinSend({
     scrollEl,
-    mode: { kind: 'PIN_USER_MSG', cid: 'c-123' },
+    mode: { kind: 'FOLLOW_BOTTOM' },
     isFirstUserMsg: false,
   }), true)
 })
@@ -99,6 +99,20 @@ test('shouldPinSend still refuses to pin when real content gap is large', () => 
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 800,
+    clientHeight: 560,
+    spacerHeight: 400,
+  })
+  assert.equal(shouldPinSend({
+    scrollEl,
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    isFirstUserMsg: false,
+  }), false)
+})
+
+test('shouldPinSend refuses a geometrically-at-bottom reader who is still in hold', () => {
+  const scrollEl = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1000,
     clientHeight: 560,
     spacerHeight: 400,
   })
@@ -199,14 +213,10 @@ test('pin reapply is idle when the pinned send is still at its target', () => {
   )
 })
 
-test('viewport resize at physical bottom retires stale pin mode', () => {
+test('viewport resize never turns a pin into auto-scroll without a gesture', () => {
   const stalePin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
-  assert.deepEqual(
-    modeForViewportChange(stalePin, true),
-    { kind: 'FOLLOW_BOTTOM' },
-  )
   assert.equal(
-    modeForViewportChange(stalePin, false),
+    modeForViewportChange(stalePin, true),
     stalePin,
   )
 })
@@ -218,17 +228,6 @@ test('viewport resize in reserved spacer anchors instead of snapping to bottom',
   assert.equal(
     modeForViewportChange(staleFollow, false, anchor),
     anchor,
-  )
-})
-
-test('foreground return preserves FOLLOW_BOTTOM at the physical tail', () => {
-  assert.deepEqual(
-    modeForForegroundReturn(makeScrollEl({
-      scrollHeight: 1600,
-      scrollTop: 1000,
-      clientHeight: 600,
-    })),
-    { kind: 'FOLLOW_BOTTOM' },
   )
 })
 
@@ -274,7 +273,7 @@ test('chat exit freezes the visible anchor even at the physical tail', () => {
   )
 })
 
-test('chat exit falls back to follow mode only when no message anchor exists', () => {
+test('chat exit never infers follow mode when no message anchor exists', () => {
   const scrollEl = {
     scrollHeight: 1800,
     scrollTop: 1000,
@@ -282,7 +281,7 @@ test('chat exit falls back to follow mode only when no message anchor exists', (
     querySelectorAll() { return [] },
   }
 
-  assert.deepEqual(modeForChatExit(scrollEl), { kind: 'FOLLOW_BOTTOM' })
+  assert.equal(modeForChatExit(scrollEl), null)
 })
 
 test('applyMode PIN is a no-op when the cid resolves no row (strict, no fallback)', () => {
@@ -525,12 +524,11 @@ test('F2: FOLLOW_BOTTOM ignores permanent spacer room so a short restored chat s
 
 
 // ---------------------------------------------------------------------------
-// F4 — returning to the foreground while a turn is STREAMING must freeze the
-// reader where they were (anchor), even at the tail; keep-FOLLOW-at-tail is only
-// right for an idle chat where nothing grew while backgrounded.
+// F4 — returning to the foreground freezes the reader where they were
+// (anchor), even at the tail. Return never creates or restores FOLLOW_BOTTOM.
 // ---------------------------------------------------------------------------
 
-test('F4: foreground return freezes a STREAMING turn as an anchor even at the tail; idle keeps FOLLOW', () => {
+test('F4: foreground return freezes as an anchor even at the tail', () => {
   const tailItem = { offsetTop: 1200, offsetHeight: 200, dataset: { key: 'a-9' } }
   const scrollEl = {
     scrollHeight: 1400, scrollTop: 685, clientHeight: 700,   // near the tail
@@ -538,12 +536,8 @@ test('F4: foreground return freezes a STREAMING turn as an anchor even at the ta
   }
   assert.equal(isNearScrollBottom(scrollEl), true, 'precondition: at the tail')
 
-  const streaming = modeForForegroundReturn(scrollEl, { streaming: true })
-  assert.equal(streaming.kind, 'ANCHOR_AT',
-    'streaming return freezes as an anchor, not the grown tail')
-  assert.equal(streaming.key, 'a-9')
-
-  const idle = modeForForegroundReturn(scrollEl, { streaming: false })
-  assert.deepEqual(idle, { kind: 'FOLLOW_BOTTOM' },
-    'an idle chat at the tail keeps following')
+  const restored = modeForForegroundReturn(scrollEl)
+  assert.equal(restored.kind, 'ANCHOR_AT',
+    'return freezes as an anchor, not the grown tail')
+  assert.equal(restored.key, 'a-9')
 })

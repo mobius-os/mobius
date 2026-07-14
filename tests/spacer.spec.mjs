@@ -257,34 +257,44 @@ test.describe('Spacer mechanics', () => {
     assertSpacerReasonable(m)
   })
 
-  test('2. Second message — new spacer anchored to latest user msg', async ({ page }) => {
+  test('2. Second message in hold — spacer retargets without moving the reader', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First message')
+    const first = await measure(page)
     await stopAgent(page)
     await sendMessage(page, 'Second message')
 
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
     expect(m.spacerH).toBeGreaterThan(0)
-    assertUserMsgAtTop(m)
+    expect(Math.abs(m.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
+    expect(m.lastUserTop).toBeGreaterThan(first.lastUserTop)
+    expect(m.userVisualTop).toBeGreaterThan(10)
     assertSpacerReasonable(m)
   })
 
-  test('3. Third message — consistent behavior', async ({ page }) => {
+  test('3. Repeated messages in hold keep the original reading position', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First')
+    const first = await measure(page)
     await stopAgent(page)
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
     await sendMessage(page, 'Second')
+    const second = await measure(page)
     await stopAgent(page)
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
     await sendMessage(page, 'Third')
 
-    const m = await measure(page)
-    assertUserMsgAtTop(m)
-    assertSpacerReasonable(m)
+    const third = await measure(page)
+    expect(Math.abs(second.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
+    expect(Math.abs(third.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
+    expect(second.lastUserTop).toBeGreaterThan(first.lastUserTop)
+    expect(third.lastUserTop).toBeGreaterThan(second.lastUserTop)
+    expect(third.userVisualTop).toBeGreaterThan(10)
+    expect(third.spacerH).toBeGreaterThan(0)
+    assertSpacerReasonable(third)
   })
 })
 
@@ -377,7 +387,7 @@ test.describe('Short responses', () => {
     // makes ChatView's post-mount fetch resolve with messages=[],
     // showEmpty flips true, .chat__scroll unmounts and is replaced by
     // .chat__empty-wrap — which is documented intentional behavior
-    // (see CLAUDE.md "Chat UX — non-negotiable constraints" #6: the
+    // (see ARCHITECTURE.md "Chat scroll + steer contract" R1: the
     // scroll container only mounts after the first user send).
     //
     // To exercise the "returning to a chat that has messages" path
@@ -456,10 +466,11 @@ test.describe('Short responses', () => {
     // Let spacer recalculation settle before next send.
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
-    // Send a new message — spacer should be recalculated for the new msg.
+    // Send a new message while still in hold. The viewport stays put, while
+    // the permanent reservation retargets to the new latest user row.
     await sendMessage(page, 'Follow-up question')
     const m = await measure(page)
-    assertUserMsgAtTop(m)
+    expect(Math.abs(m.scrollTop - withOldSpacer.scrollTop)).toBeLessThanOrEqual(8)
     assertSpacerReasonable(m)
     // The spacer should anchor to the new user message, not the old one.
     // DOM-injected content may not survive React re-render, so the new
@@ -976,9 +987,9 @@ test.describe('Scroll edge cases', () => {
     expect(afterGap).toBeLessThan(50)
   })
 
-  test('26. Fresh second send while scrolled up still pins to top', async ({ page }) => {
-    // A deliberate fresh send always establishes the next reading seam at the
-    // viewport top. This is independent from auto-scroll/follow mode.
+  test('26. Fresh second send while scrolled up preserves the reading anchor', async ({ page }) => {
+    // A subsequent send outside gesture-entered auto-scroll reserves room for
+    // its reply but leaves the reader at the exact current position.
     //
     // Uses the REAL SSE path (not injectContent) so the long first
     // response PERSISTS across the second send — DOM-injected content
@@ -1033,11 +1044,10 @@ test.describe('Scroll edge cases', () => {
     })
     expect(userMsgs).toContain('Second message')
 
-    // CRITICAL: pinned flush to the top even though the prior position was a
-    // reading anchor in earlier history.
+    // CRITICAL: no pin while the reader is holding a reading anchor.
     const after = await measure(page)
-    assertUserMsgAtTop(after)
-    expect(Math.abs(after.scrollTop - savedTop)).toBeGreaterThan(8)
+    expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
+    expect(after.spacerH).toBeGreaterThanOrEqual(0)
   })
 
   test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {
