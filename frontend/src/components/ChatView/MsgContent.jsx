@@ -281,6 +281,7 @@ function MsgContentInner({
                   </label>
                 </div>
                 <Switch
+                  className="chat-policy-switch"
                   id={autoResumeSwitchId}
                   checked={!!autoResumeEnabled}
                   onCheckedChange={onAutoResumeChange}

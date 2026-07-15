@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, false,
+  String, Text, true,
 )
 
 from app.database import Base
@@ -102,7 +102,7 @@ class Chat(Base):
   # runtime configuration; mixing this policy into it can skip first-send
   # model snapshots or overwrite the owner's global model defaults.
   auto_resume_on_limit = Column(
-    Boolean, nullable=False, default=False, server_default=false()
+    Boolean, nullable=False, default=True, server_default=true()
   )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.

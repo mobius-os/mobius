@@ -236,7 +236,7 @@ export default function ChatSettingsPanel({
   provider,
   effective,
   hasAssistantTurns,
-  autoResumeEnabled = false,
+  autoResumeEnabled = true,
   autoResumeSaving = false,
   autoResumeError = '',
   onAutoResumeChange,
@@ -802,14 +802,10 @@ export default function ChatSettingsPanel({
             onPointerDown={preserveFocusUnlessTouch}
           >
             <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
-              <span className="csp__automation-title">
-                Continue after rate limits
-              </span>
-              <span className="csp__automation-sub">
-                {autoResumeEnabled ? 'On for this chat' : 'Off for this chat'}
-              </span>
+              <span className="csp__automation-title">Continue after rate limits</span>
             </label>
             <Switch
+              className="chat-policy-switch"
               id={autoResumeSwitchId}
               checked={!!autoResumeEnabled}
               onCheckedChange={onAutoResumeChange}

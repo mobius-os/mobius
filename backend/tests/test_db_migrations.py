@@ -120,8 +120,8 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
       "SELECT auto_resume_on_limit FROM chats "
       "WHERE id = 'new-after-upgrade'"
     )).scalar_one()
-  assert value in (False, 0)
-  assert future_value in (False, 0)
+  assert value in (True, 1)
+  assert future_value in (True, 1)
 
 
 def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
@@ -151,4 +151,4 @@ def test_fresh_chat_schema_has_database_auto_resume_default():
   assert column.nullable is False
   assert column.default is not None
   assert column.server_default is not None
-  assert str(column.server_default.arg).lower() == "false"
+  assert str(column.server_default.arg).lower() == "true"

@@ -567,6 +567,36 @@
   color: var(--danger);
   font-size: 12px;
 }
+
+/* Match Settings' full-size black/purple switch. Tailwind's unlayered
+   button reset otherwise wins over the SDK component layer and erases the
+   track, leaving only a floating white thumb inside chat surfaces. */
+.chat-policy-switch {
+  --switch-track-width: 48px;
+  --switch-track-height: 28px;
+  --switch-thumb-size: 22px;
+  --switch-thumb-offset: 3px;
+  --switch-track-color: var(--border);
+  --switch-track-color-hover: var(--surface2);
+  --switch-track-color-checked: var(--accent);
+  --switch-track-color-disabled: var(--surface);
+  --switch-track-color-checked-disabled: var(--accent-dim);
+  --color-ring: var(--accent);
+}
+
+.chat-policy-switch button[role="switch"] {
+  background: var(--switch-track-color);
+  border-radius: var(--radius-full, 9999px);
+}
+.chat-policy-switch button[role="switch"][data-state="checked"] {
+  background: var(--switch-track-color-checked);
+}
+.chat-policy-switch button[role="switch"][data-disabled] {
+  background: var(--switch-track-color-disabled);
+}
+.chat-policy-switch button[role="switch"][data-disabled][data-state="checked"] {
+  background: var(--switch-track-color-checked-disabled);
+}
 /* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
    Rendered only on the tail resumable interrupt note; re-sends "continue".
    This is the single most important recovery gesture, so it clears the 44px
