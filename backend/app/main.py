@@ -49,7 +49,7 @@ from app.routes import (
   admin_router, apps_router, auth_router,
   chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, fs_router, github_router, media_router,
-  notifications_router, notify_router, proxy_router, push_router,
+  local_services_router, notifications_router, notify_router, proxy_router, push_router,
   secrets_router, self_reminders_router, settings_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
@@ -710,6 +710,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
   )
 app.include_router(notify_router)
 app.include_router(proxy_router)
+app.include_router(local_services_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)
@@ -730,17 +731,6 @@ app.include_router(self_reminders_router)
 # routes win.
 app.include_router(standalone_router)
 app.include_router(published_router)  # /sites/<token>/ — before the SPA catch-all
-
-# Tandoor reverse proxy: /tandoor/* -> local Tandoor gunicorn (see /data/tandoor).
-# Registered here (before the SPA catch-all) so /tandoor wins. Wrapped in
-# try/except so an import failure can never brick boot — it lives outside the
-# crash-tolerant _load registry, so it carries its own guard.
-try:
-  from app.routes.tandoor_proxy import router as tandoor_router
-  app.include_router(tandoor_router)
-except Exception:
-  import logging as _tandoor_logging
-  _tandoor_logging.getLogger(__name__).exception("tandoor proxy router failed to load")
 
 
 @app.get("/api/health")

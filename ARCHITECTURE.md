@@ -195,6 +195,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `uploads.py` | Per-chat file upload management |
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
+| `local_services.py` | Guarded same-origin mount for real local backend web apps at `/services/<slug>/`; reads the private `/data/local-services.json` map per request, accepts literal loopback HTTP origins only, preserves the public prefix upstream, and fails closed without affecting shell startup |
 | `standalone.py` | Top-level routes that make a mini-app installable as its own PWA (own importmap) |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
