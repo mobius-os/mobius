@@ -501,7 +501,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
 - **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
   same visible anchor, even if the chat had been auto-scrolling and content grew while
   it was inactive. Return never jumps to the new tail and does not restore
-  auto-scroll; the user must manually reach the bottom again.
+  auto-scroll; the user must manually reach the bottom again. If there is no saved
+  location, or its target row is no longer available, return shows the latest real
+  conversation content at the viewport bottom once as a settled anchor. It must not
+  manufacture a top-of-chat location or engage live following.
 - **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize

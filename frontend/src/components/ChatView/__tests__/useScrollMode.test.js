@@ -4,7 +4,9 @@ import assert from 'node:assert/strict'
 import {
   _computeSpacerH,
   _pinReapplyNeeded,
+  _validateSavedMode,
   applyMode,
+  bottomAnchorModeFromScroll,
   isNearContentBottom,
   isNearScrollBottom,
   layoutMayOwnScroll,
@@ -375,6 +377,68 @@ test('foreground return anchors the current reading position when scrolled up', 
     modeForForegroundReturn(scrollEl),
     { kind: 'ANCHOR_AT', key: 'assistant-7', offset: 60 },
   )
+})
+
+test('no saved chat location opens at the latest real content without enabling follow', () => {
+  const last = {
+    offsetTop: 1500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-latest' },
+  }
+  const scrollEl = {
+    scrollHeight: 2100,
+    scrollTop: 0,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 200 }
+      if (selector === '[data-key="assistant-latest"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const mode = _validateSavedMode(null, [], scrollEl)
+  assert.deepEqual(mode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-latest',
+    offset: 300,
+  })
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1200,
+    'the real content tail is visible and reserved spacer room is excluded')
+})
+
+test('an unresolvable saved location falls back to a settled bottom anchor', () => {
+  const last = {
+    offsetTop: 900,
+    offsetHeight: 180,
+    dataset: { key: 'assistant-current-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 1400,
+    scrollTop: 0,
+    clientHeight: 600,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 0 }
+      if (selector === '[data-key="missing-old-row"]') return null
+      if (selector === '[data-key="assistant-current-tail"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const mode = _validateSavedMode(
+    { kind: 'ANCHOR_AT', key: 'missing-old-row', offset: 12 },
+    [],
+    scrollEl,
+  )
+  assert.equal(mode.kind, 'ANCHOR_AT')
+  assert.equal(mode.key, 'assistant-current-tail')
+  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM')
 })
 
 test('chat exit freezes the visible anchor even at the physical tail', () => {

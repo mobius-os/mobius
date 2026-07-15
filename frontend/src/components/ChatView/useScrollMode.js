@@ -60,9 +60,20 @@ const GESTURE_WINDOW_MS = 250
 // succession. Take the state at the end of a quiescent window.
 const IO_DEBOUNCE_MS = 50
 
-// Per-chat ScrollMode persistence in sessionStorage.
+// Per-chat ScrollMode persistence in sessionStorage. Schema 2 retires modes
+// written by the old missing-location fallback, which manufactured an
+// ANCHOR_AT from the browser's initial scrollTop=0 and then persisted that
+// accidental top-of-chat position as if the reader had chosen it.
+const SCROLL_MODE_SCHEMA = '2'
 const _scrollModes = (() => {
-  try { return JSON.parse(sessionStorage.getItem('chat-mode') || '{}') }
+  try {
+    if (sessionStorage.getItem('chat-mode-schema') !== SCROLL_MODE_SCHEMA) {
+      sessionStorage.removeItem('chat-mode')
+      sessionStorage.setItem('chat-mode-schema', SCROLL_MODE_SCHEMA)
+      return {}
+    }
+    return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+  }
   catch { return {} }
 })()
 
@@ -100,6 +111,26 @@ export function anchorModeFromScroll(scrollEl) {
     kind: 'ANCHOR_AT',
     key: anchorEl.dataset.key,
     offset: anchorEl.offsetTop - scrollEl.scrollTop,
+  }
+}
+
+
+/** Create a settled anchor with the latest real conversation content at the
+ * viewport bottom. This is a one-time restoration target, NOT FOLLOW_BOTTOM:
+ * later streaming/layout growth cannot drag the reader after return. */
+export function bottomAnchorModeFromScroll(scrollEl) {
+  if (!scrollEl) return null
+  const items = scrollEl.querySelectorAll('.chat__msg[data-key]')
+  const last = items[items.length - 1]
+  const key = last?.dataset?.key
+  if (!last || !key) return null
+  const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
+  const realContentH = scrollEl.scrollHeight - spacerH
+  const targetScrollTop = Math.max(0, realContentH - scrollEl.clientHeight)
+  return {
+    kind: 'ANCHOR_AT',
+    key,
+    offset: last.offsetTop - targetScrollTop,
   }
 }
 
@@ -180,17 +211,17 @@ export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
 }
 
 
-/** Validates a saved ScrollMode against current state. Restoration is not a
- *  user gesture, so it always degrades to a hold anchor — never to
- *  FOLLOW_BOTTOM. */
-function _validateSavedMode(saved, messages, scrollEl) {
-  const holdCurrent = () => anchorModeFromScroll(scrollEl) || { kind: 'INITIAL' }
-  if (!saved || !saved.kind) return holdCurrent()
-  if (saved.kind === 'FOLLOW_BOTTOM') return holdCurrent()
+/** Validates a saved ScrollMode against current state. A valid reader anchor
+ * is exact. With no resolvable location, show the latest real content once as
+ * a settled ANCHOR_AT — never FOLLOW_BOTTOM. */
+export function _validateSavedMode(saved, messages, scrollEl) {
+  const holdBottom = () => bottomAnchorModeFromScroll(scrollEl) || { kind: 'INITIAL' }
+  if (!saved || !saved.kind) return holdBottom()
+  if (saved.kind === 'FOLLOW_BOTTOM') return holdBottom()
   if (saved.kind === 'PIN_USER_MSG') {
     // A save without a cid (malformed, or written by pre-cid code) can't
-    // resolve a pin target — freeze the currently visible row instead.
-    if (saved.cid == null) return holdCurrent()
+    // resolve a pin target — use the explicit no-location fallback.
+    if (saved.cid == null) return holdBottom()
     const lastUserMsg = [...messages].reverse()
       .find(m => m.role === 'user' && !m.hidden)
     // Automatic pin→follow is live-turn state, never restoration state. Strip
@@ -198,14 +229,14 @@ function _validateSavedMode(saved, messages, scrollEl) {
     // must not manufacture tail-follow from saved geometry.
     return cidOf(lastUserMsg) === saved.cid
       ? settledPinMode(saved)
-      : holdCurrent()
+      : holdBottom()
   }
   if (saved.kind === 'ANCHOR_AT') {
     const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
       ? CSS.escape(saved.key) : saved.key}"]`
-    return scrollEl?.querySelector(sel) ? saved : holdCurrent()
+    return scrollEl?.querySelector(sel) ? saved : holdBottom()
   }
-  return holdCurrent()
+  return holdBottom()
 }
 
 
