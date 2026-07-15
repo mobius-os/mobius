@@ -31,7 +31,6 @@ import {
   workspaceRequestsForBuiltApps,
 } from './workspacePlacement.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
-import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
   freshChatBuiltApps,
@@ -1186,11 +1185,11 @@ export default function Shell() {
       // reloads.
       requestShellReload({ passive: ev.type === 'shell_rebuilt' })
     } else if (ev.type === 'shell_rebuild_failed') {
-      // System-bus-only, delivered once — no dedup stamp.
-      showToast(shellRebuildFailureMessage(ev), {
-        variant: 'error',
-        duration: 10000,
-      })
+      // Deliberately silent in the owner UI. The atomic publisher keeps the
+      // previous shell running, and watcher failures commonly describe a
+      // transient intermediate state during a multi-file agent edit. The
+      // producer logs the diagnostic and retries; an explicit operation such
+      // as a platform update reports its own failure where it was initiated.
     }
   }, [
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,

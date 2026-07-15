@@ -47,7 +47,7 @@ _LABEL_MAX = 80
 # Catch-up-unsafe events: they ride the system broadcast alone and are NEVER
 # fanned out to per-chat broadcasts, because a chat reconnect replaying an old
 # copy from its event log would fire a spurious shell apply (or a stale
-# failure toast). SystemBroadcast has no replay, so one delivery per client —
+# failure signal). SystemBroadcast has no replay, so one delivery per client —
 # no frontend dedup needed. app_build_failed's live producer
 # (app_watcher._publish_app_build_failed) already publishes system-bus-only and
 # never hits this route, but it is listed here so a hypothetical POST stays
