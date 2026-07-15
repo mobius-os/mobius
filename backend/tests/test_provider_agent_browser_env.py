@@ -8,7 +8,12 @@ from app.providers import ClaudeProvider, CodexProvider
 
 def test_codex_build_env_sets_agent_browser_session(tmp_path):
   env = CodexProvider().build_env(
-    base_env={"AGENT_BROWSER_PROFILE": "/profiles/chat-1"},
+    base_env={
+      "AGENT_BROWSER_PROFILE": "/profiles/chat-1",
+      "AGENT_BROWSER_ARGS": (
+        "--disk-cache-size=33554432,--media-cache-size=16777216"
+      ),
+    },
     data_dir=str(tmp_path),
     chat_id="abc-123",
   )
@@ -16,6 +21,9 @@ def test_codex_build_env_sets_agent_browser_session(tmp_path):
   assert env["CODEX_HOME"] == str(tmp_path / "cli-auth" / "codex")
   assert env["AGENT_BROWSER_PROFILE"] == "/profiles/chat-1"
   assert env["AGENT_BROWSER_SESSION"] == "chat-abc-123"
+  assert env["AGENT_BROWSER_ARGS"] == (
+    "--disk-cache-size=33554432,--media-cache-size=16777216"
+  )
 
 
 def test_codex_build_env_without_chat_id_does_not_invent_session(tmp_path):

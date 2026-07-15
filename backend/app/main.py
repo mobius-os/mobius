@@ -16,6 +16,13 @@ from datetime import timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
+# Do this before importing FastAPI, SQLAlchemy, or any app module that may
+# create worker threads. See allocator.limit_glibc_arenas for the observed
+# per-thread 64 MiB arena failure mode on the production host.
+from app.allocator import limit_glibc_arenas
+
+limit_glibc_arenas()
+
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse

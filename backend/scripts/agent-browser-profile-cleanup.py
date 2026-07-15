@@ -106,17 +106,18 @@ def _process_rss() -> tuple[int, list[dict[str, Any]]]:
   rows: list[dict[str, Any]] = []
   total = 0
   for line in out.splitlines()[1:]:
-    low = line.lower()
-    if (
-      "agent-browser" not in low
-      and "chrome" not in low
-      and "chromium" not in low
-    ):
-      continue
     parts = line.split(None, 4)
     if len(parts) < 5:
       continue
     pid, ppid, rss_kib, comm, args = parts
+    # Match the executable, not its arguments. This report script's own argv
+    # contains "agent-browser", which previously made every dry run claim that
+    # the Python reporter and its shell were live browser processes.
+    executable = comm.lower()
+    if not any(name in executable for name in (
+      "agent-browser", "chrome", "chromium",
+    )):
+      continue
     try:
       rss_bytes = int(rss_kib) * 1024
     except ValueError:

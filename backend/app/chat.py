@@ -4208,6 +4208,14 @@ async def _run_chat_impl_with_db(
   base_env["AGENT_BROWSER_PROFILE"] = (
     f"/data/agent-browser-profiles/chat-{chat_id_safe}"
   )
+  # Persistent profiles are valuable for reproducing the partner's warm-PWA
+  # state, but Chromium's default disk/media caches are effectively unbounded
+  # across hundreds of chats (4+ GiB was observed on the production volume).
+  # Keep cookies, localStorage, IndexedDB, and service-worker state intact while
+  # bounding only regenerable HTTP/media cache data per profile.
+  base_env["AGENT_BROWSER_ARGS"] = (
+    "--disk-cache-size=33554432,--media-cache-size=16777216"
+  )
 
   # Get the provider first — needed for auth check.
   provider = get_provider(provider_id)
