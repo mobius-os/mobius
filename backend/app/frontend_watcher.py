@@ -41,7 +41,17 @@ _REBUILD_DIST_DIR = _FRONTEND_DIR / ".dist-rebuild"
 _NEXT_DIST_DIR = _FRONTEND_DIR / ".dist-next"
 _OLD_DIST_DIR = _FRONTEND_DIR / ".dist-old"
 _ATTIC_DIR = _FRONTEND_DIR / ".assets-attic"
-_ATTIC_KEEP = 3
+# A running tab deliberately defers shell reloads while its owner is typing,
+# steering, or reading a live reply. Agent edits can publish many generations
+# during that one foreground session, and lazy chunks (Settings is the common
+# case) are fetched only when first opened. Three generations lasted less than
+# two minutes during a real multi-file refactor. Sixty-four keeps roughly an
+# hour of that unusually rapid edit cadence while remaining a hard, predictable
+# disk bound (today's complete hashed asset set is about 1.3 MiB/generation).
+_ATTIC_KEEP = 64
+_BUILT_GLOBAL_CHECK = (
+  _FRONTEND_DIR / "scripts" / "check-built-globals.mjs"
+)
 _CACHE_DIR = _FRONTEND_DIR / ".vite-cache"
 _TMP_DIR = _FRONTEND_DIR / ".vite-tmp"
 # The explicit full-rebuild path gets its own cache/temp dirs: rebuild_shell.sh
@@ -65,6 +75,10 @@ class _StagingChangedDuringPublish(RuntimeError):
 
 class _IncompleteBuild(RuntimeError):
   """Raised when the watched staging tree is not a full Vite generation yet."""
+
+
+class _BuiltGlobalValidationError(RuntimeError):
+  """Raised when a built shell still references an undeclared identifier."""
 
 
 def _acquire_watch_lock():
@@ -117,6 +131,43 @@ def _complete_build(d: Path) -> bool:
     and (d / "sw.js").is_file()
     and (d / "manifest.webmanifest").is_file()
   )
+
+
+def _validate_built_globals(d: Path) -> None:
+  """Reject a complete-looking bundle with undeclared runtime identifiers.
+
+  Vite/Rollup intentionally permits free identifiers because a web page may
+  supply globals at runtime. That also means a half-finished refactor such as
+  ``clearTimeout(ioBounceTimer)`` compiles successfully, publishes, and crashes
+  only when the affected callback runs. The companion Node script parses every
+  emitted JS module with Babel's scope analysis and allows only the explicit
+  browser/worker/toolchain globals the shell actually relies on.
+
+  Run this after copying to ``.dist-next`` and before the atomic swap so a
+  rejected generation never displaces the last working ``dist``.
+  """
+  if not _BUILT_GLOBAL_CHECK.is_file():
+    raise _BuiltGlobalValidationError(
+      f"frontend global checker is missing: {_BUILT_GLOBAL_CHECK}"
+    )
+  try:
+    result = subprocess.run(
+      ["node", str(_BUILT_GLOBAL_CHECK), str(d)],
+      cwd=str(_FRONTEND_DIR),
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      timeout=45,
+    )
+  except (OSError, subprocess.TimeoutExpired) as exc:
+    raise _BuiltGlobalValidationError(
+      f"frontend global checker could not run: {exc}"
+    ) from exc
+  if result.returncode != 0:
+    detail = _tail(result.stdout) or (
+      f"frontend global checker exited {result.returncode}"
+    )
+    raise _BuiltGlobalValidationError(detail)
 
 
 def _tail(text: str, limit: int = 4000) -> str:
@@ -319,6 +370,14 @@ def _prepare_next_from(source_dir: Path) -> None:
       "vite build did not produce index.html, assets/, sw.js, and "
       "manifest.webmanifest"
     )
+  try:
+    _validate_built_globals(_NEXT_DIST_DIR)
+  except Exception:
+    # Match every other preparation failure: a rejected candidate must not
+    # linger as a complete-looking `.dist-next` that a later publisher could
+    # mistake for its own output.
+    shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
+    raise
 
 
 def _content_identical(a: Path, b: Path) -> bool:
@@ -328,9 +387,10 @@ def _content_identical(a: Path, b: Path) -> bool:
   build on every (re)start, which rewrites staging with fresh mtimes even when
   the output is byte-identical to the served ``dist``. Publishing that would
   fire a spurious ``shell_rebuilt`` (an idle-client reload per container
-  restart) and burn an attic slot per boot — three restarts could evict a
-  generation an unreloaded tab still needs. Byte comparison, not mtimes: the
-  question here is "would clients see anything new", not "did files move".
+  restart) and burn an attic slot per boot — repeated no-op restarts would
+  needlessly consume the bounded window an unreloaded tab needs. Byte
+  comparison, not mtimes: the question here is "would clients see anything
+  new", not "did files move".
   """
   if not (a.is_dir() and b.is_dir()):
     return False
