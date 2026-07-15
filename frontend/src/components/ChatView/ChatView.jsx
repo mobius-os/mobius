@@ -816,6 +816,7 @@ export default function ChatView({
     closePreSendGestureWindow,
     freezeForegroundReturn,
     freezeQueuedSubmission,
+    revealConversationTail,
     reapplyActiveMode,
     settleNonPin,
     settleStreamingPin,
@@ -3684,12 +3685,7 @@ export default function ChatView({
           <button
             type="button"
             className="chat__resume-nudge"
-            onClick={() => {
-              // USER-initiated scroll — same contract as the question nudge: a
-              // tap is the user asking to be taken to the card, not the app
-              // moving the viewport on its own.
-              findResumeCard()?.scrollIntoView({ block: 'nearest' })
-            }}
+            onClick={revealConversationTail}
           >
             {pendingResumeBlock?.pause?.resets_at
               ? 'Rate limit reached — tap to resume'

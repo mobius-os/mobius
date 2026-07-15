@@ -444,7 +444,7 @@ The removals not yet done at HEAD are noted in the last bullet:
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.3 (2026-07-15).** This section is the
+**Owner-authoritative contract — v1.4 (2026-07-15).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -528,6 +528,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   while wheel/scrolling-key input that produces no scroll releases on the next frame;
   only after a real scroll lands does the short momentum window begin. A bounded
   dead-man remains the final escape hatch for an interrupted gesture.
+- **R5a — Recovery nudges reveal the usable tail.** Tapping an offscreen paused-turn
+  nudge is an explicit one-shot reading action: it lands at the physical tail,
+  including the list's composer-clearance padding, so the real Resume control is
+  visible above the overlaid composer. It becomes a settled `ANCHOR_AT` hold rather
+  than `FOLLOW_BOTTOM`; revealing a recovery control must not manufacture future
+  live-follow intent. The action routes through the scroll controller instead of
+  calling `scrollIntoView`, because viewport intersection alone cannot detect that
+  the absolutely-positioned composer is covering the target.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as
@@ -560,6 +568,7 @@ path means routing it through the same entries rather than inventing another rul
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | same mode and active assistant row | None |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
+| Offscreen paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 
 Controller structure is part of the contract, not an implementation detail:
 
