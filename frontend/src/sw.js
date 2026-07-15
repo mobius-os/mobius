@@ -689,6 +689,12 @@ registerRoute(
 // Empty here on purpose: no single instance's app is baked into the shipped shell.
 const PROXIED_APP_SUBTREES = []
 
+// Owner-configured backend web services live under one reserved namespace.
+// They are server-served, multi-page applications rather than SPA routes, so
+// every depth below /services/ must reach the guarded backend proxy.  The
+// concrete service map is private data (`/data/local-services.json`), never
+// compiled into the stock shell or edited into this service worker.
+
 registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
   {
@@ -702,7 +708,8 @@ registerRoute(new NavigationRoute(
       // cached index.html for a published URL, so opening it showed the Möbius
       // app instead of the built website.
       /^\/sites(\/|$)/,
-      // Instance-configured reverse-proxied app subtrees (empty in stock Möbius).
+      /^\/services(\/|$)/,
+      // Legacy instance-local mounts remain supported as an extension point.
       ...PROXIED_APP_SUBTREES,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
     ],

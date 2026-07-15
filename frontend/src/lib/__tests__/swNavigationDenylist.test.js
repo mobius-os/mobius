@@ -7,22 +7,21 @@ const SOURCE = readFileSync(
   'utf8',
 )
 
-// The denylist literal spreads `PROXIED_APP_SUBTREES` (the reverse-proxied-app
-// extension point), so the eval needs that binding in scope. `proxied` lets a
-// test drive the extension point without editing the shipped shell.
+// The denylist spreads the legacy instance-local extension point. Keep that
+// binding available while also testing the stock reserved /services subtree.
 function shellNavigationDenylist(proxied = null) {
   const match = SOURCE.match(/denylist:\s*\[([\s\S]*?)\n\s*\]/)
   assert.ok(match, 'shell NavigationRoute denylist exists')
-  let decl
+  let declaration
   if (proxied === null) {
     const constMatch = SOURCE.match(/^const PROXIED_APP_SUBTREES = (\[[\s\S]*?\])/m)
     assert.ok(constMatch, 'PROXIED_APP_SUBTREES extension point exists')
-    decl = constMatch[1]
+    declaration = constMatch[1]
   } else {
-    decl = `[${proxied}]`
+    declaration = `[${proxied}]`
   }
   return Function(
-    `"use strict"; const PROXIED_APP_SUBTREES = ${decl}; return [${match[1]}]`,
+    `"use strict"; const PROXIED_APP_SUBTREES = ${declaration}; return [${match[1]}]`,
   )()
 }
 
@@ -58,33 +57,34 @@ test('shell embed navigation reaches the server, not the non-injected precache',
   assert.equal(denied('/shell/chat/abc'), false)
 })
 
-test('reverse-proxied app subtrees ship empty — no instance app baked in', () => {
-  // The shipped shell must not deny any concrete instance's proxy prefix; the
-  // extension point is empty by default.
-  const constMatch = SOURCE.match(/^const PROXIED_APP_SUBTREES = (\[[\s\S]*?\])/m)
-  assert.ok(constMatch, 'PROXIED_APP_SUBTREES extension point exists')
-  assert.equal(constMatch[1].replace(/\s/g, ''), '[]', 'ships empty')
-
-  // With the empty default, a deep path under an arbitrary would-be proxy
-  // prefix still falls through to the SPA (nothing extra is denied).
+test('guarded local services bypass the shell at every depth', () => {
   const denied = path => shellNavigationDenylist().some(re => re.test(path))
+
+  assert.equal(denied('/services'), true)
+  assert.equal(denied('/services/'), true)
+  assert.equal(denied('/services/recipes'), true)
+  assert.equal(denied('/services/recipes/setup/'), true)
+  assert.equal(denied('/services/recipes/accounts/login/'), true)
+  assert.equal(denied('/services/recipes/api/recipe/42/'), true)
+  // No concrete instance service is compiled into the shell. An old ad-hoc
+  // prefix is still an ordinary SPA path unless it moves under /services/.
   assert.equal(denied('/recipes/setup/step/2'), false)
+  assert.equal(denied('/shell/chat/abc'), false)
 })
 
-test('a configured proxied subtree denies the WHOLE subtree, deep paths too', () => {
-  // Mechanism/regression guard for the deep-path bounce: when an instance adds
-  // its proxied app root, EVERY deep navigation under it must be denied (sent to
-  // the network), not just the single-segment root the catch-all already covers.
+test('legacy reverse-proxy extension still ships empty', () => {
+  const constMatch = SOURCE.match(/^const PROXIED_APP_SUBTREES = (\[[\s\S]*?\])/m)
+  assert.ok(constMatch, 'PROXIED_APP_SUBTREES extension point exists')
+  assert.equal(constMatch[1].replace(/\s/g, ''), '[]')
+})
+
+test('a configured legacy proxy subtree still bypasses the shell deeply', () => {
   const denylist = shellNavigationDenylist(String.raw`/^\/recipes(\/|$)/`)
   const denied = path => denylist.some(re => re.test(path))
 
   assert.equal(denied('/recipes'), true)
-  assert.equal(denied('/recipes/'), true)
-  assert.equal(denied('/recipes/setup/'), true)
-  assert.equal(denied('/recipes/accounts/login/'), true)
-  assert.equal(denied('/recipes/api/recipe/42/'), true)
-  // A sibling top-level route is unaffected — still SPA-served.
-  assert.equal(denied('/shell/chat/abc'), false)
+  assert.equal(denied('/recipes/setup/step/2'), true)
+  assert.equal(denied('/other/deep/path'), false)
 })
 
 test('offline app cache key ignores install intent query', () => {
