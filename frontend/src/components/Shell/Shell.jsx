@@ -44,7 +44,10 @@ import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
 } from './swHandoff.js'
-import { flushPersistedQueryCache } from '../../queryClient.js'
+import {
+  awaitCacheFlushBeforeReload,
+  flushPersistedQueryCache,
+} from '../../queryClient.js'
 import './Shell.css'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -199,7 +202,7 @@ export default function Shell() {
     // cache as the reload handoff; the backend remains authoritative on the
     // immediate background revalidation. This follows the synchronous event
     // above so view-owned anchors are captured before the first await.
-    try { await flushPersistedQueryCache(queryClient) } catch { /* best-effort */ }
+    await awaitCacheFlushBeforeReload(flushPersistedQueryCache(queryClient))
     sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
     // Match the manifest scope so the post-reload page lands inside
     // the installed PWA's declared scope — writing `/` here would

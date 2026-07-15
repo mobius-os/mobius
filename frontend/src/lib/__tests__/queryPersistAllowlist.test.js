@@ -19,6 +19,7 @@ import { QueryClient } from '@tanstack/react-query'
 import { indexedDB } from 'fake-indexeddb'
 import { get } from 'idb-keyval'
 import {
+  awaitCacheFlushBeforeReload,
   flushPersistedQueryCache,
   shouldPersistQueryKey,
 } from '../../queryClient.js'
@@ -80,4 +81,27 @@ test('explicit reload handoff flushes the latest allowlisted chat cache', async 
   } finally {
     globalThis.indexedDB = previousIndexedDb
   }
+})
+
+test('reload handoff cannot be stranded by a blocked cache write', async () => {
+  let fireDeadline = null
+  let clearedTimer = null
+  let completed = false
+  const blockedWrite = new Promise(() => {})
+  const handoff = awaitCacheFlushBeforeReload(blockedWrite, {
+    timeoutMs: 25,
+    setTimeoutFn: callback => {
+      fireDeadline = callback
+      return 17
+    },
+    clearTimeoutFn: timer => { clearedTimer = timer },
+  }).then(() => { completed = true })
+
+  await Promise.resolve()
+  assert.equal(completed, false)
+  assert.equal(typeof fireDeadline, 'function')
+  fireDeadline()
+  await handoff
+  assert.equal(completed, true)
+  assert.equal(clearedTimer, 17)
 })

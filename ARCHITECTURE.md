@@ -815,9 +815,11 @@ streaming, then performs the controlled SW handoff/reload. The idle boundary alo
 is not a transcript-persistence boundary—terminal promotion updates the in-memory
 TanStack cache synchronously while its normal IndexedDB mirror is throttled. Before
 the intentional reload, `flushPersistedQueryCache()` writes the current allowlisted
-cache directly; this guarantees the reloaded ChatView hydrates the terminal assistant
-row rather than the previous partial while its authoritative GET revalidates. Do not
-replace this with a timeout: the explicit cache flush is the reload handoff.
+cache directly; this normally guarantees the reloaded ChatView hydrates the terminal
+assistant row rather than the previous partial while its authoritative GET revalidates.
+The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be blocked by
+another browser lifecycle transaction, and a best-effort cache write must never strand
+a waiting service-worker generation. The write may still finish after the deadline.
 
 ## Mini-app manifest (mobius.json)
 
