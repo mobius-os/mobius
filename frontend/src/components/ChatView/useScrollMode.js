@@ -186,6 +186,31 @@ export function bottomAnchorModeFromScroll(scrollEl) {
 }
 
 
+/** Create a settled hold anchor at the true physical scroll tail.
+ *
+ * Sticky question and paused-turn nudges are explicit one-shot navigation.
+ * Their actions sit behind the overlaid composer, so merely bringing the card
+ * into the viewport can still leave Submit or Resume covered. Include all tail
+ * clearance, then hold as ANCHOR_AT instead of following future content.
+ */
+export function physicalBottomAnchorModeFromScroll(scrollEl) {
+  if (!scrollEl) return null
+  const items = scrollEl.querySelectorAll('.chat__msg[data-key]')
+  const last = items[items.length - 1]
+  const key = last?.dataset?.key
+  if (!last || !key) return null
+  const targetScrollTop = Math.max(
+    0,
+    scrollEl.scrollHeight - scrollEl.clientHeight,
+  )
+  return {
+    kind: 'ANCHOR_AT',
+    key,
+    offset: last.offsetTop - targetScrollTop,
+  }
+}
+
+
 /** Resolve the DOM row a PIN_USER_MSG targets: the user row whose
  *  `data-cid` equals the mode's cid.
  *
@@ -650,6 +675,7 @@ export function mountMediaSettled(scrollEl) {
  *   freezeQueuedSubmission: () => void,
  *   settleNonPin: (event?: object) => void,
  *   settleStreamingPin: () => void,
+ *   revealConversationTail: () => void,
  * }}
  */
 export default function useScrollMode({
@@ -1502,6 +1528,20 @@ export default function useScrollMode({
     writeMode,
   ])
 
+  // A sticky attention nudge is a reader-requested move, but not a gesture
+  // inside `.chat__scroll`. Route it through the mode owner so the absolutely
+  // positioned composer cannot cover the real action and the resulting hold
+  // position survives later layout work without creating live-follow intent.
+  const revealConversationTail = useCallback(() => {
+    const scrollEl = scrollRef.current
+    const nextMode = physicalBottomAnchorModeFromScroll(scrollEl)
+    if (!scrollEl || !nextMode) return
+    gestureWindowUntilRef.current = 0
+    transitionMode(nextMode, 'attention:reveal-physical-tail')
+    writeMode(scrollEl, nextMode, 'attention:reveal-physical-tail')
+    persistMode()
+  }, [persistMode, scrollRef, transitionMode, writeMode])
+
   return {
     modeRef,
     gestureWindowUntilRef,
@@ -1512,6 +1552,7 @@ export default function useScrollMode({
     closePreSendGestureWindow,
     freezeForegroundReturn,
     freezeQueuedSubmission,
+    revealConversationTail,
     reapplyActiveMode,
     settleNonPin,
     settleStreamingPin,
