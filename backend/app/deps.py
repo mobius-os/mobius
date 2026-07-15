@@ -412,13 +412,16 @@ def get_owner_or_app_with_github_access(
 ) -> models.Owner:
   """Owner JWT, OR an app-scoped JWT whose App row has github_access=true.
 
-  Gates the WHOLE GitHub surface in routes/github.py: the connect flow
+  Gates the WHOLE GitHub/Contribute surface in routes/github.py: the connect flow
   (device-code start/poll, PAT submit) AND disconnect AND the read-only
   REST/GraphQL passthrough. So this is NOT a read-only grant — read it
   as "let this app manage and read the owner's GitHub connection". A
   github_access app can drive the connect UI (a normal connect still
   needs the owner to authorize on github.com or paste their own PAT),
-  can disconnect, and can read PR/issue state under the stored token.
+  can disconnect, and can read PR/issue state under the stored token. It also
+  gates Contribute's fetch-free local source-status metadata (sanitized refs,
+  counts, and relative path names; never source contents or absolute paths),
+  avoiding a much broader filesystem grant.
   What it CANNOT do is exfiltrate the token (it never leaves the server,
   INV1) or write arbitrary GitHub mutations over HTTP with an app-scoped
   token. The read surface is GET-only / mutation-rejecting; the PR submit

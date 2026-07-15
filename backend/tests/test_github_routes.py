@@ -12,6 +12,7 @@ the network. Two harness notes:
   identity test re-points GIT_CONFIG_GLOBAL at a tmp file and reads it back.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -22,13 +23,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import github_auth
+from app import github_auth, source_status
 from app.config import get_settings
 from app.storage_io import atomic_write
 
 # The github router's Limiter is a separate instance from app.state.limiter,
 # so conftest's disable doesn't reach it (see module docstring).
 from app.routes.github import _limiter as _github_limiter
+from app.routes import github as github_routes
 
 _github_limiter.enabled = False
 
@@ -406,6 +408,116 @@ def test_status_connected_never_echoes_token(client, auth):
   # INV1: the token never appears anywhere in the payload.
   assert "token" not in body
   assert secret not in json.dumps(body)
+
+
+def test_source_status_is_fetch_free_and_available_to_owner(client, auth):
+  r = client.get("/api/github/source-status", headers=auth)
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert body["schema"] == 1
+  assert body["fetch_free"] is True
+  assert body["platform"]["key"] == "platform"
+  assert body["apps"] == []
+  serialized = json.dumps(body)
+  assert "source_dir" not in serialized
+  assert "manifest_url" not in serialized
+
+
+def test_source_status_releases_db_before_waiting_on_repository_locks(
+  monkeypatch,
+):
+  class EmptyQuery:
+    def filter(self, *args):
+      return self
+
+    def order_by(self, *args):
+      return self
+
+    def all(self):
+      return []
+
+  class FakeSession:
+    closed = False
+
+    def query(self, *args):
+      return EmptyQuery()
+
+    def close(self):
+      self.closed = True
+
+  db = FakeSession()
+
+  async def checked_to_thread(function, *args):
+    assert db.closed, "repository inspection started with DB still checked out"
+    assert function is source_status.build_platform_status
+    return {"key": "platform", "available": True}
+
+  monkeypatch.setattr(github_routes.asyncio, "to_thread", checked_to_thread)
+  result = asyncio.run(github_routes.github_source_status(None, db))
+
+  assert result["platform"] == {"key": "platform", "available": True}
+  assert result["apps"] == []
+
+
+def test_source_status_requires_github_access_for_app_tokens(
+  client, owner_token,
+):
+  _, denied_token = _app_token(client, owner_token, github_access=False)
+  denied = client.get(
+    "/api/github/source-status",
+    headers={"Authorization": f"Bearer {denied_token}"},
+  )
+  assert denied.status_code == 403
+
+  _, allowed_token = _app_token(client, owner_token, github_access=True)
+  allowed = client.get(
+    "/api/github/source-status",
+    headers={"Authorization": f"Bearer {allowed_token}"},
+  )
+  assert allowed.status_code == 200, allowed.text
+
+
+def test_source_status_keeps_healthy_apps_when_one_checkout_fails(
+  client, owner_token, auth, monkeypatch,
+):
+  from app import models
+  from app.database import SessionLocal
+
+  good_id, _ = _app_token(client, owner_token)
+  bad_id, _ = _app_token(client, owner_token)
+  app_root = Path(get_settings().data_dir) / "apps"
+  good_dir = app_root / "good-source"
+  bad_dir = app_root / "bad-source"
+  good_dir.mkdir(parents=True, exist_ok=True)
+  bad_dir.mkdir(parents=True, exist_ok=True)
+  session = SessionLocal()
+  try:
+    session.query(models.App).filter(models.App.id == good_id).update({
+      "name": "Good source", "source_dir": str(good_dir),
+    })
+    session.query(models.App).filter(models.App.id == bad_id).update({
+      "name": "Bad source", "source_dir": str(bad_dir),
+    })
+    session.commit()
+  finally:
+    session.close()
+
+  monkeypatch.setattr(source_status, "build_platform_status", lambda: {
+    "key": "platform", "available": True,
+  })
+
+  def inspect(app):
+    if app["id"] == bad_id:
+      raise RuntimeError("damaged checkout")
+    return {"key": f'app:{app["id"]}', "name": app["name"]}
+
+  monkeypatch.setattr(source_status, "build_app_status", inspect)
+  response = client.get("/api/github/source-status", headers=auth)
+
+  assert response.status_code == 200, response.text
+  assert response.json()["apps"] == [{
+    "key": f"app:{good_id}", "name": "Good source",
+  }]
 
 
 # --- disconnect -------------------------------------------------------
