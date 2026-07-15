@@ -10,7 +10,10 @@ on:
     # cheap; finding regressions early is not.
     branches: [main, 'integration/**', 'feat/**', 'fix/**']
   pull_request:
-    branches: [main]
+    # True PR stacks target the upstream branch directly beneath them. Run the
+    # same suite for every layer so the chain is reviewable in parallel; main's
+    # strict required checks still decide when each retargeted layer can merge.
+    branches: [main, 'stack/**']
 
 # Cancel an in-flight run when a newer commit lands on the same ref.
 # Several agents push to main in bursts. cancel-in-progress is scoped to

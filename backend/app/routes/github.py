@@ -10,12 +10,14 @@ paste their own token, but the grant itself is powerful — see the
 get_owner_or_app_with_github_access docstring. The remote read surface
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
-document containing a mutation or subscription operation. GitHub writes
-are limited to the Contribute submit endpoint, which consumes a single
-prepared ledger record after the owner presses Send: it claims that
-record, rechecks the reviewed branch/diff, pushes to the owner's fork,
-and creates the pull request. An app-scoped github_access token may submit
-only its own prepared record; it cannot act as a general GitHub write proxy.
+document containing a mutation or subscription operation. GitHub writes are
+limited to the Contribute submit endpoints. A standalone Send consumes one
+prepared record, rechecks its reviewed branch/diff, pushes to the owner's
+fork, and creates the pull request. An explicitly enumerated stack Send
+validates every parent link and diff before publishing dedicated upstream
+stack branches in order; it is available only when the connected owner can
+push there. An app-scoped github_access token may submit only records from its
+own storage; it cannot act as a general GitHub write proxy.
 
 The fetch-free /source-status read is the local companion for Contribute's
 Sources view. It exposes only sanitized repository identity, refs, diff
@@ -36,6 +38,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
@@ -123,6 +126,10 @@ class GithubConnectStartRequest(BaseModel):
 class GraphqlRequest(BaseModel):
   query: str
   variables: dict | None = None
+
+
+class ContributionStackSubmitRequest(BaseModel):
+  record_ids: list[str]
 
 
 class ContributionSubmitError(Exception):
@@ -479,6 +486,34 @@ def _normalize_head_attribution(
   return _head_sha_patch(record, before["sha"], after["sha"])
 
 
+def _assert_head_attribution(
+  repo: Path,
+  branch: str,
+  *,
+  author_name: str,
+  author_email: str,
+) -> None:
+  """Require a stack commit to already carry the connected owner identity.
+
+  Standalone submissions may safely amend their one reviewed commit before
+  push.  A stack cannot: rewriting a parent commit would invalidate every
+  child's reviewed base SHA and ancestry.  Stack preparation therefore pins
+  the identity up front and submission only verifies it.
+  """
+  metadata = _head_commit_metadata(repo, branch)
+  if (
+    metadata["author_name"] != author_name
+    or metadata["author_email"] != author_email
+    or metadata["committer_name"] != author_name
+    or metadata["committer_email"] != author_email
+  ):
+    raise ContributionSubmitError(
+      "This PR stack was prepared with a different commit identity. Leave "
+      "feedback so your agent can rebuild the stack without rewriting its "
+      "reviewed parent links."
+    )
+
+
 def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
   proc = _gh(
     repo,
@@ -491,6 +526,23 @@ def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
   if not branch:
     branch = "main"
   return _validate_branch(branch)
+
+
+def _assert_upstream_push_permission(repo: Path, upstream_repo: str) -> None:
+  """True GitHub stacks need their base branches in the upstream repository."""
+  proc = _gh(
+    repo,
+    "api", f"repos/{upstream_repo}",
+    "--jq", ".permissions.push",
+    check=False,
+  )
+  if proc.returncode != 0 or (proc.stdout or "").strip().lower() != "true":
+    raise ContributionSubmitError(
+      "GitHub only allows a PR to target a branch in its base repository. "
+      "This account cannot publish the upstream stack branches, so nothing "
+      "was sent. Submit these as independent PRs or use an account with "
+      "upstream push access."
+    )
 
 
 def _assert_merges_with_upstream(
@@ -659,6 +711,166 @@ def _claim_record(
   return claimed, record_path, diff_path
 
 
+def _stack_meta(record: dict) -> dict:
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else {}
+  stack_id = str(stack.get("id") or "").strip()
+  if not _CONTRIBUTION_ID.match(stack_id):
+    raise ContributionSubmitError(
+      "This PR stack has an invalid stack id. Leave feedback so your agent "
+      "can prepare it again."
+    )
+  try:
+    position = int(stack.get("position"))
+    total = int(stack.get("total"))
+  except (TypeError, ValueError):
+    raise ContributionSubmitError(
+      "This PR stack is missing its layer positions. Leave feedback so your "
+      "agent can prepare it again."
+    ) from None
+  if total < 2 or total > 12 or position < 1 or position > total:
+    raise ContributionSubmitError(
+      "A PR stack must contain between 2 and 12 ordered layers."
+    )
+  base_branch = _validate_branch(stack.get("base_branch"))
+  parent_record_id = str(stack.get("parent_record_id") or "").strip()
+  if parent_record_id and not _CONTRIBUTION_ID.match(parent_record_id):
+    raise ContributionSubmitError("This PR stack has an invalid parent record.")
+  return {
+    **stack,
+    "id": stack_id,
+    "position": position,
+    "total": total,
+    "base_branch": base_branch,
+    "parent_record_id": parent_record_id,
+  }
+
+
+def _validate_stack_records(records: list[dict]) -> list[dict]:
+  """Validate one complete, immutable parent-to-child contribution chain."""
+  if not records:
+    raise ContributionSubmitError("This PR stack has no reviewed records.")
+  decorated = [(record, _stack_meta(record)) for record in records]
+  decorated.sort(key=lambda item: item[1]["position"])
+  first_stack = decorated[0][1]
+  total = first_stack["total"]
+  stack_id = first_stack["id"]
+  if len(decorated) != total:
+    raise ContributionSubmitError(
+      "This PR stack is incomplete. Review every layer together before "
+      "sending it."
+    )
+  if [meta["position"] for _, meta in decorated] != list(range(1, total + 1)):
+    raise ContributionSubmitError("This PR stack has duplicate or missing layers.")
+
+  repo = None
+  branches = set()
+  previous_record = None
+  previous_plan = None
+  # `draft` means the owner has not approved that layer yet. Never let a
+  # prepared sibling smuggle it into the explicitly reviewed batch request.
+  allowed_statuses = {"prepared", "open", "merged"}
+  for record, meta in decorated:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    record_id = str(record.get("id") or "")
+    record_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+    branch = _validate_branch(plan.get("branch") or record.get("branch"))
+    prefix = f"stack/{stack_id}/"
+    if not branch.startswith(prefix):
+      raise ContributionSubmitError(
+        f"Every branch in this stack must start with {prefix}."
+      )
+    if branch in branches:
+      raise ContributionSubmitError("Every PR stack layer needs a unique branch.")
+    branches.add(branch)
+    if meta["id"] != stack_id or meta["total"] != total:
+      raise ContributionSubmitError("These records do not describe one PR stack.")
+    if record.get("type") != "pr" or plan.get("action") != "pr":
+      raise ContributionSubmitError("PR stacks can contain pull requests only.")
+    if record.get("status") not in allowed_statuses:
+      raise ContributionSubmitError(
+        "Every stack layer must be ready, open, or already merged."
+      )
+    if repo is None:
+      repo = record_repo
+    elif record_repo != repo:
+      raise ContributionSubmitError("Every layer in a PR stack must target one repository.")
+
+    if previous_record is None:
+      if meta["parent_record_id"]:
+        raise ContributionSubmitError("The first stack layer cannot have a parent PR.")
+    else:
+      if meta["parent_record_id"] != str(previous_record.get("id") or ""):
+        raise ContributionSubmitError("A PR stack layer points at the wrong parent record.")
+      previous_branch = _validate_branch(
+        previous_plan.get("branch") or previous_record.get("branch")
+      )
+      if meta["base_branch"] != previous_branch:
+        raise ContributionSubmitError("A PR stack layer points at the wrong base branch.")
+      if str(plan.get("base_sha") or "") != str(previous_plan.get("head_sha") or ""):
+        raise ContributionSubmitError(
+          "A PR stack layer is not based on its reviewed parent commit."
+        )
+    previous_record = record
+    previous_plan = plan
+
+  # Keep the validated metadata beside each record for callers without
+  # changing the stored ledger shape.
+  return [{"record": record, "stack": meta} for record, meta in decorated]
+
+
+def _claim_stack_records(
+  *,
+  app_id: int,
+  record_ids: list[str],
+  db: Session,
+  expected_nonce: str | None,
+) -> list[dict]:
+  if not 2 <= len(record_ids) <= 12 or len(set(record_ids)) != len(record_ids):
+    raise HTTPException(
+      status_code=400,
+      detail="Choose one complete PR stack of 2 to 12 unique records.",
+    )
+  _recheck_submit_app(db, app_id, expected_nonce)
+  rows = []
+  for record_id in record_ids:
+    record_path, diff_path = _record_paths(app_id, record_id)
+    record = _read_record(record_path)
+    if str(record.get("id") or "") != record_id:
+      raise HTTPException(status_code=409, detail="A stack record id changed.")
+    rows.append({
+      "record": record,
+      "record_path": record_path,
+      "diff_path": diff_path,
+    })
+  try:
+    validated = _validate_stack_records([row["record"] for row in rows])
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
+  by_id = {row["record"]["id"]: row for row in rows}
+  ordered = []
+  now = _now_iso()
+  for item in validated:
+    row = by_id[item["record"]["id"]]
+    record = row["record"]
+    if record.get("status") == "prepared":
+      record = {
+        **record,
+        "status": "submitting",
+        "submitter": "contribute-stack-button",
+        "submit_started_at": now,
+        "updated_at": now,
+      }
+      _write_record(row["record_path"], record)
+    ordered.append({**row, "record": record, "stack": item["stack"]})
+  if not any(row["record"].get("status") == "submitting" for row in ordered):
+    raise HTTPException(
+      status_code=409,
+      detail="Every PR in this stack has already been submitted.",
+    )
+  return ordered
+
+
 def _mark_submit_failure(
   *,
   app_id: int,
@@ -707,20 +919,58 @@ def _mark_submit_success(
   return next_record
 
 
+def _mark_stack_submit_failure(
+  rows: list[dict],
+  message: str,
+  *,
+  failed_id: str | None = None,
+  record_patch: dict | None = None,
+) -> list[dict]:
+  snapshots = []
+  for row in rows:
+    current = _read_record(row["record_path"])
+    if current.get("status") == "submitting":
+      patch = record_patch if current.get("id") == failed_id else None
+      current = _mark_submit_failure(
+        app_id=0,
+        record_path=row["record_path"],
+        message=message,
+        record_patch=patch,
+      ) or current
+    snapshots.append(current)
+  return snapshots
+
+
+def _stack_record_snapshots(rows: list[dict]) -> list[dict]:
+  return [_read_record(row["record_path"]) for row in rows]
+
+
 def _parse_pr_number(url: str) -> int | None:
   m = re.search(r"/pull/(\d+)(?:$|[/?#])", url)
   return int(m.group(1)) if m else None
 
 
-def _find_existing_pr(repo: Path, upstream_repo: str, login: str, branch: str) -> str | None:
-  proc = _gh(
-    repo,
+def _find_existing_pr(
+  repo: Path,
+  upstream_repo: str,
+  login: str,
+  branch: str,
+  *,
+  base_branch: str | None = None,
+  same_repo: bool = False,
+) -> str | None:
+  head = branch if same_repo else f"{login}:{branch}"
+  args = [
     "pr", "list",
     "-R", upstream_repo,
-    "--head", f"{login}:{branch}",
-    "--state", "open",
-    "--json", "url",
-    "--limit", "1",
+    "--head", head,
+  ]
+  if base_branch:
+    args.extend(("--base", _validate_branch(base_branch)))
+  args.extend(("--state", "open", "--json", "url", "--limit", "1"))
+  proc = _gh(
+    repo,
+    *args,
     check=False,
   )
   if proc.returncode != 0:
@@ -1059,7 +1309,12 @@ def _sync_owner_fork_with_workflow_scope(
   return {**verified, "last_submit_fork_sync": "fast-forwarded"}
 
 
-def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None, dict]:
+def _submit_prepared_pr(
+  record: dict,
+  diff_path: Path,
+  *,
+  direct_base_branch: str | None = None,
+) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
       "This platform needs git and gh installed before it can submit PRs.",
@@ -1075,6 +1330,9 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
   plan = record.get("plan") or {}
   upstream_repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
   branch = _validate_branch(plan.get("branch") or record.get("branch"))
+  direct_base = (
+    _validate_branch(direct_base_branch) if direct_base_branch else None
+  )
   repo = _safe_repo_path(plan.get("repo_path"))
   if not (repo / ".git").exists():
     raise ContributionSubmitError("The staged repo is not a git checkout.")
@@ -1100,15 +1358,24 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
     _assert_clean_worktree(repo)
     expected_base, _, expected_diff = _assert_fresh(record, diff_path, repo, branch)
     _assert_coauthor_trailer(repo, branch)
-    record_patch = _normalize_head_attribution(
-      repo,
-      branch,
-      author_name=author_name,
-      author_email=author_email,
-      base_sha=expected_base,
-      expected_diff=expected_diff,
-      record=record,
-    )
+    if direct_base:
+      _assert_head_attribution(
+        repo,
+        branch,
+        author_name=author_name,
+        author_email=author_email,
+      )
+      record_patch = {}
+    else:
+      record_patch = _normalize_head_attribution(
+        repo,
+        branch,
+        author_name=author_name,
+        author_email=author_email,
+        base_sha=expected_base,
+        expected_diff=expected_diff,
+        record=record,
+      )
     _assert_clean_worktree(repo)
 
     try:
@@ -1117,69 +1384,85 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
     except ContributionSubmitError as exc:
       raise _merge_error_patch(exc, record_patch) from exc
 
-    try:
-      fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
-    except ContributionSubmitError as exc:
-      raise _merge_error_patch(exc, record_patch) from exc
-    record_patch = _record_patch_with(record_patch, {"head_repository": fork_slug})
-
-    try:
-      fork_sync_patch = _inspect_owner_fork_default_branch(
-        repo,
-        fork_slug,
-        upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
-        upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-      )
-      record_patch = _record_patch_with(record_patch, fork_sync_patch)
-    except ContributionSubmitError as exc:
-      raise _merge_error_patch(exc, record_patch) from exc
-
     push_source = "HEAD"
-    if fork_sync_patch.get("last_submit_fork_sync") == "strictly-behind":
+    if direct_base:
       try:
-        push_source = _build_fork_compatible_topic_commit(
-          repo,
-          branch=branch,
-          fork_sha=str(fork_sync_patch["last_submit_fork_sha"]),
-          upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-          diff_path=diff_path,
-          expected_diff=expected_diff,
-          author_name=author_name,
-          author_email=author_email,
-        )
-        record_patch = _record_patch_with(record_patch, {
-          "last_submit_fork_sync": "stale-base-compatible",
-          "last_submit_push_sha": push_source,
-        })
+        _assert_upstream_push_permission(repo, upstream_repo)
       except ContributionSubmitError as exc:
-        granted_scopes = set(state.get("scopes") or [])
-        if "workflow" not in granted_scopes:
-          raise ContributionSubmitError(
-            "This reviewed change depends on newer code in a stale PR fork. "
-            "In Contribute, enable optional workflow access, then try Send "
-            "again; Contribute will fast-forward only that fork's default "
-            "branch before pushing the reviewed topic branch.",
-            record_patch=_record_patch_with(record_patch, {
-              "last_submit_requires_workflow_scope": True,
-              "last_submit_compatible_error": exc.message,
-            }),
-          ) from exc
+        raise _merge_error_patch(exc, record_patch) from exc
+      push_remote = f"https://github.com/{upstream_repo}.git"
+      published_repo = upstream_repo
+      record_patch = _record_patch_with(record_patch, {
+        "head_repository": upstream_repo,
+        "last_submit_base_branch": direct_base,
+        "last_submit_mode": "stack",
+        "last_submit_push_sha": _git(repo, "rev-parse", "HEAD").stdout.strip(),
+      })
+    else:
+      try:
+        fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
+      except ContributionSubmitError as exc:
+        raise _merge_error_patch(exc, record_patch) from exc
+      record_patch = _record_patch_with(record_patch, {"head_repository": fork_slug})
+
+      try:
+        fork_sync_patch = _inspect_owner_fork_default_branch(
+          repo,
+          fork_slug,
+          upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+          upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+        )
+      except ContributionSubmitError as exc:
+        raise _merge_error_patch(exc, record_patch) from exc
+      record_patch = _record_patch_with(record_patch, fork_sync_patch)
+
+      if fork_sync_patch.get("last_submit_fork_sync") == "strictly-behind":
         try:
-          synced_patch = _sync_owner_fork_with_workflow_scope(
+          push_source = _build_fork_compatible_topic_commit(
             repo,
-            fork_slug,
-            upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+            branch=branch,
+            fork_sha=str(fork_sync_patch["last_submit_fork_sha"]),
             upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+            diff_path=diff_path,
+            expected_diff=expected_diff,
+            author_name=author_name,
+            author_email=author_email,
           )
-          record_patch = _record_patch_with(record_patch, synced_patch)
-          push_source = "HEAD"
-        except ContributionSubmitError as sync_exc:
-          raise _merge_error_patch(sync_exc, record_patch) from sync_exc
+          record_patch = _record_patch_with(record_patch, {
+            "last_submit_fork_sync": "stale-base-compatible",
+            "last_submit_push_sha": push_source,
+          })
+        except ContributionSubmitError as exc:
+          granted_scopes = set(state.get("scopes") or [])
+          if "workflow" not in granted_scopes:
+            raise ContributionSubmitError(
+              "This reviewed change depends on newer code in a stale PR fork. "
+              "In Contribute, enable optional workflow access, then try Send "
+              "again; Contribute will fast-forward only that fork's default "
+              "branch before pushing the reviewed topic branch.",
+              record_patch=_record_patch_with(record_patch, {
+                "last_submit_requires_workflow_scope": True,
+                "last_submit_compatible_error": exc.message,
+              }),
+            ) from exc
+          try:
+            synced_patch = _sync_owner_fork_with_workflow_scope(
+              repo,
+              fork_slug,
+              upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+              upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+            )
+            record_patch = _record_patch_with(record_patch, synced_patch)
+            push_source = "HEAD"
+          except ContributionSubmitError as sync_exc:
+            raise _merge_error_patch(sync_exc, record_patch) from sync_exc
+      push_remote = "fork"
+      published_repo = fork_slug
 
     last_push_error = None
     for _ in range(_PUSH_RETRIES):
       proc = _git(
-        repo, "push", "fork", f"{push_source}:refs/heads/{branch}",
+        repo, "push", push_remote, f"{push_source}:refs/heads/{branch}",
         check=False,
       )
       if proc.returncode == 0:
@@ -1193,16 +1476,25 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
         record_patch=record_patch,
       )
     pushed_branch_url = (
-      f"https://github.com/{fork_slug}/tree/{quote(branch, safe='/')}"
+      f"https://github.com/{published_repo}/tree/{quote(branch, safe='/')}"
     )
     pushed_patch = {
       **record_patch,
       "last_submit_stage": "pushed",
-      "last_pushed_branch": f"{login}:{branch}",
+      "last_pushed_branch": (
+        branch if direct_base else f"{login}:{branch}"
+      ),
       "last_pushed_branch_url": pushed_branch_url,
     }
 
-    existing = _find_existing_pr(repo, upstream_repo, login, branch)
+    existing = _find_existing_pr(
+      repo,
+      upstream_repo,
+      login,
+      branch,
+      base_branch=direct_base,
+      same_repo=bool(direct_base),
+    )
     if existing:
       return existing, _parse_pr_number(existing), record_patch
 
@@ -1214,10 +1506,12 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
         create_args = [
           "pr", "create",
           "-R", upstream_repo,
-          "-H", f"{login}:{branch}",
+          "-H", branch if direct_base else f"{login}:{branch}",
           "--title", title,
           "--body-file", body_file,
         ]
+        if direct_base:
+          create_args.extend(("--base", direct_base))
         pr = _gh(
           repo,
           *create_args,
@@ -1244,6 +1538,69 @@ def _submit_prepared_pr(record: dict, diff_path: Path) -> tuple[str, int | None,
   finally:
     if checkout_back:
       _git(repo, "checkout", "-q", checkout_back, check=False)
+
+
+def _preflight_prepared_stack(rows: list[dict]) -> None:
+  """Prove every private layer before the first upstream branch is pushed."""
+  if not shutil.which("git") or not shutil.which("gh"):
+    raise ContributionSubmitError(
+      "This platform needs git and gh installed before it can submit PRs."
+    )
+  token = github_auth.get_token()
+  state = github_auth.read_state() or {}
+  login = str(state.get("login") or "")
+  if not token or not login:
+    raise ContributionSubmitError("Connect GitHub before approving this PR stack.", 401)
+  author_name, author_email = _connected_git_identity(state, login)
+  sendable = [row for row in rows if row["record"].get("status") == "submitting"]
+  if not sendable:
+    raise ContributionSubmitError("Every PR in this stack has already been submitted.")
+
+  first_plan = rows[0]["record"].get("plan") or {}
+  upstream_repo = _validate_repo_slug(
+    first_plan.get("repo") or rows[0]["record"].get("repo")
+  )
+  permission_repo = _safe_repo_path(
+    (sendable[0]["record"].get("plan") or {}).get("repo_path")
+  )
+  default_branch = _upstream_default_branch(permission_repo, upstream_repo)
+  if rows[0]["stack"]["base_branch"] != default_branch:
+    raise ContributionSubmitError(
+      f"The first PR in this stack must target upstream {default_branch}."
+    )
+  _assert_upstream_push_permission(permission_repo, upstream_repo)
+
+  for row in sendable:
+    record = row["record"]
+    plan = record.get("plan") or {}
+    repo = _safe_repo_path(plan.get("repo_path"))
+    branch = _validate_branch(plan.get("branch") or record.get("branch"))
+    if not (repo / ".git").exists():
+      raise ContributionSubmitError("A staged stack repo is not a git checkout.")
+    checkout_back = None
+    try:
+      current_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+      checkout_back = (
+        _git(repo, "rev-parse", "HEAD").stdout.strip()
+        if current_branch == "HEAD"
+        else current_branch
+      )
+      _git(repo, "check-ref-format", "--branch", branch)
+      _assert_clean_worktree(repo)
+      _git(repo, "checkout", "-q", branch)
+      _assert_clean_worktree(repo)
+      _assert_fresh(record, row["diff_path"], repo, branch)
+      _assert_coauthor_trailer(repo, branch)
+      _assert_head_attribution(
+        repo,
+        branch,
+        author_name=author_name,
+        author_email=author_email,
+      )
+      _assert_merges_with_upstream(repo, upstream_repo, branch)
+    finally:
+      if checkout_back:
+        _git(repo, "checkout", "-q", checkout_back, check=False)
 
 
 async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
@@ -1635,6 +1992,128 @@ async def submit_contribution(
       record_patch=record_patch,
     )
   return {"record": submitted, "url": pr_url, "number": number}
+
+
+@router.post(
+  "/contributions/{app_id}/submit-stack",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("5/minute")
+async def submit_contribution_stack(
+  request: Request,
+  app_id: int,
+  body: ContributionStackSubmitRequest,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Publish one explicitly reviewed parent-to-child PR stack.
+
+  The request names every record shown in the batch confirmation. The server
+  validates the complete immutable chain, claims only its still-private
+  layers, and preflights every reviewed diff before the first public push.
+  True stacked PR bases must exist in the upstream repository, so this path is
+  deliberately limited to connected owners with upstream push permission.
+  """
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  async with fs_locks.app_storage_lock(app_id):
+    rows = _claim_stack_records(
+      app_id=app_id,
+      record_ids=body.record_ids,
+      db=db,
+      expected_nonce=expected_nonce,
+    )
+
+  try:
+    repo_paths = sorted({
+      str(_safe_repo_path((row["record"].get("plan") or {}).get("repo_path")))
+      for row in rows
+      if row["record"].get("status") == "submitting"
+    })
+    async with AsyncExitStack() as source_locks:
+      for repo_path in repo_paths:
+        await source_locks.enter_async_context(
+          fs_locks.source_dir_lock(repo_path)
+        )
+      await asyncio.to_thread(_preflight_prepared_stack, rows)
+
+      submitted_urls = []
+      for row in rows:
+        record = row["record"]
+        if record.get("status") != "submitting":
+          continue
+        try:
+          pr_url, number, record_patch = await asyncio.to_thread(
+            _submit_prepared_pr,
+            record,
+            row["diff_path"],
+            direct_base_branch=row["stack"]["base_branch"],
+          )
+        except ContributionSubmitError as exc:
+          async with fs_locks.app_storage_lock(app_id):
+            _recheck_submit_app(db, app_id, expected_nonce)
+            snapshots = _mark_stack_submit_failure(
+              rows,
+              exc.message,
+              failed_id=str(record.get("id") or ""),
+              record_patch=exc.record_patch,
+            )
+          raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+              "message": exc.message,
+              "records": snapshots,
+              "submitted": submitted_urls,
+            },
+          ) from exc
+
+        async with fs_locks.app_storage_lock(app_id):
+          _recheck_submit_app(db, app_id, expected_nonce)
+          current = _read_record(row["record_path"])
+          if current.get("status") != "submitting":
+            raise ContributionSubmitError(
+              "This PR stack changed while it was being published."
+            )
+          opened = _mark_submit_success(
+            record_path=row["record_path"],
+            record=current,
+            pr_url=pr_url,
+            number=number,
+            record_patch=record_patch,
+          )
+        submitted_urls.append({
+          "id": opened.get("id"),
+          "url": pr_url,
+          "number": number,
+        })
+  except HTTPException:
+    raise
+  except ContributionSubmitError as exc:
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      snapshots = _mark_stack_submit_failure(
+        rows,
+        exc.message,
+        record_patch=exc.record_patch,
+      )
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"message": exc.message, "records": snapshots},
+    ) from exc
+  except Exception as exc:
+    log.exception("Contribution stack submit failed for app %s", app_id)
+    message = "Could not submit this PR stack. Leave feedback so your agent can retry."
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      snapshots = _mark_stack_submit_failure(rows, message)
+    raise HTTPException(
+      status_code=500,
+      detail={"message": message, "records": snapshots},
+    ) from exc
+
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    snapshots = _stack_record_snapshots(rows)
+  return {"records": snapshots, "submitted": submitted_urls}
 
 
 @router.post(

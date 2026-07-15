@@ -1620,6 +1620,386 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
 
 
+def test_submit_contribution_stack_opens_ordered_incremental_prs(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  stack_id = "chat-reliability"
+  base = "b" * 40
+  parent_head = "a" * 40
+  child_head = "c" * 40
+  record_ids = ["stack-chat-01", "stack-chat-02"]
+  specs = [
+    (record_ids[0], 1, "main", "", base, parent_head, "01-stream"),
+    (
+      record_ids[1], 2, f"stack/{stack_id}/01-stream", record_ids[0],
+      parent_head, child_head, "02-settlement",
+    ),
+  ]
+  for record_id, position, base_branch, parent_id, base_sha, head_sha, suffix in specs:
+    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    (repo / ".git").mkdir(parents=True)
+    diff_text = f"diff --git a/{suffix} b/{suffix}\n+reviewed\n"
+    record = {
+      "id": record_id,
+      "type": "pr",
+      "repo": "mobius-os/mobius",
+      "status": "prepared",
+      "title": f"Layer {position}",
+      "branch": f"stack/{stack_id}/{suffix}",
+      "plan": {
+        "action": "pr",
+        "repo": "mobius-os/mobius",
+        "title": f"Layer {position}",
+        "body_draft": f"Reviewed layer {position}.",
+        "branch": f"stack/{stack_id}/{suffix}",
+        "repo_path": str(repo),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+        "stack": {
+          "id": stack_id,
+          "name": "Chat reliability",
+          "position": position,
+          "total": 2,
+          "parent_record_id": parent_id,
+          "base_branch": base_branch,
+        },
+      },
+    }
+    _write_contribution(app_id, record_id, record, diff_text)
+
+  monkeypatch.setattr(
+    "app.routes.github._preflight_prepared_stack",
+    lambda rows: None,
+  )
+  calls = []
+
+  def fake_submit(record, diff_path, *, direct_base_branch=None):
+    calls.append((record["id"], direct_base_branch, diff_path.name))
+    number = 70 + len(calls)
+    return (
+      f"https://github.com/mobius-os/mobius/pull/{number}",
+      number,
+      {
+        "last_submit_mode": "stack",
+        "last_submit_base_branch": direct_base_branch,
+      },
+    )
+
+  monkeypatch.setattr("app.routes.github._submit_prepared_pr", fake_submit)
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/submit-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert r.status_code == 200, r.text
+  assert calls == [
+    (record_ids[0], "main", f"{record_ids[0]}.diff"),
+    (record_ids[1], f"stack/{stack_id}/01-stream", f"{record_ids[1]}.diff"),
+  ]
+  body = r.json()
+  assert [record["status"] for record in body["records"]] == ["open", "open"]
+  assert [item["number"] for item in body["submitted"]] == [71, 72]
+  assert body["records"][1]["last_submit_base_branch"] == (
+    f"stack/{stack_id}/01-stream"
+  )
+
+
+def test_submit_contribution_stack_preserves_open_parent_when_child_fails(
+  client, owner_token, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError
+
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  stack_id = "partial-stack"
+  record_ids = ["partial-stack-01", "partial-stack-02"]
+  parent_head = "a" * 40
+  specs = [
+    (record_ids[0], 1, "main", "", "b" * 40, parent_head),
+    (
+      record_ids[1], 2, f"stack/{stack_id}/01-parent", record_ids[0],
+      parent_head, "c" * 40,
+    ),
+  ]
+  for record_id, position, base_branch, parent_id, base_sha, head_sha in specs:
+    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    (repo / ".git").mkdir(parents=True)
+    branch = f"stack/{stack_id}/0{position}-" + (
+      "parent" if position == 1 else "child"
+    )
+    diff_text = f"diff --git a/{record_id} b/{record_id}\n+reviewed\n"
+    record = {
+      "id": record_id,
+      "type": "pr",
+      "repo": "mobius-os/mobius",
+      "status": "prepared",
+      "title": f"Layer {position}",
+      "branch": branch,
+      "plan": {
+        "action": "pr",
+        "repo": "mobius-os/mobius",
+        "title": f"Layer {position}",
+        "body_draft": f"Reviewed layer {position}.",
+        "branch": branch,
+        "repo_path": str(repo),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+        "stack": {
+          "id": stack_id,
+          "position": position,
+          "total": 2,
+          "parent_record_id": parent_id,
+          "base_branch": base_branch,
+        },
+      },
+    }
+    _write_contribution(app_id, record_id, record, diff_text)
+
+  monkeypatch.setattr("app.routes.github._preflight_prepared_stack", lambda rows: None)
+  calls = []
+
+  def fake_submit(record, diff_path, *, direct_base_branch=None):
+    calls.append(record["id"])
+    if len(calls) == 1:
+      return (
+        "https://github.com/mobius-os/mobius/pull/81",
+        81,
+        {"last_submit_mode": "stack"},
+      )
+    raise ContributionSubmitError("Child PR could not be opened.")
+
+  monkeypatch.setattr("app.routes.github._submit_prepared_pr", fake_submit)
+  r = client.post(
+    f"/api/github/contributions/{app_id}/submit-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert r.status_code == 409, r.text
+  detail = r.json()["detail"]
+  assert calls == record_ids
+  assert detail["submitted"] == [{
+    "id": record_ids[0],
+    "url": "https://github.com/mobius-os/mobius/pull/81",
+    "number": 81,
+  }]
+  assert [record["status"] for record in detail["records"]] == [
+    "open", "prepared",
+  ]
+  assert detail["records"][1]["last_submit_error"] == (
+    "Child PR could not be opened."
+  )
+
+
+def test_submit_contribution_stack_rejects_unapproved_draft_layer():
+  from app.routes.github import ContributionSubmitError, _validate_stack_records
+
+  stack_id = "approval-boundary"
+  parent_head = "a" * 40
+  records = []
+  for position, status in ((1, "draft"), (2, "prepared")):
+    branch = f"stack/{stack_id}/0{position}-layer"
+    records.append({
+      "id": f"approval-{position}",
+      "type": "pr",
+      "repo": "mobius-os/mobius",
+      "status": status,
+      "branch": branch,
+      "plan": {
+        "action": "pr",
+        "repo": "mobius-os/mobius",
+        "branch": branch,
+        "base_sha": "b" * 40 if position == 1 else parent_head,
+        "head_sha": parent_head if position == 1 else "c" * 40,
+        "stack": {
+          "id": stack_id,
+          "position": position,
+          "total": 2,
+          "parent_record_id": "" if position == 1 else "approval-1",
+          "base_branch": (
+            "main" if position == 1 else f"stack/{stack_id}/01-layer"
+          ),
+        },
+      },
+    })
+
+  with pytest.raises(ContributionSubmitError, match="ready, open, or already merged"):
+    _validate_stack_records(records)
+
+
+def test_submit_contribution_stack_rejects_broken_parent_link_before_claim(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  stack_id = "broken-chain"
+  record_ids = ["broken-01", "broken-02"]
+  for position, record_id in enumerate(record_ids, 1):
+    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    (repo / ".git").mkdir(parents=True)
+    base_sha = "b" * 40 if position == 1 else "9" * 40
+    head_sha = "a" * 40 if position == 1 else "c" * 40
+    branch = f"stack/{stack_id}/0{position}-layer"
+    record = {
+      "id": record_id,
+      "type": "pr",
+      "repo": "mobius-os/mobius",
+      "status": "prepared",
+      "branch": branch,
+      "plan": {
+        "action": "pr",
+        "repo": "mobius-os/mobius",
+        "title": "Layer",
+        "body_draft": "Body",
+        "branch": branch,
+        "repo_path": str(repo),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "diff_sha256": "d" * 64,
+        "stack": {
+          "id": stack_id,
+          "position": position,
+          "total": 2,
+          "parent_record_id": record_ids[0] if position == 2 else "",
+          "base_branch": (
+            f"stack/{stack_id}/01-layer" if position == 2 else "main"
+          ),
+        },
+      },
+    }
+    _write_contribution(app_id, record_id, record, "reviewed")
+
+  called = False
+
+  def fake_preflight(_rows):
+    nonlocal called
+    called = True
+
+  monkeypatch.setattr("app.routes.github._preflight_prepared_stack", fake_preflight)
+  r = client.post(
+    f"/api/github/contributions/{app_id}/submit-stack",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert r.status_code == 409
+  assert "not based on its reviewed parent" in r.json()["detail"]
+  assert called is False
+  for record_id in record_ids:
+    stored = json.loads(
+      (Path(get_settings().data_dir) / "apps" / str(app_id) /
+       "contributions" / f"{record_id}.json").read_text()
+    )
+    assert stored["status"] == "prepared"
+
+
+def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _submit_prepared_pr
+
+  _write_token(login="octocat")
+  record_id = "direct-stack-layer"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  branch = "stack/demo-flow/01-model"
+  base = "b" * 40
+  head = "a" * 40
+  diff_text = "diff --git a/model.py b/model.py\n+reviewed\n"
+  diff_path = tmp_path / "layer.diff"
+  diff_path.write_text(diff_text)
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "submitting",
+    "title": "Model layer",
+    "branch": branch,
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Model layer",
+      "body_draft": "Reviewed model layer.",
+      "branch": branch,
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  git_calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp(branch + "\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", branch) or args == ("rev-parse", "HEAD"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args[-1:] == (f"{base}..{head}",) and "diff" in args:
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", branch):
+      return _cp(
+        "Model layer\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args[:3] == (
+      "show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI",
+    ):
+      return _commit_metadata(head)
+    return _cp("")
+
+  gh_calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    gh_calls.append(args)
+    if args[:2] == ("repo", "view"):
+      return _cp("main\n")
+    if args[:2] == ("api", "repos/mobius-os/app-demo"):
+      return _cp("true\n")
+    if args[:2] == ("pr", "list"):
+      return _cp("[]")
+    if args[:2] == ("pr", "create"):
+      return _cp("https://github.com/mobius-os/app-demo/pull/73\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  url, number, patch = _submit_prepared_pr(
+    record,
+    diff_path,
+    direct_base_branch="main",
+  )
+
+  assert url.endswith("/pull/73")
+  assert number == 73
+  assert patch["last_submit_mode"] == "stack"
+  assert patch["last_submit_base_branch"] == "main"
+  assert (
+    "push", "https://github.com/mobius-os/app-demo.git",
+    f"HEAD:refs/heads/{branch}",
+  ) in git_calls
+  create = next(call for call in gh_calls if call[:2] == ("pr", "create"))
+  assert create[create.index("-H") + 1] == branch
+  assert create[-2:] == ("--base", "main")
+  assert not any(call[:2] == ("repo", "fork") for call in gh_calls)
+
+
 def test_submit_contribution_rejects_branch_diff_mismatch(
   client, owner_token, monkeypatch,
 ):
