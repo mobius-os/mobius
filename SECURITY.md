@@ -12,15 +12,17 @@ being external attackers reaching the public HTTPS endpoint.
   No client-side token exposure.
 - **Encryption at rest:** API keys stored with Fernet (AES-128 + HMAC),
   derived from SECRET_KEY.
-- **TLS:** Caddy auto-provisions HTTPS certificates. HSTS (1 year,
-  preload) plus X-Frame-Options, X-Content-Type-Options, Referrer-Policy,
-  and Permissions-Policy are set by a backend middleware (`main.py`), so
-  they hold regardless of which proxy fronts the app (the external
-  production Caddy does not set them).
-- **No global Content-Security-Policy:** mini-apps intentionally support
-  owner-chosen external resources, so a shell-wide resource policy would break
-  the app contract. Frame isolation and scoped server principals are the
-  authorization boundaries instead.
+- **TLS and response headers:** Caddy auto-provisions HTTPS certificates. The
+  backend sets HSTS (1 year, preload), X-Frame-Options,
+  X-Content-Type-Options, Referrer-Policy, and Permissions-Policy so those
+  protections do not depend on the front proxy. The bundled Caddy deployment
+  also sets a resource CSP and mirrors the frame policy; other operators may
+  supply a different resource CSP at their proxy.
+- **CSP is deployment policy, not the app authorization boundary:** the
+  backend does not impose a shell-wide resource CSP. The bundled Caddyfile does
+  apply one, including `frame-ancestors 'self'` on every route except the exact
+  inert embedded-chat bootstrap route. Opaque frame isolation and scoped,
+  server-verified principals remain the security boundary in every deployment.
 - **Mini-app isolation and tokens:** shell-mounted app frames omit
   `allow-same-origin`, giving them an opaque origin. They cannot read shell
   localStorage or the owner JWT. Each receives a refreshable app JWT bound to

@@ -107,6 +107,22 @@ Runtime smoke checks for this class of app:
 - `/app-assets/by-id/<app-id>/static/...` and fonts/media return 200.
 - Old ad-hoc routes such as `/cuberun/index.html` return 404, not the shell HTML.
 - Opening `/shell/?app=<app-id>` shows the game/tool inside the nested iframe, not a copy of Möbius.
+- **Visual smoke checks use the partner's viewport, even for standalone builds.**
+  The authenticated helpers (`preview_app.sh`, `agent-screenshot.sh`) use
+  `$VIEWPORT_WIDTH`/`$VIEWPORT_HEIGHT` for Möbius pages, but those values must
+  be present in the shell environment; a raw
+  `agent-browser open http://127.0.0.1:PORT/...` keeps whatever viewport the
+  browser last had. Before any standalone/local-build screenshot or visual
+  verdict, export a phone fallback and set the browser explicitly:
+
+  ```bash
+  export VIEWPORT_WIDTH="${VIEWPORT_WIDTH:-426}" VIEWPORT_HEIGHT="${VIEWPORT_HEIGHT:-860}"
+  agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"
+  ```
+
+  Only use a different viewport when the check is intentionally about desktop
+  layout, and say so in the handoff. A wide screenshot of a phone-first app is
+  a misleading verification artifact, even if the runtime smoke test passed.
 
 If a package update leaves `.mobius-bak` files or a dirty `/data/apps/<slug>` git tree, that is installer noise, not app source; re-run the installer on a backend that includes the static-asset backup fix.
 
@@ -793,6 +809,14 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 })
 ```
 
+The proxy is GET-only, requires the bearer in the header (never a query
+parameter), and truncates bodies at 2,097,152 bytes. Request small renditions,
+not full-resolution media. A cross-origin `<img src>` cannot attach the bearer,
+so fetch through the proxy and convert the result to a `data:` URL before
+rendering it; the bundled CSP allows `data:` images but not blob object URLs.
+Use `Promise.allSettled` for multi-provider searches and always keep a static
+deep-link fallback so one provider failure cannot blank the app.
+
 A non-self external resource referenced at load time — a Google Fonts `<link>`/`@import`, any off-origin CDN script or stylesheet — can do worse than fail silently under the `default-src 'self'` CSP: it can HANG the in-app browser so the page never finishes loading and the whole app goes non-interactive (taps and anchors dead, "loading timeout"). So when the owner reports BOTH "X doesn't work" AND "loading timeout" in the same breath, treat the hang as the primary signal and grep the app for off-origin references first — it is not a scroll/offset bug. Vendor the font/asset same-origin or drop it; bundle fonts as a `@font-face` over a self-hosted file, never a CDN link.
 
 ---
@@ -843,6 +867,10 @@ useEffect(() => {
   app-defined group. Pair it with a scope-specific `persist` key when the app
   wants one remembered chat per domain object, such as one chat per workout
   session.
+- **A chat's provider is create-only.** The helper's resume PATCH deliberately
+  omits provider changes. Give each provider its own persist key (for example,
+  `chat_codex.json` and `chat_claude.json`) and remount on selection rather than
+  trying to switch one persisted transcript between providers.
 - `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
   embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
 - **Viewer variant:** to display an EXISTING chat owned by this app (including a
@@ -857,8 +885,14 @@ useEffect(() => {
 
 ```jsx
 // Open a new chat with pre-filled text
-window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.location.origin)
+window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, '*')
 ```
+
+The opaque app document cannot name the shell as a target origin, so raw
+app-to-shell messages use `'*'`. For reply protocols, require
+`event.source === window.parent` plus the exact request/correlation id. These
+are routing guards, not authorization; privileged operations still require the
+app's server-verified bearer.
 
 ---
 
@@ -869,7 +903,7 @@ The shell's top bar takes ~58px a game wants back. An app can ask the shell to h
 ```jsx
 useEffect(() => {
   const post = (value) => window.parent.postMessage(
-    { type: 'moebius:immersive', value, appId }, window.location.origin)
+    { type: 'moebius:immersive', value, appId }, '*')
   post(true)
   return () => post(false)
 }, [appId])
@@ -978,7 +1012,6 @@ function navPushAndAwaitAck(label) {
   const requestId = `np-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   return new Promise((resolve, reject) => {
     function onMsg(e) {
-      if (e.origin !== window.location.origin) return
       if (e.source !== window.parent) return
       if (e.data?.requestId !== requestId) return
       if (e.data.type === 'moebius:nav-push-ack') {
@@ -988,7 +1021,7 @@ function navPushAndAwaitAck(label) {
       }
     }
     window.addEventListener('message', onMsg)
-    window.parent.postMessage({ type: 'moebius:nav-push', label, requestId }, window.location.origin)
+    window.parent.postMessage({ type: 'moebius:nav-push', label, requestId }, '*')
   })
 }
 
@@ -998,12 +1031,11 @@ async function openArticle(article) {
 }
 
 // On the app's own in-app back tap (X button, swipe handler):
-window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+window.parent.postMessage({ type: 'moebius:nav-pop' }, '*')
 
 // Listen for the shell to tell you the user back-gestured:
 useEffect(() => {
   function onMessage(e) {
-    if (e.origin !== window.location.origin) return
     if (e.source !== window.parent) return
     if (e.data?.type !== 'moebius:nav-back') return
     closeNestedView()  // your app's own state mutation
@@ -1013,7 +1045,10 @@ useEffect(() => {
 }, [])
 ```
 
-(Vanilla-JS variant: same messages, same origin checks, just `await new Promise(...)` and plain functions instead of React hooks.)
+(Vanilla-JS variant: same messages and exact source/correlation checks, just
+`await new Promise(...)` and plain functions instead of React hooks. An opaque
+frame's `window.location.origin` is `"null"`; never use it as `targetOrigin` or
+as an authorization signal.)
 
 The shell installs a back-sentinel in its own history on `nav-push`, so the OS snapshots the list page underneath for the preview; on back-gesture the shell consumes the sentinel and forwards `moebius:nav-back` to you instead of changing its own view. Single back-press, real preview.
 
