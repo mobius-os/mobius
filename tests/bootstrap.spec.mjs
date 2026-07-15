@@ -255,7 +255,7 @@ test.describe('Logout cache wipe', () => {
     // wipe's effect is observable on the reloaded (now logged-out)
     // page. Stubbing window.location.reload is unreliable in Chromium
     // anyway (the property resists reassignment).
-    await page.route(/\/api\/chats$/, route =>
+    await page.route(/\/api\/chats\/?$/, route =>
       route.fulfill({ status: 401, body: '{"detail":"Not signed in"}' })
     )
 

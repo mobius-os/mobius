@@ -518,6 +518,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   turn adds no transcript row, so it
   freezes the visible message before the queue tray/composer/keyboard reflow; the
   separately captured submit snapshot still controls the row when it is promoted.
+  Never replace the input-to-first-scroll handoff with a fixed short window: under
+  rendering load the browser may deliver that scroll later. Pointer/touch release and
+  a bounded no-scroll dead-man release handle inputs that never produce a scroll;
+  only after the first scroll lands does the short momentum window begin.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as

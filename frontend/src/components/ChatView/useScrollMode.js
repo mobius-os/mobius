@@ -28,9 +28,10 @@
  * the scroll event itself. There is no second sentinel/observer authority
  * that can lag behind the reader and contradict the current viewport.
  *
- * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown open a
- * 250ms window in which scroll events are user-driven and can
- * transition the mode. Outside the window, scrolls come from our
+ * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown hold
+ * reader ownership until the first scroll event actually arrives, then keep a
+ * 250ms momentum window in which scroll events are user-driven and can
+ * transition the mode. Outside that handoff/window, scrolls come from our
  * applyMode or browser clamps and are ignored.
  *
  * See ARCHITECTURE.md "Chat scroll + steer contract" for the full design.
@@ -49,11 +50,18 @@ import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 // renderers room to land before the chat becomes visible.
 const REVEAL_CAP_MS = 1500
 
-// User gesture window — scroll events fired within this window of a
-// pointerdown/wheel/touchstart/touchmove/keydown are treated as user-driven.
-// Outside the window, scrolls are our own applyMode or browser
-// clamps and MUST NOT mutate mode.
+// User gesture momentum window — once the first scroll event lands, further
+// events inside this window are treated as part of the same reader gesture.
+// Before that first event the ref is Infinity, closing the input→scroll race;
+// outside both phases, scrolls are our own applyMode or browser clamps and
+// MUST NOT mutate mode.
 const GESTURE_WINDOW_MS = 250
+
+// A tap or non-scrolling key must not suspend layout ownership forever. This
+// cap is only a dead-man release for input that produces no scroll event; a
+// delayed scroll caused by a busy main thread still wins because its timer
+// cannot run until that same thread is available again.
+const PENDING_GESTURE_CAP_MS = 2000
 
 // Physical-bottom transitions are exact reader intent, not the broader
 // "near real-content tail" send heuristic. Allow only subpixel/browser
@@ -620,6 +628,7 @@ export default function useScrollMode({
   // changes must not promote that fallback into a saved reading position.
   const readerLocationExplicitRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
+  const pendingGestureTimerRef = useRef(0)
   // Monotonic counter for actual user scroll intent. Send/steer code captures
   // this at submit time and honors a delayed pin only if the user did not
   // scroll after submitting. Programmatic applyMode scrolls must not increment
@@ -797,6 +806,10 @@ export default function useScrollMode({
 
   const closePreSendGestureWindow = useCallback(() => {
     gestureWindowUntilRef.current = 0
+  }, [])
+
+  useLayoutEffect(() => () => {
+    clearTimeout(pendingGestureTimerRef.current)
   }, [])
 
   // Persist mode on every chatId change so the next mount restores.
@@ -1110,7 +1123,25 @@ export default function useScrollMode({
 
     // User-gesture detection.
     const onUserInput = () => {
-      gestureWindowUntilRef.current = performance.now() + GESTURE_WINDOW_MS
+      // Input and its first scroll event are ordered, but not guaranteed to be
+      // less than 250ms apart under a busy renderer. Keep layout ownership
+      // suspended until that first event actually lands; after it, the normal
+      // short window covers momentum/follow-up scroll events. A bounded
+      // fallback releases taps/keys that never produce any scroll at all.
+      gestureWindowUntilRef.current = Number.POSITIVE_INFINITY
+      clearTimeout(pendingGestureTimerRef.current)
+      pendingGestureTimerRef.current = setTimeout(() => {
+        if (gestureWindowUntilRef.current === Number.POSITIVE_INFINITY) {
+          gestureWindowUntilRef.current = 0
+        }
+        pendingGestureTimerRef.current = 0
+      }, PENDING_GESTURE_CAP_MS)
+    }
+    const onGestureEndWithoutScroll = () => {
+      if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
+      gestureWindowUntilRef.current = 0
+      clearTimeout(pendingGestureTimerRef.current)
+      pendingGestureTimerRef.current = 0
     }
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
@@ -1120,12 +1151,21 @@ export default function useScrollMode({
     scrollEl.addEventListener('touchmove', onUserInput, { passive: true })
     scrollEl.addEventListener('wheel', onUserInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
+    scrollEl.addEventListener('pointerup', onGestureEndWithoutScroll, { passive: true })
+    scrollEl.addEventListener('pointercancel', onGestureEndWithoutScroll, { passive: true })
+    scrollEl.addEventListener('touchend', onGestureEndWithoutScroll, { passive: true })
+    scrollEl.addEventListener('touchcancel', onGestureEndWithoutScroll, { passive: true })
 
     // Scroll handler — only user-driven scrolls mutate mode.
     const onScroll = () => {
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       const userDriven = performance.now() < gestureWindowUntilRef.current
       if (!userDriven) return
+      if (gestureWindowUntilRef.current === Number.POSITIVE_INFINITY) {
+        clearTimeout(pendingGestureTimerRef.current)
+        pendingGestureTimerRef.current = 0
+        gestureWindowUntilRef.current = performance.now() + GESTURE_WINDOW_MS
+      }
       if (loadingOlderRef.current) return
       const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 4
       if (!overflows) return
@@ -1187,6 +1227,10 @@ export default function useScrollMode({
       scrollEl.removeEventListener('touchmove', onUserInput)
       scrollEl.removeEventListener('wheel', onUserInput)
       scrollEl.removeEventListener('keydown', onUserInput)
+      scrollEl.removeEventListener('pointerup', onGestureEndWithoutScroll)
+      scrollEl.removeEventListener('pointercancel', onGestureEndWithoutScroll)
+      scrollEl.removeEventListener('touchend', onGestureEndWithoutScroll)
+      scrollEl.removeEventListener('touchcancel', onGestureEndWithoutScroll)
       if (vvHandler && typeof window !== 'undefined' && window.visualViewport) {
         window.visualViewport.removeEventListener('resize', vvHandler)
         window.visualViewport.removeEventListener('scroll', vvHandler)

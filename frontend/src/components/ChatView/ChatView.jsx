@@ -1730,8 +1730,9 @@ export default function ChatView({
     // landing near scrollTop=0 when the user msg is high in the list,
     // or FOLLOW_BOTTOM after a pagination prepend) can satisfy
     // `scrollTop < 5 && offset > 0` and trigger an unwanted pagination
-    // load. Only paginate when the scroll was user-driven (recent
-    // pointer/wheel/touch/key in the 250ms window).
+    // load. Only paginate while the shared controller says the reader owns
+    // scrolling: from pointer/wheel/touch/key input through its first scroll,
+    // then through the short momentum window.
     const userDriven = performance.now() < gestureWindowUntilRef.current
     if (!userDriven) return
     if (el.scrollTop < 5 && offset > 0) {

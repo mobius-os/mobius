@@ -133,6 +133,8 @@ test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () =
 })
 
 test('layout writes yield from the first input event until its gesture window closes', () => {
+  assert.equal(layoutMayOwnScroll(Number.POSITIVE_INFINITY, 999_999), false,
+    'a delayed first scroll keeps reader ownership without a 250ms race')
   assert.equal(layoutMayOwnScroll(1250, 1000), false)
   assert.equal(layoutMayOwnScroll(1250, 1249), false)
   assert.equal(layoutMayOwnScroll(1250, 1250), true)
