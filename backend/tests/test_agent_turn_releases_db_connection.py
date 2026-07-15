@@ -3,11 +3,39 @@
 import asyncio
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
 from app import chat as chat_mod
 from app import chat_queue, database, models, schemas
 from app.broadcast import create_broadcast, remove_broadcast
-from app.database import SessionLocal, engine
+from app.database import SessionLocal, checked_out_connections, engine
+
+
+def _wait_for_writer_connection():
+  """Stabilize the async writer startup before taking pool baselines."""
+  from app.chat_writer import get_writer
+  assert get_writer()._session_ready.wait(timeout=2)
+
+
+def test_sqlite_does_not_have_a_fixed_connection_pool_ceiling():
+  """File SQLite opens per-unit connections instead of starving at 5 + 10."""
+  assert isinstance(engine.pool, NullPool)
+
+
+def test_sqlite_serves_more_than_the_old_fifteen_connection_ceiling():
+  """Concurrent readers do not queue behind QueuePool's former hard cap."""
+  _wait_for_writer_connection()
+  baseline = checked_out_connections()
+  sessions = [SessionLocal() for _ in range(20)]
+  try:
+    for session in sessions:
+      assert session.execute(text("SELECT 1")).scalar_one() == 1
+    assert checked_out_connections() == baseline + len(sessions)
+  finally:
+    for session in sessions:
+      session.close()
+  assert checked_out_connections() == baseline
 
 
 class _Provider:
@@ -128,11 +156,12 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
   finally:
     setup.close()
 
-  baseline = engine.pool.checkedout()
+  _wait_for_writer_connection()
+  baseline = checked_out_connections()
   observed = []
 
   async def fake_runner(**_kwargs):
-    observed.append(engine.pool.checkedout())
+    observed.append(checked_out_connections())
     return {
       "session_id": "existing-session",
       "cost_usd": 0.0,
@@ -167,17 +196,18 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
   assert observed == [baseline], (
     "the provider await must begin with the turn's DB checkout returned"
   )
-  assert engine.pool.checkedout() == baseline
+  assert checked_out_connections() == baseline
 
 
 @pytest.mark.asyncio
 async def test_agent_setup_exception_always_returns_connection(monkeypatch):
   """Unexpected setup failures are covered by the outer session owner."""
-  baseline = engine.pool.checkedout()
+  _wait_for_writer_connection()
+  baseline = checked_out_connections()
 
   def fail_after_checkout(db, *_args, **_kwargs):
     db.query(models.Owner).first()
-    assert engine.pool.checkedout() == baseline + 1
+    assert checked_out_connections() == baseline + 1
     raise RuntimeError("setup failed")
 
   monkeypatch.setattr(chat_mod, "_build_app_context", fail_after_checkout)
@@ -189,7 +219,7 @@ async def test_agent_setup_exception_always_returns_connection(monkeypatch):
       provider_id="codex",
     )
 
-  assert engine.pool.checkedout() == baseline
+  assert checked_out_connections() == baseline
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
@@ -31,6 +32,7 @@ _request_label: ContextVar[str] = ContextVar(
 _checkout_warn_seconds = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
 _pool_metrics_lock = threading.Lock()
 _pool_metrics = {
+  "checked_out": 0,
   "checkouts": 0,
   "long_checkouts": 0,
   "max_checkout_ms": 0,
@@ -61,8 +63,12 @@ def _make_engine():
   # transparently reconnecting. pool_recycle caps connection age below
   # any server-side idle timeout. Omitted for SQLite, whose pool is
   # process-local and never sees these failure modes.
+  # SQLite uses NullPool so temporarily-held request sessions cannot exhaust
+  # an artificial QueuePool ceiling. Postgres retains bounded QueuePool reuse.
   pool_kwargs = (
-    {} if is_sqlite else {"pool_pre_ping": True, "pool_recycle": 1800}
+    {"poolclass": NullPool}
+    if is_sqlite
+    else {"pool_pre_ping": True, "pool_recycle": 1800}
   )
   eng = create_engine(
     settings.database_url, connect_args=connect_args, **pool_kwargs
@@ -73,6 +79,7 @@ def _make_engine():
     label = _request_label.get()
     connection_record.info["mobius_checkout"] = (time.monotonic(), label)
     with _pool_metrics_lock:
+      _pool_metrics["checked_out"] += 1
       _pool_metrics["checkouts"] += 1
 
   @event.listens_for(eng, "checkin")
@@ -84,6 +91,7 @@ def _make_engine():
     elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
     is_long = elapsed_ms >= round(_checkout_warn_seconds * 1000)
     with _pool_metrics_lock:
+      _pool_metrics["checked_out"] = max(0, _pool_metrics["checked_out"] - 1)
       _pool_metrics["max_checkout_ms"] = max(
         _pool_metrics["max_checkout_ms"], elapsed_ms,
       )
@@ -124,6 +132,14 @@ def _make_engine():
 
 
 engine = _make_engine()
+
+
+def checked_out_connections() -> int:
+  """Return live DB checkouts without depending on a concrete pool class."""
+  with _pool_metrics_lock:
+    return _pool_metrics["checked_out"]
+
+
 SessionLocal = sessionmaker(
   autocommit=False, autoflush=False, bind=engine
 )
