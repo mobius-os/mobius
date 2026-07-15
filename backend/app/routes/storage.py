@@ -244,6 +244,13 @@ _INLINE_READ_MAX = 256 * 1024
 _LIST_DEFAULT_LIMIT = 100
 _LIST_MAX_LIMIT = 500
 
+# Opt-in JSON content on app listings replaces the common list-then-GET-every-
+# file fan-out without turning directory enumeration into an unbounded bulk
+# read. Only small JSON files are eligible, and the raw bytes included across a
+# page share one ceiling. Metadata-only listing remains the default.
+_LIST_CONTENT_FILE_MAX = 64 * 1024
+_LIST_CONTENT_PAGE_MAX = 1024 * 1024
+
 
 def _is_listable_dirent(entry: os.DirEntry) -> bool:
   """Whether a directory entry may appear in a listing.
@@ -380,6 +387,53 @@ def _list_directory_page(
   ]
   next_cursor = _encode_cursor(page[-1].name) if has_more and page else None
   return entries, next_cursor
+
+
+def _include_json_listing_content(
+  entries: list[dict], base: Path,
+) -> None:
+  """Adds parsed ``content`` to eligible JSON file entries in place.
+
+  Every candidate is resolved again through the storage path guard, so a
+  listing can never make a symlink readable. Invalid JSON, files that changed
+  type/size after the directory scan, and files outside the strict per-file or
+  aggregate byte budgets simply remain metadata-only; callers can fall back to
+  an ordinary ``get`` for those exceptional entries.
+  """
+  # This is an I/O budget, not merely a response-size budget. Invalid JSON
+  # must consume it too; otherwise a page of 500 malformed 64 KiB files could
+  # still force ~32 MiB of reads before returning no content at all.
+  read_bytes = 0
+  for entry in entries:
+    if (
+      entry.get("type") != "file"
+      or not str(entry.get("name", "")).endswith(".json")
+      or entry.get("size", _LIST_CONTENT_FILE_MAX + 1)
+         > _LIST_CONTENT_FILE_MAX
+    ):
+      continue
+    try:
+      file_path = _resolve(base, entry["path"])
+      if not file_path.is_file():
+        continue
+      size = file_path.stat().st_size
+      remaining = _LIST_CONTENT_PAGE_MAX - read_bytes
+      if remaining <= 0:
+        break
+      if size > _LIST_CONTENT_FILE_MAX or size > remaining:
+        continue
+      # Read one byte beyond the stat'd size when the page budget permits, so
+      # a file that grows during the scan is detected without an unbounded
+      # read_bytes() allocation. The page budget remains a strict ceiling.
+      cap = min(_LIST_CONTENT_FILE_MAX + 1, remaining, size + 1)
+      with file_path.open("rb") as stream:
+        raw = stream.read(cap)
+      read_bytes += len(raw)
+      if len(raw) != size:
+        continue
+      entry["content"] = json.loads(raw)
+    except (HTTPException, OSError, UnicodeDecodeError, json.JSONDecodeError):
+      continue
 
 
 def _serve_file(file_path: Path, stored_mime: str | None = None):
@@ -921,6 +975,7 @@ def list_app_dir(
   prefix: str,
   limit: int = _LIST_DEFAULT_LIMIT,
   cursor: str | None = None,
+  include_content: bool = False,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -939,6 +994,12 @@ def list_app_dir(
   the cursor is the last name returned, and the next page resumes at the
   first name strictly greater than it.
 
+  With the opt-in ``include_content=true``, small, valid direct-child ``.json``
+  files also carry parsed ``content``. Both per-file and aggregate page byte
+  ceilings keep this a bounded batch read; ineligible entries remain metadata-
+  only so clients can fall back to an ordinary file read. The default response
+  is unchanged.
+
   A `prefix` that does not resolve to an existing directory returns an
   empty listing rather than a 404 — enumerating a not-yet-created
   directory (the first run of an app before it has written anything) is
@@ -946,6 +1007,10 @@ def list_app_dir(
   and is NOT subject to the stored-file JSON-envelope rules.
   """
   _check_cross_app(db, principal, app_id, mode="read")
+  # Authorization is complete and the bounded filesystem batch below needs no
+  # ORM state. Release the pooled connection before any stat/read/JSON work so
+  # a slow disk cannot make unrelated API requests wait for a DB session.
+  db.close()
   data_dir = get_settings().data_dir
   base = Path(data_dir) / "apps" / str(app_id)
   # An empty prefix means the app's root dir; _resolve's whitelist
@@ -962,6 +1027,8 @@ def list_app_dir(
     dir_path, prefix, limit, cursor,
     mime_override=lambda rel: read_content_type(data_dir, scope, rel),
   )
+  if include_content:
+    _include_json_listing_content(entries, base)
   return {"entries": entries, "next_cursor": next_cursor}
 
 

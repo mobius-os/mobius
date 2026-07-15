@@ -7,6 +7,7 @@ import pytest
 
 from app import models
 from app.config import get_settings
+from app.routes import storage as storage_routes
 
 
 def _make_app(client, owner_token):
@@ -230,6 +231,72 @@ def test_list_returns_entries_with_metadata(client, auth, owner_token):
   assert html["mime_type"] == "text/html"
   # ISO-8601 UTC with a trailing Z.
   assert html["modified_at"].endswith("Z")
+
+
+def test_list_can_include_bounded_json_content(
+  client, auth, owner_token, monkeypatch,
+):
+  """The opt-in batches small JSON reads without changing the default.
+
+  Oversized files and entries beyond the aggregate response budget stay
+  metadata-only, which gives callers an explicit per-file fallback path.
+  """
+  app_id = _make_app(client, owner_token)
+  for name, doc in (
+    ("a.json", {"id": "a", "value": "small"}),
+    ("b.json", {"id": "b", "value": "small"}),
+  ):
+    client.put(
+      f"/api/storage/apps/{app_id}/records/{name}", json=doc, headers=auth,
+    )
+  client.put(
+    f"/api/storage/apps/{app_id}/records/note.txt",
+    data="plain",
+    headers={**auth, "Content-Type": "text/plain"},
+  )
+
+  default = client.get(
+    f"/api/storage/apps-list/{app_id}/records", headers=auth,
+  ).json()["entries"]
+  assert all("content" not in entry for entry in default)
+
+  # Each JSON record fits the file limit, but only the first one fits the
+  # aggregate page budget. Lexical ordering makes the result deterministic.
+  first_size = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "records" / "a.json"
+  ).stat().st_size
+  monkeypatch.setattr(storage_routes, "_LIST_CONTENT_FILE_MAX", first_size + 8)
+  monkeypatch.setattr(storage_routes, "_LIST_CONTENT_PAGE_MAX", first_size + 1)
+  included = client.get(
+    f"/api/storage/apps-list/{app_id}/records?include_content=true",
+    headers=auth,
+  )
+  assert included.status_code == 200
+  by_name = {entry["name"]: entry for entry in included.json()["entries"]}
+  assert by_name["a.json"]["content"] == {"id": "a", "value": "small"}
+  assert "content" not in by_name["b.json"]
+  assert "content" not in by_name["note.txt"]
+
+  # Malformed candidates consume the same bounded read budget even though
+  # they add nothing to the response. Otherwise a page of invalid records
+  # could bypass the aggregate I/O ceiling.
+  records_dir = (
+    Path(get_settings().data_dir) / "apps" / str(app_id) / "records"
+  )
+  malformed = b"{not-json}"
+  (records_dir / "0-invalid.json").write_bytes(malformed)
+  monkeypatch.setattr(storage_routes, "_LIST_CONTENT_PAGE_MAX", len(malformed))
+  bounded = client.get(
+    f"/api/storage/apps-list/{app_id}/records?include_content=true",
+    headers=auth,
+  )
+  assert bounded.status_code == 200
+  bounded_by_name = {
+    entry["name"]: entry for entry in bounded.json()["entries"]
+  }
+  assert "content" not in bounded_by_name["0-invalid.json"]
+  assert "content" not in bounded_by_name["a.json"]
 
 
 def test_list_includes_directories(client, auth, owner_token):

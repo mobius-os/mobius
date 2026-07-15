@@ -27,7 +27,9 @@
 //   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
 //   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
 //   window.mobius.storage.remove(path)            -> {synced} | {queued}
-//   window.mobius.storage.list(prefix)            -> entries[]  (offline-capable: cache+outbox overlay)
+//   window.mobius.storage.list(prefix, opts?)     -> entries[]  (offline-capable: cache+outbox overlay)
+//     opts.includeContent adds `content` to small JSON file entries in the
+//     server's bounded listing response; exceptional entries remain metadata-only.
 //   window.mobius.storage.subscribe(path, cb)     -> unsubscribe fn (cb(json value))
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
@@ -1127,12 +1129,13 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   // network failure (offline/transient). Walks every page so list() is true
   // enumeration, not just the server's first page (capped at 500); the guard
   // bounds a pathological/looping cursor.
-  async function listServer(prefix) {
+  async function listServer(prefix, options = {}) {
     try {
       const entries = []
       let cursor = null
       for (let guard = 0; guard < 10000; guard++) {
-        const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+        const include = options.includeContent ? '&include_content=true' : ''
+        const q = `?limit=500${include}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
         const res = await fetchWithAppToken(
           getToken,
           `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
@@ -1165,7 +1168,12 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
         if (!cursor) return
         const v = cursor.value
         if (belongsToInstance(v) && v.present) {
-          box.value.push({ path: v.path, kind: v.kind, contentType: v.contentType })
+          box.value.push({
+            path: v.path,
+            kind: v.kind,
+            contentType: v.contentType,
+            data: v.data,
+          })
         }
         cursor.continue()
       }
@@ -1182,7 +1190,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   // (`[]` when empty/unknown), never null, since offline now has a real source.
   // Offline-derived entries carry name/path/type (+ mime_type when known) but
   // not size/modified_at, which only the server stat provides.
-  async function listInner(prefix) {
+  async function listInner(prefix, options = {}) {
     const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
     const base = norm ? norm + '/' : ''
     // The child name of `path` directly under `base`, or null if not under it.
@@ -1198,10 +1206,21 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
       if (!rest) return
       const slash = rest.indexOf('/')
       if (slash === -1) {
-        if (byName.has(rest)) return  // never downgrade an existing (server) entry
+        if (byName.has(rest)) {
+          // A queued JSON write is newer than the server listing. Keep the
+          // server's richer metadata, but overlay the value just as get() does.
+          if (options.includeContent && meta && meta.kind === 'json') {
+            byName.get(rest).content = meta.data
+          }
+          return
+        }
         const mime = (meta && meta.contentType)
           || (meta && meta.kind === 'json' ? 'application/json' : null)
-        byName.set(rest, { name: rest, path: base + rest, type: 'file', mime_type: mime })
+        const entry = { name: rest, path: base + rest, type: 'file', mime_type: mime }
+        if (options.includeContent && meta && meta.kind === 'json') {
+          entry.content = meta.data
+        }
+        byName.set(rest, entry)
       } else {
         const dname = rest.slice(0, slash)
         if (!byName.has(dname)) {
@@ -1210,7 +1229,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
       }
     }
 
-    const server = await listServer(norm)
+    const server = await listServer(norm, options)
     if (server) {
       for (const e of server) byName.set(e.name, e)
     } else {
@@ -1586,10 +1605,10 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
     durableWrite,
     onDeadLetter,
     remove,
-    async list(prefix) {
-      if (await hasIndexedDb()) return listInner(prefix)
+    async list(prefix, options = {}) {
+      if (await hasIndexedDb()) return listInner(prefix, options)
       const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
-      return (await listServer(norm)) || []
+      return (await listServer(norm, options)) || []
     },
     subscribe(path, cb) { return subscribeWith(path, cb, get) },
     subscribeText(path, cb) { return subscribeWith(path, cb, getText) },

@@ -55,7 +55,7 @@ function installGlobals() {
 //   GET    /api/storage/apps/{appId}/{path}   → 200 value | 404
 //   PUT    /api/storage/apps/{appId}/{path}   → 200 (store) | scripted status
 //   DELETE /api/storage/apps/{appId}/{path}   → 200 (remove) | 404 | scripted
-//   GET    /api/storage/apps-list/{appId}/... → list() — not exercised here
+//   GET    /api/storage/apps-list/{appId}/... → list(), optionally with JSON content
 export function makeServer() {
   const files = new Map()           // path -> { value, kind, contentType, etag }
   const signalEvents = []
@@ -108,6 +108,8 @@ export function makeServer() {
     }
     const listMatch = url.match(/\/api\/storage\/apps-list\/[^/]+\/(.*?)(?:\?.*)?$/)
     if (method === 'GET' && listMatch) {
+      const includeContent = new URL(url, 'https://mobius.test')
+        .searchParams.get('include_content') === 'true'
       const prefix = decodeURIComponent(listMatch[1] || '').replace(/^\/+|\/+$/g, '')
       const base = prefix ? `${prefix}/` : ''
       const byName = new Map()
@@ -117,12 +119,16 @@ export function makeServer() {
         if (!rest) continue
         const [name, ...tail] = rest.split('/')
         if (!byName.has(name)) {
-          byName.set(name, {
+          const entry = {
             name,
             path: `${base}${name}`,
             type: tail.length ? 'directory' : 'file',
             ...(tail.length ? {} : { mime_type: rec.contentType }),
-          })
+          }
+          if (!tail.length && includeContent && rec.kind === 'json') {
+            entry.content = rec.value
+          }
+          byName.set(name, entry)
         }
       }
       return res(200, { entries: [...byName.values()], next_cursor: null })

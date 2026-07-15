@@ -73,6 +73,46 @@ test('an opaque sandbox without IndexedDB still reads and writes online', async 
   await assert.rejects(s.set('offline.json', { no: 'phantom queue' }), /offline saving is unavailable/)
 })
 
+test('list can batch JSON content in one bounded server request', async () => {
+  const { server } = freshEnv()
+  globalThis.indexedDB = {
+    open() { throw new DOMException('denied', 'SecurityError') },
+  }
+  const s = await newStorage()
+  server.seed('records/a.json', { id: 'a' })
+  server.seed('records/b.json', { id: 'b' })
+  server.seed('records/readme.txt', 'hello', 'text', 'text/plain')
+
+  const entries = await s.list('records', { includeContent: true })
+  const byName = new Map(entries.map((entry) => [entry.name, entry]))
+  assert.deepEqual(byName.get('a.json').content, { id: 'a' })
+  assert.deepEqual(byName.get('b.json').content, { id: 'b' })
+  assert.equal(Object.hasOwn(byName.get('readme.txt'), 'content'), false)
+  assert.equal(
+    server.log.filter((request) => request.url.includes('/apps-list/')).length,
+    1,
+  )
+  assert.equal(
+    server.log.filter((request) => request.url.includes('/api/storage/apps/')).length,
+    0,
+  )
+})
+
+test('batched list content keeps a newer queued JSON write visible', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('records/a.json', { value: 'server' })
+  server.forceWrite('records/a.json', 503)
+  assert.deepEqual(
+    await s.set('records/a.json', { value: 'queued' }),
+    { queued: true },
+  )
+
+  const entries = await s.list('records', { includeContent: true })
+  assert.deepEqual(entries[0].content, { value: 'queued' })
+  assert.deepEqual(server.serverValue('records/a.json'), { value: 'server' })
+})
+
 test('opaque-frame direct storage preserves text, blob, delete, CAS, and subscriptions', async () => {
   const { server } = freshEnv()
   globalThis.indexedDB = { open() { throw new DOMException('denied', 'SecurityError') } }

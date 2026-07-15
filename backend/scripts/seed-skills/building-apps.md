@@ -298,9 +298,13 @@ const img = await window.mobius.storage.getBlob('photo.png')  // Blob | null (ca
 // reactive read: cb fires with the current value, then on every change/sync. Prefer this over re-reading.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
 // enumerate a directory's immediate children instead of probing filenames:
-// [{name,path,type,size,modified_at,mime_type}], [] when empty, null on network failure
-// (list() has NO offline mirror, unlike get()).
+// [{name,path,type,size,modified_at,mime_type}], [] when empty. Online results
+// are authoritative; offline results come from the read-through cache + outbox.
 const entries = await window.mobius.storage.list('items/')
+// For a one-file-per-record JSON collection, batch small records with the list.
+// Entries outside the server's strict file/page byte bounds omit `content`, so
+// fall back to get(entry.path) only for those exceptional records.
+const records = await window.mobius.storage.list('items/', { includeContent: true })
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes — for sync logic only, never rendered as UI
 ```
@@ -337,7 +341,7 @@ For `.json` storage paths the body IS the document. The envelope form `{content:
 
 ### Enumerate, don't probe
 
-There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Use `storage.list('prefix/')` (inside an app) or `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (cron/agent). Returns `{entries:[{name,path,type,size,modified_at,mime_type}], next_cursor}` (immediate children only, `?limit=` ≤500, opaque `?cursor=`). `list()` has no offline mirror, unlike `get()`.
+There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Use `storage.list('prefix/')` (inside an app) or `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (cron/agent). Returns `{entries:[{name,path,type,size,modified_at,mime_type}], next_cursor}` (immediate children only, `?limit=` ≤500, opaque `?cursor=`). Runtime `list()` falls back to its per-path cache plus pending writes offline. For JSON record collections, `storage.list(prefix, {includeContent:true})` / app-list `?include_content=true` adds parsed `content` to eligible small files in the same bounded response; entries that exceed the per-file or aggregate page budget stay metadata-only and should be fetched individually.
 
 ### Raw storage API (cron, agent, cross-app `shared/`, non-`.json` blobs)
 
