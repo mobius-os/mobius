@@ -683,35 +683,6 @@ export default function ChatSettingsPanel({
 
   return (
     <div className="csp">
-      {onAutoResumeChange && (
-        <div className="csp__automation">
-          <div className="csp__label csp__label--automation">Automation</div>
-          <div
-            className="csp__automation-row"
-            onPointerDown={preserveFocusUnlessTouch}
-          >
-            <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
-              <span className="csp__automation-title">
-                Continue after rate limits
-              </span>
-              <span className="csp__automation-sub">
-                {autoResumeEnabled ? 'On for this chat' : 'Off for this chat'}
-              </span>
-            </label>
-            <Switch
-              id={autoResumeSwitchId}
-              checked={!!autoResumeEnabled}
-              onCheckedChange={onAutoResumeChange}
-              disabled={!!autoResumeSaving}
-            />
-          </div>
-          {autoResumeError && (
-            <p className="csp__automation-error" role="alert">
-              {autoResumeError}
-            </p>
-          )}
-        </div>
-      )}
       <div className="csp__label">Model</div>
       {!dataReady && (
         <>
@@ -823,6 +794,35 @@ export default function ChatSettingsPanel({
           )
         })
       })}
+      {onAutoResumeChange && (
+        <div className="csp__automation">
+          <div className="csp__label csp__label--automation">Automation</div>
+          <div
+            className="csp__automation-row"
+            onPointerDown={preserveFocusUnlessTouch}
+          >
+            <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
+              <span className="csp__automation-title">
+                Continue after rate limits
+              </span>
+              <span className="csp__automation-sub">
+                {autoResumeEnabled ? 'On for this chat' : 'Off for this chat'}
+              </span>
+            </label>
+            <Switch
+              id={autoResumeSwitchId}
+              checked={!!autoResumeEnabled}
+              onCheckedChange={onAutoResumeChange}
+              disabled={!!autoResumeSaving}
+            />
+          </div>
+          {autoResumeError && (
+            <p className="csp__automation-error" role="alert">
+              {autoResumeError}
+            </p>
+          )}
+        </div>
+      )}
       {(appProviderLocked || codexSwitchWarning || switchBusy || error) && (
         <div className="csp__foot" aria-live="polite">
           {appProviderLocked && (

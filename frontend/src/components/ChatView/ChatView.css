@@ -758,6 +758,15 @@
   max-width: min(100%, 480px);
 }
 
+/* On roomy screens tool activity follows the same reading measure as the
+   assistant's output instead of shrinking to a narrow secondary column. */
+@media (min-width: 720px) {
+  .chat__tools {
+    width: min(100%, 720px);
+    max-width: min(100%, 720px);
+  }
+}
+
 .chat__text + .chat__tools { margin-top: 10px; }
 .chat__tools + .chat__text { margin-top: 10px; }
 .chat__tools + .chat__tools { margin-top: 2px; }
@@ -1394,6 +1403,19 @@
     color 0.16s ease,
     box-shadow 0.16s ease,
     transform 0.08s ease;
+}
+
+/* Primary meanings share one slot. Hold the replacement invisible for a
+   brief beat so Send/Fast-forward clears before Stop is revealed. */
+.chat__send,
+.chat__steer,
+.chat__stop {
+  animation: chat-action-reveal 0.16s ease-out both;
+}
+
+@keyframes chat-action-reveal {
+  0%, 44% { opacity: 0; }
+  100% { opacity: 1; }
 }
 .chat__action:focus { outline: none; }
 .chat__action:focus-visible {
@@ -2121,6 +2143,9 @@
 @media (prefers-reduced-motion: reduce) {
   .chat__build-rail,
   .chat__copy-toast { animation: none; }
+  .chat__send,
+  .chat__steer,
+  .chat__stop { animation: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */
