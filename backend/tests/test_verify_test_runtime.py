@@ -78,6 +78,15 @@ def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
   assert 'PYTHONPYCACHEPREFIX="$PP_TMP/pycache"' in hook
 
 
+def test_destructive_browser_setup_requires_test_runtime_identity():
+  setup = (ROOT / "tests" / "auth.setup.mjs").read_text(encoding="utf-8")
+  version_probe = "request.get(`${BASE}/api/version`"
+  first_mutation = "request.post(`${BASE}/api/auth/setup`"
+  assert version_probe in setup
+  assert "version?.test_runtime !== true" in setup
+  assert setup.index(version_probe) < setup.index(first_mutation)
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
