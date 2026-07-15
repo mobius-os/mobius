@@ -272,10 +272,7 @@ test.describe('Logout cache wipe', () => {
     // Wait through the apiFetch-deferred reload. The token was cleared,
     // so the reloaded page shows the login form — wait for it so we read
     // caches on a stable, post-wipe page rather than racing the reload.
-    await page.waitForFunction(
-      () => !!document.querySelector('.login'),
-      { timeout: 10000 }
-    )
+    await expect(page.locator('.login')).toBeVisible({ timeout: 10000 })
 
     // Both targeted prefixes are gone after the wipe; the unrelated
     // cache survives — the wipe is prefix-scoped, not a blanket purge.

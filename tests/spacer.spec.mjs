@@ -1007,7 +1007,7 @@ test.describe('Scroll edge cases', () => {
     await page.waitForFunction(() => {
       const s = document.querySelector('.chat__scroll')
       return !!s && s.scrollHeight - s.scrollTop - s.clientHeight < 50
-    }, { timeout: 3000 })
+    }, undefined, { timeout: 3000 })
     const afterGap = await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
