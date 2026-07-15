@@ -2,12 +2,9 @@ name: Tests
 
 on:
   push:
-    # All long-lived branches get CI on push, not just main. Today's
-    # session shipped three commits to integration/ux-recovery-mod
-    # that would have broken three frontend tests if main-only CI
-    # had been the gate — instead the breakage was found ~10 hours
-    # later during a manual mobius-test rebuild. CI minutes are
-    # cheap; finding regressions early is not.
+    # Cheap checks run on development branches too. The e2e job below narrows
+    # its own execution to PRs and long-lived branches, avoiding a duplicate
+    # full browser run for both a feature push and its PR event.
     branches: [main, 'integration/**', 'feat/**', 'fix/**']
   pull_request:
     # True PR stacks target the upstream branch directly beneath them. Run the
@@ -135,6 +132,14 @@ jobs:
         run: scripts/check-core-apps-sync.sh
 
   e2e:
+    # Full browser E2E is the comprehensive integration gate, not a per-push
+    # development loop. Run it for reviewable PRs and long-lived branches;
+    # feature/fix branch pushes still get the cheap jobs above without paying
+    # twice before their PR check.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/heads/integration/')
     runs-on: ubuntu-latest
     # Building the Docker image can take several minutes on cold hosted
     # runners. Keep the job cap comfortably above the inner Playwright timeout
