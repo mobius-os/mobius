@@ -60,6 +60,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
+import { FileText } from 'lucide-react'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 
 export default function ComposerPopover({
@@ -81,6 +82,7 @@ export default function ComposerPopover({
   onAutoResumeChange,
   providerSwitchState,
   onOpenInspector,
+  onOpenSummary,
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -187,6 +189,25 @@ export default function ComposerPopover({
       {open && (
         <div className="composer-popover" role="dialog" aria-label="Chat options">
           <div className="composer-popover__section">
+            <button
+              type="button"
+              className="composer-popover__row"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setOpen(false)
+                onOpenSummary?.()
+              }}
+            >
+              <span className="composer-popover__row-icon" aria-hidden="true">
+                <FileText width={18} height={18} />
+              </span>
+              <span className="composer-popover__row-main">
+                <span className="composer-popover__row-title">Chat summary</span>
+                <span className="composer-popover__row-sub">
+                  See the evolving handoff
+                </span>
+              </span>
+            </button>
             <button
               type="button"
               className="composer-popover__row"

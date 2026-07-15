@@ -72,6 +72,7 @@
 import { useRef, useLayoutEffect } from 'react'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
+import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -401,6 +402,15 @@ export default function ChatInputBar({
     if (pill) pill.classList.toggle('chat__pill--tall', h > 45)
   }
 
+  function handlePaste(e) {
+    const files = pastedFiles(e.clipboardData)
+    if (files.length === 0) return
+    if (filePasteNeedsDefaultPrevented(e.clipboardData, files)) {
+      e.preventDefault()
+    }
+    onAddFiles(files)
+  }
+
   function handleKeyDown(e) {
     const action = resolveComposerEnterAction(e, {
       hasInput,
@@ -452,6 +462,7 @@ export default function ChatInputBar({
               className="chat__input"
               value={input}
               onChange={handleTextareaChange}
+              onPaste={handlePaste}
               onKeyDown={handleKeyDown}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"

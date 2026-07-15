@@ -33,6 +33,8 @@ export default function ManageModelsModal({
   onClose,
   providerOrder,
   providerInfo,
+  selectedProvider = '',
+  selectedModel = '',
 }) {
   const queryClient = useQueryClient()
   // Read straight from cache — by the time the modal opens, the
@@ -223,13 +225,17 @@ export default function ManageModelsModal({
                   <div className="mmm__rows">
                     {entries.map(m => {
                       const visible = !draftHidden.has(m.id)
+                      const current = pid === selectedProvider && m.id === selectedModel
                       return (
                         <label
                           key={m.id}
-                          className={`mmm-row${visible ? '' : ' mmm-row--hidden'}`}
+                          className={`mmm-row${visible ? '' : ' mmm-row--hidden'}${current ? ' mmm-row--current' : ''}`}
                         >
                           <span className="mmm-row__main">
-                            <span className="mmm-row__title">{m.label}</span>
+                            <span className="mmm-row__title">
+                              {m.label}
+                              {current && <span className="mmm-row__current">Current</span>}
+                            </span>
                             <span className="mmm-row__sub">{m.id}</span>
                           </span>
                           <input

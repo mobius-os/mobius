@@ -783,6 +783,7 @@ def get_chat_agent_context(
     _read_skill_text,
     _with_system_app_prompts,
   )
+  from app.compaction import load_cumulative_summary
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
@@ -792,6 +793,7 @@ def get_chat_agent_context(
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
+  chat_summary = load_cumulative_summary(data_dir, chat_id)
   eligible_chat_ids = {
     row[0]
     for row in db.query(models.Chat.id).filter(
@@ -809,6 +811,7 @@ def get_chat_agent_context(
     "app_context": app_context_block,
     "app_report": app_report_block,
     "compaction_brief": compaction_brief,
+    "chat_summary": chat_summary,
   }
 
 
