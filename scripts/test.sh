@@ -13,7 +13,10 @@
 set -euo pipefail
 
 # ---- Config -----------------------------------------------------------------
-PROJECT_DIR="/home/hmzmrzx/projects/mobius"
+# Resolve the checkout that owns this script.  A fixed path silently tested the
+# primary clone when this wrapper was invoked from a linked worktree, which is
+# exactly where agents do most review/fix-forward work.
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TEST_IMAGE="mobius-test:ci"
 # Slow Codex SDK tests — excluded by --fast. The cost is real (each
 # SDK contract test spins up a Thread/TurnHandle dance) and they cover
@@ -38,11 +41,11 @@ Usage: scripts/test.sh [--backend | --frontend | --all | --fast | --help]
 Möbius has two test layers; this wrapper runs either or both.
 
 Flags (mutually exclusive):
-  --backend   Pytest in the mobius-test Docker image.        (~70s, 362 tests)
-  --frontend  Playwright on the host (system Chrome locally). (~30s)
-  --all       Backend first, then frontend. DEFAULT.         (~100s)
+  --backend   Full pytest suite in the mobius-test image.    (several minutes)
+  --frontend  Playwright on the host (system Chrome locally). (~2 minutes)
+  --all       Backend first, then frontend. DEFAULT.
   --fast      Backend only, skipping the slow Codex SDK tests.
-              Covers ~80% of risk in ~20s — good for tight inner loops.
+              Useful for iteration; use --backend before landing.
   --help      Show this message.
 
 Backend runs first under --all because it is slower but catches more
@@ -98,9 +101,9 @@ run_backend() {
     for f in "${SLOW_TESTS[@]}"; do
       pytest_args+=("--ignore=${f}")
     done
-    summary="pytest (fast — skipping ${#SLOW_TESTS[@]} slow files), expected ~20s"
+    summary="pytest (fast — skipping ${#SLOW_TESTS[@]} slow SDK files)"
   else
-    summary="pytest (full backend suite, 362 tests), expected ~70s"
+    summary="pytest (full backend suite, currently ~2,100 tests)"
   fi
 
   log "backend: ${summary}"
@@ -118,7 +121,7 @@ run_backend() {
 run_frontend() {
   check_frontend_prereqs
 
-  log "frontend: Playwright (8 spec files, system Chrome channel), expected ~30s"
+  log "frontend: Playwright (currently ~24 spec files, system Chrome channel)"
   if (cd "${PROJECT_DIR}" && npx playwright test); then
     FRONTEND_STATUS="PASS"
     log "frontend: PASS"
