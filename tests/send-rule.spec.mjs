@@ -10,7 +10,7 @@
  *
  * Mirrors the route-mock SSE flow of second-send-pin.spec.mjs.
  *
- * Run: npx playwright test tests/send-rule.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/send-rule.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

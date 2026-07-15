@@ -3,8 +3,13 @@
 # Builds the frontend, installs the backend + CLI tools, and serves
 # everything from one FastAPI process.  Works on VPS, Railway, PikaPods.
 
+# Keep the Node runtime source independent of the frontend build. Copying Node
+# from the completed frontend stage made every UI edit invalidate the backend's
+# expensive apt/agent-CLI/browser layers during local E2E builds.
+FROM node:22-slim AS node-runtime
+
 # -- Stage 1: build the frontend --------------------------------------
-FROM node:22-slim AS frontend
+FROM node-runtime AS frontend
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
@@ -18,8 +23,8 @@ FROM python:3.12-slim
 # Copy Node.js binary from the frontend stage instead of installing via
 # apt.  The debian nodejs/npm packages pull in ~200MB of system node
 # packages we don't need — only the claude CLI and npm globals need Node.
-COPY --from=frontend /usr/local/bin/node /usr/local/bin/node
-COPY --from=frontend /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
@@ -143,26 +148,6 @@ try{const t=JSON.parse(cp.execSync('npm view '+name+'@'+v+' time --json',{stdio:
 fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
 console.log('cli-release-dates.json:',JSON.stringify(out));" \
     || echo '{}' > /app/cli-release-dates.json
-
-COPY backend/app ./app/
-COPY backend/scripts ./scripts/
-COPY skill/ ./skill/
-COPY core-apps/ ./core-apps/
-COPY protected-files.txt ./protected-files.txt
-
-# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
-# in its OWN container (same image, command `python3 -P /app/recovery/
-# recoveryd.py`). It imports ZERO app.* code and survives a fully-broken
-# platform. Baked root-owned + chmod a-w so even root can't modify it in
-# place and the agent (mobius) cannot touch it; recoveryd self-checks this
-# at startup and refuses to run if any file is writable. This is the floor
-# of the recovery story, distinct from the platform-baked backend floor.
-COPY backend/recovery ./recovery/
-RUN chmod -R a-w /app/recovery
-
-# Frontend static files + app-frame served by FastAPI.
-COPY --from=frontend /build/dist ./static/
-COPY frontend/public/app-frame.html ./app-frame.html
 
 # Self-hosted vendor libs for mini-app import maps. Pinned via npm
 # install at image build time, served same-origin under /vendor/ with
@@ -347,6 +332,13 @@ RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
          /app/static/vendor/dompurify@3.4.11 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
 
+# Copy revision-varying source only after the expensive pinned vendor layers.
+# COPY merges the frontend build into the existing /app/static tree, retaining
+# the self-hosted vendor directory created above. This keeps ordinary backend,
+# script, and UI edits from rebuilding every vendored browser dependency.
+COPY --from=frontend /build/dist ./static/
+COPY frontend/public/app-frame.html ./app-frame.html
+
 # Full frontend source with installed node_modules. /app/shell-src is kept so
 # /data/platform/frontend/node_modules can symlink to it at runtime.
 COPY frontend/ ./shell-src/
@@ -439,7 +431,18 @@ RUN printf 'mobius ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin
     && chmod 440 /etc/sudoers.d/mobius-apt \
     && visudo -cf /etc/sudoers.d/mobius-apt
 
-COPY backend/scripts/entrypoint.sh ./scripts/entrypoint.sh
+# Runtime source belongs at the tail of the image so normal code changes reuse
+# the browser, CLI, Python, vendor, and platform-seed layers above.
+COPY backend/app ./app/
+COPY backend/scripts ./scripts/
+COPY skill/ ./skill/
+COPY core-apps/ ./core-apps/
+COPY protected-files.txt ./protected-files.txt
+
+# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs in
+# its own container. It imports no app.* code and remains root-owned/read-only.
+COPY backend/recovery ./recovery/
+RUN chmod -R a-w /app/recovery
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh

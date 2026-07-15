@@ -21,7 +21,7 @@
  * handleStop + the bundler output, catching wiring regressions that
  * the node-side unit suite cannot see.
  *
- * Run: npx playwright test tests/handleStop-sync-ordering.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/handleStop-sync-ordering.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

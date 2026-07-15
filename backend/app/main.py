@@ -878,6 +878,10 @@ def version():
   settings = get_settings()
   return {"sha": settings.build_sha,
           "build_date": settings.build_date,
+          # Browser setup verifies this dedicated test-container marker before
+          # any write. Localhost is not sufficient evidence because a preview
+          # proxy can still forward to the live app.
+          "test_runtime": os.environ.get("MOBIUS_TEST_RUNTIME") == "1",
           **_served_platform_identity(settings.data_dir),
           **_served_frontend_identity()}
 

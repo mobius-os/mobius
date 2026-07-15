@@ -3,22 +3,9 @@
  *
  * Why this exists
  * ---------------
- * `auth.setup.mjs` wipes chats once before the whole suite. With
- * `workers: 4`, every worker creates chats in the same SQLite file
- * and they accumulate until the next run. Any test that lists chats
- * sees the union of in-flight work from all workers.
- *
- * Per-worker DATABASE_URL isolation would require N containers — the
- * backend builds its engine at import time, not per-request. That's a
- * lot of moving parts to add to docker-compose + CI for a contention
- * surface that, in practice, only really matters for the chat list
- * endpoint (the drawer filters `has_messages`, and Playwright mocks
- * `/messages`, so created chats stay drawer-invisible).
- *
- * Cheaper isolation: tag each test-created chat with a worker-scoped
- * title prefix, and bulk-delete that prefix at the end of each spec
- * file. SQLite stays single-DB; each worker effectively owns its own
- * title namespace. No backend changes, no container changes.
+ * Each run already has its own backend and database. Within that run, this
+ * helper records the exact IDs created by each worker and deletes only those
+ * IDs. It never lists the account and never infers ownership from titles.
  *
  * Usage
  * -----
@@ -36,21 +23,24 @@
  * ---------------
  * `/api/auth/token` is throttled at 5/min. Cleanup across 4 workers
  * would blow through that, so we read the bearer token straight from
- * Playwright's saved `tests/.auth/state.json` (auth.setup.mjs writes
- * it into localStorage) and only fall back to the login endpoint if
- * the file is missing.
+ * Playwright's configured auth-state file (auth.setup.mjs writes the token
+ * into localStorage) and only fall back to the login endpoint if it is missing.
  */
 
 import { test } from '@playwright/test'
+import {
+  drainCreatedChats,
+  registerCreatedChats,
+} from './_chatFixtureRegistry.mjs'
+
+export { registerCreatedChats } from './_chatFixtureRegistry.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const USER = process.env.MOBIUS_USER || 'admin'
 const PASS = process.env.MOBIUS_PASS || 'admin'
 
-// Title prefix scheme: `__pw_w<workerIndex>_` so every spec file in
-// the same worker shares the same namespace (worker reused across
-// files in a Playwright run). The leading `__pw_` is the global tag
-// — used by the cleanup pass to filter via startsWith.
+// Human-readable title tags remain useful in diagnostics, but cleanup never
+// relies on them.
 const GLOBAL_PREFIX = '__pw_'
 export function workerPrefix(workerIndex) {
   return `${GLOBAL_PREFIX}w${workerIndex}_`
@@ -76,7 +66,8 @@ async function getToken(request) {
   //    into localStorage at the BASE origin. Read it from disk.
   try {
     const fs = await import('fs/promises')
-    const raw = await fs.readFile('tests/.auth/state.json', 'utf8')
+    const authFile = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
+    const raw = await fs.readFile(authFile, 'utf8')
     const state = JSON.parse(raw)
     for (const origin of state.origins || []) {
       for (const item of origin.localStorage || []) {
@@ -127,26 +118,22 @@ export async function createTaggedChat(page, label = '') {
     if (!res.ok) return null
     return res.json()
   }, title)
+  if (info && result?.id) registerCreatedChats(info.workerIndex, result.id)
   return result
 }
 
 /**
- * Delete every chat whose title starts with this worker's prefix.
- * Runs as `test.afterAll` per spec file (one cleanup pass per
- * worker-file pair). Best-effort: 4xx responses are swallowed so a
- * stale chat ID can't fail the suite.
+ * Delete only chats registered by this worker. Best-effort: 4xx responses
+ * are swallowed so a stale fixture ID cannot fail the suite.
  */
 export async function cleanupWorkerChats(workerIndex, request) {
+  const ids = drainCreatedChats(workerIndex)
+  if (ids.length === 0) return
   const token = await getToken(request)
   if (!token) return
   const headers = { Authorization: `Bearer ${token}` }
-  const listRes = await request.get(`${BASE}/api/chats`, { headers })
-  if (!listRes.ok()) return
-  const chats = await listRes.json()
-  const prefix = workerPrefix(workerIndex)
-  const mine = chats.filter(c => (c.title || '').startsWith(prefix))
-  await Promise.all(mine.map(c =>
-    request.delete(`${BASE}/api/chats/${c.id}`, {
+  await Promise.all(ids.map(id =>
+    request.delete(`${BASE}/api/chats/${id}`, {
       headers, failOnStatusCode: false,
     })
   ))

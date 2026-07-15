@@ -21,6 +21,8 @@ PLATFORM_ROOT = Path("/data/platform")
 def validate_runtime(version: dict[str, object], head: str, expected: str) -> list[str]:
   """Return identity errors; an empty list means the runtime is coherent."""
   errors: list[str] = []
+  if version.get("test_runtime") is not True:
+    errors.append(f"test_runtime={version.get('test_runtime')!r}")
   if version.get("serving_source") != "platform":
     errors.append(f"serving_source={version.get('serving_source')!r}")
   if version.get("frontend_source") != "platform":
@@ -44,7 +46,15 @@ def main() -> int:
     with urlopen(VERSION_URL, timeout=3) as response:
       version = json.load(response)
     head = subprocess.run(
-      ["git", "-C", str(PLATFORM_ROOT), "rev-parse", "HEAD"],
+      [
+        "git",
+        "-c",
+        f"safe.directory={PLATFORM_ROOT}",
+        "-C",
+        str(PLATFORM_ROOT),
+        "rev-parse",
+        "HEAD",
+      ],
       check=True,
       capture_output=True,
       text=True,

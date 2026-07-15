@@ -13,7 +13,7 @@
  * accidentally drops precache injection or runtime caching, or
  * any plugin upgrade that changes the SW URL or cache shape.
  *
- * Run: npx playwright test tests/sw-pwa.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-pwa.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 from scripts.verify_test_runtime import validate_runtime
 
@@ -9,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _version(**overrides):
   value = {
+    "test_runtime": True,
     "sha": SHA,
     "serving_source": "platform",
     "served_sha": SHA,
@@ -46,6 +50,11 @@ def test_rejects_baked_or_mismatched_runtime():
   assert any("sha=" in error for error in errors)
 
 
+def test_rejects_runtime_without_explicit_test_identity():
+  errors = validate_runtime(_version(test_runtime=False), SHA, SHA)
+  assert any("test_runtime" in error for error in errors)
+
+
 def test_rejects_checkout_that_differs_from_ci_sha():
   other = "b" * 40
   errors = validate_runtime(_version(), SHA, other)
@@ -78,6 +87,13 @@ def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
   assert 'PYTHONPYCACHEPREFIX="$PP_TMP/pycache"' in hook
 
 
+def test_identity_verifier_allows_the_mobius_owned_platform_repo():
+  verifier = (ROOT / "backend/scripts/verify_test_runtime.py").read_text(
+    encoding="utf-8"
+  )
+  assert 'f"safe.directory={PLATFORM_ROOT}"' in verifier
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -89,3 +105,135 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
     'if [ "$_use_platform" -eq 1 ] && '
     '[ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
   ) in entrypoint
+
+
+def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
+  setup = (ROOT / "tests" / "auth.setup.mjs").read_text(encoding="utf-8")
+  marker_probe = 'request.get(`${BASE}/api/version`'
+  auth_write = 'request.post(`${BASE}/api/auth/setup`'
+  assert marker_probe in setup
+  assert "version?.test_runtime !== true" in setup
+  assert setup.index(marker_probe) < setup.index(auth_write)
+  assert 'request.get(`${BASE}/api/chats`' not in setup
+  assert 'request.delete(`${BASE}/api/chats/' not in setup
+
+
+def test_chat_cleanup_uses_registered_ids_without_account_listing():
+  tracker = (ROOT / "tests" / "_chatTracker.mjs").read_text(encoding="utf-8")
+  assert "registerCreatedChats" in tracker
+  assert "drainCreatedChats" in tracker
+  assert "Promise.all(ids.map" in tracker
+  assert 'request.get(`${BASE}/api/chats`' not in tracker
+
+
+def test_local_browser_e2e_is_explicit_and_disposable():
+  config = (ROOT / "playwright.config.mjs").read_text(encoding="utf-8")
+  runner = (ROOT / "scripts" / "playwright-local.sh").read_text(encoding="utf-8")
+  assert "MOBIUS_LOCAL_E2E" in config
+  assert "MOBIUS_AUTH_FILE" in config
+  assert "--allow-local-e2e" in runner
+  assert "down -v --remove-orphans" in runner
+  assert 'value.get("test_runtime") is not True' in runner
+  assert 'MOBIUS_AUTH_FILE="$auth_file"' in runner
+  assert 'git clone --quiet --no-local "$ROOT" "$snapshot_dir"' in runner
+  assert '--project-directory "$snapshot_dir"' in runner
+  assert 'cd "$snapshot_dir"' in runner
+  assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1' in runner
+  assert 'error: timed out waiting for the isolated test backend' in runner
+
+
+def _git(repo: Path, *args: str):
+  return subprocess.run(
+    ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+  )
+
+
+def _init_repo(repo: Path):
+  repo.mkdir(parents=True)
+  _git(repo, "init", "-q")
+  _git(repo, "config", "user.name", "Test")
+  _git(repo, "config", "user.email", "test@example.com")
+
+
+def test_local_runner_refuses_uncommitted_edits_before_docker(tmp_path):
+  repo = tmp_path / "repo"
+  _init_repo(repo)
+  (repo / "scripts").mkdir()
+  shutil.copy2(ROOT / "scripts" / "playwright-local.sh", repo / "scripts")
+  playwright = repo / "node_modules" / ".bin" / "playwright"
+  playwright.parent.mkdir(parents=True)
+  playwright.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+  playwright.chmod(0o755)
+  tracked = repo / "tracked.txt"
+  tracked.write_text("clean\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-qm", "fixture")
+  tracked.write_text("dirty\n", encoding="utf-8")
+
+  fake_bin = tmp_path / "bin"
+  fake_bin.mkdir()
+  docker = fake_bin / "docker"
+  docker.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+  docker.chmod(0o755)
+  result = subprocess.run(
+    [str(repo / "scripts" / "playwright-local.sh"), "--allow-local-e2e"],
+    cwd=repo,
+    capture_output=True,
+    text=True,
+    env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+  )
+  assert result.returncode == 2
+  assert "requires a committed revision" in result.stderr
+
+  _git(repo, "restore", "tracked.txt")
+  (repo / "new-source.py").write_text("untracked\n", encoding="utf-8")
+  result = subprocess.run(
+    [str(repo / "scripts" / "playwright-local.sh"), "--allow-local-e2e"],
+    cwd=repo,
+    capture_output=True,
+    text=True,
+    env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+  )
+  assert result.returncode == 2
+  assert "requires a committed revision" in result.stderr
+
+
+def test_no_local_clone_from_linked_worktree_has_standalone_git_dir(tmp_path):
+  repo = tmp_path / "repo"
+  _init_repo(repo)
+  (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-qm", "fixture")
+  linked = tmp_path / "linked"
+  snapshot = tmp_path / "snapshot"
+  _git(repo, "worktree", "add", "-q", "--detach", str(linked), "HEAD")
+
+  subprocess.run(
+    ["git", "clone", "--quiet", "--no-local", str(linked), str(snapshot)],
+    check=True,
+  )
+  assert (linked / ".git").is_file()
+  assert (snapshot / ".git").is_dir()
+  assert _git(snapshot, "rev-parse", "HEAD").stdout == _git(
+    linked, "rev-parse", "HEAD"
+  ).stdout
+
+
+def test_documented_browser_commands_use_disposable_runner():
+  contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+  spec_text = "\n".join(
+    path.read_text(encoding="utf-8") for path in (ROOT / "tests").glob("*.mjs")
+  )
+  assert "npx playwright test" not in contributing
+  assert "npx playwright test" not in spec_text
+  assert "playwright-local.sh --allow-local-e2e" in contributing
+
+
+def test_hosted_e2e_runs_for_prs_and_long_lived_branches_only():
+  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+    encoding="utf-8"
+  )
+  e2e = workflow.split("\n  e2e:\n", 1)[1]
+  assert "github.event_name == 'pull_request'" in e2e
+  assert "github.ref == 'refs/heads/main'" in e2e
+  assert "refs/heads/integration/" in e2e

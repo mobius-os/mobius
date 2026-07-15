@@ -19,7 +19,7 @@
  *       consume_pending_cids + the exact "\n\n"-joined content,
  *   (c) the queued tray clears on a {status:"steered"} response.
  *
- * Run: npx playwright test tests/steer-queued.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/steer-queued.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

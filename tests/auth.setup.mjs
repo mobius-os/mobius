@@ -4,44 +4,49 @@
  * On a fresh container (CI), the setup endpoint creates the owner account.
  * On an existing container, it 409s harmlessly.
  *
- * Also wipes chats from prior runs. The Playwright suite shares the
- * mobius-test DB across runs and tests; without this, chats pile up
- * (we've seen 400+) and every drawer-list fetch slows down until
- * tests start timing out.
+ * This setup must never enumerate or delete an owner's chats. Every
+ * browser run is required to identify itself as an isolated test runtime,
+ * and individual specs clean up only the fixture IDs they created.
  */
-import { test as setup, expect } from '@playwright/test'
+import { test as setup } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const USER = process.env.MOBIUS_USER || 'admin'
 const PASS = process.env.MOBIUS_PASS || 'admin'
-const AUTH_FILE = 'tests/.auth/state.json'
+const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
 
-// Safety: refuse to run against anything that isn't a local mobius-test
-// container. Setup wipes ALL chats for the owner and write-once stamps
-// walkthrough_completed_at (irreversible via the API). A stray MOBIUS_URL
-// pointing at prod + matching admin/admin creds would destroy data and
-// permanently mark prod walkthrough done. Match scripts/live-test.sh's
-// own guard: localhost only, port 8000 is explicitly off-limits.
+// First guard: only local-family hosts on a non-production port.
 const allowedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '172.17.0.1']
 const baseUrl = new URL(BASE)
 if (!allowedHosts.includes(baseUrl.hostname) || baseUrl.port === '8000') {
   throw new Error(
     `auth.setup refuses to run against ${BASE} — only local mobius-test ` +
     `(non-prod port, localhost-family host) is allowed. ` +
-    `Setup destructively wipes chats and write-once stamps the walkthrough; ` +
-    `running against prod would corrupt owner state irreversibly.`
+    `Setup writes test-owner state and must only target an isolated runtime.`
   )
 }
 
 setup('authenticate', async ({ page, request }) => {
+  // Authoritative guard: a localhost URL can still be a proxy to the live
+  // backend. Verify the backend itself opted into test mode before making
+  // any authenticated or write request.
+  const versionRes = await request.get(`${BASE}/api/version`, {
+    failOnStatusCode: false,
+  })
+  const version = versionRes.ok() ? await versionRes.json() : null
+  if (version?.test_runtime !== true) {
+    throw new Error(
+      `auth.setup refuses ${BASE}: /api/version did not report ` +
+      `test_runtime=true. Use the isolated local E2E runner or hosted CI.`
+    )
+  }
+
   // Ensure the owner account exists (idempotent — 409 if already set up).
   await request.post(`${BASE}/api/auth/setup`, {
     data: { username: USER, password: PASS },
   })
 
-  // Wipe prior-run chats. Best-effort: get a token, list, delete each.
-  // If the token fetch fails (fresh container, no owner yet) we just
-  // skip — there's nothing to wipe anyway.
+  // Fetch the test-owner token so the walkthrough cannot intercept clicks.
   const tokRes = await request.post(`${BASE}/api/auth/token`, {
     form: { username: USER, password: PASS },
     failOnStatusCode: false,
@@ -49,15 +54,6 @@ setup('authenticate', async ({ page, request }) => {
   if (tokRes.ok()) {
     const { access_token } = await tokRes.json()
     const headers = { Authorization: `Bearer ${access_token}` }
-    const listRes = await request.get(`${BASE}/api/chats`, { headers })
-    if (listRes.ok()) {
-      const chats = await listRes.json()
-      await Promise.all(chats.map(c =>
-        request.delete(`${BASE}/api/chats/${c.id}`, {
-          headers, failOnStatusCode: false,
-        })
-      ))
-    }
     // Mark walkthrough complete server-side so the WalkthroughOverlay
     // doesn't render during tests. The overlay's centered-modal +
     // backdrop intercepts every pointer event in the shell; without
