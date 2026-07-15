@@ -23,6 +23,7 @@ dist/
 .dist-rebuild/
 .assets-attic/
 .publish.lock
+.watch.lock
 
 # OS
 .DS_Store
