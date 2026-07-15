@@ -11,6 +11,7 @@ import {
   closeToolLifecycle,
   closeAllToolLifecycles,
   appendThinkingChunk,
+  anchorReplayedThinking,
   attachToolSources,
   reconcileStreamItems,
 } from './streamReducers.js'
@@ -737,6 +738,11 @@ export default function useStreamConnection(chatId, {
           }
 
           if (event.type === 'catch_up_done') {
+            catchUpItems = anchorReplayedThinking(
+              catchUpItems,
+              event.ts,
+              Date.now(),
+            )
             commitCatchUp()
             // The reattach window ends when the catch-up burst commits —
             // from here on it's normal live streaming again.

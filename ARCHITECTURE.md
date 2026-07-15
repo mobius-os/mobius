@@ -574,6 +574,14 @@ repairs the legacy glued-bold seam (`****`) for already-saved chats, while legac
 events without ids retain raw token concatenation so mid-word fragments are never
 split heuristically.
 
+The live thinking timer is runner-time, not component lifetime. Each delta keeps
+its server `ts`; `catch_up_done` carries the server clock at replay completion, and
+the frontend re-anchors only a trailing live thinking block from those two server
+values before committing the replay. Reconciliation may move that clock forward
+but never backward. Do not derive a remounted timer solely from `Date.now()` or the
+client arrival time of replayed deltas: catch-up arrives as a burst and that makes a
+minutes-old turn visibly restart at one second.
+
 Every visible user row also makes R1's reservation current, whether or not that row
 pins. Reservation lifetime and pin decisions are independent.
 - **Steer = separate rows, one turn.** Steered queued messages render as separate

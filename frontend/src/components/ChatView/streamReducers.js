@@ -276,6 +276,32 @@ export function thinkingElapsedMs(item, now) {
 }
 
 /**
+ * Re-anchor the trailing live thinking block when a catch-up replay finishes.
+ *
+ * Replayed deltas arrive in a burst, so their client `lastAt` values describe
+ * replay time rather than the time the runner originally emitted them. The
+ * catch_up_done marker carries the server clock at the end of that replay;
+ * comparing it with the block's server-authored `firstTs` restores the quiet
+ * interval since the most recent reasoning delta. Without this step a block
+ * containing one summary event restarts at "1 second" whenever the chat
+ * remounts, even though the turn has been thinking for minutes.
+ */
+export function anchorReplayedThinking(items, replayTs, at = Date.now()) {
+  if (!Array.isArray(items) || items.length === 0) return items
+  if (!Number.isFinite(replayTs) || !Number.isFinite(at)) return items
+  const i = items.length - 1
+  const item = items[i]
+  if (item?.type !== 'thinking' || !Number.isFinite(item.firstTs)) return items
+
+  const replayElapsed = Math.max(0, replayTs - item.firstTs)
+  const currentDuration = Number.isFinite(item.duration_ms) ? item.duration_ms : 0
+  const duration_ms = Math.max(currentDuration, replayElapsed)
+  const updated = [...items]
+  updated[i] = { ...item, duration_ms, lastAt: at }
+  return updated
+}
+
+/**
  * Applies a `tool_end` event. A running tool flips to done; an
  * absorbed question's lifecycle closes by dropping `absorbedTool`
  * (the card itself has no status), so a later tool_output can never
@@ -359,8 +385,9 @@ export function reconcileStreamItems(prev, next) {
   if (!Array.isArray(next)) return prev
   if (!Array.isArray(prev) || prev.length === 0) return next
   let changed = next.length !== prev.length
-  const result = next.map((n, k) => {
+  const result = next.map((incoming, k) => {
     const p = prev[k]
+    let n = incoming
     if (!p || p.type !== n.type) {
       changed = true
       return n
@@ -372,6 +399,20 @@ export function reconcileStreamItems(prev, next) {
       if (!idMatch) {
         changed = true
         return n
+      }
+    }
+    if (n.type === 'thinking' && Number.isFinite(n.lastAt)) {
+      // A bounded replay may no longer contain the first delta, while the
+      // visible/session snapshot still has the older clock anchor. Never let
+      // reconciliation move a live timer backwards in that case.
+      const previousElapsed = thinkingElapsedMs(p, n.lastAt)
+      const replayElapsed = thinkingElapsedMs(n, n.lastAt)
+      if (previousElapsed > replayElapsed) {
+        n = {
+          ...n,
+          duration_ms: previousElapsed,
+          ...(Number.isFinite(p.startedAt) ? { startedAt: p.startedAt } : {}),
+        }
       }
     }
     if (shallowEqualItem(p, n)) return p

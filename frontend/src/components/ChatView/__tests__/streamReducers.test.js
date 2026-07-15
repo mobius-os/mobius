@@ -22,6 +22,7 @@ import {
   isQuestionTool,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
+  anchorReplayedThinking,
   thinkingContentForDisplay,
   thinkingElapsedMs,
   attachToolSources,
@@ -494,6 +495,27 @@ test('thinkingElapsedMs falls back to startedAt for legacy items without lastAt'
   assert.equal(thinkingElapsedMs(legacy, 4000), 3000)
 })
 
+test('catch-up completion restores quiet thinking time after a chat remount', () => {
+  let replay = []
+  replay = appendThinkingChunk(replay, 'Scheduling poll after delay', 90_000, 10_000)
+
+  const anchored = anchorReplayedThinking(replay, 70_000, 150_000)
+  assert.equal(anchored[0].duration_ms, 60_000,
+    'server replay time includes the silent interval after the only delta')
+  assert.equal(anchored[0].lastAt, 150_000)
+  assert.equal(thinkingElapsedMs(anchored[0], 151_000), 61_000,
+    'the live ticker continues from turn age instead of restarting at 1s')
+})
+
+test('catch-up anchoring only advances a trailing live thinking block', () => {
+  const completed = [
+    { type: 'thinking', content: 'plan', firstTs: 10_000, duration_ms: 2_000 },
+    { type: 'tool', tool: 'Bash', status: 'running' },
+  ]
+  assert.equal(anchorReplayedThinking(completed, 70_000, 150_000), completed,
+    'reasoning followed by visible work is already complete and stays frozen')
+})
+
 test('appendThinkingChunk falls back to client delta without runner timestamps', () => {
   let items = []
   items = appendThinkingChunk(items, 'Let me ', 1000)
@@ -558,6 +580,21 @@ test('reconcile merges a tool that changed state, keeping its key so the DOM nod
   assert.equal(result[0].tool_use_id, 'toolu_1', 'but the identity key is preserved, so React reuses the ToolBlock instance/DOM')
   assert.equal(result[0].status, 'done')
   assert.equal(result[0].output, 'a\nb')
+})
+
+test('reconcile never moves a live thinking clock backwards', () => {
+  const prev = [{
+    type: 'thinking', content: 'plan', startedAt: 1_000,
+    firstTs: 10_000, lastAt: 20_000, duration_ms: 9_000,
+  }]
+  const replay = [{
+    type: 'thinking', content: 'plan', startedAt: 30_000,
+    firstTs: 15_000, lastAt: 30_000, duration_ms: 5_000,
+  }]
+  const result = reconcileStreamItems(prev, replay)
+  assert.equal(result[0].duration_ms, 19_000,
+    'the visible snapshot was already at 19s when replay committed')
+  assert.equal(result[0].startedAt, 1_000)
 })
 
 test('reconcile matches tools by tool_use_id, not position, and never merges two different tools', () => {
