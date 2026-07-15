@@ -60,6 +60,35 @@ test('recent interaction defers visible shell reloads', () => {
   }), false)
 })
 
+test('passive watcher rebuilds coalesce while an idle chat is visible', () => {
+  const base = {
+    activeElement: el('body'),
+    activeView: 'chat',
+    activeChatId: 'c1',
+    streamingChatIds: new Set(),
+    lastUserInteractionAt: 0,
+    now: 10000,
+  }
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    passiveRebuild: true,
+  }), true)
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    passiveRebuild: false,
+  }), false, 'a deliberate apply-now still uses normal idle policy')
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    activeView: 'canvas',
+    passiveRebuild: true,
+  }), false, 'leaving the chat releases a queued watcher rebuild')
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    passiveRebuild: true,
+    visibilityState: 'hidden',
+  }), false, 'a hidden page is a safe apply boundary')
+})
+
 test('hidden pages can reload without disrupting focus', () => {
   assert.equal(shouldDeferShellReload({
     activeElement: el('textarea'),

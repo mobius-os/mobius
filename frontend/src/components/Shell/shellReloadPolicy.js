@@ -62,12 +62,19 @@ export function shouldDeferShellReload({
   activeView,
   activeChatId,
   streamingChatIds,
+  passiveRebuild = false,
   voiceDictationActive = false,
   lastUserInteractionAt = 0,
   now = Date.now(),
   visibilityState = 'visible',
 } = {}) {
   if (visibilityState === 'hidden') return false
+  // Watcher rebuilds are noisy implementation detail: a burst of source saves
+  // can publish several generations while the owner is simply reading an idle
+  // chat. Keep those generations coalesced until the chat is no longer the
+  // visible surface. A deliberate shell_apply_now is not passive and continues
+  // through the ordinary apply-on-idle policy below.
+  if (passiveRebuild && activeView === 'chat' && activeChatId != null) return true
   if (hasProtectedEditingContent(activeElement)) return true
   if (hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })) return true
   // A reload mid-dictation would drop the in-flight transcript, so hold it
