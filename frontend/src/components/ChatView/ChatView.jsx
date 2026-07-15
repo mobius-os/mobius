@@ -912,7 +912,21 @@ export default function ChatView({
         !terminal204
         && !preserveLocalTurn
         && serverSnapshotBehindLocal(msgs, messagesRef.current)
-      if (!preserveLocalTurn && !staleSnapshot) {
+      if (preserveLocalTurn) {
+        // A new local turn can begin while the mounted copy of the previous
+        // assistant row is still a stale partial. Refresh the durable history,
+        // but retain any optimistic user/queue rows newer than the server page.
+        // Skipping the commit wholesale made the previous completed reply
+        // disappear until a full remount.
+        const refreshed = mergeRecentMessagesIntoLoadedWindow({
+          loadedMessages: messagesRef.current,
+          loadedOffset: offsetRef.current,
+          recentMessages: msgs,
+          recentOffset: data.offset || 0,
+          preserveLocalSuffix: true,
+        })
+        commitMessages(refreshed.messages, refreshed.offset)
+      } else if (!staleSnapshot) {
         const refreshed = mergeRecentMessagesIntoLoadedWindow({
           loadedMessages: messagesRef.current,
           loadedOffset: offsetRef.current,
@@ -1246,7 +1260,14 @@ export default function ChatView({
         const locallyActive = (
           sendingRef.current || isStreamingRef.current
         ) && !externalClaimedRunRef.current
-        if (locallyActive) continue
+        if (locallyActive) {
+          // The local optimistic turn remains authoritative for its suffix,
+          // but completed history still needs server reconciliation. Without
+          // this fetch, an under-promoted previous reply stays missing for the
+          // lifetime of the open tab.
+          await fetchMessages({ force: true })
+          continue
+        }
 
         if (delta.started && !delta.finished) {
           externalClaimedRunRef.current = true
