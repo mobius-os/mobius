@@ -402,32 +402,28 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // generation is installed but the page has not adopted it.
     await page.reload({ waitUntil: 'domcontentloaded' })
 
-    // Controller identity can flip to gen B while this document is still
-    // executing gen A's precached bundle. The explicit reload above is load 1;
-    // mount-time pickup must remember the pre-fetch stale-generation signal,
-    // hand off the worker, and perform load 2. Requiring that navigation proves
-    // the document generation changed instead of accepting controller takeover
-    // alone as a false positive.
-    await page.waitForFunction(
-      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
-      { timeout: 20000 },
-    )
-
-    // Generation identity: the apply settles with the page controlled by the
-    // registration's ACTIVE worker and NOTHING left waiting.
-    await page.waitForFunction(async () => {
+    // Assert the actual generation contract, not a proxy load count. Chromium
+    // may adopt gen B during the explicit navigation (load 1), or preserve it
+    // as WAITING so mount-time pickup performs load 2. Either is correct only
+    // when the document's main bundle is the one gen B advertises.
+    const activeDocumentGeneration = () => page.evaluate(async () => {
       const reg = await navigator.serviceWorker.getRegistration()
-      return !!reg && !reg.waiting && !!reg.active
-        && navigator.serviceWorker.controller === reg.active
-    }, { timeout: 20000 })
+      if (!reg || reg.waiting || !reg.active
+          || navigator.serviceWorker.controller !== reg.active) return false
+      const current = Array.from(document.scripts || [])
+        .map(script => script.src || '')
+        .find(src => /\/assets\/index-[A-Za-z0-9_-]+\.js(?:[?#].*)?$/.test(src))
+      const response = await fetch('/sw.js', { cache: 'reload' })
+      if (!response.ok || !current) return false
+      const matches = (await response.text()).match(/assets\/index-[A-Za-z0-9_-]+\.js/g)
+      const expected = matches?.[matches.length - 1] || ''
+      return !!expected && current.includes(expected)
+    })
+    await expect.poll(activeDocumentGeneration, { timeout: 20000 }).toBe(true)
 
     // And it does not loop or drift back: the settled state holds.
     await page.waitForTimeout(1500)
-    const stable = await page.evaluate(async () => {
-      const reg = await navigator.serviceWorker.getRegistration()
-      return !reg.waiting && navigator.serviceWorker.controller === reg.active
-    })
-    expect(stable).toBe(true)
+    expect(await activeDocumentGeneration()).toBe(true)
     await keeper.close()
   })
 })
