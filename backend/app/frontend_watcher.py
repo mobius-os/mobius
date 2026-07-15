@@ -754,6 +754,11 @@ class _FrontendHandler:
         and now - self._incomplete_since >= _INCOMPLETE_GRACE_SECS
       ):
         self._incomplete_notified = True
+        log.warning(
+          "frontend staging remained incomplete for %.1fs: %s",
+          now - self._incomplete_since,
+          exc,
+        )
         _publish_system_event({
           "type": "shell_rebuild_failed",
           "error": str(exc),

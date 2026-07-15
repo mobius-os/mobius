@@ -175,7 +175,6 @@ When about to stop tool-calling and write the final assistant message **on any t
 | Updated an app | The notification curl (`notifications.md`). Don't record the update *event* — but if it surfaced a gotcha, record the gotcha. |
 | Deleted an app | State **Deleted X** + the reason. Uninstall is a reversible 7-day tombstone — recover via `POST /api/apps/{id}/recover`, or reinstall a store app to reattach by manifest_url. |
 | Took a screenshot | In the SAME message, emit the `![]` embed BEFORE any describing text; confirm the embed is present. See step 6. |
-| Discovered a gotcha/workaround | State one concrete "Gotcha: …" line in the conversation. |
 | Learned a partner preference / durable fact | Acknowledge it clearly enough that it is unambiguous in the transcript. |
 | Changed shell / CSS / cron | State what changed and why. |
 | Made an app / platform / shell change that would help other Möbius users | Say so to the partner in one sentence and offer to contribute it upstream — `contributing.md` has the how. |
