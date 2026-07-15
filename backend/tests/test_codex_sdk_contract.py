@@ -35,6 +35,8 @@ See CLAUDE.md "Codex `_approval_handler` patch — known fragility" for
 the broader context.
 """
 
+import json
+
 import pytest
 
 
@@ -123,3 +125,26 @@ def test_request_user_input_bridge_has_no_user_answer_timeout():
   assert "fut.result()" in source
   assert "fut.result(timeout=" not in source
   assert "_BRIDGE_USER_ANSWER_TIMEOUT" not in source
+
+
+def test_subagent_activity_resume_compatibility_is_still_required():
+  """Trip when the SDK grows native `subAgentActivity` support.
+
+  Möbius currently resumes 0.143+ histories through a narrow compatibility
+  path because the beta Python SDK's generated ThreadItem union still targets
+  its 0.137 runtime. Once upstream adds the item, a dependency bump must fail
+  here until we remove that path and explicitly decide how live and replayed
+  sub-agent activity should appear in Möbius. This prevents native support
+  from being silently masked by a stale workaround.
+  """
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+
+  schema = json.dumps(v2_all.ThreadItem.model_json_schema())
+  native_model = getattr(v2_all, "SubAgentActivityThreadItem", None)
+  assert native_model is None and "subAgentActivity" not in schema, (
+    "The Codex Python SDK now exposes native subAgentActivity ThreadItems. "
+    "Remove _resume_codex_thread's compatibility fallback, import the native "
+    "item in _sdk_imports, and explicitly handle its live/replayed behavior "
+    "before accepting this SDK bump."
+  )
