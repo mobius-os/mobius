@@ -86,6 +86,22 @@ class _OrderedBroadcast(ChatBroadcast):
     super().publish(event)
 
 
+def test_chat_broadcast_fans_out_to_phone_and_web_subscribers():
+  """One chat turn can be watched by more than one client at once."""
+  bc = ChatBroadcast("shared-chat")
+  catch_up_a, phone = bc.subscribe()
+  catch_up_b, web = bc.subscribe()
+  event = {"type": "text", "content": "live on both"}
+
+  assert catch_up_a == []
+  assert catch_up_b == []
+  bc.publish(event)
+
+  assert phone.get_nowait() == event
+  assert web.get_nowait() == event
+  assert len(bc.subscribers) == 2
+
+
 def _drain_actor():
   """Block until the writer actor has processed everything queued so far.
 

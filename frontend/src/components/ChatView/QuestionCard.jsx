@@ -224,14 +224,14 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
           </div>
         )
       })}
-      {!answered && !disabled && (
+      {(answered || !disabled) && (
         <button
           type="button"
           className="qcard__submit"
           onClick={handleSubmit}
-          disabled={!allAnswered || disabled}
+          disabled={!allAnswered || disabled || answered}
         >
-          Submit
+          {answered ? 'Submitted' : 'Submit'}
         </button>
       )}
     </div>

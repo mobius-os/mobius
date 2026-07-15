@@ -22,6 +22,7 @@ import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import AgentContextInspector from './AgentContextInspector.jsx'
+import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
@@ -50,7 +51,7 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -64,6 +65,7 @@ import {
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
   startedMessagesFromResponse,
+  stripInternalUserMessageFields,
   systemEventForChat,
 } from './chatRuntimeState.js'
 import {
@@ -421,7 +423,10 @@ export default function ChatView({
   // observer hook (useOffscreenNudge, below); their booleans are computed near
   // hasPendingQuestion / hasPendingResume where the card finders live.
   const [showInspector, setShowInspector] = useState(false)
+  const [showSummary, setShowSummary] = useState(false)
+  const [visibleTimestampKey, setVisibleTimestampKey] = useState(null)
   const [copyStatus, setCopyStatus] = useState('')
+  const timestampTimerRef = useRef(null)
   const messageHoldRef = useRef(null)
   const suppressMessageClickRef = useRef(null)
   const copyStatusTimerRef = useRef(null)
@@ -446,6 +451,7 @@ export default function ChatView({
   const lastAnnouncedPhaseRef = useRef(null)
 
   useEffect(() => () => {
+    if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
     if (messageHoldRef.current?.timer) clearTimeout(messageHoldRef.current.timer)
     if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current)
   }, [])
@@ -499,6 +505,19 @@ export default function ChatView({
     ) cancelMessageHold()
   }, [cancelMessageHold])
 
+  const showTimestamp = useCallback((event, key) => {
+    if (suppressMessageClickRef.current === key) {
+      suppressMessageClickRef.current = null
+      return
+    }
+    if (window.getSelection?.()?.toString()) return
+    if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
+    setVisibleTimestampKey(key)
+    timestampTimerRef.current = setTimeout(() => {
+      timestampTimerRef.current = null
+      setVisibleTimestampKey(current => current === key ? null : current)
+    }, 2200)
+  }, [])
   useEffect(() => {
     autoResumeRequestRef.current += 1
     autoResumeSavingRef.current = false
@@ -2821,6 +2840,20 @@ export default function ChatView({
       }
       if (!content) return
 
+      let queueAfterOptimisticPromote = null
+      function restoreOptimisticSteerQueue() {
+        // If another path touched the queue while the POST was in flight
+        // (notably the natural turn-end drain), every pendingQueue mutation
+        // assigns a fresh array. In that case the other path won the race,
+        // so restoring our stale snapshot would resurrect duplicate chips.
+        if (
+          queueAfterOptimisticPromote !== null
+          && pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote
+        ) {
+          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+        }
+      }
+
       try {
         const steerIsFirstUser = isFirstVisibleUserMessage()
         // Fast-forward is a deliberate visibility action, unlike automatic
@@ -2840,16 +2873,7 @@ export default function ChatView({
         // rows this request is steering; restore the snapshot below if the
         // backend says the turn was not steered.
         pendingQueue.promoteManyByCid(consumePendingCids)
-        const queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
-        const restoreOptimisticSteerQueue = () => {
-          // If another path touched the queue while the POST was in flight
-          // (notably the natural turn-end drain), every pendingQueue mutation
-          // assigns a fresh array. In that case the other path won the race,
-          // so restoring our stale snapshot would resurrect duplicate chips.
-          if (pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote) {
-            pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
-          }
-        }
+        queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingCids,
@@ -3366,6 +3390,12 @@ export default function ChatView({
           onClose={() => setShowInspector(false)}
         />
       )}
+      {showSummary && (
+        <ChatSummaryViewer
+          chatId={chatId}
+          onClose={() => setShowSummary(false)}
+        />
+      )}
       {copyStatus && (
         <div
           className={`chat__copy-toast${copyStatus === 'Copied' ? ' chat__copy-toast--success' : ''}`}
@@ -3532,13 +3562,7 @@ export default function ChatView({
                   }
                 : undefined}
               onClick={msg.ts && msg.role === 'user'
-                ? (event) => {
-                    if (suppressMessageClickRef.current === dataKey) {
-                      suppressMessageClickRef.current = null
-                      return
-                    }
-                    event.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible')
-                  }
+                ? (event) => showTimestamp(event, dataKey)
                 : undefined}
             >
               <MsgContent
@@ -3567,7 +3591,7 @@ export default function ChatView({
                 suppressedQuestionKeys={streamItemQuestionKeys}
               />
               {msg.ts && msg.role === 'user' && (
-                <time className="chat__ts">
+                <time className={`chat__ts${visibleTimestampKey === dataKey ? ' chat__ts--visible' : ''}`}>
                   {new Date(msg.ts).toLocaleString([], {
                     month: 'short', day: 'numeric',
                     hour: '2-digit', minute: '2-digit',
@@ -3739,6 +3763,7 @@ export default function ChatView({
                 }}
                 providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
+                onOpenSummary={() => setShowSummary(true)}
               />
             </>
           }

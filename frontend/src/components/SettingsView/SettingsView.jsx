@@ -1229,6 +1229,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   onClose={() => setManageModelsOpen(false)}
                   providerOrder={PROVIDER_ORDER}
                   providerInfo={PROVIDER_INFO}
+                  selectedProvider={defaultChatProvider}
+                  selectedModel={defaultChatModelId}
                 />
               )}
             </>

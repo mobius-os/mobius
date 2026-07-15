@@ -355,8 +355,8 @@
 .chat__msg--user { align-items: flex-end; }
 .chat__msg--assistant { align-items: flex-start; }
 
-/* Tap-to-toggle timestamp below user messages.
-   Absolutely positioned so it doesn't shift content below. */
+/* Tap-to-show timestamp below user messages. ChatView clears the visible state
+   automatically after a short glance, so the row never remains expanded. */
 .chat__ts {
   font-size: 11px;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
@@ -397,6 +397,71 @@
 
 @keyframes chat-copy-toast-in {
   from { opacity: 0; transform: translate(-50%, 6px); }
+}
+
+/* ── Evolving chat summary ─────────────────────────── */
+.chat-summary__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 210;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.46);
+}
+.chat-summary {
+  width: min(680px, 100%);
+  max-height: min(720px, calc(100% - 16px));
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.3);
+}
+.chat-summary__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.chat-summary__title { margin: 0; font-size: 18px; line-height: 1.3; }
+.chat-summary__subtitle { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.chat-summary__close {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin: -7px -7px 0 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+}
+.chat-summary__close:active { background: var(--surface2); }
+.chat-summary__body { min-height: 0; overflow-y: auto; }
+.chat-summary__state {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+}
+.chat-summary__state--error { color: var(--danger); }
+.chat-summary__content {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 /* ── Bubble content ────────────────────────────────── */

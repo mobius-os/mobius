@@ -32,6 +32,25 @@ def test_delete_chat_cancels_orphan_pending_question(client, auth, chat):
   asyncio.run(go())
 
 
+def test_agent_context_includes_evolving_chat_summary(
+  client, auth, chat, monkeypatch,
+):
+  monkeypatch.setattr(
+    "app.compaction.load_cumulative_summary",
+    lambda _data_dir, chat_id: (
+      "The cumulative handoff." if chat_id == chat.id else None
+    ),
+  )
+
+  response = client.get(
+    f"/api/chats/{chat.id}/agent-context",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json()["chat_summary"] == "The cumulative handoff."
+
+
 def test_create_chat_rejects_cross_site_request(client, auth):
   cross = client.post(
     "/api/chats",

@@ -768,6 +768,17 @@ function DrawerRow({
           </span>
         )}
       </button>
+      {onOpenInTab && (
+        <button
+          type="button"
+          className="drawer__open-tab"
+          aria-label={`Open ${label} in tab`}
+          title="Open in tab"
+          onClick={onOpenInTab}
+        >
+          <Plus width={16} height={16} aria-hidden="true" />
+        </button>
+      )}
       <Menu
         forceOpen={menuOpen}
         onOpen={() => onMenuToggle(true)}
@@ -803,15 +814,6 @@ function DrawerRow({
                 <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
-              {onOpenInTab && (
-                // Pin this chat/app as a tab in the shell strip so the owner
-                // can swap to it with one tap. Closes the menu first (same
-                // reason as Delete below — the row can slide as the strip
-                // renders).
-                <Menu.Item onSelect={() => { onMenuToggle(false); onOpenInTab() }}>
-                  Open in tab
-                </Menu.Item>
-              )}
               {kind === 'app' && slug && (
                 // Opens the in-PWA InstallSheet to set the home-screen
                 // name + icon first; the sheet saves, then navigates
