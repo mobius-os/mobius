@@ -148,6 +148,7 @@ export default function Shell() {
   const lastShellInteractionAtRef = useRef(0)
   // Guards the once-per-mount deferred shell-update pickup effect below.
   const shellUpdatePickupRef = useRef(false)
+  const shellUpdatePickupCheckStartedRef = useRef(false)
   const [composerFocusRequest, setComposerFocusRequest] = useState(null)
   const composerFocusTokenRef = useRef(0)
 
@@ -1029,12 +1030,32 @@ export default function Shell() {
   // state, so a waiting-only check misses it). Gate on a live-confirmed chats
   // list, so streamingChatIds reflects any running background turn — a cold mount's
   // empty pre-fetch list would otherwise read as idle and reload straight
-  // through a reconnecting turn. Runs at most once per mount.
+  // through a reconnecting turn. Runs at most once per mount. Do not key this
+  // recovery on TanStack's observer-relative `isFetchedAfterMount`: a fetch can
+  // complete in the same mount turn (especially through the SW cache) without
+  // that observer flag producing another usable effect pass. Instead, force one
+  // staleTime:0 query completion here, then yield a task so the query observer
+  // has committed the fresh durable run set before requestShellReload reads its
+  // refs. This is both a live-confirmation gate and deterministic mount pickup.
   useEffect(() => {
-    if (shellUpdatePickupRef.current) return
-    if (!(chatsQuery.isSuccess && chatsQuery.isFetchedAfterMount)) return
+    if (shellUpdatePickupRef.current || shellUpdatePickupCheckStartedRef.current) return
+    if (!chatsQuery.isSuccess) return
+    shellUpdatePickupCheckStartedRef.current = true
     let cancelled = false
     ;(async () => {
+      try {
+        await queryClient.fetchQuery({
+          queryKey: chatQueries.keys.all,
+          queryFn: chatQueries.list.fetch,
+          staleTime: 0,
+        })
+      } catch {
+        // A failed live confirmation is not permission to reload through a
+        // possibly-running turn. A later mount/online recovery can try again.
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 0))
+      if (cancelled) return
       let flagged = false
       try { flagged = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
       let rearm = flagged
@@ -1058,8 +1079,14 @@ export default function Shell() {
       // chat (especially when another tab keeps the outgoing worker alive).
       requestShellReload()
     })()
-    return () => { cancelled = true }
-  }, [chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
+    return () => {
+      cancelled = true
+      // React StrictMode immediately runs mount effects through one synthetic
+      // setup/cleanup cycle. Let the real setup own the check when that first
+      // async pass was cancelled before it could claim the pickup.
+      if (!shellUpdatePickupRef.current) shellUpdatePickupCheckStartedRef.current = false
+    }
+  }, [chatsQuery.isSuccess, queryClient])
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
