@@ -477,6 +477,27 @@ export function gestureLayoutRetryDelay(gestureWindowUntil, now) {
 }
 
 
+/** Only keys whose default action can move the chat begin reader ownership.
+ * Text entry and activating controls inside a message must not freeze layout
+ * until the no-scroll dead-man expires. */
+export function readerInputMayScroll(type, key = '') {
+  if (type !== 'keydown') return true
+  return [
+    'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', 'Tab', ' ',
+    'Spacebar',
+  ].includes(key)
+}
+
+
+/** Wheel and keyboard input have no pointer/touch release event. Their first
+ * rendering frame is the deterministic no-scroll release: a real scroll is
+ * dispatched before rAF and cancels it; an edge/no-op gesture resumes layout
+ * immediately instead of holding a live chat for the two-second dead-man. */
+export function readerInputNeedsFrameRelease(type) {
+  return type === 'wheel' || type === 'keydown'
+}
+
+
 /** Foreground return (visibilitychange/pageshow/online) is not a reading
  *  gesture. Freeze the exact visible anchor even when the chat was following
  *  before it left: content may have grown while inactive, and returning must
@@ -1212,7 +1233,20 @@ export default function useScrollMode({
       pendingGestureTimerRef.current = 0
       resumeLayoutAfterGestureRef.current?.()
     }
-    const onUserInput = () => {
+    const scheduleNoScrollRelease = () => {
+      if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
+      // Scroll events are delivered in the rendering step before rAF. Yield
+      // one frame so a scroll already caused by this gesture can claim the
+      // viewport before an input that changed nothing releases it.
+      const sequence = gestureSequenceRef.current
+      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+      pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
+        pendingGestureReleaseRafRef.current = 0
+        releasePendingGesture(sequence)
+      })
+    }
+    const onUserInput = (event) => {
+      if (!readerInputMayScroll(event?.type, event?.key)) return
       // Input and its first scroll event are ordered, but not guaranteed to be
       // less than 250ms apart under a busy renderer. Keep layout ownership
       // suspended until that first event actually lands; after it, the normal
@@ -1227,19 +1261,11 @@ export default function useScrollMode({
       pendingGestureTimerRef.current = setTimeout(() => {
         releasePendingGesture(sequence)
       }, PENDING_GESTURE_CAP_MS)
+      if (readerInputNeedsFrameRelease(event?.type)) {
+        scheduleNoScrollRelease()
+      }
     }
-    const onGestureEndWithoutScroll = () => {
-      if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
-      // Scroll events are delivered in the rendering step before rAF. Yield
-      // one frame so a scroll already caused by this gesture can claim the
-      // viewport before a genuine tap releases it.
-      const sequence = gestureSequenceRef.current
-      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
-      pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
-        pendingGestureReleaseRafRef.current = 0
-        releasePendingGesture(sequence)
-      })
-    }
+    const onGestureEndWithoutScroll = scheduleNoScrollRelease
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
     // A long touch can pause beyond the initial 250ms before moving. Refresh

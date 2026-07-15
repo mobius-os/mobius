@@ -118,16 +118,20 @@ async function sendMessage(page, text) {
 async function gestureToBottom(page) {
   await page.evaluate(() => {
     const s = document.querySelector('.chat__scroll')
-    if (s) s.scrollTop = s.scrollHeight
+    if (s) s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 80)
   })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+  await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
   await page.evaluate(() => {
     const s = document.querySelector('.chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-    s.scrollTop = Math.max(0, s.scrollTop - 1)
     s.scrollTop = s.scrollHeight
   })
+  await page.waitForFunction(() => {
+    const id = localStorage.getItem('moebius_active_chat')
+    const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+    return !!id && modes[id]?.kind === 'FOLLOW_BOTTOM'
+  }, { timeout: 3000 })
   // Let the 250ms gesture window close before the next send. Otherwise the
   // send's programmatic pin-scroll fires inside the window and the hook's
   // gesture-gated onScroll misreads it as a user gesture, flipping the

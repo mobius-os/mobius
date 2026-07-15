@@ -955,6 +955,16 @@ test.describe('Scroll edge cases', () => {
     // gesture window; the scrollTop write within it is treated as
     // user intent and may transition the ScrollMode.
     const userScrollTo = async (top) => {
+      if (top === 'bottom') {
+        // Move away in a separate frame first. Chromium can coalesce an
+        // already-clamped bottom write into no scroll event, which would test
+        // a no-op gesture rather than the FOLLOW_BOTTOM transition.
+        await page.evaluate(() => {
+          const s = document.querySelector('.chat__scroll')
+          if (s) s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 80)
+        })
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
+      }
       await page.evaluate((t) => {
         const s = document.querySelector('.chat__scroll')
         if (!s) return
@@ -963,7 +973,12 @@ test.describe('Scroll edge cases', () => {
           : t === 'up' ? Math.max(0, s.scrollTop - 200)
           : t
       }, top)
-      await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+      const expectedMode = top === 'bottom' ? 'FOLLOW_BOTTOM' : 'ANCHOR_AT'
+      await page.waitForFunction(kind => {
+        const id = localStorage.getItem('moebius_active_chat')
+        const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+        return !!id && modes[id]?.kind === kind
+      }, expectedMode, { timeout: 3000 })
     }
 
     // Fill viewport and engage auto-follow at the bottom (user gesture).

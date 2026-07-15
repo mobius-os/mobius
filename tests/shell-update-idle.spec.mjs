@@ -136,11 +136,11 @@ async function setup(page, { streamRoute, systemBody, systemRoute } = {}) {
 }
 
 async function gotoEmptyChat(page) {
-  await createTaggedChat(page)
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  const hasEmpty = await page.evaluate(() => !!document.querySelector('.chat__empty-wrap'))
-  if (!hasEmpty) await page.goto(BASE)
+  const chat = await createTaggedChat(page)
+  if (!chat?.id) throw new Error('failed to create isolated shell-update chat')
+  await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  return chat
 }
 
 async function sendMessage(page, text) {
@@ -358,7 +358,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
       systemBody: sse([{ type: 'system_stream_open' }]),
     })
-    await gotoEmptyChat(page)
+    const idleChat = await gotoEmptyChat(page)
     // gen A controls the page (first install claims).
     await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
 
@@ -377,6 +377,24 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
       { timeout: 15000 },
     )
+
+    // The hosted suite shares one backend across parallel Playwright workers.
+    // This case is specifically the IDLE recovery path, so do not let an
+    // unrelated worker's running fixture make the shell correctly defer its
+    // generation handoff. Keep the live-confirmation fetch real for this page,
+    // but scope its list to the chat this test owns.
+    await page.route(/\/api\/chats\/?(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{
+          ...idleChat,
+          running: false,
+          run_status: 'idle',
+        }]),
+      })
+    })
 
     await resetLoadCount(page)
     // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
