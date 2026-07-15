@@ -24,6 +24,7 @@ These tests pin five behaviours of that grace period:
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -134,6 +135,25 @@ def _set_pending_messages(chat_id: str, pending: list[dict]) -> None:
     db.close()
 
 
+def _set_activity_at(chat_id: str, value: datetime) -> None:
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.activity_at = value
+    db.commit()
+  finally:
+    db.close()
+
+
+def _activity_at(chat_id: str) -> datetime:
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    return chat.activity_at
+  finally:
+    db.close()
+
+
 def test_answer_delivers_immediately_when_pending_registered(
   client, auth, chat,
 ):
@@ -146,6 +166,8 @@ def test_answer_delivers_immediately_when_pending_registered(
     questions.register(chat.id, pending)
     # The actor's AnswerQuestion merges into a durable question block.
     _seed_question_block(chat.id, pending.question_id)
+    old_activity = datetime(2000, 1, 1, tzinfo=UTC)
+    _set_activity_at(chat.id, old_activity)
 
     started = time.monotonic()
     res = client.post(
@@ -168,6 +190,7 @@ def test_answer_delivers_immediately_when_pending_registered(
     assert fut.result() == {"Pick one": "a"}
     # Registry cleared atomically by claim().
     assert questions.get(chat.id) is None
+    assert _activity_at(chat.id).replace(tzinfo=UTC) > old_activity
     # No grace-period delay on the happy path. 500ms cap; 250ms
     # leaves comfortable headroom for slow CI without making the
     # test useless.

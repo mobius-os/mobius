@@ -46,6 +46,7 @@ import {
   subscribeProviderSwitch,
 } from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
+import { clearChatQuestionDrafts } from './questionDraft.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
@@ -165,6 +166,7 @@ function findUserIndexByCid(messages, cid) {
 export function deleteChatDraft(chatId) {
   try { sessionStorage.removeItem(`draft:${chatId}`) } catch { /* private browsing */ }
   clearFailedSendAttempt(chatId)
+  clearChatQuestionDrafts(chatId)
 }
 
 // Evict the oldest draft: key from sessionStorage so a new draft can land.
@@ -276,6 +278,7 @@ export default function ChatView({
   builtApps = NO_BUILT_APPS,
   onOpenApp,
   onMessageStart,
+  onQuestionAnswered,
   onVoiceListeningChange,
   showPicker = true,
   embedded = false,
@@ -756,6 +759,8 @@ export default function ChatView({
   // declared further down.
   const onMessageStartRef = useRef(onMessageStart)
   onMessageStartRef.current = onMessageStart
+  const onQuestionAnsweredRef = useRef(onQuestionAnswered)
+  onQuestionAnsweredRef.current = onQuestionAnswered
   const onFirstMessageRef = useRef(onFirstMessage)
   onFirstMessageRef.current = onFirstMessage
   const onStreamEndRef = useRef(onStreamEnd)
@@ -2486,6 +2491,11 @@ export default function ChatView({
         bridgeHook.markBridged()
         activeAssistantDataKeyRef.current = null
       }
+      // The answer write has committed before the 202 response. Refreshing the
+      // owner's chat list now makes this deliberate interaction visible in
+      // drawer recency immediately, instead of waiting for the resumed turn to
+      // finish and emit its terminal refresh.
+      onQuestionAnsweredRef.current?.()
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
     } catch (err) {
       setSending(false)

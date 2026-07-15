@@ -22,6 +22,10 @@ test('unanswered question cards do not have a stale gray state', () => {
     'the Other option should not disappear after submission')
   assert.match(component, /\{\(isOtherSelected \|\| answeredWithOther\) && \(\s*<input/,
     'a submitted custom answer should keep its input row in place')
+  assert.match(component, /writeQuestionDraft\(draftKey, answers, otherTexts\)/,
+    'unsubmitted selections and custom text should be cached')
+  assert.match(component, /if \(answered \|\| disabled\) \{\s*clearQuestionDraft\(draftKey\)/,
+    'submitted or superseded questions should clear their cached draft')
 })
 
 test('question card css has no stale styling hook', () => {
