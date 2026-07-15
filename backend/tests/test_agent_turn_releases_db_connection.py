@@ -1,10 +1,12 @@
 """Long provider turns must not pin a pooled database connection."""
 
+import asyncio
+
 import pytest
 
 from app import chat as chat_mod
-from app import chat_queue, models, schemas
-from app.broadcast import create_broadcast
+from app import chat_queue, database, models, schemas
+from app.broadcast import create_broadcast, remove_broadcast
 from app.database import SessionLocal, engine
 
 
@@ -20,6 +22,82 @@ class _Provider:
 
   def build_env(self, **_kwargs):
     return {}
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_closes_preflight_session_before_provider_wait(
+  chat, db, monkeypatch,
+):
+  """The exact turn session is closed before a provider can wait indefinitely."""
+  chat.provider = "codex"
+  # Avoid the first-send settings commit so this exercises the setup-query
+  # checkout rather than relying on commit() to return the connection.
+  chat.agent_settings_json = {"model": "gpt-5.4"}
+  db.commit()
+
+  real_session_factory = database.SessionLocal
+  turn_sessions = []
+
+  class TrackingSession:
+    def __init__(self):
+      self.real = real_session_factory()
+      self.close_calls = 0
+
+    def close(self):
+      self.close_calls += 1
+      self.real.close()
+
+    def __getattr__(self, name):
+      return getattr(self.real, name)
+
+  def tracking_session_factory():
+    session = TrackingSession()
+    turn_sessions.append(session)
+    return session
+
+  monkeypatch.setattr(database, "SessionLocal", tracking_session_factory)
+  runner_started = asyncio.Event()
+  release_runner = asyncio.Event()
+
+  async def fake_runner(**kwargs):
+    turn_db = kwargs["db"]
+    assert turn_db is turn_sessions[0]
+    assert turn_db.close_calls >= 1, (
+      "the turn must close its preflight DB session before provider execution"
+    )
+    assert not turn_db.real.in_transaction()
+    runner_started.set()
+    await release_runner.wait()
+    return {"session_id": None, "cost_usd": 0.0, "error": None}
+
+  async def fake_complete(**kwargs):
+    kwargs["db"].close()
+    return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.run_codex_sdk_turn",
+    fake_runner,
+  )
+  monkeypatch.setattr(
+    "app.providers.CodexProvider.check_auth",
+    lambda self, _data_dir: None,
+  )
+  monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete)
+
+  create_broadcast(chat.id)
+  task = asyncio.create_task(chat_mod._run_chat_impl(
+    messages=[schemas.ChatMessage(role="user", content="hi")],
+    chat_id=chat.id,
+    session_id="existing-session",
+    provider_id="codex",
+    run_gen=chat_mod.current_run_generation(chat.id),
+  ))
+  try:
+    await asyncio.wait_for(runner_started.wait(), timeout=2)
+  finally:
+    release_runner.set()
+    await asyncio.wait_for(task, timeout=2)
+    remove_broadcast(chat.id)
 
 
 @pytest.mark.asyncio
