@@ -34,6 +34,20 @@ if (!allowedHosts.includes(baseUrl.hostname) || baseUrl.port === '8000') {
 }
 
 setup('authenticate', async ({ page, request }) => {
+  // Localhost is not proof of isolation: a live self-hosted instance may also
+  // use :8001. The test compose file sets MOBIUS_TEST_RUNTIME=1, reported by
+  // /api/version. Refuse every mutation unless the target identifies itself.
+  const versionRes = await request.get(`${BASE}/api/version`, {
+    failOnStatusCode: false,
+  })
+  const version = versionRes.ok() ? await versionRes.json() : null
+  if (version?.test_runtime !== true) {
+    throw new Error(
+      `auth.setup refuses destructive setup against ${BASE}: target is not ` +
+      `an explicit Möbius test runtime.`
+    )
+  }
+
   // Ensure the owner account exists (idempotent — 409 if already set up).
   await request.post(`${BASE}/api/auth/setup`, {
     data: { username: USER, password: PASS },

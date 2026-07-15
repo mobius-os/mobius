@@ -889,6 +889,10 @@ def version():
   settings = get_settings()
   return {"sha": settings.build_sha,
           "build_date": settings.build_date,
+          # Browser-test setup deletes every owner chat before a suite. Expose
+          # the dedicated test-container marker so cleanup can fail closed
+          # instead of trusting a localhost port, which may be the live app.
+          "test_runtime": os.environ.get("MOBIUS_TEST_RUNTIME") == "1",
           **_served_platform_identity(settings.data_dir),
           **_served_frontend_identity()}
 
