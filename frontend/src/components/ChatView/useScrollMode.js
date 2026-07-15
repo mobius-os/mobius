@@ -531,6 +531,19 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
 }
 
 
+/** True once every image frame present during entry has either decoded or
+ * failed. The frame is rendered before its short-lived media URL resolves, so
+ * a frame without an <img> is still pending. */
+export function mountMediaSettled(scrollEl) {
+  if (!scrollEl?.querySelectorAll) return true
+  for (const frame of scrollEl.querySelectorAll('.md-image-frame')) {
+    const img = frame.querySelector?.('img')
+    if (!img || !img.complete) return false
+  }
+  return true
+}
+
+
 /**
  * Hook that owns the chat scroll subsystem.
  *
@@ -594,6 +607,10 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  * @param {boolean} args.turnRunning
  *   Whether a live turn can consume an existing reservation. Used only when
  *   the reader reaches the physical bottom while spacer room remains.
+ * @param {boolean} args.initialEntryCanReveal
+ *   Whether entry has a trustworthy idle cache or settled server history.
+ * @param {boolean} args.initialEntrySettled
+ *   Whether authoritative history and any first mount catch-up have settled.
  *
  * @returns {{
  *   modeRef: React.MutableRefObject<
@@ -624,6 +641,8 @@ export default function useScrollMode({
   pendingMessagesLength,
   loadingOlderRef,
   turnRunning,
+  initialEntryCanReveal,
+  initialEntrySettled,
 }) {
   const [revealed, setRevealed] = useState(false)
   // Synchronous mirror of `revealed` for reapplyActiveMode, which is called
@@ -669,6 +688,14 @@ export default function useScrollMode({
   // observer/listener whenever the boolean changes.
   const turnRunningRef = useRef(!!turnRunning)
   turnRunningRef.current = !!turnRunning
+  const initialEntryCanRevealRef = useRef(!!initialEntryCanReveal)
+  initialEntryCanRevealRef.current = !!initialEntryCanReveal
+  const initialEntrySettledRef = useRef(!!initialEntrySettled)
+  initialEntrySettledRef.current = !!initialEntrySettled
+  // A normal reveal ends entry stabilization. A forced safety-cap reveal keeps
+  // the saved anchor under layout ownership until history/catch-up/media settle.
+  const mountStabilizingRef = useRef(true)
+  const forceRevealRef = useRef(null)
 
   // Absolute reveal deadline for this mounted chat. This deliberately lives
   // outside the messages-dependent layout effect below: tool-rich turns can
@@ -676,11 +703,16 @@ export default function useScrollMode({
   // timer kept the ENTIRE transcript visibility:hidden indefinitely.
   useLayoutEffect(() => {
     revealedRef.current = false
+    mountStabilizingRef.current = true
     setRevealed(false)
     const deadline = setTimeout(() => {
       if (revealedRef.current) return
-      revealedRef.current = true
-      setRevealed(true)
+      if (forceRevealRef.current) forceRevealRef.current()
+      else {
+        // Defensive fallback for a mount whose scroll DOM never materialized.
+        revealedRef.current = true
+        setRevealed(true)
+      }
     }, REVEAL_CAP_MS)
     return () => clearTimeout(deadline)
   }, [chatId])
@@ -1058,23 +1090,36 @@ export default function useScrollMode({
     }
     syncLayout()
 
-    // Quiet-RO reveal debouncer. The initial reveal (below) waits for
-    // the layout to be stable for ~50ms — that catches the case where
-    // late renderers (markdown lexer, KaTeX, highlight.js, or just a
-    // question card whose initial measurement isn't its final height)
-    // cause a visible scroll adjustment AFTER the chat reveals. Capped
-    // at REVEAL_CAP_MS so a perpetually-changing layout (live
-    // streaming) doesn't strand the chat hidden.
+    // Reveal only from trusted idle cache or after authoritative history/first
+    // catch-up, once current image frames settle and layout stays quiet for
+    // 50ms. REVEAL_CAP_MS remains the escape hatch for a request that stalls.
     let revealTimer = 0
+    let mountMutationObserver = null
+    const entryReady = () => (
+      initialEntryCanRevealRef.current && mountMediaSettled(scrollEl)
+    )
     const requestRevealOnQuiet = () => {
-      if (revealedRef.current) return
       clearTimeout(revealTimer)
+      if (revealedRef.current && !mountStabilizingRef.current) return
+      if (!entryReady()) return
       revealTimer = setTimeout(() => {
-        if (scrollRef.current === scrollEl) syncLayout()
+        if (scrollRef.current !== scrollEl || !entryReady()) return
+        syncLayout()
         revealedRef.current = true
+        mountStabilizingRef.current = !initialEntrySettledRef.current
         setRevealed(true)
+        if (!mountStabilizingRef.current) mountMutationObserver?.disconnect()
       }, 50)
     }
+    const forceReveal = () => {
+      if (revealedRef.current || scrollRef.current !== scrollEl) return
+      syncLayout()
+      mountStabilizingRef.current = true
+      revealedRef.current = true
+      setRevealed(true)
+      requestRevealOnQuiet()
+    }
+    forceRevealRef.current = forceReveal
 
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
@@ -1098,7 +1143,9 @@ export default function useScrollMode({
       const k = modeRef.current.kind
       const mayWriteScroll = layoutOwnsScroll()
       if (mayWriteScroll && (
-        k === 'FOLLOW_BOTTOM' || (k === 'ANCHOR_AT' && !revealedRef.current)
+        k === 'FOLLOW_BOTTOM'
+        || (k === 'ANCHOR_AT'
+          && (!revealedRef.current || mountStabilizingRef.current))
       )) {
         writeMode(scrollEl, modeRef.current, k === 'FOLLOW_BOTTOM'
           ? 'layout:follow-live-tail'
@@ -1148,6 +1195,13 @@ export default function useScrollMode({
     ro.observe(scrollEl)  // catches form-row growth (file chips, queue tray)
     const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
     if (queuedTrayEl) ro.observe(queuedTrayEl)
+    if (mountStabilizingRef.current && typeof MutationObserver !== 'undefined') {
+      mountMutationObserver = new MutationObserver(requestRevealOnQuiet)
+      mountMutationObserver.observe(listEl, { childList: true, subtree: true })
+    }
+    // A frame can gain its token-resolved image without changing outer size.
+    scrollEl.addEventListener('load', requestRevealOnQuiet, true)
+    scrollEl.addEventListener('error', requestRevealOnQuiet, true)
 
     // User-gesture detection.
     const releasePendingGesture = (sequence) => {
@@ -1259,7 +1313,7 @@ export default function useScrollMode({
     // late-settling renderers like markdown/KaTeX/question cards).
     // The absolute reveal deadline is owned by the chatId-only effect above,
     // so message and tool churn cannot reset it.
-    if (!revealed) {
+    if (!revealedRef.current || mountStabilizingRef.current) {
       requestRevealOnQuiet()
     }
 
@@ -1269,6 +1323,7 @@ export default function useScrollMode({
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
         resumeLayoutAfterGestureRef.current = null
       }
+      mountMutationObserver?.disconnect()
       ro.disconnect()
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)
@@ -1280,12 +1335,21 @@ export default function useScrollMode({
       scrollEl.removeEventListener('pointercancel', onGestureEndWithoutScroll)
       scrollEl.removeEventListener('touchend', onGestureEndWithoutScroll)
       scrollEl.removeEventListener('touchcancel', onGestureEndWithoutScroll)
+      scrollEl.removeEventListener('load', requestRevealOnQuiet, true)
+      scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
+      if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
       if (vvHandler && typeof window !== 'undefined' && window.visualViewport) {
         window.visualViewport.removeEventListener('resize', vvHandler)
         window.visualViewport.removeEventListener('scroll', vvHandler)
       }
     }
-  }, [messages, pendingMessagesLength, chatId])
+  }, [
+    messages,
+    pendingMessagesLength,
+    chatId,
+    initialEntryCanReveal,
+    initialEntrySettled,
+  ])
 
   // Re-hold the reading position after an atomic catch-up commit lands
   // post-reveal (contract v2 item 2, lever 3 — cloak the commit). The in-place

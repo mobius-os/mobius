@@ -878,6 +878,150 @@ test.describe('Scroll position', () => {
     expect(Math.abs(restored.offset - (-12))).toBeLessThanOrEqual(2)
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
+
+  test('10d. Previous-chat entry stays visually fixed through delayed history, image decode, and first catch-up', async ({ page }) => {
+    await setup(page, { width: 900, height: 760 })
+    await newChat(page)
+
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
+
+    let returning = false
+    let streamCount = 0
+    let returnImageServed = false
+    const squarePng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const history = imageName => {
+      const above = [
+        ...Array.from({ length: 32 }, (_, i) =>
+          `Entry-settle paragraph ${i + 1}. ${'Content above the saved anchor. '.repeat(8)}`),
+        `![late layout image](${BASE}/${imageName})`,
+      ].join('\n\n')
+      const below = Array.from({ length: 24 }, (_, i) =>
+        `Later paragraph ${i + 1}. ${'Content below the saved anchor. '.repeat(8)}`).join('\n\n')
+      return [
+        { id: 'entry-user-1', cid: 'entry-cid-1', role: 'user', ts: 1700000300000, content: 'Entry test start' },
+        { id: 'entry-above', role: 'assistant', ts: 1700000300001, content: above, blocks: [{ type: 'text', content: above }] },
+        { id: 'entry-anchor', cid: 'entry-anchor-cid', role: 'user', ts: 1700000300002, content: 'Saved reading anchor' },
+        { id: 'entry-tail', role: 'assistant', ts: 1700000300003, content: below, blocks: [{ type: 'text', content: below }] },
+      ]
+    }
+
+    await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      if (returning) await new Promise(resolve => setTimeout(resolve, 220))
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
+          total: 4,
+          offset: 0,
+          running: returning,
+          pending_messages: [],
+        }),
+      })
+    })
+    await page.route('**/entry-image-initial.png', route => route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' },
+      body: squarePng,
+    }))
+    await page.route('**/entry-image-return.png', async route => {
+      await new Promise(resolve => setTimeout(resolve, 320))
+      returnImageServed = true
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' },
+        body: squarePng,
+      })
+    })
+    await page.route(new RegExp(`/api/chats/${chatId}/stream$`), async route => {
+      streamCount += 1
+      if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
+      await new Promise(resolve => setTimeout(resolve, 500))
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: [
+          'data: {"type":"catch_up_done"}\n\n',
+          'data: {"type":"text","content":"Still active after mount catch-up"}\n\n',
+        ].join(''),
+      })
+    })
+
+    // First visit: establish a deliberate saved ANCHOR_AT location.
+    await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      const img = document.querySelector('.md-image')
+      return !!el && getComputedStyle(el).visibility !== 'hidden'
+        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
+    }, { timeout: 10000 })
+    await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      const target = document.querySelector('[data-key="entry-anchor"]')
+      if (!el || !target) throw new Error('missing entry anchor')
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      // Put the target just above the viewport edge so it becomes the
+      // controller's topmost visible row. Leaving it 80px below the edge made
+      // the preceding, very tall assistant row the saved anchor instead.
+      el.scrollTop = target.offsetTop + 12
+      el.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await page.waitForFunction(
+      id => JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.key
+        === 'entry-anchor',
+      chatId,
+      { timeout: 3000 },
+    )
+
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+
+    returning = true
+    await page.evaluate(() => {
+      window.__entryTrajectory = []
+      const started = performance.now()
+      const sample = () => {
+        const el = document.querySelector('.chat__scroll')
+        const target = document.querySelector('[data-key="entry-anchor"]')
+        const visible = !!el && getComputedStyle(el).visibility !== 'hidden'
+        window.__entryTrajectory.push({
+          t: Math.round(performance.now() - started),
+          visible,
+          anchor: !!target,
+          y: el && target
+            ? Math.round(target.getBoundingClientRect().top - el.getBoundingClientRect().top)
+            : null,
+        })
+        if (performance.now() - started < 1500) requestAnimationFrame(sample)
+      }
+      requestAnimationFrame(sample)
+      history.back()
+    })
+
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      const img = document.querySelector('.md-image')
+      return !!el && getComputedStyle(el).visibility !== 'hidden'
+        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
+    }, { timeout: 10000 })
+    await page.waitForTimeout(500)
+
+    const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
+    const visibleRows = trajectory.filter(row => row.visible)
+    expect(returnImageServed).toBe(true)
+    expect(streamCount).toBeGreaterThan(0)
+    expect(visibleRows.length).toBeGreaterThan(2)
+    expect(visibleRows.every(row => row.anchor && row.y != null)).toBe(true)
+    const visibleYs = visibleRows.map(row => row.y)
+    expect(Math.max(...visibleYs) - Math.min(...visibleYs)).toBeLessThanOrEqual(2)
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -291,6 +291,11 @@ export default function ChatView({
   const offsetRef = useRef(offset)
   offsetRef.current = offset
   const [loading, setLoading] = useState(!cached)
+  // Warm cache content is useful immediately, but it is not authoritative for
+  // entry layout. The first refresh decides whether an already-running turn's
+  // catch-up must settle before the transcript can be revealed.
+  const cachedEntryPhase = cached && !cached.running ? 'cached' : 'history'
+  const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
   // render the empty-state UI ("What's on your mind?") as if the chat had no
@@ -780,6 +785,9 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     turnRunning: sending || serverRunning,
+    initialEntryCanReveal: initialEntryPhase === 'cached'
+      || initialEntryPhase === 'ready',
+    initialEntrySettled: initialEntryPhase === 'ready',
   })
 
   function makeSendPinIntent(willPin) {
@@ -1538,6 +1546,7 @@ export default function ChatView({
     let cancelled = false
     chatIdStaleRef.current = false
     setLoadError(false)
+    setInitialEntryPhase(cachedEntryPhase)
 
     const gen = fetchGenRef.current
     apiFetch(`/chats/${chatId}?limit=20`)
@@ -1566,6 +1575,7 @@ export default function ChatView({
           auto_resume_on_limit: !!data.auto_resume_on_limit,
         })
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+          setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
           setLoading(false)
           return
         }
@@ -1616,6 +1626,7 @@ export default function ChatView({
           runningAtMount: !!data.running,
           lastMsgAtMount: msgs.length > 0 ? msgs[msgs.length - 1] : null,
         })
+        setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
         setLoading(false)
 
         // Hydrate pending queue from backend so a reload mid-queue
@@ -1634,6 +1645,7 @@ export default function ChatView({
       })
       .catch((err) => {
         if (cancelled) return
+        setInitialEntryPhase('ready')
         setLoadError(true)
         setLoading(false)
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
@@ -2773,8 +2785,18 @@ export default function ChatView({
   // only a commit bumps it, so this skips the initial mount.
   useLayoutEffect(() => {
     if (catchUpCommitSeq === 0) return
+    setInitialEntryPhase(phase => phase === 'catch-up' ? 'ready' : phase)
     reapplyActiveMode()
   }, [catchUpCommitSeq, reapplyActiveMode])
+
+  // A stale `running` history snapshot can be followed by an authoritative
+  // terminal response without a catch-up commit. Release the bounded entry
+  // gate instead of waiting for its safety deadline.
+  useEffect(() => {
+    if (initialEntryPhase === 'catch-up' && !turnActive) {
+      setInitialEntryPhase('ready')
+    }
+  }, [initialEntryPhase, turnActive])
 
   // Promotion and this sequence update share one React batch, so the terminal
   // pin decision runs after the settled assistant DOM is committed and before

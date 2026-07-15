@@ -12,6 +12,7 @@ import {
   isNearContentBottom,
   isNearScrollBottom,
   layoutMayOwnScroll,
+  mountMediaSettled,
   modeForChatExit,
   modeForForegroundReturn,
   modeForQueuedSubmission,
@@ -41,6 +42,21 @@ function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 
     },
   }
 }
+
+test('mount media readiness waits for token insertion and image decode', () => {
+  const frame = img => ({ querySelector: selector => selector === 'img' ? img : null })
+  const scrollEl = frames => ({
+    querySelectorAll: selector => selector === '.md-image-frame' ? frames : [],
+  })
+
+  assert.equal(mountMediaSettled(scrollEl([])), true)
+  assert.equal(mountMediaSettled(scrollEl([frame(null)])), false)
+  assert.equal(mountMediaSettled(scrollEl([frame({ complete: false })])), false)
+  assert.equal(mountMediaSettled(scrollEl([
+    frame({ complete: true }),
+    frame({ complete: true, naturalWidth: 0 }),
+  ])), true, 'decoded and terminally-failed images both release the bounded gate')
+})
 
 test('shouldPinSend pins first visible user message regardless of scroll', () => {
   assert.equal(shouldPinSend({
