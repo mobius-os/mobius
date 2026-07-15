@@ -20,6 +20,8 @@ import {
   modeAfterReaderReachesBottom,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
+  readerInputMayScroll,
+  readerInputNeedsFrameRelease,
   settledPinMode,
   shouldPinSend,
 } from '../useScrollMode.js'
@@ -161,6 +163,23 @@ test('deferred layout waits for the first scroll instead of timing Infinity', ()
   assert.equal(gestureLayoutRetryDelay(Number.POSITIVE_INFINITY, 1000), null)
   assert.equal(gestureLayoutRetryDelay(1250, 1000), 251)
   assert.equal(gestureLayoutRetryDelay(999, 1000), 1)
+})
+
+test('only scrolling keys claim reader ownership', () => {
+  assert.equal(readerInputMayScroll('keydown', 'a'), false)
+  assert.equal(readerInputMayScroll('keydown', 'Enter'), false)
+  assert.equal(readerInputMayScroll('keydown', 'PageDown'), true)
+  assert.equal(readerInputMayScroll('keydown', 'ArrowUp'), true)
+  assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
+  assert.equal(readerInputMayScroll('wheel'), true)
+  assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('inputs without an end event get a next-frame no-scroll release', () => {
+  assert.equal(readerInputNeedsFrameRelease('wheel'), true)
+  assert.equal(readerInputNeedsFrameRelease('keydown'), true)
+  assert.equal(readerInputNeedsFrameRelease('pointerdown'), false)
+  assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
 })
 
 test('scroll diagnostics expose behavior without message identity', () => {
