@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   _computeSpacerH,
   _pinReapplyNeeded,
+  _scrollModeForDiagnostics,
   _validateSavedMode,
   applyMode,
   bottomAnchorModeFromScroll,
@@ -137,6 +138,24 @@ test('layout writes yield from the first input event until its gesture window cl
   assert.equal(layoutMayOwnScroll(1250, 1250), true)
 })
 
+test('scroll diagnostics expose behavior without message identity', () => {
+  assert.deepEqual(_scrollModeForDiagnostics({
+    kind: 'PIN_USER_MSG',
+    cid: 'private-message-cid',
+    followWhenFilled: true,
+  }), {
+    kind: 'PIN_USER_MSG',
+    armed: true,
+  })
+  assert.deepEqual(_scrollModeForDiagnostics({
+    kind: 'ANCHOR_AT',
+    key: 'private-message-key',
+    offset: 42,
+  }), {
+    kind: 'ANCHOR_AT',
+  })
+})
+
 test('queued submission freezes the visible row before footer reflow', () => {
   const item = {
     offsetTop: 720,
@@ -167,6 +186,19 @@ test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
   assert.equal(isNearContentBottom(scrollEl), true)
   assert.equal(isNearScrollBottom(scrollEl), false,
     'middle of reserved spacer is not true scroll bottom')
+})
+
+test('physical-bottom geometry uses only a rounding epsilon', () => {
+  assert.equal(isNearScrollBottom(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1497,
+    clientHeight: 500,
+  }), 4), true)
+  assert.equal(isNearScrollBottom(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1495,
+    clientHeight: 500,
+  }), 4), false)
 })
 
 test('pin reapply is needed when the first pin was clamped but spacer now makes the target reachable', () => {
@@ -404,6 +436,7 @@ test('no saved chat location opens at the latest real content without enabling f
     kind: 'ANCHOR_AT',
     key: 'assistant-latest',
     offset: 300,
+    defaultTail: true,
   })
   applyMode(scrollEl, mode)
   assert.equal(scrollEl.scrollTop, 1200,
@@ -438,6 +471,8 @@ test('an unresolvable saved location falls back to a settled bottom anchor', () 
   )
   assert.equal(mode.kind, 'ANCHOR_AT')
   assert.equal(mode.key, 'assistant-current-tail')
+  assert.equal(mode.defaultTail, true,
+    'automatic fallback must not masquerade as a reader-chosen location')
   assert.notEqual(mode.kind, 'FOLLOW_BOTTOM')
 })
 

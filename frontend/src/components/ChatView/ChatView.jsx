@@ -12,9 +12,6 @@ import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   shouldPinSend,
-  anchorModeFromScroll,
-  modeForForegroundReturn,
-  modeForQueuedSubmission,
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
@@ -143,28 +140,6 @@ function findUserIndexByCid(messages, cid) {
     if (msg?.role === 'user' && cidOf(msg) === cid) return i
   }
   return -1
-}
-
-/** Settle the scroll mode for a send that did NOT pin (the reader is
- *  scrolled up, or a caller opted out via pin:false).
- *
- *  The mode that misbehaves on a non-pin send is a STALE PIN_USER_MSG left
- *  by an earlier send: re-applying it would move scrollTop even though the
- *  user is reading above the tail. Convert that stale pin into the reader's
- *  current scroll position (ANCHOR_AT). The bottom spacer is now independent
- *  from pinning, so it can still reserve room below the newest user message
- *  without moving the reader. By default FOLLOW_BOTTOM is left alone because
- *  pin:false synthetic sends (e.g. handleStop's queue-collapse) intentionally
- *  keep following. Real user sends/steers that choose not to pin pass
- *  retireFollow:true so a stale FOLLOW_BOTTOM cannot yank a scrolled-up reader
- *  when the delayed message becomes visible. */
-function settleNonPinMode(modeRef, scrollEl, { retireFollow = false } = {}) {
-  const kind = modeRef.current?.kind
-  if (kind !== 'PIN_USER_MSG' && !(retireFollow && kind === 'FOLLOW_BOTTOM')) {
-    return
-  }
-  const anchor = anchorModeFromScroll(scrollEl)
-  if (anchor) modeRef.current = anchor
 }
 
 // Exported so sibling components (Shell, etc.) can clean up drafts when a
@@ -702,16 +677,15 @@ export default function ChatView({
 
   // ── Scroll subsystem ─────────────────────────────────────────────
   //
-  // useScrollMode owns the entire scroll state machine: mode ref,
-  // applyMode funnel, IntersectionObserver bottom sentinel,
-  // ResizeObserver for layout updates, user-gesture detection,
-  // mobile keyboard handling via visualViewport, and the
-  // hide-then-reveal restore on mount.
+  // useScrollMode owns the entire scroll state machine: semantic lifecycle
+  // transitions, the automatic scroll-write funnel, geometry-based bottom
+  // detection, ResizeObserver layout updates, user-gesture ownership, mobile
+  // keyboard handling, diagnostics, and hide-then-reveal restore on mount.
   //
   // The hook returns:
-  //   • modeRef               — mutate to set PIN_USER_MSG{ts} on send,
-  //                             FOLLOW_BOTTOM on user scroll-to-bottom,
-  //                             ANCHOR_AT{...} on pagination, etc.
+  //   • modeRef               — read-only to ChatView for submit snapshots.
+  //                             Lifecycle changes go through the returned
+  //                             semantic controller methods below.
   //   • gestureWindowUntilRef — read by handleScroll to gate pagination
   //                             on user-driven scrolls only.
   //   • userScrollIntentVersionRef
@@ -728,7 +702,13 @@ export default function ChatView({
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
+    anchorPagination,
+    armSentMessage,
+    closePreSendGestureWindow,
+    freezeForegroundReturn,
+    freezeQueuedSubmission,
     reapplyActiveMode,
+    settleNonPin,
     settleStreamingPin,
   } = useScrollMode({
     chatId,
@@ -791,32 +771,16 @@ export default function ChatView({
     return !stateHasUser && !domHasUser
   }
 
-  // The ONE place a send/steer/promote arms the pin. Owns intent-staleness (a
-  // real user scroll after submit wins) and the PIN-vs-settle mode write. The pin
-  // targets the stable `cid`, which the DOM row already carries from mint, so
-  // the pin lands on the first apply — no ts-swap retarget, ever. Spacer HEIGHT
-  // belongs to the layout effect's sizeSpacer; this never zeroes it (zeroing
-  // would clamp scrollTop with no guaranteed re-run to re-pin).
+  // Every send/steer/promote enters the scroll controller through this one
+  // semantic event. ChatView resolves delayed-intent staleness; the controller
+  // owns the actual PIN-vs-hold transition and the later automatic writes. The
+  // pin targets the stable `cid` carried by the DOM row from mint.
   function pinSentMessage(cid, { willPin, intent } = {}) {
-    if (intent && !pinIntentStillCurrent(intent)) {
-      // A real user scroll landed after submit — the reader wins. Leave
-      // scrollTop where they put it; retire any stale PIN/FOLLOW to their
-      // current anchor so the reserved room stays available below.
-      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-      return
-    }
-    if (willPin && cid != null) {
-      modeRef.current = {
-        kind: 'PIN_USER_MSG',
-        cid,
-        // Hold while exact reserved reply room remains, then follow the live
-        // tail. A short response's terminal path disarms this flag and keeps
-        // the settled prompt pinned.
-        followWhenFilled: true,
-      }
-    } else {
-      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-    }
+    armSentMessage({
+      cid,
+      willPin,
+      intentCurrent: !intent || pinIntentStillCurrent(intent),
+    })
   }
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
@@ -1682,9 +1646,7 @@ export default function ChatView({
         // user msg's NEW offsetTop) → visible jump → then our rAF
         // would set the anchor → second jump.
         if (anchorKey) {
-          modeRef.current = {
-            kind: 'ANCHOR_AT', key: anchorKey, offset: anchorOffset,
-          }
+          anchorPagination(anchorKey, anchorOffset)
         }
         commitMessages(prev => [...older, ...prev], data.offset || 0)
         requestAnimationFrame(() => {
@@ -1756,7 +1718,7 @@ export default function ChatView({
     // snapshot and cancel the brand-new PIN before its spacer is measured.
     // Close only the PRE-SEND ownership window. Any wheel/touch/key input that
     // begins after this line opens a fresh window and still wins normally.
-    gestureWindowUntilRef.current = 0
+    closePreSendGestureWindow()
 
     const queuesBehindActiveTurn = !!(
       sendingRef.current
@@ -1770,10 +1732,7 @@ export default function ChatView({
       // exact visible message before any of those layout changes. The captured
       // submit intent above is kept for the later promotion/steer, while the
       // current in-flight answer stays where the reader left it now.
-      modeRef.current = modeForQueuedSubmission(
-        scrollRef.current,
-        modeRef.current,
-      )
+      freezeQueuedSubmission()
     }
 
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
@@ -2111,7 +2070,10 @@ export default function ChatView({
         if (!result.started) {
           const queuedPinStillValid = pinIntentStillCurrent(freshPinIntent)
           if (queuedPinStillValid) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
+            settleNonPin({
+              retireFollow: pin,
+              event: 'send:not-started-hold',
+            })
           }
           setSending(false)
           setServerRunningState(false)
@@ -2725,8 +2687,7 @@ export default function ChatView({
         return
       }
       if (!turnActive) return
-      const nextMode = modeForForegroundReturn(scrollRef.current)
-      if (nextMode) modeRef.current = nextMode
+      freezeForegroundReturn()
     }
 
     document.addEventListener('visibilitychange', freezeStreamingReturn)
@@ -2737,7 +2698,7 @@ export default function ChatView({
       window.removeEventListener('pageshow', freezeStreamingReturn)
       window.removeEventListener('online', freezeStreamingReturn)
     }
-  }, [turnActive, modeRef])
+  }, [freezeForegroundReturn, turnActive])
 
   // Cloak the first post-reconnect catch-up commit (contract v2 item 2, lever
   // 3). freezeStreamingReturn above already anchors the mode at the moment the
@@ -3383,11 +3344,6 @@ export default function ChatView({
         </ul>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
-        {/* Bottom sentinel — watched by IntersectionObserver. When
-            it's in the viewport, the user is at the bottom of
-            content (FOLLOW_BOTTOM intent). Zero size + aria-hidden
-            so it's invisible to users and screen readers. */}
-        <div className="chat__bottom-sentinel" aria-hidden="true" />
       </div>
       )}
 

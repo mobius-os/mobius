@@ -24,10 +24,9 @@
  * reservation reaches zero. A short reply never reaches the handoff and
  * remains pinned after settle. The dynamic pin spacer is reserved room, not
  * message content.
- * The IntersectionObserver on a sentinel at the end of `.chat__scroll` is
- * used only for the gesture-driven mode transition (engaging
- * FOLLOW_BOTTOM when the user scrolls to the physical bottom), not for the
- * send-pin decision.
+ * Gesture-driven bottom detection reads the scroll container's geometry in
+ * the scroll event itself. There is no second sentinel/observer authority
+ * that can lag behind the reader and contradict the current viewport.
  *
  * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown open a
  * 250ms window in which scroll events are user-driven and can
@@ -55,16 +54,58 @@ const REVEAL_CAP_MS = 1500
 // clamps and MUST NOT mutate mode.
 const GESTURE_WINDOW_MS = 250
 
-// IntersectionObserver debounce — momentum-scroll can flip the
-// bottom-sentinel's isIntersecting state multiple times in rapid
-// succession. Take the state at the end of a quiescent window.
-const IO_DEBOUNCE_MS = 50
+// Physical-bottom transitions are exact reader intent, not the broader
+// "near real-content tail" send heuristic. Allow only subpixel/browser
+// rounding at the scroll extent.
+const PHYSICAL_BOTTOM_EPSILON_PX = 4
 
-// Per-chat ScrollMode persistence in sessionStorage. Schema 2 retires modes
+// Bounded, content-free diagnostics. Recurring scroll bugs used to require
+// reconstructing races from screenshots and guesses; this keeps the last
+// controller transitions and actual automatic writes without recording any
+// message text, message keys, or pin cids.
+const SCROLL_TRACE_LIMIT = 80
+
+export function _scrollModeForDiagnostics(mode) {
+  if (!mode?.kind) return { kind: 'NONE' }
+  return {
+    kind: mode.kind,
+    ...(mode.kind === 'PIN_USER_MSG'
+      ? { armed: !!mode.followWhenFilled }
+      : {}),
+  }
+}
+
+function _scrollGeometryForDiagnostics(scrollEl) {
+  if (!scrollEl) return null
+  const spacerH = scrollEl.querySelector?.('.spacer-dynamic')?.offsetHeight || 0
+  return {
+    top: Math.round(scrollEl.scrollTop || 0),
+    height: Math.round(scrollEl.scrollHeight || 0),
+    viewport: Math.round(scrollEl.clientHeight || 0),
+    spacer: Math.round(spacerH),
+  }
+}
+
+function _appendScrollTrace(bucket, entry) {
+  if (typeof window === 'undefined') return
+  const existing = window.__mobiusChatScrollTrace
+  const trace = existing?.version === 1
+    ? existing
+    : { version: 1, transitions: [], writes: [] }
+  const rows = trace[bucket]
+  if (!Array.isArray(rows)) return
+  rows.push(entry)
+  if (rows.length > SCROLL_TRACE_LIMIT) {
+    rows.splice(0, rows.length - SCROLL_TRACE_LIMIT)
+  }
+  window.__mobiusChatScrollTrace = trace
+}
+
+// Per-chat ScrollMode persistence in sessionStorage. Schema 3 retires modes
 // written by the old missing-location fallback, which manufactured an
 // ANCHOR_AT from the browser's initial scrollTop=0 and then persisted that
 // accidental top-of-chat position as if the reader had chosen it.
-const SCROLL_MODE_SCHEMA = '2'
+const SCROLL_MODE_SCHEMA = '3'
 const _scrollModes = (() => {
   try {
     if (sessionStorage.getItem('chat-mode-schema') !== SCROLL_MODE_SCHEMA) {
@@ -131,6 +172,7 @@ export function bottomAnchorModeFromScroll(scrollEl) {
     kind: 'ANCHOR_AT',
     key,
     offset: last.offsetTop - targetScrollTop,
+    defaultTail: true,
   }
 }
 
@@ -471,8 +513,8 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   {kind: 'FOLLOW_BOTTOM'}
  *     Sticky-bottom for streaming. applyMode sets scrollTop =
  *     scrollHeight (only if content actually overflows). Engaged
- *     when the user scrolls to within the bottom sentinel; lost
- *     when the user scrolls up.
+ *     when the reader reaches the physical bottom, or when an armed live
+ *     pin consumes its reservation; lost when the reader scrolls up.
  *
  *   {kind: 'ANCHOR_AT', key: string, offset: number}
  *     Anchored at a specific message (`data-key="<key>"`) with
@@ -482,11 +524,9 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *     the current visible hold anchor, never FOLLOW_BOTTOM.
  *
  * The caller is expected to:
- *   - Mutate `modeRef.current = {...}` on lifecycle events:
- *     * PIN_USER_MSG{cid} only when the shared submit-time rule allows it
- *     * INITIAL only for pre-restore setup; FOLLOW_BOTTOM is entered by this
- *       hook's gesture-gated scroll handler or its armed live-pin handoff,
- *       not by callers
+ *   - Treat `modeRef` as read-only snapshot state. Route send, queue,
+ *     pagination, and foreground lifecycle events through the semantic
+ *     controller methods returned by this hook.
  *   - Read `gestureWindowUntilRef.current` in any custom scroll
  *     handlers (e.g., pagination triggers) to gate on user intent
  *   - Apply `revealed` as `style={revealed ? undefined : {visibility:
@@ -523,6 +563,12 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
  *   userScrollIntentVersionRef: React.MutableRefObject<number>,
  *   revealed: boolean,
+ *   anchorPagination: (key: string, offset: number) => void,
+ *   armSentMessage: (event: object) => void,
+ *   closePreSendGestureWindow: () => void,
+ *   freezeForegroundReturn: () => void,
+ *   freezeQueuedSubmission: () => void,
+ *   settleNonPin: (event?: object) => void,
  *   settleStreamingPin: () => void,
  * }}
  */
@@ -544,7 +590,10 @@ export default function useScrollMode({
   const revealedRef = useRef(false)
   const modeRef = useRef({ kind: 'INITIAL' })
   const modeChatIdRef = useRef(null)
-  const bottomVisibleRef = useRef(false)
+  // False only when mount had no deliberate reader location and therefore
+  // used the automatic latest-message fallback. Passive lifecycle/viewport
+  // changes must not promote that fallback into a saved reading position.
+  const readerLocationExplicitRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
   // Monotonic counter for actual user scroll intent. Send/steer code captures
   // this at submit time and honors a delayed pin only if the user did not
@@ -575,18 +624,140 @@ export default function useScrollMode({
   const turnRunningRef = useRef(!!turnRunning)
   turnRunningRef.current = !!turnRunning
 
-  const persistMode = ({ freezeToCurrentPosition = false } = {}) => {
+  const recordTrace = useCallback((bucket, event, {
+    from = null,
+    to = null,
+    scrollEl = scrollRef.current,
+  } = {}) => {
+    _appendScrollTrace(bucket, {
+      at: Math.round(typeof performance !== 'undefined' ? performance.now() : 0),
+      chatId: String(chatId),
+      event,
+      ...(from ? { from: _scrollModeForDiagnostics(from) } : {}),
+      ...(to ? { to: _scrollModeForDiagnostics(to) } : {}),
+      geometry: _scrollGeometryForDiagnostics(scrollEl),
+    })
+  }, [chatId, scrollRef])
+
+  // The sole mode-mutation funnel. ChatView emits semantic lifecycle events
+  // through the methods returned by this hook; layout and reader paths below
+  // use the same transition function, so mode ownership cannot drift across
+  // a collection of direct `modeRef.current = ...` writes.
+  const transitionMode = useCallback((nextMode, event) => {
+    if (!nextMode) return modeRef.current
+    const previousMode = modeRef.current
+    if (nextMode === previousMode) return previousMode
+    modeRef.current = nextMode
+    recordTrace('transitions', event, {
+      from: previousMode,
+      to: nextMode,
+    })
+    return nextMode
+  }, [recordTrace])
+
+  // The sole automatic scrollTop funnel inside the controller. `applyMode`
+  // remains exported as a pure executor for unit tests, but live code routes
+  // every mode-owned write through here and records only writes that actually
+  // moved the viewport.
+  const writeMode = useCallback((scrollEl, mode, event) => {
+    if (!scrollEl || !mode) return
+    const before = scrollEl.scrollTop
+    applyMode(scrollEl, mode)
+    if (Math.abs(scrollEl.scrollTop - before) > 0.5) {
+      recordTrace('writes', event, {
+        from: mode,
+        to: mode,
+        scrollEl,
+      })
+    }
+  }, [recordTrace])
+
+  const persistMode = useCallback(({ freezeToCurrentPosition = false } = {}) => {
     try {
+      if (!readerLocationExplicitRef.current) {
+        delete _scrollModes[chatId]
+        sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+        return
+      }
       const mode = freezeToCurrentPosition
         ? (modeForChatExit(scrollRef.current) || modeRef.current)
         : modeRef.current
       if (mode && mode.kind !== 'INITIAL') {
-        if (freezeToCurrentPosition) modeRef.current = mode
+        if (freezeToCurrentPosition) {
+          transitionMode(mode, 'lifecycle:chat-exit')
+        }
         _scrollModes[chatId] = mode
         sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
       }
     } catch {}
-  }
+  }, [chatId, scrollRef, transitionMode])
+
+  const settleNonPin = useCallback(({
+    retireFollow = false,
+    event = 'send:hold-current',
+  } = {}) => {
+    readerLocationExplicitRef.current = true
+    const kind = modeRef.current?.kind
+    if (kind !== 'PIN_USER_MSG'
+        && !(retireFollow && kind === 'FOLLOW_BOTTOM')) {
+      return modeRef.current
+    }
+    const anchor = anchorModeFromScroll(scrollRef.current)
+    return anchor ? transitionMode(anchor, event) : modeRef.current
+  }, [scrollRef, transitionMode])
+
+  const armSentMessage = useCallback(({
+    cid,
+    willPin,
+    intentCurrent = true,
+  }) => {
+    readerLocationExplicitRef.current = true
+    if (!intentCurrent) {
+      return settleNonPin({
+        retireFollow: true,
+        event: 'send:reader-overrode-delayed-pin',
+      })
+    }
+    if (willPin && cid != null) {
+      return transitionMode({
+        kind: 'PIN_USER_MSG',
+        cid,
+        followWhenFilled: true,
+      }, 'send:pin-user-message')
+    }
+    return settleNonPin({
+      retireFollow: true,
+      event: 'send:hold-current',
+    })
+  }, [settleNonPin, transitionMode])
+
+  const freezeQueuedSubmission = useCallback(() => {
+    readerLocationExplicitRef.current = true
+    return transitionMode(
+      modeForQueuedSubmission(scrollRef.current, modeRef.current),
+      'send:queue-freeze',
+    )
+  }, [scrollRef, transitionMode])
+
+  const anchorPagination = useCallback((key, offset) => {
+    if (!key) return modeRef.current
+    readerLocationExplicitRef.current = true
+    return transitionMode(
+      { kind: 'ANCHOR_AT', key, offset },
+      'reader:paginate-anchor',
+    )
+  }, [transitionMode])
+
+  const freezeForegroundReturn = useCallback(() => {
+    const nextMode = modeForForegroundReturn(scrollRef.current)
+    return nextMode
+      ? transitionMode(nextMode, 'lifecycle:foreground-return')
+      : modeRef.current
+  }, [scrollRef, transitionMode])
+
+  const closePreSendGestureWindow = useCallback(() => {
+    gestureWindowUntilRef.current = 0
+  }, [])
 
   // Persist mode on every chatId change so the next mount restores.
   // (Layout effect can't easily handle persistence because it runs
@@ -617,11 +788,10 @@ export default function useScrollMode({
     }
   }, [chatId])
 
-  // Single layout effect: spacer sizing, applyMode, IntersectionObserver
-  // for bottom detection, ResizeObserver for layout updates, user-gesture
-  // detection, scroll handler for mode transitions, mobile keyboard
-  // tracking via visualViewport. Re-runs on messages / pendingMessages
-  // / chatId changes.
+  // Single layout effect: spacer sizing, automatic scroll writes,
+  // ResizeObserver layout updates, user-gesture detection, geometry-based
+  // scroll transitions, and mobile keyboard tracking via visualViewport.
+  // Re-runs on messages / pendingMessages / chatId changes.
   useLayoutEffect(() => {
     const scrollEl = scrollRef.current
     const spacerEl = spacerRef.current
@@ -640,30 +810,27 @@ export default function useScrollMode({
     // won't inherit stale modes from the previous chat.
     if (modeChatIdRef.current !== chatId) {
       modeChatIdRef.current = chatId
-      modeRef.current = { kind: 'INITIAL' }
+      transitionMode({ kind: 'INITIAL' }, 'lifecycle:chat-change')
     }
 
     // Restore mode for this chat if persisted (mount-restore path).
     if (modeRef.current.kind === 'INITIAL') {
       const saved = _scrollModes[chatId]
-      modeRef.current = _validateSavedMode(saved, messagesRef.current, scrollEl)
-    }
-
-    // Synchronous sentinel-rect bootstrap — without it, there's a
-    // 50ms window after mount where bottomVisibleRef defaults to
-    // false and a user scroll could stamp ANCHOR_AT.
-    const sentinelEl = scrollEl.querySelector('.chat__bottom-sentinel')
-    if (sentinelEl) {
-      const sRect = sentinelEl.getBoundingClientRect()
-      const cRect = scrollEl.getBoundingClientRect()
-      bottomVisibleRef.current = sRect.top < cRect.bottom && sRect.bottom > cRect.top
+      const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
+      readerLocationExplicitRef.current = !!saved
+        && restored?.kind !== 'INITIAL'
+        && !restored?.defaultTail
+      transitionMode(
+        restored,
+        'lifecycle:restore',
+      )
     }
     nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
 
-    // Identity check: apply the mode ONLY when modeRef.current
-    // changed since the last apply. Callers always assign a fresh
-    // object (`modeRef.current = { kind: ..., ts: ... }`) when they
-    // intend a transition, so === identity is the right signal.
+    // Identity check: apply the mode ONLY when transitionMode changed the
+    // current object since the last apply. Semantic events always supply a
+    // fresh object when they intend a transition, so === identity is the
+    // right signal.
     // Steady-state streaming (mode unchanged) won't re-pin even as
     // the layout settles around tool-block status flips, KaTeX,
     // highlight.js, and markdown re-wrap — that's the bug from
@@ -732,14 +899,14 @@ export default function useScrollMode({
       // interval; the gesture-driven onScroll owns the next transition.
       const advanced = modeAfterSpacerResize(modeRef.current, h)
       if (advanced !== modeRef.current) {
-        modeRef.current = advanced
+        transitionMode(advanced, 'layout:reservation-filled')
         persistMode()
       }
     }
 
     function maybeApplyMode() {
       if (modeRef.current !== lastAppliedModeRef.current) {
-        applyMode(scrollEl, modeRef.current)
+        writeMode(scrollEl, modeRef.current, 'layout:mode-transition')
         lastAppliedModeRef.current = modeRef.current
         // Record the pin baseline (or clear it) so the RO's re-pin-on-shift
         // check below has a reference offsetTop for this pin.
@@ -756,7 +923,7 @@ export default function useScrollMode({
       if (!_pinReapplyNeeded(scrollEl, modeRef.current, lastPinTopRef.current)) {
         return
       }
-      applyMode(scrollEl, modeRef.current)
+      writeMode(scrollEl, modeRef.current, 'layout:repair-pin')
       const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
       lastPinTopRef.current = el ? el.offsetTop : null
       lastAppliedModeRef.current = modeRef.current
@@ -780,11 +947,12 @@ export default function useScrollMode({
       }
       if (viewportChange) {
         const anchor = preserveBottom ? null : anchorModeFromScroll(scrollEl)
-        modeRef.current = modeForViewportChange(
-          modeRef.current, preserveBottom, anchor,
+        transitionMode(
+          modeForViewportChange(modeRef.current, preserveBottom, anchor),
+          'layout:viewport-change',
         )
         persistMode()
-        applyMode(scrollEl, modeRef.current)
+        writeMode(scrollEl, modeRef.current, 'layout:viewport-change')
         lastAppliedModeRef.current = modeRef.current
         if (modeRef.current.kind === 'PIN_USER_MSG') {
           const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
@@ -793,7 +961,7 @@ export default function useScrollMode({
           lastPinTopRef.current = null
         }
       } else if (forceApply) {
-        applyMode(scrollEl, modeRef.current)
+        writeMode(scrollEl, modeRef.current, 'layout:forced-reapply')
       } else {
         maybeApplyMode()
       }
@@ -806,17 +974,6 @@ export default function useScrollMode({
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
     syncLayout()
-
-    // IntersectionObserver on the bottom sentinel.
-    let ioBounceTimer = 0
-    const io = sentinelEl ? new IntersectionObserver(entries => {
-      const v = entries[0]?.isIntersecting ?? false
-      clearTimeout(ioBounceTimer)
-      ioBounceTimer = setTimeout(() => {
-        bottomVisibleRef.current = v
-      }, IO_DEBOUNCE_MS)
-    }, { root: scrollEl, threshold: 0 }) : null
-    if (io && sentinelEl) io.observe(sentinelEl)
 
     // Quiet-RO reveal debouncer. The initial reveal (below) waits for
     // the layout to be stable for ~50ms — that catches the case where
@@ -866,7 +1023,9 @@ export default function useScrollMode({
       if (mayWriteScroll && (
         k === 'FOLLOW_BOTTOM' || (k === 'ANCHOR_AT' && !revealedOnce)
       )) {
-        applyMode(scrollEl, modeRef.current)
+        writeMode(scrollEl, modeRef.current, k === 'FOLLOW_BOTTOM'
+          ? 'layout:follow-live-tail'
+          : 'layout:restore-anchor')
         nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       } else if (k === 'PIN_USER_MSG' && mayWriteScroll) {
         // Re-pin in two cases, both of which leave the message off its
@@ -935,41 +1094,31 @@ export default function useScrollMode({
       const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 4
       if (!overflows) return
       userScrollIntentVersionRef.current += 1
+      readerLocationExplicitRef.current = true
 
-      // Synchronous bottom check. bottomVisibleRef is updated by the
-      // IntersectionObserver with a 50ms debounce — but a fast scroll
-      // gesture (user flicks to the bottom and the scroll event fires
-      // before the IO has had a chance to settle) would read the
-      // PREVIOUS state and incorrectly stamp ANCHOR_AT. Doing one
-      // getBoundingClientRect per scroll event closes that race.
-      //
-      // Also: cancel any pending IO debounce write — without this,
-      // a queued debounce timer carrying the OLD value (from before
-      // the user's gesture) could fire 50ms later and clobber the
-      // sync ref we just wrote. The next IO entry will land its
-      // fresh value through the normal path.
-      let atBottom = bottomVisibleRef.current
-      if (sentinelEl) {
-        const sRect = sentinelEl.getBoundingClientRect()
-        const cRect = scrollEl.getBoundingClientRect()
-        atBottom = sRect.top < cRect.bottom && sRect.bottom > cRect.top
-        // Sync the ref + cancel any in-flight stale IO write.
-        bottomVisibleRef.current = atBottom
-        clearTimeout(ioBounceTimer)
-      }
+      // The scroll event's own geometry is the only bottom authority. The old
+      // sentinel + debounced IntersectionObserver could report the PREVIOUS
+      // position and contradict the viewport during a fast gesture.
+      const atBottom = isNearScrollBottom(
+        scrollEl,
+        PHYSICAL_BOTTOM_EPSILON_PX,
+      )
 
       if (atBottom) {
         const spacerH = spacerEl.offsetHeight || 0
         const lastUserCid = _lastUserRowEl(scrollEl)?.dataset?.cid ?? null
-        modeRef.current = modeAfterReaderReachesBottom({
-          mode: modeRef.current,
-          spacerH,
-          turnRunning: turnRunningRef.current,
-          lastUserCid,
-        })
+        transitionMode(
+          modeAfterReaderReachesBottom({
+            mode: modeRef.current,
+            spacerH,
+            turnRunning: turnRunningRef.current,
+            lastUserCid,
+          }),
+          'reader:physical-bottom',
+        )
       } else {
         const anchor = anchorModeFromScroll(scrollEl)
-        if (anchor) modeRef.current = anchor
+        if (anchor) transitionMode(anchor, 'reader:hold-anchor')
       }
       persistMode()
     }
@@ -999,11 +1148,9 @@ export default function useScrollMode({
     }
 
     return () => {
-      clearTimeout(ioBounceTimer)
       clearTimeout(safetyReveal)
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)
-      io?.disconnect()
       ro.disconnect()
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)
@@ -1036,9 +1183,9 @@ export default function useScrollMode({
     )) return
     const k = modeRef.current.kind
     if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT') {
-      applyMode(scrollEl, modeRef.current)
+      writeMode(scrollEl, modeRef.current, 'lifecycle:catch-up-reapply')
     }
-  }, [scrollRef])
+  }, [scrollRef, writeMode])
 
   // Terminal stream promotion and final buffered text can land in separate
   // React/browser phases. Observe committed geometry until two consecutive
@@ -1077,7 +1224,10 @@ export default function useScrollMode({
         // Terminal promotion can land between input and the first scroll
         // event. The reader wins that race: freeze what is visible and retire
         // the live handoff without issuing a final scroll write.
-        modeRef.current = anchorModeFromScroll(scrollEl) || settledPinMode(mode)
+        transitionMode(
+          anchorModeFromScroll(scrollEl) || settledPinMode(mode),
+          'terminal:reader-owns',
+        )
         persistMode()
         return
       }
@@ -1086,7 +1236,7 @@ export default function useScrollMode({
       const spacerEl = spacerRef.current
       const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
       if (!listEl || !spacerEl || !lastUserEl) {
-        modeRef.current = settledPinMode(mode)
+        transitionMode(settledPinMode(mode), 'terminal:missing-layout-settle')
         persistMode()
         return
       }
@@ -1116,20 +1266,36 @@ export default function useScrollMode({
       // Keep styled geometry and the decision in the same frame. The main RO
       // normally wrote this value already; assigning the same value is a no-op.
       spacerEl.style.height = `${spacerH}px`
-      modeRef.current = nextMode
-      applyMode(scrollEl, modeRef.current)
+      transitionMode(nextMode, spacerH <= 1
+        ? 'terminal:reservation-filled'
+        : 'terminal:short-reply-settle')
+      writeMode(scrollEl, modeRef.current, 'terminal:settle-layout')
       persistMode()
     }
 
     requestAnimationFrame(inspectCommittedLayout)
-  }, [chatId, scrollRef, spacerRef, lastUserMsgRef])
+  }, [
+    chatId,
+    lastUserMsgRef,
+    persistMode,
+    scrollRef,
+    spacerRef,
+    transitionMode,
+    writeMode,
+  ])
 
   return {
     modeRef,
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
+    anchorPagination,
+    armSentMessage,
+    closePreSendGestureWindow,
+    freezeForegroundReturn,
+    freezeQueuedSubmission,
     reapplyActiveMode,
+    settleNonPin,
     settleStreamingPin,
   }
 }

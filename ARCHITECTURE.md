@@ -441,7 +441,7 @@ The removals not yet done at HEAD are noted in the last bullet:
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.2 (2026-07-14).** This section is the
+**Owner-authoritative contract — v1.3 (2026-07-15).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -504,7 +504,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   auto-scroll; the user must manually reach the bottom again. If there is no saved
   location, or its target row is no longer available, return shows the latest real
   conversation content at the viewport bottom once as a settled anchor. It must not
-  manufacture a top-of-chat location or engage live following.
+  manufacture a top-of-chat location or engage live following. That automatic tail
+  fallback is not a reader-chosen location and must not be persisted on pagehide or
+  shell reload; only a deliberate scroll/send/pagination position earns restoration.
 - **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
@@ -548,6 +550,22 @@ path means routing it through the same entries rather than inventing another rul
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | same mode and active assistant row | None |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
+
+Controller structure is part of the contract, not an implementation detail:
+
+- `ChatView` may read `modeRef` for a submit snapshot but must not assign it.
+  It emits send, queue, pagination, and lifecycle events through the semantic
+  methods returned by `useScrollMode`.
+- Every live mode mutation goes through `transitionMode`; every mode-owned
+  `scrollTop` write goes through `writeMode`. The exported `applyMode` executor
+  is for the controller and pure unit tests, not a second live writer.
+- The gesture-gated `scroll` event reads physical-bottom geometry directly.
+  Do not reintroduce a sentinel or asynchronous observer as a second bottom
+  authority: its delayed state can contradict the viewport that caused the
+  event.
+- `window.__mobiusChatScrollTrace` keeps bounded, content-free transition and
+  actual-write history for diagnosis. It records mode kinds, armed state, and
+  geometry only—never message text, keys, or cids.
 
 Thinking/reasoning deltas also carry a semantic `segment_id` end to end. Token
 deltas with the same id concatenate verbatim; a new provider summary/content index
