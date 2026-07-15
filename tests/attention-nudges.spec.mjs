@@ -7,7 +7,7 @@
  * card's Submit or Resume action, leaving the reader roughly one composer-
  * height short of the tail.
  *
- * Run: npx playwright test tests/attention-nudges.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/attention-nudges.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
@@ -112,6 +112,7 @@ for (const scenario of SCENARIOS) {
         ts: 1700000200002,
       })}\n\n`,
       'data: {"type":"catch_up_done"}\n\n',
+      'data: {"type":"done"}\n\n',
     ].join('')
     await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
       route.fulfill({

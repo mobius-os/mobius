@@ -10,7 +10,7 @@
  *   4. Auto-follow engages when user scrolls to bottom.
  *
  * Tests use mocked SSE / mocked /messages — no agent tokens spent.
- * Run: npx playwright test tests/chat-redesign.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/chat-redesign.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'

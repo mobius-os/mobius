@@ -7,7 +7,7 @@
  * These are pure functions (frontend/src/sw-cache-policy.js), so no
  * browser/SW context is needed.
  *
- * Run: npx playwright test tests/sw-cache-policy.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-cache-policy.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import {
