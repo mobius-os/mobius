@@ -1990,13 +1990,15 @@
 }
 
 /* ── Build-milestone rail ──────────────────────────── */
-/* A slim, non-interactive progress rail in the foot, above the open-app CTA:
-   one dot+label per milestone the building agent emitted this turn. Frosted so
-   it reads as a card over the chat scrolling behind the transparent foot, muted
-   so it stays quiet next to the composer. The most recent phase is emphasized;
-   earlier ones dim to compact history. Entrance is transform/opacity ONLY — the
-   foot's ResizeObserver publishes --composer-h off its height, so a height
-   animation would fight the composer clearance. */
+/* A slim, non-interactive progress rail in the foot, directly above the composer:
+   one dot+label per milestone the building agent emitted this turn. Attention,
+   connection, queue, and open-app notices deliberately stack ABOVE this rail so
+   nothing interrupts its relationship to the chat controls. Frosted so it reads
+   as a card over the chat scrolling behind the transparent foot, muted so it
+   stays quiet next to the composer. The most recent phase is emphasized; earlier
+   ones dim to compact history. Entrance is transform/opacity ONLY — the foot's
+   ResizeObserver publishes --composer-h off its height, so a height animation
+   would fight the composer clearance. */
 .chat__build-rail {
   max-width: 720px;
   margin: 0 auto 8px;

@@ -99,13 +99,30 @@ for (const scenario of SCENARIOS) {
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
+          // Build phases only arrive while a chat stream is active. Mirror the
+          // real build state so this exercises event delivery, not just markup.
+          running: true,
           pending_messages: [],
         }),
       })
     })
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'build_phase',
+        label: 'Guarded service boundary ready — Tandoor migrated safely',
+        ts: 1700000200002,
+      })}\n\n`,
+      'data: {"type":"catch_up_done"}\n\n',
+    ].join('')
     await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
-      route.fulfill({ status: 204, body: '' }))
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        },
+        body: streamBody,
+      }))
 
     await page.evaluate(chatId => {
       localStorage.setItem('moebius_active_chat', chatId)
@@ -130,6 +147,17 @@ for (const scenario of SCENARIOS) {
     })
     const nudge = page.locator(scenario.nudgeSelector)
     await expect(nudge).toBeVisible({ timeout: 5000 })
+    const rail = page.locator('.chat__build-rail')
+    const composer = page.locator('.chat__pill')
+    await expect(rail).toBeVisible({ timeout: 5000 })
+
+    const [nudgeBox, railBox, composerBox] = await Promise.all([
+      nudge.boundingBox(),
+      rail.boundingBox(),
+      composer.boundingBox(),
+    ])
+    expect((nudgeBox?.y ?? 0) + (nudgeBox?.height ?? 0)).toBeLessThan(railBox?.y)
+    expect((railBox?.y ?? 0) + (railBox?.height ?? 0)).toBeLessThan(composerBox?.y)
 
     await nudge.click()
 
