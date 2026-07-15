@@ -262,6 +262,36 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     expect(await loadCount(page)).toBe(0)
   })
 
+  test('a queued passive rebuild releases when the visible chat is backgrounded', async ({ page }) => {
+    let armRebuilt
+    const armed = new Promise(resolve => { armRebuilt = resolve })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemRoute: oneShotSystemEventRoute('shell_rebuilt', armed),
+    })
+    await gotoEmptyChat(page)
+    await resetLoadCount(page)
+
+    armRebuilt()
+    await page.waitForTimeout(500)
+    expect(await loadCount(page)).toBe(0)
+
+    // Headless Chromium keeps the only page visible, so shadow the readonly
+    // getter for this document and dispatch the real lifecycle event. The
+    // override disappears with the reload.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
+      { timeout: 8000 },
+    )
+  })
+
   test('shell_apply_now on the global system stream while idle applies immediately', async ({ page }) => {
     // No turn is streaming; the global system stream delivers shell_apply_now at
     // load. Idle → immediate apply → one reload. Loop prevention is single
@@ -307,8 +337,16 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
       systemBody: sse([{ type: 'system_stream_open' }]),
     })
+    await gotoEmptyChat(page)
     // gen A controls the page (first install claims).
     await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
+
+    // Keep a second gen-A client alive. Without it, navigation commonly leaves
+    // no outgoing client and Chromium activates gen B before the shell mounts,
+    // so the test never exercises the mount-time pickup path it claims to pin.
+    const keeper = await page.context().newPage()
+    await keeper.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await keeper.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
 
     // Publish gen B; wait until it is installed and WAITING (leashed — the SW
     // never skipWaiting()s on its own).
@@ -325,6 +363,14 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // generation is installed but the page has not adopted it.
     await page.reload({ waitUntil: 'domcontentloaded' })
 
+    // The explicit reload above is load 1. Mount-time pickup must deliberately
+    // hand off the still-waiting worker and perform load 2 even though a restored
+    // idle chat is visible.
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
+      { timeout: 20000 },
+    )
+
     // Generation identity: the apply settles with the page controlled by the
     // registration's ACTIVE worker and NOTHING left waiting.
     await page.waitForFunction(async () => {
@@ -340,5 +386,6 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       return !reg.waiting && navigator.serviceWorker.controller === reg.active
     })
     expect(stable).toBe(true)
+    await keeper.close()
   })
 })
