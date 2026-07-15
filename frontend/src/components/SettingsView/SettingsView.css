@@ -215,6 +215,11 @@
    own track + knob markup, so the custom toggle classes were
    unreachable. Removed instead of left as dead weight. */
 
+.settings__last-model-name {
+  color: var(--accent);
+  font-weight: 650;
+}
+
 /* Provider rows + .settings__providers wrapper styles live in
    ../ProviderAuth/ProviderAuth.css since the component is shared
    between SettingsView and SetupWizard. */

@@ -1143,7 +1143,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   subtitle="Which models appear in chat pickers."
                   statusNode={
                     <StatusDot color="--muted">
-                      {lastModelLabel ? `Last model: ${lastModelLabel}` : 'No default yet'}
+                      {lastModelLabel ? (
+                        <span>
+                          Last model: <span className="settings__last-model-name">{lastModelLabel}</span>
+                        </span>
+                      ) : 'No default yet'}
                     </StatusDot>
                   }
                   actionLabel="Configure"
@@ -1229,8 +1233,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   onClose={() => setManageModelsOpen(false)}
                   providerOrder={PROVIDER_ORDER}
                   providerInfo={PROVIDER_INFO}
-                  selectedProvider={defaultChatProvider}
-                  selectedModel={defaultChatModelId}
                 />
               )}
             </>
