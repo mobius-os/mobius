@@ -1,5 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import './QuestionCard.css'
+import {
+  clearQuestionDraft,
+  questionDraftKey,
+  readQuestionDraft,
+  writeQuestionDraft,
+} from './questionDraft.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -12,13 +18,38 @@ function resolveAnswer(answer, otherText) {
 }
 
 
-export default function QuestionCard({ questions, questionId, answeredMap, onAnswer, disabled }) {
-  const [answers, setAnswers] = useState({})
-  const [otherTexts, setOtherTexts] = useState({})
+export default function QuestionCard({
+  chatId,
+  questions,
+  questionId,
+  answeredMap,
+  onAnswer,
+  disabled,
+}) {
+  const draftKey = questionDraftKey(chatId, questionId, questions)
+  const [answers, setAnswers] = useState(
+    () => readQuestionDraft(draftKey).answers,
+  )
+  const [otherTexts, setOtherTexts] = useState(
+    () => readQuestionDraft(draftKey).otherTexts,
+  )
   const [submitted, setSubmitted] = useState(false)
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
+
+  // ChatView is keyed by chat, so switching away remounts this card. Keep an
+  // unsubmitted selection in the same per-tab cache as composer drafts; the
+  // owner can inspect another chat and return without rebuilding their answer.
+  // A completed or superseded card clears its draft instead of leaving stale
+  // choices attached to transcript history.
+  useEffect(() => {
+    if (answered || disabled) {
+      clearQuestionDraft(draftKey)
+      return
+    }
+    writeQuestionDraft(draftKey, answers, otherTexts)
+  }, [draftKey, answers, otherTexts, answered, disabled])
 
   const allAnswered = questions.every(q => {
     const a = answers[q.question]

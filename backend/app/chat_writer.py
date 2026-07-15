@@ -1415,6 +1415,12 @@ class ChatWriterActor:
     )
     if not applied:
       raise _PersistFailed("AnswerQuestion: no matching question block")
+    # Answering an interactive question is an owner action just like a visible
+    # send. Keep drawer recency separate from generic transcript writes, but do
+    # advance it here so a parked chat returns to the top as soon as the answer
+    # commits (including the same-turn answer-delivery path).
+    from datetime import UTC, datetime
+    chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AnswerQuestion did not persist")
     return True

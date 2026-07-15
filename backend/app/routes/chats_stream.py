@@ -834,6 +834,13 @@ async def _send_message_locked(
         # runner already does and queue the message instead.
         steered = False
       if steered:
+        # A question tool is a synchronous human pause. Once the owner
+        # explicitly fast-forwards (or a steer-enabled chat auto-steers), the
+        # new message supersedes that pause; leaving its future registered
+        # would strand Codex waiting on a card that the transcript has already
+        # moved past. Retire it only AFTER the provider accepts the steer so a
+        # failed steer still leaves the original question answerable.
+        questions.cancel(chat_id)
         # Persist the steer so a reload renders Q1, A1, Q2, A2: seal the
         # pre-interrupt assistant text (A1) as its own message, append this
         # steered user row at the END, and reset the live sink so the
