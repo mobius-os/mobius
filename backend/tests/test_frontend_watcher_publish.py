@@ -72,6 +72,45 @@ def test_publish_rejects_broken_staging_without_touching_dist(fw_dirs):
   assert not old.exists()
 
 
+def test_publish_rejects_undeclared_built_identifier_without_touching_dist(
+  fw_dirs,
+):
+  """Vite accepts free identifiers; the publisher must not serve them."""
+  dist, staging, nxt, old = (
+    fw_dirs["dist"], fw_dirs["staging"], fw_dirs["next"], fw_dirs["old"]
+  )
+  _write_build(dist, "old")
+  _write_build(staging, "broken-global")
+  (staging / "assets" / "index-broken-global.js").write_text(
+    "export function cleanup() { clearTimeout(ioBounceTimer) }",
+    encoding="utf-8",
+  )
+
+  with pytest.raises(
+    fw._BuiltGlobalValidationError,
+    match=r"ioBounceTimer.*index-broken-global\.js",
+  ):
+    fw._publish_built_dir(staging, "undeclared global")
+
+  assert (dist / "assets" / "index-old.js").is_file()
+  assert not (dist / "assets" / "index-broken-global.js").exists()
+  assert not nxt.exists()
+  assert not old.exists()
+
+
+def test_publish_accepts_declared_and_browser_globals(fw_dirs):
+  staging = fw_dirs["staging"]
+  _write_build(staging, "valid-globals")
+  (staging / "assets" / "index-valid-globals.js").write_text(
+    "const timer = setTimeout(() => window.fetch(new URL('/ok', location)), 1);"
+    " export function cleanup() { clearTimeout(timer) }",
+    encoding="utf-8",
+  )
+
+  assert fw._publish_built_dir(staging, "valid globals") is True
+  assert (fw_dirs["dist"] / "assets" / "index-valid-globals.js").is_file()
+
+
 @pytest.mark.asyncio
 async def test_settle_coalesces_many_staged_builds(monkeypatch):
   calls = []
@@ -157,7 +196,7 @@ def test_identical_publish_is_skipped_without_event_or_attic(
   """vite --watch rebuilds staging on every (re)start with fresh mtimes even
   when the output is byte-identical to the served dist. Publishing that would
   reload every idle client per container restart and burn an attic slot per
-  boot (three restarts could evict a generation an unreloaded tab needs)."""
+  boot (repeated no-op restarts would consume the bounded stale-tab window)."""
   events = []
   monkeypatch.setattr(fw, "_publish_system_event", events.append)
   dist, staging, attic = fw_dirs["dist"], fw_dirs["staging"], fw_dirs["attic"]

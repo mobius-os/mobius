@@ -192,8 +192,8 @@ export default function Shell() {
       clearTimeout(shellReloadTimerRef.current)
       shellReloadTimerRef.current = null
     }
-    // Capture view-owned transient state synchronously, before the
-    // service-worker handoff can let layout/data change underneath it.
+    // Capture view-owned transient state synchronously, before the async query
+    // flush or service-worker handoff can let layout/data change underneath it.
     // ChatView uses this to persist the exact visible message anchor.
     window.dispatchEvent(new Event(BEFORE_SHELL_RELOAD_EVENT))
     // ChatView promotes terminal stream items into the in-memory query cache
