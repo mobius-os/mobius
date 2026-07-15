@@ -166,7 +166,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
 
     const card = page.locator('.qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
-    await page.getByRole('radio', { name: /Scenic/ }).click()
+    await page.getByRole('radio', { name: 'Other' }).click()
+    const customAnswer = card.getByRole('textbox', { name: 'Other answer for: Which route?' })
+    await customAnswer.fill('Take the quiet streets')
 
     const geometry = () => card.evaluate(el => ({
       height: el.getBoundingClientRect().height,
@@ -181,6 +183,20 @@ test.describe('Bug 1: AskUserQuestion', () => {
         const rect = node.getBoundingClientRect()
         return { text: node.textContent.trim(), top: rect.top, height: rect.height }
       }),
+      input: (() => {
+        const node = el.querySelector('.qcard__input')
+        const rect = node?.getBoundingClientRect()
+        return node && rect
+          ? {
+              value: node.value,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+              color: getComputedStyle(node).color,
+              textFillColor: getComputedStyle(node).webkitTextFillColor,
+            }
+          : null
+      })(),
       submitTop: el.querySelector('.qcard__submit')?.getBoundingClientRect().top,
     }))
 
@@ -189,11 +205,19 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
     await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
     await expect(card.locator('.qcard__opt')).toHaveCount(3)
+    await expect(customAnswer).toBeDisabled()
+    await expect(customAnswer).toHaveValue('Take the quiet streets')
 
     const after = await geometry()
     expect(after.height).toBeCloseTo(before.height, 5)
     expect(after.hint).toEqual(before.hint)
     expect(after.options).toEqual(before.options)
+    expect(after.input.value).toBe(before.input.value)
+    expect(after.input.top).toBeCloseTo(before.input.top, 5)
+    expect(after.input.width).toBeCloseTo(before.input.width, 5)
+    expect(after.input.height).toBeCloseTo(before.input.height, 5)
+    expect(after.input.color).not.toBe(before.input.color)
+    expect(after.input.textFillColor).toBe(after.input.color)
     expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
   })
 
