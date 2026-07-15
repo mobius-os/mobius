@@ -402,10 +402,19 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // generation is installed but the page has not adopted it.
     await page.reload({ waitUntil: 'domcontentloaded' })
 
-    // Generation identity is the contract. Chromium may activate gen B during
-    // the explicit navigation (load 1), or preserve it as WAITING so the shell's
-    // mount-time pickup performs load 2. Both are correct; requiring load 2 even
-    // after load 1 already adopted B makes browser lifecycle timing the test.
+    // Controller identity can flip to gen B while this document is still
+    // executing gen A's precached bundle. The explicit reload above is load 1;
+    // mount-time pickup must remember the pre-fetch stale-generation signal,
+    // hand off the worker, and perform load 2. Requiring that navigation proves
+    // the document generation changed instead of accepting controller takeover
+    // alone as a false positive.
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
+      { timeout: 20000 },
+    )
+
+    // Generation identity: the apply settles with the page controlled by the
+    // registration's ACTIVE worker and NOTHING left waiting.
     await page.waitForFunction(async () => {
       const reg = await navigator.serviceWorker.getRegistration()
       return !!reg && !reg.waiting && !!reg.active
