@@ -22,9 +22,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.responses import Response
 
 from app import github_auth, source_status
 from app.config import get_settings
+from app.database import engine
 from app.storage_io import atomic_write
 
 # The github router's Limiter is a separate instance from app.state.limiter,
@@ -595,6 +597,29 @@ def test_rest_app_with_github_access_ok(client, owner_token, monkeypatch):
                  headers={"Authorization": f"Bearer {app_token}"})
   assert r.status_code == 200
   assert r.json()["login"] == "octocat"
+
+
+def test_github_capability_releases_db_before_upstream_request(
+  client, owner_token, monkeypatch,
+):
+  """A fan-out of slow GitHub reads must consume sockets, not the DB pool."""
+  _write_token(token="gh-app-tok")
+  _, app_token = _app_token(client, owner_token, github_access=True)
+  baseline = engine.pool.checkedout()
+  checked_out = []
+
+  async def fake_forward(_client, _request):
+    checked_out.append(engine.pool.checkedout())
+    return Response(content=b'{}', media_type="application/json")
+
+  monkeypatch.setattr(github_routes, "_forward_capped", fake_forward)
+  r = client.get(
+    "/api/github/api/user",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert r.status_code == 200
+  assert checked_out == [baseline]
 
 
 def test_rest_owner_ok(client, auth, monkeypatch):

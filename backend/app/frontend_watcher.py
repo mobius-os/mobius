@@ -53,6 +53,7 @@ _REBUILD_TMP_DIR = _FRONTEND_DIR / ".vite-tmp-rebuild"
 # from _FRONTEND_DIR at call time so tests that repoint the dir stay isolated).
 _PUBLISH_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.Lock()
+_START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 
 
@@ -62,6 +63,27 @@ class _StagingChangedDuringPublish(RuntimeError):
 
 class _IncompleteBuild(RuntimeError):
   """Raised when the watched staging tree is not a full Vite generation yet."""
+
+
+def _acquire_watch_lock():
+  """Lease the editable frontend to one warm watcher process.
+
+  The in-process ``_ACTIVE_WATCHER`` guard cannot see a test/rehearsal backend
+  launched beside production in the same container. Both would otherwise keep
+  a full Rollup graph and write the same staging tree. An OS lease follows the
+  process lifetime, so crashes release it without cleanup while deliberate
+  one-shot rebuilds remain independent.
+  """
+  lock_path = _FRONTEND_DIR / ".watch.lock"
+  lock_fh = open(lock_path, "a+")
+  try:
+    fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except BlockingIOError as exc:
+    lock_fh.close()
+    raise RuntimeError(
+      f"frontend warm watcher already active for {_FRONTEND_DIR}"
+    ) from exc
+  return lock_fh
 
 
 def _publish_system_event(event: dict) -> None:
@@ -438,19 +460,26 @@ class _FrontendHandler:
     self._last_staging_signature = _tree_signature(_STAGING_DIST_DIR)
     self._watch_thread: threading.Thread | None = None
     self._stage_thread: threading.Thread | None = None
+    self._watch_lock_fh = _acquire_watch_lock() if start_threads else None
     if start_threads:
-      self._watch_thread = threading.Thread(
-        target=self._watch_loop,
-        name="frontend-vite-watch",
-        daemon=True,
-      )
-      self._stage_thread = threading.Thread(
-        target=self._stage_poll_loop,
-        name="frontend-stage-poll",
-        daemon=True,
-      )
-      self._watch_thread.start()
-      self._stage_thread.start()
+      try:
+        self._watch_thread = threading.Thread(
+          target=self._watch_loop,
+          name="frontend-vite-watch",
+          daemon=True,
+        )
+        self._stage_thread = threading.Thread(
+          target=self._stage_poll_loop,
+          name="frontend-stage-poll",
+          daemon=True,
+        )
+        self._watch_thread.start()
+        self._stage_thread.start()
+      except Exception:
+        fcntl.flock(self._watch_lock_fh, fcntl.LOCK_UN)
+        self._watch_lock_fh.close()
+        self._watch_lock_fh = None
+        raise
 
   def close(self) -> None:
     """Cancel publication timers and stop the Vite watch process."""
@@ -464,6 +493,10 @@ class _FrontendHandler:
       self._terminate_watch_process(signal.SIGKILL)
       if self._watch_thread is not None:
         self._watch_thread.join(timeout=2)
+    if self._watch_lock_fh is not None:
+      fcntl.flock(self._watch_lock_fh, fcntl.LOCK_UN)
+      self._watch_lock_fh.close()
+      self._watch_lock_fh = None
     global _ACTIVE_WATCHER
     with _ACTIVE_LOCK:
       if _ACTIVE_WATCHER is self:
@@ -672,13 +705,19 @@ def start_watcher(
   if not src_dir.is_dir():
     raise FileNotFoundError(f"{src_dir} does not exist")
 
-  handler = _FrontendHandler(loop)
+  # Close a same-process predecessor before acquiring the cross-process lease.
+  # Serialize the whole handoff so two concurrent lifespan starts cannot both
+  # observe an empty in-process slot.
   global _ACTIVE_WATCHER
-  with _ACTIVE_LOCK:
-    old = _ACTIVE_WATCHER
-    _ACTIVE_WATCHER = handler
-  if old is not None:
-    old.close()
+  with _START_LOCK:
+    with _ACTIVE_LOCK:
+      old = _ACTIVE_WATCHER
+      _ACTIVE_WATCHER = None
+    if old is not None:
+      old.close()
+    handler = _FrontendHandler(loop)
+    with _ACTIVE_LOCK:
+      _ACTIVE_WATCHER = handler
   log.info("frontend warm watcher started on %s", _FRONTEND_DIR)
   return None, handler
 

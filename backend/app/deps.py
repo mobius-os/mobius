@@ -444,13 +444,21 @@ def get_owner_or_app_with_github_access(
   manifest that no longer declares the grant — AppUpdate has no
   github_access field, so a plain PATCH can't toggle it.
   """
+  owner = principal.owner
   if principal.app_id is None:
-    return principal.owner
+    # Every route behind this capability may proceed to GitHub network I/O.
+    # Authorization is complete, so do not pin its pooled connection for the
+    # upstream request's lifetime. Routes that also depend on this same Session
+    # can reuse it normally; SQLAlchemy checks out a fresh connection on their
+    # next query.
+    db.close()
+    return owner
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
   if bool(app.github_access):
-    return principal.owner
+    db.close()
+    return owner
   raise HTTPException(
     status_code=403,
     detail=(

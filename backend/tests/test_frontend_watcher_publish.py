@@ -1,6 +1,7 @@
 """Warm frontend watcher publication behavior."""
 
 import asyncio
+import fcntl
 import shutil
 
 import pytest
@@ -260,6 +261,21 @@ def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):
   assert "--max-old-space-size=512" in env["NODE_OPTIONS"]
   assert "--watch" in cmd
   assert ".dist-staging" in cmd
+
+
+def test_warm_watcher_has_a_cross_process_singleton_lease(fw_dirs):
+  first = fw._acquire_watch_lock()
+  try:
+    with pytest.raises(RuntimeError, match="already active"):
+      fw._acquire_watch_lock()
+  finally:
+    fcntl.flock(first, fcntl.LOCK_UN)
+    first.close()
+
+  # Releasing the owner (including process exit) makes the lease reusable.
+  second = fw._acquire_watch_lock()
+  fcntl.flock(second, fcntl.LOCK_UN)
+  second.close()
 
 
 def test_vite_env_preserves_operator_resource_overrides(fw_dirs, monkeypatch):
