@@ -517,7 +517,7 @@ test('no saved chat location opens at the latest real content without enabling f
     'the real content tail is visible and reserved spacer room is excluded')
 })
 
-test('recovery nudge anchors the physical tail without enabling follow', () => {
+test('attention nudge anchors the physical tail without enabling follow', () => {
   const last = {
     offsetTop: 1500,
     offsetHeight: 220,
@@ -544,9 +544,9 @@ test('recovery nudge anchors the physical tail without enabling follow', () => {
   })
   applyMode(scrollEl, mode)
   assert.equal(scrollEl.scrollTop, 1400,
-    'the nudge includes all composer clearance after the paused card')
+    'the nudge includes all composer clearance after the attention card')
   assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
-    'revealing Resume must not create live-follow intent')
+    'revealing a question or Resume control must not create live-follow intent')
 })
 
 test('an unresolvable saved location falls back to a settled bottom anchor', () => {
