@@ -8,7 +8,7 @@
  * refreshes from the DB, Stop clears streaming, and short post-send 204s
  * still retry.
  *
- * Run: npx playwright test tests/stream-reconnect.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/stream-reconnect.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

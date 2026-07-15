@@ -9,7 +9,7 @@
  * The point of these tests is to lock in the no-flash chat-back-nav
  * behavior so future changes don't silently regress it.
  *
- * Run:  npx playwright test tests/cache.spec.mjs
+ * Run:  scripts/playwright-local.sh --allow-local-e2e tests/cache.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import {

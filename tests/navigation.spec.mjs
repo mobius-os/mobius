@@ -4,7 +4,7 @@
  * Tests the useNavigation hook: back button between chats, back from app
  * canvas to chat, drawer open/close via back, and pushState/popstate handling.
  *
- * Run:  npx playwright test tests/navigation.spec.mjs
+ * Run:  scripts/playwright-local.sh --allow-local-e2e tests/navigation.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

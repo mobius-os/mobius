@@ -105,6 +105,8 @@ jobs:
           node-version: 20
       - name: Run static app packager tests
         run: npm run test:packager
+      - name: Run browser harness unit tests
+        run: npm run test:e2e-harness
 
   core-apps-unit:
     runs-on: ubuntu-latest

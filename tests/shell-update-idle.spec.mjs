@@ -37,7 +37,7 @@
  * Reloads are observed via a sessionStorage load counter bumped in an init
  * script that runs on every navigation (including reload).
  *
- * Run: npx playwright test tests/shell-update-idle.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/shell-update-idle.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'

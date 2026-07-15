@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 from scripts.verify_test_runtime import validate_runtime
 
@@ -110,8 +113,8 @@ def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
 
 def test_chat_cleanup_uses_registered_ids_without_account_listing():
   tracker = (ROOT / "tests" / "_chatTracker.mjs").read_text(encoding="utf-8")
-  assert "createdChatIdsByWorker" in tracker
   assert "registerCreatedChats" in tracker
+  assert "drainCreatedChats" in tracker
   assert "Promise.all(ids.map" in tracker
   assert 'request.get(`${BASE}/api/chats`' not in tracker
 
@@ -125,7 +128,90 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert "down -v --remove-orphans" in runner
   assert 'value.get("test_runtime") is not True' in runner
   assert 'MOBIUS_AUTH_FILE="$auth_file"' in runner
-  assert 'npx playwright test "$@" --workers=1' in runner
+  assert 'git clone --quiet --no-local "$ROOT" "$snapshot_dir"' in runner
+  assert '--project-directory "$snapshot_dir"' in runner
+  assert 'cd "$snapshot_dir"' in runner
+  assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1' in runner
+  assert 'error: timed out waiting for the isolated test backend' in runner
+
+
+def _git(repo: Path, *args: str):
+  return subprocess.run(
+    ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+  )
+
+
+def _init_repo(repo: Path):
+  repo.mkdir(parents=True)
+  _git(repo, "init", "-q")
+  _git(repo, "config", "user.name", "Test")
+  _git(repo, "config", "user.email", "test@example.com")
+
+
+def test_local_runner_refuses_tracked_edits_before_docker(tmp_path):
+  repo = tmp_path / "repo"
+  _init_repo(repo)
+  (repo / "scripts").mkdir()
+  shutil.copy2(ROOT / "scripts" / "playwright-local.sh", repo / "scripts")
+  playwright = repo / "node_modules" / ".bin" / "playwright"
+  playwright.parent.mkdir(parents=True)
+  playwright.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+  playwright.chmod(0o755)
+  tracked = repo / "tracked.txt"
+  tracked.write_text("clean\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-qm", "fixture")
+  tracked.write_text("dirty\n", encoding="utf-8")
+
+  fake_bin = tmp_path / "bin"
+  fake_bin.mkdir()
+  docker = fake_bin / "docker"
+  docker.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+  docker.chmod(0o755)
+  result = subprocess.run(
+    [str(repo / "scripts" / "playwright-local.sh"), "--allow-local-e2e"],
+    cwd=repo,
+    capture_output=True,
+    text=True,
+    env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+  )
+  assert result.returncode == 2
+  assert "requires a committed revision" in result.stderr
+
+
+def test_no_local_clone_from_linked_worktree_has_standalone_git_dir(tmp_path):
+  repo = tmp_path / "repo"
+  _init_repo(repo)
+  (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-qm", "fixture")
+  linked = tmp_path / "linked"
+  snapshot = tmp_path / "snapshot"
+  _git(repo, "worktree", "add", "-q", "--detach", str(linked), "HEAD")
+
+  subprocess.run(
+    ["git", "clone", "--quiet", "--no-local", str(linked), str(snapshot)],
+    check=True,
+  )
+  assert (linked / ".git").is_file()
+  assert (snapshot / ".git").is_dir()
+  assert _git(snapshot, "rev-parse", "HEAD").stdout == _git(
+    linked, "rev-parse", "HEAD"
+  ).stdout
+
+
+def test_documented_browser_commands_use_disposable_runner():
+  contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+  test_script = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
+  spec_text = "\n".join(
+    path.read_text(encoding="utf-8") for path in (ROOT / "tests").glob("*.mjs")
+  )
+  assert "npx playwright test" not in contributing
+  assert "npx playwright test" not in test_script
+  assert "npx playwright test" not in spec_text
+  assert "playwright-local.sh --allow-local-e2e" in contributing
+  assert "playwright-local.sh --allow-local-e2e" in test_script
+  assert '/home/' not in test_script
 
 
 def test_hosted_e2e_runs_for_prs_and_long_lived_branches_only():

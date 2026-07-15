@@ -5,7 +5,7 @@
 // read-your-writes, the fatal-write deadlock regression) without owner auth.
 //
 // Run against a container serving the NEW mobius-runtime.js:
-//   MOBIUS_URL=http://localhost:8030 npx playwright test tests/storage-typed.spec.mjs
+//   scripts/playwright-local.sh --allow-local-e2e tests/storage-typed.spec.mjs
 import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8030'

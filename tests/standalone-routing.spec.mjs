@@ -1,7 +1,7 @@
 /**
  * Standalone app routing regressions.
  *
- * Run: npx playwright test tests/standalone-routing.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/standalone-routing.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

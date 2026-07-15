@@ -21,7 +21,7 @@
  * postMessage behavior end-to-end and assert the parent overlay
  * reacts correctly.
  *
- * Run: npx playwright test tests/app-canvas.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/app-canvas.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

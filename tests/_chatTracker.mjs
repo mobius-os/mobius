@@ -28,6 +28,12 @@
  */
 
 import { test } from '@playwright/test'
+import {
+  drainCreatedChats,
+  registerCreatedChats,
+} from './_chatFixtureRegistry.mjs'
+
+export { registerCreatedChats } from './_chatFixtureRegistry.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const USER = process.env.MOBIUS_USER || 'admin'
@@ -54,20 +60,6 @@ export function workerChatTitle(workerIndex, label = '') {
 // file as a first preference — no network call at all in the happy
 // path.
 let _cachedToken = null
-const createdChatIdsByWorker = new Map()
-
-export function registerCreatedChats(workerIndex, chatsOrIds) {
-  const values = Array.isArray(chatsOrIds) ? chatsOrIds : [chatsOrIds]
-  let ids = createdChatIdsByWorker.get(workerIndex)
-  if (!ids) {
-    ids = new Set()
-    createdChatIdsByWorker.set(workerIndex, ids)
-  }
-  for (const value of values) {
-    const id = typeof value === 'string' ? value : value?.id
-    if (id) ids.add(id)
-  }
-}
 async function getToken(request) {
   if (_cachedToken) return _cachedToken
   // 1. Try the saved storageState — auth.setup.mjs writes the token
@@ -135,8 +127,7 @@ export async function createTaggedChat(page, label = '') {
  * are swallowed so a stale fixture ID cannot fail the suite.
  */
 export async function cleanupWorkerChats(workerIndex, request) {
-  const ids = [...(createdChatIdsByWorker.get(workerIndex) || [])]
-  createdChatIdsByWorker.delete(workerIndex)
+  const ids = drainCreatedChats(workerIndex)
   if (ids.length === 0) return
   const token = await getToken(request)
   if (!token) return

@@ -4,7 +4,7 @@
  * Tests message rendering, input behavior, theme switching, and app canvas.
  * All tests use API interception — no agent tokens consumed.
  *
- * Run: npx playwright test tests/frontend.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/frontend.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
