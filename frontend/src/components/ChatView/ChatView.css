@@ -1696,24 +1696,19 @@
   gap: 1px;
 }
 
-/* Hairline divider between the Attach section and the picker
-   section so the popover reads as two distinct groups. */
+/* Hairline divider between Attach and the picker. The popover owns the one
+   scroll surface; a nested model-list scroller hid the continuation control
+   above summary rows on phones and made their visible order misleading. */
 .composer-popover__section--picker {
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  max-height: min(34dvh, 300px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  -webkit-overflow-scrolling: touch;
 }
 
-.composer-popover__section--picker::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+.composer-popover__section--context {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light);
 }
 
 /* Generic popover row — used by the Attach files entry. Same

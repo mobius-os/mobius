@@ -57,7 +57,7 @@ Every chat maintains three summaries of itself, each for a different context:
 - `## Digest` — one short paragraph, re-distilled every turn; this is the only chat content automatically included in new sessions;
 - `## Summary` — the complete cumulative handoff, allowed to grow without a length cap; this preserves decisions, work state, and important detail for compaction or a cold continuation.
 
-Session start includes the `description` + `Digest` from roughly the ten most-recently-touched chats. Each digest is fenced with its `chats/<id>/index.md` path. No unrelated notes or app data are included. Escalate deliberately when needed:
+Session start includes the name, `chats/<id>/index.md` location, and `Digest` from roughly the ten most-recently-touched chats. One shared instruction explains how to read a listed location when more detail is needed; that instruction is not repeated inside every chat entry. No unrelated notes or app data are included. Escalate deliberately when needed:
 
 - **the complete chat summary** — `Read /data/shared/memory/chats/<id>/index.md`;
 - **the transcript** — `curl -s "$API_BASE_URL/api/chats/<id>?limit=500" -H "Authorization: Bearer $AGENT_TOKEN"`.

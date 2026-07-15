@@ -58,6 +58,39 @@ def test_chat_digests_are_newest_first_and_budget_bounded(tmp_path):
   assert len(block.text.encode("utf-8")) <= 600
 
 
+def test_chat_digest_entries_have_name_location_and_digest_without_repeated_copy(
+  tmp_path,
+):
+  root = tmp_path / "shared" / "memory"
+  _chat_note(root, "c1", description="first chat", Digest="first digest")
+  _chat_note(root, "c2", description="second chat", Digest="second digest")
+
+  block = memory.build_memory_block(tmp_path)
+
+  assert "Name: first chat" in block.text
+  assert "Location: chats/c1/index.md" in block.text
+  assert "Digest: first digest" in block.text
+  assert "Name: second chat" in block.text
+  assert "Location: chats/c2/index.md" in block.text
+  assert "Digest: second digest" in block.text
+  assert "Read this file for the full note" not in block.text
+  assert "recent chat —" not in block.text
+  assert "When more detail would materially help" not in block.text
+  assert "<Location>" in memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
+  assert sorted(block.entries, key=lambda entry: entry["location"]) == [
+    {
+      "name": "first chat",
+      "location": "chats/c1/index.md",
+      "digest": "first digest",
+    },
+    {
+      "name": "second chat",
+      "location": "chats/c2/index.md",
+      "digest": "second digest",
+    },
+  ]
+
+
 def test_deleted_or_otherwise_ineligible_chat_note_is_never_injected(tmp_path):
   root = tmp_path / "shared" / "memory"
   active = _chat_note(root, "active", Digest="active context")
