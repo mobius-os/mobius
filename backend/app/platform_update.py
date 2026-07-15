@@ -621,24 +621,26 @@ def _served_platform_sha() -> str | None:
   return sha or None
 
 
-# The served uvicorn runs with cwd ``backend/`` and imports the platform backend,
-# so a change to any backend RUNTIME source (anything under ``backend/`` EXCEPT
-# the never-imported subtrees below) can alter the running server and needs a
-# restart to load. Everything else takes effect without restarting the served
-# process: frontend/** rebuilds into dist (served per-request), top-level tests/
-# and docs never run in the server, backend/tests/** never imports, backend/
-# scripts/** are subprocess-invoked fresh each call, backend/recovery/** is the
-# separate recoveryd container, and backend/memeval/** is eval tooling. Broad
-# (any backend/ runtime path, not just backend/app/**) so a root-level module or
-# a symlinked source can't silently slip past — fail toward restarting.
+# The served uvicorn runs with cwd ``backend/`` and imports the platform backend.
+# Any backend RUNTIME source (anything under ``backend/`` EXCEPT the
+# never-imported subtrees below) can alter the running server. The tracked
+# constitution is also loaded and cached by that process. Both need a restart.
+# Everything else takes effect without one: frontend/** rebuilds into dist,
+# top-level tests/ and docs never run in the server, backend/tests/** never
+# imports, backend/scripts/** are subprocess-invoked fresh each call,
+# backend/recovery/** is the separate recoveryd container, and backend/memeval/**
+# is eval tooling. Broad on backend runtime so a root-level module or symlinked
+# source cannot silently slip past — fail toward restarting.
 _NON_RUNTIME_BACKEND_SUBDIRS = (
   "backend/tests/", "backend/scripts/", "backend/recovery/", "backend/memeval/",
 )
 
 
 def _paths_need_restart(paths: list[str]) -> bool:
-  """True iff any changed path is served-backend RUNTIME code (needs a restart)."""
+  """True iff changed files are cached or imported by the served process."""
   for p in paths:
+    if p == "skill/core.md":
+      return True
     if p != "backend" and not p.startswith("backend/"):
       continue  # not backend (frontend/tests/docs/…) — no server restart
     if any(p.startswith(sub) for sub in _NON_RUNTIME_BACKEND_SUBDIRS):
@@ -647,16 +649,34 @@ def _paths_need_restart(paths: list[str]) -> bool:
   return False
 
 
+def _paths_need_import_probe(paths: list[str]) -> bool:
+  """True iff changed files can affect backend imports in a fresh process."""
+  return _paths_need_restart([p for p in paths if p != "skill/core.md"])
+
+
+def _tree_change_needs_import_probe(
+  repo: Path, before: str | None, after: str | None
+) -> bool:
+  """Whether a reconciled tree needs the defensive throwaway backend boot."""
+  if before == after:
+    return False
+  if not before or not after:
+    return True
+  paths = _changed_paths(repo, before, after)
+  if paths is None:
+    return True
+  return _paths_need_import_probe(paths)
+
+
 def _tree_change_needs_restart(
   repo: Path, before: str | None, after: str | None
 ) -> bool:
   """Does the ``before``→``after`` change require restarting the served uvicorn?
 
-  True iff it touched served backend runtime code. Fail SAFE toward restarting:
-  a missing sha or an uncomputable diff returns True, so a restart is never
-  skipped on an ambiguous change (the one thing the old blunt check got right —
-  never serve stale backend). Same commit → False; a genuinely empty diff (an
-  ``--allow-empty`` commit) → False (nothing to load).
+  True iff it touched served backend runtime code or the process-cached
+  constitution. Fail SAFE toward restarting: a missing sha or an uncomputable
+  diff returns True, so a restart is never skipped on an ambiguous change. Same
+  commit → False; a genuinely empty diff (an ``--allow-empty`` commit) → False.
   """
   if before == after:
     return False  # same sha (or both missing) — nothing changed
@@ -678,8 +698,8 @@ def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
   except Exception:
     return False
   # The tree advanced past what's served, but a restart is only needed if the
-  # served BACKEND package changed; a frontend/tests/docs/scripts advance is
-  # already live or irrelevant to the running server.
+  # served backend package or process-cached constitution changed; a
+  # frontend/tests/docs/scripts advance is already live or irrelevant.
   return _tree_change_needs_restart(repo, served, head)
 
 
@@ -842,9 +862,9 @@ def reconcile_clone(
     # broken. Skip the ~60s throwaway boot when the reconcile touched NO served
     # backend code (frontend/tests/docs/scripts only): the backend tree is then
     # byte-identical, so the probe would only re-prove an unchanged import. This
-    # is the same backend-change gate that decides the restart, so the two stay
-    # consistent.
-    if _tree_change_needs_restart(repo, pre, _rev(repo, local)):
+    # Constitution-only changes need a real server restart to refresh the
+    # process cache, but cannot break Python imports, so they skip this probe.
+    if _tree_change_needs_import_probe(repo, pre, _rev(repo, local)):
       ok, err = _import_probe(repo)
       if not ok:
         _reset_hard_to(repo, local, pre)
@@ -1140,8 +1160,9 @@ async def apply_platform_update(
 
     if res.status == "updated":
       # Frontend changes rebuild into dist (served per-request, no restart);
-      # only a served-backend change requires restarting uvicorn. Path-aware so a
-      # test/docs/frontend-only update finishes without a spurious restart prompt.
+      # only a served-backend or constitution change requires restarting
+      # uvicorn. Path-aware so test/docs/frontend-only updates finish without a
+      # spurious restart prompt.
       await _rebuild_frontend_after_update_if_needed(repo, res)
       # Compare the SERVED sha (what the running uvicorn imported) to the new
       # head, not just this reconcile's delta: a backend edit committed locally

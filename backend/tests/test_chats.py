@@ -82,6 +82,7 @@ def test_agent_context_includes_evolving_chat_summary(
     "location": "chats/older/index.md",
     "digest": "A bounded digest.",
   }]
+  assert payload["system_prompt_origin"] in {"platform", "baked_fallback"}
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

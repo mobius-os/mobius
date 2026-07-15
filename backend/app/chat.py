@@ -740,15 +740,13 @@ def _with_system_app_prompts(base: str) -> str:
 def _read_skill_text() -> str:
   """Return the cached platform constitution plus live app fragments.
 
-  Only the image-baked constitution has a process-lifetime cache.  App-owned
+  The tracked platform constitution has a process-lifetime cache. App-owned
   fragments are composed from live rows for every turn, so install, update,
   and uninstall take effect on the next turn without a platform restart.
-  An in-place edit to the constitution inside
-  a running container won't be picked up until the container restarts.
-  This is intentional given the deploy model (image rebuild → restart
-  → fresh cache load), but worth knowing if you're testing skill edits
-  on a live container — `docker restart mobius-test` (or prod) is
-  required to refresh.
+  An edit to `skill/core.md` is picked up on the next server restart; platform
+  update status treats that tracked file as restart-worthy. If the live
+  platform checkout is unavailable, resolution falls back to the image-baked
+  constitution for degraded boot.
   """
   global _SKILL_TEXT_CACHE
   if _SKILL_TEXT_CACHE is not None:

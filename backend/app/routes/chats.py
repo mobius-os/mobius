@@ -791,6 +791,7 @@ def get_chat_agent_context(
     _with_system_app_prompts,
   )
   from app.compaction import load_cumulative_summary
+  from app.providers import get_skill_origin
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
@@ -816,6 +817,7 @@ def get_chat_agent_context(
   return {
     "system_prompt": system_prompt,
     "system_prompt_source": "custom" if custom else "skill",
+    "system_prompt_origin": "custom" if custom else get_skill_origin(),
     # `memory_block` remains as a compatibility alias for an older shell. The
     # owner-facing name is now precise: this is only bounded recent-chat
     # continuity, never knowledge-graph memory.
