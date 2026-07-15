@@ -111,6 +111,21 @@ agent-browser wait --fn \
   "!document.querySelector('input[type=password]')" >/dev/null 2>&1 || \
   agent-browser wait 1500 >/dev/null
 
+# The readiness wait above is deliberately bounded, but its old fallback then
+# continued unconditionally. If the token was rejected or expired, the helper
+# silently captured the login wall and reported success — indistinguishable
+# from a real product screenshot until the agent inspected the PNG. Verify the
+# post-navigation auth state explicitly and fail before writing any image.
+# Never print the token itself; only test that it survived the shell's 401
+# interceptor and that the login form is absent.
+AUTH_OK="$(agent-browser eval \
+  "!!localStorage.getItem('token') && !document.querySelector('input[type=password]')" \
+  2>/dev/null || true)"
+if [ "$AUTH_OK" != "true" ]; then
+  echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
+  exit 1
+fi
+
 # Dismiss the PWA install banner if it surfaces — it covers the bottom
 # of the view and would distract from the actual page.
 agent-browser find text "Not now" click >/dev/null 2>&1 || true

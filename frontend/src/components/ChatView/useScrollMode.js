@@ -34,6 +34,7 @@
 
 import { useState, useRef, useLayoutEffect, useCallback } from 'react'
 import { cidOf } from './chatRuntimeState.js'
+import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 
 
 // Hide-then-reveal safety cap. Code-block-heavy chats with KaTeX and
@@ -482,10 +483,12 @@ export default function useScrollMode({
     }
     window.addEventListener('pagehide', onPageLeaving)
     window.addEventListener('beforeunload', onPageLeaving)
+    window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, onPageLeaving)
     document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       window.removeEventListener('pagehide', onPageLeaving)
       window.removeEventListener('beforeunload', onPageLeaving)
+      window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, onPageLeaving)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [chatId])
