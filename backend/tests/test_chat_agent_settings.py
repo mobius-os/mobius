@@ -206,6 +206,41 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   assert disabled["agent_settings_json"] is None
 
 
+def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
+  """The last explicit choice seeds new chats without rewriting old ones."""
+  initial = client.post(
+    "/api/chats", headers=auth, json={"title": "initial"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{initial['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is False
+
+  client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+  inherited_on = client.post(
+    "/api/chats", headers=auth, json={"title": "inherits on"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{inherited_on['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is True
+
+  client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"auto_resume_on_limit": False},
+  )
+  inherited_off = client.post(
+    "/api/chats", headers=auth, json={"title": "inherits off"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{inherited_off['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is False
+  assert client.get(
+    f"/api/chats/{inherited_on['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is True
+
+
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(
   client, auth, chat,
 ):

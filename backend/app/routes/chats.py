@@ -352,6 +352,9 @@ def create_chat(
     messages=body.messages or [],
     provider=provider,
     agent_settings_json=None,
+    auto_resume_on_limit=(
+      bool(owner.auto_resume_on_limit_default) if owner else False
+    ),
   )
   db.add(chat)
   db.commit()
@@ -428,7 +431,7 @@ def _first_message_title(chat) -> str:
 async def patch_chat(
   body: ChatPatch,
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
   """Partial-update endpoint used by the `/` slash picker.
@@ -500,6 +503,10 @@ async def patch_chat(
 
     if body.auto_resume_on_limit is not None:
       chat.auto_resume_on_limit = body.auto_resume_on_limit
+      # Existing chats keep their own stored policy. This only seeds the next
+      # chat, matching other "last picked" defaults without making the setting
+      # global at runtime.
+      owner.auto_resume_on_limit_default = body.auto_resume_on_limit
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
