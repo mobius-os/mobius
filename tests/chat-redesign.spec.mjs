@@ -45,7 +45,7 @@ async function setupWithStreamMock(page, streamBody) {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
         },
-        body: streamBody,
+        body: typeof streamBody === 'function' ? streamBody() : streamBody,
       })
     )
   } else {
@@ -137,6 +137,64 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // disabled={isStreaming} stayed grayed out).
     const optionButtons = page.locator('.qcard__opt')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
+  })
+
+
+  test('submitting a choice keeps every question-card row in place', async ({ page }) => {
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-stable-card',
+        questions: [{
+          question: 'Which route?',
+          header: 'Route',
+          multiSelect: false,
+          options: [
+            { label: 'Direct', description: 'Use the shortest path' },
+            { label: 'Scenic', description: 'Keep more context visible' },
+          ],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    let streamCount = 0
+    await setupWithStreamMock(page, () => (
+      streamCount++ === 0 ? streamBody : 'data: {"type":"done"}\n\n'
+    ))
+    await newChat(page)
+    await sendMessage(page, 'Ask me which route')
+
+    const card = page.locator('.qcard')
+    await expect(card).toBeVisible({ timeout: 5000 })
+    await page.getByRole('radio', { name: /Scenic/ }).click()
+
+    const geometry = () => card.evaluate(el => ({
+      height: el.getBoundingClientRect().height,
+      hint: (() => {
+        const node = el.querySelector('.qcard__hint')
+        const rect = node?.getBoundingClientRect()
+        return node && rect
+          ? { text: node.textContent, top: rect.top, height: rect.height }
+          : null
+      })(),
+      options: [...el.querySelectorAll('.qcard__opt')].map(node => {
+        const rect = node.getBoundingClientRect()
+        return { text: node.textContent.trim(), top: rect.top, height: rect.height }
+      }),
+      submitTop: el.querySelector('.qcard__submit')?.getBoundingClientRect().top,
+    }))
+
+    const before = await geometry()
+    await page.getByRole('button', { name: 'Submit' }).click()
+    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
+    await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
+    await expect(card.locator('.qcard__opt')).toHaveCount(3)
+
+    const after = await geometry()
+    expect(after.height).toBeCloseTo(before.height, 5)
+    expect(after.hint).toEqual(before.hint)
+    expect(after.options).toEqual(before.options)
+    expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
   })
 
 
