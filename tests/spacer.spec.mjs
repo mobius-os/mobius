@@ -1001,6 +1001,13 @@ test.describe('Scroll edge cases', () => {
 
     // Inject more content — should auto-follow again.
     await injectContent(page, 'After re-engage. ', 10)
+    // FOLLOW_BOTTOM is persisted by the scroll event before the controller's
+    // finite reader-ownership window expires. Wait for the deferred layout pass
+    // it schedules, rather than sampling the intentional intermediate frame.
+    await page.waitForFunction(() => {
+      const s = document.querySelector('.chat__scroll')
+      return !!s && s.scrollHeight - s.scrollTop - s.clientHeight < 50
+    }, { timeout: 3000 })
     const afterGap = await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
