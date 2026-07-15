@@ -681,6 +681,67 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(contract.overscrollBehavior).toBe('none')
   })
 
+  test('22c. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    // Reproduce the mobile failure: a slight horizontal drawer drag writes an
+    // inline transform, then shell navigation closes the drawer before the
+    // browser delivers touchend/touchcancel. The close state must clear that
+    // imperative transform unconditionally rather than trusting a terminal
+    // touch event that may never arrive.
+    await page.locator('.drawer').evaluate((drawer) => {
+      const point = (x, y) => new Touch({
+        identifier: 41,
+        target: drawer,
+        clientX: x,
+        clientY: y,
+      })
+      drawer.dispatchEvent(new TouchEvent('touchstart', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(220, 420)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchmove', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(195, 420)],
+      }))
+    })
+    expect(await page.locator('.drawer').evaluate((drawer) => drawer.style.transform))
+      .toBe('translateX(-25px)')
+
+    await page.evaluate(() => history.back())
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    expect(await page.locator('.drawer').evaluate((drawer) => ({
+      inlineTransform: drawer.style.transform,
+      inert: drawer.inert,
+    }))).toEqual({ inlineTransform: '', inert: true })
+    await expect.poll(() => page.locator('.drawer').evaluate(
+      (drawer) => new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41,
+    )).toBeLessThanOrEqual(-359)
+  })
+
+  test('22d. Closing scrim blocks the app until the panel is offscreen', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+    await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 7,
+      pointerType: 'touch',
+    })
+
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'auto')
+    await expect.poll(() => page.locator('.drawer').evaluate(
+      (drawer) => new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41,
+    )).toBeLessThanOrEqual(-359)
+    await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
+  })
+
   test('23. X-button (toggle) closes drawer (does not navigate, even from deep view)', async ({ page }) => {
     // Same regression as test 22 but via the toggle button. test 9
     // covers the basic case from a non-default view; this test just
