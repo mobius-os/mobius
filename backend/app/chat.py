@@ -3944,6 +3944,41 @@ async def _run_chat_impl(
 
   from app.database import SessionLocal
   db = SessionLocal()
+  try:
+    return await _run_chat_impl_with_db(
+      messages=messages,
+      chat_id=chat_id,
+      session_id=session_id,
+      provider_id=provider_id,
+      run_gen=run_gen,
+      attachments=attachments,
+      timezone=timezone,
+      viewport=viewport,
+      run_token=run_token,
+      db=db,
+    )
+  finally:
+    # Several setup paths can raise before reaching their explicit terminal
+    # cleanup.  A single outer owner guarantees the request's checkout is
+    # returned even for those unexpected failures.  close() is idempotent,
+    # so the terminal helpers may still release it as soon as they finish.
+    db.close()
+
+
+async def _run_chat_impl_with_db(
+  messages: list[schemas.ChatMessage],
+  chat_id: str = "",
+  session_id: str | None = None,
+  provider_id: str | None = None,
+  run_gen: int | None = None,
+  attachments: list[dict] | None = None,
+  timezone: str | None = None,
+  viewport: dict | None = None,
+  run_token: str | None = None,
+  *,
+  db: Session,
+) -> chat_queue.TerminalDisposition:
+  """Run a turn with a session whose lifetime is owned by the wrapper."""
   log = _get_logger()
   settings = get_settings()
   user_message = messages[-1].content
@@ -4267,6 +4302,12 @@ async def _run_chat_impl(
     sink = _ChatEventSink(bc, chat_id, run_token=run_token)
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
+    # The provider can run for hours.  Everything needed to launch it is now
+    # materialized, so return the SQLite connection to the pool first.  The
+    # Session object remains reusable for the short terminal queries below;
+    # runner-side session-id persistence goes through the writer actor and
+    # does not use this connection.
+    db.close()
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
       runner_result = await run_codex_sdk_turn(
@@ -4306,7 +4347,7 @@ async def _run_chat_impl(
       limit_kwargs = _limit_exit(sink, None, str(exc))
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-        provider_id=provider_id, cost_usd=0, close_browser=False,
+        provider_id=provider_id, cost_usd=0, close_browser=True,
         **limit_kwargs,
       )
     err = runner_result.get("error")
@@ -4377,6 +4418,10 @@ async def _run_chat_impl(
       claude_session_id = None
     sink = _ChatEventSink(bc, chat_id, run_token=run_token)
     register_active_sink(chat_id, sink)
+    # As in the Codex path, do not pin a pooled connection while the provider
+    # is thinking or waiting for user input.  Resume fallback has already
+    # consumed chat_row, so no detached ORM state is needed during the await.
+    db.close()
     try:
       from app.providers import skills_enabled as _skills_enabled
       runner_result = await run_claude_sdk_turn(
@@ -4416,7 +4461,7 @@ async def _run_chat_impl(
       limit_kwargs = _limit_exit(sink, None, str(exc))
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-        provider_id=provider_id, cost_usd=0, close_browser=False,
+        provider_id=provider_id, cost_usd=0, close_browser=True,
         **limit_kwargs,
       )
     # Same save-before-broadcast rationale: _limit_exit persists the error
