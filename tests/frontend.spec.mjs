@@ -683,14 +683,36 @@ test.describe('Scroll position', () => {
       { timeout: 10000 },
     )
 
-    // A real wheel gesture is the sole transition into FOLLOW_BOTTOM.
+    // A real wheel gesture is the sole transition into FOLLOW_BOTTOM. The
+    // initial restore can already place the viewport at the physical bottom,
+    // so first move away from it; a wheel-down from an already-clamped tail
+    // emits no scroll event and therefore cannot establish reader intent.
     const scroll = page.locator('.chat__scroll')
     await scroll.hover()
+    await page.mouse.wheel(0, -300)
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      return !!el
+        && el.scrollTop > 0
+        && el.scrollHeight - el.scrollTop - el.clientHeight > 100
+    }, { timeout: 3000 })
     await page.mouse.wheel(0, 100000)
     await page.waitForFunction(() => {
       const el = document.querySelector('.chat__scroll')
       return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 50
     }, { timeout: 3000 })
+    await page.waitForFunction(
+      id => {
+        try {
+          return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.kind
+            === 'FOLLOW_BOTTOM'
+        } catch {
+          return false
+        }
+      },
+      chatId,
+      { timeout: 3000 },
+    )
     const scrollBefore = await page.evaluate(
       () => document.querySelector('.chat__scroll')?.scrollTop ?? null,
     )
