@@ -19,7 +19,7 @@ Möbius is AI-maximalist: light up the good path with design, examples, and inst
 | `frontend/src/`, `frontend/` | yes | Frontend source. Your saved edits **rebuild automatically** (a watcher runs `vite build` into the served `dist/`; reload the page — no manual rebuild). One exception: source that arrives from a git/platform update fires no edit event, so after such an update kick the watcher by touching a changed file under `frontend/src`, then restart if prompted. The updater does not auto-detect this by design — run the step explicitly. |
 | `backend/app/` | yes | Backend Python. Edits take effect on the **next server restart** — when your edit is finished and correct, tell the partner to restart (Settings → Server → Restart), or use `/recover` if the shell is broken. |
 | `backend/scripts/`, `tests/`, and everything else tracked | yes | Scripts (take effect next time they run), tests, other source — plain source you own. |
-| `skill/core.md` (this constitution) | yes, but | Served from the **baked image** (`get_skill_path` prefers `/app/skill/core.md`), so an edit here is a real, PR-able source change but does **not** alter this instance's system prompt on a restart — it goes live only once it's merged upstream and the image rebuilds (rebuild tier). Your *live-editable* how-to skills are under `/data/shared/skills/` — see the Skills section. |
+| `skill/core.md` (this constitution) | yes | Read from this live platform checkout and cached for the server process. Edits take effect after a **server restart**; `/app/skill/core.md` is only the degraded-boot fallback when the checkout is unavailable. Your next-turn-editable how-to skills are under `/data/shared/skills/` — see the Skills section. |
 | `backend/requirements.txt`, `frontend/package.json`, `Dockerfile` | yes, but | Dependency/image changes need a **container rebuild** to take effect, not just a restart — a heavier operation we avoid where we can. Prefer a code change; reach for these only for a genuinely needed dependency. |
 | `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
@@ -175,7 +175,6 @@ When about to stop tool-calling and write the final assistant message **on any t
 | Updated an app | The notification curl (`notifications.md`). Don't record the update *event* — but if it surfaced a gotcha, record the gotcha. |
 | Deleted an app | State **Deleted X** + the reason. Uninstall is a reversible 7-day tombstone — recover via `POST /api/apps/{id}/recover`, or reinstall a store app to reattach by manifest_url. |
 | Took a screenshot | In the SAME message, emit the `![]` embed BEFORE any describing text; confirm the embed is present. See step 6. |
-| Discovered a gotcha/workaround | State one concrete "Gotcha: …" line in the conversation. |
 | Learned a partner preference / durable fact | Acknowledge it clearly enough that it is unambiguous in the transcript. |
 | Changed shell / CSS / cron | State what changed and why. |
 | Made an app / platform / shell change that would help other Möbius users | Say so to the partner in one sentence and offer to contribute it upstream — `contributing.md` has the how. |

@@ -32,6 +32,20 @@ def test_delete_chat_cancels_orphan_pending_question(client, auth, chat):
   asyncio.run(go())
 
 
+def test_agent_context_reports_constitution_origin(
+  client, auth, chat, monkeypatch,
+):
+  monkeypatch.setattr("app.providers.get_skill_origin", lambda: "platform")
+
+  response = client.get(
+    f"/api/chats/{chat.id}/agent-context",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json()["system_prompt_origin"] == "platform"
+
+
 def test_create_chat_rejects_cross_site_request(client, auth):
   cross = client.post(
     "/api/chats",

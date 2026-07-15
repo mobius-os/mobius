@@ -783,6 +783,7 @@ def get_chat_agent_context(
     _read_skill_text,
     _with_system_app_prompts,
   )
+  from app.providers import get_skill_origin
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
@@ -805,6 +806,7 @@ def get_chat_agent_context(
   return {
     "system_prompt": system_prompt,
     "system_prompt_source": "custom" if custom else "skill",
+    "system_prompt_origin": "custom" if custom else get_skill_origin(),
     "memory_block": memory_block,
     "app_context": app_context_block,
     "app_report": app_report_block,

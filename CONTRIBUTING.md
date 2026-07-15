@@ -12,7 +12,7 @@ guide gets a fresh clone to a running dev/test loop.
 |------|-----------------|
 | `backend/app/` | FastAPI backend (app factory `main.py`, routers under `routes/`, SQLAlchemy models, chat/SSE plumbing). |
 | `frontend/src/` | React 19 + Vite shell (chat UI, drawer, mini-app iframe canvas). |
-| `skill/core.md` | The agent's system prompt (the "constitution"); baked into the image. |
+| `skill/core.md` | The agent's system prompt (the "constitution"); read from the live checkout after restart, with an image-baked degraded-boot fallback. |
 | `backend/scripts/seed-skills/` | Per-topic agent skills (building-apps, theming, cron, …), seeded into `/data/shared/skills/` create-if-absent on first boot. |
 | `core-apps/` | Built-in mini-apps (`memory`, `reflection`) shipped with the platform. |
 | `tests/` | Playwright end-to-end suite (repo root). |
