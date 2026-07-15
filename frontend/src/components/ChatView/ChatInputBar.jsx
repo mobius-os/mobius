@@ -326,6 +326,7 @@ export default function ChatInputBar({
   canSteer,
   canRequestSteer = canSteer,
   offline,
+  sendFailure = null,
   submissionBlocked = false,
   pendingFiles,
   onAddFiles,
@@ -429,9 +430,14 @@ export default function ChatInputBar({
         onChange={handleFileSelect}
         style={{ display: 'none' }}
       />
-      {offline && (
-        <div className="chat__offline-note" role="status" aria-live="polite">
-          You're offline — chat needs a connection.
+      {(sendFailure || offline) && (
+        <div
+          className={`chat__offline-note${sendFailure ? ' chat__offline-note--error' : ''}`}
+          role={sendFailure ? 'alert' : 'status'}
+          aria-live={sendFailure ? 'assertive' : 'polite'}
+          aria-atomic="true"
+        >
+          {sendFailure || "You're offline — chat needs a connection."}
         </div>
       )}
       <div className="chat__input-row">

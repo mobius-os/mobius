@@ -1223,6 +1223,7 @@
 }
 
 .chat__offline-note {
+  max-width: min(680px, calc(100vw - 32px));
   align-self: center;
   margin: 0 0 6px;
   padding: 4px 10px;
@@ -1234,6 +1235,13 @@
   line-height: 1.35;
   backdrop-filter: blur(12px) saturate(140%);
   -webkit-backdrop-filter: blur(12px) saturate(140%);
+}
+
+.chat__offline-note--error {
+  border-color: color-mix(in srgb, var(--danger, #b42318) 28%, var(--border-light));
+  color: var(--danger, #b42318);
+  background: color-mix(in srgb, var(--danger, #b42318) 7%, var(--surface));
+  text-align: center;
 }
 
 /* The pill: TRANSLUCENT surface with backdrop-blur — chat content

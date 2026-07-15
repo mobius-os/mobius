@@ -54,6 +54,20 @@ log = logging.getLogger(__name__)
 _KEEPALIVE_INTERVAL = 30  # seconds
 
 
+def _message_persist_unavailable(exc: Exception, *, chat_id: str) -> HTTPException:
+  """Normalize writer failures at the user-send boundary.
+
+  The writer is the durability boundary for both fresh and queued messages. If
+  it is dead or cannot acquire a DB connection, the request is retryable service
+  unavailability—not an opaque route-specific 500.
+  """
+  log.warning("message persistence unavailable chat_id=%s: %r", chat_id, exc)
+  return HTTPException(
+    status_code=503,
+    detail="Could not save your message; please try again.",
+  )
+
+
 def _safe_upload_path(path_str: str, data_dir: str) -> str | None:
   """Returns the resolved path if it lives within data_dir, None otherwise.
 
@@ -140,7 +154,10 @@ async def _append_to_pending(
       require_answer_match=require_answer_match,
     )
   )
-  result = await await_ack(ack)
+  try:
+    result = await await_ack(ack)
+  except Exception as exc:
+    raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
   # Reflect the committed state on the request's session so a later
   # `db.refresh(chat)` in this handler sees the actor's write.
   db.expire(chat)
@@ -956,7 +973,10 @@ async def _send_message_locked(
     # provider it set/kept. Awaited so the user message + run marker are
     # durable before the background task starts (the chat list reflects
     # the send immediately, and run_chat sees the marker).
-    result = await await_ack(ack)
+    try:
+      result = await await_ack(ack)
+    except Exception as exc:
+      raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
     msgs = result["history"]
     session_id = result["session_id"]
     provider = result["provider"]

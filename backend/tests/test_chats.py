@@ -109,6 +109,41 @@ def test_fresh_send_response_includes_stored_user_message(
   assert chat.messages == [body["message"]]
 
 
+def test_fresh_send_returns_503_when_writer_is_unavailable(client, auth, chat):
+  from app.chat_writer import get_writer
+
+  get_writer()._go_fatal()
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "please keep this draft"},
+    headers=auth,
+  )
+
+  assert response.status_code == 503
+  assert response.json()["detail"] == "Could not save your message; please try again."
+
+
+def test_queued_send_returns_503_when_writer_is_unavailable(
+  client, auth, chat, db,
+):
+  from app.chat_writer import get_writer
+
+  chat.pending_messages = [{
+    "role": "user", "content": "already queued", "ts": 1, "cid": "prior",
+  }]
+  db.commit()
+  get_writer()._go_fatal()
+
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "queue this too"},
+    headers=auth,
+  )
+
+  assert response.status_code == 503
+  assert response.json()["detail"] == "Could not save your message; please try again."
+
+
 def test_update_icon_rejects_cross_site_request(client, auth):
   # The cross-site dependency fires before the handler, so a non-existent
   # app id still 403s (mirrors test_update_app_rejects_cross_site_request).

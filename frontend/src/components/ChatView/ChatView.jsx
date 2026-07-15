@@ -49,6 +49,7 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
+import { sendFailureMessage } from './sendFailure.js'
 import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
   answerKeepsCurrentTurn,
@@ -331,6 +332,7 @@ export default function ChatView({
     initialComposerRef.current = readInitialComposer(chatId)
   }
   const [input, setInput] = useState(() => initialComposerRef.current.input)
+  const [sendFailure, setSendFailure] = useState(null)
   const [autoSendPendingDraft, setAutoSendPendingDraft] = useState(
     () => initialComposerRef.current.autoSend,
   )
@@ -1768,6 +1770,7 @@ export default function ChatView({
     const pin = opts.pin !== false  // default true
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
+    setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
     // after we clear it.
@@ -2018,14 +2021,7 @@ export default function ChatView({
         forgetQueuedPinIntent({ cid: queuedMsg.cid })
         inlineSteerPinIntentRef.current = null
         restoreComposerAfterFailedSend()
-        commitMessages(prev => [
-          ...prev,
-          {
-            role: 'assistant',
-            content: `Message didn’t send. I put it back in the composer so you can try again.`,
-            blocks: [],
-          },
-        ])
+        setSendFailure(sendFailureMessage(err, { online }))
       }
       return
     }
@@ -2180,13 +2176,9 @@ export default function ChatView({
         const next = [...prev]
         const idx = findUserIndexByCid(next, cid)
         if (idx >= 0) next.splice(idx, 1)
-        next.push({
-          role: 'assistant',
-          content: `Message didn’t send. I put it back in the composer so you can try again.`,
-          blocks: [],
-        })
         return next
       })
+      setSendFailure(sendFailureMessage(err, { online }))
       onStreamEndRef.current?.({ continues: false })
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —
@@ -2207,6 +2199,7 @@ export default function ChatView({
     clearFiles,
     restoreFiles,
     releaseFiles,
+    online,
   ])
 
   useEffect(() => {
@@ -3541,6 +3534,7 @@ export default function ChatView({
           canSteer={canSteer}
           canRequestSteer={canRequestSteer}
           offline={!online}
+          sendFailure={sendFailure}
           submissionBlocked={providerSwitching}
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}

@@ -5,6 +5,7 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
+import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
@@ -1044,16 +1045,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   }
 
   const version = versionQuery.data
-  // The short SHA of the served platform tree. Fall back to the image build
-  // sha and finally 'unknown'. First 7 chars, matching the shell version row.
-  const mobiusBuildSha = (() => {
-    const raw = version?.served_sha && version.served_sha !== 'unknown'
-      ? version.served_sha
-      : version?.sha && version.sha !== 'unknown'
-        ? version.sha
-        : null
-    return raw ? raw.slice(0, 7) : 'unknown'
-  })()
+  // Show the upstream commit the local platform is reconciled to as the
+  // user-facing version. A reconcile/rebase can create a local served commit
+  // whose SHA does not exist on GitHub even though it fully contains
+  // origin/main; keep that identity as a secondary diagnostic instead of
+  // presenting it as the published Möbius version.
+  const mobiusVersion = platformVersionIdentity(platform, version)
   // The commit date (YYYY-MM-DD) baked at build time, shown next to the sha as
   // a human "version · date". Null on a dev build that didn't stamp it.
   const buildDate = version?.build_date && version.build_date !== 'unknown'
@@ -1415,12 +1412,16 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                         ? 'New update available'
                         : 'Up to date'}
               </StatusDot>
-              {/* The honest build identity is the served platform commit when
-                  available, falling back to the image build stamp. Hidden on a
-                  dev build where no sha is stamped. */}
-              {mobiusBuildSha !== 'unknown' && (
+              {mobiusVersion.primarySha && (
                 <p className="settings__build">
-                  {mobiusBuildSha}{buildDate ? ` · ${buildDate}` : ''}
+                  {mobiusVersion.synced ? 'Synced to ' : 'Serving '}
+                  {mobiusVersion.primarySha}
+                  {!mobiusVersion.synced && buildDate ? ` · ${buildDate}` : ''}
+                </p>
+              )}
+              {mobiusVersion.localSha && (
+                <p className="settings__build settings__build--local">
+                  Serving local {mobiusVersion.localSha}
                 </p>
               )}
             </div>

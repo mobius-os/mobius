@@ -350,6 +350,11 @@
   color: var(--muted);
 }
 
+.settings__build--local {
+  margin-top: -3px;
+  opacity: 0.72;
+}
+
 .settings__btn--nowrap { white-space: nowrap; }
 
 .settings-bg-list {

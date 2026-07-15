@@ -42,6 +42,9 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
   monkeypatch.setattr(fw, "_CACHE_DIR", dirs["cache"])
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
+  # Keep build comparisons hermetic when the test happens to run in an image
+  # that has the production vendor tree mounted at /app/static/vendor.
+  monkeypatch.setattr(fw, "_copy_vendor", lambda _dest: None)
   yield dirs
   shutil.rmtree(frontend, ignore_errors=True)
 
@@ -245,11 +248,25 @@ def test_incomplete_watched_build_retries_before_warning(monkeypatch):
 
 def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):
   monkeypatch.setenv("CHOKIDAR_USEPOLLING", "0")
+  monkeypatch.delenv("CHOKIDAR_INTERVAL", raising=False)
+  monkeypatch.delenv("NODE_OPTIONS", raising=False)
   env = fw._vite_env()
   cmd = fw._vite_build_cmd(fw_dirs["staging"], watch=True)
 
   assert env["MOBIUS_VITE_CACHE"] == str(fw_dirs["cache"])
   assert env["TMPDIR"] == str(fw_dirs["tmp"])
   assert env["CHOKIDAR_USEPOLLING"] == "1"
+  assert env["CHOKIDAR_INTERVAL"] == "500"
+  assert "--max-old-space-size=512" in env["NODE_OPTIONS"]
   assert "--watch" in cmd
   assert ".dist-staging" in cmd
+
+
+def test_vite_env_preserves_operator_resource_overrides(fw_dirs, monkeypatch):
+  monkeypatch.setenv("CHOKIDAR_INTERVAL", "900")
+  monkeypatch.setenv("NODE_OPTIONS", "--trace-warnings --max_old_space_size=768")
+
+  env = fw._vite_env()
+
+  assert env["CHOKIDAR_INTERVAL"] == "900"
+  assert env["NODE_OPTIONS"] == "--trace-warnings --max_old_space_size=768"

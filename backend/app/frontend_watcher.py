@@ -215,7 +215,7 @@ def _ensure_node_modules() -> None:
 def _vite_env(
   cache_dir: Path | None = None, tmp_dir: Path | None = None,
 ) -> dict[str, str]:
-  """Return Vite env with cache/temp dirs and polling watch enabled."""
+  """Return Vite env with bounded memory and polling watch enabled."""
   cache_dir = cache_dir if cache_dir is not None else _CACHE_DIR
   tmp_dir = tmp_dir if tmp_dir is not None else _TMP_DIR
   cache_dir.mkdir(parents=True, exist_ok=True)
@@ -227,7 +227,15 @@ def _vite_env(
   # chokidar underneath, so force polling rather than reintroducing a Python
   # source watcher beside Vite's own watch mode.
   env["CHOKIDAR_USEPOLLING"] = "1"
-  env["CHOKIDAR_INTERVAL"] = env.get("CHOKIDAR_INTERVAL", "250")
+  # 500ms remains below the watcher's existing publish debounce, while halving
+  # polling churn across the large editable frontend tree.
+  env["CHOKIDAR_INTERVAL"] = env.get("CHOKIDAR_INTERVAL", "500")
+  # Rollup's warm watch graph is intentionally long-lived, but V8 otherwise
+  # expands toward the container limit and retains close to a gigabyte. Keep a
+  # predictable ceiling while preserving an explicit operator override.
+  node_options = env.get("NODE_OPTIONS", "")
+  if "--max-old-space-size" not in node_options and "--max_old_space_size" not in node_options:
+    env["NODE_OPTIONS"] = f"{node_options} --max-old-space-size=512".strip()
   return env
 
 

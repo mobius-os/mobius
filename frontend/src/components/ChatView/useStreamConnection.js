@@ -634,7 +634,11 @@ export default function useStreamConnection(chatId, {
         return
       }
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        const error = new Error(`HTTP ${res.status}`)
+        error.status = res.status
+        throw error
+      }
 
       setIsStreaming(true)
       wantsReconnectRef.current = true
@@ -1217,7 +1221,11 @@ export default function useStreamConnection(chatId, {
       } finally {
         clearTimeout(sendTimer)
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        const error = new Error(`HTTP ${res.status}`)
+        error.status = res.status
+        throw error
+      }
       const data = await res.json()
       responseData = data
       // Trust the backend's actual status, not the frontend's queueOnly
