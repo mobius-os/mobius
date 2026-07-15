@@ -144,6 +144,34 @@ test('tool_output still attaches to a running ordinary tool (non-regression)', (
   assert.equal(next[0].status, 'running', 'output does not close the lifecycle')
 })
 
+test('large live tool output keeps the metadata needed for lazy full fetch', () => {
+  const prev = [toolItem('Bash', { input: 'cat big.log' })]
+  const next = attachToolOutput(prev, 'bounded excerpt', {
+    tool_use_id: 'toolu_large',
+    output_truncated: true,
+    output_full_len: 120_000,
+    output_exit_code: 0,
+  })
+  assert.deepEqual(next[0], {
+    ...prev[0],
+    output: 'bounded excerpt',
+    tool_use_id: 'toolu_large',
+    output_truncated: true,
+    output_full_len: 120_000,
+    output_exit_code: 0,
+  })
+})
+
+test('live output metadata cannot replace a runner-assigned tool identity', () => {
+  const prev = [toolItem('Bash', { tool_use_id: 'toolu_original' })]
+  const next = attachToolOutput(prev, 'bounded excerpt', {
+    tool_use_id: 'toolu_late',
+    output_truncated: true,
+    output_full_len: 9_000,
+  })
+  assert.equal(next[0].tool_use_id, 'toolu_original')
+})
+
 test('tool_sources attach to the latest WebSearch tool block', () => {
   const sources = [{ title: 'Docs', url: 'https://example.com/docs' }]
   const prev = [

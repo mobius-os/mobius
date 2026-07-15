@@ -818,7 +818,7 @@ export default function useStreamConnection(chatId, {
             // item, or a question card that absorbed its tool block
             // (the post-answer "answers echo" output is swallowed
             // there; see streamReducers.js).
-            applyStreamItems(prev => attachToolOutput(prev, event.content))
+            applyStreamItems(prev => attachToolOutput(prev, event.content, event))
           } else if (event.type === 'tool_sources') {
             applyStreamItems(prev => attachToolSources(prev, event.sources))
           } else if (event.type === 'tool_end') {

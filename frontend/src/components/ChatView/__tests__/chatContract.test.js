@@ -313,6 +313,18 @@ test('mirrored constants stay in sync with useScrollMode.js (sync obligation)', 
   )
 })
 
+test('the transcript reveal safety deadline cannot be reset by message churn', () => {
+  const src = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
+  const deadline = src.indexOf('Absolute reveal deadline for this mounted chat')
+  const messagesEffect = src.indexOf('Single layout effect: spacer sizing')
+  assert.ok(deadline >= 0 && deadline < messagesEffect,
+    'the safety deadline is owned outside the messages-dependent layout effect')
+  assert.match(src.slice(deadline, messagesEffect), /\}, \[chatId\]\)/,
+    'the safety deadline resets only when the mounted chat changes')
+  assert.doesNotMatch(src.slice(messagesEffect), /clearTimeout\(safetyReveal\)/,
+    'message/layout cleanup cannot cancel and restart the absolute deadline')
+})
+
 test('every predicate id is registered in CHAT_CONTRACT (registry is the map)', () => {
   const registered = new Set(CHAT_CONTRACT.map(c => c.id))
   for (const c of CHAT_CONTRACT) {

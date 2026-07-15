@@ -144,11 +144,26 @@ function openToolLifecycleIndex(items) {
  * the answered card already shows the same content as the
  * "Your questions have been answered" echo.
  */
-export function attachToolOutput(prev, content) {
+export function attachToolOutput(prev, content, event = null) {
   const i = openToolLifecycleIndex(prev)
   if (i === -1 || prev[i].type === 'question') return prev
   const updated = [...prev]
-  updated[i] = { ...updated[i], output: content }
+  const block = { ...updated[i], output: content }
+  // The backend reduces large output before it reaches either SSE or
+  // persistence. Preserve the reduction metadata on the live item too, so an
+  // expanded tool can fetch its stashed full text immediately instead of
+  // treating the excerpt as complete until the turn settles and reloads.
+  if (event?.tool_use_id && !block.tool_use_id) {
+    block.tool_use_id = event.tool_use_id
+  }
+  if (event?.output_truncated) {
+    block.output_truncated = true
+    block.output_full_len = event.output_full_len
+    if (event.output_exit_code != null) {
+      block.output_exit_code = event.output_exit_code
+    }
+  }
+  updated[i] = block
   return updated
 }
 
