@@ -8,29 +8,28 @@
  *   1. shell_rebuilt DURING a streaming turn does NOT reload; the reload is held
  *      QUIETLY (shellReloadPolicy.shouldDeferShellReload) until idle — no toast,
  *      no popup — and the live turn keeps rendering.
- *   2. a shell_rebuilt that lands mid-turn reloads exactly ONCE at the idle
- *      boundary (the hold-until-idle recheck fires after the turn reaches
- *      `done`), carries the terminal transcript across that reload, and does
- *      not loop.
- *   3. shell_rebuilt delivered on the GLOBAL system stream while idle applies
- *      immediately (reloads once; the dedup window prevents a loop).
+ *   2. passive shell_rebuilt generations stay coalesced while an idle chat is
+ *      visible, so source-save bursts cannot interrupt a reader.
+ *   3. deliberate shell_apply_now still reloads exactly ONCE at the idle
+ *      boundary, captures the current anchor, carries the terminal transcript
+ *      across that reload, and does not loop.
  *   4. after a REAL SW update (a genuinely new, WAITING worker), an idle apply
  *      lands the page on the NEW generation — controlled by the registration's
- *      ACTIVE worker with nothing left waiting. Cases 1-3 assert apply-ONCE but
- *      never WHICH generation the page ends on; feature 207 is precisely an
- *      apply that reloads back onto the OUTGOING generation and sticks, so this
- *      case pins generation identity (the gap that let 207 ship).
+ *      ACTIVE worker with nothing left waiting. Deliberate-apply cases assert
+ *      apply-ONCE but never WHICH generation the page ends on; feature 207 is
+ *      precisely an apply that reloads onto the OUTGOING generation and sticks,
+ *      so this case pins generation identity (the gap that let 207 ship).
  *
  * SYNTHESIS NOTES — why these differ from a naive mock:
  *   - shell_rebuilt is SYSTEM-BUS-ONLY: the backend never fans it out to
  *     per-chat broadcasts (a chat reconnect replaying a stale rebuilt would
  *     fire a spurious apply), so the mock delivers it over /api/events/system.
  *     The mocked system route mirrors the REAL SystemBroadcast contract — live
- *     delivery, NO replay on reconnect (oneShotRebuiltSystemRoute) — which is
+ *     delivery, NO replay on reconnect (oneShotSystemEventRoute) — which is
  *     exactly why the client needs no dedup stamps, and why a mock that
  *     redelivered on every reconnect would (rightly) reload-loop.
- *   - The reload is HELD via a recheck timer, not an event-driven boundary, so
- *     the idle apply in case 2 lands a few seconds after `done` — the waits
+ *   - A deliberate reload is HELD via a recheck timer, not an event-driven
+ *     boundary, so the idle apply lands a few seconds after `done` — the waits
  *     account for that.
  *   - The mechanism is QUIET (the sibling's "Quiet shell maintenance popups"):
  *     there is no toast to assert. The observable is the reload counter.
@@ -72,7 +71,7 @@ function fulfillStream(body) {
 // replay on reconnect is the load-bearing property: with the sessionStorage
 // dedup stamps gone, single delivery is what prevents a reload loop, so a
 // mock that redelivered would fail these cases for the right reason.
-function oneShotRebuiltSystemRoute(armed) {
+function oneShotSystemEventRoute(eventType, armed) {
   let delivered = false
   return async (route) => {
     try {
@@ -84,7 +83,7 @@ function oneShotRebuiltSystemRoute(armed) {
         if (!delivered) {
           await route.fulfill(fulfillStream(sse([
             { type: 'system_stream_open' },
-            { type: 'shell_rebuilt' },
+            { type: eventType },
           ])))
           delivered = true
           return
@@ -165,7 +164,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     ])
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(streamingBody)),
-      systemRoute: oneShotRebuiltSystemRoute(armed),
+      systemRoute: oneShotSystemEventRoute('shell_rebuilt', armed),
     })
     await gotoEmptyChat(page)
     await resetLoadCount(page)
@@ -183,8 +182,8 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     expect(await loadCount(page)).toBe(0)
   })
 
-  test('a mid-turn shell_rebuilt applies exactly once at the turn-end idle boundary', async ({ page }) => {
-    // shell_rebuilt arrives on the system stream while the turn streams →
+  test('a deliberate mid-turn shell_apply_now applies exactly once at the turn-end idle boundary', async ({ page }) => {
+    // shell_apply_now arrives on the system stream while the turn streams →
     // defer; the chat stream's `done` (held back so the rebuilt lands
     // genuinely mid-turn) then empties the streaming set → the hold-until-idle
     // recheck applies → exactly one reload. No loop: the post-reload system
@@ -234,10 +233,15 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
           { type: 'done' },
         ])))
       },
-      systemRoute: oneShotRebuiltSystemRoute(armed),
+      systemRoute: oneShotSystemEventRoute('shell_apply_now', armed),
     })
     await gotoEmptyChat(page)
     await resetLoadCount(page)
+    await page.evaluate(() => {
+      window.addEventListener('mobius:before-shell-reload', () => {
+        sessionStorage.setItem('__before_shell_reload_seen', '1')
+      }, { once: true })
+    })
 
     await sendMessage(page, 'rebuild the shell')
     // The send marks the chat streaming synchronously (onMessageStart), so
@@ -253,14 +257,34 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     )
     await expect(page.getByText('shell rebuilt')).toBeVisible({ timeout: 1500 })
     releasePostReloadChatRead()
+    expect(await page.evaluate(() => (
+      sessionStorage.getItem('__before_shell_reload_seen')
+    ))).toBe('1')
     // And does NOT loop: the reloaded page's system reconnect gets only the
     // hello (no replay), so nothing re-applies.
     await page.waitForTimeout(2000)
     expect(await loadCount(page)).toBe(1)
   })
 
-  test('shell_rebuilt on the global system stream while idle applies immediately', async ({ page }) => {
-    // No turn is streaming; the global system stream delivers shell_rebuilt at
+  test('passive shell_rebuilt stays queued while an idle chat is visible', async ({ page }) => {
+    let armRebuilt
+    const armed = new Promise(resolve => { armRebuilt = resolve })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemRoute: oneShotSystemEventRoute('shell_rebuilt', armed),
+    })
+    await gotoEmptyChat(page)
+    await resetLoadCount(page)
+
+    armRebuilt()
+    // Wait past the six-second recheck: a passive generation must remain
+    // coalesced for as long as this idle chat is still the visible surface.
+    await page.waitForTimeout(7000)
+    expect(await loadCount(page)).toBe(0)
+  })
+
+  test('shell_apply_now on the global system stream while idle applies immediately', async ({ page }) => {
+    // No turn is streaming; the global system stream delivers shell_apply_now at
     // load. Idle → immediate apply → one reload. Loop prevention is single
     // delivery itself: the post-reload reconnect gets no replay, exactly like
     // the real SystemBroadcast (the old sessionStorage dedup is gone).
@@ -269,7 +293,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // makes it #2. No pre-reset — the base is the initial load.
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
-      systemRoute: oneShotRebuiltSystemRoute(Promise.resolve()),
+      systemRoute: oneShotSystemEventRoute('shell_apply_now', Promise.resolve()),
     })
 
     await page.waitForFunction(

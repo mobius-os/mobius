@@ -32,6 +32,7 @@ import {
 } from './workspacePlacement.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
 import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
+import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
   freshChatBuiltApps,
   freshAppIds,
@@ -137,6 +138,9 @@ export default function Shell() {
     })
   }, [])
   const pendingShellReloadRef = useRef(false)
+  // False wins when several requests coalesce: an explicit shell_apply_now
+  // promotes an already-pending passive watcher rebuild to deliberate apply.
+  const pendingShellReloadPassiveRef = useRef(false)
   const shellReloadTimerRef = useRef(null)
   const lastShellInteractionAtRef = useRef(0)
   // Guards the once-per-mount deferred shell-update pickup effect below.
@@ -168,27 +172,33 @@ export default function Shell() {
     }
   }
 
-  async function performShellReload() {
+  async function performShellReload({ passive = false } = {}) {
     let stalePrecache = false
     try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
     if (stalePrecache && navigator.onLine === false) {
       // An offline reload is safe only while the existing precache remains
       // intact; purging Workbox offline can strand an installed PWA on the
       // fallback page, so stale recovery waits for an online idle boundary.
-      deferShellReload()
+      deferShellReload({ passive })
       return
     }
     pendingShellReloadRef.current = false
+    pendingShellReloadPassiveRef.current = false
     if (shellReloadTimerRef.current) {
       clearTimeout(shellReloadTimerRef.current)
       shellReloadTimerRef.current = null
     }
+    // Capture view-owned transient state synchronously, before the
+    // service-worker handoff can let layout/data change underneath it.
+    // ChatView uses this to persist the exact visible message anchor.
+    window.dispatchEvent(new Event(BEFORE_SHELL_RELOAD_EVENT))
     // ChatView promotes terminal stream items into the in-memory query cache
     // synchronously before it marks the shell idle. Normal IndexedDB writes
     // are throttled, so a deferred rebuild can otherwise reload between those
     // two phases and hydrate the previous partial. Flush the exact terminal
     // cache as the reload handoff; the backend remains authoritative on the
-    // immediate background revalidation.
+    // immediate background revalidation. This follows the synchronous event
+    // above so view-owned anchors are captured before the first await.
     try { await flushPersistedQueryCache(queryClient) } catch { /* best-effort */ }
     sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
     // Match the manifest scope so the post-reload page lands inside
@@ -249,12 +259,13 @@ export default function Shell() {
     }
   }
 
-  function shellReloadWouldDisruptUser() {
+  function shellReloadWouldDisruptUser({ passive = false } = {}) {
     return shouldDeferShellReload({
       activeElement: document.activeElement,
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
       streamingChatIds: streamingChatIdsRef.current,
+      passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
       lastUserInteractionAt: lastShellInteractionAtRef.current,
       visibilityState: document.visibilityState,
@@ -266,24 +277,28 @@ export default function Shell() {
     shellReloadTimerRef.current = setTimeout(() => {
       shellReloadTimerRef.current = null
       if (!pendingShellReloadRef.current) return
-      if (shellReloadWouldDisruptUser()) {
+      const passive = pendingShellReloadPassiveRef.current
+      if (shellReloadWouldDisruptUser({ passive })) {
         scheduleShellReloadCheck()
       } else {
-        performShellReload()
+        performShellReload({ passive })
       }
     }, SHELL_RELOAD_RECHECK_MS)
   }
 
-  function deferShellReload() {
+  function deferShellReload({ passive = false } = {}) {
+    pendingShellReloadPassiveRef.current = pendingShellReloadRef.current
+      ? (pendingShellReloadPassiveRef.current && passive)
+      : passive
     pendingShellReloadRef.current = true
     scheduleShellReloadCheck()
   }
 
-  function requestShellReload() {
-    if (shellReloadWouldDisruptUser()) {
-      deferShellReload()
+  function requestShellReload({ passive = false } = {}) {
+    if (shellReloadWouldDisruptUser({ passive })) {
+      deferShellReload({ passive })
     } else {
-      performShellReload()
+      performShellReload({ passive })
     }
   }
 
@@ -1008,7 +1023,7 @@ export default function Shell() {
       shellUpdatePickupRef.current = true
       // requestShellReload reads streaming/view state from refs at call time, so
       // the captured closure is fresh even though it isn't in this effect's deps.
-      requestShellReload()
+      requestShellReload({ passive: true })
     })()
     return () => { cancelled = true }
   }, [chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
@@ -1087,8 +1102,10 @@ export default function Shell() {
     } else if (ev.type === 'shell_rebuilt' || ev.type === 'shell_apply_now') {
       // A new shell generation is available. `shell_rebuilt` fires automatically
       // when the frontend rebuilds; `shell_apply_now` is the agent's EXPLICIT
-      // "look now" signal (design §1.5). Both carry identical client policy —
-      // apply if idle, else hold — so they share this branch.
+      // "look now" signal (design §1.5). A watcher rebuild is passive and
+      // coalesces while an idle chat is visible; apply-now is deliberate and
+      // uses the ordinary apply-on-idle policy. This prevents source-save
+      // bursts from repeatedly refreshing a transcript someone is reading.
       //
       // These are system-bus-only (frontend_watcher / notify skip the per-chat
       // fan-out) and SystemBroadcast has no replay, so each reaches the Shell
@@ -1103,7 +1120,7 @@ export default function Shell() {
       // leash rides the same moment: performShellReload posts SKIP_WAITING to
       // the waiting worker so the SW generation flips exactly when the page
       // reloads.
-      requestShellReload()
+      requestShellReload({ passive: ev.type === 'shell_rebuilt' })
     } else if (ev.type === 'shell_rebuild_failed') {
       // System-bus-only, delivered once — no dedup stamp.
       showToast(shellRebuildFailureMessage(ev), {
