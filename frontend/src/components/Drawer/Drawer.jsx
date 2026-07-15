@@ -570,6 +570,7 @@ export default function Drawer({
           <div className="drawer__group drawer__group--bottom">
             <button
               className={`drawer__item ${activeView === 'settings' ? 'drawer__item--active' : ''}`}
+              aria-label="Settings"
               onClick={onSettings}
             >
               <SettingsCog width={16} height={16} aria-hidden="true" style={{ flexShrink: 0 }} />

@@ -114,7 +114,7 @@ test.describe('Tabs', () => {
     await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 3000 })
 
     // Tap the chat tab (the one that is NOT the app) — back to the chat.
-    await page.locator('.shell__tab:not(:has-text("Demo App")) .shell__tab-open').click()
+    await page.getByRole('button', { name: chat.title, exact: true }).click()
     await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
 
     // Close the app tab — one fewer tab, strip stays.
@@ -161,7 +161,7 @@ test.describe('Tabs', () => {
     // Switch to the chat tab (wait for it to settle), then back to the app tab
     // (string id → Number()). Waiting between taps keeps the sequence
     // deterministic under multi-worker load.
-    await page.locator('.shell__tab:not(:has-text("Demo App")) .shell__tab-open').click()
+    await page.getByRole('button', { name: chat.title, exact: true }).click()
     await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
     await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open').click()
     await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 3000 })
