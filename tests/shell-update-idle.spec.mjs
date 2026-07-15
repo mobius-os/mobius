@@ -396,6 +396,12 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       })
     })
 
+    // The synthetic gen B changes only a trailing sw.js comment, so its
+    // advertised page bundle is intentionally identical to gen A. A real shell
+    // publish changes that bundle hash and the boot check sets this recovery
+    // flag; seed the same public signal so this case exercises the resulting
+    // new-document handoff rather than an indistinguishable no-op generation.
+    await page.evaluate(() => sessionStorage.setItem('sw-stale-precache-pending', '1'))
     await resetLoadCount(page)
     // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
     // re-arms the idle apply — the recovery path a client hits when a newer
