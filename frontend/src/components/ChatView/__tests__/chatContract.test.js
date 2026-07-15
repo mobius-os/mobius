@@ -43,6 +43,29 @@ test('pin registry summary matches owner-authoritative R2 geometry', () => {
   assert.doesNotMatch(rule.summary, /gesture-entered auto-scroll/)
 })
 
+test('ChatView only consumes methods returned by the scroll controller', () => {
+  const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  const scrollController = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
+
+  const useEnd = chatView.indexOf('} = useScrollMode({')
+  const useStart = chatView.lastIndexOf('const {', useEnd)
+  assert.ok(useStart >= 0 && useEnd > useStart, 'ChatView useScrollMode destructure exists')
+
+  const returnStart = scrollController.lastIndexOf('\n  return {')
+  const returnEnd = scrollController.indexOf('\n  }', returnStart)
+  assert.ok(returnStart >= 0 && returnEnd > returnStart,
+    'useScrollMode has a final returned controller object')
+
+  const identifiers = source => [...source.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*,?\s*$/gm)]
+    .map(match => match[1])
+  const consumed = identifiers(chatView.slice(useStart + 'const {'.length, useEnd))
+  const returned = new Set(identifiers(scrollController.slice(returnStart, returnEnd)))
+  const missing = consumed.filter(name => !returned.has(name))
+
+  assert.deepEqual(missing, [],
+    `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
+})
+
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {
   const s = snapshotChatUX(pinnedEnv)
   assert.equal(s.scrollTop, 996)
