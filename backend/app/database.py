@@ -571,6 +571,13 @@ def run_migrations(eng) -> None:
         "ALTER TABLE owner ADD COLUMN provider VARCHAR(32) "
         "NOT NULL DEFAULT 'claude'"
       )
+    if "auto_resume_on_limit_default" not in owner_cols:
+      # The initial choice is on. Later chat-level selections update this
+      # owner seed so new chats inherit the most recently chosen value.
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN auto_resume_on_limit_default BOOLEAN "
+        "NOT NULL DEFAULT TRUE"
+      )
     if "model_prefs_json" not in owner_cols:
       # Nullable JSON blob holding the owner's model-picker
       # preferences (e.g. hidden model IDs). Null = "show

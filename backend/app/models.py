@@ -34,6 +34,12 @@ class Owner(Base):
   hashed_password = Column(String(255), nullable=False)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
+  # Default provider-limit recovery policy for newly-created chats. Each chat
+  # stores its own copy; changing a chat's switch updates this seed for the
+  # next chat without rewriting any existing conversation.
+  auto_resume_on_limit_default = Column(
+    Boolean, nullable=False, default=True, server_default=true()
+  )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
   # The picker filters out any registry entry whose ID appears in
