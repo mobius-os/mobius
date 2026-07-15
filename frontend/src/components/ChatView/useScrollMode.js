@@ -288,15 +288,23 @@ export function isNearScrollBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
 
 
 /** visualViewport resize/scroll is a browser viewport clamp, not a user
- *  reading gesture, so it must never CREATE FOLLOW_BOTTOM. Existing follow
- *  intent may survive while it remains at the tail; PIN/hold modes freeze to
- *  the current anchor when possible. Only the gesture-gated scroll handler may
- *  enter FOLLOW_BOTTOM. */
+ *  reading gesture, so it must never CREATE FOLLOW_BOTTOM or retire a valid
+ *  PIN_USER_MSG. Existing follow intent may survive while it remains at the
+ *  tail; an ordinary hold freezes to the current anchor when possible.
+ *
+ *  PIN_USER_MSG must keep its identity through the whole keyboard cycle. The
+ *  open keyboard deliberately leaves the permanent full-height reservation in
+ *  place, so the pinned scrollTop is no longer at the physical bottom while
+ *  the viewport is short. If keyboard-close used that temporary geometry to
+ *  demote PIN_USER_MSG to ANCHOR_AT, a short reply's terminal live-to-settled
+ *  height change could clamp scrollTop with no pin left to restore it. Only the
+ *  gesture-gated scroll handler may retire a pin: a real reader scroll stamps
+ *  FOLLOW_BOTTOM or ANCHOR_AT before any viewport event sees the mode. */
 export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = null) {
+  if (mode?.kind === 'PIN_USER_MSG') return mode
   if (mode?.kind === 'FOLLOW_BOTTOM') {
     return wasNearScrollBottom ? mode : (anchorMode || mode)
   }
-  if (mode?.kind === 'PIN_USER_MSG' && anchorMode) return anchorMode
   return mode
 }
 
@@ -394,6 +402,7 @@ export function modeForChatExit(scrollEl) {
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
  *   userScrollIntentVersionRef: React.MutableRefObject<number>,
  *   revealed: boolean,
+ *   reapplyPinnedMode: () => void,
  * }}
  */
 export default function useScrollMode({
@@ -845,11 +854,25 @@ export default function useScrollMode({
     }
   }, [scrollRef])
 
+  // Called from ChatView's terminal-promotion layout effect, after React has
+  // committed the settled assistant markup. Keeping this synchronous is the
+  // handshake: a requestAnimationFrame scheduled from the stream callback can
+  // run before a concurrent React commit and lose the final scroll-range
+  // clamp. The strict mode check means a reader gesture that retired the pin
+  // before completion always wins.
+  const reapplyPinnedMode = useCallback(() => {
+    const scrollEl = scrollRef.current
+    if (!scrollEl || modeRef.current?.kind !== 'PIN_USER_MSG') return
+    applyMode(scrollEl, modeRef.current)
+    persistMode()
+  }, [chatId, scrollRef])
+
   return {
     modeRef,
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
     reapplyActiveMode,
+    reapplyPinnedMode,
   }
 }

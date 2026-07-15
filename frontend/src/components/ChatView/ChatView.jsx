@@ -372,6 +372,9 @@ export default function ChatView({
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
   const [sending, setSending] = useState(() => !!cached?.running)
+  // Terminal live-to-settled commits bump this sequence. The corresponding
+  // layout effect re-applies a surviving prompt pin against the committed DOM.
+  const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
   // Server-hydrated running marker. `sending` is the local UI flag and
   // `isStreaming` belongs to the SSE hook; both can briefly be false across
   // app/chat remounts or reconnect windows even though the backend still has
@@ -772,6 +775,7 @@ export default function ChatView({
     userScrollIntentVersionRef,
     revealed,
     reapplyActiveMode,
+    reapplyPinnedMode,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -1085,6 +1089,7 @@ export default function ChatView({
         if (pendingQueue.pendingMessagesRef.current.length > 0) {
           fetchMessages({ force: true })
         }
+        setPinnedSettleSeq(seq => seq + 1)
       }
       onStreamEnd?.({ continues })
     },
@@ -2761,6 +2766,16 @@ export default function ChatView({
     if (catchUpCommitSeq === 0) return
     reapplyActiveMode()
   }, [catchUpCommitSeq, reapplyActiveMode])
+
+  // The terminal stream callback promotes live content and bumps this sequence
+  // in the same React batch. A layout effect therefore runs only after the
+  // settled message DOM is committed, before paint. That is the durable pin
+  // handshake: scheduling from the callback itself can race a concurrent
+  // commit and restore against the old live geometry.
+  useLayoutEffect(() => {
+    if (pinnedSettleSeq === 0) return
+    reapplyPinnedMode()
+  }, [pinnedSettleSeq, reapplyPinnedMode])
 
   // Composer action state: queued work is also non-idle from the user's point
   // of view. Even if we momentarily don't have a live stream attached yet, a

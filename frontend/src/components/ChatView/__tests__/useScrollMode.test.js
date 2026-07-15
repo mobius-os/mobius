@@ -221,6 +221,17 @@ test('viewport resize never turns a pin into auto-scroll without a gesture', () 
   )
 })
 
+test('keyboard close preserves pin identity even when keyboard-open geometry is away from the physical bottom', () => {
+  const pin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
+  const temporaryAnchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: 4 }
+
+  assert.equal(
+    modeForViewportChange(pin, false, temporaryAnchor),
+    pin,
+    'only a real reader scroll may retire PIN_USER_MSG',
+  )
+})
+
 test('viewport resize in reserved spacer anchors instead of snapping to bottom', () => {
   const staleFollow = { kind: 'FOLLOW_BOTTOM' }
   const anchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: -240 }
