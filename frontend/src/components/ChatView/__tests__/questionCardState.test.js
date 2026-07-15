@@ -29,4 +29,6 @@ test('question card css has no stale styling hook', () => {
     'stale question styling should not come back')
   assert.doesNotMatch(css, /\.qcard__status\s*\{[\s\S]*?\}/,
     'expiration status styling should not come back')
+  assert.match(css, /\.qcard__input:disabled\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
+    'a submitted custom answer should visibly gray out in every browser')
 })
