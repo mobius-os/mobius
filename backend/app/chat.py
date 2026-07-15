@@ -4287,6 +4287,27 @@ async def _run_chat_impl_with_db(
     _with_system_app_prompts(custom_prompt) if custom_prompt
     else _read_skill_text()
   )
+  # A close() below detaches chat_row. Precompute the only provider-time value
+  # that still reads it (the bounded Claude fallback for a missing CLI
+  # transcript) while the Session can refresh attributes expired by the
+  # first-send settings commit.
+  resumed_context_fallback = (
+    _build_resumed_context(chat_row)
+    if provider.name == "Claude Code" and session_id
+    else None
+  )
+
+  # Everything needed to launch the provider is now detached or copied into
+  # plain values. Return this turn's checked-out connection before the
+  # potentially hours-long SDK await. A Session may be reused after close(),
+  # so the short terminal/session-id paths below can lazily check out a fresh
+  # connection if they actually need one. Keeping the initial checkout here
+  # pinned one connection per concurrent agent turn; at 15 active turns that
+  # exhausted SQLAlchemy's default 5 + 10 pool, blocked ordinary chat/storage
+  # requests for 30 seconds, and also starved the single-writer actor that must
+  # persist those turns. The SDK runners' early session-id persistence already
+  # goes through chat_writer and does not use this request-local Session.
+  db.close()
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
@@ -4424,7 +4445,7 @@ async def _run_chat_impl_with_db(
         "starting fresh and reseeding from DB transcript",
         session_id, chat_id,
       )
-      resumed_block = _build_resumed_context(chat_row)
+      resumed_block = resumed_context_fallback
       if resumed_block:
         if is_slash_command:
           user_message = f"{user_message}\n\n{resumed_block}"
