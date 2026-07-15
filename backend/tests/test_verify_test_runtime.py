@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _version(**overrides):
   value = {
+    "test_runtime": True,
     "sha": SHA,
     "serving_source": "platform",
     "served_sha": SHA,
@@ -46,6 +47,11 @@ def test_rejects_baked_or_mismatched_runtime():
   assert any("sha=" in error for error in errors)
 
 
+def test_rejects_runtime_without_explicit_test_identity():
+  errors = validate_runtime(_version(test_runtime=False), SHA, SHA)
+  assert any("test_runtime" in error for error in errors)
+
+
 def test_rejects_checkout_that_differs_from_ci_sha():
   other = "b" * 40
   errors = validate_runtime(_version(), SHA, other)
@@ -78,15 +84,6 @@ def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
   assert 'PYTHONPYCACHEPREFIX="$PP_TMP/pycache"' in hook
 
 
-def test_destructive_browser_setup_requires_test_runtime_identity():
-  setup = (ROOT / "tests" / "auth.setup.mjs").read_text(encoding="utf-8")
-  version_probe = "request.get(`${BASE}/api/version`"
-  first_mutation = "request.post(`${BASE}/api/auth/setup`"
-  assert version_probe in setup
-  assert "version?.test_runtime !== true" in setup
-  assert setup.index(version_probe) < setup.index(first_mutation)
-
-
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -98,3 +95,44 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
     'if [ "$_use_platform" -eq 1 ] && '
     '[ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
   ) in entrypoint
+
+
+def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
+  setup = (ROOT / "tests" / "auth.setup.mjs").read_text(encoding="utf-8")
+  marker_probe = 'request.get(`${BASE}/api/version`'
+  auth_write = 'request.post(`${BASE}/api/auth/setup`'
+  assert marker_probe in setup
+  assert "version?.test_runtime !== true" in setup
+  assert setup.index(marker_probe) < setup.index(auth_write)
+  assert 'request.get(`${BASE}/api/chats`' not in setup
+  assert 'request.delete(`${BASE}/api/chats/' not in setup
+
+
+def test_chat_cleanup_uses_registered_ids_without_account_listing():
+  tracker = (ROOT / "tests" / "_chatTracker.mjs").read_text(encoding="utf-8")
+  assert "createdChatIdsByWorker" in tracker
+  assert "registerCreatedChats" in tracker
+  assert "Promise.all(ids.map" in tracker
+  assert 'request.get(`${BASE}/api/chats`' not in tracker
+
+
+def test_local_browser_e2e_is_explicit_and_disposable():
+  config = (ROOT / "playwright.config.mjs").read_text(encoding="utf-8")
+  runner = (ROOT / "scripts" / "playwright-local.sh").read_text(encoding="utf-8")
+  assert "MOBIUS_LOCAL_E2E" in config
+  assert "MOBIUS_AUTH_FILE" in config
+  assert "--allow-local-e2e" in runner
+  assert "down -v --remove-orphans" in runner
+  assert 'value.get("test_runtime") is not True' in runner
+  assert 'MOBIUS_AUTH_FILE="$auth_file"' in runner
+  assert 'npx playwright test "$@" --workers=1' in runner
+
+
+def test_hosted_e2e_runs_for_prs_and_long_lived_branches_only():
+  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+    encoding="utf-8"
+  )
+  e2e = workflow.split("\n  e2e:\n", 1)[1]
+  assert "github.event_name == 'pull_request'" in e2e
+  assert "github.ref == 'refs/heads/main'" in e2e
+  assert "refs/heads/integration/" in e2e
