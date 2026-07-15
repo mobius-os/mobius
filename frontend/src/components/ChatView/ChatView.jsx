@@ -3635,21 +3635,6 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
-        {buildPhaseRail.length > 0 && (
-          <div className="chat__build-rail" role="group" aria-label="Build progress">
-            {buildPhaseRail.map(phase => (
-              <span
-                key={phase.ts}
-                className={`chat__build-phase${
-                  phase.current ? ' chat__build-phase--current' : ''
-                }`}
-              >
-                <span className="chat__build-phase-dot" aria-hidden="true" />
-                <span className="chat__build-phase-label">{phase.label}</span>
-              </span>
-            ))}
-          </div>
-        )}
         {openAppCtas.length > 0 && (
           <div className="chat__open-app">
             {openAppCtas.map(({ app, vm }) => {
@@ -3693,6 +3678,21 @@ export default function ChatView({
           onRetry={retry}
         />
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
+        {buildPhaseRail.length > 0 && (
+          <div className="chat__build-rail" role="group" aria-label="Build progress">
+            {buildPhaseRail.map(phase => (
+              <span
+                key={phase.ts}
+                className={`chat__build-phase${
+                  phase.current ? ' chat__build-phase--current' : ''
+                }`}
+              >
+                <span className="chat__build-phase-dot" aria-hidden="true" />
+                <span className="chat__build-phase-label">{phase.label}</span>
+              </span>
+            ))}
+          </div>
+        )}
         <ChatInputBar
           input={input}
           onInputChange={handleComposerInputChange}
