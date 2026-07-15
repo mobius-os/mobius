@@ -101,35 +101,30 @@ AGENT_TOKEN="$AGENT_TOKEN" python3 -c 'import json,os; print("localStorage.setIt
 # Now navigate to the actual target route, authenticated.
 agent-browser open "${API_BASE_URL}${ROUTE}" >/dev/null
 
-# Wait on a SIGNAL, not a fixed sleep: the page is authenticated once
-# the login form's password field is gone. This holds for both the
-# shell (LoginForm unmounts after token resolves) and the standalone
-# app page (it redirects to login only when the token is missing — with
-# a token it renders the app, never the password field). Bounded so a
-# genuinely-stuck page fails loudly instead of hanging.
+# Give the target a bounded render window. The missing password field is only a
+# settling signal — token presence mounts Shell before the server has accepted
+# it — so the protected request below remains the authoritative auth check.
 agent-browser wait --fn \
   "!document.querySelector('input[type=password]')" >/dev/null 2>&1 || \
   agent-browser wait 1500 >/dev/null
-
-# The readiness wait above is deliberately bounded, but its old fallback then
-# continued unconditionally. If the token was rejected or expired, the helper
-# silently captured the login wall and reported success — indistinguishable
-# from a real product screenshot until the agent inspected the PNG. Verify the
-# post-navigation auth state explicitly and fail before writing any image.
-# Never print the token itself; only test that it survived the shell's 401
-# interceptor and that the login form is absent.
-AUTH_OK="$(agent-browser eval \
-  "!!localStorage.getItem('token') && !document.querySelector('input[type=password]')" \
-  2>/dev/null || true)"
-if [ "$AUTH_OK" != "true" ]; then
-  echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
-  exit 1
-fi
 
 # Dismiss the PWA install banner if it surfaces — it covers the bottom
 # of the view and would distract from the actual page.
 agent-browser find text "Not now" click >/dev/null 2>&1 || true
 agent-browser wait 300 >/dev/null
+
+# Token presence alone is not proof of authentication: App mounts Shell from
+# localStorage immediately, then a later protected request can reject the token,
+# clear it, and reload onto LoginForm. Verify the token with a protected request
+# at the FINAL capture boundary, after the settle/banner work above. The token is
+# read inside the page and never appears in argv or output.
+AUTH_OK="$(agent-browser eval \
+  "(async () => { const token = localStorage.getItem('token'); if (!token || document.querySelector('input[type=password]')) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !document.querySelector('input[type=password]'); } catch { return false; } })()" \
+  2>/dev/null || true)"
+if [ "$AUTH_OK" != "true" ]; then
+  echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
+  exit 1
+fi
 
 agent-browser screenshot "${OUT}" >/dev/null
 echo "${OUT}"

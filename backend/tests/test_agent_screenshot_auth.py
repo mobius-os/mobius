@@ -13,6 +13,7 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   browser = tmp_path / "agent-browser"
   browser.write_text(
     "#!/bin/sh\n"
+    "printf '%s\\n' \"$*\" >> \"$FAKE_BROWSER_LOG\"\n"
     "case \"$1\" in\n"
     "  eval)\n"
     "    if [ \"$2\" = \"--stdin\" ]; then cat >/dev/null; exit 0; fi\n"
@@ -30,9 +31,10 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   return browser, marker
 
 
-def _run_helper(tmp_path: Path, *, auth_ok: bool) -> tuple[subprocess.CompletedProcess, Path, Path]:
+def _run_helper(tmp_path: Path, *, auth_ok: bool) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   output = tmp_path / "shot.png"
+  browser_log = tmp_path / "browser.log"
   env = {
     **os.environ,
     "PATH": f"{tmp_path}:{os.environ['PATH']}",
@@ -41,6 +43,7 @@ def _run_helper(tmp_path: Path, *, auth_ok: bool) -> tuple[subprocess.CompletedP
     "VIEWPORT_WIDTH": "412",
     "VIEWPORT_HEIGHT": "915",
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
+    "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_SCREENSHOT_MARKER": str(marker),
   }
   result = subprocess.run(
@@ -50,21 +53,29 @@ def _run_helper(tmp_path: Path, *, auth_ok: bool) -> tuple[subprocess.CompletedP
     capture_output=True,
     check=False,
   )
-  return result, output, marker
+  return result, output, marker, browser_log
 
 
-def test_helper_refuses_to_capture_login_wall(tmp_path: Path):
-  result, output, marker = _run_helper(tmp_path, auth_ok=False)
+def test_helper_refuses_to_capture_when_protected_request_rejects_token(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=False)
 
   assert result.returncode != 0
   assert "authentication failed" in result.stderr
+  assert "/api/chats" in browser_log.read_text(encoding="utf-8")
   assert not output.exists()
   assert not marker.exists()
 
 
 def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
-  result, output, marker = _run_helper(tmp_path, auth_ok=True)
+  result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=True)
 
   assert result.returncode == 0, result.stderr
   assert output.exists()
   assert marker.exists()
+
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  settle_index = commands.index("wait 300")
+  auth_index = next(i for i, command in enumerate(commands) if "/api/chats" in command)
+  screenshot_index = next(i for i, command in enumerate(commands) if command.startswith("screenshot "))
+  assert settle_index < auth_index < screenshot_index
+  assert all("test-token" not in command for command in commands)
