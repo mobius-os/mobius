@@ -109,6 +109,99 @@ def test_fresh_send_response_includes_stored_user_message(
   assert chat.messages == [body["message"]]
 
 
+def test_retry_of_durable_message_is_acknowledged_without_new_turn(
+  client, auth, chat, db, monkeypatch,
+):
+  calls = []
+
+  async def _record_run_chat(*args, **kwargs):
+    calls.append((args, kwargs))
+
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", _record_run_chat)
+  stored = {
+    "role": "user",
+    "content": "build forge",
+    "ts": 123,
+    "cid": "cid-retry",
+  }
+  chat.messages = [stored]
+  db.commit()
+
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "build forge", "cid": "cid-retry"},
+    headers=auth,
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json() == {
+    "status": "duplicate",
+    "message": stored,
+    "running": False,
+  }
+  db.refresh(chat)
+  assert chat.messages == [stored]
+  assert chat.run_status is None
+  assert calls == []
+
+
+def test_retry_of_durable_message_preserves_a_later_running_turn(
+  client, auth, chat, db, monkeypatch,
+):
+  stored = {
+    "role": "user",
+    "content": "first request",
+    "ts": 123,
+    "cid": "cid-retry",
+  }
+  chat.messages = [stored]
+  db.commit()
+  monkeypatch.setattr(
+    "app.routes.chats_stream.is_chat_running", lambda _chat_id: True,
+  )
+
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "first request", "cid": "cid-retry"},
+    headers=auth,
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "duplicate"
+  assert response.json()["running"] is True
+  db.refresh(chat)
+  assert chat.messages == [stored]
+
+
+def test_retry_of_pending_message_returns_its_existing_queue_position(
+  client, auth, chat, db, monkeypatch,
+):
+  first = {
+    "role": "user", "content": "first", "ts": 10, "cid": "cid-first",
+  }
+  retry = {
+    "role": "user", "content": "second", "ts": 11, "cid": "cid-retry",
+  }
+  chat.pending_messages = [first, retry]
+  db.commit()
+  monkeypatch.setattr(
+    "app.routes.chats_stream.is_chat_running", lambda _chat_id: True,
+  )
+
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "second", "cid": "cid-retry"},
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert response.json()["position"] == 2
+  assert response.json()["pending_message"] == retry
+  db.refresh(chat)
+  assert chat.pending_messages == [first, retry]
+
+
 def test_fresh_send_returns_503_when_writer_is_unavailable(client, auth, chat):
   from app.chat_writer import get_writer
 

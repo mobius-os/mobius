@@ -573,6 +573,36 @@ def test_start_turn_is_atomic(actor):
   assert chat["run_started_at"] is not None
 
 
+def test_start_turn_retry_after_completion_is_idempotent(actor):
+  """A lost response retried after the run settled must not wake the agent."""
+  original = {
+    "role": "user", "content": "build it", "ts": 5, "cid": "cid-stable",
+  }
+  _seed_chat(messages=[original], session_id="sess-x")
+
+  result = _await(actor.submit(
+    StartTurn(
+      chat_id="c1",
+      run_token="retry-run",
+      user_msg={
+        "role": "user", "content": "build it", "ts": 99,
+        "cid": "cid-stable",
+      },
+      title_source="build it",
+      default_provider="codex",
+    )
+  ))
+
+  assert result["duplicate"] is True
+  assert result["duplicate_location"] == "transcript"
+  assert result["message"] == original
+  chat = _load_chat()
+  assert chat["messages"] == [original]
+  assert chat["run_status"] is None
+  assert chat["run_started_at"] is None
+  assert _load_run("retry-run") is None
+
+
 def test_persist_session_id_updates_chat_without_touching_transcript(actor):
   """Provider session ids are persisted before terminal turn completion."""
   _seed_chat(

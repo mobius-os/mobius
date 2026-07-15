@@ -1601,6 +1601,38 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("StartTurn: chat not found or deleted")
     existing = list(chat.messages or [])
+    pending = list(chat.pending_messages or [])
+    incoming_cid = cid_of(cmd.user_msg)
+    if incoming_cid is not None:
+      # The transition lock normally routes a retry that lands while the
+      # original turn is still active through AppendPending, whose cid gate
+      # already makes it idempotent. StartTurn owns the remaining race: the
+      # original POST committed and completed, its response was lost, and the
+      # owner retried after the chat became idle. Treat the durable cid as the
+      # acknowledgement. Do not append another row, open a ChatRun, or wake the
+      # provider again.
+      for row in existing:
+        if row.get("role") == "user" and cid_of(row) == incoming_cid:
+          return {
+            "duplicate": True,
+            "duplicate_location": "transcript",
+            "message": row,
+            "session_id": chat.session_id,
+            "provider": chat.provider,
+          }
+      # Defensive symmetry with AppendPending. A normal route never calls
+      # StartTurn while pending rows exist, but keeping the actor gate complete
+      # prevents a future caller from turning a queued retry into a second run.
+      for row in pending:
+        if cid_of(row) == incoming_cid:
+          return {
+            "duplicate": True,
+            "duplicate_location": "pending",
+            "message": row,
+            "pending": pending,
+            "session_id": chat.session_id,
+            "provider": chat.provider,
+          }
     if not existing:
       chat.provider = cmd.default_provider or "claude"
     # Build the agent history as schemas.ChatMessage objects, exactly as the

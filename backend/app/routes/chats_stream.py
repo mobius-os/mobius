@@ -237,6 +237,43 @@ def _queued_response(
   )
 
 
+def _duplicate_send_response(
+  chat_id: str, chat: models.Chat, cid: str | None,
+) -> JSONResponse | None:
+  """Acknowledge a durable cid before any provider-side send effect.
+
+  The transition lock makes this the ordinary retry gate. Actor-level cid
+  checks remain as the persistence backstop for future callers and cross-
+  process races, but steering must also be stopped here: de-duplicating only
+  after injecting text into a live provider would be too late.
+  """
+  if not cid:
+    return None
+  pending = list(chat.pending_messages or [])
+  for position, row in enumerate(pending, start=1):
+    if cid_of(row) == cid:
+      if is_chat_running(chat_id):
+        return _queued_response(row, position)
+      # Preserve the existing stale-queue self-heal: the normal queue branch
+      # will idempotently find this cid via AppendPending, then promote the
+      # idle queue into exactly one run. A preflight acknowledgement here
+      # would leave durable work parked until some later user action.
+      return None
+  for row in list(chat.messages or []):
+    if row.get("role") == "user" and cid_of(row) == cid:
+      return JSONResponse(
+        status_code=200,
+        content={
+          "status": "duplicate",
+          "message": row,
+          # A retry can race a later turn. The client must not tear down that
+          # unrelated live stream while reconciling this durable message.
+          "running": is_chat_running(chat_id),
+        },
+      )
+  return None
+
+
 def _user_message_from_body(
   chat: models.Chat,
   body: schemas.SendMessage,
@@ -675,6 +712,10 @@ async def _send_message_locked(
 ):
   """Handle a normal send while holding the per-chat transition lock."""
 
+  duplicate = _duplicate_send_response(chat_id, chat, body.cid)
+  if duplicate is not None:
+    return duplicate
+
   # One choke point for every genuine user send (initial / queued / steered all
   # pass here, after the answer-delivery returns above). Skip force_steer —
   # Stop's queue-collapse re-send of already-counted messages. Counts a turn
@@ -977,6 +1018,27 @@ async def _send_message_locked(
       result = await await_ack(ack)
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
+    if result.get("duplicate"):
+      # The first POST committed but its acknowledgement was lost. The actor
+      # found this cid in durable state, so the retry is complete without a
+      # new run. Release the speculative route claim before responding.
+      discard_starting(chat_id)
+      if result.get("duplicate_location") == "pending":
+        pending = list(result.get("pending") or [])
+        existing = result.get("message") or user_msg
+        try:
+          position = [cid_of(row) for row in pending].index(cid_of(existing)) + 1
+        except ValueError:
+          position = len(pending)
+        return _queued_response(existing, position)
+      return JSONResponse(
+        status_code=200,
+        content={
+          "status": "duplicate",
+          "message": result.get("message") or user_msg,
+          "running": is_chat_running(chat_id),
+        },
+      )
     msgs = result["history"]
     session_id = result["session_id"]
     provider = result["provider"]

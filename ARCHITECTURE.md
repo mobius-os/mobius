@@ -591,6 +591,16 @@ minutes-old turn visibly restart at one second.
 
 Every visible user row also makes R1's reservation current, whether or not that row
 pins. Reservation lifetime and pin decisions are independent.
+- **A restored send is one logical message.** The frontend scopes the draft
+  identity to the chat and reuses its client-minted `cid` when an ambiguous
+  failed POST restores an unchanged composer. The route checks that durable
+  identity before queue or provider side effects; `StartTurn`,
+  `AppendPending`, and steer persistence retain actor-level de-duplication as
+  backstops. A cid already in the transcript is acknowledged without appending
+  a row or waking the provider. A cid still pending keeps its existing queue
+  position behind an active turn; an idle stale queue follows the normal
+  single-run self-heal. If a later turn is active, retry reconciliation
+  preserves that unrelated live stream.
 - **Steer = separate rows, one turn.** Steered queued messages render as separate
   transcript rows in send order (`insertMessageBatchByTs`), never one stranded
   after the reply. The agent receives them joined by `\n\n` (clean paragraphs,

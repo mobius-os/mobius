@@ -67,6 +67,10 @@ import {
   systemEventForChat,
 } from './chatRuntimeState.js'
 import {
+  cidForSendAttempt,
+  sendDraftIdentity,
+} from './sendAttemptIdentity.js'
+import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
   buildPhaseRailViewModel,
@@ -698,6 +702,10 @@ export default function ChatView({
   // the answer). A dedicated flag flipped synchronously at entry protects
   // against a fast double-tap submitting the same answer twice.
   const sendSilentInFlightRef = useRef(false)
+  // If a POST's acknowledgement is lost, the composer is restored with the
+  // same logical message identity. An unchanged retry reuses its cid so the
+  // backend can acknowledge the durable row instead of starting a twin turn.
+  const failedSendAttemptRef = useRef(null)
 
   // Ref mirrors of prop callbacks. doSend / doSendSilent are
   // memoized via useCallback; if these props were listed in the
@@ -1301,6 +1309,25 @@ export default function ChatView({
     releaseFiles,
   } = useFileUpload({ chatId })
 
+  // Reuse a failed attempt id only while the restored composer is genuinely
+  // untouched. Once the owner edits text or attachments—even if they later
+  // recreate the same visible draft—that is a new compose action and gets a
+  // new cid on send.
+  function handleComposerInputChange(nextInput) {
+    failedSendAttemptRef.current = null
+    setInput(nextInput)
+  }
+
+  function handleComposerAddFiles(fileList) {
+    failedSendAttemptRef.current = null
+    return addFiles(fileList)
+  }
+
+  function handleComposerRemoveFile(fileId) {
+    failedSendAttemptRef.current = null
+    return removeFile(fileId)
+  }
+
   function restoreComposerText(text, { focus = false } = {}) {
     setInput(text)
     requestAnimationFrame(() => {
@@ -1843,11 +1870,17 @@ export default function ChatView({
 
     // Mint the message's stable identity ONCE, before the queue-vs-fresh
     // branch, so both paths carry the same `cid` from optimistic render
-    // through the wire and into persistence. The row's identity never changes
-    // across the optimistic→server-ts update — that is the whole redesign.
-    const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    // through the wire and into persistence. If a prior POST failed after the
+    // server may have accepted it, an unchanged restored draft reuses that cid
+    // and lets the backend's durable identity gate answer the ambiguity.
+    const draftIdentity = sendDraftIdentity(chatId, text, attachments)
+    const cid = cidForSendAttempt({
+      failedAttempt: failedSendAttemptRef.current,
+      draftIdentity,
+      mintCid: () => ((typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`),
+    })
 
     // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
     // entry carrying the minted `cid` — the row identity is stable across
@@ -1898,7 +1931,29 @@ export default function ChatView({
           attachments.length > 0 ? attachments : undefined,
           { queueOnly: true, cid },
         )
+        failedSendAttemptRef.current = null
         releaseComposerFilesAfterAccepted()
+        if (result?.status === 'duplicate') {
+          // A stale local queue decision can race an already-durable retry.
+          // Remove only this send's optimistic tray row; an unrelated live
+          // turn may still be streaming and must remain attached.
+          pendingQueue.cancelByCid(queuedMsg.cid)
+          forgetQueuedPinIntent({ cid: queuedMsg.cid })
+          inlineSteerPinIntentRef.current = null
+          const durableRows = startedMessagesFromResponse(result)
+          if (durableRows) {
+            commitMessages(prev => appendMessageBatch(prev, durableRows))
+          }
+          const continues = result.running === true
+          if (!continues) {
+            setSending(false)
+            sendingRef.current = false
+            setServerRunningState(false)
+            onStreamEndRef.current?.({ continues: false })
+          }
+          fetchMessages({ force: true, authoritative: true })
+          return
+        }
         if (result?.status === 'queued') {
           const canonicalPending = result.pending_message || null
           // Update the DISPLAY ts + canonical content on the cid-matched row.
@@ -2020,6 +2075,7 @@ export default function ChatView({
         pendingQueue.cancelByCid(queuedMsg.cid)
         forgetQueuedPinIntent({ cid: queuedMsg.cid })
         inlineSteerPinIntentRef.current = null
+        failedSendAttemptRef.current = { cid, draftIdentity }
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online }))
       }
@@ -2099,7 +2155,25 @@ export default function ChatView({
         // selector goes blind after the ack re-render.
         { cid },
       )
+      failedSendAttemptRef.current = null
       releaseComposerFilesAfterAccepted()
+      if (result?.status === 'duplicate') {
+        const durableRows = startedMessagesFromResponse(result)
+        if (durableRows) {
+          commitMessages(prev => replaceOptimisticWithBatch(prev, cid, durableRows))
+        } else {
+          commitMessages(prev => prev.filter(
+            m => !(m?.role === 'user' && cidOf(m) === cid && m.optimistic),
+          ))
+        }
+        const continues = result.running === true
+        setSending(continues)
+        sendingRef.current = continues
+        setServerRunningState(continues)
+        if (!continues) onStreamEndRef.current?.({ continues: false })
+        fetchMessages({ force: true, authoritative: true })
+        return
+      }
       if (result?.status === 'queued') {
         const canonicalPending = result.pending_message || null
         commitMessages(prev => {
@@ -2167,6 +2241,7 @@ export default function ChatView({
       setSending(false)
       sendingRef.current = false
       setServerRunningState(false)
+      failedSendAttemptRef.current = { cid, draftIdentity }
       restoreComposerAfterFailedSend()
       // The POST never reached/finished on the server, so remove the optimistic
       // user bubble and keep the text in the composer. Otherwise a transient
@@ -3522,7 +3597,7 @@ export default function ChatView({
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
         <ChatInputBar
           input={input}
-          onInputChange={setInput}
+          onInputChange={handleComposerInputChange}
           onSubmit={handleSubmit}
           inputRef={inputRef}
           sending={composerBusy}
@@ -3537,8 +3612,8 @@ export default function ChatView({
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching}
           pendingFiles={pendingFiles}
-          onAddFiles={addFiles}
-          onRemoveFile={removeFile}
+          onAddFiles={handleComposerAddFiles}
+          onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
           leftButtons={
             <>

@@ -1236,6 +1236,17 @@ export default function useStreamConnection(chatId, {
       if (data.status === 'queued' && !data.started) return data
       if (data.status === 'steered') return data
       if (data.status === 'not_steered') return data
+      if (data.status === 'duplicate') {
+        // The original POST committed but its acknowledgement was lost. This
+        // retry did not start a new turn. If another turn is active, preserve
+        // (or restore) its stream; otherwise undo the optimistic stream state
+        // armed above and let ChatView reconcile the durable row.
+        const running = data.running === true
+        wantsReconnectRef.current = running
+        setIsStreaming(running)
+        if (running && !queueOnly) connectRef.current?.(true)
+        return data
+      }
       // AskUserQuestion answer was delivered in-process to the parked
       // future — the runner resumes the EXISTING turn with the answer.
       // The response also declares `answer_turn: "same"`; ChatView consumes
