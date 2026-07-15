@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { Check } from 'lucide-react'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
@@ -47,6 +48,7 @@ import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
+import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
   answerKeepsCurrentTurn,
@@ -393,6 +395,10 @@ export default function ChatView({
   // observer hook (useOffscreenNudge, below); their booleans are computed near
   // hasPendingQuestion / hasPendingResume where the card finders live.
   const [showInspector, setShowInspector] = useState(false)
+  const [copyStatus, setCopyStatus] = useState('')
+  const messageHoldRef = useRef(null)
+  const suppressMessageClickRef = useRef(null)
+  const copyStatusTimerRef = useRef(null)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
   // updated ✓" for ~2s), or null.
@@ -412,6 +418,60 @@ export default function ChatView({
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
+
+  useEffect(() => () => {
+    if (messageHoldRef.current?.timer) clearTimeout(messageHoldRef.current.timer)
+    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current)
+  }, [])
+
+  const cancelMessageHold = useCallback(() => {
+    if (messageHoldRef.current?.timer) {
+      clearTimeout(messageHoldRef.current.timer)
+    }
+    messageHoldRef.current = null
+  }, [])
+
+  const copyMessage = useCallback(async (message, key) => {
+    const text = copyableMessageText(message)
+    if (!text) return
+    suppressMessageClickRef.current = key
+    const copied = await copyPlainText(text)
+    if (copied) {
+      try { navigator.vibrate?.(8) } catch { /* haptics are optional */ }
+    }
+    setCopyStatus(copied ? 'Copied' : 'Couldn’t copy')
+    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current)
+    copyStatusTimerRef.current = setTimeout(() => {
+      copyStatusTimerRef.current = null
+      setCopyStatus('')
+    }, 1800)
+  }, [])
+
+  const handleMessagePointerDown = useCallback((event, message, key) => {
+    if (
+      !_isTouchPrimary
+      || event.pointerType !== 'touch'
+      || event.button !== 0
+      || event.target?.closest?.('button, a, input, textarea, summary, pre, code')
+    ) return
+    cancelMessageHold()
+    const startX = event.clientX
+    const startY = event.clientY
+    const timer = setTimeout(() => {
+      messageHoldRef.current = null
+      void copyMessage(message, key)
+    }, 520)
+    messageHoldRef.current = { timer, startX, startY, key }
+  }, [cancelMessageHold, copyMessage])
+
+  const handleMessagePointerMove = useCallback((event) => {
+    const hold = messageHoldRef.current
+    if (!hold) return
+    if (
+      Math.abs(event.clientX - hold.startX) > 10
+      || Math.abs(event.clientY - hold.startY) > 10
+    ) cancelMessageHold()
+  }, [cancelMessageHold])
 
   useEffect(() => {
     autoResumeRequestRef.current += 1
@@ -3132,6 +3192,16 @@ export default function ChatView({
           onClose={() => setShowInspector(false)}
         />
       )}
+      {copyStatus && (
+        <div
+          className={`chat__copy-toast${copyStatus === 'Copied' ? ' chat__copy-toast--success' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          {copyStatus === 'Copied' && <Check size={15} strokeWidth={2.5} aria-hidden="true" />}
+          {copyStatus}
+        </div>
+      )}
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
@@ -3275,8 +3345,26 @@ export default function ChatView({
               data-key={dataKey}
               data-cid={userCid || undefined}
               data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
+              onPointerDown={(event) => handleMessagePointerDown(event, msg, dataKey)}
+              onPointerMove={handleMessagePointerMove}
+              onPointerUp={cancelMessageHold}
+              onPointerCancel={cancelMessageHold}
+              onContextMenu={_isTouchPrimary
+                ? (event) => {
+                    if (event.target?.closest?.('button, a, input, textarea, summary, pre, code')) return
+                    event.preventDefault()
+                    cancelMessageHold()
+                    void copyMessage(msg, dataKey)
+                  }
+                : undefined}
               onClick={msg.ts && msg.role === 'user'
-                ? (e) => { e.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible') }
+                ? (event) => {
+                    if (suppressMessageClickRef.current === dataKey) {
+                      suppressMessageClickRef.current = null
+                      return
+                    }
+                    event.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible')
+                  }
                 : undefined}
             >
               <MsgContent

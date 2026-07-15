@@ -272,17 +272,31 @@ export default function Shell() {
     })
   }
 
+  function passiveChatReloadIsReadingHold(passive) {
+    return passive
+      && document.visibilityState !== 'hidden'
+      && activeViewRef.current === 'chat'
+      && activeChatIdRef.current != null
+  }
+
+  function checkPendingShellReload() {
+    if (!pendingShellReloadRef.current) return
+    const passive = pendingShellReloadPassiveRef.current
+    if (shellReloadWouldDisruptUser({ passive })) {
+      // A passive watcher generation has no deadline while somebody is reading
+      // a visible chat. Wait for the view/visibility effects below instead of
+      // waking the page every six seconds for the whole reading session.
+      if (!passiveChatReloadIsReadingHold(passive)) scheduleShellReloadCheck()
+    } else {
+      performShellReload({ passive })
+    }
+  }
+
   function scheduleShellReloadCheck() {
     if (shellReloadTimerRef.current) clearTimeout(shellReloadTimerRef.current)
     shellReloadTimerRef.current = setTimeout(() => {
       shellReloadTimerRef.current = null
-      if (!pendingShellReloadRef.current) return
-      const passive = pendingShellReloadPassiveRef.current
-      if (shellReloadWouldDisruptUser({ passive })) {
-        scheduleShellReloadCheck()
-      } else {
-        performShellReload({ passive })
-      }
+      checkPendingShellReload()
     }, SHELL_RELOAD_RECHECK_MS)
   }
 
@@ -291,7 +305,9 @@ export default function Shell() {
       ? (pendingShellReloadPassiveRef.current && passive)
       : passive
     pendingShellReloadRef.current = true
-    scheduleShellReloadCheck()
+    if (!passiveChatReloadIsReadingHold(pendingShellReloadPassiveRef.current)) {
+      scheduleShellReloadCheck()
+    }
   }
 
   function requestShellReload({ passive = false } = {}) {
@@ -304,21 +320,32 @@ export default function Shell() {
 
   useEffect(() => {
     const record = () => { lastShellInteractionAtRef.current = Date.now() }
+    const releaseWhenHidden = () => {
+      if (document.visibilityState === 'hidden') checkPendingShellReload()
+    }
     const opts = { capture: true, passive: true }
     window.addEventListener('pointerdown', record, opts)
     window.addEventListener('touchstart', record, opts)
     window.addEventListener('keydown', record, opts)
     window.addEventListener('input', record, opts)
     window.addEventListener('focusin', record, opts)
+    document.addEventListener('visibilitychange', releaseWhenHidden)
     return () => {
       window.removeEventListener('pointerdown', record, opts)
       window.removeEventListener('touchstart', record, opts)
       window.removeEventListener('keydown', record, opts)
       window.removeEventListener('input', record, opts)
       window.removeEventListener('focusin', record, opts)
+      document.removeEventListener('visibilitychange', releaseWhenHidden)
       if (shellReloadTimerRef.current) clearTimeout(shellReloadTimerRef.current)
     }
   }, [])
+
+  // A passive generation held for a visible chat should land as soon as the
+  // owner leaves the chat surface. Switching between chats remains protected.
+  useEffect(() => {
+    checkPendingShellReload()
+  }, [activeView, activeChatId])
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
@@ -1023,7 +1050,10 @@ export default function Shell() {
       shellUpdatePickupRef.current = true
       // requestShellReload reads streaming/view state from refs at call time, so
       // the captured closure is fresh even though it isn't in this effect's deps.
-      requestShellReload({ passive: true })
+      // This is recovery, not watcher noise: the page has just mounted and a
+      // waiting/mismatched worker must not remain stranded behind a restored
+      // chat (especially when another tab keeps the outgoing worker alive).
+      requestShellReload()
     })()
     return () => { cancelled = true }
   }, [chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])

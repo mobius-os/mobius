@@ -377,6 +377,36 @@
 }
 .chat__ts--visible { opacity: 1; }
 
+/* Holding a mobile message copies immediately. The only visible UI is this
+   brief confirmation, kept above the composer so it never shifts content. */
+.chat__copy-toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--composer-h, 72px) + 18px);
+  z-index: 230;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  animation: chat-copy-toast-in 0.18s var(--ease-out-soft, ease-out);
+}
+.chat__copy-toast--success svg { color: var(--accent); }
+
+@keyframes chat-copy-toast-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+}
+
 /* ── Bubble content ────────────────────────────────── */
 
 .chat__text {
@@ -2024,7 +2054,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat__build-rail { animation: none; }
+  .chat__build-rail,
+  .chat__copy-toast { animation: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */

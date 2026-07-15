@@ -7,7 +7,7 @@ connection-management grant, not a read scope: an app with it can
 start/complete the connect flow, submit a PAT, and disconnect. A
 normal connect still needs the owner to authorize on github.com or
 paste their own token, but the grant itself is powerful — see the
-get_owner_or_app_with_github_access docstring. The read surface
+get_owner_or_app_with_github_access docstring. The remote read surface
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
 document containing a mutation or subscription operation. GitHub writes
@@ -16,6 +16,12 @@ prepared ledger record after the owner presses Send: it claims that
 record, rechecks the reviewed branch/diff, pushes to the owner's fork,
 and creates the pull request. An app-scoped github_access token may submit
 only its own prepared record; it cannot act as a general GitHub write proxy.
+
+The fetch-free /source-status read is the local companion for Contribute's
+Sources view. It exposes only sanitized repository identity, refs, diff
+magnitudes, and capped relative path names — never source contents, absolute
+paths, raw remotes, or credentials — so Contribute does not need the broader
+filesystem capability merely to explain where local work sits.
 
 The token itself never appears in any response or log line (INV1).
 """
@@ -42,7 +48,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app import fs_locks, github_auth, models
+from app import fs_locks, github_auth, models, source_status
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -1352,6 +1358,76 @@ async def github_status(
     "token_source": state.get("token_source") if connected else None,
     "device_flow_available": bool(get_settings().github_oauth_client_id),
     "gh_version": github_auth.gh_version(),
+  }
+
+
+@router.get("/source-status")
+async def github_source_status(
+  _: models.Owner = Depends(get_owner_or_app_with_github_access),
+  db: Session = Depends(get_db),
+):
+  """Fetch-free local source map for the Contribute app.
+
+  Returns refs, diff magnitudes, and working-tree metadata for the platform and
+  every live app source repository.  It deliberately does not fetch remotes,
+  expose source contents/absolute paths, or grant Contribute the much broader
+  filesystem capability.  App reads take the same per-source lock as the
+  watcher and installer, so a commit/update cannot split one status snapshot.
+  """
+  rows = (
+    db.query(models.App)
+    .filter(
+      models.App.deleted_at.is_(None),
+      models.App.source_dir.isnot(None),
+    )
+    .order_by(models.App.name.asc())
+    .all()
+  )
+  apps = [{
+    "id": row.id,
+    "name": row.name,
+    "slug": row.slug,
+    "version": row.version,
+    "manifest_url": row.manifest_url,
+    "source_dir": row.source_dir,
+  } for row in rows]
+
+  # The repository scan may wait on the same source lock held by an app
+  # compile/update. Do not keep a database connection checked out across that
+  # wait: the compiler also needs the pool before it can release its lock, so
+  # overlapping map refreshes would otherwise create a lock-order deadlock.
+  # FastAPI's dependency finalizer will close again; SQLAlchemy close is safe
+  # and idempotent.
+  db.close()
+
+  platform = await asyncio.to_thread(source_status.build_platform_status)
+  semaphore = asyncio.Semaphore(4)
+
+  async def inspect(app: dict) -> dict | None:
+    async with semaphore:
+      async with fs_locks.source_dir_lock(app["source_dir"]):
+        try:
+          return await asyncio.to_thread(source_status.build_app_status, app)
+        except Exception:
+          # One damaged checkout must not blank the complete repository map.
+          # The omitted app can recover on the next refresh after its source is
+          # repaired, while every healthy source remains useful now.
+          log.warning(
+            "Could not inspect source status for app %s",
+            app.get("id"),
+            exc_info=True,
+          )
+          return None
+
+  inspected = await asyncio.gather(*(inspect(app) for app in apps))
+  projects = [item for item in inspected if item is not None]
+  projects.sort(key=lambda item: item["name"].casefold())
+  return {
+    "schema": 1,
+    "generated_at": _now_iso(),
+    "fetch_free": True,
+    "platform": platform,
+    "apps": projects,
   }
 
 
