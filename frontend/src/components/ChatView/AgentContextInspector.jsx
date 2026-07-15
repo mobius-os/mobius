@@ -12,7 +12,7 @@ const CSS = `
   z-index: 1000;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: 18px;
   box-sizing: border-box;
   background: rgba(0, 0, 0, 0.45);
 }
@@ -22,19 +22,20 @@ const CSS = `
 }
 
 .aci {
-  width: min(720px, 100%);
-  max-height: calc(100vh - 48px);
-  max-height: calc(100dvh - 48px);
+  width: min(680px, 100%);
+  max-height: calc(100vh - 36px);
+  max-height: calc(100dvh - 36px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 0;
   box-sizing: border-box;
-  padding: 18px;
-  border-radius: 14px;
+  padding: 0;
+  border-radius: 18px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
 }
 
 [data-theme="light"] .aci {
@@ -45,9 +46,11 @@ const CSS = `
 
 .aci__head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  padding: 18px;
+  border-bottom: 1px solid var(--border);
 }
 
 .aci__title {
@@ -57,11 +60,21 @@ const CSS = `
   line-height: 1.25;
 }
 
+.aci__subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .aci__close {
   flex-shrink: 0;
   border: 0;
-  border-radius: 8px;
-  padding: 4px 8px;
+  width: 40px;
+  height: 40px;
+  margin: -7px -7px 0 0;
+  border-radius: 9px;
+  padding: 0;
   background: none;
   color: var(--muted);
   font: inherit;
@@ -81,7 +94,8 @@ const CSS = `
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  padding: 14px;
   overscroll-behavior: contain;
 }
 
@@ -100,10 +114,6 @@ const CSS = `
   color: var(--danger);
 }
 
-.aci__empty {
-  color: var(--muted);
-}
-
 .aci-section {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -114,56 +124,106 @@ const CSS = `
 .aci-section__summary {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 11px 12px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px;
   cursor: pointer;
   user-select: none;
   color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
+  list-style: none;
 }
 
 .aci-section__summary::-webkit-details-marker {
   display: none;
 }
 
-.aci-section__summary::before {
-  content: "›";
+.aci-section__chevron {
+  flex: none;
   color: var(--muted);
   font-size: 18px;
   line-height: 1;
   transition: transform 0.12s ease;
 }
 
-.aci-section[open] .aci-section__summary::before {
+.aci-section[open] .aci-section__chevron {
   transform: rotate(90deg);
 }
 
-.aci-section__source {
-  margin-left: auto;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 8px;
+.aci-section__heading {
+  min-width: 0;
+}
+
+.aci-section__title {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.aci-section__description {
+  display: block;
+  margin-top: 2px;
   color: var(--muted);
-  background: var(--surface);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
   line-height: 1.4;
 }
 
 .aci-section__content {
-  margin: 0 12px 12px;
-  max-height: min(42vh, 360px);
+  margin: 0;
+  max-height: min(48vh, 420px);
   overflow: auto;
   word-break: break-word;
-  border: 1px solid var(--border-light);
-  border-radius: 10px;
-  padding: 12px;
+  border-top: 1px solid var(--border);
+  padding: 14px;
   background: var(--surface);
   color: var(--text);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.aci-section__empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.aci-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.aci-recent__item {
+  padding: 11px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.aci-recent__name {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.aci-recent__digest {
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.aci-recent__location {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .aci-section__content .md-blocks {
@@ -175,24 +235,64 @@ const CSS = `
   padding-left: 0;
   padding-right: 0;
 }
+
+@media (max-width: 640px) {
+  .aci__overlay {
+    align-items: end;
+    padding: 10px;
+  }
+
+  .aci {
+    max-height: calc(100dvh - 20px);
+    border-radius: 18px;
+  }
+
+  .aci__head {
+    padding: 16px;
+  }
+
+  .aci__body {
+    padding: 10px;
+  }
+}
 `
 
-function hasText(value) {
-  return typeof value === 'string' && value.trim() !== ''
-}
-
-function Section({ title, source, children }) {
+function Section({ title, description, children }) {
   return (
     <details className="aci-section">
       <summary className="aci-section__summary">
-        <span>{title}</span>
-        {source && <span className="aci-section__source">{source}</span>}
+        <span className="aci-section__heading">
+          <span className="aci-section__title">{title}</span>
+          <span className="aci-section__description">{description}</span>
+        </span>
+        <span className="aci-section__chevron" aria-hidden="true">›</span>
       </summary>
       <div className="aci-section__content">
-        <StandardMarkdown text={children} />
+        {children}
       </div>
     </details>
   )
+}
+
+function RecentChats({ entries }) {
+  if (!entries.length) {
+    return <p className="aci-section__empty">No recent chat summaries are available yet.</p>
+  }
+  return (
+    <div className="aci-recent">
+      {entries.map(entry => (
+        <article className="aci-recent__item" key={entry.location}>
+          <h3 className="aci-recent__name">{entry.name}</h3>
+          <p className="aci-recent__digest">{entry.digest}</p>
+          <code className="aci-recent__location">{entry.location}</code>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function hasText(value) {
+  return typeof value === 'string' && value.trim() !== ''
 }
 
 export default function AgentContextInspector({ chatId, onClose }) {
@@ -242,24 +342,48 @@ export default function AgentContextInspector({ chatId, onClose }) {
 
   const sections = useMemo(() => {
     const data = state.data || {}
-    return [
+    const primary = [
       {
         key: 'system_prompt',
-        title: 'System prompt — static (core.md); held constant across turns so the prompt cache keeps hitting',
+        title: 'System prompt',
+        description: 'Rules and capabilities that shape every response.',
         value: data.system_prompt,
-        source: data.system_prompt_source
-          ? `source: ${data.system_prompt_source}`
-          : null,
+        type: 'markdown',
       },
       {
-        key: 'memory_block',
-        title: 'Memory — recalled knowledge-graph facts, injected into the FIRST user turn (NOT part of the system prompt, so the cache stays warm)',
-        value: data.memory_block,
+        key: 'recent_chats',
+        title: 'Recent chat summaries',
+        description: 'Names and digests from your latest conversations.',
+        value: Array.isArray(data.recent_chat_entries)
+          ? data.recent_chat_entries
+          : [],
+        type: 'recent',
       },
-      { key: 'app_context', title: 'App context', value: data.app_context },
-      { key: 'app_report', title: 'Report', value: data.app_report },
-      { key: 'compaction_brief', title: 'Compaction', value: data.compaction_brief },
+    ]
+    const activeContext = [
+      {
+        key: 'app_context',
+        title: 'Current app context',
+        description: 'The app and project details attached to this chat.',
+        value: data.app_context,
+        type: 'markdown',
+      },
+      {
+        key: 'app_report',
+        title: 'App report',
+        description: 'Diagnostics or findings an app attached to the next turn.',
+        value: data.app_report,
+        type: 'markdown',
+      },
+      {
+        key: 'compaction_brief',
+        title: 'Compaction handoff',
+        description: 'The latest handoff used after this chat was compacted.',
+        value: data.compaction_brief,
+        type: 'markdown',
+      },
     ].filter(section => hasText(section.value))
+    return [...primary, ...activeContext]
   }, [state.data])
 
   return (
@@ -279,7 +403,10 @@ export default function AgentContextInspector({ chatId, onClose }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="aci__head">
-          <h2 id="aci-title" className="aci__title">System prompt inspector</h2>
+          <div>
+            <h2 id="aci-title" className="aci__title">What the agent knows</h2>
+            <p className="aci__subtitle">Core instructions and recent conversation context.</p>
+          </div>
           {onClose && (
             <button
               ref={closeRef}
@@ -298,16 +425,17 @@ export default function AgentContextInspector({ chatId, onClose }) {
           {state.status === 'error' && (
             <p className="aci__state aci__state--error">{state.error}</p>
           )}
-          {state.status === 'ready' && sections.length === 0 && (
-            <p className="aci__state aci__empty">No agent context is available for this chat.</p>
-          )}
           {state.status === 'ready' && sections.map(section => (
             <Section
               key={section.key}
               title={section.title}
-              source={section.source}
+              description={section.description}
             >
-              {section.value}
+              {section.type === 'recent'
+                ? <RecentChats entries={section.value} />
+                : section.value
+                  ? <StandardMarkdown text={section.value} />
+                  : <p className="aci-section__empty">Not available for this chat.</p>}
             </Section>
           ))}
         </div>

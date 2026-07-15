@@ -22,6 +22,7 @@ import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import AgentContextInspector from './AgentContextInspector.jsx'
+import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
@@ -421,6 +422,7 @@ export default function ChatView({
   // observer hook (useOffscreenNudge, below); their booleans are computed near
   // hasPendingQuestion / hasPendingResume where the card finders live.
   const [showInspector, setShowInspector] = useState(false)
+  const [showSummary, setShowSummary] = useState(false)
   const [copyStatus, setCopyStatus] = useState('')
   const messageHoldRef = useRef(null)
   const suppressMessageClickRef = useRef(null)
@@ -3341,6 +3343,12 @@ export default function ChatView({
           onClose={() => setShowInspector(false)}
         />
       )}
+      {showSummary && (
+        <ChatSummaryViewer
+          chatId={chatId}
+          onClose={() => setShowSummary(false)}
+        />
+      )}
       {copyStatus && (
         <div
           className={`chat__copy-toast${copyStatus === 'Copied' ? ' chat__copy-toast--success' : ''}`}
@@ -3714,6 +3722,7 @@ export default function ChatView({
                 }}
                 providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
+                onOpenSummary={() => setShowSummary(true)}
               />
             </>
           }

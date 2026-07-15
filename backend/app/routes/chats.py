@@ -783,6 +783,7 @@ def get_chat_agent_context(
     _read_skill_text,
     _with_system_app_prompts,
   )
+  from app.compaction import load_cumulative_summary
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
@@ -792,23 +793,37 @@ def get_chat_agent_context(
   app_context_block, _env = _build_app_context(db, chat_id, data_dir)
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
+  chat_summary = load_cumulative_summary(data_dir, chat_id)
+  chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
   eligible_chat_ids = {
     row[0]
     for row in db.query(models.Chat.id).filter(
       models.Chat.deleted_at.is_(None),
     ).all()
   }
-  memory_block = memory.build_memory_block(
+  recent_chat_block = memory.build_memory_block(
     data_dir,
     eligible_chat_ids=eligible_chat_ids,
-  ).text or None
+  )
+  recent_chats = recent_chat_block.text or None
   return {
     "system_prompt": system_prompt,
     "system_prompt_source": "custom" if custom else "skill",
-    "memory_block": memory_block,
+    # `memory_block` remains as a compatibility alias for an older shell. The
+    # owner-facing name is now precise: this is only bounded recent-chat
+    # continuity, never knowledge-graph memory.
+    "recent_chats": recent_chats,
+    "recent_chat_entries": recent_chat_block.entries,
+    "memory_block": recent_chats,
     "app_context": app_context_block,
     "app_report": app_report_block,
     "compaction_brief": compaction_brief,
+    # The title fallback keeps the first layer useful before the first settled
+    # turn publishes its note. Once published, expose the one-line summary
+    # itself so the owner can inspect all three summary layers together.
+    "chat_description": chat_summary_metadata["description"] or chat.title,
+    "chat_digest": chat_summary_metadata["digest"],
+    "chat_summary": chat_summary,
   }
 
 

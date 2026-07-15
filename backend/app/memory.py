@@ -13,6 +13,7 @@ envelope and observability event.
 
 from __future__ import annotations
 
+import html
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,16 @@ RECENT_CHAT_NOTES = 10
 # head rather than crowding out the other recent chats or blowing the budget.
 DIGEST_MAX_BYTES = 800
 
+# Injected once per new session, outside the individual recent-chat entries.
+# Keeping retrieval guidance here makes the structured entry contract and its
+# single shared instruction one source of truth.
+RECENT_CHAT_RETRIEVAL_INSTRUCTION = (
+  "Each recent-chat entry gives a Name, Location, and bounded Digest. "
+  "When more detail would materially help, read "
+  "/data/shared/memory/<Location> for that chat's complete cumulative "
+  "summary. The platform alone publishes those files; do not edit them."
+)
+
 
 @dataclass
 class MemoryBlock:
@@ -38,13 +49,15 @@ class MemoryBlock:
 
   `text` is the bare context (no `<agent_experience>` envelope — the caller
   adds that plus the dynamic provider/timezone/viewport tail). `loaded` is the
-  list of chat-note paths that made it into the block. `mode` is
+  list of chat-note paths that made it into the block; `entries` is their
+  owner-visible name/location/digest representation. `mode` is
   "recent_chats" | "empty" for observability. Knowledge-graph material is
   deliberately never assembled here; installed apps recall it explicitly.
   """
 
   text: str
   loaded: list[str] = field(default_factory=list)
+  entries: list[dict[str, str]] = field(default_factory=list)
   mode: str = "empty"
 
 
@@ -86,6 +99,31 @@ def parse_frontmatter(text: str) -> dict[str, object]:
   return out
 
 
+def load_chat_summary_metadata(
+  data_dir: str | Path, chat_id: str,
+) -> dict[str, str | None]:
+  """Read the short, owner-visible layers of a published chat note.
+
+  ``description`` is the one-line gist that normally becomes the chat name;
+  ``digest`` is the bounded cross-chat continuity paragraph. The unbounded
+  ``## Summary`` remains owned by :func:`compaction.load_cumulative_summary`
+  because it is also continuation-critical provider handoff state.
+
+  Missing and legacy notes are normal: older notes predate ``## Digest`` and
+  return ``None`` for that layer rather than duplicating their full Summary.
+  """
+  path = memory_dir(data_dir) / "chats" / chat_id / "index.md"
+  text = _read(path)
+  if not text.strip():
+    return {"description": None, "digest": None}
+  description = str(parse_frontmatter(text).get("description", "")).strip()
+  digest = _extract_section(text, "Digest")
+  return {
+    "description": description or None,
+    "digest": digest.strip() if digest and digest.strip() else None,
+  }
+
+
 def _read(path: Path) -> str:
   try:
     return path.read_text(encoding="utf-8")
@@ -111,8 +149,8 @@ def build_memory_block(
   """Assembles the injected memory context.
 
   Only recent-chat digests are injected, always and without a graph/app gate.
-  Each chunk is the note's one-line ``description`` plus bounded ``## Digest``
-  paragraph, fenced with the full-note path. The cumulative ``## Summary``,
+  Each entry is the note's one-line ``description``, relative path, and bounded
+  ``## Digest`` paragraph. The cumulative ``## Summary``,
   facts, graph router, MOCs, and atomic notes are never pulled into a new chat.
   An installed system app may teach the agent to request graph recall through
   a separate prompt-scoped reader.
@@ -128,6 +166,7 @@ def build_memory_block(
   root = memory_dir(data_dir)
   parts: list[str] = []
   loaded: list[str] = []
+  entries: list[dict[str, str]] = []
   used = 0
   # Each note is independently capped. Continue past one that does not fit so
   # an unusually long newest note cannot hide every older short digest.
@@ -135,21 +174,35 @@ def build_memory_block(
   for note in _recent_chat_notes(
     root, note_limit, eligible_chat_ids=eligible_chat_ids,
   ):
-    digest = _chat_digest(note)
-    if not digest:
+    name, digest = _chat_digest_parts(note)
+    if not name and not digest:
       continue
     rel = f"chats/{note.parent.name}/index.md"
-    chunk = f"<<< {rel} (recent chat — Read this file for the full note) >>>\n{digest}"
+    safe_name = html.escape(name or note.parent.name, quote=False)
+    safe_digest = html.escape(digest, quote=False)
+    chunk = (
+      "<recent_chat>\n"
+      f"Name: {safe_name}\n"
+      f"Location: {rel}\n"
+      f"Digest: {safe_digest}\n"
+      "</recent_chat>"
+    )
     if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
       continue
     parts.append(chunk)
     loaded.append(rel)
+    entries.append({
+      "name": name or note.parent.name,
+      "location": rel,
+      "digest": digest,
+    })
     used += len(chunk.encode("utf-8")) + 2
 
   if not parts:
-    return MemoryBlock(text="", loaded=[], mode="empty")
+    return MemoryBlock(text="", loaded=[], entries=[], mode="empty")
   return MemoryBlock(
-    text="\n\n".join(parts), loaded=loaded, mode="recent_chats"
+    text="\n\n".join(parts), loaded=loaded, entries=entries,
+    mode="recent_chats",
   )
 
 
@@ -219,8 +272,8 @@ def _extract_section(text: str, heading: str) -> str | None:
   return "\n".join(collected).strip()
 
 
-def _chat_digest(note: Path) -> str:
-  """Return one bounded cross-chat paragraph plus its one-line gist.
+def _chat_digest_parts(note: Path) -> tuple[str, str]:
+  """Return a chat's one-line name and bounded cross-chat paragraph.
 
   New notes carry an explicit ``## Digest``. Legacy notes fall back to their
   ``## Summary`` (not the whole body, so facts never enter automatic startup
@@ -228,12 +281,11 @@ def _chat_digest(note: Path) -> str:
   """
   text = _read(note)
   if not text.strip():
-    return ""
+    return "", ""
   desc = str(parse_frontmatter(text).get("description", "")).strip()
   digest = _extract_section(text, "Digest")
   if digest is None:
     digest = _extract_section(text, "Summary")
   if digest is None:
     digest = _strip_frontmatter(text).strip()
-  combined = "\n".join(p for p in (desc, digest.strip()) if p).strip()
-  return _truncate_bytes(combined, DIGEST_MAX_BYTES).strip()
+  return desc, _truncate_bytes(digest.strip(), DIGEST_MAX_BYTES).strip()
