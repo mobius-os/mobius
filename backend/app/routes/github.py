@@ -141,11 +141,13 @@ class ContributionSubmitError(Exception):
     status_code: int = 409,
     *,
     record_patch: dict | None = None,
+    code: str | None = None,
   ):
     super().__init__(message)
     self.message = message
     self.status_code = status_code
     self.record_patch = record_patch or {}
+    self.code = code
 
 
 def _now_iso() -> str:
@@ -353,7 +355,8 @@ def _assert_clean_worktree(repo: Path) -> None:
   if status:
     raise ContributionSubmitError(
       "This staged branch has uncommitted source changes. Ask your agent "
-      "to prepare the PR again before submitting."
+      "to prepare the PR again before submitting.",
+      code="working_changes",
     )
 
 
@@ -362,7 +365,8 @@ def _assert_coauthor_trailer(repo: Path, branch: str) -> None:
   if _COAUTHOR_TRAILER not in body:
     raise ContributionSubmitError(
       "This staged commit is missing the Möbius Agent co-author trailer. "
-      "Leave feedback so your agent can prepare it again."
+      "Leave feedback so your agent can prepare it again.",
+      code="missing_coauthor",
     )
 
 
@@ -420,6 +424,7 @@ def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> Contributio
     exc.message,
     exc.status_code,
     record_patch={**patch, **exc.record_patch},
+    code=exc.code,
   )
 
 
@@ -545,6 +550,40 @@ def _assert_upstream_push_permission(repo: Path, upstream_repo: str) -> None:
     )
 
 
+def _assert_upstream_branch_at(
+  repo: Path,
+  upstream_repo: str,
+  branch: str,
+  expected_sha: str,
+) -> None:
+  """Require an already-public stack parent to remain at its reviewed tip."""
+  branch = _validate_branch(branch)
+  if not _GIT_SHA.match(str(expected_sha or "")):
+    raise ContributionSubmitError(
+      "An existing PR stack parent has no valid reviewed commit. Leave "
+      "feedback so your agent can prepare the remaining layers again."
+    )
+  proc = _gh(
+    repo,
+    "api",
+    f"repos/{upstream_repo}/git/ref/heads/{quote(branch, safe='')}",
+    "--jq", ".object.sha",
+    check=False,
+  )
+  actual_sha = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+  if not _GIT_SHA.match(actual_sha):
+    raise ContributionSubmitError(
+      f"The existing stack base {branch} is no longer available upstream. "
+      "Nothing was sent; leave feedback so your agent can refresh the "
+      "remaining layers."
+    )
+  if actual_sha != expected_sha:
+    raise ContributionSubmitError(
+      f"The existing stack base {branch} changed after review. Nothing was "
+      "sent; leave feedback so your agent can refresh the remaining layers."
+    )
+
+
 def _assert_merges_with_upstream(
   repo: Path, upstream_repo: str, branch: str,
 ) -> dict:
@@ -647,24 +686,28 @@ def _assert_fresh(
   if actual_head != expected_head:
     raise ContributionSubmitError(
       "This branch changed after review. Ask your agent to refresh the "
-      "Contribute card before submitting."
+      "Contribute card before submitting.",
+      code="branch_moved",
     )
   expected_diff = str(plan.get("diff_sha256") or "").strip()
   if not expected_diff:
     raise ContributionSubmitError(
-      "This record needs to be prepared again: it has no reviewed diff hash."
+      "This record needs to be prepared again: it has no reviewed diff hash.",
+      code="missing_diff_hash",
     )
   try:
     diff_bytes = diff_path.read_bytes()
   except OSError:
     raise ContributionSubmitError(
-      "The reviewed diff is missing. Ask your agent to prepare this again."
+      "The reviewed diff is missing. Ask your agent to prepare this again.",
+      code="missing_diff",
     )
   stored_hash = hashlib.sha256(diff_bytes).hexdigest()
   if stored_hash != expected_diff:
     raise ContributionSubmitError(
       "The reviewed diff changed. Ask your agent to refresh the "
-      "Contribute card before submitting."
+      "Contribute card before submitting.",
+      code="review_changed",
     )
   branch_hash = hashlib.sha256(
     _reviewed_branch_diff(repo, expected_base, expected_head)
@@ -672,7 +715,8 @@ def _assert_fresh(
   if branch_hash != expected_diff:
     raise ContributionSubmitError(
       "The reviewed diff does not match the branch that would be pushed. "
-      "Ask your agent to prepare this PR again."
+      "Ask your agent to prepare this PR again.",
+      code="diff_mismatch",
     )
   return expected_base, expected_head, expected_diff
 
@@ -698,6 +742,14 @@ def _claim_record(
     raise HTTPException(
       status_code=400,
       detail="Direct approval currently supports pull requests.",
+    )
+  if isinstance(plan.get("stack"), dict):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This contribution belongs to a PR stack. Review and send the complete "
+        "chain together."
+      ),
     )
   now = _now_iso()
   claimed = {
@@ -767,9 +819,10 @@ def _validate_stack_records(records: list[dict]) -> list[dict]:
   branches = set()
   previous_record = None
   previous_plan = None
-  # `draft` means the owner has not approved that layer yet. Never let a
-  # prepared sibling smuggle it into the explicitly reviewed batch request.
-  allowed_statuses = {"prepared", "open", "merged"}
+  # A draft PR is already public and owner-approved; it is a valid durable
+  # parent for a later private layer just like an open PR. `prepared` remains
+  # the only private state this request is allowed to claim.
+  allowed_statuses = {"prepared", "draft", "open", "merged"}
   for record, meta in decorated:
     plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
     record_id = str(record.get("id") or "")
@@ -789,7 +842,7 @@ def _validate_stack_records(records: list[dict]) -> list[dict]:
       raise ContributionSubmitError("PR stacks can contain pull requests only.")
     if record.get("status") not in allowed_statuses:
       raise ContributionSubmitError(
-        "Every stack layer must be ready, open, or already merged."
+        "Every stack layer must be ready, draft, open, or already merged."
       )
     if repo is None:
       repo = record_repo
@@ -807,7 +860,13 @@ def _validate_stack_records(records: list[dict]) -> list[dict]:
       )
       if meta["base_branch"] != previous_branch:
         raise ContributionSubmitError("A PR stack layer points at the wrong base branch.")
-      if str(plan.get("base_sha") or "") != str(previous_plan.get("head_sha") or ""):
+      # GitHub may retarget/rebase an already-public child after its parent
+      # merges. Preserve that settled history in the stack, but require exact
+      # reviewed ancestry at every still-private edge.
+      if (
+        record.get("status") == "prepared" and
+        str(plan.get("base_sha") or "") != str(previous_plan.get("head_sha") or "")
+      ):
         raise ContributionSubmitError(
           "A PR stack layer is not based on its reviewed parent commit."
         )
@@ -1496,7 +1555,7 @@ def _submit_prepared_pr(
       same_repo=bool(direct_base),
     )
     if existing:
-      return existing, _parse_pr_number(existing), record_patch
+      return existing, _parse_pr_number(existing), pushed_patch
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -1534,7 +1593,7 @@ def _submit_prepared_pr(
         f"to {pushed_branch_url}.",
         record_patch=pushed_patch,
       )
-    return url, _parse_pr_number(url), record_patch
+    return url, _parse_pr_number(url), pushed_patch
   finally:
     if checkout_back:
       _git(repo, "checkout", "-q", checkout_back, check=False)
@@ -1569,6 +1628,31 @@ def _preflight_prepared_stack(rows: list[dict]) -> None:
       f"The first PR in this stack must target upstream {default_branch}."
     )
   _assert_upstream_push_permission(permission_repo, upstream_repo)
+
+  # A retry can legitimately contain a public parent plus a private child.
+  # Verify an open/draft parent's branch before any new branch is pushed. A
+  # merged parent needs a fresh child review on the default branch: squash and
+  # rebase merges do not preserve the reviewed parent commit, so silently
+  # retargeting the old child could repeat parent changes in its PR diff.
+  for index, row in enumerate(rows):
+    if row["record"].get("status") != "submitting" or index == 0:
+      continue
+    previous = rows[index - 1]
+    previous_record = previous["record"]
+    if previous_record.get("status") == "merged":
+      raise ContributionSubmitError(
+        "A parent PR in this stack has already merged. Nothing was sent; "
+        "leave feedback so your agent can rebase and review the remaining "
+        f"layers on {default_branch}."
+      )
+    if previous_record.get("status") in {"draft", "open"}:
+      previous_plan = previous_record.get("plan") or {}
+      _assert_upstream_branch_at(
+        permission_repo,
+        upstream_repo,
+        previous_plan.get("branch") or previous_record.get("branch"),
+        str(previous_plan.get("head_sha") or ""),
+      )
 
   for row in sendable:
     record = row["record"]
@@ -1863,12 +1947,12 @@ async def github_source_status(
     "source_dir": row.source_dir,
   } for row in rows]
 
-  # The repository scan may wait on the same source lock held by an app
-  # compile/update. Do not keep a database connection checked out across that
-  # wait: the compiler also needs the pool before it can release its lock, so
-  # overlapping map refreshes would otherwise create a lock-order deadlock.
-  # FastAPI's dependency finalizer will close again; SQLAlchemy close is safe
-  # and idempotent.
+  # Repository inspection may wait on the same source lock held by an app
+  # compile/update. Release the request's database connection before that wait
+  # so overlapping map refreshes cannot exhaust the pool and deadlock the
+  # compiler that will release the source lock.
+  # FastAPI's dependency finalizer will close it again; SQLAlchemy close is
+  # safe and idempotent.
   db.close()
 
   platform = await asyncio.to_thread(source_status.build_platform_status)
@@ -1911,6 +1995,200 @@ def github_disconnect(
   """Disconnects GitHub — removes the stored credentials."""
   github_auth.clear_credentials()
   return {"ok": True}
+
+
+_REVIEW_STATUS_MESSAGES = {
+  "working_changes": (
+    "The staged checkout has new working changes, so this review is no "
+    "longer the exact source that would be sent."
+  ),
+  "branch_moved": (
+    "The staged branch moved after this review was prepared."
+  ),
+  "missing_diff_hash": (
+    "This older review does not have the fingerprint needed for safe sending."
+  ),
+  "missing_diff": "The reviewed source diff is no longer available.",
+  "review_changed": "The stored review changed after it was prepared.",
+  "diff_mismatch": (
+    "The reviewed source does not exactly match the staged branch."
+  ),
+  "missing_coauthor": (
+    "The staged commit is missing its Möbius Agent co-author marker."
+  ),
+  "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
+  "parent_merged": (
+    "A parent PR has merged, so the remaining private layer must be refreshed "
+    "onto the repository's main branch."
+  ),
+  "invalid_plan": "This older card needs a fresh agent review before it can send.",
+  "missing_checkout": "The staged checkout is no longer available.",
+  "invalid_checkout": "The staged checkout can no longer be verified safely.",
+  "review_unavailable": "This review could not be verified locally.",
+}
+
+
+def _review_status_problem(
+  record_id: str,
+  *,
+  code: str,
+  detail: str | None = None,
+) -> dict:
+  return {
+    "id": record_id,
+    "state": "needs_refresh",
+    "code": code,
+    "message": _REVIEW_STATUS_MESSAGES.get(
+      code,
+      detail or _REVIEW_STATUS_MESSAGES["review_unavailable"],
+    ),
+  }
+
+
+def _inspect_prepared_review(record: dict, diff_path: Path) -> dict:
+  """Read-only local preflight for one prepared review.
+
+  This deliberately stops before every remote/network check. Its job is to
+  catch local drift while the owner is reviewing the card, rather than after
+  they press the public Send action. The submit endpoint remains authoritative
+  and repeats these checks before any push.
+  """
+  record_id = str(record.get("id") or "")
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else None
+  if (
+    not plan
+    or record.get("type") != "pr"
+    or plan.get("action") != "pr"
+  ):
+    return _review_status_problem(record_id, code="invalid_plan")
+  try:
+    repo = _safe_repo_path(plan.get("repo_path"))
+    branch = _validate_branch(plan.get("branch") or record.get("branch"))
+    if not (repo / ".git").exists():
+      return _review_status_problem(record_id, code="missing_checkout")
+    _assert_clean_worktree(repo)
+    _assert_fresh(record, diff_path, repo, branch)
+    _assert_coauthor_trailer(repo, branch)
+
+    stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
+    state = github_auth.read_state() or {}
+    login = str(state.get("login") or "")
+    if stack and login and _GITHUB_LOGIN.match(login):
+      author_name, author_email = _connected_git_identity(state, login)
+      _assert_head_attribution(
+        repo,
+        branch,
+        author_name=author_name,
+        author_email=author_email,
+      )
+  except ContributionSubmitError as exc:
+    return _review_status_problem(
+      record_id,
+      code=exc.code or "review_unavailable",
+      detail=exc.message,
+    )
+  return {
+    "id": record_id,
+    "state": "ready",
+    "code": "ready",
+    "message": "Still matches the exact source you reviewed.",
+  }
+
+
+@router.get("/contributions/{app_id}/review-status")
+@_limiter.limit("30/minute")
+async def contribution_review_status(
+  request: Request,
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Return one read-only local validity verdict per prepared review.
+
+  The route never fetches GitHub, checks out a branch, writes a ledger record,
+  or weakens submit-time validation. It snapshots the app's contribution
+  ledger under its storage lock, validates stack shape as one unit, then takes
+  the same per-repository locks used by submit while comparing each prepared
+  branch and stored diff.
+  """
+  _validate_submit_app(app_id, principal, db)
+  contribution_dir = _contributions_dir(app_id)
+  async with fs_locks.app_storage_lock(app_id):
+    records = []
+    if contribution_dir.exists():
+      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+        record = _read_record_tolerant(path)
+        if record is not None and record.get("id"):
+          records.append(record)
+
+  prepared = [record for record in records if record.get("status") == "prepared"]
+  structural_problems: dict[str, dict] = {}
+  stack_ids = {
+    str(((record.get("plan") or {}).get("stack") or {}).get("id") or "")
+    for record in prepared
+    if isinstance(record.get("plan"), dict)
+    and isinstance((record.get("plan") or {}).get("stack"), dict)
+  }
+  for stack_id in {value for value in stack_ids if value}:
+    stack_records = [
+      record for record in records
+      if str((((record.get("plan") or {}).get("stack") or {}).get("id")) or "")
+      == stack_id
+    ]
+    try:
+      validated = _validate_stack_records(stack_records)
+      for index, item in enumerate(validated):
+        record = item["record"]
+        if (
+          index > 0
+          and record.get("status") == "prepared"
+          and validated[index - 1]["record"].get("status") == "merged"
+        ):
+          record_id = str(record.get("id") or "")
+          structural_problems[record_id] = _review_status_problem(
+            record_id,
+            code="parent_merged",
+          )
+    except ContributionSubmitError as exc:
+      for record in stack_records:
+        if record.get("status") == "prepared":
+          record_id = str(record.get("id") or "")
+          structural_problems[record_id] = _review_status_problem(
+            record_id,
+            code="invalid_stack",
+            detail=exc.message,
+          )
+
+  results = []
+  for record in prepared:
+    record_id = str(record.get("id") or "")
+    if record_id in structural_problems:
+      results.append(structural_problems[record_id])
+      continue
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    try:
+      repo = _safe_repo_path(plan.get("repo_path"))
+    except ContributionSubmitError as exc:
+      results.append(_review_status_problem(
+        record_id,
+        code=exc.code or "invalid_checkout",
+        detail=exc.message,
+      ))
+      continue
+    _, diff_path = _record_paths(app_id, record_id)
+    async with fs_locks.source_dir_lock(str(repo)):
+      results.append(await asyncio.to_thread(
+        _inspect_prepared_review,
+        record,
+        diff_path,
+      ))
+
+  return {
+    "generated_at": _now_iso(),
+    "records": results,
+    "ready": sum(item["state"] == "ready" for item in results),
+    "needs_refresh": sum(item["state"] == "needs_refresh" for item in results),
+  }
 
 
 @router.post(

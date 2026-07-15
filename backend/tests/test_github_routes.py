@@ -756,6 +756,165 @@ def _write_contribution(app_id, record_id, record, diff_text=""):
     atomic_write(base / f"{record_id}.diff", diff_text)
 
 
+def _prepared_real_review(app_id, record_id):
+  """Build one exact local review checkout under the route's allowlist."""
+  data_dir = Path(get_settings().data_dir)
+  repo = data_dir / "contrib" / record_id / "worktree"
+  repo.mkdir(parents=True)
+  subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True,
+                 capture_output=True)
+  subprocess.run(["git", "config", "user.name", "octocat"], cwd=repo,
+                 check=True)
+  subprocess.run([
+    "git", "config", "user.email", "42+octocat@users.noreply.github.com",
+  ], cwd=repo, check=True)
+  (repo / "index.jsx").write_text("export default 1\n")
+  subprocess.run(["git", "add", "index.jsx"], cwd=repo, check=True)
+  subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True,
+                 capture_output=True)
+  base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                 text=True).strip()
+  subprocess.run(["git", "checkout", "-b", "fix/demo-review"], cwd=repo,
+                 check=True, capture_output=True)
+  (repo / "index.jsx").write_text("export default 2\n")
+  subprocess.run(["git", "add", "index.jsx"], cwd=repo, check=True)
+  subprocess.run([
+    "git", "commit", "-m", "reviewed fix", "-m",
+    "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>",
+  ], cwd=repo, check=True, capture_output=True)
+  head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                 text=True).strip()
+  diff_text = subprocess.check_output([
+    "git", "-c", "core.quotePath=false", "diff", "--no-ext-diff",
+    "--no-color", "--binary", "--full-index", "--src-prefix=a/",
+    "--dst-prefix=b/", f"{base}..{head}",
+  ], cwd=repo, text=True)
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Reviewed fix",
+    "branch": "fix/demo-review",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "branch": "fix/demo-review",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+  return repo, record, diff_text
+
+
+def test_review_status_catches_local_drift_before_send(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  repo, _record, _diff = _prepared_real_review(app_id, "review-health")
+  headers = {"Authorization": f"Bearer {app_token}"}
+
+  ready = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert ready.status_code == 200, ready.text
+  assert ready.json()["ready"] == 1
+  assert ready.json()["records"] == [{
+    "id": "review-health",
+    "state": "ready",
+    "code": "ready",
+    "message": "Still matches the exact source you reviewed.",
+  }]
+
+  (repo / "index.jsx").write_text("export default 3\n")
+  stale = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert stale.status_code == 200, stale.text
+  assert stale.json()["needs_refresh"] == 1
+  assert stale.json()["records"][0]["code"] == "working_changes"
+  # Read-only means the review check neither commits nor discards the edit.
+  assert (repo / "index.jsx").read_text() == "export default 3\n"
+
+
+def test_review_status_catches_noncanonical_stored_diff(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, _diff = _prepared_real_review(app_id, "review-diff-shape")
+  abbreviated = "diff --git a/index.jsx b/index.jsx\nindex 123..456 100644\n"
+  record["plan"]["diff_sha256"] = hashlib.sha256(abbreviated.encode()).hexdigest()
+  _write_contribution(app_id, "review-diff-shape", record, abbreviated)
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["records"][0]["code"] == "diff_mismatch"
+
+
+def test_review_status_requires_refresh_after_stack_parent_merges(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  stack_id = "merged-review"
+  parent_branch = f"stack/{stack_id}/01-parent"
+  child_branch = f"stack/{stack_id}/02-child"
+  parent_head = "a" * 40
+  common = {
+    "type": "pr", "repo": "mobius-os/app-demo",
+  }
+  parent = {
+    **common,
+    "id": "merged-parent", "status": "merged", "branch": parent_branch,
+    "plan": {
+      "action": "pr", "repo": "mobius-os/app-demo",
+      "branch": parent_branch, "base_sha": "b" * 40,
+      "head_sha": parent_head,
+      "stack": {
+        "id": stack_id, "position": 1, "total": 2,
+        "parent_record_id": "", "base_branch": "main",
+      },
+    },
+  }
+  child = {
+    **common,
+    "id": "private-child", "status": "prepared", "branch": child_branch,
+    "plan": {
+      "action": "pr", "repo": "mobius-os/app-demo",
+      "branch": child_branch,
+      "repo_path": str(Path(get_settings().data_dir) / "contrib" / "unused"),
+      "base_sha": parent_head, "head_sha": "c" * 40,
+      "diff_sha256": "d" * 64,
+      "stack": {
+        "id": stack_id, "position": 2, "total": 2,
+        "parent_record_id": "merged-parent", "base_branch": parent_branch,
+      },
+    },
+  }
+  _write_contribution(app_id, parent["id"], parent)
+  _write_contribution(app_id, child["id"], child)
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["records"][0]["code"] == "parent_merged"
+
+
 def _cp(stdout="", stderr="", returncode=0):
   return subprocess.CompletedProcess(["mock"], returncode, stdout, stderr)
 
@@ -1620,6 +1779,54 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
 
 
+def test_stack_layer_cannot_be_sent_through_standalone_endpoint(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "stack-standalone-guard"
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/mobius",
+    "status": "prepared",
+    "title": "Layer 1",
+    "branch": "stack/guarded/01-layer",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/mobius",
+      "branch": "stack/guarded/01-layer",
+      "stack": {
+        "id": "guarded",
+        "position": 1,
+        "total": 2,
+        "parent_record_id": "",
+        "base_branch": "main",
+      },
+    },
+  }
+  _write_contribution(app_id, record_id, record, "reviewed")
+  called = False
+
+  def submit(*args, **kwargs):
+    nonlocal called
+    called = True
+
+  monkeypatch.setattr("app.routes.github._submit_prepared_pr", submit)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 409
+  assert "complete chain" in response.json()["detail"]
+  assert called is False
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )
+  assert stored["status"] == "prepared"
+
+
 def test_submit_contribution_stack_opens_ordered_incremental_prs(
   client, owner_token, monkeypatch,
 ):
@@ -1797,8 +2004,8 @@ def test_submit_contribution_stack_preserves_open_parent_when_child_fails(
   )
 
 
-def test_submit_contribution_stack_rejects_unapproved_draft_layer():
-  from app.routes.github import ContributionSubmitError, _validate_stack_records
+def test_submit_contribution_stack_accepts_public_draft_parent():
+  from app.routes.github import _validate_stack_records
 
   stack_id = "approval-boundary"
   parent_head = "a" * 40
@@ -1829,8 +2036,105 @@ def test_submit_contribution_stack_rejects_unapproved_draft_layer():
       },
     })
 
-  with pytest.raises(ContributionSubmitError, match="ready, open, or already merged"):
-    _validate_stack_records(records)
+  validated = _validate_stack_records(records)
+  assert [item["record"]["status"] for item in validated] == [
+    "draft", "prepared",
+  ]
+
+
+def test_stack_validation_allows_retargeted_public_history():
+  from app.routes.github import _validate_stack_records
+
+  stack_id = "retargeted-history"
+  records = []
+  statuses = ("merged", "open", "prepared")
+  heads = ("a" * 40, "b" * 40, "c" * 40)
+  for position, status in enumerate(statuses, 1):
+    branch = f"stack/{stack_id}/0{position}-layer"
+    if position == 1:
+      base_sha = "0" * 40
+    elif position == 2:
+      base_sha = "f" * 40
+    else:
+      base_sha = heads[position - 2]
+    records.append({
+      "id": f"retargeted-{position}",
+      "type": "pr", "repo": "mobius-os/mobius", "status": status,
+      "branch": branch,
+      "plan": {
+        "action": "pr", "repo": "mobius-os/mobius", "branch": branch,
+        "base_sha": base_sha, "head_sha": heads[position - 1],
+        "stack": {
+          "id": stack_id, "position": position, "total": 3,
+          "parent_record_id": "" if position == 1 else f"retargeted-{position - 1}",
+          "base_branch": "main" if position == 1 else f"stack/{stack_id}/0{position - 1}-layer",
+        },
+      },
+    })
+
+  validated = _validate_stack_records(records)
+  assert [item["record"]["status"] for item in validated] == list(statuses)
+
+
+def test_stack_preflight_requires_refresh_after_parent_merges(monkeypatch):
+  from app.routes.github import ContributionSubmitError, _preflight_prepared_stack
+
+  _write_token(login="octocat")
+  repo = Path(get_settings().data_dir) / "contributions" / "merged-retry" / "repo"
+  (repo / ".git").mkdir(parents=True)
+  stack_id = "merged-retry"
+  parent_branch = f"stack/{stack_id}/01-parent"
+  rows = [
+    {
+      "record": {
+        "id": "merged-parent", "status": "merged", "repo": "mobius-os/mobius",
+        "branch": parent_branch,
+        "plan": {
+          "repo": "mobius-os/mobius", "branch": parent_branch,
+          "head_sha": "a" * 40,
+        },
+      },
+      "stack": {"base_branch": "main"},
+    },
+    {
+      "record": {
+        "id": "private-child", "status": "submitting", "repo": "mobius-os/mobius",
+        "branch": f"stack/{stack_id}/02-child",
+        "plan": {
+          "repo": "mobius-os/mobius", "repo_path": str(repo),
+          "branch": f"stack/{stack_id}/02-child",
+        },
+      },
+      "stack": {"base_branch": parent_branch},
+    },
+  ]
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr("app.routes.github._upstream_default_branch", lambda *args: "main")
+  monkeypatch.setattr("app.routes.github._assert_upstream_push_permission", lambda *args: None)
+
+  with pytest.raises(ContributionSubmitError, match="already merged"):
+    _preflight_prepared_stack(rows)
+
+
+def test_stack_preflight_rejects_changed_existing_parent(monkeypatch, tmp_path):
+  from app.routes.github import ContributionSubmitError, _assert_upstream_branch_at
+
+  expected = "a" * 40
+  changed = "b" * 40
+
+  def fake_gh(repo, *args, check=True):
+    assert args == (
+      "api",
+      "repos/mobius-os/mobius/git/ref/heads/stack%2Fchat%2F01-parent",
+      "--jq", ".object.sha",
+    )
+    return _cp(changed + "\n")
+
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  with pytest.raises(ContributionSubmitError, match="changed after review"):
+    _assert_upstream_branch_at(
+      tmp_path, "mobius-os/mobius", "stack/chat/01-parent", expected,
+    )
 
 
 def test_submit_contribution_stack_rejects_broken_parent_link_before_claim(
