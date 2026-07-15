@@ -57,6 +57,14 @@
   transition: transform var(--transition-duration-basic, 250ms) var(--cubic-move, cubic-bezier(0.4, 0, 0.2, 1));
 }
 
+/* Give longer chat and app names more room on larger screens without
+   changing the compact phone drawer. */
+@media (min-width: 768px) {
+  .drawer {
+    width: min(420px, 90vw);
+  }
+}
+
 .drawer--open {
   transform: translateX(0);
   box-shadow: 8px 0 48px rgba(0, 0, 0, 0.5);
