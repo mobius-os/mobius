@@ -9,7 +9,7 @@ between "event published" and "registry populated" used to hit a
 410. The route now polls with a short grace period before deciding
 the question is stale.
 
-These tests pin four behaviours of that grace period:
+These tests pin five behaviours of that grace period:
 
   1. Happy path — pending registered before POST → 202 immediately.
   2. Race path — pending registered AFTER POST starts but inside
@@ -18,6 +18,8 @@ These tests pin four behaviours of that grace period:
      after restart → answer is recorded and a hidden continuation starts.
   4. Stale path — no pending, none arrives, and no durable open question
      exists → 410 after the grace window elapses.
+  5. Stopped path — once Stop has completed, a later deliberate Submit
+     restarts from the durable question while a Stop racing Submit still wins.
 """
 
 import asyncio
@@ -241,6 +243,75 @@ def test_answer_recovers_durable_question_without_live_pending(
         "queued-visible"
       ]
       assert row.run_status == "running"
+    finally:
+      db.close()
+
+  asyncio.run(go())
+
+
+def test_answer_after_completed_stop_recovers_durable_question(
+  client, auth, chat, monkeypatch,
+):
+  """Submit after Stop is a fresh continuation request, not a stale race.
+
+  Stop cancels the in-memory future and leaves its tombstone behind. If the
+  user subsequently answers the still-durable tail card, that later Submit
+  should record the answer and start a hidden continuation. A request that
+  began before Stop remains 410 (covered by the real lock-contention test).
+  """
+  scheduled: list[dict] = []
+
+  def fake_schedule_continuation(**kwargs):
+    scheduled.append(kwargs)
+    chat_mod.discard_starting(kwargs["chat_id"])
+
+  monkeypatch.setattr(
+    chats_stream, "_schedule_continuation", fake_schedule_continuation,
+  )
+
+  async def go():
+    qid = "q-stopped-then-submitted"
+    _seed_question_block(chat.id, qid)
+    loop = asyncio.get_event_loop()
+    pending = PendingQuestion(
+      question_id=qid,
+      questions=[{"id": "q1", "question": "Pick one"}],
+      future=loop.create_future(),
+    )
+    questions.register(chat.id, pending)
+    questions.cancel(chat.id)
+    assert questions.was_cancelled(chat.id, qid)
+    assert pending.future.cancelled()
+
+    res = await loop.run_in_executor(
+      None,
+      lambda: client.post(
+        f"/api/chats/{chat.id}/messages",
+        json={
+          "content": "- Pick one: a",
+          "hidden": True,
+          "answers": {"Pick one": "a"},
+          "question_id": qid,
+        },
+        headers=auth,
+      ),
+    )
+
+    assert res.status_code == 202, res.text
+    assert res.json()["status"] == "started"
+    assert res.json()["answer_turn"] == "new"
+    assert scheduled
+    assert scheduled[0]["next_user"]["hidden"] is True
+    db = SessionLocal()
+    try:
+      row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+      question = next(
+        block
+        for msg in row.messages
+        for block in (msg.get("blocks") or [])
+        if block.get("question_id") == qid
+      )
+      assert question["answers"] == {"Pick one": "a"}
     finally:
       db.close()
 
