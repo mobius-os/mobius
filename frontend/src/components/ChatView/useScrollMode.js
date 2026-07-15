@@ -950,35 +950,46 @@ export default function useScrollMode({
     }
   }, [scrollRef])
 
-  // Terminal stream promotion and spacer sizing land in different browser
-  // phases. Wait for the next committed frame, then either honor a terminal
-  // fill that crossed the boundary in the final buffered text, or disarm a
-  // short reply's live-only handoff. This is a render handshake, not a delay.
+  // ChatView calls this from a layout effect after React commits terminal
+  // promotion. Decide from that settled DOM whether the final buffered text
+  // filled the exact reservation or the short reply must disarm its live-only
+  // handoff. The committed-layout effect is the handshake; no timer or frame
+  // guess is involved.
   const settleStreamingPin = useCallback(() => {
-    requestAnimationFrame(() => {
-      const scrollEl = scrollRef.current
-      const mode = modeRef.current
-      if (!scrollEl || mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) {
-        return
-      }
-      const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
-      const advanced = modeAfterSpacerResize(mode, spacerH)
-      const mayWriteScroll = layoutMayOwnScroll(
-        gestureWindowUntilRef.current,
-        performance.now(),
-      )
-      if (!mayWriteScroll) {
-        // Terminal promotion can land between input and the first scroll
-        // event. The reader wins that race: freeze what is visible and retire
-        // the live handoff without issuing a final scroll write.
-        modeRef.current = anchorModeFromScroll(scrollEl) || settledPinMode(mode)
-      } else {
-        modeRef.current = advanced === mode ? settledPinMode(mode) : advanced
-        applyMode(scrollEl, modeRef.current)
-      }
+    const scrollEl = scrollRef.current
+    const mode = modeRef.current
+    if (!scrollEl || mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) {
+      return
+    }
+
+    const listEl = scrollEl.querySelector('.chat__list')
+    const spacerEl = spacerRef.current
+    const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+    if (!listEl || !spacerEl || !lastUserEl) {
+      modeRef.current = settledPinMode(mode)
       persistMode()
-    })
-  }, [chatId, scrollRef])
+      return
+    }
+
+    const spacerH = _computeSpacerH(
+      scrollEl, listEl, lastUserEl, fullViewHRef.current,
+    )
+    const advanced = modeAfterSpacerResize(mode, spacerH)
+    const mayWriteScroll = layoutMayOwnScroll(
+      gestureWindowUntilRef.current,
+      performance.now(),
+    )
+    if (!mayWriteScroll) {
+      // Terminal promotion can land between input and the first scroll event.
+      // The reader wins: freeze what is visible and issue no final scroll write.
+      modeRef.current = anchorModeFromScroll(scrollEl) || settledPinMode(mode)
+    } else {
+      spacerEl.style.height = `${spacerH}px`
+      modeRef.current = advanced === mode ? settledPinMode(mode) : advanced
+      applyMode(scrollEl, modeRef.current)
+    }
+    persistMode()
+  }, [chatId, lastUserMsgRef, scrollRef, spacerRef])
 
   return {
     modeRef,

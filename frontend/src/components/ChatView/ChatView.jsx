@@ -325,6 +325,9 @@ export default function ChatView({
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
   const [sending, setSending] = useState(() => !!cached?.running)
+  // Terminal live-to-settled commits bump this sequence. The corresponding
+  // layout effect settles an armed prompt pin against the committed DOM.
+  const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
   // Server-hydrated running marker. `sending` is the local UI flag and
   // `isStreaming` belongs to the SSE hook; both can briefly be false across
   // app/chat remounts or reconnect windows even though the backend still has
@@ -1053,7 +1056,7 @@ export default function ChatView({
         if (pendingQueue.pendingMessagesRef.current.length > 0) {
           fetchMessages({ force: true })
         }
-        settleStreamingPin()
+        setPinnedSettleSeq(seq => seq + 1)
       }
       onStreamEnd?.({ continues })
     },
@@ -2741,6 +2744,14 @@ export default function ChatView({
     if (catchUpCommitSeq === 0) return
     reapplyActiveMode()
   }, [catchUpCommitSeq, reapplyActiveMode])
+
+  // Promotion and this sequence update share one React batch, so the terminal
+  // pin decision runs after the settled assistant DOM is committed and before
+  // paint. This avoids racing a concurrent commit from the stream callback.
+  useLayoutEffect(() => {
+    if (pinnedSettleSeq === 0) return
+    settleStreamingPin()
+  }, [pinnedSettleSeq, settleStreamingPin])
 
   // Composer action state: queued work is also non-idle from the user's point
   // of view. Even if we momentarily don't have a live stream attached yet, a

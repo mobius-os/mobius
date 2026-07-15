@@ -490,6 +490,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll position temporarily look away from the physical bottom; viewport geometry
   is not reader intent, so apart from the explicit filled-reservation handoff, only a
   gesture-gated reader scroll may retire the pin.
+  Terminal promotion makes this decision against the committed settled DOM,
+  before paint, so a final browser clamp cannot race the pin or its exact
+  filled-reservation handoff.
 - **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
   same visible anchor, even if the chat had been auto-scrolling and content grew while
   it was inactive. Return never jumps to the new tail and does not restore
