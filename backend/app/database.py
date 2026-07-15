@@ -517,11 +517,11 @@ def run_migrations(eng) -> None:
         "ALTER TABLE chats ADD COLUMN agent_settings_json JSON"
       )
     if "auto_resume_on_limit" not in chats_cols:
-      # Chat-local provider-limit recovery policy. Existing chats stay on the
-      # safe notify + one-tap Resume path until the owner opts this chat in.
+      # Chat-local provider-limit recovery policy. Automatic continuation is
+      # the initial default; any later owner selection remains stored per chat.
       _add.append(
         "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
-        "NOT NULL DEFAULT FALSE"
+        "NOT NULL DEFAULT TRUE"
       )
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
