@@ -54,6 +54,7 @@ admin_router = _load("admin")
 apps_router = _load("apps")
 auth_router = _load("auth")
 chat_router = _load("chat")
+chat_embed_router = _load("chat_embed")
 chats_router = _load("chats")
 chats_stream_router = _load("chats_stream")
 chat_logs_router = _load("chat_logs")
@@ -85,6 +86,7 @@ __all__ = [
   "storage_router",
   "fs_router",
   "chat_router",
+  "chat_embed_router",
   "chats_router",
   "chats_stream_router",
   "chat_logs_router",

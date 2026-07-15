@@ -104,6 +104,69 @@ def create_media_token(chat_id: str, owner_username: str, token_epoch: int) -> s
   )
 
 
+def create_chat_embed_media_token(
+  *,
+  owner_username: str,
+  token_epoch: int,
+  app_id: int,
+  app_nonce: str,
+  chat_id: str,
+  session_id: str,
+  expires_delta: timedelta = timedelta(minutes=15),
+) -> str:
+  """Create a URL-safe media token chained to one live embed session."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "chat_embed_media",
+      "app_id": app_id,
+      "app_nonce": app_nonce,
+      "media_chat": chat_id,
+      "embed_session": session_id,
+    },
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
+def create_chat_embed_session_token(
+  *,
+  owner_username: str,
+  token_epoch: int,
+  app_id: int,
+  app_nonce: str,
+  chat_id: str,
+  instance_id: str,
+  session_id: str,
+  role: str,
+  operations: list[str],
+  expires_delta: timedelta = timedelta(minutes=15),
+) -> str:
+  """Mint the in-memory bearer used by one authorized chat embed.
+
+  The one-time bootstrap grant is a random opaque secret stored hashed in the
+  database; after exchange, this signed session is what ChatView presents on
+  API requests. It is deliberately narrower than an app token: exact app
+  installation, chat, embed instance, role and operation set are claims, and
+  the dependency layer re-checks the live grant/app/chat rows on every use.
+  """
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "chat_embed",
+      "app_id": app_id,
+      "app_nonce": app_nonce,
+      "chat_id": chat_id,
+      "embed_instance": instance_id,
+      "embed_session": session_id,
+      "embed_role": role,
+      "embed_ops": operations,
+    },
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
 def decode_access_token(token: str) -> Optional[dict]:
   """Decodes a JWT and returns the payload, or None if invalid."""
   settings = get_settings()

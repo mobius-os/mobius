@@ -126,9 +126,21 @@ export default defineConfig({
       // Exclude SSE-timing specs from this project — they get their
       // own project below with retries=0 so a 50%-flake regression
       // can't be papered over by the global retries=1.
-      testIgnore: /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
+      testIgnore: [
+        /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
+        /\.unauth\.spec\.mjs$/,
+      ],
       dependencies: ['auth'],
       use: { storageState: AUTH_FILE },
+    },
+    {
+      // Security checks that must prove their result without a login or owner
+      // state. Keeping these in a dependency-free project prevents auth.setup
+      // failures from masking whether the hostile request was actually tested.
+      name: 'tests-unauthenticated',
+      testMatch: /\.unauth\.spec\.mjs$/,
+      use: { storageState: { cookies: [], origins: [] } },
+      retries: 0,
     },
     {
       // SSE-timing-sensitive specs: a 50%-pass-rate regression here

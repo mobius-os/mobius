@@ -60,6 +60,12 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: pip install -r requirements.txt
+      - name: Validate bundled Caddy policy
+        run: >-
+          docker run --rm
+          -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2.9-alpine
+          caddy validate --config /etc/caddy/Caddyfile
       - name: Run pytest
         working-directory: backend
         run: pytest -q --durations=25

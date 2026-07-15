@@ -45,6 +45,11 @@ def get_active_chat_for_principal(
       reach); 403 when an app token targets a chat it doesn't own.
   """
   chat = get_active_chat_or_404(db, chat_id)
+  if principal.scope == "chat_embed" and principal.chat_id != chat_id:
+    raise HTTPException(
+      status_code=403,
+      detail="This embedded session is not valid for that chat.",
+    )
   if principal.app_id is None:
     return chat  # owner drives anything
   if chat.created_by_app_id != principal.app_id:

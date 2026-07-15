@@ -226,6 +226,42 @@ class ChatRun(Base):
   park_reason = Column(String(32), nullable=True, default=None)
 
 
+class ChatEmbedGrant(Base):
+  """One-time bootstrap grant and its revocable embedded-chat session.
+
+  The browser receives the random grant secret once; only its SHA-256 digest is
+  stored here. Exchange atomically stamps ``consumed_at`` and ``session_id``,
+  closing bootstrap replay. The short-lived session JWT points back to this row
+  so revocation/expiry and the live app/chat bindings are enforced on every
+  request instead of trusting browser frame metadata.
+
+  This is a new table, so ``create_all`` creates it on existing installations
+  without an ALTER migration.
+  """
+
+  __tablename__ = "chat_embed_grants"
+
+  # Monotonic creation order is security-relevant for refresh handoff: a slow
+  # older exchange must never supersede a newer successfully exchanged grant.
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  app_nonce = Column(String(64), nullable=False)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  instance_id = Column(String(160), nullable=False, index=True)
+  owner_epoch = Column(Integer, nullable=False)
+  role = Column(String(32), nullable=False, default="participant")
+  operations_json = Column(JSON, nullable=False, default=list)
+  created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None)
+  session_id = Column(String(64), nullable=True, unique=True, index=True)
+  session_expires_at = Column(DateTime, nullable=True, default=None, index=True)
+  revoked_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
 class App(Base):
   """A mini-app created and managed by the agent."""
 

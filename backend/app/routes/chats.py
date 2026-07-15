@@ -27,7 +27,9 @@ from app.chat import (
 )
 from app.database import get_db
 from app.deps import (
-  Principal, get_current_owner, get_principal, reject_cross_site,
+  Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
+  reject_cross_site,
+  require_chat_embed_operation,
 )
 from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
 from app.schemas import ChatPatch, ChatProviderSwitch
@@ -167,7 +169,7 @@ def _visible_in_owner_drawer(chat: models.Chat) -> bool:
 )
 def issue_media_token(
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Issues a short-lived media token scoped to one chat's uploads and media.
@@ -183,13 +185,31 @@ def issue_media_token(
   Cache the returned token client-side (~10 min) and refresh on 401. The token is
   revoked by "sign out everywhere" like all other tokens (carries token_epoch).
   """
-  # Verify the chat exists and belongs to this owner before issuing a token.
-  get_active_chat_or_404(db, chat_id)
-  token = auth.create_media_token(
-    chat_id=chat_id,
-    owner_username=owner.username,
-    token_epoch=owner.token_epoch,
-  )
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:media")
+  get_active_chat_for_principal(db, chat_id, principal)
+  if principal.scope == "chat_embed":
+    if (
+      principal.app_id is None
+      or principal.app_instance_id is None
+      or principal.embed_session_id is None
+    ):
+      raise HTTPException(status_code=401, detail="Malformed chat embed session.")
+    token = auth.create_chat_embed_media_token(
+      owner_username=principal.owner.username,
+      token_epoch=principal.owner.token_epoch,
+      app_id=principal.app_id,
+      app_nonce=principal.app_instance_id,
+      chat_id=chat_id,
+      session_id=principal.embed_session_id,
+    )
+  else:
+    token = auth.create_media_token(
+      chat_id=chat_id,
+      owner_username=principal.owner.username,
+      token_epoch=principal.owner.token_epoch,
+    )
   return {"token": token, "expires_in": 900}
 
 
@@ -431,7 +451,7 @@ def _first_message_title(chat) -> str:
 async def patch_chat(
   body: ChatPatch,
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Partial-update endpoint used by the `/` slash picker.
@@ -455,8 +475,23 @@ async def patch_chat(
   from app.providers import effective_agent_settings
   from app.chat_queue import get_transition_lock
 
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:settings")
+  if principal.scope == "chat_embed" and (
+    body.title is not None
+    or body.pinned is not None
+    or body.auto_resume_on_limit is not None
+    or body.by_agent
+    or body.clear_title
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Embedded chat may only change its model/runtime settings.",
+    )
+
   async with get_transition_lock(chat_id):
-    chat = get_active_chat_or_404(db, chat_id)
+    chat = get_active_chat_for_principal(db, chat_id, principal)
     agent_settings_patch = (
       body.agent_settings_json.model_dump(exclude_unset=True)
       if body.agent_settings_json is not None else {}
@@ -506,7 +541,7 @@ async def patch_chat(
       # Existing chats keep their own stored policy. This only seeds the next
       # chat, matching other "last picked" defaults without making the setting
       # global at runtime.
-      owner.auto_resume_on_limit_default = body.auto_resume_on_limit
+      principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
@@ -631,7 +666,11 @@ async def patch_chat(
     # An auto-resume/title/pin-only PATCH must not mirror this chat's old
     # model snapshot back into the global defaults. Only an actual picker
     # mutation owns that side effect.
-    if settings_obj and picker_settings_changed:
+    if (
+      principal.scope != "chat_embed"
+      and settings_obj
+      and picker_settings_changed
+    ):
       from app.providers import _load_agent_settings, write_agent_settings
       mirror = _load_agent_settings(data_dir) or {}
       for key in ("model", "effort", "effort_by_provider"):
@@ -644,7 +683,11 @@ async def patch_chat(
     # PATCH actually represents a picker/provider choice. A title, pin, or
     # auto-resume-only PATCH on a historical chat must not change which
     # provider the next new chat inherits.
-    if chat.provider and (target_provider is not None or picker_settings_changed):
+    if (
+      principal.scope != "chat_embed"
+      and chat.provider
+      and (target_provider is not None or picker_settings_changed)
+    ):
       owner = db.query(models.Owner).first()
       if owner is not None:
         owner.provider = chat.provider
@@ -668,7 +711,7 @@ def get_chat(
   chat_id: str,
   limit: int = 20,
   before: int | None = None,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Returns a chat with paginated messages and running status.
@@ -682,6 +725,9 @@ def get_chat(
   messages have higher indices. The response includes `offset` (the index
   of the first message in this page) and `total` (total message count).
   """
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
   chat = get_active_chat_for_principal(db, chat_id, principal)
   from app.chat_transcript import materialized_messages
   all_msgs = materialized_messages(chat)
@@ -721,7 +767,9 @@ def get_chat(
     "pending_question_id": (
       pending_question.question_id if pending_question is not None else None
     ),
-    "session_id": chat.session_id,
+    # Provider thread ids are backend continuity state, not part of the
+    # embedded participant surface.
+    "session_id": None if principal.scope == "chat_embed" else chat.session_id,
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
@@ -739,7 +787,7 @@ def get_chat(
 def get_tool_output_by_id(
   chat_id: str,
   tool_use_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ) -> PlainTextResponse:
   """Returns the FULL text of a large tool block, fetched lazily on expand
@@ -751,7 +799,10 @@ def get_tool_output_by_id(
   This is the sole tool-output fetch path: every large block carries a
   ``tool_use_id`` (both SDK runners tag universally, and card-221 migrated all
   history), so the retired legacy ``?ts=&i=`` sibling endpoint is gone."""
-  get_active_chat_or_404(db, chat_id)
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
   row = db.query(models.ToolOutput).filter(
     models.ToolOutput.chat_id == chat_id,
     models.ToolOutput.tool_use_id == tool_use_id,

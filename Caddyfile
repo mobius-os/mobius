@@ -1,9 +1,16 @@
 {$DOMAIN} {
     encode gzip
 
+    # The embedded-chat bootstrap document is intentionally nested below an
+    # opaque app frame. That ancestor can satisfy neither X-Frame-Options:
+    # SAMEORIGIN nor CSP frame-ancestors 'self'. Keep the exception exact and
+    # retain the rest of the resource/security policy while the blank document
+    # establishes its server-verified one-use capability.
+    @chatEmbed path /shell/embed/chat
+    @notChatEmbed not path /shell/embed/chat
+
     header {
         X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
         Referrer-Policy "strict-origin-when-cross-origin"
         Permissions-Policy "camera=(), geolocation=()"
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -18,8 +25,10 @@
         #   calls are governed by script-src; removing the origin would break
         #   every mini-app that uses those libraries at runtime. Removing it
         #   requires vendoring all three libraries under /vendor (like three.js).
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
     }
+    header @notChatEmbed X-Frame-Options "SAMEORIGIN"
+    header @notChatEmbed Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
+    header @chatEmbed Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
 
     # Recovery floor lives in the separate recoveryd container (its own
     # cgroup + pid1) so a broken or crash-looping platform can't take

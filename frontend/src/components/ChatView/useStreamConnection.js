@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getToken, BASE } from '../../api/client.js'
+import { getAuthHeaders, BASE } from '../../api/client.js'
 import {
   isChatStreamSystemEvent,
   shouldForwardChatStreamSystemEvent,
@@ -572,7 +572,7 @@ export default function useStreamConnection(chatId, {
 
     try {
       const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/stream`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: getAuthHeaders(),
         signal: controller.signal,
       })
 
@@ -1214,10 +1214,7 @@ export default function useStreamConnection(chatId, {
       let res
       const requestInit = {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
         signal: sendCtrl.signal,
       }

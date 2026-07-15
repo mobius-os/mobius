@@ -6,7 +6,6 @@
            AppCanvas hydrates it before module import and persists mutations in
            an app-private namespace. No owner credential is ever included. -->
       <script data-mobius-storage-shim>(function () {
-  try { void window.localStorage; return; } catch (e) {}
   var values = Object.create(null);
   var hydrating = false;
   function keys() { return Object.keys(values); }
@@ -31,6 +30,22 @@
     }
   };
   Object.defineProperty(window, 'localStorage', { value: storage, configurable: true });
+  // sessionStorage is also unavailable in an opaque origin. It is intentionally
+  // memory-only: app preferences that need persistence use the localStorage
+  // facade above, while tab-lifetime state must never escape this frame.
+  var sessionValues = Object.create(null);
+  var sessionStorage = {
+    get length() { return Object.keys(sessionValues).length; },
+    key: function (index) { return Object.keys(sessionValues)[index] || null; },
+    getItem: function (key) {
+      key = String(key);
+      return Object.prototype.hasOwnProperty.call(sessionValues, key) ? sessionValues[key] : null;
+    },
+    setItem: function (key, value) { sessionValues[String(key)] = String(value); },
+    removeItem: function (key) { delete sessionValues[String(key)]; },
+    clear: function () { sessionValues = Object.create(null); }
+  };
+  Object.defineProperty(window, 'sessionStorage', { value: sessionStorage, configurable: true });
   window.__mobiusHydrateLocalStorage = function (snapshot) {
     hydrating = true;
     values = Object.create(null);

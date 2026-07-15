@@ -40,7 +40,9 @@ from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  Principal, get_current_owner, get_principal, reject_cross_site,
+  Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
+  get_current_owner, reject_cross_site,
+  chat_embed_session_is_active, require_chat_embed_operation,
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
@@ -489,7 +491,7 @@ def _user_messages_from_pending(
 async def send_message(
   body: schemas.SendMessage,
   chat_id: str,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """Saves the user message, starts the agent as a background task,
@@ -500,6 +502,7 @@ async def send_message(
   attributed contract (design §1). Foreign chats are 403; the runner /
   queue / SSE internals are reused unchanged for both actors.
   """
+  require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
 
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
@@ -1106,7 +1109,7 @@ async def _send_message_locked(
 async def cancel_pending_message(
   chat_id: str,
   cid: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Removes a queued (not-yet-started) user message from the pending
@@ -1119,7 +1122,10 @@ async def cancel_pending_message(
   """
   # Existence check only — the actor's CancelPending does the RMW. The
   # 404 here keeps the route's contract (unknown / deleted chat → 404).
-  get_active_chat_or_404(db, chat_id)
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:send")
+  get_active_chat_for_principal(db, chat_id, principal)
 
   # The actor's CancelPending removes the matching cid and commits — the
   # SOLE runtime mutator of pending_messages, so a DELETE racing a
@@ -1137,7 +1143,7 @@ async def cancel_pending_message(
 async def stream_chat(
   request: Request,
   chat_id: str,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """SSE endpoint: subscribes to the chat's broadcast and streams events.
@@ -1154,7 +1160,11 @@ async def stream_chat(
   """
   # Gate before touching the broadcast. Raises 404 (missing/deleted) or
   # 403 (app token, foreign chat) — matching send_message's surface.
+  require_chat_embed_operation(principal, "chat:stream")
   get_active_chat_for_principal(db, chat_id, principal)
+  embed_session_id = (
+    principal.embed_session_id if principal.scope == "chat_embed" else None
+  )
 
   # Release the DB connection before the stream loop. Like the shell SSE
   # in notify.py, this StreamingResponse would otherwise pin a pooled
@@ -1188,7 +1198,20 @@ async def stream_chat(
     # the queue with no await in between), so the catch-up burst still
     # captures exactly the events present when this subscriber attaches.
     catch_up, queue = bc.subscribe()
+    last_embed_auth_check = 0.0
+
+    def embed_session_active() -> bool:
+      nonlocal last_embed_auth_check
+      if embed_session_id is None:
+        return True
+      now_mono = time.monotonic()
+      if now_mono - last_embed_auth_check < 1.0:
+        return True
+      last_embed_auth_check = now_mono
+      return chat_embed_session_is_active(embed_session_id)
     try:
+      if not embed_session_active():
+        return
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:
@@ -1217,6 +1240,8 @@ async def stream_chat(
 
       # Stream live events from the queue.
       while True:
+        if not embed_session_active():
+          return
         if await request.is_disconnected():
           break
 

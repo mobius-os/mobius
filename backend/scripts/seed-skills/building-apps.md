@@ -2,7 +2,7 @@
 
 The full mini-app contract: component shape, `window.mobius.storage` and its traps, the app lifecycle (register-on-create only), offline, fetching, embedded app chats, back-navigation, and theming. `Read` this before building or updating any mini-app.
 
-Mini-apps are JSX components in opaque-origin sandboxed iframes. Each gets `appId` and an app-scoped `token` prop, and should use `window.mobius` for storage, navigation, chat, and supported shell capabilities. Do not assume access to the shell's DOM, owner credentials, cookies, or same-origin browser storage; communicate with the parent only through the documented runtime bridge.
+Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-scoped `token`, and persists through `window.mobius.storage`. Shell-mounted app frames intentionally omit `allow-same-origin`: their effective origin is opaque (`null`), they cannot read the shell's localStorage/owner JWT, and origin-bound browser stores such as IndexedDB/OPFS are unavailable. Root-relative API fetches still work when they present the scoped bearer; `window.mobius.storage` owns that transport and its offline fallbacks.
 
 ---
 
@@ -309,7 +309,7 @@ window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes — for sync logic only, never rendered as UI
 ```
 
-Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
+Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). In the default opaque shell frame, use `window.mobius.storage`: raw IndexedDB/OPFS cannot open under an opaque origin. A future reviewed high-capability/per-app-origin architecture may add those APIs without weakening the shell-origin default; do not restore `allow-same-origin` to get them today.
 
 ### Secrets — use the app-scoped encrypted store
 
@@ -804,6 +804,16 @@ Apps that need agent assistance embed the real shell chat with one call —
 `POST /api/app-chats` create, the `PATCH` prompt update, or the chat-id
 persistence yourself:
 
+Security contract: the app frame and nested chat frame are opaque. The nested
+document navigates to the exact inert `/shell/embed/chat` route with no chat id
+or bearer in its URL and stays blank until the app runtime transfers a one-use
+server grant in memory. The child exchanges that grant for a short-lived,
+exact-chat `participant` session; it never receives the owner JWT or stores its
+session in localStorage. `event.origin === "null"`, source/window identity,
+instance ids and handshakes are routing guards, never authorization. Keep using
+this helper so reads, send/SSE, picker, uploads/media, context callbacks,
+remounts and completion events stay on the scoped principal.
+
 ```jsx
 const mountRef = useRef(null)
 useEffect(() => {
@@ -835,8 +845,8 @@ useEffect(() => {
   session.
 - `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
   embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
-- **Viewer variant:** to display an EXISTING chat the app didn't create (e.g. a
-  cron-attributed daily chat resolved from a `meta.json`), pass an explicit
+- **Viewer variant:** to display an EXISTING chat owned by this app (including a
+  same-app cron-attributed daily chat resolved from a `meta.json`), pass an explicit
   `chatId` and no `persist` — the helper just mounts it read-through.
 - Keep the chat as the interaction surface; it gives the user a persistent
   transcript, normal agent tooling, and follow-up questions in one place.

@@ -83,6 +83,7 @@ export default function ComposerPopover({
   providerSwitchState,
   onOpenInspector,
   onOpenSummary,
+  embedded = false,
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -230,6 +231,7 @@ export default function ComposerPopover({
               />
             </div>
           )}
+          {!embedded && (
           <div className="composer-popover__section composer-popover__section--context">
             <button
               type="button"
@@ -264,6 +266,7 @@ export default function ComposerPopover({
               </span>
             </button>
           </div>
+          )}
         </div>
       )}
     </div>

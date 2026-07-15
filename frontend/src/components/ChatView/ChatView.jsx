@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check } from 'lucide-react'
-import { apiFetch, getToken, BASE } from '../../api/client.js'
+import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
@@ -2617,10 +2617,7 @@ export default function ChatView({
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${getToken()}`,
-          },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ chat_id: chatId }),
         })
         let data = null
@@ -3395,13 +3392,13 @@ export default function ChatView({
       >
         {buildPhaseStatus}
       </div>
-      {showInspector && (
+      {!embedded && showInspector && (
         <AgentContextInspector
           chatId={chatId}
           onClose={() => setShowInspector(false)}
         />
       )}
-      {showSummary && (
+      {!embedded && showSummary && (
         <ChatSummaryViewer
           chatId={chatId}
           onClose={() => setShowSummary(false)}
@@ -3765,6 +3762,7 @@ export default function ChatView({
                 providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
+                embedded={embedded}
               />
             </>
           }

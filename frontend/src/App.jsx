@@ -6,7 +6,7 @@ import LoginForm from './components/LoginForm/LoginForm.jsx'
 import Shell from './components/Shell/Shell.jsx'
 import ChatEmbed from './components/ChatEmbed/ChatEmbed.jsx'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
-import { getToken, BASE } from './api/client.js'
+import { beginEphemeralAuth, getToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
@@ -20,8 +20,8 @@ import { shellReload } from './hooks/useNavigation.js'
 // (capability A). The SPA catch-all serves index.html for any non-API
 // path, so `/shell/embed/chat` boots the same main.jsx → App. We branch
 // here, BEFORE the setup/login/Shell flow, so the embed renders inside
-// a plain QueryClientProvider (ChatView needs the QueryClient, while an
-// opaque sandbox cannot use IndexedDB persistence) with none of the Shell chrome. We prepend Vite's
+// the same PersistQueryClientProvider (ChatView needs the QueryClient +
+// persistence) but with none of the Shell chrome. We prepend Vite's
 // build-time BASE (with its trailing slash stripped) so the match holds
 // if the bundle is ever built under a sub-path; in this repo BASE is '/',
 // so the comparison is the literal '/shell/embed/chat'.
@@ -32,6 +32,9 @@ function isEmbedRoute() {
     return false
   }
 }
+
+const EMBED_ROUTE = isEmbedRoute()
+if (EMBED_ROUTE) beginEphemeralAuth()
 
 // Validate a ?return= target: same-origin in-app path only. Rejects
 // backslashes (browsers normalize '/\\evil' to '//evil' -> open redirect),
@@ -50,15 +53,10 @@ function safeReturnPath(raw) {
 }
 
 export default function App() {
-  // App frames are intentionally opaque-origin sandboxes. A chat iframe nested
-  // inside one inherits that restriction, so IndexedDB is unavailable there.
-  // Do not let persisted-cache restoration hold the embed behind index.html's
-  // splash forever; the embed fetches its chat from the server after receiving
-  // the app-scoped token from its exact parent frame.
-  if (isEmbedRoute()) {
+  if (EMBED_ROUTE) {
     return (
       <QueryClientProvider client={queryClient}>
-        <ErrorBoundary label="app">
+        <ErrorBoundary label="chat-embed">
           <ChatEmbed />
         </ErrorBoundary>
       </QueryClientProvider>

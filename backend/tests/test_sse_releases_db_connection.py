@@ -90,7 +90,9 @@ async def test_system_stream_releases_db_connection_while_open():
   try:
     response = await stream_system_events(
       request=_ConnectedRequest(),
-      _owner=models.Owner(username="test"),
+      principal=Principal(
+        owner=models.Owner(username="test"), app_id=None, scope="owner",
+      ),
       db=db,
     )
     gen = response.body_iterator

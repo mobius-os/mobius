@@ -9,28 +9,48 @@ import { clearLatchedTokens } from '../lib/appToken.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
-// A chat renderer nested inside an app frame inherits that frame's opaque
-// origin, so it cannot read the owner's localStorage. The app already holds a
-// short-lived, app-scoped JWT; the exact parent frame passes that narrower
-// credential over the correlated chat-embed protocol and we keep it in memory
-// only. Never persist it and never accept an owner token on this path.
-let embeddedToken = null
+// The opaque embedded-chat document must never read or receive the owner's
+// browser token. App.jsx enables this mode before ChatEmbed mounts; the only
+// credential exposed through getToken() is then the short-lived chat session
+// established by the server-verified bootstrap exchange.
+let ephemeralAuthEnabled = false
+let ephemeralToken = null
+let ephemeralInstanceId = null
+let ephemeralSessionGeneration = 0
 
-export function isAppScopedToken(token) {
-  try {
-    const encoded = String(token || '').split('.')[1]
-    if (!encoded) return false
-    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
-    const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
-    return payload?.scope === 'app' && payload?.app_id != null
-  } catch {
-    return false
-  }
+export function beginEphemeralAuth() {
+  ephemeralAuthEnabled = true
 }
 
-export function setEmbeddedToken(token) {
-  embeddedToken = isAppScopedToken(token) ? token : null
-  return !!embeddedToken
+export function setEphemeralAuthSession(token, instanceId) {
+  if (!ephemeralAuthEnabled) throw new Error('Ephemeral auth is not enabled')
+  const nextToken = token || null
+  const nextInstanceId = instanceId || null
+  if (nextToken !== ephemeralToken || nextInstanceId !== ephemeralInstanceId) {
+    ephemeralSessionGeneration += 1
+  }
+  ephemeralToken = nextToken
+  ephemeralInstanceId = nextInstanceId
+}
+
+export function clearEphemeralAuthSession() {
+  if (ephemeralToken !== null || ephemeralInstanceId !== null) {
+    ephemeralSessionGeneration += 1
+  }
+  ephemeralToken = null
+  ephemeralInstanceId = null
+}
+
+// Media credentials minted by an embedded chat are chained to the exact
+// chat_embed session. This memory-only generation lets mediaToken.js replace
+// its per-chat cache entry atomically when that session changes, without
+// exposing or decoding the bearer itself.
+export function getAuthSessionCacheKey() {
+  return ephemeralAuthEnabled ? `embed:${ephemeralSessionGeneration}` : 'owner'
+}
+
+export function isEphemeralAuth() {
+  return ephemeralAuthEnabled
 }
 
 // localStorage access can throw in private-browsing modes or when the
@@ -38,8 +58,19 @@ export function setEmbeddedToken(token) {
 // to decide between Shell / Login / SetupWizard — an uncaught throw
 // here would crash the splash. Wrap all three helpers defensively.
 export function getToken() {
-  if (embeddedToken) return embeddedToken
+  if (ephemeralAuthEnabled) return ephemeralToken
   try { return localStorage.getItem('token') } catch { return null }
+}
+
+export function getAuthHeaders(extra = {}) {
+  const token = getToken()
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(ephemeralAuthEnabled && ephemeralInstanceId
+      ? { 'X-Mobius-Embed-Instance': ephemeralInstanceId }
+      : {}),
+    ...extra,
+  }
 }
 
 export function setToken(token) {
@@ -47,7 +78,10 @@ export function setToken(token) {
 }
 
 export function clearToken() {
-  embeddedToken = null
+  if (ephemeralAuthEnabled) {
+    clearEphemeralAuthSession()
+    return
+  }
   try { localStorage.removeItem('token') } catch {}
   // Setup-wizard resume state assumes an active token. If the token
   // is gone (logout / expiry), clear the resume key + in-progress
@@ -154,11 +188,9 @@ async function wipeSwCaches() {
 }
 
 export async function apiFetch(path, options = {}) {
-  const token = getToken()
   const headers = {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...options.headers,
+    ...getAuthHeaders(options.headers),
   }
 
   // Opt-in timeout: callers that must not hang forever (e.g. the background
@@ -182,6 +214,11 @@ export async function apiFetch(path, options = {}) {
   }
 
   if (res.status === 401 && !setupSession.isInProgress()) {
+    if (ephemeralAuthEnabled) {
+      clearEphemeralAuthSession()
+      window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
+      throw new Error('EMBED_AUTH_EXPIRED')
+    }
     clearToken()
     try { sessionStorage.setItem('auth_expired', '1') } catch {}
     // Await the cache wipe before reloading. Without this, the page

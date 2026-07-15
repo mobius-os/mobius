@@ -1,11 +1,10 @@
 // Protocol for the in-app agent-chat embed (capability A, design §1).
 //
 // A mini-app calls `window.mobius.chat({chatId?, ...})` (mobius-runtime.js)
-// which mounts a nested iframe at the shell embed route
-// (`/shell/embed/chat?chatId=…`). That iframe renders the real ChatView
-// (ChatEmbed.jsx) — a stripped-chrome RENDERER over the app-attributed
-// backend chat contract. The app's scoped JWT and backend chat ownership
-// checks remain the trust boundary; the renderer keeps that token in memory.
+// which mounts a nested iframe at `/shell/embed/chat`. The outer app sandbox
+// makes both app and nested documents opaque (`event.origin === "null"`). The
+// route is inert until it exchanges a one-use server capability delivered in
+// memory by INIT; neither chat ids nor bearer material enter its URL.
 //
 // This module is the single source of truth for the postMessage shapes
 // exchanged between the app frame (parent) and the embed frame (child).
@@ -15,12 +14,9 @@
 // deliberately tiny (the NS prefix + the source/origin guard); keep the
 // two in sync the way app-frame.html ↔ AppCanvas.jsx already do.
 //
-// Hardening (design §1.4): three frames are in play (shell → opaque app
-// frame → embed frame), so origin alone is not enough. Every hop validates
-// the allowed serialized origin AND `e.source === expectedWindow` (the specific
-// contentWindow / parent we are talking to), then matches the namespaced
-// type and the `instanceId` correlation token. No generic relay: only
-// the enumerated message types below cross a frame boundary.
+// Exact source-window and instance checks prevent accidental/spoofed routing in
+// the browser. They are defense in depth only: null origin, window identity,
+// correlation ids and a successful handshake are not server authorization.
 
 // All embed messages carry this prefix. Greppable, and distinct from the
 // app-frame protocol's `moebius:frame-*` / `moebius:nav-*` / `moebius:app-*`
@@ -34,6 +30,7 @@ export const MESSAGE_SENT = NS + 'message-sent' // a user turn was submitted
 export const TURN_DONE = NS + 'turn-done' // the agent turn finished streaming
 export const ERROR = NS + 'error' // the embed hit a load/stream error
 export const HEIGHT = NS + 'height' // optional content height (see note below)
+export const AUTH_EXPIRING = NS + 'auth-expiring' // parent should mint a new grant
 
 // Parent (app frame) → child (embed frame).
 export const INIT = NS + 'init' // hand the embed its config + correlation id
@@ -55,20 +52,15 @@ export const CONTEXT_RESPONSE = NS + 'context-response' // parent → child: {no
 // asked. Keeping the type here (rather than inventing it ad hoc later)
 // means the namespace stays closed and greppable.
 
-// True when `event` is a trusted-origin, same-source message in our
-// namespace for this `instanceId`. A chat nested below an opaque app sandbox
-// serializes its MessageEvent origin as "null"; callers must opt into that
-// case explicitly and still supply the exact expectedSource window.
-// `expectedSource` is the specific
+// True when `event` has an explicitly allowed origin, exact source and our
+// namespace/correlation id. Opaque frames report "null". `expectedSource` is the specific
 // window we expect to hear from (the embed's contentWindow on the parent
-// side; `window.parent` on the child side). This is the §1.4 guard —
+// side; `window.parent` on the child side). This is a routing guard —
 // callers should treat anything that fails it as not-ours and ignore it,
-// NOT as an error (other frames legitimately share the origin).
-export function isEmbedMessage(event, {
-  origin, expectedSource, instanceId, allowOpaqueOrigin = false,
-}) {
-  if (!event) return false
-  if (event.origin !== origin && !(allowOpaqueOrigin && event.origin === 'null')) return false
+// NOT as an error. Server authorization never depends on this predicate.
+export function isEmbedMessage(event, { origin, origins, expectedSource, instanceId }) {
+  const allowedOrigins = origins || (origin ? [origin] : [])
+  if (!event || !allowedOrigins.includes(event.origin)) return false
   if (expectedSource && event.source !== expectedSource) return false
   const msg = event.data
   if (!msg || typeof msg !== 'object') return false
@@ -132,13 +124,15 @@ export function makeEmitter() {
   return { emit, on }
 }
 
-// Build the embed route URL. Stable, query-only (chatId may be absent on
-// lazy-create). Kept here so the helper and any test agree on the shape.
-export function embedUrl({ base = '', chatId, picker } = {}) {
-  const root = `${base}/shell/embed/chat`
-  const params = []
-  if (chatId) params.push(`chatId=${encodeURIComponent(String(chatId))}`)
-  if (picker === false) params.push('picker=0')
-  const qs = params.join('&')
-  return qs ? `${root}?${qs}` : root
+// Stable inert route: configuration and credentials are never serialized into
+// its URL. Kept here so the helper and regression tests agree on the contract.
+export function embedUrl({ base = '' } = {}) {
+  return `${base}/shell/embed/chat`
+}
+
+// A refresh exchange is a two-session handoff: failure must not tear down the
+// still-valid session/UI. Initial authorization has no prior authority and
+// therefore remains blank and fail-closed.
+export function retainEmbedSessionAfterExchangeFailure(hadAuthorizedSession) {
+  return hadAuthorizedSession === true
 }
