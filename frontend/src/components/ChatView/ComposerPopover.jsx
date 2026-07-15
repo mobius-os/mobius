@@ -4,9 +4,9 @@
  *
  *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
- *   2. Model / effort — renders <ChatSettingsPanel> when a chatInfo
- *      is available; omitted on a fresh empty chat where chatInfo
- *      hasn't loaded yet.
+ *   2. Model / effort / summary / automation — renders
+ *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
+ *      empty chat where chatInfo hasn't loaded yet.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover
@@ -60,7 +60,6 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import { FileText } from 'lucide-react'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 
 export default function ComposerPopover({
@@ -146,6 +145,11 @@ export default function ComposerPopover({
     onOpenInspector?.()
   }
 
+  function handleOpenSummary() {
+    setOpen(false)
+    onOpenSummary?.()
+  }
+
   return (
     <div className="composer-plus" ref={wrapRef}>
       <button
@@ -192,25 +196,6 @@ export default function ComposerPopover({
             <button
               type="button"
               className="composer-popover__row"
-              onPointerDown={(e) => e.preventDefault()}
-              onClick={() => {
-                setOpen(false)
-                onOpenSummary?.()
-              }}
-            >
-              <span className="composer-popover__row-icon" aria-hidden="true">
-                <FileText width={18} height={18} />
-              </span>
-              <span className="composer-popover__row-main">
-                <span className="composer-popover__row-title">Chat summary</span>
-                <span className="composer-popover__row-sub">
-                  See the evolving handoff
-                </span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="composer-popover__row"
               // Keep the textarea focused so the soft keyboard stays
               // open while the user picks from the popover.
               onPointerDown={(e) => e.preventDefault()}
@@ -237,6 +222,7 @@ export default function ComposerPopover({
                 autoResumeSaving={autoResumeSaving}
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
+                onOpenSummary={handleOpenSummary}
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 reqIdRef={reqIdRef}

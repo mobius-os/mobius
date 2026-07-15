@@ -801,6 +801,7 @@ def get_chat_agent_context(
   app_report_block = _build_app_report_block(db, chat_id, data_dir)
   compaction_brief = _latest_compaction_brief(chat)
   chat_summary = load_cumulative_summary(data_dir, chat_id)
+  chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
   eligible_chat_ids = {
     row[0]
     for row in db.query(models.Chat.id).filter(
@@ -818,6 +819,11 @@ def get_chat_agent_context(
     "app_context": app_context_block,
     "app_report": app_report_block,
     "compaction_brief": compaction_brief,
+    # The title fallback keeps the first layer useful before the first settled
+    # turn publishes its note. Once published, expose the one-line summary
+    # itself so the owner can inspect all three summary layers together.
+    "chat_description": chat_summary_metadata["description"] or chat.title,
+    "chat_digest": chat_summary_metadata["digest"],
     "chat_summary": chat_summary,
   }
 
