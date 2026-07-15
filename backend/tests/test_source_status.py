@@ -91,6 +91,21 @@ def test_committed_and_working_deltas_are_reported_separately():
   assert result["working"]["untracked"] == 1
 
 
+def test_typical_project_returns_its_complete_changed_filename_list():
+  repo = _repo("many-files")
+  for index in range(25):
+    (repo / f"change-{index:02}.js").write_text(
+      f"export default {index}\n", encoding="utf-8",
+    )
+  _git(repo, "add", ".")
+  _commit(repo, "local source files")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["tree"]["files"] == 25
+  assert len(result["tree"]["paths"]) == 25
+  assert result["tree"]["truncated"] is False
 def test_diverged_counts_and_sanitized_github_identity():
   repo = _repo()
   _git(repo, "checkout", "-q", "upstream")

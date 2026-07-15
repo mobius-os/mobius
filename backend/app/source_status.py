@@ -25,7 +25,10 @@ from typing import Any
 from app.config import get_settings
 
 _GIT_TIMEOUT = 8
-_PATH_PREVIEW = 12
+# Filenames and numstat counts are safe metadata (never source contents). Keep
+# a generous ceiling so Contribute can offer a truthful "Show all files" for
+# normal projects while still bounding pathological repositories.
+_PATH_LIST_LIMIT = 500
 _GITHUB_HTTPS = re.compile(
   r"^https://github\.com/([^/]+)/([^/#]+?)(?:\.git)?/?$", re.IGNORECASE,
 )
@@ -107,7 +110,7 @@ def _diff_summary(repo: Path, left: str, right: str) -> dict[str, Any]:
         add = delete = 0
       insertions += add
       deletions += delete
-    if len(paths) < _PATH_PREVIEW:
+    if len(paths) < _PATH_LIST_LIMIT:
       paths.append({
         "path": path, "insertions": add, "deletions": delete,
         "binary": binary,
@@ -155,7 +158,7 @@ def _working_summary(repo: Path) -> dict[str, Any]:
       staged += int(has_staged)
       unstaged += int(has_unstaged)
       group = "staged" if has_staged and not has_unstaged else "unstaged"
-    if len(paths) < _PATH_PREVIEW:
+    if len(paths) < _PATH_LIST_LIMIT:
       paths.append({"path": path, "status": code, "group": group})
     # In -z porcelain, rename/copy records carry the old path as the next item.
     if code[0] in "RC" and i + 1 < len(records):
