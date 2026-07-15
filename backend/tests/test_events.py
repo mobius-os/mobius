@@ -239,6 +239,30 @@ def test_thinking_events_coalesce_with_duration():
   assert "_thinking_start_ts" not in msg["blocks"][0]
 
 
+def test_thinking_segment_identity_preserves_semantic_paragraphs():
+  blocks = []
+  process_event({
+    "type": "thinking", "content": "**Planning ", "ts": 1000,
+    "segment_id": "summary:0",
+  }, blocks)
+  process_event({
+    "type": "thinking", "content": "the fix**", "ts": 1100,
+    "segment_id": "summary:0",
+  }, blocks)
+  process_event({
+    "type": "thinking", "content": "**Writing tests**", "ts": 1200,
+    "segment_id": "summary:1",
+  }, blocks)
+
+  assert blocks[0]["content"] == (
+    "**Planning the fix**\n\n**Writing tests**"
+  )
+  assert blocks[0]["_thinking_segment_id"] == "summary:1"
+  persisted = build_assistant_message(blocks)["blocks"][0]
+  assert persisted["content"] == blocks[0]["content"]
+  assert "_thinking_segment_id" not in persisted
+
+
 def test_thinking_event_after_tool_starts_fresh_block():
   blocks = []
   process_event({"type": "thinking", "content": "first", "ts": 1000}, blocks)

@@ -4,12 +4,25 @@ import assert from 'node:assert/strict'
 import {
   _computeSpacerH,
   _pinReapplyNeeded,
+  _scrollModeForDiagnostics,
+  _validateSavedMode,
   applyMode,
+  bottomAnchorModeFromScroll,
+  gestureLayoutRetryDelay,
   isNearContentBottom,
   isNearScrollBottom,
+  layoutMayOwnScroll,
+  mountMediaSettled,
   modeForChatExit,
   modeForForegroundReturn,
+  modeForQueuedSubmission,
   modeForViewportChange,
+  modeAfterReaderReachesBottom,
+  modeAfterSpacerResize,
+  modeAfterTerminalLayout,
+  readerInputMayScroll,
+  readerInputNeedsFrameRelease,
+  settledPinMode,
   shouldPinSend,
 } from '../useScrollMode.js'
 import {
@@ -31,6 +44,21 @@ function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 
     },
   }
 }
+
+test('mount media readiness waits for token insertion and image decode', () => {
+  const frame = img => ({ querySelector: selector => selector === 'img' ? img : null })
+  const scrollEl = frames => ({
+    querySelectorAll: selector => selector === '.md-image-frame' ? frames : [],
+  })
+
+  assert.equal(mountMediaSettled(scrollEl([])), true)
+  assert.equal(mountMediaSettled(scrollEl([frame(null)])), false)
+  assert.equal(mountMediaSettled(scrollEl([frame({ complete: false })])), false)
+  assert.equal(mountMediaSettled(scrollEl([
+    frame({ complete: true }),
+    frame({ complete: true, naturalWidth: 0 }),
+  ])), true, 'decoded and terminally-failed images both release the bounded gate')
+})
 
 test('shouldPinSend pins first visible user message regardless of scroll', () => {
   assert.equal(shouldPinSend({
@@ -56,7 +84,7 @@ test('shouldPinSend can use a complete pre-blur auto-scroll snapshot on mobile s
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'ANCHOR_AT', key: 'old', offset: 0 },
     isFirstUserMsg: false,
-    wasAutoScrollAtBottom: true,
+    wasAtContentBottom: true,
   }), true)
 })
 
@@ -73,7 +101,7 @@ test('shouldPinSend holds delayed insertion when submit-time intent is unavailab
     scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
     mode: { kind: 'FOLLOW_BOTTOM' },
     isFirstUserMsg: false,
-    wasAutoScrollAtBottom: false,
+    wasAtContentBottom: false,
   }), false)
 })
 
@@ -109,7 +137,7 @@ test('shouldPinSend still refuses to pin when real content gap is large', () => 
   }), false)
 })
 
-test('shouldPinSend refuses a geometrically-at-bottom reader who is still in hold', () => {
+test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () => {
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 1000,
@@ -120,7 +148,105 @@ test('shouldPinSend refuses a geometrically-at-bottom reader who is still in hol
     scrollEl,
     mode: { kind: 'PIN_USER_MSG', cid: 'c-123' },
     isFirstUserMsg: false,
-  }), false)
+  }), true)
+})
+
+test('layout writes yield from the first input event until its gesture window closes', () => {
+  assert.equal(layoutMayOwnScroll(Number.POSITIVE_INFINITY, 999_999), false,
+    'a delayed first scroll keeps reader ownership without a 250ms race')
+  assert.equal(layoutMayOwnScroll(1250, 1000), false)
+  assert.equal(layoutMayOwnScroll(1250, 1249), false)
+  assert.equal(layoutMayOwnScroll(1250, 1250), true)
+})
+
+test('deferred layout waits for the first scroll instead of timing Infinity', () => {
+  assert.equal(gestureLayoutRetryDelay(Number.POSITIVE_INFINITY, 1000), null)
+  assert.equal(gestureLayoutRetryDelay(1250, 1000), 251)
+  assert.equal(gestureLayoutRetryDelay(999, 1000), 1)
+})
+
+test('only scrolling keys claim reader ownership', () => {
+  assert.equal(readerInputMayScroll('keydown', 'a'), false)
+  assert.equal(readerInputMayScroll('keydown', 'Enter'), false)
+  assert.equal(readerInputMayScroll('keydown', 'PageDown'), true)
+  assert.equal(readerInputMayScroll('keydown', 'ArrowUp'), true)
+  assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
+  assert.equal(readerInputMayScroll('wheel'), true)
+  assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('inputs without an end event get a next-frame no-scroll release', () => {
+  assert.equal(readerInputNeedsFrameRelease('wheel'), true)
+  assert.equal(readerInputNeedsFrameRelease('keydown'), true)
+  assert.equal(readerInputNeedsFrameRelease('pointerdown'), false)
+  assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
+})
+
+test('scroll diagnostics expose behavior without message identity', () => {
+  assert.deepEqual(_scrollModeForDiagnostics({
+    kind: 'PIN_USER_MSG',
+    cid: 'private-message-cid',
+    followWhenFilled: true,
+  }), {
+    kind: 'PIN_USER_MSG',
+    armed: true,
+  })
+  assert.deepEqual(_scrollModeForDiagnostics({
+    kind: 'ANCHOR_AT',
+    key: 'private-message-key',
+    offset: 42,
+  }), {
+    kind: 'ANCHOR_AT',
+  })
+})
+
+test('queued submission freezes the visible row before footer reflow', () => {
+  const item = {
+    offsetTop: 720,
+    offsetHeight: 120,
+    dataset: { key: 'assistant-live' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 660,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+  assert.deepEqual(
+    modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
+    { kind: 'ANCHOR_AT', key: 'assistant-live', offset: 60 },
+  )
+})
+
+test('queued submission anchors before the active assistant shell that steer will split', () => {
+  const user = {
+    offsetTop: 8,
+    offsetHeight: 50,
+    dataset: { key: 'user-stable' },
+    hasAttribute() { return false },
+  }
+  const activeAssistant = {
+    offsetTop: 82,
+    offsetHeight: 1600,
+    dataset: { key: 'streaming-chat' },
+    hasAttribute(name) { return name === 'data-active-assistant' },
+  }
+  const rows = [user, activeAssistant]
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 800,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? rows : []
+    },
+  }
+
+  assert.deepEqual(
+    modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
+    { kind: 'ANCHOR_AT', key: 'user-stable', offset: -792 },
+  )
 })
 
 test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
@@ -133,6 +259,19 @@ test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
   assert.equal(isNearContentBottom(scrollEl), true)
   assert.equal(isNearScrollBottom(scrollEl), false,
     'middle of reserved spacer is not true scroll bottom')
+})
+
+test('physical-bottom geometry uses only a rounding epsilon', () => {
+  assert.equal(isNearScrollBottom(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1497,
+    clientHeight: 500,
+  }), 4), true)
+  assert.equal(isNearScrollBottom(makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1495,
+    clientHeight: 500,
+  }), 4), false)
 })
 
 test('pin reapply is needed when the first pin was clamped but spacer now makes the target reachable', () => {
@@ -221,6 +360,88 @@ test('viewport resize never turns a pin into auto-scroll without a gesture', () 
   )
 })
 
+test('an armed live pin holds until its exact spacer is filled, then follows', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.equal(modeAfterSpacerResize(livePin, 320), livePin)
+  assert.equal(modeAfterSpacerResize(livePin, 2), livePin)
+  assert.deepEqual(modeAfterSpacerResize(livePin, 1), { kind: 'FOLLOW_BOTTOM' })
+  assert.deepEqual(modeAfterSpacerResize(livePin, 0), { kind: 'FOLLOW_BOTTOM' })
+})
+
+test('reader reaching the reserved physical bottom keeps the live pin armed', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.equal(modeAfterReaderReachesBottom({
+    mode: livePin,
+    spacerH: 320,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), livePin, 'the existing pin identity stays intact')
+})
+
+test('reader reaching reserved bottom repairs a lost live pin instead of following immediately', () => {
+  assert.deepEqual(modeAfterReaderReachesBottom({
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    spacerH: 320,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  })
+})
+
+test('reader reaches ordinary bottom only after reservation is exhausted', () => {
+  assert.deepEqual(modeAfterReaderReachesBottom({
+    mode: { kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true },
+    spacerH: 0,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), { kind: 'FOLLOW_BOTTOM' })
+})
+
+test('idle reserved bottom is a settled pin and cannot manufacture follow', () => {
+  assert.deepEqual(modeAfterReaderReachesBottom({
+    mode: { kind: 'ANCHOR_AT', key: 'user-c-123', offset: 4 },
+    spacerH: 320,
+    turnRunning: false,
+    lastUserCid: 'c-123',
+  }), { kind: 'PIN_USER_MSG', cid: 'c-123' })
+})
+
+test('a short settled pin retires automatic follow but keeps its identity', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  const settled = settledPinMode(livePin)
+  assert.deepEqual(settled, { kind: 'PIN_USER_MSG', cid: 'c-123' })
+  assert.equal(modeAfterSpacerResize(settled, 0), settled,
+    'later layout changes cannot manufacture follow after stream settle')
+})
+
+test('terminal pin waits for stable committed geometry before disarming', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.equal(modeAfterTerminalLayout(livePin, 320, false), livePin)
+  assert.deepEqual(
+    modeAfterTerminalLayout(livePin, 320, true),
+    { kind: 'PIN_USER_MSG', cid: 'c-123' },
+  )
+})
+
+test('terminal pin follows immediately when final committed geometry fills the spacer', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.deepEqual(
+    modeAfterTerminalLayout(livePin, 0, false),
+    { kind: 'FOLLOW_BOTTOM' },
+  )
+})
+
 test('keyboard close preserves pin identity even when keyboard-open geometry is away from the physical bottom', () => {
   const pin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
   const temporaryAnchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: 4 }
@@ -261,6 +482,71 @@ test('foreground return anchors the current reading position when scrolled up', 
     modeForForegroundReturn(scrollEl),
     { kind: 'ANCHOR_AT', key: 'assistant-7', offset: 60 },
   )
+})
+
+test('no saved chat location opens at the latest real content without enabling follow', () => {
+  const last = {
+    offsetTop: 1500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-latest' },
+  }
+  const scrollEl = {
+    scrollHeight: 2100,
+    scrollTop: 0,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 200 }
+      if (selector === '[data-key="assistant-latest"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const mode = _validateSavedMode(null, [], scrollEl)
+  assert.deepEqual(mode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-latest',
+    offset: 300,
+    defaultTail: true,
+  })
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1200,
+    'the real content tail is visible and reserved spacer room is excluded')
+})
+
+test('an unresolvable saved location falls back to a settled bottom anchor', () => {
+  const last = {
+    offsetTop: 900,
+    offsetHeight: 180,
+    dataset: { key: 'assistant-current-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 1400,
+    scrollTop: 0,
+    clientHeight: 600,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 0 }
+      if (selector === '[data-key="missing-old-row"]') return null
+      if (selector === '[data-key="assistant-current-tail"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const mode = _validateSavedMode(
+    { kind: 'ANCHOR_AT', key: 'missing-old-row', offset: 12 },
+    [],
+    scrollEl,
+  )
+  assert.equal(mode.kind, 'ANCHOR_AT')
+  assert.equal(mode.key, 'assistant-current-tail')
+  assert.equal(mode.defaultTail, true,
+    'automatic fallback must not masquerade as a reader-chosen location')
+  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM')
 })
 
 test('chat exit freezes the visible anchor even at the physical tail', () => {

@@ -17,9 +17,13 @@
  * that window), gcTime 24h means it's kept on disk for a day after
  * last use. Tweak per-query via the queryKey/queryFn config.
  */
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, dehydrate } from '@tanstack/react-query'
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
 import { get, set, del } from 'idb-keyval'
+
+const QUERY_CACHE_KEY = 'mobius-query-cache'
+const QUERY_CACHE_BUSTER = 'v1'
+export const QUERY_CACHE_RELOAD_FLUSH_TIMEOUT_MS = 750
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -41,14 +45,14 @@ const idbStorage = {
 
 export const queryPersister = createAsyncStoragePersister({
   storage: idbStorage,
-  key: 'mobius-query-cache',
+  key: QUERY_CACHE_KEY,
   throttleTime: 1000,
 })
 
 export const persistOptions = {
   persister: queryPersister,
   maxAge: 24 * 60 * 60 * 1000,
-  buster: 'v1',
+  buster: QUERY_CACHE_BUSTER,
   dehydrateOptions: {
     shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
   },
@@ -77,4 +81,51 @@ export function shouldPersistQueryKey(queryKey) {
     return true
   }
   return PERSISTED_FULL_KEYS.has(JSON.stringify(queryKey))
+}
+
+/** Force the current in-memory cache to IndexedDB before an intentional shell
+ * reload. Normal persistence is deliberately throttled because live streams
+ * update the chat cache frequently. A deferred shell rebuild can become idle
+ * in the sub-second interval after terminal promotion, however; reloading in
+ * that window used to hydrate the previous partial and make the final response
+ * disappear until the chat remounted/refetched. This explicit terminal
+ * handoff snapshots the same allowlisted cache without changing steady-state
+ * throttling. */
+export async function flushPersistedQueryCache(client = queryClient) {
+  const persistedClient = {
+    buster: QUERY_CACHE_BUSTER,
+    timestamp: Date.now(),
+    clientState: dehydrate(client, {
+      shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
+    }),
+  }
+  await idbStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(persistedClient))
+}
+
+/** Wait briefly for the reload handoff, but never let a blocked IndexedDB
+ * transaction strand a waiting service-worker generation. The write itself is
+ * still allowed to finish; this only bounds how long shell activation waits. */
+export function awaitCacheFlushBeforeReload(
+  flushPromise,
+  {
+    timeoutMs = QUERY_CACHE_RELOAD_FLUSH_TIMEOUT_MS,
+    setTimeoutFn = (typeof setTimeout !== 'undefined' ? setTimeout : null),
+    clearTimeoutFn = (typeof clearTimeout !== 'undefined' ? clearTimeout : null),
+  } = {},
+) {
+  if (!setTimeoutFn || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    return Promise.resolve(flushPromise).catch(() => {})
+  }
+  return new Promise(resolve => {
+    let settled = false
+    let timer = null
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (timer != null && clearTimeoutFn) clearTimeoutFn(timer)
+      resolve()
+    }
+    timer = setTimeoutFn(finish, timeoutMs)
+    Promise.resolve(flushPromise).then(finish, finish)
+  })
 }

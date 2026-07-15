@@ -257,7 +257,7 @@ test.describe('Spacer mechanics', () => {
     assertSpacerReasonable(m)
   })
 
-  test('2. Second message in hold — spacer retargets without moving the reader', async ({ page }) => {
+  test('2. Second message at the content tail retargets the spacer and pins', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First message')
@@ -268,13 +268,12 @@ test.describe('Spacer mechanics', () => {
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
     expect(m.spacerH).toBeGreaterThan(0)
-    expect(Math.abs(m.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
     expect(m.lastUserTop).toBeGreaterThan(first.lastUserTop)
-    expect(m.userVisualTop).toBeGreaterThan(10)
+    assertUserMsgAtTop(m)
     assertSpacerReasonable(m)
   })
 
-  test('3. Repeated messages in hold keep the original reading position', async ({ page }) => {
+  test('3. Repeated messages at the content tail pin deterministically', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First')
@@ -288,11 +287,10 @@ test.describe('Spacer mechanics', () => {
     await sendMessage(page, 'Third')
 
     const third = await measure(page)
-    expect(Math.abs(second.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
-    expect(Math.abs(third.scrollTop - first.scrollTop)).toBeLessThanOrEqual(8)
     expect(second.lastUserTop).toBeGreaterThan(first.lastUserTop)
     expect(third.lastUserTop).toBeGreaterThan(second.lastUserTop)
-    expect(third.userVisualTop).toBeGreaterThan(10)
+    assertUserMsgAtTop(second, 'second tail send')
+    assertUserMsgAtTop(third, 'third tail send')
     expect(third.spacerH).toBeGreaterThan(0)
     assertSpacerReasonable(third)
   })
@@ -466,11 +464,12 @@ test.describe('Short responses', () => {
     // Let spacer recalculation settle before next send.
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
-    // Send a new message while still in hold. The viewport stays put, while
-    // the permanent reservation retargets to the new latest user row.
+    // The short transcript is still at its real-content tail, so the next
+    // send follows the same geometry rule as every other send: retarget the
+    // permanent reservation and pin the new user row.
     await sendMessage(page, 'Follow-up question')
     const m = await measure(page)
-    expect(Math.abs(m.scrollTop - withOldSpacer.scrollTop)).toBeLessThanOrEqual(8)
+    assertUserMsgAtTop(m, 'follow-up after short response')
     assertSpacerReasonable(m)
     // The spacer should anchor to the new user message, not the old one.
     // DOM-injected content may not survive React re-render, so the new
@@ -599,7 +598,7 @@ test.describe('SSE streaming (real React path)', () => {
     assertSpacerReasonable(m)
   })
 
-  test('17. Long SSE response — content overflows, user stays near top', async ({ page }) => {
+  test('17. Long SSE response fills the reservation and follows the tail', async ({ page }) => {
     const events = [
       { type: 'catch_up_done' },
       { type: 'text', content: 'Very long response. '.repeat(200) },
@@ -618,10 +617,10 @@ test.describe('SSE streaming (real React path)', () => {
     const m = await measure(page)
     // Content should overflow the viewport.
     expect(m.listH).toBeGreaterThan(m.clientH)
-    // User should NOT be at the bottom — auto-follow is off by default.
-    // They stay near the top where their message was sent.
+    // Once the reply consumes the exact reservation, the live pin performs
+    // its single automatic handoff to real-content tail follow.
     const gap = m.scrollH - m.scrollTop - m.clientH
-    expect(gap).toBeGreaterThan(100)
+    expect(Math.abs(gap)).toBeLessThanOrEqual(4)
   })
 })
 
@@ -686,7 +685,9 @@ test.describe('Autoscroll behavior', () => {
     // Scroll to middle (user deliberately scrolled up).
     await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = s.scrollHeight / 2
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = s.scrollHeight / 2
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 
@@ -702,7 +703,7 @@ test.describe('Autoscroll behavior', () => {
     expect(after.scrollTop).toBeLessThan(after.scrollH - after.clientH - 50)
   })
 
-  test('20. SSE streaming does NOT auto-follow — user stays near top', async ({ page }) => {
+  test('20. SSE streaming follows only after the reservation is consumed', async ({ page }) => {
     // Simulate a long SSE response delivered in chunks.
     const chunks = []
     for (let i = 0; i < 20; i++) {
@@ -726,11 +727,10 @@ test.describe('Autoscroll behavior', () => {
     const m = await measure(page)
     // Content should exceed viewport.
     expect(m.listH).toBeGreaterThan(m.clientH)
-    // Auto-follow is OFF by default — user should NOT be at the bottom.
-    // They stay near the top where their message was sent.
+    // This response is deliberately long enough to consume the reservation,
+    // so the one pin-to-follow handoff has occurred by terminal settlement.
     const gap = m.scrollH - m.scrollTop - m.clientH
-    expect(gap).toBeGreaterThan(100)
-    assertUserMsgAtTop(m, 'after long SSE promote')
+    expect(Math.abs(gap)).toBeLessThanOrEqual(4)
   })
 
   test('20b. User message stays pinned near top through real SSE stream', async ({ page }) => {
@@ -873,7 +873,13 @@ test.describe('Scroll edge cases', () => {
     // Scroll up past 50px threshold.
     await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = Math.max(0, s.scrollTop - 200)
+      if (!s) return
+      // This test claims reader ownership, so exercise the actual contract:
+      // input opens the gesture window before the browser scroll lands.
+      // A bare scrollTop assignment is app-owned test setup and must not
+      // change ScrollMode.
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = Math.max(0, s.scrollTop - 200)
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 
@@ -949,6 +955,16 @@ test.describe('Scroll edge cases', () => {
     // gesture window; the scrollTop write within it is treated as
     // user intent and may transition the ScrollMode.
     const userScrollTo = async (top) => {
+      if (top === 'bottom') {
+        // Move away in a separate frame first. Chromium can coalesce an
+        // already-clamped bottom write into no scroll event, which would test
+        // a no-op gesture rather than the FOLLOW_BOTTOM transition.
+        await page.evaluate(() => {
+          const s = document.querySelector('.chat__scroll')
+          if (s) s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 80)
+        })
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
+      }
       await page.evaluate((t) => {
         const s = document.querySelector('.chat__scroll')
         if (!s) return
@@ -957,7 +973,12 @@ test.describe('Scroll edge cases', () => {
           : t === 'up' ? Math.max(0, s.scrollTop - 200)
           : t
       }, top)
-      await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+      const expectedMode = top === 'bottom' ? 'FOLLOW_BOTTOM' : 'ANCHOR_AT'
+      await page.waitForFunction(kind => {
+        const id = localStorage.getItem('moebius_active_chat')
+        const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+        return !!id && modes[id]?.kind === kind
+      }, expectedMode, { timeout: 3000 })
     }
 
     // Fill viewport and engage auto-follow at the bottom (user gesture).
@@ -980,6 +1001,13 @@ test.describe('Scroll edge cases', () => {
 
     // Inject more content — should auto-follow again.
     await injectContent(page, 'After re-engage. ', 10)
+    // FOLLOW_BOTTOM is persisted by the scroll event before the controller's
+    // finite reader-ownership window expires. Wait for the deferred layout pass
+    // it schedules, rather than sampling the intentional intermediate frame.
+    await page.waitForFunction(() => {
+      const s = document.querySelector('.chat__scroll')
+      return !!s && s.scrollHeight - s.scrollTop - s.clientHeight < 50
+    }, undefined, { timeout: 3000 })
     const afterGap = await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0

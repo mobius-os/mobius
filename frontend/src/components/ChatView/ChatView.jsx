@@ -13,8 +13,6 @@ import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   shouldPinSend,
-  anchorModeFromScroll,
-  modeForForegroundReturn,
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
@@ -49,6 +47,7 @@ import {
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
+import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
@@ -57,6 +56,7 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
+  mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
@@ -92,58 +92,6 @@ const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-/** Cheap structural equality for chat-message arrays. Returns true when
- *  the lists have the same length AND the last message has the same
- *  role/content/blocks. Avoids re-renders when the background fetch
- *  returns the same data we just rendered from cache.
- *
- *  Conservative — false negatives (saying "different" when actually
- *  identical) just trigger a redundant re-render, which is the worst-
- *  case status quo. False positives (saying "same" when actually
- *  different) would cause stale rendering, so this comparison stays on
- *  the safe side: any structural difference in the last entry returns
- *  false. */
-function sameBlock(a, b) {
-  if (a === b) return true
-  if (!a || !b) return false
-  return a.type === b.type && a.status === b.status
-      && a.content === b.content && a.tool === b.tool
-      && a.input === b.input && a.output === b.output
-      && a.questions === b.questions && a.answers === b.answers
-      && a.question_id === b.question_id
-      // The error-card fields: a warm DB refresh can deliver a message that
-      // differs ONLY in these (e.g. boot reconcile stamped resumable + a
-      // `pause` descriptor onto an existing drain note, or a coalescing error
-      // event rewrote the message/pause). Skipping them froze a stale red card
-      // on screen until a remount. Compare the pause sub-fields (kind +
-      // resets_at) rather than the object reference, which a refetch always
-      // recreates.
-      && a.message === b.message && a.resumable === b.resumable
-      && a.pause?.kind === b.pause?.kind
-      && a.pause?.resets_at === b.pause?.resets_at
-}
-
-function sameMessageList(a, b) {
-  if (a === b) return true
-  if (!a || !b) return false
-  if (a.length !== b.length) return false
-  if (a.length === 0) return true
-  const la = a[a.length - 1]
-  const lb = b[b.length - 1]
-  if (la === lb) return true
-  if (!la || !lb) return false
-  if (la.role !== lb.role) return false
-  if (la.content !== lb.content) return false
-  const bla = la.blocks, blb = lb.blocks
-  if ((bla?.length || 0) !== (blb?.length || 0)) return false
-  if (bla && blb) {
-    for (let i = 0; i < bla.length; i++) {
-      if (!sameBlock(bla[i], blb[i])) return false
-    }
-  }
-  return true
 }
 
 function appendMessageBatch(prev, rows) {
@@ -194,28 +142,6 @@ function findUserIndexByCid(messages, cid) {
     if (msg?.role === 'user' && cidOf(msg) === cid) return i
   }
   return -1
-}
-
-/** Settle the scroll mode for a send that did NOT pin (the reader is
- *  scrolled up, or a caller opted out via pin:false).
- *
- *  The mode that misbehaves on a non-pin send is a STALE PIN_USER_MSG left
- *  by an earlier send: re-applying it would move scrollTop even though the
- *  user is reading above the tail. Convert that stale pin into the reader's
- *  current scroll position (ANCHOR_AT). The bottom spacer is now independent
- *  from pinning, so it can still reserve room below the newest user message
- *  without moving the reader. By default FOLLOW_BOTTOM is left alone because
- *  pin:false synthetic sends (e.g. handleStop's queue-collapse) intentionally
- *  keep following. Real user sends/steers that choose not to pin pass
- *  retireFollow:true so a stale FOLLOW_BOTTOM cannot yank a scrolled-up reader
- *  when the delayed message becomes visible. */
-function settleNonPinMode(modeRef, scrollEl, { retireFollow = false } = {}) {
-  const kind = modeRef.current?.kind
-  if (kind !== 'PIN_USER_MSG' && !(retireFollow && kind === 'FOLLOW_BOTTOM')) {
-    return
-  }
-  const anchor = anchorModeFromScroll(scrollEl)
-  if (anchor) modeRef.current = anchor
 }
 
 // Exported so sibling components (Shell, etc.) can clean up drafts when a
@@ -362,7 +288,14 @@ export default function ChatView({
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
+  const offsetRef = useRef(offset)
+  offsetRef.current = offset
   const [loading, setLoading] = useState(!cached)
+  // Warm cache content is useful immediately, but it is not authoritative for
+  // entry layout. The first refresh decides whether an already-running turn's
+  // catch-up must settle before the transcript can be revealed.
+  const cachedEntryPhase = cached && !cached.running ? 'cached' : 'history'
+  const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
   // render the empty-state UI ("What's on your mind?") as if the chat had no
@@ -375,7 +308,7 @@ export default function ChatView({
   const [loadNonce, setLoadNonce] = useState(0)
   const [sending, setSending] = useState(() => !!cached?.running)
   // Terminal live-to-settled commits bump this sequence. The corresponding
-  // layout effect re-applies a surviving prompt pin against the committed DOM.
+  // layout effect settles an armed prompt pin against the committed DOM.
   const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
   // Server-hydrated running marker. `sending` is the local UI flag and
   // `isStreaming` belongs to the SSE hook; both can briefly be false across
@@ -639,6 +572,7 @@ export default function ChatView({
     // second call's updater reads the pre-batch prev and overwrites
     // the first call's result on setMessages.
     messagesRef.current = next
+    if (nextOffset !== undefined) offsetRef.current = nextOffset
     queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
       ...(existing || {}),
       messages: next,
@@ -808,16 +742,15 @@ export default function ChatView({
 
   // ── Scroll subsystem ─────────────────────────────────────────────
   //
-  // useScrollMode owns the entire scroll state machine: mode ref,
-  // applyMode funnel, IntersectionObserver bottom sentinel,
-  // ResizeObserver for layout updates, user-gesture detection,
-  // mobile keyboard handling via visualViewport, and the
-  // hide-then-reveal restore on mount.
+  // useScrollMode owns the entire scroll state machine: semantic lifecycle
+  // transitions, the automatic scroll-write funnel, geometry-based bottom
+  // detection, ResizeObserver layout updates, user-gesture ownership, mobile
+  // keyboard handling, diagnostics, and hide-then-reveal restore on mount.
   //
   // The hook returns:
-  //   • modeRef               — mutate to set PIN_USER_MSG{ts} on send,
-  //                             FOLLOW_BOTTOM on user scroll-to-bottom,
-  //                             ANCHOR_AT{...} on pagination, etc.
+  //   • modeRef               — read-only to ChatView for submit snapshots.
+  //                             Lifecycle changes go through the returned
+  //                             semantic controller methods below.
   //   • gestureWindowUntilRef — read by handleScroll to gate pagination
   //                             on user-driven scrolls only.
   //   • userScrollIntentVersionRef
@@ -834,8 +767,14 @@ export default function ChatView({
     gestureWindowUntilRef,
     userScrollIntentVersionRef,
     revealed,
+    anchorPagination,
+    armSentMessage,
+    closePreSendGestureWindow,
+    freezeForegroundReturn,
+    freezeQueuedSubmission,
     reapplyActiveMode,
-    reapplyPinnedMode,
+    settleNonPin,
+    settleStreamingPin,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -845,6 +784,10 @@ export default function ChatView({
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
+    turnRunning: sending || serverRunning,
+    initialEntryCanReveal: initialEntryPhase === 'cached'
+      || initialEntryPhase === 'ready',
+    initialEntrySettled: initialEntryPhase === 'ready',
   })
 
   function makeSendPinIntent(willPin) {
@@ -896,25 +839,16 @@ export default function ChatView({
     return !stateHasUser && !domHasUser
   }
 
-  // The ONE place a send/steer/promote arms the pin. Owns intent-staleness (a
-  // real user scroll after submit wins) and the PIN-vs-settle mode write. The pin
-  // targets the stable `cid`, which the DOM row already carries from mint, so
-  // the pin lands on the first apply — no ts-swap retarget, ever. Spacer HEIGHT
-  // belongs to the layout effect's sizeSpacer; this never zeroes it (zeroing
-  // would clamp scrollTop with no guaranteed re-run to re-pin).
+  // Every send/steer/promote enters the scroll controller through this one
+  // semantic event. ChatView resolves delayed-intent staleness; the controller
+  // owns the actual PIN-vs-hold transition and the later automatic writes. The
+  // pin targets the stable `cid` carried by the DOM row from mint.
   function pinSentMessage(cid, { willPin, intent } = {}) {
-    if (intent && !pinIntentStillCurrent(intent)) {
-      // A real user scroll landed after submit — the reader wins. Leave
-      // scrollTop where they put it; retire any stale PIN/FOLLOW to their
-      // current anchor so the reserved room stays available below.
-      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-      return
-    }
-    if (willPin && cid != null) {
-      modeRef.current = { kind: 'PIN_USER_MSG', cid }
-    } else {
-      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
-    }
+    armSentMessage({
+      cid,
+      willPin,
+      intentCurrent: !intent || pinIntentStillCurrent(intent),
+    })
   }
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
@@ -954,7 +888,13 @@ export default function ChatView({
         && !preserveLocalTurn
         && serverSnapshotBehindLocal(msgs, messagesRef.current)
       if (!preserveLocalTurn && !staleSnapshot) {
-        commitMessages(msgs, data.offset || 0)
+        const refreshed = mergeRecentMessagesIntoLoadedWindow({
+          loadedMessages: messagesRef.current,
+          loadedOffset: offsetRef.current,
+          recentMessages: msgs,
+          recentOffset: data.offset || 0,
+        })
+        commitMessages(refreshed.messages, refreshed.offset)
       }
       if (data.running) {
         setSending(true)
@@ -1118,7 +1058,7 @@ export default function ChatView({
             // The original submit-time intent is unavailable (for example
             // after a remount). Never infer a delayed pin from the reader's
             // later position; only the first-message exception remains.
-            wasAutoScrollAtBottom: false,
+            wasAtContentBottom: false,
           })
           const contWillPin = continuationPinIntent
             ? continuationPinIntent.willPin
@@ -1201,12 +1141,11 @@ export default function ChatView({
       // segment into `messages`, then append the steered user row, then let
       // future text deltas build a fresh streaming assistant block.
       //
-      // It still follows the one USER-SEND scroll rule. The queued row keeps
-      // its original submit-time decision: first row always pins; a later row
-      // pins only if it was submitted from gesture-entered FOLLOW_BOTTOM at
-      // the real-content tail. Tapping fast-forward never recomputes intent
-      // from the reader's later position. Whether it pins or holds, the row
-      // receives the same permanent bottom reservation as a normal send.
+      // It still follows the one visible-row scroll rule. Automatic queue
+      // promotion keeps the original submit snapshot; an explicit fast-forward
+      // captures a fresh snapshot when pressed, because that is the deliberate
+      // action making the row visible. Whether it pins or holds, the row gets
+      // the same permanent bottom reservation as a normal send.
       //
       // Current backends carry a non-empty `messages` array, each row with its
       // stable cid (card-221: every row carries one). During rolling deploys an
@@ -1239,7 +1178,7 @@ export default function ChatView({
         isFirstUserMsg: steeredIsFirstUser,
         // A missing submit-time intent must degrade to hold, not infer a pin
         // from wherever the reader happens to be when the SSE event arrives.
-        wasAutoScrollAtBottom: false,
+        wasAtContentBottom: false,
       })
       const steerWillPin = pinIntent ? pinIntent.willPin : fallbackWillPin()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
@@ -1607,6 +1546,7 @@ export default function ChatView({
     let cancelled = false
     chatIdStaleRef.current = false
     setLoadError(false)
+    setInitialEntryPhase(cachedEntryPhase)
 
     const gen = fetchGenRef.current
     apiFetch(`/chats/${chatId}?limit=20`)
@@ -1635,6 +1575,7 @@ export default function ChatView({
           auto_resume_on_limit: !!data.auto_resume_on_limit,
         })
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+          setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
           setLoading(false)
           return
         }
@@ -1657,9 +1598,15 @@ export default function ChatView({
           }
         }
 
-        commitMessages(msgs, data.offset || 0)
+        const refreshed = mergeRecentMessagesIntoLoadedWindow({
+          loadedMessages: messagesRef.current,
+          loadedOffset: offsetRef.current,
+          recentMessages: msgs,
+          recentOffset: data.offset || 0,
+        })
+        commitMessages(refreshed.messages, refreshed.offset)
         setServerRunningState(!!data.running)
-        hadMessagesRef.current = msgs.length > 0
+        hadMessagesRef.current = refreshed.messages.length > 0
         setLiveQuestionId(data.pending_question_id || null)
         queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
           ...(existing || {}),
@@ -1679,6 +1626,7 @@ export default function ChatView({
           runningAtMount: !!data.running,
           lastMsgAtMount: msgs.length > 0 ? msgs[msgs.length - 1] : null,
         })
+        setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
         setLoading(false)
 
         // Hydrate pending queue from backend so a reload mid-queue
@@ -1697,6 +1645,7 @@ export default function ChatView({
       })
       .catch((err) => {
         if (cancelled) return
+        setInitialEntryPhase('ready')
         setLoadError(true)
         setLoading(false)
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
@@ -1769,9 +1718,7 @@ export default function ChatView({
         // user msg's NEW offsetTop) → visible jump → then our rAF
         // would set the anchor → second jump.
         if (anchorKey) {
-          modeRef.current = {
-            kind: 'ANCHOR_AT', key: anchorKey, offset: anchorOffset,
-          }
+          anchorPagination(anchorKey, anchorOffset)
         }
         commitMessages(prev => [...older, ...prev], data.offset || 0)
         requestAnimationFrame(() => {
@@ -1795,8 +1742,9 @@ export default function ChatView({
     // landing near scrollTop=0 when the user msg is high in the list,
     // or FOLLOW_BOTTOM after a pagination prepend) can satisfy
     // `scrollTop < 5 && offset > 0` and trigger an unwanted pagination
-    // load. Only paginate when the scroll was user-driven (recent
-    // pointer/wheel/touch/key in the 250ms window).
+    // load. Only paginate while the shared controller says the reader owns
+    // scrolling: from pointer/wheel/touch/key input through its first scroll,
+    // then through the short momentum window.
     const userDriven = performance.now() < gestureWindowUntilRef.current
     if (!userDriven) return
     if (el.scrollTop < 5 && offset > 0) {
@@ -1826,10 +1774,9 @@ export default function ChatView({
     if (listeningRef.current) stopVoiceRef.current?.()
 
     // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
-    // textarea. Pin only for the first visible user message, or when the reader
-    // is already in gesture-entered FOLLOW_BOTTOM and remains at the real
-    // content tail. Mobile blur can resize/clamp the viewport, so the complete
-    // decision (mode + geometry) must be captured before it.
+    // textarea. The real-content geometry is authoritative; mode can lag a
+    // gesture/layout by a frame. Mobile blur can resize/clamp the viewport, so
+    // capture the complete decision before it.
     const isFirstUserMsgAtSubmit = isFirstVisibleUserMessage()
     const willPinAtSubmit = pin && shouldPinSend({
       scrollEl: scrollRef.current,
@@ -1837,6 +1784,29 @@ export default function ChatView({
       isFirstUserMsg: isFirstUserMsgAtSubmit,
     })
     const sendPinIntent = makeSendPinIntent(willPinAtSubmit)
+    // Sending is a newer explicit action than the wheel/touch gesture that
+    // positioned the viewport for that send. Browsers update scrollTop
+    // synchronously but may dispatch the matching `scroll` event later; if the
+    // old gesture window stays open, that delayed event can land after this
+    // snapshot and cancel the brand-new PIN before its spacer is measured.
+    // Close only the PRE-SEND ownership window. Any wheel/touch/key input that
+    // begins after this line opens a fresh window and still wins normally.
+    closePreSendGestureWindow()
+
+    const queuesBehindActiveTurn = !!(
+      sendingRef.current
+      || isStreamingRef.current
+      || serverRunningRef.current
+      || pendingQueue.pendingMessagesRef.current.length > 0
+    )
+    if (queuesBehindActiveTurn) {
+      // Queueing changes the footer immediately (new chip, cleared composer,
+      // mobile keyboard close) but adds no transcript row yet. Freeze the
+      // exact visible message before any of those layout changes. The captured
+      // submit intent above is kept for the later promotion/steer, while the
+      // current in-flight answer stays where the reader left it now.
+      freezeQueuedSubmission()
+    }
 
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
@@ -1887,12 +1857,7 @@ export default function ChatView({
     // be `true` in this render's closure, sending the message to the
     // queue path instead of the fresh-send path. Refs reflect the
     // latest commit and dodge that.
-    if (
-      sendingRef.current
-      || isStreamingRef.current
-      || serverRunningRef.current
-      || pendingQueue.pendingMessagesRef.current.length > 0
-    ) {
+    if (queuesBehindActiveTurn) {
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
       pendingQueue.add(queuedMsg, { inFlight: true })
@@ -2178,7 +2143,10 @@ export default function ChatView({
         if (!result.started) {
           const queuedPinStillValid = pinIntentStillCurrent(freshPinIntent)
           if (queuedPinStillValid) {
-            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
+            settleNonPin({
+              retireFollow: pin,
+              event: 'send:not-started-hold',
+            })
           }
           setSending(false)
           setServerRunningState(false)
@@ -2708,22 +2676,16 @@ export default function ChatView({
 
       try {
         const steerIsFirstUser = isFirstVisibleUserMessage()
-        // Fast-forward promotes rows that were already submitted. Preserve
-        // the head row's original submit-time decision; do not recompute it
-        // from the reader's later fast-forward position. After a remount the
-        // in-memory intent may be unavailable, in which case hold is the safe
-        // default (except for the first-message rule).
-        const headQueuedIntent = queuedPinIntentByCidRef.current.get(
-          consumePendingCids[0],
-        ) || null
-        const fallbackSteerWillPin = shouldPinSend({
+        // Fast-forward is a deliberate visibility action, unlike automatic
+        // queue drain. Capture the reader's ACTUAL position now: bottom pins,
+        // reading elsewhere holds. A later real scroll during the POST still
+        // invalidates this snapshot through the intent version.
+        const steerWillPin = shouldPinSend({
           scrollEl: scrollRef.current,
           mode: modeRef.current,
           isFirstUserMsg: steerIsFirstUser,
-          wasAutoScrollAtBottom: false,
         })
-        steerPinIntentRef.current = headQueuedIntent
-          || makeSendPinIntent(fallbackSteerWillPin)
+        steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
         // The queued tray is part of the footer height. If it stays visible
         // until after the steered row is inserted, the scroll system pins with
         // one layout and then immediately reflows when the tray disappears — the
@@ -2798,8 +2760,7 @@ export default function ChatView({
         return
       }
       if (!turnActive) return
-      const nextMode = modeForForegroundReturn(scrollRef.current)
-      if (nextMode) modeRef.current = nextMode
+      freezeForegroundReturn()
     }
 
     document.addEventListener('visibilitychange', freezeStreamingReturn)
@@ -2810,7 +2771,7 @@ export default function ChatView({
       window.removeEventListener('pageshow', freezeStreamingReturn)
       window.removeEventListener('online', freezeStreamingReturn)
     }
-  }, [turnActive, modeRef])
+  }, [freezeForegroundReturn, turnActive])
 
   // Cloak the first post-reconnect catch-up commit (contract v2 item 2, lever
   // 3). freezeStreamingReturn above already anchors the mode at the moment the
@@ -2824,18 +2785,26 @@ export default function ChatView({
   // only a commit bumps it, so this skips the initial mount.
   useLayoutEffect(() => {
     if (catchUpCommitSeq === 0) return
+    setInitialEntryPhase(phase => phase === 'catch-up' ? 'ready' : phase)
     reapplyActiveMode()
   }, [catchUpCommitSeq, reapplyActiveMode])
 
-  // The terminal stream callback promotes live content and bumps this sequence
-  // in the same React batch. A layout effect therefore runs only after the
-  // settled message DOM is committed, before paint. That is the durable pin
-  // handshake: scheduling from the callback itself can race a concurrent
-  // commit and restore against the old live geometry.
+  // A stale `running` history snapshot can be followed by an authoritative
+  // terminal response without a catch-up commit. Release the bounded entry
+  // gate instead of waiting for its safety deadline.
+  useEffect(() => {
+    if (initialEntryPhase === 'catch-up' && !turnActive) {
+      setInitialEntryPhase('ready')
+    }
+  }, [initialEntryPhase, turnActive])
+
+  // Promotion and this sequence update share one React batch, so the terminal
+  // pin decision runs after the settled assistant DOM is committed and before
+  // paint. This avoids racing a concurrent commit from the stream callback.
   useLayoutEffect(() => {
     if (pinnedSettleSeq === 0) return
-    reapplyPinnedMode()
-  }, [pinnedSettleSeq, reapplyPinnedMode])
+    settleStreamingPin()
+  }, [pinnedSettleSeq, settleStreamingPin])
 
   // Composer action state: queued work is also non-idle from the user's point
   // of view. Even if we momentarily don't have a live stream attached yet, a
@@ -2960,21 +2929,35 @@ export default function ChatView({
   const trailingAssistantPartialIdx = turnActive
     ? findTrailingAssistantPartialIndex(messages)
     : -1
-  const activePartialMsgIdx = bridgeMsgIdx >= 0 ? bridgeMsgIdx : trailingAssistantPartialIdx
-  const activePartialMsg = activePartialMsgIdx >= 0 ? messages[activePartialMsgIdx] : null
-  // Select DATA, never a component tree. A captured bridge is authoritative;
-  // without one, the trailing assistant is folded into the active row only
-  // when chooseActiveAssistantSurface establishes that it mirrors this stream.
-  // Unrelated prior assistant history therefore remains untouched.
-  const activeAssistantSurface = chooseActiveAssistantSurface(activePartialMsg, streamItems)
   const hasLiveAssistantPayload = turnActive && streamItems.length > 0
+  const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
+  const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
+    ? messages[trailingAssistantPartialIdx]
+    : null
+  // Select DATA, never a component tree. A mount-time bridge is only
+  // authoritative while the live payload still proves it is the same answer.
+  // A stale in-memory cache can otherwise nominate the completed PREVIOUS
+  // answer just as a new turn starts, suppressing that whole reply and showing
+  // only the question card that happened to be cached. If the bridge and live
+  // surfaces are unrelated, fall through to the real trailing DB partial.
+  const bridgeAssistantSurface = chooseActiveAssistantSurface(bridgeMsg, streamItems)
+  const trailingAssistantSurface = chooseActiveAssistantSurface(
+    trailingAssistantPartialMsg,
+    streamItems,
+  )
   const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
     bridgeMsgIdx,
     trailingAssistantPartialIdx,
     hasLivePayload: hasLiveAssistantPayload,
-    surface: activeAssistantSurface,
+    bridgeSurface: bridgeAssistantSurface,
+    surface: trailingAssistantSurface,
   })
   const activeMirrorMsg = activeMirrorMsgIdx >= 0 ? messages[activeMirrorMsgIdx] : null
+  const activeAssistantSurface = activeMirrorMsgIdx === bridgeMsgIdx
+    ? bridgeAssistantSurface
+    : (activeMirrorMsgIdx === trailingAssistantPartialIdx
+        ? trailingAssistantSurface
+        : { hideMessage: false, suppressStream: false })
   const useDbActivePayload = !!(
     activeMirrorMsg
     && (!hasLiveAssistantPayload || activeAssistantSurface.suppressStream)
@@ -3472,11 +3455,6 @@ export default function ChatView({
         </ul>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
-        {/* Bottom sentinel — watched by IntersectionObserver. When
-            it's in the viewport, the user is at the bottom of
-            content (FOLLOW_BOTTOM intent). Zero size + aria-hidden
-            so it's invisible to users and screen readers. */}
-        <div className="chat__bottom-sentinel" aria-hidden="true" />
       </div>
       )}
 

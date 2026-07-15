@@ -11,7 +11,8 @@
  *   2. passive shell_rebuilt generations stay coalesced while an idle chat is
  *      visible, so source-save bursts cannot interrupt a reader.
  *   3. deliberate shell_apply_now still reloads exactly ONCE at the idle
- *      boundary and does not loop.
+ *      boundary, captures the current anchor, carries the terminal transcript
+ *      across that reload, and does not loop.
  *   4. after a REAL SW update (a genuinely new, WAITING worker), an idle apply
  *      lands the page on the NEW generation — controlled by the registration's
  *      ACTIVE worker with nothing left waiting. Deliberate-apply cases assert
@@ -135,11 +136,11 @@ async function setup(page, { streamRoute, systemBody, systemRoute } = {}) {
 }
 
 async function gotoEmptyChat(page) {
-  await createTaggedChat(page)
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  const hasEmpty = await page.evaluate(() => !!document.querySelector('.chat__empty-wrap'))
-  if (!hasEmpty) await page.goto(BASE)
+  const chat = await createTaggedChat(page)
+  if (!chat?.id) throw new Error('failed to create isolated shell-update chat')
+  await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  return chat
 }
 
 async function sendMessage(page, text) {
@@ -190,6 +191,23 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // that lets single-bus delivery need no client dedup.
     let armRebuilt
     const armed = new Promise(resolve => { armRebuilt = resolve })
+    let releasePostReloadChatRead
+    const postReloadChatReadReleased = new Promise(resolve => {
+      releasePostReloadChatRead = resolve
+    })
+    let holdChatReads = false
+    // The route-mocked SSE is intentionally not persisted by the backend. Hold
+    // the post-reload authoritative GET so this test observes the reload
+    // handoff itself: the terminal assistant row must hydrate from the cache
+    // Shell explicitly flushed before navigation. Without that flush, the last
+    // streamed line disappears until a later remount/refetch — the production
+    // regression this assertion locks in.
+    await page.route(/\/api\/chats\/[0-9a-f-]+(?:\?.*)?$/, async route => {
+      if (route.request().method() === 'GET' && holdChatReads) {
+        await postReloadChatReadReleased
+      }
+      return route.continue()
+    })
     let streamConnects = 0
     await setup(page, {
       streamRoute: async route => {
@@ -229,6 +247,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // The send marks the chat streaming synchronously (onMessageStart), so
     // arming here delivers the rebuilt while the turn is live.
     armRebuilt()
+    holdChatReads = true
 
     // Reloads once when the turn goes idle. The recheck interval (6s) + reload
     // delay put this a few seconds after `done`; allow generous headroom.
@@ -236,6 +255,8 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
       { timeout: 20000 },
     )
+    await expect(page.getByText('shell rebuilt')).toBeVisible({ timeout: 1500 })
+    releasePostReloadChatRead()
     expect(await page.evaluate(() => (
       sessionStorage.getItem('__before_shell_reload_seen')
     ))).toBe('1')
@@ -337,7 +358,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
       systemBody: sse([{ type: 'system_stream_open' }]),
     })
-    await gotoEmptyChat(page)
+    const idleChat = await gotoEmptyChat(page)
     // gen A controls the page (first install claims).
     await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
 
@@ -357,15 +378,42 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       { timeout: 15000 },
     )
 
+    // The hosted suite shares one backend across parallel Playwright workers.
+    // This case is specifically the IDLE recovery path, so do not let an
+    // unrelated worker's running fixture make the shell correctly defer its
+    // generation handoff. Keep the live-confirmation fetch real for this page,
+    // but scope its list to the chat this test owns.
+    await page.route(/\/api\/chats\/?(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{
+          ...idleChat,
+          running: false,
+          run_status: 'idle',
+        }]),
+      })
+    })
+
+    // The synthetic gen B changes only a trailing sw.js comment, so its
+    // advertised page bundle is intentionally identical to gen A. A real shell
+    // publish changes that bundle hash and the boot check sets this recovery
+    // flag; seed the same public signal so this case exercises the resulting
+    // new-document handoff rather than an indistinguishable no-op generation.
+    await page.evaluate(() => sessionStorage.setItem('sw-stale-precache-pending', '1'))
     await resetLoadCount(page)
     // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
     // re-arms the idle apply — the recovery path a client hits when a newer
     // generation is installed but the page has not adopted it.
     await page.reload({ waitUntil: 'domcontentloaded' })
 
-    // The explicit reload above is load 1. Mount-time pickup must deliberately
-    // hand off the still-waiting worker and perform load 2 even though a restored
-    // idle chat is visible.
+    // Controller identity can flip to gen B while this document is still
+    // executing gen A's precached bundle. The explicit reload above is load 1;
+    // mount-time pickup must remember the pre-fetch stale-generation signal,
+    // hand off the worker, and perform load 2. Requiring that navigation proves
+    // the document generation changed instead of accepting controller takeover
+    // alone as a false positive.
     await page.waitForFunction(
       () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
       { timeout: 20000 },

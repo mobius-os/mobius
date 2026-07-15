@@ -144,11 +144,26 @@ function openToolLifecycleIndex(items) {
  * the answered card already shows the same content as the
  * "Your questions have been answered" echo.
  */
-export function attachToolOutput(prev, content) {
+export function attachToolOutput(prev, content, event = null) {
   const i = openToolLifecycleIndex(prev)
   if (i === -1 || prev[i].type === 'question') return prev
   const updated = [...prev]
-  updated[i] = { ...updated[i], output: content }
+  const block = { ...updated[i], output: content }
+  // The backend reduces large output before it reaches either SSE or
+  // persistence. Preserve the reduction metadata on the live item too, so an
+  // expanded tool can fetch its stashed full text immediately instead of
+  // treating the excerpt as complete until the turn settles and reloads.
+  if (event?.tool_use_id && !block.tool_use_id) {
+    block.tool_use_id = event.tool_use_id
+  }
+  if (event?.output_truncated) {
+    block.output_truncated = true
+    block.output_full_len = event.output_full_len
+    if (event.output_exit_code != null) {
+      block.output_exit_code = event.output_exit_code
+    }
+  }
+  updated[i] = block
   return updated
 }
 
@@ -177,7 +192,13 @@ export function attachToolSources(prev, sources) {
  * reasoning stays in emit-order. Empty content is a no-op. The caller
  * is responsible for flushing any pending typewriter text first.
  */
-export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
+export function appendThinkingChunk(
+  prev,
+  chunk,
+  at = Date.now(),
+  ts = null,
+  segmentId = null,
+) {
   if (!chunk) return prev
   const last = prev[prev.length - 1]
   const eventTs = Number.isFinite(ts) ? ts : null
@@ -185,6 +206,9 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
     const startedAt = Number.isFinite(last.startedAt) ? last.startedAt : at
     const firstTs = Number.isFinite(last.firstTs) ? last.firstTs : eventTs
     const updated = [...prev]
+    const segmentChanged = segmentId != null
+      && last.segmentId != null
+      && segmentId !== last.segmentId
     updated[updated.length - 1] = {
       ...last,
       startedAt,
@@ -193,7 +217,11 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
       // runner-measured span up to here), this lets the live ticker survive a
       // reconnect/catch-up replay — see thinkingElapsedMs.
       lastAt: at,
-      content: last.content + chunk,
+      // Token deltas inside one provider segment concatenate verbatim. A new
+      // summary/content index is a semantic paragraph, not another token.
+      // Legacy events have no identity and keep the old raw-concat behavior.
+      content: last.content + (segmentChanged ? '\n\n' : '') + chunk,
+      ...(segmentId != null ? { segmentId } : {}),
       duration_ms: Number.isFinite(firstTs) && Number.isFinite(eventTs)
         ? Math.max(0, eventTs - firstTs)
         : Math.max(0, at - startedAt),
@@ -207,7 +235,16 @@ export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
     firstTs: eventTs,
     lastAt: at,
     duration_ms: 0,
+    ...(segmentId != null ? { segmentId } : {}),
   }]
+}
+
+/** Render-time repair for already-persisted reasoning from clients that lost
+ * provider segment identity. Adjacent bold summary headings were stored as
+ * `****`; restore only that unambiguous Markdown seam. New events carry
+ * segment_id and are separated before persistence, so this is legacy-only. */
+export function thinkingContentForDisplay(content) {
+  return String(content || '').replaceAll('****', '**\n\n**')
 }
 
 /**
@@ -236,6 +273,32 @@ export function thinkingElapsedMs(item, now) {
   }
   const startedAt = item && Number.isFinite(item.startedAt) ? item.startedAt : now
   return Math.max(0, now - startedAt)
+}
+
+/**
+ * Re-anchor the trailing live thinking block when a catch-up replay finishes.
+ *
+ * Replayed deltas arrive in a burst, so their client `lastAt` values describe
+ * replay time rather than the time the runner originally emitted them. The
+ * catch_up_done marker carries the server clock at the end of that replay;
+ * comparing it with the block's server-authored `firstTs` restores the quiet
+ * interval since the most recent reasoning delta. Without this step a block
+ * containing one summary event restarts at "1 second" whenever the chat
+ * remounts, even though the turn has been thinking for minutes.
+ */
+export function anchorReplayedThinking(items, replayTs, at = Date.now()) {
+  if (!Array.isArray(items) || items.length === 0) return items
+  if (!Number.isFinite(replayTs) || !Number.isFinite(at)) return items
+  const i = items.length - 1
+  const item = items[i]
+  if (item?.type !== 'thinking' || !Number.isFinite(item.firstTs)) return items
+
+  const replayElapsed = Math.max(0, replayTs - item.firstTs)
+  const currentDuration = Number.isFinite(item.duration_ms) ? item.duration_ms : 0
+  const duration_ms = Math.max(currentDuration, replayElapsed)
+  const updated = [...items]
+  updated[i] = { ...item, duration_ms, lastAt: at }
+  return updated
 }
 
 /**
@@ -322,8 +385,9 @@ export function reconcileStreamItems(prev, next) {
   if (!Array.isArray(next)) return prev
   if (!Array.isArray(prev) || prev.length === 0) return next
   let changed = next.length !== prev.length
-  const result = next.map((n, k) => {
+  const result = next.map((incoming, k) => {
     const p = prev[k]
+    let n = incoming
     if (!p || p.type !== n.type) {
       changed = true
       return n
@@ -335,6 +399,20 @@ export function reconcileStreamItems(prev, next) {
       if (!idMatch) {
         changed = true
         return n
+      }
+    }
+    if (n.type === 'thinking' && Number.isFinite(n.lastAt)) {
+      // A bounded replay may no longer contain the first delta, while the
+      // visible/session snapshot still has the older clock anchor. Never let
+      // reconciliation move a live timer backwards in that case.
+      const previousElapsed = thinkingElapsedMs(p, n.lastAt)
+      const replayElapsed = thinkingElapsedMs(n, n.lastAt)
+      if (previousElapsed > replayElapsed) {
+        n = {
+          ...n,
+          duration_ms: previousElapsed,
+          ...(Number.isFinite(p.startedAt) ? { startedAt: p.startedAt } : {}),
+        }
       }
     }
     if (shallowEqualItem(p, n)) return p

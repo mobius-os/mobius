@@ -1097,7 +1097,11 @@ async def stream_chat(
 
       # Signal the client that catch-up is complete and live events follow.
       # The client uses this to switch from instant rendering to typewriter.
-      yield _sse({"type": "catch_up_done"})
+      # Include the server clock at replay completion. Thinking deltas retain
+      # their original server timestamps in the broadcast log; the frontend
+      # uses this marker to restore the quiet interval after the last delta
+      # instead of restarting the visible timer when a chat remounts.
+      yield _sse({"type": "catch_up_done", "ts": int(time.time() * 1000)})
 
       # If the broadcast already finished and the catch-up included the
       # done event, we're done — no need to wait on the live queue.

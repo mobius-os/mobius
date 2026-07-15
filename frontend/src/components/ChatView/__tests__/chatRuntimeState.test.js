@@ -8,6 +8,7 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
+  mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
@@ -58,6 +59,58 @@ test('an unknown explicit answer-turn value fails closed to a separate boundary'
     status: 'started',
     answer_turn: 'future-mode',
   }), false)
+})
+
+test('R4: a recent-page refresh preserves the loaded prefix containing the return anchor', () => {
+  const loaded = Array.from({ length: 40 }, (_, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    cid: index % 2 ? undefined : `message-cid-${index + 5}`,
+    ts: 1700000000000 + index + 5,
+    content: `Loaded ${index + 5}`,
+  }))
+  const recent = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    cid: index % 2 ? undefined : `message-cid-${index + 25}`,
+    ts: 1700000000000 + index + 25,
+    content: `Fresh ${index + 25}`,
+  }))
+
+  const restored = mergeRecentMessagesIntoLoadedWindow({
+    loadedMessages: loaded,
+    loadedOffset: 5,
+    recentMessages: recent,
+    recentOffset: 25,
+  })
+
+  assert.equal(restored.offset, 5)
+  assert.equal(restored.messages.length, 40)
+  assert.equal(restored.messages[0].content, 'Loaded 5',
+    'the older row that can own the saved ANCHOR_AT remains mounted')
+  assert.equal(restored.messages[20].content, 'Fresh 25',
+    'the overlapping recent page still refreshes from server truth')
+})
+
+test('R4: a non-overlapping or rewritten recent page replaces stale loaded history', () => {
+  const loaded = Array.from({ length: 20 }, (_, index) => ({
+    id: `old-${index}`,
+    role: 'assistant',
+    content: `Old ${index}`,
+  }))
+  const recent = Array.from({ length: 20 }, (_, index) => ({
+    id: `new-${index}`,
+    role: 'assistant',
+    content: `New ${index}`,
+  }))
+
+  assert.deepEqual(mergeRecentMessagesIntoLoadedWindow({
+    loadedMessages: loaded,
+    loadedOffset: 0,
+    recentMessages: recent,
+    recentOffset: 20,
+  }), {
+    messages: recent,
+    offset: 20,
+  })
 })
 
 test('cidOf returns the row cid, else null (no read-time derivation)', () => {

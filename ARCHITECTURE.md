@@ -441,16 +441,30 @@ The removals not yet done at HEAD are noted in the last bullet:
 
 ## Chat scroll + steer contract
 
-How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
+**Owner-authoritative contract — v1.3 (2026-07-15).** This section is the
+canonical source of truth for how a chat scrolls and steers. When implementation,
+comments, and this contract disagree, the implementation/comments are the bug:
+fix behavior to match this contract. If a real case is unspecified or the desired
+behavior changes, agree the new rule with the owner first, update this versioned
+section explicitly, and add or change the matching regression test; never silently
+rewrite the contract around the behavior that happened to ship.
+
+The Chat Issue Reporter mini-app carries an owner-readable snapshot of these rules
+and attaches their rule ids to new diagnostic chats. The Playwright lock-in specs
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
 `backend/tests/test_chats_stream_steer`) encode this:
 
-- **R0 — Two modes; one auto-scroll entrance.** A chat is either in **auto-scroll**
+- **R0 — Two modes; two explicit auto-scroll entrances.** A chat is either in **auto-scroll**
   (`FOLLOW_BOTTOM`, following the real-content tail as the reply streams) or **hold**
   (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
-  position). Auto-scroll engages ONLY through the gesture-gated scroll handler after
-  the user manually scrolls to the physical bottom. A send, viewport/keyboard change,
-  foreground return, mount, or chat restoration must never create auto-scroll.
+  position). Auto-scroll engages only through (a) the gesture-gated scroll handler
+  after the user manually reaches an ordinary bottom with no reservation remaining,
+  or (b) the live-send pin handoff when the streaming reply has consumed its exact
+  reserved room. The physical bottom while reservation remains is the prompt's pin
+  target, not the real-content tail: reaching it preserves (or repairs) pin hold and
+  waits for the spacer-exhaustion handoff. A viewport /
+  keyboard change, foreground return, mount, or chat restoration must never create
+  auto-scroll.
 - **R1 — Permanent exact reservation.** Every non-empty chat keeps enough dynamic
   bottom spacer for its latest visible user message to reach the viewport top,
   including after leaving and reopening the chat. The reservation is exact — no
@@ -459,24 +473,68 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   a short restored chat cannot open on an empty viewport.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
-  pins only when its submit-time snapshot says the reader was already in
-  `FOLLOW_BOTTOM` at the real-content tail. Merely being geometrically near the tail
-  while in hold is not enough. A user scroll after submission invalidates a delayed
-  queued/steered pin. Missing delayed intent degrades to hold, never to an inferred
-  pin.
-- **R3 — Pin means hold.** A legitimate pin transitions to `PIN_USER_MSG`, not
-  `FOLLOW_BOTTOM`; the response grows below the prompt without moving it. Auto-scroll
-  resumes only after the user manually scrolls to the physical bottom. A non-pinning
-  send preserves the exact reading anchor. `PIN_USER_MSG` survives the complete
+  pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
+  authoritative because `ScrollMode` can lag an input/layout frame; requiring both
+  made identical bottom sends behave inconsistently. A real user scroll after
+  submission invalidates an automatic delayed queue promotion (a tap without
+  scrolling does not). Explicit fast-forward is itself the visibility action, so it
+  captures fresh bottom geometry when pressed; a real scroll during its request
+  invalidates that snapshot. Missing delayed intent degrades to hold, never to an
+  inferred pin.
+- **R3 — Pin holds until the reservation is filled.** A legitimate live pin
+  transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
+  first grows below the prompt without moving it. Exactly when the streaming reply
+  consumes the reservation (spacer reaches zero), the armed pin hands off once to
+  `FOLLOW_BOTTOM`. If the reply settles while any reservation remains, that handoff
+  is retired only after committed geometry is stable across consecutive layout
+  frames, and the prompt stays pinned; a one-frame terminal check cannot disarm
+  just before final buffered text fills the reservation. Later idle layout changes
+  cannot create follow. A non-pinning send preserves the exact reading anchor. `PIN_USER_MSG`
+  survives the complete
   mobile-keyboard open/close cycle even though the full-height reservation makes its
   scroll position temporarily look away from the physical bottom; viewport geometry
-  is not reader intent, so only a gesture-gated reader scroll may retire the pin. The
-  terminal live-to-settled render is an explicit handshake: on its next committed
-  frame, the pin is re-applied once so a final scroll-range clamp cannot move it.
+  is not reader intent, so apart from the explicit filled-reservation handoff, only a
+  gesture-gated reader scroll may retire the pin.
+  Terminal promotion makes this decision against the committed settled DOM,
+  before paint, so a final browser clamp cannot race the pin or its exact
+  filled-reservation handoff.
 - **R4 — Exact leave-and-return.** Leaving, backgrounding, and returning restore the
   same visible anchor, even if the chat had been auto-scrolling and content grew while
   it was inactive. Return never jumps to the new tail and does not restore
-  auto-scroll; the user must manually reach the bottom again.
+  auto-scroll; the user must manually reach the bottom again. If there is no saved
+  location, or its target row is no longer available, return shows the latest real
+  conversation content at the viewport bottom once as a settled anchor. It must not
+  manufacture a top-of-chat location or engage live following. That automatic tail
+  fallback is not a reader-chosen location and must not be persisted on pagehide or
+  shell reload; only a deliberate scroll/send/pagination position earns restoration.
+- **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
+  input until its scroll event lands, no layout path may write `scrollTop`: stream
+  resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
+  all share the same ownership gate. Only an actual gesture-driven scroll invalidates
+  delayed send intent. Send is a newer explicit action than the gesture that
+  positioned it: after submit snapshots the synchronous geometry, a delayed browser
+  `scroll` event from that pre-send gesture cannot cancel the new pin. Any input begun
+  after submit opens fresh reader ownership and still wins. Queueing behind a live
+  turn adds no transcript row, so it
+  freezes the visible message before the queue tray/composer/keyboard reflow; the
+  separately captured submit snapshot still controls the row when it is promoted.
+  Never replace the input-to-first-scroll handoff with a fixed short window: under
+  rendering load the browser may deliver that scroll later. Ownership begins only for
+  inputs whose default action can scroll the transcript; ordinary typing, Enter, and
+  control activation are not reader scroll intent. Pointer/touch release handles taps,
+  while wheel/scrolling-key input that produces no scroll releases on the next frame;
+  only after a real scroll lands does the short momentum window begin. A bounded
+  dead-man remains the final escape hatch for an interrupted gesture.
+- **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
+  and the settled transcript are alternate sources for one active assistant row, not
+  separate answers. The answer response declares this ownership independently as
+  `answer_turn: "same" | "new"`: an in-process question answer (`answer_delivered`)
+  resumes that same row and turn, so answering must not retire its source bridge.
+  The source handoff
+  preserves the question, its answer, and every pre/post-answer thinking, tool, and
+  text block in event order, without hiding, duplicating, or reordering them. Only a
+  recovered answer whose POST returns `started` creates a new hidden continuation.
+  Switching sources preserves the active row's anchor identity and writes no scroll.
 
 The transition table is intentionally exhaustive; adding a new send or lifecycle
 path means routing it through the same entries rather than inventing another rule:
@@ -484,15 +542,52 @@ path means routing it through the same entries rather than inventing another rul
 | Event | Before | After | Scroll write |
 |---|---|---|---|
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
-| Later send submitted while manually entered `FOLLOW_BOTTOM` and still at real-content tail | `FOLLOW_BOTTOM` | `PIN_USER_MSG` | New row to top |
+| Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
-| Reader scrolls manually to physical bottom | any | `FOLLOW_BOTTOM` | User-owned |
+| Reader reaches physical bottom while live reservation remains | any | armed `PIN_USER_MSG` | User-owned; then keep prompt fixed |
+| Reader reaches physical bottom while idle reservation remains | any | settled `PIN_USER_MSG` | User-owned; keep prompt fixed |
+| Reader reaches bottom with no reservation remaining | any | `FOLLOW_BOTTOM` | User-owned |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
-| Reply/layout grows while pinned or anchored | hold | same hold | Reapply only the held target |
-| Live reply becomes settled markup while pinned | pin hold | same pin hold | Reapply on the next committed frame |
+| Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
+| Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow real-content tail |
+| Short reply settles before consuming the reservation | armed pin hold | settled pin hold | Keep prompt fixed; retire automatic handoff |
+| Other layout grows while pinned or anchored | hold | same hold | Reapply only the held target |
 | Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
 | Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
+| In-process question is answered | any | same mode and active assistant row | None |
+| Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
+
+Controller structure is part of the contract, not an implementation detail:
+
+- `ChatView` may read `modeRef` for a submit snapshot but must not assign it.
+  It emits send, queue, pagination, and lifecycle events through the semantic
+  methods returned by `useScrollMode`.
+- Every live mode mutation goes through `transitionMode`; every mode-owned
+  `scrollTop` write goes through `writeMode`. The exported `applyMode` executor
+  is for the controller and pure unit tests, not a second live writer.
+- The gesture-gated `scroll` event reads physical-bottom geometry directly.
+  Do not reintroduce a sentinel or asynchronous observer as a second bottom
+  authority: its delayed state can contradict the viewport that caused the
+  event.
+- `window.__mobiusChatScrollTrace` keeps bounded, content-free transition and
+  actual-write history for diagnosis. It records mode kinds, armed state, and
+  geometry only—never message text, keys, or cids.
+
+Thinking/reasoning deltas also carry a semantic `segment_id` end to end. Token
+deltas with the same id concatenate verbatim; a new provider summary/content index
+adds a paragraph boundary before live rendering and durable reduction. The renderer
+repairs the legacy glued-bold seam (`****`) for already-saved chats, while legacy
+events without ids retain raw token concatenation so mid-word fragments are never
+split heuristically.
+
+The live thinking timer is runner-time, not component lifetime. Each delta keeps
+its server `ts`; `catch_up_done` carries the server clock at replay completion, and
+the frontend re-anchors only a trailing live thinking block from those two server
+values before committing the replay. Reconciliation may move that clock forward
+but never backward. Do not derive a remounted timer solely from `Date.now()` or the
+client arrival time of replayed deltas: catch-up arrives as a burst and that makes a
+minutes-old turn visibly restart at one second.
 
 Every visible user row also makes R1's reservation current, whether or not that row
 pins. Reservation lifetime and pin decisions are independent.
@@ -579,12 +674,13 @@ context is preserved.
 
 This section is the **owner-authoritative source of truth** for chat UX; the
 gitignored `CLAUDE.md` / `docs/*` copies must not diverge from it (when they do, this
-wins). Alignment is held
-by the lock-in Playwright specs above **plus** three harnesses tracked in `.pm/` that
-exist specifically to keep prod matching this contract: a runtime chat-contract
-monitor on the live shell (`208`), a deterministic chat-states gallery with geometry
-goldens (`209`), and an SSE event-replay harness (`210`). Changing a rule here means
-updating those specs in the same change.
+wins). Alignment is currently enforced by the tracked unit and Playwright lock-in
+specs above plus `chatContract.js`'s pure geometry predicates. Three additional
+harnesses have been designed but are **not present in this repository yet**: a
+runtime chat-contract monitor on the live shell (`208`), a deterministic chat-states
+gallery with geometry goldens (`209`), and an SSE event-replay harness (`210`). Do
+not cite those planned harnesses as current coverage. Changing a rule here means
+updating a matching tracked test in the same change.
 
 ## Stop-chat contract
 
@@ -720,6 +816,17 @@ Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
 
 Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.7, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
+
+Shell rebuilds apply on idle: `Shell.jsx` defers `shell_rebuilt` while any chat is
+streaming, then performs the controlled SW handoff/reload. The idle boundary alone
+is not a transcript-persistence boundary—terminal promotion updates the in-memory
+TanStack cache synchronously while its normal IndexedDB mirror is throttled. Before
+the intentional reload, `flushPersistedQueryCache()` writes the current allowlisted
+cache directly; this normally guarantees the reloaded ChatView hydrates the terminal
+assistant row rather than the previous partial while its authoritative GET revalidates.
+The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be blocked by
+another browser lifecycle transaction, and a best-effort cache write must never strand
+a waiting service-worker generation. The write may still finish after the deadline.
 
 ## Mini-app manifest (mobius.json)
 

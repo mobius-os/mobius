@@ -11,6 +11,7 @@ import {
   closeToolLifecycle,
   closeAllToolLifecycles,
   appendThinkingChunk,
+  anchorReplayedThinking,
   attachToolSources,
   reconcileStreamItems,
 } from './streamReducers.js'
@@ -737,6 +738,11 @@ export default function useStreamConnection(chatId, {
           }
 
           if (event.type === 'catch_up_done') {
+            catchUpItems = anchorReplayedThinking(
+              catchUpItems,
+              event.ts,
+              Date.now(),
+            )
             commitCatchUp()
             // The reattach window ends when the catch-up burst commits —
             // from here on it's normal live streaming again.
@@ -781,7 +787,8 @@ export default function useStreamConnection(chatId, {
                 prev,
                 content,
                 Date.now(),
-                event.ts
+                event.ts,
+                event.segment_id,
               ))
             }
           } else if (event.type === 'tool_start') {
@@ -817,7 +824,7 @@ export default function useStreamConnection(chatId, {
             // item, or a question card that absorbed its tool block
             // (the post-answer "answers echo" output is swallowed
             // there; see streamReducers.js).
-            applyStreamItems(prev => attachToolOutput(prev, event.content))
+            applyStreamItems(prev => attachToolOutput(prev, event.content, event))
           } else if (event.type === 'tool_sources') {
             applyStreamItems(prev => attachToolSources(prev, event.sources))
           } else if (event.type === 'tool_end') {

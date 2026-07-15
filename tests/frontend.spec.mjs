@@ -597,7 +597,7 @@ test.describe('Scroll position', () => {
     // saves the reader's ANCHOR_AT mode for this chat.
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
     await page.waitForFunction(
       id => {
@@ -683,14 +683,36 @@ test.describe('Scroll position', () => {
       { timeout: 10000 },
     )
 
-    // A real wheel gesture is the sole transition into FOLLOW_BOTTOM.
+    // A real wheel gesture is the sole transition into FOLLOW_BOTTOM. The
+    // initial restore can already place the viewport at the physical bottom,
+    // so first move away from it; a wheel-down from an already-clamped tail
+    // emits no scroll event and therefore cannot establish reader intent.
     const scroll = page.locator('.chat__scroll')
     await scroll.hover()
+    await page.mouse.wheel(0, -300)
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      return !!el
+        && el.scrollTop > 0
+        && el.scrollHeight - el.scrollTop - el.clientHeight > 100
+    }, { timeout: 3000 })
     await page.mouse.wheel(0, 100000)
     await page.waitForFunction(() => {
       const el = document.querySelector('.chat__scroll')
       return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 50
     }, { timeout: 3000 })
+    await page.waitForFunction(
+      id => {
+        try {
+          return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.kind
+            === 'FOLLOW_BOTTOM'
+        } catch {
+          return false
+        }
+      },
+      chatId,
+      { timeout: 3000 },
+    )
     const scrollBefore = await page.evaluate(
       () => document.querySelector('.chat__scroll')?.scrollTop ?? null,
     )
@@ -698,7 +720,7 @@ test.describe('Scroll position', () => {
 
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
     await page.waitForFunction(
       id => {
@@ -751,6 +773,254 @@ test.describe('Scroll position', () => {
     expect(restored).not.toBeNull()
     expect(Math.abs(restored.scrollTop - scrollBefore)).toBeLessThan(50)
     expect(restored.bottomGap).toBeGreaterThan(100)
+  })
+
+  test('10c. A paginated return anchor survives the latest-page refresh', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
+
+    const allMessages = Array.from({ length: 45 }, (_, index) => {
+      const role = index % 2 === 0 ? 'user' : 'assistant'
+      const content = `History row ${index}. ${'Restorable content. '.repeat(8)}`
+      return {
+        cid: role === 'user' ? `history-cid-${index}` : undefined,
+        role,
+        ts: 1700000200000 + index,
+        content,
+        blocks: role === 'assistant' ? [{ type: 'text', content }] : [],
+      }
+    })
+    let recentFetches = 0
+
+    await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      const url = new URL(route.request().url())
+      const limit = Number(url.searchParams.get('limit') || 20)
+      const beforeParam = url.searchParams.get('before')
+      const before = beforeParam == null ? allMessages.length : Number(beforeParam)
+      const start = Math.max(0, before - limit)
+      if (beforeParam == null) recentFetches += 1
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: allMessages.slice(start, before),
+          total: allMessages.length,
+          offset: start,
+          running: false,
+          pending_messages: [],
+        }),
+      })
+    })
+
+    await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('button', { name: 'Load earlier messages' }))
+      .toBeVisible({ timeout: 10000 })
+    await page.getByRole('button', { name: 'Load earlier messages' }).click()
+    await page.waitForFunction(
+      () => document.querySelector('[data-key="user-1700000200010"]'),
+      { timeout: 5000 },
+    )
+    // loadOlderMessages keeps its pagination guard raised until the commit's
+    // requestAnimationFrame. Wait for that boundary before synthesizing the
+    // reader gesture; otherwise the scroll handler correctly ignores the
+    // programmatic prepend settle and this test accidentally races the guard.
+    await page.evaluate(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))))
+
+    // Read an older row that is outside the server's default newest-20 page.
+    // The pointerdown makes the ensuing scroll an owner gesture, so R4 saves
+    // this exact row+offset rather than a programmatic position.
+    await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      const target = document.querySelector('[data-key="user-1700000200010"]')
+      if (!el || !target) throw new Error('missing paginated anchor target')
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      el.scrollTop = target.offsetTop + 12
+    })
+    await page.waitForFunction(
+      id => JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.key
+        === 'user-1700000200010',
+      chatId,
+      { timeout: 3000 },
+    )
+
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+
+    await page.evaluate(() => history.back())
+    await expect.poll(() => recentFetches, { timeout: 10000 }).toBeGreaterThan(1)
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.chat__scroll')
+        return !!el && getComputedStyle(el).visibility !== 'hidden'
+      },
+      { timeout: 10000 },
+    )
+    await page.evaluate(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))))
+
+    const restored = await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      const target = document.querySelector('[data-key="user-1700000200010"]')
+      return {
+        keyStillMounted: !!target,
+        offset: target && el ? target.offsetTop - el.scrollTop : null,
+        scrollTop: el?.scrollTop ?? null,
+      }
+    })
+    expect(restored.keyStillMounted).toBe(true)
+    expect(Math.abs(restored.offset - (-12))).toBeLessThanOrEqual(2)
+    expect(restored.scrollTop).toBeGreaterThan(0)
+  })
+
+  test('10d. Previous-chat entry stays visually fixed through delayed history, image decode, and first catch-up', async ({ page }) => {
+    await setup(page, { width: 900, height: 760 })
+    await newChat(page)
+
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
+
+    let returning = false
+    let streamCount = 0
+    let returnImageServed = false
+    const squarePng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const history = imageName => {
+      const above = [
+        ...Array.from({ length: 32 }, (_, i) =>
+          `Entry-settle paragraph ${i + 1}. ${'Content above the saved anchor. '.repeat(8)}`),
+        `![late layout image](${BASE}/${imageName})`,
+      ].join('\n\n')
+      const below = Array.from({ length: 24 }, (_, i) =>
+        `Later paragraph ${i + 1}. ${'Content below the saved anchor. '.repeat(8)}`).join('\n\n')
+      return [
+        { id: 'entry-user-1', cid: 'entry-cid-1', role: 'user', ts: 1700000300000, content: 'Entry test start' },
+        { id: 'entry-above', role: 'assistant', ts: 1700000300001, content: above, blocks: [{ type: 'text', content: above }] },
+        { id: 'entry-anchor', cid: 'entry-anchor-cid', role: 'user', ts: 1700000300002, content: 'Saved reading anchor' },
+        { id: 'entry-tail', role: 'assistant', ts: 1700000300003, content: below, blocks: [{ type: 'text', content: below }] },
+      ]
+    }
+
+    await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      if (returning) await new Promise(resolve => setTimeout(resolve, 220))
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
+          total: 4,
+          offset: 0,
+          running: returning,
+          pending_messages: [],
+        }),
+      })
+    })
+    await page.route('**/entry-image-initial.png', route => route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' },
+      body: squarePng,
+    }))
+    await page.route('**/entry-image-return.png', async route => {
+      await new Promise(resolve => setTimeout(resolve, 320))
+      returnImageServed = true
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' },
+        body: squarePng,
+      })
+    })
+    await page.route(new RegExp(`/api/chats/${chatId}/stream$`), async route => {
+      streamCount += 1
+      if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
+      await new Promise(resolve => setTimeout(resolve, 500))
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: [
+          'data: {"type":"catch_up_done"}\n\n',
+          'data: {"type":"text","content":"Still active after mount catch-up"}\n\n',
+        ].join(''),
+      })
+    })
+
+    // First visit: establish a deliberate saved ANCHOR_AT location.
+    await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      const img = document.querySelector('.md-image')
+      return !!el && getComputedStyle(el).visibility !== 'hidden'
+        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
+    }, { timeout: 10000 })
+    await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      const target = document.querySelector('[data-key="entry-anchor"]')
+      if (!el || !target) throw new Error('missing entry anchor')
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      // Put the target just above the viewport edge so it becomes the
+      // controller's topmost visible row. Leaving it 80px below the edge made
+      // the preceding, very tall assistant row the saved anchor instead.
+      el.scrollTop = target.offsetTop + 12
+      el.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await page.waitForFunction(
+      id => JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.key
+        === 'entry-anchor',
+      chatId,
+      { timeout: 3000 },
+    )
+
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+
+    returning = true
+    await page.evaluate(() => {
+      window.__entryTrajectory = []
+      const started = performance.now()
+      const sample = () => {
+        const el = document.querySelector('.chat__scroll')
+        const target = document.querySelector('[data-key="entry-anchor"]')
+        const visible = !!el && getComputedStyle(el).visibility !== 'hidden'
+        window.__entryTrajectory.push({
+          t: Math.round(performance.now() - started),
+          visible,
+          anchor: !!target,
+          y: el && target
+            ? Math.round(target.getBoundingClientRect().top - el.getBoundingClientRect().top)
+            : null,
+        })
+        if (performance.now() - started < 1500) requestAnimationFrame(sample)
+      }
+      requestAnimationFrame(sample)
+      history.back()
+    })
+
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      const img = document.querySelector('.md-image')
+      return !!el && getComputedStyle(el).visibility !== 'hidden'
+        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
+    }, { timeout: 10000 })
+    await page.waitForTimeout(500)
+
+    const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
+    const visibleRows = trajectory.filter(row => row.visible)
+    expect(returnImageServed).toBe(true)
+    expect(streamCount).toBeGreaterThan(0)
+    expect(visibleRows.length).toBeGreaterThan(2)
+    expect(visibleRows.every(row => row.anchor && row.y != null)).toBe(true)
+    const visibleYs = visibleRows.map(row => row.y)
+    expect(Math.max(...visibleYs) - Math.min(...visibleYs)).toBeLessThanOrEqual(2)
   })
 })
 

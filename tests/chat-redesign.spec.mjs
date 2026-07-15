@@ -297,18 +297,17 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
 
 
 // ─────────────────────────────────────────────────────────────────
-// BUG 2/4: scroll behaviors — IntersectionObserver + state machine
+// BUG 2/4: scroll behaviors — geometry-owned state machine
 // ─────────────────────────────────────────────────────────────────
 
 test.describe('Bug 2/4: scroll state machine', () => {
 
-  test('bottom sentinel exists at the end of chat__scroll', async ({ page }) => {
-    // Smoke: sentinel must be rendered for IO to observe.
+  test('bottom detection has no lagging sentinel authority', async ({ page }) => {
     await setupWithStreamMock(page, null)
     await newChat(page)
     await sendMessage(page, 'First send')
-    const sentinel = await page.locator('.chat__bottom-sentinel')
-    await expect(sentinel).toHaveCount(1)
+    await expect(page.locator('.chat__bottom-sentinel')).toHaveCount(0)
+    await expect(page.locator('.chat__scroll')).toHaveCount(1)
   })
 
 

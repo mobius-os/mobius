@@ -21,6 +21,7 @@
 """
 
 import asyncio
+import json
 
 import pytest
 from pydantic import ValidationError
@@ -681,7 +682,9 @@ async def test_stream_generator_unsubscribes_after_finally_runs(db, chat):
     )
 
     saw_subscriber_mid_stream = False
-    async for _chunk in resp.body_iterator:
+    chunks = []
+    async for chunk in resp.body_iterator:
+      chunks.append(chunk)
       # While the generator is live (mid-iteration), the subscriber IS
       # registered — proof subscribe happened inside generate().
       if len(bc.subscribers) > baseline:
@@ -690,6 +693,17 @@ async def test_stream_generator_unsubscribes_after_finally_runs(db, chat):
     assert saw_subscriber_mid_stream, (
       "subscribe never ran inside the generator — the catch-up burst was "
       "served without ever registering a live subscriber"
+    )
+    payloads = [
+      json.loads(line.removeprefix("data: "))
+      for chunk in chunks
+      for line in chunk.splitlines()
+      if line.startswith("data: ")
+    ]
+    marker = next(event for event in payloads if event.get("type") == "catch_up_done")
+    assert isinstance(marker.get("ts"), int) and marker["ts"] > 0, (
+      "catch_up_done must carry the server replay clock so a remounted "
+      "thinking timer can recover time since its last delta"
     )
     # The finally ran on generator exhaustion → back to baseline.
     assert len(bc.subscribers) == baseline, (

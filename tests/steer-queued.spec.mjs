@@ -261,7 +261,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
 
-  test('a steer preserves the live stream and held scroll position', async ({ page }) => {
+  test('a steer while reading above the tail preserves the live stream and held position', async ({ page }) => {
     // Regression for bug #1: a force_steer must inject into the LIVE turn,
     // not trigger the fresh-send reset. The old code ran sendMessage's
     // "new turn" reset (setStreamItems([]) + setIsStreaming + reconnect) for
@@ -276,7 +276,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     //     inline and the pre-steer text is sealed as an assistant message.
     const QUEUE_TS = Date.now() + 60_000
     const QUEUED_TEXT = 'steer me in'
-    const PRE_STEER = 'thinking out loud before the steer'
+    const PRE_STEER_MARKER = 'thinking out loud before the steer'
+    const PRE_STEER = PRE_STEER_MARKER
     const POST_STEER = 'continuing after the steered message'
 
     const messagePosts = []
@@ -368,8 +369,24 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // The pre-steer assistant text streams in.
     await page.waitForFunction(
       (t) => document.body.textContent?.includes(t),
-      PRE_STEER, { timeout: 5000 },
+      PRE_STEER_MARKER, { timeout: 5000 },
     )
+
+    // Explicit fast-forward snapshots the reader position when pressed. Grow
+    // the durable user row (not the active assistant shell) so this case is
+    // unambiguously above the tail and the synthetic layout remains stable
+    // across the live→sealed assistant split. Growing the transient shell here
+    // would disappear during promotion and test a browser clamp instead of the
+    // steer anchor contract.
+    await page.evaluate(() => {
+      const scroll = document.querySelector('.chat__scroll')
+      if (!scroll) return
+      const firstUser = document.querySelector('.chat__msg--user')
+      if (firstUser) firstUser.style.paddingBottom = '1600px'
+      scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
+    })
+    await page.waitForTimeout(350)
 
     // Queue + steer.
     await sendMessage(page, QUEUED_TEXT)
@@ -409,7 +426,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // streamItems on the force_steer POST and the text vanished. Poll in the
     // BROWSER context (page.evaluate), not Node.
     await expect.poll(
-      () => page.evaluate(t => document.body.textContent?.includes(t), PRE_STEER),
+      () => page.evaluate(t => document.body.textContent?.includes(t), PRE_STEER_MARKER),
       { timeout: 2000 },
     ).toBe(true)
     await page.waitForFunction(

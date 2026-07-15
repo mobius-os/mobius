@@ -324,6 +324,47 @@ test('active trailing DB row stays mirrored across an empty to related-live sour
   }), -1, 'an unrelated prior assistant remains ordinary history')
 })
 
+test('stale mount bridge cannot hide a completed prior reply when a new turn streams', () => {
+  const previousReply = {
+    role: 'assistant',
+    ts: 2,
+    blocks: [
+      { type: 'question', question_id: 'q-1', answers: { Continue: 'Yes' } },
+      { type: 'text', content: 'The completed continuation after the answer' },
+    ],
+  }
+  const currentPartial = {
+    role: 'assistant',
+    ts: 4,
+    blocks: [{ type: 'text', content: 'Working on the new request' }],
+  }
+  const liveItems = [{ type: 'text', content: 'Working on the new request now' }]
+
+  const bridgeSurface = chooseActiveAssistantSurface(previousReply, liveItems)
+  const trailingSurface = chooseActiveAssistantSurface(currentPartial, liveItems)
+  assert.deepEqual(bridgeSurface, { hideMessage: false, suppressStream: false },
+    'the old answer is unrelated to the current stream')
+  assert.deepEqual(trailingSurface, { hideMessage: true, suppressStream: false },
+    'the current DB partial is covered by the current stream')
+  assert.equal(chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx: 1,
+    trailingAssistantPartialIdx: 3,
+    hasLivePayload: true,
+    bridgeSurface,
+    surface: trailingSurface,
+  }), 3, 'only the current partial may be suppressed; the completed prior reply stays visible')
+})
+
+test('unrelated stale mount bridge remains history when the new turn has no DB partial', () => {
+  assert.equal(chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx: 1,
+    trailingAssistantPartialIdx: -1,
+    hasLivePayload: true,
+    bridgeSurface: { hideMessage: false, suppressStream: false },
+    surface: { hideMessage: false, suppressStream: false },
+  }), -1)
+})
+
 test('active row data-key is latched for both live-first and DB-first source switches', () => {
   const synthetic = chooseActiveAssistantDataKey({
     latched: null,

@@ -100,7 +100,16 @@ export default function ToolBlock({ t, chatId }) {
   )
 
   useEffect(() => {
-    if (!open || !t.output_truncated || fullOutput !== null || loadingFull || loadFailed) return
+    // `loadingFull` is intentionally not a dependency or start guard. Setting
+    // it true inside this effect would otherwise re-run the effect, execute its
+    // cleanup, and mark the in-flight request cancelled before the response
+    // could be accepted. Closing the disclosure resets the visible loading
+    // state; reopening starts a fresh request if the first one was abandoned.
+    if (!open) {
+      setLoadingFull(false)
+      return
+    }
+    if (!t.output_truncated || fullOutput !== null || loadFailed) return
     if (!chatId) return
     // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
     // its full text from the side-table endpoint. Every large block is tagged
@@ -116,7 +125,7 @@ export default function ToolBlock({ t, chatId }) {
       .catch(() => { if (!cancelled) setLoadFailed(true) })
       .finally(() => { if (!cancelled) setLoadingFull(false) })
     return () => { cancelled = true }
-  }, [open, t.output_truncated, t.tool_use_id, fullOutput, loadingFull, loadFailed, chatId])
+  }, [open, t.output_truncated, t.tool_use_id, fullOutput, loadFailed, chatId])
 
   // Show the fetched full output once it lands; until then the inline preview.
   const shownOutput = t.output_truncated && fullOutput !== null ? fullOutput : t.output

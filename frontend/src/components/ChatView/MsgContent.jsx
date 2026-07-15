@@ -8,7 +8,11 @@ import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
-import { suppressedQuestionToolIndices, thinkingElapsedMs } from './streamReducers.js'
+import {
+  suppressedQuestionToolIndices,
+  thinkingContentForDisplay,
+  thinkingElapsedMs,
+} from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -69,7 +73,7 @@ function ActiveThinkingDisclosure({ block, isStreaming }) {
         </span>
       </summary>
       <div className="chat__reasoning-body">
-        <StandardMarkdown text={block.content || ''} />
+        <StandardMarkdown text={thinkingContentForDisplay(block.content)} />
       </div>
     </details>
   )
@@ -205,7 +209,7 @@ function MsgContentInner({
               </span>
             </summary>
             <div className="chat__reasoning-body">
-              <StandardMarkdown text={block.content || ''} />
+              <StandardMarkdown text={thinkingContentForDisplay(block.content)} />
             </div>
           </details>
         )
