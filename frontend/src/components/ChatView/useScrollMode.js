@@ -982,7 +982,13 @@ export default function useScrollMode({
       if (delay == null) return
       deferredGestureLayoutTimer = setTimeout(() => {
         deferredGestureLayoutPending = false
-        if (scrollRef.current === scrollEl) syncLayout()
+        // The observer pass that noticed the geometry change deliberately
+        // yielded to reader input. Once ownership returns, replay that missed
+        // write even when the semantic mode object itself did not change (the
+        // common case for FOLLOW_BOTTOM while new content arrives). Calling
+        // the ordinary identity-gated path here would resize the spacer but
+        // leave the viewport behind the live tail forever.
+        if (scrollRef.current === scrollEl) syncLayout({ forceApply: true })
       }, delay)
     }
     const resumeLayoutAfterGesture = () => {
