@@ -485,7 +485,31 @@ export function modeForChatExit(scrollEl) {
  * row. Freeze the visible anchor before that reflow; its separately-captured
  * submit intent still decides what happens when the row is later promoted. */
 export function modeForQueuedSubmission(scrollEl, currentMode) {
-  return anchorModeFromScroll(scrollEl) || currentMode
+  if (!scrollEl) return currentMode
+  const visible = _topmostVisibleMsg(scrollEl)
+  if (!visible) return currentMode
+
+  // A live assistant row can be split by fast-forward: its rendered content
+  // is sealed into history, the steered user row is inserted, and a new live
+  // assistant row continues below it. The active shell therefore cannot own a
+  // queue-time anchor even though its data-key is stable during ordinary
+  // streaming. Anchor to the nearest preceding transcript row instead; that
+  // row survives the split and its (possibly negative) visual offset preserves
+  // the exact reading position.
+  let anchor = visible
+  if (visible.hasAttribute?.('data-active-assistant')) {
+    const rows = [...scrollEl.querySelectorAll('.chat__msg[data-key]')]
+    const index = rows.indexOf(visible)
+    if (index > 0) anchor = rows[index - 1]
+  }
+
+  return anchor?.dataset?.key
+    ? {
+        kind: 'ANCHOR_AT',
+        key: anchor.dataset.key,
+        offset: anchor.offsetTop - scrollEl.scrollTop,
+      }
+    : currentMode
 }
 
 

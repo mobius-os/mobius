@@ -597,7 +597,7 @@ test.describe('Scroll position', () => {
     // saves the reader's ANCHOR_AT mode for this chat.
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
     await page.waitForFunction(
       id => {
@@ -698,7 +698,7 @@ test.describe('Scroll position', () => {
 
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
     await page.waitForFunction(
       id => {
@@ -802,6 +802,12 @@ test.describe('Scroll position', () => {
       () => document.querySelector('[data-key="user-1700000200010"]'),
       { timeout: 5000 },
     )
+    // loadOlderMessages keeps its pagination guard raised until the commit's
+    // requestAnimationFrame. Wait for that boundary before synthesizing the
+    // reader gesture; otherwise the scroll handler correctly ignores the
+    // programmatic prepend settle and this test accidentally races the guard.
+    await page.evaluate(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
     // Read an older row that is outside the server's default newest-20 page.
     // The pointerdown makes the ensuing scroll an owner gesture, so R4 saves
@@ -822,7 +828,7 @@ test.describe('Scroll position', () => {
 
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
 
     await page.evaluate(() => history.back())

@@ -27,6 +27,7 @@ export default function StreamingMessage({
     <li
       className="chat__msg chat__msg--assistant"
       data-key={dataKey}
+      data-active-assistant="true"
     >
       <MsgContent
         msg={msg}

@@ -176,6 +176,35 @@ test('queued submission freezes the visible row before footer reflow', () => {
   )
 })
 
+test('queued submission anchors before the active assistant shell that steer will split', () => {
+  const user = {
+    offsetTop: 8,
+    offsetHeight: 50,
+    dataset: { key: 'user-stable' },
+    hasAttribute() { return false },
+  }
+  const activeAssistant = {
+    offsetTop: 82,
+    offsetHeight: 1600,
+    dataset: { key: 'streaming-chat' },
+    hasAttribute(name) { return name === 'data-active-assistant' },
+  }
+  const rows = [user, activeAssistant]
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 800,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? rows : []
+    },
+  }
+
+  assert.deepEqual(
+    modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
+    { kind: 'ANCHOR_AT', key: 'user-stable', offset: -792 },
+  )
+})
+
 test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
