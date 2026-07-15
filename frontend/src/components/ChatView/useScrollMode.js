@@ -448,6 +448,21 @@ export default function useScrollMode({
   // already changed, so we need the last known pre-change tail snapshot.
   const nearScrollBottomRef = useRef(false)
 
+  // Absolute reveal deadline for this mounted chat. This deliberately lives
+  // outside the messages-dependent layout effect below: tool-rich turns can
+  // re-run that effect continuously, and clearing/restarting its local safety
+  // timer kept the ENTIRE transcript visibility:hidden indefinitely.
+  useLayoutEffect(() => {
+    revealedRef.current = false
+    setRevealed(false)
+    const deadline = setTimeout(() => {
+      if (revealedRef.current) return
+      revealedRef.current = true
+      setRevealed(true)
+    }, REVEAL_CAP_MS)
+    return () => clearTimeout(deadline)
+  }, [chatId])
+
   const persistMode = ({ freezeToCurrentPosition = false } = {}) => {
     try {
       const mode = freezeToCurrentPosition
@@ -661,11 +676,10 @@ export default function useScrollMode({
     // streaming) doesn't strand the chat hidden.
     let revealTimer = 0
     const requestRevealOnQuiet = () => {
-      if (revealed || revealedOnce) return
+      if (revealedRef.current) return
       clearTimeout(revealTimer)
       revealTimer = setTimeout(() => {
         if (scrollRef.current === scrollEl) syncLayout()
-        revealedOnce = true
         revealedRef.current = true
         setRevealed(true)
       }, 50)
@@ -685,11 +699,6 @@ export default function useScrollMode({
     //                   jitter so we stop.
     //   PIN_USER_MSG  — never re-applied; same jitter risk.
     //
-    // `revealedOnce` mirrors `revealed` at effect-start so re-runs of
-    // this effect on an already-revealed chat (messages change, etc.)
-    // don't re-enter the during-reveal branch and cause mid-stream
-    // jitter.
-    let revealedOnce = revealed
     const ro = new ResizeObserver(() => {
       if (scrollEl.clientHeight > fullViewHRef.current) {
         fullViewHRef.current = scrollEl.clientHeight
@@ -697,7 +706,7 @@ export default function useScrollMode({
       sizeSpacer()
       const k = modeRef.current.kind
       if (k === 'FOLLOW_BOTTOM'
-          || (k === 'ANCHOR_AT' && !revealedOnce)) {
+          || (k === 'ANCHOR_AT' && !revealedRef.current)) {
         applyMode(scrollEl, modeRef.current)
         nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       } else if (k === 'PIN_USER_MSG') {
@@ -806,21 +815,14 @@ export default function useScrollMode({
     // Hide-then-reveal: kick off the quiet-debounce path immediately
     // (reveals ~50ms after the last RO firing, smoothing out
     // late-settling renderers like markdown/KaTeX/question cards).
-    // Capped at REVEAL_CAP_MS so a perpetually-mutating layout
-    // (live streaming) can't strand the chat hidden indefinitely.
-    let safetyReveal = 0
+    // The absolute reveal deadline is owned by the chatId-only effect above,
+    // so message and tool churn cannot reset it.
     if (!revealed) {
       requestRevealOnQuiet()
-      safetyReveal = setTimeout(() => {
-        revealedOnce = true
-        revealedRef.current = true
-        setRevealed(true)
-      }, REVEAL_CAP_MS)
     }
 
     return () => {
       clearTimeout(ioBounceTimer)
-      clearTimeout(safetyReveal)
       clearTimeout(revealTimer)
       io?.disconnect()
       ro.disconnect()
