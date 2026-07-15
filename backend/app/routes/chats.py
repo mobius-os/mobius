@@ -808,14 +808,20 @@ def get_chat_agent_context(
       models.Chat.deleted_at.is_(None),
     ).all()
   }
-  memory_block = memory.build_memory_block(
+  recent_chat_block = memory.build_memory_block(
     data_dir,
     eligible_chat_ids=eligible_chat_ids,
-  ).text or None
+  )
+  recent_chats = recent_chat_block.text or None
   return {
     "system_prompt": system_prompt,
     "system_prompt_source": "custom" if custom else "skill",
-    "memory_block": memory_block,
+    # `memory_block` remains as a compatibility alias for an older shell. The
+    # owner-facing name is now precise: this is only bounded recent-chat
+    # continuity, never knowledge-graph memory.
+    "recent_chats": recent_chats,
+    "recent_chat_entries": recent_chat_block.entries,
+    "memory_block": recent_chats,
     "app_context": app_context_block,
     "app_report": app_report_block,
     "compaction_brief": compaction_brief,

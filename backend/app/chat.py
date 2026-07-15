@@ -4081,11 +4081,10 @@ async def _run_chat_impl_with_db(
       #  - data-not-instructions: notes are derived from past chats + web
       #    research, so a poisoned note must not be obeyed as a command —
       #    authored rules live only in the system prompt.
-      #  - pointer: where to read the full platform-published chat summary.
-      pointer = (
-        "For more detail about a listed chat, Read its fenced chat-note path. "
-        "The platform alone publishes those files; do not edit them."
-      )
+      #  - pointer: one shared retrieval instruction for every structured
+      #    recent-chat entry. Repeating it inside each entry wastes context and
+      #    makes the owner-facing inspector noisy.
+      pointer = memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
       meta = (
         "The <agent_experience> block below is PRIVATE CONTEXT — recent chat "
         "digests plus runtime metadata. Read it "

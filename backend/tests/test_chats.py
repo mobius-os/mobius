@@ -3,7 +3,7 @@
 import asyncio
 from uuid import uuid4
 
-from app import questions
+from app import memory, questions
 from app.pending_questions import PendingQuestion
 
 
@@ -48,6 +48,19 @@ def test_agent_context_includes_evolving_chat_summary(
       "digest": "The bounded digest." if chat_id == chat.id else None,
     },
   )
+  monkeypatch.setattr(
+    "app.memory.build_memory_block",
+    lambda *_args, **_kwargs: memory.MemoryBlock(
+      text="<recent_chat>...</recent_chat>",
+      loaded=["chats/older/index.md"],
+      entries=[{
+        "name": "Older chat",
+        "location": "chats/older/index.md",
+        "digest": "A bounded digest.",
+      }],
+      mode="recent_chats",
+    ),
+  )
 
   response = client.get(
     f"/api/chats/{chat.id}/agent-context",
@@ -64,6 +77,11 @@ def test_agent_context_includes_evolving_chat_summary(
     "chat_digest": "The bounded digest.",
     "chat_summary": "The cumulative handoff.",
   }
+  assert payload["recent_chat_entries"] == [{
+    "name": "Older chat",
+    "location": "chats/older/index.md",
+    "digest": "A bounded digest.",
+  }]
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

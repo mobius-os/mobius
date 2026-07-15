@@ -63,7 +63,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
       >
         <div className="chat-summary__head">
           <div>
-            <h2 id="chat-summary-title" className="chat-summary__title">Chat summaries</h2>
+            <h2 id="chat-summary-title" className="chat-summary__title">Chat summary</h2>
             <p className="chat-summary__subtitle">Three levels of continuity, updated after each settled turn.</p>
           </div>
           <button
