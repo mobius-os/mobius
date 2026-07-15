@@ -160,7 +160,7 @@ def _diff_summary(
       "binary": binary, "group": "managed" if managed else "authored",
     })
   # Owner-authored paths are the decision-bearing part of the comparison, so
-  # keep them visible before install-managed adaptations when the preview caps.
+  # keep them visible before install-managed adaptations when the list caps.
   all_paths.sort(key=lambda item: (item["group"] == "managed", item["path"]))
   paths = all_paths[:_PATH_LIST_LIMIT]
   return {
