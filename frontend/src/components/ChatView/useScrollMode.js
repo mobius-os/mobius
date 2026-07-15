@@ -468,6 +468,15 @@ export function layoutMayOwnScroll(gestureWindowUntil, now) {
 }
 
 
+/** Return a retry delay only after the first scroll has converted reader
+ * ownership into a finite momentum window. Infinity is an event handoff, not
+ * a timer duration (browsers clamp an infinite setTimeout unpredictably). */
+export function gestureLayoutRetryDelay(gestureWindowUntil, now) {
+  if (!Number.isFinite(gestureWindowUntil)) return null
+  return Math.max(0, gestureWindowUntil - now) + 1
+}
+
+
 /** Foreground return (visibilitychange/pageshow/online) is not a reading
  *  gesture. Freeze the exact visible anchor even when the chat was following
  *  before it left: content may have grown while inactive, and returning must
@@ -629,6 +638,9 @@ export default function useScrollMode({
   const readerLocationExplicitRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
   const pendingGestureTimerRef = useRef(0)
+  const pendingGestureReleaseRafRef = useRef(0)
+  const gestureSequenceRef = useRef(0)
+  const resumeLayoutAfterGestureRef = useRef(null)
   // Monotonic counter for actual user scroll intent. Send/steer code captures
   // this at submit time and honors a delayed pin only if the user did not
   // scroll after submitting. Programmatic applyMode scrolls must not increment
@@ -805,11 +817,17 @@ export default function useScrollMode({
   }, [scrollRef, transitionMode])
 
   const closePreSendGestureWindow = useCallback(() => {
+    gestureSequenceRef.current += 1
     gestureWindowUntilRef.current = 0
+    clearTimeout(pendingGestureTimerRef.current)
+    pendingGestureTimerRef.current = 0
+    cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+    pendingGestureReleaseRafRef.current = 0
   }, [])
 
   useLayoutEffect(() => () => {
     clearTimeout(pendingGestureTimerRef.current)
+    cancelAnimationFrame(pendingGestureReleaseRafRef.current)
   }, [])
 
   // Persist mode on every chatId change so the next mount restores.
@@ -899,16 +917,26 @@ export default function useScrollMode({
       performance.now(),
     )
     let deferredGestureLayoutTimer = 0
+    let deferredGestureLayoutPending = false
     const deferLayoutUntilReaderYields = () => {
       clearTimeout(deferredGestureLayoutTimer)
-      const delay = Math.max(
-        0,
-        gestureWindowUntilRef.current - performance.now(),
-      ) + 1
+      deferredGestureLayoutPending = true
+      const ownershipUntil = gestureWindowUntilRef.current
+      // Infinity means input has arrived but its first scroll has not. There
+      // is deliberately no guessed retry delay in that phase: onScroll, the
+      // no-scroll release, or the next effect instance resumes this pass.
+      const delay = gestureLayoutRetryDelay(ownershipUntil, performance.now())
+      if (delay == null) return
       deferredGestureLayoutTimer = setTimeout(() => {
+        deferredGestureLayoutPending = false
         if (scrollRef.current === scrollEl) syncLayout()
       }, delay)
     }
+    const resumeLayoutAfterGesture = () => {
+      if (!deferredGestureLayoutPending) return
+      deferLayoutUntilReaderYields()
+    }
+    resumeLayoutAfterGestureRef.current = resumeLayoutAfterGesture
 
     function sizeSpacer() {
       // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
@@ -1122,26 +1150,41 @@ export default function useScrollMode({
     if (queuedTrayEl) ro.observe(queuedTrayEl)
 
     // User-gesture detection.
+    const releasePendingGesture = (sequence) => {
+      if (gestureSequenceRef.current !== sequence
+          || gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
+      gestureWindowUntilRef.current = 0
+      clearTimeout(pendingGestureTimerRef.current)
+      pendingGestureTimerRef.current = 0
+      resumeLayoutAfterGestureRef.current?.()
+    }
     const onUserInput = () => {
       // Input and its first scroll event are ordered, but not guaranteed to be
       // less than 250ms apart under a busy renderer. Keep layout ownership
       // suspended until that first event actually lands; after it, the normal
       // short window covers momentum/follow-up scroll events. A bounded
       // fallback releases taps/keys that never produce any scroll at all.
+      const sequence = gestureSequenceRef.current + 1
+      gestureSequenceRef.current = sequence
       gestureWindowUntilRef.current = Number.POSITIVE_INFINITY
       clearTimeout(pendingGestureTimerRef.current)
+      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+      pendingGestureReleaseRafRef.current = 0
       pendingGestureTimerRef.current = setTimeout(() => {
-        if (gestureWindowUntilRef.current === Number.POSITIVE_INFINITY) {
-          gestureWindowUntilRef.current = 0
-        }
-        pendingGestureTimerRef.current = 0
+        releasePendingGesture(sequence)
       }, PENDING_GESTURE_CAP_MS)
     }
     const onGestureEndWithoutScroll = () => {
       if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
-      gestureWindowUntilRef.current = 0
-      clearTimeout(pendingGestureTimerRef.current)
-      pendingGestureTimerRef.current = 0
+      // Scroll events are delivered in the rendering step before rAF. Yield
+      // one frame so a scroll already caused by this gesture can claim the
+      // viewport before a genuine tap releases it.
+      const sequence = gestureSequenceRef.current
+      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+      pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
+        pendingGestureReleaseRafRef.current = 0
+        releasePendingGesture(sequence)
+      })
     }
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
@@ -1164,7 +1207,10 @@ export default function useScrollMode({
       if (gestureWindowUntilRef.current === Number.POSITIVE_INFINITY) {
         clearTimeout(pendingGestureTimerRef.current)
         pendingGestureTimerRef.current = 0
+        cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+        pendingGestureReleaseRafRef.current = 0
         gestureWindowUntilRef.current = performance.now() + GESTURE_WINDOW_MS
+        resumeLayoutAfterGestureRef.current?.()
       }
       if (loadingOlderRef.current) return
       const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 4
@@ -1220,6 +1266,9 @@ export default function useScrollMode({
     return () => {
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)
+      if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
+        resumeLayoutAfterGestureRef.current = null
+      }
       ro.disconnect()
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)

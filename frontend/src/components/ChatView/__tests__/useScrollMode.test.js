@@ -8,6 +8,7 @@ import {
   _validateSavedMode,
   applyMode,
   bottomAnchorModeFromScroll,
+  gestureLayoutRetryDelay,
   isNearContentBottom,
   isNearScrollBottom,
   layoutMayOwnScroll,
@@ -138,6 +139,12 @@ test('layout writes yield from the first input event until its gesture window cl
   assert.equal(layoutMayOwnScroll(1250, 1000), false)
   assert.equal(layoutMayOwnScroll(1250, 1249), false)
   assert.equal(layoutMayOwnScroll(1250, 1250), true)
+})
+
+test('deferred layout waits for the first scroll instead of timing Infinity', () => {
+  assert.equal(gestureLayoutRetryDelay(Number.POSITIVE_INFINITY, 1000), null)
+  assert.equal(gestureLayoutRetryDelay(1250, 1000), 251)
+  assert.equal(gestureLayoutRetryDelay(999, 1000), 1)
 })
 
 test('scroll diagnostics expose behavior without message identity', () => {
