@@ -568,14 +568,14 @@
   font-size: 12px;
 }
 
-/* Match Settings' full-size black/purple switch. Tailwind's unlayered
-   button reset otherwise wins over the SDK component layer and erases the
-   track, leaving only a floating white thumb inside chat surfaces. */
+/* Keep Settings' black/purple semantics at a compact chat-menu scale.
+   Tailwind's unlayered button reset otherwise wins over the SDK component
+   layer and erases the track, leaving only a floating white thumb. */
 .chat-policy-switch {
-  --switch-track-width: 48px;
-  --switch-track-height: 28px;
-  --switch-thumb-size: 22px;
-  --switch-thumb-offset: 3px;
+  --switch-track-width: 36px;
+  --switch-track-height: 20px;
+  --switch-thumb-size: 16px;
+  --switch-thumb-offset: 2px;
   --switch-track-color: var(--border);
   --switch-track-color-hover: var(--surface2);
   --switch-track-color-checked: var(--accent);
