@@ -16,8 +16,12 @@ test('unanswered question cards do not have a stale gray state', () => {
     'submit button should remain in place after an answer is submitted')
   assert.match(component, /\{answered \? 'Submitted' : 'Submit'\}/,
     'the retained submit button should explain its answered state')
-  assert.match(component, /\{!answered && !disabled && \(\s*<div className="qcard__hint"/,
-    'selection hints should render only when the card is answerable')
+  assert.match(component, /\{\(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
+    'selection hints should stay in place after the answer is submitted')
+  assert.doesNotMatch(component, /\{!answered && \(\s*<button[\s\S]*?qcard__opt--other/,
+    'the Other option should not disappear after submission')
+  assert.match(component, /\{\(isOtherSelected \|\| answeredWithOther\) && \(\s*<input/,
+    'a submitted custom answer should keep its input row in place')
 })
 
 test('question card css has no stale styling hook', () => {
