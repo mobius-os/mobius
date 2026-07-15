@@ -7,10 +7,11 @@ so this module returns metadata only: refs, ancestry counts, source-diff
 magnitudes, and working-tree counts/path names.  It never fetches, writes, or
 returns source contents.
 
-Platform compares ``HEAD`` with ``origin/main``.  Apps compare ``HEAD`` with
-their installer-owned ``upstream`` branch.  The latter is the last installed
-source, not a promise that the remote catalog was checked just now; callers
-must keep that wording honest.
+Platform compares ``HEAD`` with ``origin/main``.  Apps keep their
+installer-owned ``upstream`` branch as the installed baseline, while also
+reporting last-fetched ``origin`` and configured GitHub-fork topology.  Nothing
+here fetches, so every remote relationship is a view of refs already on disk,
+not a promise that GitHub or the catalog was checked just now.
 """
 
 from __future__ import annotations
