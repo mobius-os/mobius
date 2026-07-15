@@ -190,11 +190,11 @@ export function bottomAnchorModeFromScroll(scrollEl) {
  *
  * This is deliberately different from `bottomAnchorModeFromScroll`, which
  * excludes the dynamic reservation for the automatic no-location restore.
- * An explicit recovery-nudge tap asks to see everything after the paused
- * card too: composer clearance, any remaining reservation, and the card's
- * primary action. Keep that one-shot navigation as ANCHOR_AT rather than
- * FOLLOW_BOTTOM so revealing a paused control cannot manufacture live-follow
- * intent for a later resume.
+ * An explicit attention-nudge tap asks to see everything after the question
+ * or paused card too: composer clearance, any remaining reservation, and the
+ * card's primary action. Keep that one-shot navigation as ANCHOR_AT rather
+ * than FOLLOW_BOTTOM so revealing a control cannot manufacture live-follow
+ * intent for a later answer or resume.
  */
 export function physicalBottomAnchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
@@ -898,23 +898,24 @@ export default function useScrollMode({
       : modeRef.current
   }, [scrollRef, transitionMode])
 
-  // A sticky recovery nudge is an explicit reader request, but not a scroll
-  // gesture inside `.chat__scroll`. Route it through the controller anyway:
+  // A sticky attention nudge (question or paused turn) is an explicit reader
+  // request, but not a scroll gesture inside `.chat__scroll`. Route it through
+  // the controller anyway:
   // the old `element.scrollIntoView({block:'nearest'})` stopped as soon as the
-  // Resume button intersected the scroll viewport, even when the absolutely
-  // positioned composer still covered it. It also left modeRef describing the
-  // old reading position. Anchor the true physical tail in hold mode instead,
-  // and close any gesture window from the scroll that exposed the nudge so the
-  // resulting programmatic scroll event cannot be mistaken for a second human
-  // gesture that enables FOLLOW_BOTTOM.
+  // question/Resume card intersected the scroll viewport, even when the
+  // absolutely positioned composer still covered its primary action. It also
+  // left modeRef describing the old reading position. Anchor the true physical
+  // tail in hold mode instead, and close any gesture window from the scroll
+  // that exposed the nudge so the resulting programmatic scroll event cannot
+  // be mistaken for a second human gesture that enables FOLLOW_BOTTOM.
   const revealConversationTail = useCallback(() => {
     const scrollEl = scrollRef.current
     const nextMode = physicalBottomAnchorModeFromScroll(scrollEl)
     if (!scrollEl || !nextMode) return
     gestureWindowUntilRef.current = 0
     readerLocationExplicitRef.current = true
-    transitionMode(nextMode, 'reader:recovery-nudge-tail')
-    writeMode(scrollEl, nextMode, 'reader:recovery-nudge-tail')
+    transitionMode(nextMode, 'reader:attention-nudge-tail')
+    writeMode(scrollEl, nextMode, 'reader:attention-nudge-tail')
     lastAppliedModeRef.current = nextMode
     nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     persistMode()

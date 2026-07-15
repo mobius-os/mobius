@@ -53,7 +53,7 @@ test('Resume button clears the 44px touch floor with press feedback', () => {
     'the Resume button has :active press feedback')
 })
 
-test('ChatView mirrors the offscreen nudge for a scrolled-away resume card', () => {
+test('ChatView routes both offscreen attention nudges through the controller', () => {
   assert.match(chatView, /hasPendingResume/,
     'ChatView detects a tail resumable pause/park block')
   assert.match(chatView, /const pendingResumeBlock = tailResumableBlock\(messages\)/,
@@ -64,10 +64,18 @@ test('ChatView mirrors the offscreen nudge for a scrolled-away resume card', () 
     'the non-park nudge copy names the pause')
   assert.match(chatView, /Rate limit reached — tap to resume/,
     'the park variant names the rate limit')
-  assert.match(chatView, /onClick=\{revealConversationTail\}/,
-    'tapping the nudge routes through the scroll controller')
-  assert.doesNotMatch(chatView, /findResumeCard\(\)\?\.scrollIntoView/,
-    'nearest-element scrolling can strand Resume behind the composer')
+  assert.match(
+    chatView,
+    /className="chat__question-nudge"\s+onClick=\{revealConversationTail\}/,
+    'the question nudge routes through the scroll controller',
+  )
+  assert.match(
+    chatView,
+    /className="chat__resume-nudge"\s+onClick=\{revealConversationTail\}/,
+    'the resume nudge routes through the scroll controller',
+  )
+  assert.doesNotMatch(chatView, /scrollIntoView/,
+    'nearest-element scrolling can strand either primary action behind the composer')
   assert.match(css, /\.chat__resume-nudge/,
     'the resume nudge reuses the question-nudge visual style')
 })

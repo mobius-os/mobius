@@ -3671,12 +3671,7 @@ export default function ChatView({
           <button
             type="button"
             className="chat__question-nudge"
-            onClick={() => {
-              // USER-initiated scroll — the no-auto-scroll contract only
-              // forbids the app moving the viewport on its own; a tap on
-              // this chip is the user asking to be taken to the card.
-              findPendingQuestionCard()?.scrollIntoView({ block: 'nearest' })
-            }}
+            onClick={revealConversationTail}
           >
             Möbius asked you something — tap to answer
           </button>
