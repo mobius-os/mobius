@@ -441,7 +441,7 @@ The removals not yet done at HEAD are noted in the last bullet:
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.1 (2026-07-14).** This section is the
+**Owner-authoritative contract — v1.2 (2026-07-14).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -458,8 +458,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   (`FOLLOW_BOTTOM`, following the real-content tail as the reply streams) or **hold**
   (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
   position). Auto-scroll engages only through (a) the gesture-gated scroll handler
-  after the user manually reaches the physical bottom, or (b) the live-send pin
-  handoff when the streaming reply has consumed its exact reserved room. A viewport /
+  after the user manually reaches an ordinary bottom with no reservation remaining,
+  or (b) the live-send pin handoff when the streaming reply has consumed its exact
+  reserved room. The physical bottom while reservation remains is the prompt's pin
+  target, not the real-content tail: reaching it preserves (or repairs) pin hold and
+  waits for the spacer-exhaustion handoff. A viewport /
   keyboard change, foreground return, mount, or chat restoration must never create
   auto-scroll.
 - **R1 — Permanent exact reservation.** Every non-empty chat keeps enough dynamic
@@ -483,8 +486,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   first grows below the prompt without moving it. Exactly when the streaming reply
   consumes the reservation (spacer reaches zero), the armed pin hands off once to
   `FOLLOW_BOTTOM`. If the reply settles while any reservation remains, that handoff
-  is retired and the prompt stays pinned; later idle layout changes cannot create
-  follow. A non-pinning send preserves the exact reading anchor. `PIN_USER_MSG`
+  is retired only after committed geometry is stable across consecutive layout
+  frames, and the prompt stays pinned; a one-frame terminal check cannot disarm
+  just before final buffered text fills the reservation. Later idle layout changes
+  cannot create follow. A non-pinning send preserves the exact reading anchor. `PIN_USER_MSG`
   survives the complete
   mobile-keyboard open/close cycle even though the full-height reservation makes its
   scroll position temporarily look away from the physical bottom; viewport geometry
@@ -501,7 +506,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
   all share the same ownership gate. Only an actual gesture-driven scroll invalidates
-  delayed send intent. Queueing behind a live turn adds no transcript row, so it
+  delayed send intent. Send is a newer explicit action than the gesture that
+  positioned it: after submit snapshots the synchronous geometry, a delayed browser
+  `scroll` event from that pre-send gesture cannot cancel the new pin. Any input begun
+  after submit opens fresh reader ownership and still wins. Queueing behind a live
+  turn adds no transcript row, so it
   freezes the visible message before the queue tray/composer/keyboard reflow; the
   separately captured submit snapshot still controls the row when it is promoted.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
@@ -523,7 +532,9 @@ path means routing it through the same entries rather than inventing another rul
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
-| Reader scrolls manually to physical bottom | any | `FOLLOW_BOTTOM` | User-owned |
+| Reader reaches physical bottom while live reservation remains | any | armed `PIN_USER_MSG` | User-owned; then keep prompt fixed |
+| Reader reaches physical bottom while idle reservation remains | any | settled `PIN_USER_MSG` | User-owned; keep prompt fixed |
+| Reader reaches bottom with no reservation remaining | any | `FOLLOW_BOTTOM` | User-owned |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow real-content tail |

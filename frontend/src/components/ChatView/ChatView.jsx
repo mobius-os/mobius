@@ -739,6 +739,7 @@ export default function ChatView({
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
+    turnRunning: sending || serverRunning,
   })
 
   function makeSendPinIntent(willPin) {
@@ -1748,6 +1749,14 @@ export default function ChatView({
       isFirstUserMsg: isFirstUserMsgAtSubmit,
     })
     const sendPinIntent = makeSendPinIntent(willPinAtSubmit)
+    // Sending is a newer explicit action than the wheel/touch gesture that
+    // positioned the viewport for that send. Browsers update scrollTop
+    // synchronously but may dispatch the matching `scroll` event later; if the
+    // old gesture window stays open, that delayed event can land after this
+    // snapshot and cancel the brand-new PIN before its spacer is measured.
+    // Close only the PRE-SEND ownership window. Any wheel/touch/key input that
+    // begins after this line opens a fresh window and still wins normally.
+    gestureWindowUntilRef.current = 0
 
     const queuesBehindActiveTurn = !!(
       sendingRef.current

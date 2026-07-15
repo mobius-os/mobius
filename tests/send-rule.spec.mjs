@@ -41,6 +41,56 @@ async function routeStream(page, events) {
     }))
 }
 
+/** Install genuinely chunked SSE responses before navigation. Atomic
+ * route.fulfill bodies cannot expose the live frame between first text and
+ * spacer exhaustion, which is the behavior this contract needs to observe. */
+async function installChunkedStreams(page, streams) {
+  await page.addInitScript((streamSpecs) => {
+    const realFetch = window.fetch.bind(window)
+    let streamIndex = 0
+    const sentChatIds = []
+    window.fetch = (input, init) => {
+      const url = String(input?.url || input)
+      const messageMatch = url.match(/\/api\/chats\/([^/]+)\/messages$/)
+      if (messageMatch
+          && String(init?.method || input?.method || 'GET').toUpperCase() === 'POST') {
+        // Record synchronously. useStreamConnection opens the corresponding
+        // stream only after this POST resolves, so the next matching stream
+        // is unambiguously owned by this test send.
+        sentChatIds.push(messageMatch[1])
+        return realFetch(input, init)
+      }
+      const streamMatch = url.match(/\/api\/chats\/([^/]+)\/stream$/)
+      if (!streamMatch) {
+        return realFetch(input, init)
+      }
+      // Ignore foreground/reconnect streams for chats that this test did not
+      // just send. This keeps the sequence deterministic even when the shell
+      // initially mounts a different live chat before `newChat()` runs.
+      const pendingIdx = sentChatIds.indexOf(streamMatch[1])
+      if (pendingIdx < 0) return realFetch(input, init)
+      sentChatIds.splice(pendingIdx, 1)
+      const spec = streamSpecs[streamIndex++] || []
+      const encoder = new TextEncoder()
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          for (const [delayMs, event] of spec) {
+            setTimeout(() => {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+              )
+              if (event.type === 'done') controller.close()
+            }, delayMs)
+          }
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }))
+    }
+  }, streams)
+}
+
 async function newChat(page) {
   await page.evaluate(() => {
     const btn = document.querySelector('[aria-expanded]')
@@ -82,11 +132,9 @@ async function gestureToBottom(page) {
     s.scrollTop = Math.max(0, s.scrollTop - 1)
     s.scrollTop = s.scrollHeight
   })
-  // Let the 250ms gesture window close before the next send. Otherwise the
-  // send's programmatic pin-scroll fires inside the window and the hook's
-  // gesture-gated onScroll misreads it as a user gesture and flips the
-  // mode away from PIN — a test-timing artifact, not real-user behavior.
-  await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+  // Deliberately do not wait for the gesture window to expire. A real reader
+  // can reach the tail and send immediately; the app must not mistake its own
+  // ensuing pin write for a second reader scroll and cancel the pin.
 }
 
 /** Scroll up to read — a gesture (pointerdown) + scroll to the middle
@@ -157,7 +205,7 @@ test('First message in a chat pins to the viewport top', async ({ page }) => {
 // Send while AT THE BOTTOM (following) — pins
 // ───────────────────────────────────────────────────────────────────
 
-test('Send while at the bottom (following) pins to top, response grows below', async ({ page }) => {
+test('Send while at the bottom hands off after a long response fills the reservation', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
@@ -189,10 +237,84 @@ test('Send while at the bottom (following) pins to top, response grows below', a
   const m = await measure(page)
   expect(m.userMsgCount).toBe(2)
   expect(m.lastUserText).toBe('Second from bottom')
-  // The new message pins, then stays in hold while the long response grows.
-  expect(m.lastUserVisualTop).toBeGreaterThanOrEqual(-50)
-  expect(m.lastUserVisualTop).toBeLessThanOrEqual(m.clientH / 3)
-  expect(m.scrollH - m.scrollTop - m.clientH).toBeGreaterThan(50)
+  // This response is deliberately taller than the reserved room, so the
+  // initial pin has handed off and the real response tail is now followed.
+  expect(m.spacerH).toBeLessThanOrEqual(1)
+  expect(m.lastUserVisualTop).toBeLessThan(0)
+  expect(m.scrollH - m.scrollTop - m.clientH).toBeLessThanOrEqual(8)
+})
+
+test('Immediate tail-to-send holds through reserved streaming room, then follows', async ({ page }) => {
+  await installChunkedStreams(page, [
+    [
+      [0, { type: 'catch_up_done' }],
+      [30, { type: 'text', content: 'First response paragraph. '.repeat(120) }],
+      [60, { type: 'done' }],
+    ],
+    [
+      [0, { type: 'catch_up_done' }],
+      [60, { type: 'text', content: 'HOLD_MARKER' }],
+      [1800, { type: 'text', content: ' HOLD_AFTER_MANUAL_TAIL' }],
+      // Leave a wide observation window after the marker. The test waits on
+      // rendered text, not this duration; the later event only advances the
+      // stream into the filled-reservation phase.
+      [3500, { type: 'text', content: ' FILL_MARKER '.repeat(1000) }],
+      [3700, { type: 'done' }],
+    ],
+  ])
+  await setup(page)
+  await newChat(page)
+
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  await gestureToBottom(page)
+
+  // No grace period after the gesture: send exactly as a person can.
+  await sendMessage(page, 'Second immediately from tail')
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.chat__msg--assistant')]
+      .some(el => el.textContent?.includes('HOLD_MARKER')),
+  null, { timeout: 5000 })
+
+  const held = await measure(page)
+  expect(held.spacerH).toBeGreaterThan(1)
+  expect(held.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(held.lastUserVisualTop).toBeLessThanOrEqual(10)
+
+  // Reproduce the owner's manual recovery exactly: move away, then reach the
+  // physical tail while reserved room still exists. The next streamed chunk
+  // must keep the prompt parked; it cannot turn that tail gesture into
+  // immediate real-content following.
+  await page.evaluate(() => {
+    const s = document.querySelector('.chat__scroll')
+    if (!s) return
+    s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    s.scrollTop = Math.max(0, s.scrollTop - 120)
+    s.scrollTop = s.scrollHeight
+  })
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.chat__msg--assistant')]
+      .some(el => el.textContent?.includes('HOLD_AFTER_MANUAL_TAIL')))
+  const manuallyHeld = await measure(page)
+  expect(manuallyHeld.spacerH).toBeGreaterThan(1)
+  expect(manuallyHeld.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(manuallyHeld.lastUserVisualTop).toBeLessThanOrEqual(10)
+
+  await page.waitForFunction(() => {
+    const text = [...document.querySelectorAll('.chat__msg--assistant')]
+      .map(el => el.textContent || '').join(' ')
+    return (text.match(/FILL_MARKER/g) || []).length > 500
+  })
+  await page.waitForFunction(() => {
+    const scroll = document.querySelector('.chat__scroll')
+    const spacer = document.querySelector('.spacer-dynamic')
+    if (!scroll || !spacer || spacer.offsetHeight > 1) return false
+    return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 8
+  })
+
+  const following = await measure(page)
+  expect(following.spacerH).toBeLessThanOrEqual(1)
+  expect(following.scrollH - following.scrollTop - following.clientH).toBeLessThanOrEqual(8)
 })
 
 // ───────────────────────────────────────────────────────────────────

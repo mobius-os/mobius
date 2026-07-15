@@ -1,7 +1,46 @@
 import { defineConfig } from '@playwright/test'
+import { existsSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 const AUTH_FILE = 'tests/.auth/state.json'
 const isCI = !!process.env.CI
+
+/** Resolve the Chrome-for-Testing binary already installed for agent-browser.
+ * Möbius images ship that browser even when the conventional system `chrome`
+ * channel is absent. Falling through to Playwright's channel lookup made every
+ * local browser contract fail before launch, so scroll changes were routinely
+ * declared green from unit tests alone. An explicit env override remains first
+ * for ordinary contributor workstations; bare local installs still fall back
+ * to the standard `chrome` channel. */
+function localChromeExecutable() {
+  const explicit = process.env.MOBIUS_PLAYWRIGHT_EXECUTABLE
+    || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+  if (explicit && existsSync(explicit)) return explicit
+
+  const roots = [
+    '/opt/agent-browser/browsers',
+    join(homedir(), '.agent-browser', 'browsers'),
+  ]
+  for (const root of roots) {
+    let dirs = []
+    try {
+      dirs = readdirSync(root, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && entry.name.startsWith('chrome-'))
+        .map(entry => entry.name)
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+    } catch {
+      continue
+    }
+    for (const dir of dirs) {
+      const executable = join(root, dir, 'chrome')
+      if (existsSync(executable)) return executable
+    }
+  }
+  return null
+}
+
+const localChrome = isCI ? null : localChromeExecutable()
 
 export default defineConfig({
   testDir: './tests',
@@ -36,9 +75,17 @@ export default defineConfig({
   use: {
     headless: true,
     ignoreHTTPSErrors: true,
-    // CI uses Playwright's bundled chromium; locally use the system
-    // Chrome channel (faster startup, real browser).
-    ...(isCI ? { browserName: 'chromium' } : { channel: 'chrome' }),
+    // CI uses Playwright's bundled chromium. Möbius instances use the browser
+    // already shipped for agent-browser; contributor machines without it fall
+    // back to the conventional system Chrome channel.
+    ...(isCI
+      ? { browserName: 'chromium' }
+      : localChrome
+        ? {
+            browserName: 'chromium',
+            launchOptions: { executablePath: localChrome },
+          }
+        : { channel: 'chrome' }),
     // Capture diagnostics for failure analysis on CI.
     trace: isCI ? 'on-first-retry' : 'off',
     screenshot: isCI ? 'only-on-failure' : 'off',

@@ -12,7 +12,9 @@ import {
   modeForForegroundReturn,
   modeForQueuedSubmission,
   modeForViewportChange,
+  modeAfterReaderReachesBottom,
   modeAfterSpacerResize,
+  modeAfterTerminalLayout,
   settledPinMode,
   shouldPinSend,
 } from '../useScrollMode.js'
@@ -261,6 +263,47 @@ test('an armed live pin holds until its exact spacer is filled, then follows', (
   assert.deepEqual(modeAfterSpacerResize(livePin, 0), { kind: 'FOLLOW_BOTTOM' })
 })
 
+test('reader reaching the reserved physical bottom keeps the live pin armed', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.equal(modeAfterReaderReachesBottom({
+    mode: livePin,
+    spacerH: 320,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), livePin, 'the existing pin identity stays intact')
+})
+
+test('reader reaching reserved bottom repairs a lost live pin instead of following immediately', () => {
+  assert.deepEqual(modeAfterReaderReachesBottom({
+    mode: { kind: 'FOLLOW_BOTTOM' },
+    spacerH: 320,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  })
+})
+
+test('reader reaches ordinary bottom only after reservation is exhausted', () => {
+  assert.deepEqual(modeAfterReaderReachesBottom({
+    mode: { kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true },
+    spacerH: 0,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), { kind: 'FOLLOW_BOTTOM' })
+})
+
+test('idle reserved bottom is a settled pin and cannot manufacture follow', () => {
+  assert.deepEqual(modeAfterReaderReachesBottom({
+    mode: { kind: 'ANCHOR_AT', key: 'user-c-123', offset: 4 },
+    spacerH: 320,
+    turnRunning: false,
+    lastUserCid: 'c-123',
+  }), { kind: 'PIN_USER_MSG', cid: 'c-123' })
+})
+
 test('a short settled pin retires automatic follow but keeps its identity', () => {
   const livePin = {
     kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
@@ -269,6 +312,27 @@ test('a short settled pin retires automatic follow but keeps its identity', () =
   assert.deepEqual(settled, { kind: 'PIN_USER_MSG', cid: 'c-123' })
   assert.equal(modeAfterSpacerResize(settled, 0), settled,
     'later layout changes cannot manufacture follow after stream settle')
+})
+
+test('terminal pin waits for stable committed geometry before disarming', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.equal(modeAfterTerminalLayout(livePin, 320, false), livePin)
+  assert.deepEqual(
+    modeAfterTerminalLayout(livePin, 320, true),
+    { kind: 'PIN_USER_MSG', cid: 'c-123' },
+  )
+})
+
+test('terminal pin follows immediately when final committed geometry fills the spacer', () => {
+  const livePin = {
+    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+  }
+  assert.deepEqual(
+    modeAfterTerminalLayout(livePin, 0, false),
+    { kind: 'FOLLOW_BOTTOM' },
+  )
 })
 
 test('keyboard close preserves pin identity even when keyboard-open geometry is away from the physical bottom', () => {

@@ -332,6 +332,50 @@ export function settledPinMode(mode) {
   return { kind: 'PIN_USER_MSG', cid: mode.cid }
 }
 
+/** Terminal promotion may commit before the final buffered text has changed
+ * DOM geometry. A positive spacer is conclusive only after the layout is
+ * stable; zero is immediately conclusive and hands off to follow. */
+export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
+  if (mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) return mode
+  const advanced = modeAfterSpacerResize(mode, spacerH)
+  if (advanced !== mode) return advanced
+  return layoutStable ? settledPinMode(mode) : mode
+}
+
+
+/** Resolve a reader-owned scroll that reaches the physical bottom.
+ *
+ * The physical bottom sits AFTER the dynamic reservation. While that spacer
+ * still exists, reaching it means the latest user row is at its exact pin
+ * target; it does NOT mean the reader asked to follow the real-content tail
+ * above the spacer. Conflating those two bottoms made the next ResizeObserver
+ * tick jump back to the response and follow every token immediately.
+ *
+ * During a live turn, reaching the reserved bottom (re-)arms the ordinary
+ * spacer-exhaustion handoff. In an idle chat it is a settled pin, so a later
+ * image/font/layout change cannot manufacture live-follow intent.
+ */
+export function modeAfterReaderReachesBottom({
+  mode,
+  spacerH,
+  turnRunning,
+  lastUserCid,
+}) {
+  if (spacerH > 1 && lastUserCid != null) {
+    if (mode?.kind === 'PIN_USER_MSG'
+        && mode.cid === lastUserCid
+        && (!!mode.followWhenFilled || !turnRunning)) {
+      return mode
+    }
+    return {
+      kind: 'PIN_USER_MSG',
+      cid: lastUserCid,
+      ...(turnRunning ? { followWhenFilled: true } : {}),
+    }
+  }
+  return { kind: 'FOLLOW_BOTTOM' }
+}
+
 
 /** Layout observers may own scrollTop only outside the gesture-intent window.
  * Input events precede the browser's first `scroll` event; without this gate,
@@ -434,6 +478,9 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
+ * @param {boolean} args.turnRunning
+ *   Whether a live turn can consume an existing reservation. Used only when
+ *   the reader reaches the physical bottom while spacer room remains.
  *
  * @returns {{
  *   modeRef: React.MutableRefObject<
@@ -457,6 +504,7 @@ export default function useScrollMode({
   messagesRef,
   pendingMessagesLength,
   loadingOlderRef,
+  turnRunning,
 }) {
   const [revealed, setRevealed] = useState(false)
   // Synchronous mirror of `revealed` for reapplyActiveMode, which is called
@@ -491,6 +539,10 @@ export default function useScrollMode({
   // when the keyboard opens, visualViewport fires AFTER the viewport has
   // already changed, so we need the last known pre-change tail snapshot.
   const nearScrollBottomRef = useRef(false)
+  // Keep reader events wired to the latest run state without rebuilding every
+  // observer/listener whenever the boolean changes.
+  const turnRunningRef = useRef(!!turnRunning)
+  turnRunningRef.current = !!turnRunning
 
   const persistMode = ({ freezeToCurrentPosition = false } = {}) => {
     try {
@@ -876,7 +928,14 @@ export default function useScrollMode({
       }
 
       if (atBottom) {
-        modeRef.current = { kind: 'FOLLOW_BOTTOM' }
+        const spacerH = spacerEl.offsetHeight || 0
+        const lastUserCid = _lastUserRowEl(scrollEl)?.dataset?.cid ?? null
+        modeRef.current = modeAfterReaderReachesBottom({
+          mode: modeRef.current,
+          spacerH,
+          turnRunning: turnRunningRef.current,
+          lastUserCid,
+        })
       } else {
         const anchor = anchorModeFromScroll(scrollEl)
         if (anchor) modeRef.current = anchor
@@ -950,46 +1009,89 @@ export default function useScrollMode({
     }
   }, [scrollRef])
 
-  // ChatView calls this from a layout effect after React commits terminal
-  // promotion. Decide from that settled DOM whether the final buffered text
-  // filled the exact reservation or the short reply must disarm its live-only
-  // handoff. The committed-layout effect is the handshake; no timer or frame
-  // guess is involved.
+  // Terminal stream promotion and final buffered text can land in separate
+  // React/browser phases. Observe committed geometry until two consecutive
+  // animation frames agree; then either honor a filled reservation or disarm
+  // a genuinely short reply. This is a layout-stability handshake, not a
+  // guessed timeout. It replaces the one-rAF check that could retire
+  // `followWhenFilled` just before the final text commit shrank the spacer to
+  // zero, leaving a long completed reply stranded below a still-pinned prompt.
   const settleStreamingPin = useCallback(() => {
     const scrollEl = scrollRef.current
-    const mode = modeRef.current
-    if (!scrollEl || mode?.kind !== 'PIN_USER_MSG' || !mode.followWhenFilled) {
+    const terminalMode = modeRef.current
+    if (!scrollEl
+        || terminalMode?.kind !== 'PIN_USER_MSG'
+        || !terminalMode.followWhenFilled) {
       return
     }
+    const terminalCid = terminalMode.cid
+    let previousSignature = null
+    let stableFrames = 0
 
-    const listEl = scrollEl.querySelector('.chat__list')
-    const spacerEl = spacerRef.current
-    const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
-    if (!listEl || !spacerEl || !lastUserEl) {
-      modeRef.current = settledPinMode(mode)
-      persistMode()
-      return
-    }
+    const inspectCommittedLayout = () => {
+      if (scrollRef.current !== scrollEl) return
+      const mode = modeRef.current
+      // A newer send has its own pin lifecycle. A reader gesture may also have
+      // retired this terminal pin; neither may be settled by the old turn.
+      if (mode?.kind !== 'PIN_USER_MSG'
+          || !mode.followWhenFilled
+          || mode.cid !== terminalCid) {
+        return
+      }
+      const mayWriteScroll = layoutMayOwnScroll(
+        gestureWindowUntilRef.current,
+        performance.now(),
+      )
+      if (!mayWriteScroll) {
+        // Terminal promotion can land between input and the first scroll
+        // event. The reader wins that race: freeze what is visible and retire
+        // the live handoff without issuing a final scroll write.
+        modeRef.current = anchorModeFromScroll(scrollEl) || settledPinMode(mode)
+        persistMode()
+        return
+      }
 
-    const spacerH = _computeSpacerH(
-      scrollEl, listEl, lastUserEl, fullViewHRef.current,
-    )
-    const advanced = modeAfterSpacerResize(mode, spacerH)
-    const mayWriteScroll = layoutMayOwnScroll(
-      gestureWindowUntilRef.current,
-      performance.now(),
-    )
-    if (!mayWriteScroll) {
-      // Terminal promotion can land between input and the first scroll event.
-      // The reader wins: freeze what is visible and issue no final scroll write.
-      modeRef.current = anchorModeFromScroll(scrollEl) || settledPinMode(mode)
-    } else {
+      const listEl = scrollEl.querySelector('.chat__list')
+      const spacerEl = spacerRef.current
+      const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+      if (!listEl || !spacerEl || !lastUserEl) {
+        modeRef.current = settledPinMode(mode)
+        persistMode()
+        return
+      }
+
+      const spacerH = _computeSpacerH(
+        scrollEl, listEl, lastUserEl, fullViewHRef.current,
+      )
+      const signature = [
+        Math.round(listEl.offsetHeight),
+        Math.round(lastUserEl.offsetTop),
+        Math.round(scrollEl.clientHeight),
+        Math.round(spacerH),
+      ].join(':')
+      stableFrames = signature === previousSignature ? stableFrames + 1 : 0
+      previousSignature = signature
+
+      const nextMode = modeAfterTerminalLayout(
+        mode,
+        spacerH,
+        stableFrames >= 1,
+      )
+      if (nextMode === mode) {
+        requestAnimationFrame(inspectCommittedLayout)
+        return
+      }
+
+      // Keep styled geometry and the decision in the same frame. The main RO
+      // normally wrote this value already; assigning the same value is a no-op.
       spacerEl.style.height = `${spacerH}px`
-      modeRef.current = advanced === mode ? settledPinMode(mode) : advanced
+      modeRef.current = nextMode
       applyMode(scrollEl, modeRef.current)
+      persistMode()
     }
-    persistMode()
-  }, [chatId, lastUserMsgRef, scrollRef, spacerRef])
+
+    requestAnimationFrame(inspectCommittedLayout)
+  }, [chatId, scrollRef, spacerRef, lastUserMsgRef])
 
   return {
     modeRef,

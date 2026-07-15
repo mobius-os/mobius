@@ -873,7 +873,13 @@ test.describe('Scroll edge cases', () => {
     // Scroll up past 50px threshold.
     await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = Math.max(0, s.scrollTop - 200)
+      if (!s) return
+      // This test claims reader ownership, so exercise the actual contract:
+      // input opens the gesture window before the browser scroll lands.
+      // A bare scrollTop assignment is app-owned test setup and must not
+      // change ScrollMode.
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = Math.max(0, s.scrollTop - 200)
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 

@@ -12,6 +12,19 @@
 import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const STREAM_ROUTE = /\/api\/chats\/[0-9a-f-]+\/stream$/
+
+async function replaceStreamRoute(page, events) {
+  await page.unroute(STREAM_ROUTE)
+  const sseBody = events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
+  await page.route(STREAM_ROUTE, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      body: sseBody,
+    })
+  )
+}
 
 async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
@@ -23,14 +36,7 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
     route.fulfill({ status: 200, body: '{}' })
   )
 
-  const sseBody = events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
-  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
-    route.fulfill({
-      status: 200,
-      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-      body: sseBody,
-    })
-  )
+  await replaceStreamRoute(page, events)
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -87,11 +93,8 @@ async function gestureToBottom(page) {
     s.scrollTop = Math.max(0, s.scrollTop - 1)
     s.scrollTop = s.scrollHeight
   })
-  // Let the 250ms gesture window close before the next send. Otherwise the
-  // send's programmatic pin-scroll fires inside the window and the hook's
-  // gesture-gated onScroll misreads it as a user gesture, flipping the
-  // mode away from PIN — a test-timing artifact, not real-user behavior.
-  await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+  // Deliberately do not wait out the gesture window. Scroll-to-tail followed
+  // immediately by Send is a real interaction, not a test artifact.
 }
 
 async function waitStreamDone(page) {
@@ -158,7 +161,17 @@ test('Second send from auto-scroll pins to viewport top through the full SSE flo
   // opposite case, covered by send-rule.spec.mjs.)
   await gestureToBottom(page)
 
-  // Send 2.
+  // Keep the second reply shorter than the reservation so this assertion
+  // observes the PIN phase. Reusing the long first-turn body here delivered
+  // the whole answer atomically, legitimately exhausted the spacer, and then
+  // contradicted the contract by still expecting the prompt at the top.
+  await replaceStreamRoute(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Short second reply.' },
+    { type: 'done' },
+  ])
+
+  // Send 2 immediately after reaching the tail.
   await sendMessage(page, 'Second user message')
   // No waitStreamDone here — pin happens immediately on send (the
   // spacer effect's `if (isSend) scrollEl.scrollTop = st`).
@@ -205,6 +218,11 @@ test('Pin HOLDS when content above the pinned message grows after send (late ima
   // this test is about the pin HOLDING through later content growth, so
   // it must legitimately pin first.
   await gestureToBottom(page)
+  await replaceStreamRoute(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Short second reply.' },
+    { type: 'done' },
+  ])
   await sendMessage(page, 'Second user message')
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
