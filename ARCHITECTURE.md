@@ -519,9 +519,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   freezes the visible message before the queue tray/composer/keyboard reflow; the
   separately captured submit snapshot still controls the row when it is promoted.
   Never replace the input-to-first-scroll handoff with a fixed short window: under
-  rendering load the browser may deliver that scroll later. Pointer/touch release and
-  a bounded no-scroll dead-man release handle inputs that never produce a scroll;
-  only after the first scroll lands does the short momentum window begin.
+  rendering load the browser may deliver that scroll later. Ownership begins only for
+  inputs whose default action can scroll the transcript; ordinary typing, Enter, and
+  control activation are not reader scroll intent. Pointer/touch release handles taps,
+  while wheel/scrolling-key input that produces no scroll releases on the next frame;
+  only after a real scroll lands does the short momentum window begin. A bounded
+  dead-man remains the final escape hatch for an interrupted gesture.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as
