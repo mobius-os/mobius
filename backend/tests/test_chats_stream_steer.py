@@ -685,6 +685,59 @@ def test_force_steer_consumes_existing_queued_messages(
   ]
 
 
+def test_api_send_without_cid_can_be_force_steered(
+  client, auth, monkeypatch,
+):
+  """An API-originated mid-turn send gets a server cid before queueing.
+
+  The returned identity must name the durable row and remain selectable by a
+  later fast-forward request; otherwise force_steer becomes an inert
+  `not_steered` response for non-browser callers that omit cid.
+  """
+  chat_id = "servercidforce"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  queued = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "use the queued instruction"},
+    headers=auth,
+  )
+  assert queued.status_code == 202, queued.text
+  queued_body = queued.json()
+  assert queued_body["status"] == "queued"
+  server_cid = queued_body["pending_message"]["cid"]
+  assert server_cid.startswith("server-")
+  assert cid_of(_read_chat(chat_id).pending_messages[0]) == server_cid
+
+  steered_calls = []
+
+  async def _fake_steer(cid, message):
+    steered_calls.append((cid, message))
+    return True
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+  steered = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "use the queued instruction",
+      "force_steer": True,
+      "consume_pending_cids": [server_cid],
+    },
+    headers=auth,
+  )
+  assert steered.status_code == 202, steered.text
+  assert steered.json()["status"] == "steered"
+  assert steered_calls == [(chat_id, "use the queued instruction")]
+  chat = _read_chat(chat_id)
+  assert chat.pending_messages in (None, [])
+  assert chat.messages[-1]["cid"] == server_cid
+  assert chat.messages[-1]["content"] == "use the queued instruction"
+
+
 def test_force_steer_failure_does_not_append_duplicate_queue(
   client, auth, monkeypatch,
 ):

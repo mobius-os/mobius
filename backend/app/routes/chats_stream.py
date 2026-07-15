@@ -32,6 +32,7 @@ from app.chat_writer import (
   alloc_run_token,
   await_ack,
   cid_of,
+  ensure_user_cid,
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
@@ -286,11 +287,12 @@ def _user_message_from_body(
     "content": _content_with_uploads(chat, body),
     "ts": int(time.time() * 1000),
   }
-  # Carry the client-minted stable identity into persistence so the row keeps
-  # one identity across optimistic→confirm, reload, and echo. Absent (older
-  # client / legacy) rows derive `legacy-<ts>` lazily via cid_of at read time.
+  # Carry the client-minted identity when present; API clients may omit it, so
+  # stamp an opaque server identity before the row reaches any queue/transcript
+  # command. The writer repeats this invariant for non-HTTP producers.
   if body.cid:
     user_msg["cid"] = body.cid
+  ensure_user_cid(user_msg)
   if body.hidden:
     user_msg["hidden"] = True
   if body.attachments:
@@ -437,10 +439,10 @@ def _selected_force_steer_pending(
   separate rows, but durable rows are reconstructed from the server-owned
   pending queue here; the client cannot forge transcript entries.
 
-  Selection is keyed on the stable `cid` (matched via cid_of, which covers a
-  legacy `legacy-<ts>` derivation). The old content byte-match is GONE — cid
-  binds the request to specific queued rows directly, with no fragile
-  "\n\n"-join contract against the composer text.
+  Selection is keyed on the stable `cid` (matched via cid_of, which retains a
+  legacy `legacy-<ts>` fallback for rows missed by migration). The old content
+  byte-match is GONE — cid binds the request to specific queued rows directly,
+  with no fragile "\n\n"-join contract against the composer text.
   """
   requested_cids = set(body.consume_pending_cids or [])
   if not requested_cids:
@@ -472,7 +474,7 @@ def _user_messages_from_pending(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     # Preserve the stable identity across the queue→transcript hop. A legacy
-    # pending row without a cid gets its `legacy-<ts>` derivation stamped so
+    # pending row without a cid gets its `legacy-<ts>` fallback stamped so
     # the steered transcript row and its echo carry the same value the client
     # will compare against.
     if not msg.get("cid"):
