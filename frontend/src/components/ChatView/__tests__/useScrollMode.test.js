@@ -20,6 +20,7 @@ import {
   modeAfterReaderReachesBottom,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
+  physicalBottomAnchorModeFromScroll,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
   settledPinMode,
@@ -514,6 +515,38 @@ test('no saved chat location opens at the latest real content without enabling f
   applyMode(scrollEl, mode)
   assert.equal(scrollEl.scrollTop, 1200,
     'the real content tail is visible and reserved spacer room is excluded')
+})
+
+test('recovery nudge anchors the physical tail without enabling follow', () => {
+  const last = {
+    offsetTop: 1500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-paused-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 2100,
+    scrollTop: 700,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '[data-key="assistant-paused-tail"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const mode = physicalBottomAnchorModeFromScroll(scrollEl)
+  assert.deepEqual(mode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-paused-tail',
+    offset: 100,
+  })
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1400,
+    'the nudge includes all composer clearance after the paused card')
+  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
+    'revealing Resume must not create live-follow intent')
 })
 
 test('an unresolvable saved location falls back to a settled bottom anchor', () => {

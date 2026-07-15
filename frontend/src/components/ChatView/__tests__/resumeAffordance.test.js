@@ -64,8 +64,10 @@ test('ChatView mirrors the offscreen nudge for a scrolled-away resume card', () 
     'the non-park nudge copy names the pause')
   assert.match(chatView, /Rate limit reached — tap to resume/,
     'the park variant names the rate limit')
-  assert.match(chatView, /findResumeCard\(\)\?\.scrollIntoView/,
-    'tapping the nudge scrolls the resume card into view')
+  assert.match(chatView, /onClick=\{revealConversationTail\}/,
+    'tapping the nudge routes through the scroll controller')
+  assert.doesNotMatch(chatView, /findResumeCard\(\)\?\.scrollIntoView/,
+    'nearest-element scrolling can strand Resume behind the composer')
   assert.match(css, /\.chat__resume-nudge/,
     'the resume nudge reuses the question-nudge visual style')
 })
