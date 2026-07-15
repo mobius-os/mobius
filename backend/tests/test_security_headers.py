@@ -53,21 +53,30 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
   assert "@chatEmbed path /shell/embed/chat" in lines
   assert "@notChatEmbed not path /shell/embed/chat" in lines
-  assert 'header @notChatEmbed X-Frame-Options "SAMEORIGIN"' in lines
+  assert 'header @notChatEmbed >X-Frame-Options "SAMEORIGIN"' in lines
   assert not any(
     line.startswith("X-Frame-Options ") for line in lines
   ), "X-Frame-Options must remain on the exact non-embed matcher"
   ordinary_csp = next(
     line for line in lines
-    if line.startswith("header @notChatEmbed Content-Security-Policy ")
+    if line.startswith("header @notChatEmbed >Content-Security-Policy ")
   )
   embed_csp = next(
     line for line in lines
-    if line.startswith("header @chatEmbed Content-Security-Policy ")
+    if line.startswith("header @chatEmbed >Content-Security-Policy ")
   )
   assert "frame-ancestors 'self'" in ordinary_csp
   assert "frame-ancestors" not in embed_csp
   assert "frame-src 'self'" in embed_csp
+  assert "https://cdn.openai.com" in ordinary_csp
+  assert "https://cdn.openai.com" in embed_csp
+  for name in (
+    "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy",
+    "Strict-Transport-Security",
+  ):
+    assert any(line.startswith(f">{name} ") for line in lines), (
+      f"{name} must replace, not duplicate, the backend value after proxying"
+    )
 
 
 def test_opaque_embed_preflight_allows_scoped_instance_header():

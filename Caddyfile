@@ -10,10 +10,14 @@
     @notChatEmbed not path /shell/embed/chat
 
     header {
-        X-Content-Type-Options "nosniff"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        Permissions-Policy "camera=(), geolocation=()"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Defer replacements until after reverse_proxy copies the backend
+        # response. Without `>`, the mirrored backend values are appended and
+        # browsers receive comma-joined duplicates such as
+        # `X-Content-Type-Options: nosniff, nosniff`.
+        >X-Content-Type-Options "nosniff"
+        >Referrer-Policy "strict-origin-when-cross-origin"
+        >Permissions-Policy "camera=(), geolocation=()"
+        >Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         # script-src notes:
         #   'unsafe-inline' — cannot be removed: index.html, app-frame.html,
         #   standalone.py, and recover_html.py all contain inline <script>
@@ -26,9 +30,9 @@
         #   every mini-app that uses those libraries at runtime. Removing it
         #   requires vendoring all three libraries under /vendor (like three.js).
     }
-    header @notChatEmbed X-Frame-Options "SAMEORIGIN"
-    header @notChatEmbed Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
-    header @chatEmbed Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
+    header @notChatEmbed >X-Frame-Options "SAMEORIGIN"
+    header @notChatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
+    header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
 
     # Recovery floor lives in the separate recoveryd container (its own
     # cgroup + pid1) so a broken or crash-looping platform can't take
