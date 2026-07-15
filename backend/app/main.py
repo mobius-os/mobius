@@ -691,7 +691,21 @@ app.add_middleware(
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allow_headers=["Authorization", "Content-Type"],
+  # The app runtime uses X-Mobius-Version to opt into ETag reads, then
+  # If-Match / If-None-Match for conflict-safe writes. Sandboxed app frames
+  # have the opaque `null` origin, so Chromium preflights these non-simple
+  # headers; omitting them here makes the runtime's versioned request fail
+  # before it ever reaches the authenticated storage route.
+  allow_headers=[
+    "Authorization",
+    "Content-Type",
+    "X-Mobius-Version",
+    "If-Match",
+    "If-None-Match",
+  ],
+  # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
+  # return the version token that the storage route intentionally emits.
+  expose_headers=["ETag"],
 )
 
 # Security remains outside CORS and request-size enforcement so its headers

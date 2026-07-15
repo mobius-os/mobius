@@ -42,3 +42,47 @@ def test_embedded_chat_allows_opaque_origin_app_ancestor():
 
 def test_frame_exception_is_exactly_scoped_to_embed_document():
   assert _headers("/shell/embed/chat/other").get("x-frame-options") == "SAMEORIGIN"
+
+
+def test_opaque_app_preflight_allows_versioned_storage_requests():
+  """Sandboxed apps can perform the runtime's versioned read/write flow.
+
+  App frames intentionally have Origin:null. The runtime opts into an ETag
+  read with X-Mobius-Version, then may send If-Match or If-None-Match on a
+  conditional write. Every one of those headers must survive the browser's
+  CORS preflight, and the returned ETag must be readable by app JavaScript.
+  """
+  client = TestClient(app)
+  response = client.options(
+    "/api/storage/apps/62/visited.json",
+    headers={
+      "Origin": "null",
+      "Access-Control-Request-Method": "PUT",
+      "Access-Control-Request-Headers": (
+        "authorization,content-type,x-mobius-version,if-match,if-none-match"
+      ),
+    },
+  )
+
+  assert response.status_code == 200
+  allowed = {
+    header.strip().lower()
+    for header in response.headers["access-control-allow-headers"].split(",")
+  }
+  assert {
+    "authorization",
+    "content-type",
+    "x-mobius-version",
+    "if-match",
+    "if-none-match",
+  } <= allowed
+  # Starlette correctly puts Access-Control-Expose-Headers on the actual
+  # response, not the preflight response. Check that half of the contract on a
+  # simple opaque-origin request.
+  actual = client.get("/api/health", headers={"Origin": "null"})
+  assert actual.status_code == 200
+  exposed = {
+    header.strip().lower()
+    for header in actual.headers["access-control-expose-headers"].split(",")
+  }
+  assert "etag" in exposed
