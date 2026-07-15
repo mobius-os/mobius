@@ -86,6 +86,31 @@ def parse_frontmatter(text: str) -> dict[str, object]:
   return out
 
 
+def load_chat_summary_metadata(
+  data_dir: str | Path, chat_id: str,
+) -> dict[str, str | None]:
+  """Read the short, owner-visible layers of a published chat note.
+
+  ``description`` is the one-line gist that normally becomes the chat name;
+  ``digest`` is the bounded cross-chat continuity paragraph. The unbounded
+  ``## Summary`` remains owned by :func:`compaction.load_cumulative_summary`
+  because it is also continuation-critical provider handoff state.
+
+  Missing and legacy notes are normal: older notes predate ``## Digest`` and
+  return ``None`` for that layer rather than duplicating their full Summary.
+  """
+  path = memory_dir(data_dir) / "chats" / chat_id / "index.md"
+  text = _read(path)
+  if not text.strip():
+    return {"description": None, "digest": None}
+  description = str(parse_frontmatter(text).get("description", "")).strip()
+  digest = _extract_section(text, "Digest")
+  return {
+    "description": description or None,
+    "digest": digest.strip() if digest and digest.strip() else None,
+  }
+
+
 def _read(path: Path) -> str:
   try:
     return path.read_text(encoding="utf-8")

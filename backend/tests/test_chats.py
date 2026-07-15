@@ -41,6 +41,13 @@ def test_agent_context_includes_evolving_chat_summary(
       "The cumulative handoff." if chat_id == chat.id else None
     ),
   )
+  monkeypatch.setattr(
+    "app.memory.load_chat_summary_metadata",
+    lambda _data_dir, chat_id: {
+      "description": "A one-line summary" if chat_id == chat.id else None,
+      "digest": "The bounded digest." if chat_id == chat.id else None,
+    },
+  )
 
   response = client.get(
     f"/api/chats/{chat.id}/agent-context",
@@ -48,7 +55,15 @@ def test_agent_context_includes_evolving_chat_summary(
   )
 
   assert response.status_code == 200
-  assert response.json()["chat_summary"] == "The cumulative handoff."
+  payload = response.json()
+  assert {
+    key: payload[key]
+    for key in ("chat_description", "chat_digest", "chat_summary")
+  } == {
+    "chat_description": "A one-line summary",
+    "chat_digest": "The bounded digest.",
+    "chat_summary": "The cumulative handoff.",
+  }
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

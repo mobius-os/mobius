@@ -119,3 +119,41 @@ def test_parse_frontmatter_supports_chat_description():
     "---\ndescription: Hello world\ntags: [a, b]\n---\nbody"
   ) == {"description": "Hello world", "tags": ["a", "b"]}
   assert memory.parse_frontmatter("---\nunterminated") == {}
+
+
+def test_load_chat_summary_metadata_keeps_description_and_digest_distinct(
+  tmp_path,
+):
+  note = tmp_path / "shared" / "memory" / "chats" / "chat-1" / "index.md"
+  note.parent.mkdir(parents=True)
+  note.write_text(
+    "---\n"
+    "type: chat\n"
+    "description: naming the chat clearly\n"
+    "---\n"
+    "## Digest\n"
+    "A bounded handoff.\n\n"
+    "## Summary\n"
+    "A much longer cumulative handoff.\n",
+    encoding="utf-8",
+  )
+
+  assert memory.load_chat_summary_metadata(tmp_path, "chat-1") == {
+    "description": "naming the chat clearly",
+    "digest": "A bounded handoff.",
+  }
+
+
+def test_load_chat_summary_metadata_does_not_duplicate_legacy_summary(tmp_path):
+  note = tmp_path / "shared" / "memory" / "chats" / "chat-1" / "index.md"
+  note.parent.mkdir(parents=True)
+  note.write_text(
+    "---\ndescription: legacy chat\n---\n"
+    "## Summary\nThe only legacy summary.\n",
+    encoding="utf-8",
+  )
+
+  assert memory.load_chat_summary_metadata(tmp_path, "chat-1") == {
+    "description": "legacy chat",
+    "digest": None,
+  }

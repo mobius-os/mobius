@@ -1,4 +1,4 @@
-/* ChatSummaryViewer shows the platform-published cumulative summary on demand. */
+/* ChatSummaryViewer shows all three platform-published chat summary layers. */
 
 import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
@@ -6,7 +6,11 @@ import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 
 export default function ChatSummaryViewer({ chatId, onClose }) {
-  const [state, setState] = useState({ status: 'loading', summary: '', error: '' })
+  const [state, setState] = useState({
+    status: 'loading',
+    layers: { description: '', digest: '', summary: '' },
+    error: '',
+  })
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
 
@@ -25,12 +29,20 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
         })
         if (!response.ok) throw new Error(`Request failed (${response.status})`)
         const data = await response.json()
-        setState({ status: 'ready', summary: data.chat_summary || '', error: '' })
+        setState({
+          status: 'ready',
+          layers: {
+            description: data.chat_description || '',
+            digest: data.chat_digest || '',
+            summary: data.chat_summary || '',
+          },
+          error: '',
+        })
       } catch (error) {
         if (error?.name === 'AbortError') return
         setState({
           status: 'error',
-          summary: '',
+          layers: { description: '', digest: '', summary: '' },
           error: error?.message || 'Could not load the chat summary.',
         })
       }
@@ -51,8 +63,8 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
       >
         <div className="chat-summary__head">
           <div>
-            <h2 id="chat-summary-title" className="chat-summary__title">Chat summary</h2>
-            <p className="chat-summary__subtitle">Updated after each settled turn.</p>
+            <h2 id="chat-summary-title" className="chat-summary__title">Chat summaries</h2>
+            <p className="chat-summary__subtitle">Three levels of continuity, updated after each settled turn.</p>
           </div>
           <button
             ref={closeRef}
@@ -71,12 +83,39 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
               {state.error}
             </p>
           )}
-          {state.status === 'ready' && !state.summary && (
-            <p className="chat-summary__state">The first summary will appear after this chat settles.</p>
-          )}
-          {state.status === 'ready' && state.summary && (
-            <div className="chat-summary__content">
-              <StandardMarkdown text={state.summary} />
+          {state.status === 'ready' && (
+            <div className="chat-summary__layers">
+              <section className="chat-summary__layer">
+                <div className="chat-summary__layer-head">
+                  <h3>Chat name</h3>
+                  <p>One-line summary used to identify this conversation.</p>
+                </div>
+                <div className="chat-summary__layer-body chat-summary__layer-body--plain">
+                  {state.layers.description || 'The chat name will appear after this conversation settles.'}
+                </div>
+              </section>
+              <section className="chat-summary__layer">
+                <div className="chat-summary__layer-head">
+                  <h3>Digest</h3>
+                  <p>Bounded context available to recent conversations.</p>
+                </div>
+                <div className="chat-summary__layer-body">
+                  {state.layers.digest
+                    ? <StandardMarkdown text={state.layers.digest} />
+                    : <p className="chat-summary__empty">No separate digest has been published for this chat yet.</p>}
+                </div>
+              </section>
+              <section className="chat-summary__layer">
+                <div className="chat-summary__layer-head">
+                  <h3>Full summary</h3>
+                  <p>Cumulative handoff retained for continuing this conversation.</p>
+                </div>
+                <div className="chat-summary__layer-body">
+                  {state.layers.summary
+                    ? <StandardMarkdown text={state.layers.summary} />
+                    : <p className="chat-summary__empty">The full summary will appear after this conversation settles.</p>}
+                </div>
+              </section>
             </div>
           )}
         </div>

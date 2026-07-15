@@ -77,6 +77,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
+import { FileText } from 'lucide-react'
 import { modelQueries } from '../../hooks/queries.js'
 import {
   CLAUDE_MODELS,
@@ -240,6 +241,7 @@ export default function ChatSettingsPanel({
   autoResumeSaving = false,
   autoResumeError = '',
   onAutoResumeChange,
+  onOpenSummary,
   onChange,
   // Stale-PATCH guard: parent passes a ref that survives panel
   // mount/unmount. See ComposerPopover for the rationale.
@@ -794,6 +796,24 @@ export default function ChatSettingsPanel({
           )
         })
       })}
+      {onOpenSummary && (
+        <div className="csp__summary-link">
+          <button
+            type="button"
+            className="csp-row csp-summary-row"
+            onPointerDown={preserveFocusUnlessTouch}
+            onClick={onOpenSummary}
+          >
+            <span className="csp-row__icon" aria-hidden="true">
+              <FileText width={18} height={18} />
+            </span>
+            <span className="csp-row__main">
+              <span className="csp-row__title"><span>Chat summaries</span></span>
+              <span className="csp-row__sub">Name, digest, full handoff</span>
+            </span>
+          </button>
+        </div>
+      )}
       {onAutoResumeChange && (
         <div className="csp__automation">
           <div className="csp__label csp__label--automation">Automation</div>
