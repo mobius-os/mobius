@@ -151,8 +151,13 @@
     </div>
     <div id="root"></div>
     <script>
-      // Hide splash immediately on refresh (user already logged in).
-      if (localStorage.getItem('token')) {
+      // The nested chat has its own lightweight start state; never cover it with
+      // the full-shell brand splash. Top-level refreshes can still skip the
+      // splash when the owner token is locally available.
+      var isChatEmbed = window.location.pathname === '/shell/embed/chat'
+      var hasOwnerToken = false
+      try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
+      if (isChatEmbed || hasOwnerToken) {
         var s = document.getElementById('splash')
         if (s) s.remove()
       }
@@ -182,7 +187,7 @@
       // triggers a fresh sw.js fetch from network so deploys take
       // effect immediately. Belt-and-suspenders with the server-side
       // header in main.py.
-      if ('serviceWorker' in navigator) {
+      if (window.parent === window && 'serviceWorker' in navigator) {
         // The flag prevents a reload loop during one update handoff. Clear it
         // on the next page load so later shell rebuilds in the same PWA
         // session can still auto-activate.
@@ -349,7 +354,7 @@
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —
       // browser may deny without prompting.
-      if (navigator.storage && navigator.storage.persist) {
+      if (window.parent === window && navigator.storage && navigator.storage.persist) {
         navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => {})
       }
     </script>

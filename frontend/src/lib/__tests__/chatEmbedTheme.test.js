@@ -8,9 +8,9 @@
  * only other useTheme() caller. Without ChatEmbed calling useTheme() itself,
  * the embed inherits no theme: it paints with the unstyled default tokens
  * (black-on-black in dark mode, black composer in light mode) — exactly the
- * bug this guards against. useTheme() reads the persisted theme (React Query /
- * localStorage) and runs applyThemeToDom, so the embed self-themes correctly
- * in BOTH modes and live-updates when the theme query is invalidated.
+ * bug this guards against. useTheme() reads the effective theme through React
+ * Query and runs applyThemeToDom, so the embed self-themes correctly in BOTH
+ * modes and live-updates when the theme query is invalidated.
  *
  * A full component render of ChatEmbed pulls in ChatView + React Query and is
  * not feasible under the repo's lightweight node:test loaders, so we assert the
@@ -37,13 +37,13 @@ test('ChatEmbed imports the shared useTheme hook', () => {
 })
 
 test('ChatEmbed invokes useTheme() unconditionally on mount', () => {
-  // The hook call must appear inside the component, before the `if (!chatId)`
-  // early return, so it runs on every mount regardless of chat state.
+  // The hook call must appear inside the component, before the readiness early
+  // return, so it runs on every mount regardless of chat/token state.
   const componentStart = SOURCE.indexOf('export default function ChatEmbed(')
   assert.ok(componentStart !== -1, 'ChatEmbed component declaration exists')
 
-  const earlyReturn = SOURCE.indexOf('if (!chatId)', componentStart)
-  assert.ok(earlyReturn !== -1, 'ChatEmbed has the no-chat early return')
+  const earlyReturn = SOURCE.indexOf('if (!chatId || !tokenReady)', componentStart)
+  assert.ok(earlyReturn !== -1, 'ChatEmbed has the chat/token readiness return')
 
   const body = SOURCE.slice(componentStart, earlyReturn)
   assert.match(

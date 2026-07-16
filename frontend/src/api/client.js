@@ -9,11 +9,36 @@ import { clearLatchedTokens } from '../lib/appToken.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
+// A chat renderer nested inside an app frame inherits that frame's opaque
+// origin, so it cannot read the owner's localStorage. The app already holds a
+// short-lived, app-scoped JWT; the exact parent frame passes that narrower
+// credential over the correlated chat-embed protocol and we keep it in memory
+// only. Never persist it and never accept an owner token on this path.
+let embeddedToken = null
+
+export function isAppScopedToken(token) {
+  try {
+    const encoded = String(token || '').split('.')[1]
+    if (!encoded) return false
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+    return payload?.scope === 'app' && payload?.app_id != null
+  } catch {
+    return false
+  }
+}
+
+export function setEmbeddedToken(token) {
+  embeddedToken = isAppScopedToken(token) ? token : null
+  return !!embeddedToken
+}
+
 // localStorage access can throw in private-browsing modes or when the
 // storage quota is hit. App.jsx reads getToken() during initial render
 // to decide between Shell / Login / SetupWizard — an uncaught throw
 // here would crash the splash. Wrap all three helpers defensively.
 export function getToken() {
+  if (embeddedToken) return embeddedToken
   try { return localStorage.getItem('token') } catch { return null }
 }
 
@@ -22,6 +47,7 @@ export function setToken(token) {
 }
 
 export function clearToken() {
+  embeddedToken = null
   try { localStorage.removeItem('token') } catch {}
   // Setup-wizard resume state assumes an active token. If the token
   // is gone (logout / expiry), clear the resume key + in-progress

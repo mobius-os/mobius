@@ -23,10 +23,14 @@ import assert from 'node:assert/strict'
 // Replicate the IIFE logic as a pure function for unit testing.
 // This mirrors the exact code in hooks/useNavigation.js.
 function parseShellReload(storage) {
-  const raw = storage.get('shell-reload')
-  if (!raw) return null
-  storage.delete('shell-reload')
-  try { return JSON.parse(raw) } catch { return null }
+  try {
+    const raw = storage.get('shell-reload')
+    if (!raw) return null
+    storage.delete('shell-reload')
+    try { return JSON.parse(raw) } catch { return null }
+  } catch {
+    return null
+  }
 }
 
 test('shellReload: returns null when key is absent', () => {
@@ -58,5 +62,12 @@ test('shellReload: returns null on malformed JSON', () => {
 test('shellReload: returns null on empty string value', () => {
   const storage = new Map([['shell-reload', '']])
   // Empty raw → falsy check returns null before even trying JSON.parse.
+  assert.equal(parseShellReload(storage), null)
+})
+
+test('shellReload: returns null when sandbox storage is unavailable', () => {
+  const storage = {
+    get() { throw new DOMException('Blocked by opaque sandbox', 'SecurityError') },
+  }
   assert.equal(parseShellReload(storage), null)
 })

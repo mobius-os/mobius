@@ -57,3 +57,19 @@ test('read returns [] for corrupt or absent values', () => {
   assert.deepEqual(readStoredStreamSnapshot('missing', storage), [])
   assert.deepEqual(readStoredStreamSnapshot('bad', storage), [])
 })
+
+test('default cache is optional when an opaque sandbox denies sessionStorage', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    get() { throw new DOMException('Blocked by opaque sandbox', 'SecurityError') },
+  })
+  try {
+    assert.deepEqual(readStoredStreamSnapshot('chat-a'), [])
+    assert.doesNotThrow(() => writeStoredStreamSnapshot('chat-a', [{ type: 'text' }]))
+    assert.doesNotThrow(() => clearStoredStreamSnapshot('chat-a'))
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor)
+    else delete globalThis.sessionStorage
+  }
+})

@@ -1,12 +1,11 @@
 // Protocol for the in-app agent-chat embed (capability A, design §1).
 //
 // A mini-app calls `window.mobius.chat({chatId?, ...})` (mobius-runtime.js)
-// which mounts a NESTED same-origin iframe at the shell embed route
+// which mounts a nested iframe at the shell embed route
 // (`/shell/embed/chat?chatId=…`). That iframe renders the real ChatView
 // (ChatEmbed.jsx) — a stripped-chrome RENDERER over the app-attributed
-// backend chat contract, never the trust boundary (design §0b: a
-// same-origin app already holds the owner JWT, so the embed adds no
-// confidentiality control — enforcement lives server-side).
+// backend chat contract. The app's scoped JWT and backend chat ownership
+// checks remain the trust boundary; the renderer keeps that token in memory.
 //
 // This module is the single source of truth for the postMessage shapes
 // exchanged between the app frame (parent) and the embed frame (child).
@@ -16,10 +15,9 @@
 // deliberately tiny (the NS prefix + the source/origin guard); keep the
 // two in sync the way app-frame.html ↔ AppCanvas.jsx already do.
 //
-// Hardening (design §1.4): three same-origin frames are in play (shell →
-// app frame → embed frame), so origin alone is not enough — a sibling
-// frame shares the origin. Every hop validates BOTH `e.origin ===
-// expectedOrigin` AND `e.source === expectedWindow` (the specific
+// Hardening (design §1.4): three frames are in play (shell → opaque app
+// frame → embed frame), so origin alone is not enough. Every hop validates
+// the allowed serialized origin AND `e.source === expectedWindow` (the specific
 // contentWindow / parent we are talking to), then matches the namespaced
 // type and the `instanceId` correlation token. No generic relay: only
 // the enumerated message types below cross a frame boundary.
@@ -57,14 +55,20 @@ export const CONTEXT_RESPONSE = NS + 'context-response' // parent → child: {no
 // asked. Keeping the type here (rather than inventing it ad hoc later)
 // means the namespace stays closed and greppable.
 
-// True when `event` is a same-origin, same-source message in our
-// namespace for this `instanceId`. `expectedSource` is the specific
+// True when `event` is a trusted-origin, same-source message in our
+// namespace for this `instanceId`. A chat nested below an opaque app sandbox
+// serializes its MessageEvent origin as "null"; callers must opt into that
+// case explicitly and still supply the exact expectedSource window.
+// `expectedSource` is the specific
 // window we expect to hear from (the embed's contentWindow on the parent
 // side; `window.parent` on the child side). This is the §1.4 guard —
 // callers should treat anything that fails it as not-ours and ignore it,
 // NOT as an error (other frames legitimately share the origin).
-export function isEmbedMessage(event, { origin, expectedSource, instanceId }) {
-  if (!event || event.origin !== origin) return false
+export function isEmbedMessage(event, {
+  origin, expectedSource, instanceId, allowOpaqueOrigin = false,
+}) {
+  if (!event) return false
+  if (event.origin !== origin && !(allowOpaqueOrigin && event.origin === 'null')) return false
   if (expectedSource && event.source !== expectedSource) return false
   const msg = event.data
   if (!msg || typeof msg !== 'object') return false

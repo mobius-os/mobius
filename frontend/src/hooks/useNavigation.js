@@ -48,10 +48,17 @@ function safeStoredChatId() {
 // sessionStorage.getItem() call — the IIFE already consumed and removed the
 // key, so a second read would always return null (dead branch in App.jsx).
 export const shellReload = (() => {
-  const raw = sessionStorage.getItem('shell-reload')
-  if (!raw) return null
-  sessionStorage.removeItem('shell-reload')
-  try { return JSON.parse(raw) } catch { return null }
+  try {
+    const raw = sessionStorage.getItem('shell-reload')
+    if (!raw) return null
+    sessionStorage.removeItem('shell-reload')
+    try { return JSON.parse(raw) } catch { return null }
+  } catch {
+    // Sandboxed app chat embeds have an opaque origin and therefore no
+    // sessionStorage. Navigation restore belongs to the top-level shell, so
+    // treating unavailable storage as an empty restore is the correct fallback.
+    return null
+  }
 })()
 
 // Parse deep-link URL. A COLD notification tap lands on the in-scope
