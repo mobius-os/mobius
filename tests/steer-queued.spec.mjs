@@ -110,7 +110,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
-          body: JSON.stringify({ status: 'started' }),
+          body: JSON.stringify({
+            status: 'started',
+            message: {
+              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+            },
+          }),
         })
       }
 
@@ -218,7 +223,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
-          body: JSON.stringify({ status: 'started' }),
+          body: JSON.stringify({
+            status: 'started',
+            message: {
+              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+            },
+          }),
         })
       }
       const ts = queueCount === 0 ? TS1 : TS2
@@ -309,7 +319,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
-          body: JSON.stringify({ status: 'started' }),
+          body: JSON.stringify({
+            status: 'started',
+            message: {
+              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+            },
+          }),
         })
       }
       return route.fulfill({
