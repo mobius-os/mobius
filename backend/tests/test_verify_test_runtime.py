@@ -111,6 +111,13 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   assert "the test runner never rebuilds" in wrapper
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   assert "COPY Dockerfile ./test-image-inputs/Dockerfile" not in dockerfile
+  shell_deps = "RUN cd ./shell-src && npm ci --ignore-scripts"
+  last_vendor = "RUN mkdir -p /tmp/dompurify-install"
+  backend_source = "COPY backend/app ./app/"
+  frontend_source = "COPY frontend/ ./shell-src/"
+  assert dockerfile.index(shell_deps) < dockerfile.index(last_vendor)
+  assert dockerfile.index(last_vendor) < dockerfile.index(backend_source)
+  assert dockerfile.index(last_vendor) < dockerfile.index(frontend_source)
 
 
 def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
@@ -173,6 +180,8 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert '--project-directory "$snapshot_dir"' in runner
   assert 'cd "$snapshot_dir"' in runner
   assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1' in runner
+  assert "Local E2E artifacts retained at:" in runner
+  assert 'compose logs --no-color app caddy recoveryd fake-tandoor' in runner
   assert 'error: timed out waiting for the isolated test backend' in runner
   assert 'error: isolated test stack failed to start' in runner
   assert 'error: timed out waiting for isolated browser proxy' in runner

@@ -173,11 +173,30 @@ if errors:
 
 echo "Running focused Playwright checks with one worker..."
 cd "$snapshot_dir"
-CI= \
-MOBIUS_LOCAL_E2E=1 \
-MOBIUS_AUTH_FILE="$auth_file" \
-MOBIUS_URL="http://localhost:${test_port}" \
-MOBIUS_TEST_INTERNAL_API="http://127.0.0.1:${internal_test_port}" \
-MOBIUS_USER=admin \
-MOBIUS_PASS=admin \
-  "$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1
+if CI= \
+   MOBIUS_LOCAL_E2E=1 \
+   MOBIUS_AUTH_FILE="$auth_file" \
+   MOBIUS_URL="http://localhost:${test_port}" \
+   MOBIUS_TEST_INTERNAL_API="http://127.0.0.1:${internal_test_port}" \
+   MOBIUS_USER=admin \
+   MOBIUS_PASS=admin \
+     "$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1; then
+  exit 0
+else
+  test_rc=$?
+fi
+
+# The snapshot is deleted during cleanup, so retain the browser context and
+# stack logs before exiting. The default lives under an ignored repository
+# path; callers can redirect it to a durable CI/debug directory.
+artifact_dir="${MOBIUS_LOCAL_E2E_ARTIFACTS:-$ROOT/test-results/local-e2e-$run_id}"
+mkdir -p "$artifact_dir"
+for result_dir in test-results playwright-report; do
+  if [[ -e "$snapshot_dir/$result_dir" ]]; then
+    cp -a "$snapshot_dir/$result_dir" "$artifact_dir/"
+  fi
+done
+compose logs --no-color app caddy recoveryd fake-tandoor \
+  >"$artifact_dir/stack.log" 2>&1 || true
+echo "Local E2E artifacts retained at: $artifact_dir" >&2
+exit "$test_rc"
