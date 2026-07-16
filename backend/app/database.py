@@ -547,10 +547,10 @@ def run_migrations(eng) -> None:
       )
     if "auto_resume_on_limit" not in chats_cols:
       # Chat-local provider-limit recovery policy. Automatic continuation is
-      # initially conservative; any later owner selection remains per chat.
+      # the initial default; any later owner selection remains stored per chat.
       _add.append(
         "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
-        "NOT NULL DEFAULT FALSE"
+        "NOT NULL DEFAULT TRUE"
       )
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
@@ -601,11 +601,11 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'claude'"
       )
     if "auto_resume_on_limit_default" not in owner_cols:
-      # Start conservatively off. Later chat-level selections update this
+      # The initial choice is on. Later chat-level selections update this
       # owner seed so new chats inherit the most recently chosen value.
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN auto_resume_on_limit_default BOOLEAN "
-        "NOT NULL DEFAULT FALSE"
+        "NOT NULL DEFAULT TRUE"
       )
     if "model_prefs_json" not in owner_cols:
       # Nullable JSON blob holding the owner's model-picker

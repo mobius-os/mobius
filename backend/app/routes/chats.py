@@ -373,7 +373,7 @@ def create_chat(
     provider=provider,
     agent_settings_json=None,
     auto_resume_on_limit=(
-      bool(owner.auto_resume_on_limit_default) if owner else False
+      bool(owner.auto_resume_on_limit_default) if owner else True
     ),
   )
   db.add(chat)

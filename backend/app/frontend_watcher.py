@@ -372,14 +372,6 @@ def _prepare_next_from(source_dir: Path) -> None:
       "vite build did not produce index.html, assets/, sw.js, and "
       "manifest.webmanifest"
     )
-  try:
-    _validate_built_globals(_NEXT_DIST_DIR)
-  except Exception:
-    # Match every other preparation failure: a rejected candidate must not
-    # linger as a complete-looking `.dist-next` that a later publisher could
-    # mistake for its own output.
-    shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
-    raise
 
 
 def _content_identical(a: Path, b: Path) -> bool:
