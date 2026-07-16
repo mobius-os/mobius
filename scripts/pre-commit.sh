@@ -98,7 +98,9 @@ fi
 # means an unclosed fence — usually a paste-snippet mistake.
 for f in "${MD_FILES[@]:-}"; do
   [ -n "$f" ] || continue
-  fences=$(grep -c '^```' "$f" 2>/dev/null || echo 0)
+  # grep -c already prints 0 when there are no matches, despite exiting 1.
+  # Swallow that status without echoing a second 0 ("0\n0" is not arithmetic).
+  fences=$(grep -c '^```' "$f" 2>/dev/null || true)
   if [ $((fences % 2)) -ne 0 ]; then
     fail "unbalanced code fences in $f (found $fences fence markers, expected even count)"
   fi

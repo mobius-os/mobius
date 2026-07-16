@@ -1,4 +1,4 @@
-"""First-boot bootstrap that auto-installs the curated app-store mini-app.
+"""First-boot bootstrap for the App Store, Memory, and Reflection apps.
 
 Called from the FastAPI lifespan handler once the server is up and the
 DB is migrated. Calls `install_from_manifest()` directly (in-process)
@@ -7,16 +7,16 @@ ready to accept connections from itself at lifespan-startup time, and
 an in-process call skips the auth + rate-limit layers that exist for
 external callers we don't need to traverse here.
 
-Failure is non-fatal: a network blip fetching the store manifest must
-not crash uvicorn (otherwise the whole platform is unreachable on the
-first boot after a deploy that lands during a GitHub outage). We log
-the failure and return; the owner can install the store manually.
+Failure is non-fatal and isolated per app: a network blip fetching one
+manifest must not crash uvicorn or prevent the remaining bootstrap apps
+from installing. We log each failure and continue.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,22 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
 )
 
 LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
+
+
+@dataclass(frozen=True)
+class _BootstrapApp:
+  name: str
+  manifest_url: str
+  reinstall_after_uninstall: bool
+
+
+_BOOTSTRAP_APPS = (
+  _BootstrapApp("store", BOOTSTRAP_STORE_MANIFEST_URL, True),
+  _BootstrapApp("memory", LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], False),
+  _BootstrapApp(
+    "reflection", LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], False,
+  ),
+)
 
 # Tests set MOEBIUS_SKIP_BOOTSTRAP=1 so the pytest suite doesn't hit
 # the live GitHub URL. Set in docker-compose.test.yml's `pytest`
@@ -64,9 +80,8 @@ def _is_legacy_platform_row(app: models.App) -> bool:
 async def _migrate_legacy_platform_apps(db: Session) -> None:
   """Move old built-in rows forward by installing their trusted catalog entry.
 
-  New instances do not auto-install these apps. This only runs when an active
-  row from an older image is already present and still points at the retired
-  platform-core source tree.
+  This only runs when an active row from an older image is already present and
+  still points at the retired platform-core source tree.
   """
   rows = (
     db.query(models.App)
@@ -99,72 +114,70 @@ async def _migrate_legacy_platform_apps(db: Session) -> None:
       )
 
 
-async def ensure_store_installed(db: Session) -> None:
-  """Idempotent: if no App installed from BOOTSTRAP_STORE_MANIFEST_URL
-  exists, install it.
+async def ensure_bootstrap_apps_installed(db: Session) -> None:
+  """Idempotently install the configured bootstrap apps when absent.
 
-  Identity is keyed on `manifest_url`, not slug. Two reasons:
+  Identity is keyed on `manifest_url`, not slug. This means:
     1. The bootstrapped store doesn't always end up with slug='store'
        — if the user already built an app called "store", first-boot
        slug-assignment hands it a fallback like 'app-store'. A slug
        check would then mis-treat the bootstrapped store as absent
        and try to install it again every boot.
-    2. If the user uninstalls the bootstrapped store (DELETE
-       /api/apps/<id>), the next container restart should reinstall
-       it. Keying on manifest_url makes the re-install fire correctly
-       regardless of what slug the deleted row had.
+    2. Every bootstrap app retains its canonical identity even if its
+       assigned slug differs from the catalog slug.
 
   Caller is the FastAPI lifespan/startup handler. Owns no transaction
   state — `install_from_manifest` commits its own work on success and
   rolls back on failure. We just decide whether to call it.
   """
   if os.environ.get(_SKIP_ENV) == "1":
-    log.info("bootstrap: %s=1, skipping store install", _SKIP_ENV)
+    log.info("bootstrap: %s=1, skipping bootstrap app installs", _SKIP_ENV)
     return
 
   await _migrate_legacy_platform_apps(db)
 
-  # Installs store the CANONICAL identity key (`<base>#manifest-id=<id>`, with a
-  # trailing `/mobius.json` stripped from the base), NOT the bare URL — so match
-  # on that canonical prefix, else this lookup misses every restart and
-  # needlessly re-fetches + updates the store (Codex review round-10 #8,
-  # round-11 #1).
+  # Manifest installs store the canonical identity key
+  # (`<base>#manifest-id=<id>`, with a trailing `/mobius.json` stripped from the
+  # base), not the bare URL.
   from app.install import _canonical_base
-  existing = (
-    db.query(models.App)
-    .filter(models.App.manifest_url.like(
-      _canonical_base(BOOTSTRAP_STORE_MANIFEST_URL) + "#manifest-id=%"
+
+  for bootstrap_app in _BOOTSTRAP_APPS:
+    query = db.query(models.App).filter(models.App.manifest_url.like(
+      _canonical_base(bootstrap_app.manifest_url) + "#manifest-id=%"
     ))
-    # A tombstoned (soft-deleted) store reads as ABSENT here so this boot
-    # reinstalls it — install_from_manifest reattaches the same row and clears
-    # deleted_at, reviving it with its data. Without this filter an uninstalled
-    # store would never return on restart, contradicting reason (2) above and
-    # leaving the owner with no UI surface to get it back (feature 110).
-    .filter(models.App.deleted_at.is_(None))
-    .first()
-  )
-  if existing is not None:
-    log.info("bootstrap: store already installed (app id=%s)", existing.id)
-    return
-  log.info("bootstrap: installing store from %s", BOOTSTRAP_STORE_MANIFEST_URL)
-  try:
-    app, mode, warnings, _manifest, _conflicts, _divergence = (
-      await install_from_manifest(
-        db,
-        manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
-        manifest=None,
-        raw_base=None,
-        source="bootstrap",
+    if bootstrap_app.reinstall_after_uninstall:
+      # The store is the recovery surface, so it must return after uninstall;
+      # owner uninstalls of the other bootstrap apps are respected.
+      query = query.filter(models.App.deleted_at.is_(None))
+    existing = query.first()
+    if existing is not None:
+      log.info(
+        "bootstrap: %s already installed (app id=%s)",
+        bootstrap_app.name, existing.id,
       )
+      continue
+    log.info(
+      "bootstrap: installing %s from %s",
+      bootstrap_app.name, bootstrap_app.manifest_url,
     )
-  except Exception as exc:
-    # Catch-all on purpose: HTTPException, network errors, JSON parse
-    # errors, anything else. The cost of letting the bootstrap crash
-    # lifespan is higher than the cost of an uninstalled store —
-    # without uvicorn there's no recovery surface to install it from.
-    log.exception("bootstrap: store install failed — %s", exc)
-    return
-  log.info(
-    "bootstrap: store install %s (app id=%s, warnings=%s)",
-    mode, app.id, warnings,
-  )
+    try:
+      app, mode, warnings, _manifest, _conflicts, _divergence = (
+        await install_from_manifest(
+          db,
+          manifest_url=bootstrap_app.manifest_url,
+          manifest=None,
+          raw_base=None,
+          source="bootstrap",
+        )
+      )
+    except Exception as exc:
+      # Catch-all on purpose: no manifest failure should crash lifespan or
+      # prevent the remaining bootstrap apps from installing.
+      log.exception(
+        "bootstrap: %s install failed — %s", bootstrap_app.name, exc,
+      )
+      continue
+    log.info(
+      "bootstrap: %s install %s (app id=%s, warnings=%s)",
+      bootstrap_app.name, mode, app.id, warnings,
+    )

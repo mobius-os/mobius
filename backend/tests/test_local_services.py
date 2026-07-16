@@ -36,7 +36,7 @@ def test_stock_instance_exposes_no_local_service(client):
 def test_surface_is_inert_without_explicit_origin(
   client, auth, clean_local_services_config, monkeypatch,
 ):
-  monkeypatch.delenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", raising=False)
+  monkeypatch.delenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", raising=False)
   write_config(clean_local_services_config, {
     "tandoor": {"upstream": "http://127.0.0.1:8123"},
   })
@@ -202,11 +202,11 @@ def test_unreachable_service_degrades_to_scoped_502(
   assert "127.0.0.1" not in response.text
 
 
-def test_surface_requires_distinct_origin_and_owner(
+def test_surface_requires_distinct_gateway_origin_and_owner(
   client, auth, clean_local_services_config, monkeypatch,
 ):
   monkeypatch.setattr(get_settings(), "domain", "localhost")
-  monkeypatch.setenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
   write_config(clean_local_services_config, {
     "tandoor": {
       "upstream": "http://127.0.0.1:8123",
@@ -217,12 +217,12 @@ def test_surface_requires_distinct_origin_and_owner(
   response = client.get("/api/local-services/tandoor/surface", headers=auth)
   assert response.status_code == 200
   assert response.json()["url"] == (
-    "http://tandoor.localhost/services/tandoor/_mobius/surface"
+    "http://services.localhost/services/tandoor/_mobius/surface"
   )
 
   adapter = client.get(
     "/services/tandoor/_mobius/surface",
-    headers={"host": "tandoor.localhost"},
+    headers={"host": "services.localhost"},
   )
   assert adapter.status_code == 200
   assert "x-frame-options" not in adapter.headers
@@ -242,26 +242,71 @@ def test_surface_requires_distinct_origin_and_owner(
 @pytest.mark.parametrize("path", [
   "/", "/shell/", "/api/health", "/recover", "/services/recipes/",
 ])
-def test_dedicated_surface_host_never_serves_other_platform_paths(
+def test_shared_gateway_host_never_serves_other_platform_paths(
   client, clean_local_services_config, monkeypatch, path,
 ):
   monkeypatch.setattr(get_settings(), "domain", "localhost")
-  monkeypatch.setenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
   write_config(clean_local_services_config, {
     "tandoor": {
       "upstream": "http://127.0.0.1:8123", "public_surface": True,
     },
   })
-  response = client.get(path, headers={"host": "tandoor.localhost"})
+  response = client.get(path, headers={"host": "services.localhost"})
   assert response.status_code == 404
   assert "<!doctype html>" not in response.text.lower()
+
+
+@pytest.mark.parametrize("host", [
+  "services.localhost:80", "SERVICES.localhost", "services.localhost.",
+])
+def test_gateway_guard_covers_every_legal_host_spelling(
+  client, clean_local_services_config, monkeypatch, host,
+):
+  """`host:defaultport`, case, and a trailing dot are the same authority.
+
+  A raw string compare fails open on those spellings, letting the gateway
+  hostname serve shell/API paths again (codex review finding, 2026-07-16).
+  """
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  response = client.get("/api/health", headers={"host": host})
+  assert response.status_code == 404
+  adapter = client.get(
+    "/services/tandoor/_mobius/surface", headers={"host": host},
+  )
+  assert adapter.status_code == 200
+
+
+def test_gateway_guard_requires_explicit_nondefault_port(
+  client, clean_local_services_config, monkeypatch,
+):
+  """An origin pinned to a non-default port only matches that exact port."""
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv(
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost:8001",
+  )
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  gated = client.get("/api/health", headers={"host": "services.localhost:8001"})
+  assert gated.status_code == 404
+  other_port = client.get("/api/health", headers={"host": "services.localhost"})
+  assert other_port.status_code == 200
 
 
 def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
   client, clean_local_services_config, monkeypatch,
 ):
   monkeypatch.setattr(get_settings(), "domain", "localhost")
-  monkeypatch.setenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
   write_config(clean_local_services_config, {
     "tandoor": {
       "upstream": "http://127.0.0.1:8123",
@@ -287,7 +332,7 @@ def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
 
   monkeypatch.setattr(local_services_module.httpx, "AsyncClient", FakeAsyncClient)
   public = client.get(
-    "/services/tandoor/", headers={"host": "tandoor.localhost"},
+    "/services/tandoor/", headers={"host": "services.localhost"},
   )
   ordinary = client.get(
     "/services/tandoor/", headers={"host": "localhost"},
@@ -302,7 +347,57 @@ def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
   assert "domain=.localhost" in ordinary.headers["set-cookie"].lower()
 
 
-def test_production_surface_rejects_http_localhost_fallback(
+def test_multiple_owner_trusted_services_share_one_gateway_but_private_service_does_not(
+  client, auth, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv(
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost",
+  )
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+    "grafana": {
+      "upstream": "http://127.0.0.1:8124", "public_surface": True,
+    },
+    "private": {
+      "upstream": "http://127.0.0.1:8125",
+    },
+  })
+
+  tandoor = client.get("/api/local-services/tandoor/surface", headers=auth)
+  grafana = client.get("/api/local-services/grafana/surface", headers=auth)
+  private = client.get("/api/local-services/private/surface", headers=auth)
+
+  assert tandoor.status_code == 200
+  assert grafana.status_code == 200
+  assert private.status_code == 409
+  assert tandoor.json()["url"] == (
+    "http://services.localhost/services/tandoor/_mobius/surface"
+  )
+  assert grafana.json()["url"] == (
+    "http://services.localhost/services/grafana/_mobius/surface"
+  )
+  assert client.get(
+    "/services/tandoor/_mobius/surface",
+    headers={"host": "services.localhost"},
+  ).status_code == 200
+  assert client.get(
+    "/services/grafana/_mobius/surface",
+    headers={"host": "services.localhost"},
+  ).status_code == 200
+  # The gateway host is not a second shell and cannot expose a service which
+  # has not explicitly joined this owner-trusted origin group.
+  assert client.get(
+    "/services/private/", headers={"host": "services.localhost"},
+  ).status_code == 404
+  assert client.get(
+    "/api/health", headers={"host": "services.localhost"},
+  ).status_code == 404
+
+
+def test_production_gateway_rejects_http_localhost_fallback(
   client, auth, clean_local_services_config, monkeypatch,
 ):
   monkeypatch.setattr(get_settings(), "domain", "mobius.example.com")
@@ -310,7 +405,7 @@ def test_production_surface_rejects_http_localhost_fallback(
     get_settings(), "frontend_origin", "https://mobius.example.com",
   )
   monkeypatch.setenv(
-    "MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost",
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost",
   )
   write_config(clean_local_services_config, {
     "tandoor": {

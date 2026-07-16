@@ -248,21 +248,19 @@ async def lifespan(app):
         _nt_db.close()
   except Exception as exc:
     _log.error("paused-turn resume notify failed: %s", exc, exc_info=True)
-  # First-boot auto-install of the curated app-store mini-app so a
-  # fresh container shows the store in the drawer immediately. The
-  # bootstrap module is idempotent (no-op if slug='store' already
-  # exists) and swallows its own failures — a GitHub blip must not
-  # crash lifespan and brick the recovery surface.
+  # First-boot auto-install of the App Store, Memory, and Reflection. The
+  # bootstrap module is idempotent and isolates failures so a GitHub blip must
+  # not crash lifespan or prevent another bootstrap app from installing.
   try:
-    from app.bootstrap import ensure_store_installed
+    from app.bootstrap import ensure_bootstrap_apps_installed
     from app.database import SessionLocal as _BootstrapSession
     _bs_db = _BootstrapSession()
     try:
-      await ensure_store_installed(_bs_db)
+      await ensure_bootstrap_apps_installed(_bs_db)
     finally:
       _bs_db.close()
   except Exception as exc:
-    _log.error("bootstrap store install wiring failed: %s", exc, exc_info=True)
+    _log.error("bootstrap app install wiring failed: %s", exc, exc_info=True)
   # Reconcile the DB-independent recovery credential seed with the current
   # owner. Backfills instances that completed setup before the seed
   # existed and keeps it current; idempotent (no write when unchanged) and
@@ -643,7 +641,7 @@ class _BodySizeLimitMiddleware:
 # App isolation instead comes from opaque-origin sandboxed frames plus scoped
 # tokens. Clickjacking is covered by X-Frame-Options without a CSP. Narrow
 # exceptions are the inert embedded-chat bootstrap, response-sandboxed packaged
-# documents, and an explicitly configured dedicated service surface.
+# documents, and an explicitly configured shared service-gateway surface.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
@@ -654,13 +652,23 @@ _SECURITY_HEADERS = [
 ]
 _SECURITY_HEADER_NAMES = frozenset(name for name, _ in _SECURITY_HEADERS)
 _X_FRAME_OPTIONS = b"x-frame-options"
+_CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
+
+# This isolation boundary must always be enforced, never Report-Only: browsers
+# ignore the CSP sandbox directive in a Report-Only policy.
+_STATIC_EMBED_CSP = (
+  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
+  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
+  "media-src 'self' blob:; worker-src 'self' blob:"
+)
 
 
 def _frame_policy_exception(scope) -> bool:
   """Exact routes whose own isolation permits a non-SAMEORIGIN ancestor."""
   path = scope.get("path") or ""
-  if path == "/shell/embed/chat" or path.startswith(_OPAQUE_STATIC_EMBED_PREFIX):
+  if path == "/shell/embed/chat":
     return True
   if path.startswith("/services/"):
     try:
@@ -675,9 +683,10 @@ class _SecurityHeadersMiddleware:
   """Authoritatively sets the platform security headers on every response. Pure
   ASGI so it never buffers a streaming body. It strips any same-named header a
   route may have set first and replaces it with the platform value, so no route
-  can weaken the HSTS/MIME/etc. wall. Frame-policy exceptions are delegated to
-  exact routes whose own response sandbox or dedicated-origin adapter provides
-  the replacement boundary; ordinary routes retain SAMEORIGIN protection."""
+  can weaken the HSTS/MIME/etc. wall. Opaque static embeds get their enforced
+  response sandbox here alongside their frame-policy exception. Other frame
+  exceptions are exact routes whose inert response or gateway-origin adapter
+  provides the replacement boundary; ordinary routes retain SAMEORIGIN."""
 
   def __init__(self, app):
     self.app = app
@@ -686,24 +695,55 @@ class _SecurityHeadersMiddleware:
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
 
+    # Frameability and sandboxing are one policy for this exact namespace; keep
+    # both decisions adjacent so no response can receive only the exception.
+    opaque_static_embed = (scope.get("path") or "").startswith(
+      _OPAQUE_STATIC_EMBED_PREFIX
+    )
     response_headers = _SECURITY_HEADERS
-    if _frame_policy_exception(scope):
+    replaced_header_names = _SECURITY_HEADER_NAMES
+    if opaque_static_embed or _frame_policy_exception(scope):
       response_headers = [
         (name, value) for name, value in _SECURITY_HEADERS
         if name != _X_FRAME_OPTIONS
       ]
+    if opaque_static_embed:
+      response_headers.append((
+        _CONTENT_SECURITY_POLICY,
+        _STATIC_EMBED_CSP.encode("ascii"),
+      ))
+      replaced_header_names = replaced_header_names | {
+        _CONTENT_SECURITY_POLICY
+      }
+
+    response_started = False
 
     async def _send(message):
+      nonlocal response_started
       if message["type"] == "http.response.start":
+        response_started = True
         headers = [
           (k, v) for k, v in message.get("headers", [])
-          if k.lower() not in _SECURITY_HEADER_NAMES
+          if k.lower() not in replaced_header_names
         ]
         headers.extend(response_headers)
         message["headers"] = headers
       await send(message)
 
-    return await self.app(scope, receive, _send)
+    try:
+      return await self.app(scope, receive, _send)
+    except Exception:
+      # Starlette's unhandled-error response is outside user middleware. Send
+      # this namespace's generic 500 through our wrapper before re-raising so
+      # the outer layer still logs it without bypassing the sandbox boundary.
+      if opaque_static_embed and not response_started:
+        response = Response(
+          "Internal Server Error",
+          status_code=500,
+          media_type="text/plain",
+        )
+        await response(scope, receive, _send)
+      raise
 
 
 class _DatabaseRequestContextMiddleware:
@@ -724,7 +764,7 @@ class _DatabaseRequestContextMiddleware:
 
 
 class _ServiceSurfaceHostMiddleware:
-  """Prevent a dedicated service host from becoming another Möbius origin."""
+  """Prevent the service gateway host from becoming another Möbius origin."""
 
   def __init__(self, app):
     self.app = app
@@ -1350,14 +1390,6 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   )
 
 
-_STATIC_EMBED_CSP = (
-  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
-  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
-  "media-src 'self' blob:; worker-src 'self' blob:"
-)
-
-
 @app.api_route(
   "/app-embeds/by-id/{app_id}/{asset_path:path}",
   methods=["GET", "HEAD"],
@@ -1373,13 +1405,11 @@ async def app_owned_opaque_embed_by_id(
   assets stay below the same alias. Ordinary /app-assets remains protected by
   SAMEORIGIN and is never the document-navigation surface.
   """
-  response = _serve_app_static_asset(
+  return _serve_app_static_asset(
     await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
     asset_path,
     request,
   )
-  response.headers["Content-Security-Policy"] = _STATIC_EMBED_CSP
-  return response
 
 
 @app.api_route(
@@ -1431,6 +1461,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       str(target),
       media_type=media_type,
       headers={
+        "Access-Control-Allow-Origin": "*",
         "Cache-Control": "public, max-age=31536000, immutable",
         "X-Content-Type-Options": "nosniff",
       },

@@ -1,10 +1,11 @@
-/** Dedicated service-origin topology: shell -> adapter -> same-origin service. */
+/** Shared service-gateway topology: shell -> adapter -> same-origin service. */
 import { test, expect } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const baseUrl = new URL(BASE)
-const SERVICE_ORIGIN = process.env.MOBIUS_TEST_TANDOOR_ORIGIN
-  || `http://tandoor.localhost:${baseUrl.port || '80'}`
+const SERVICE_ORIGIN = process.env.MOBIUS_TEST_SERVICE_GATEWAY_ORIGIN
+  || `http://services.localhost:${baseUrl.port || '80'}`
 const FAKE_UPSTREAM = process.env.MOBIUS_FAKE_TANDOOR_UPSTREAM || 'http://127.0.0.1:8123'
 const INTERNAL_API = process.env.MOBIUS_TEST_INTERNAL_API
 if (!INTERNAL_API) {
@@ -39,12 +40,16 @@ test.describe.configure({ retries: 0 })
 // 'block'` shim reads navigator.serviceWorker inside every child and injects a
 // runner-owned SecurityError into the deliberately opaque app frame.
 
-const TANDOOR_WRAPPER = `
+const SYNTHETIC_TANDOOR_WRAPPER = `
 import { useEffect } from 'react'
 export default function App(){
   useEffect(()=>{ window.parent.postMessage({type:'moebius:open-service',service:'tandoor'},'*') },[])
   return <main id="tandoor-wrapper">Opening Tandoor…</main>
 }`
+const TRACKED_TANDOOR_SOURCE = process.env.MOBIUS_TEST_TANDOOR_SOURCE
+const TANDOOR_WRAPPER = TRACKED_TANDOOR_SOURCE
+  ? readFileSync(TRACKED_TANDOOR_SOURCE, 'utf8')
+  : SYNTHETIC_TANDOOR_WRAPPER
 
 async function ownerToken(context) {
   const state = await context.storageState()
@@ -53,7 +58,7 @@ async function ownerToken(context) {
   return origin?.localStorage.find(item => item.name === 'token')?.value || null
 }
 
-test('service adapter stays branded until heartbeat, then preserves cookies and re-covers navigation failure', async ({ page, context, request }) => {
+test('shared gateway stays branded until heartbeat, preserves cookies, and rejects other platform paths', async ({ page, context, request }) => {
   // Read the auth project's persisted token without opening the shell. The app
   // must exist before the page's first navigation so this is a real cold
   // deep-link, not a race against an already-hydrated app list.
@@ -151,17 +156,34 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
       slug: 'tandoor',
       url: `${SERVICE_ORIGIN}/services/tandoor/_mobius/surface`,
     })
+    // One gateway may host many explicitly enabled service paths, but it must
+    // never become a second shell/API origin or expose an unregistered sibling.
+    for (const path of ['/', '/shell/', '/api/health', '/services/grafana/']) {
+      const blocked = await request.get(`${SERVICE_ORIGIN}${path}`, {
+        failOnStatusCode: false,
+      })
+      expect(blocked.status(), path).toBe(404)
+    }
 
     const created = await request.post(`${BASE}/api/apps/`, {
       headers,
       data: {
-        name: 'Tandoor', description: 'Disposable dedicated service fixture.',
+        name: 'Tandoor', description: 'Disposable shared-gateway service fixture.',
         jsx_source: TANDOOR_WRAPPER,
       },
     })
     expect(created.status()).toBe(201)
     app = await created.json()
     expect(app.slug).toBe('tandoor')
+
+    if (TRACKED_TANDOOR_SOURCE) {
+      // The real wrapper's top-level PWA branch must be actionable rather
+      // than endlessly retrying a surface which only the shell can mount.
+      await page.goto(`${BASE}/apps/${app.slug}/`, { waitUntil: 'domcontentloaded' })
+      const openInMobius = page.getByRole('link', { name: 'Open in Möbius' })
+      await expect(openInMobius).toBeVisible({ timeout: 5_000 })
+      expect(await openInMobius.getAttribute('href')).toBe(`/shell/?app=${app.id}`)
+    }
 
     const shellResponse = await page.goto(
       `${BASE}/shell/?app=${app.id}`,

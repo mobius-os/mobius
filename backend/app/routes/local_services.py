@@ -1,4 +1,4 @@
-"""Guarded same-origin reverse proxy for owner-configured local web services.
+"""Guarded reverse proxy for owner-configured local web services.
 
 Mini-apps are sandboxed frontend frames, so a real backend web application
 (Tandoor, Paperless, Grafana, etc.) cannot run *inside* one.  This route gives
@@ -11,8 +11,9 @@ platform checkout at ``<DATA_DIR>/local-services.json`` and stock Möbius ships
 with no configured services.  Only literal loopback targets are accepted in
 v1; this prevents the route from becoming an SSRF/open-proxy primitive while
 covering the local-process use case it was introduced for. A service may also
-opt into a dedicated-origin surface. The backend and bundled proxy both read
-``MOBIUS_SERVICE_<SLUG>_ORIGIN`` so that origin has one configuration source:
+opt into the shared service-gateway surface. The backend and bundled proxy both
+read ``MOBIUS_SERVICE_GATEWAY_ORIGIN`` so every owner-trusted full web service
+can share one browser origin that is still distinct from the Möbius shell:
 
 Configuration schema::
 
@@ -25,6 +26,12 @@ Configuration schema::
       }
     }
   }
+
+The gateway deliberately isolates services from the shell, not from one
+another. Cookies remain host-only and should use the service mount path, but
+all public-surface services share origin storage and must therefore be treated
+as one trust group. A service needing isolation from sibling services requires
+its own origin rather than this low-friction gateway.
 
 The public ``/services/<slug>`` prefix is preserved on the upstream request.
 Backend applications must therefore be configured to serve from that same
@@ -58,7 +65,7 @@ _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _CONFIG_NAME = "local-services.json"
 _MAX_CONFIG_BYTES = 64 * 1024
-_SURFACE_ENV = re.compile(r"^MOBIUS_SERVICE_([A-Z0-9_]+)_ORIGIN$")
+_GATEWAY_ENV = "MOBIUS_SERVICE_GATEWAY_ORIGIN"
 
 # RFC 9110 hop-by-hop fields plus Content-Length: StreamingResponse owns the
 # downstream framing and httpx calculates the upstream request length.
@@ -149,18 +156,14 @@ def _validated_upstream(value: object) -> str:
   return f"http://{host}:{port}"
 
 
-def _surface_origin_env(slug: str) -> str:
-  return f"MOBIUS_SERVICE_{slug.upper().replace('-', '_')}_ORIGIN"
-
-
-def _validated_surface_origin(value: object, slug: str) -> str:
+def _validated_surface_origin(value: object) -> str:
   if not isinstance(value, str):
     raise ServiceConfigError("surface origin must be a URL string")
   parsed = urlsplit(value)
   is_local_dev = (
     get_settings().domain == "localhost"
     and parsed.scheme == "http"
-    and parsed.hostname == f"{slug}.localhost"
+    and parsed.hostname == "services.localhost"
   )
   if (
     (parsed.scheme != "https" and not is_local_dev)
@@ -172,23 +175,23 @@ def _validated_surface_origin(value: object, slug: str) -> str:
     or parsed.path not in ("", "/")
   ):
     raise ServiceConfigError(
-      "surface origin must be a dedicated HTTPS origin without a path"
+      "service gateway origin must be an HTTPS origin without a path"
     )
   shell = urlsplit(get_settings().frontend_origin)
   if (parsed.scheme, parsed.netloc) == (shell.scheme, shell.netloc):
-    raise ServiceConfigError("surface origin must not be the shell origin")
+    raise ServiceConfigError("service gateway origin must not be the shell origin")
   return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _configured_surface_origin(slug: str, enabled: object) -> str | None:
+def _configured_surface_origin(enabled: object) -> str | None:
   if enabled is not True:
     if enabled in (None, False):
       return None
     raise ServiceConfigError("public_surface must be a boolean")
-  value = os.environ.get(_surface_origin_env(slug), "").strip()
+  value = os.environ.get(_GATEWAY_ENV, "").strip()
   if not value:
-    raise ServiceConfigError(f"{_surface_origin_env(slug)} is not configured")
-  return _validated_surface_origin(value, slug)
+    raise ServiceConfigError(f"{_GATEWAY_ENV} is not configured")
+  return _validated_surface_origin(value)
 
 
 def _service_for(slug: str) -> LocalService | None:
@@ -208,9 +211,7 @@ def _service_for(slug: str) -> LocalService | None:
     return LocalService(
       slug=slug,
       upstream=_validated_upstream(entry["upstream"]),
-      surface_origin=_configured_surface_origin(
-        slug, entry.get("public_surface"),
-      ),
+      surface_origin=_configured_surface_origin(entry.get("public_surface")),
     )
   except ServiceConfigError as exc:
     log.warning("Local service %s is unavailable: %s", slug, exc)
@@ -295,7 +296,7 @@ async def _proxy(service: LocalService, request: Request) -> Response:
     if lower in _HOP_BY_HOP:
       continue
     if public_surface and lower == b"x-frame-options":
-      # The dedicated service origin is framed only by the shell origin below.
+      # The shared service gateway is framed only by the shell origin below.
       # Normal /services traffic on the shell origin keeps upstream XFO.
       continue
     if public_surface and lower == b"content-security-policy":
@@ -329,7 +330,11 @@ def _request_matches_surface_origin(request: Request, service: LocalService) -> 
   if not service.surface_origin:
     return False
   public = urlsplit(service.surface_origin)
-  return request.headers.get("host", "").lower() == public.netloc.lower()
+  expected = _canonical_authority(public.netloc, public.scheme)
+  requested = _canonical_authority(
+    request.headers.get("host", ""), public.scheme,
+  )
+  return bool(expected) and requested == expected
 
 
 def is_public_service_surface_request(scope) -> bool:
@@ -346,15 +351,42 @@ def is_public_service_surface_request(scope) -> bool:
     if name.lower() == b"host":
       host = value.decode("latin-1").lower()
       break
-  return host == urlsplit(service.surface_origin).netloc.lower()
+  surface = urlsplit(service.surface_origin)
+  expected = _canonical_authority(surface.netloc, surface.scheme)
+  return bool(expected) and _canonical_authority(host, surface.scheme) == expected
+
+
+def _canonical_authority(authority: str, scheme: str) -> str:
+  """Canonicalize a Host-header authority for comparison against an origin.
+
+  ``services.example.com``, ``SERVICES.example.com:443``, and
+  ``services.example.com.`` are the same HTTPS authority; a raw string
+  compare treats them as different hosts and fails the guard open. Lowercase
+  the hostname, drop a trailing dot, and elide the scheme's default port so
+  every legal spelling collapses to one form. Returns "" for an authority
+  that cannot be parsed (which then matches nothing).
+  """
+  try:
+    parsed = urlsplit(f"//{authority.strip()}")
+    hostname = (parsed.hostname or "").rstrip(".")
+    port = parsed.port
+  except ValueError:
+    return ""
+  if not hostname:
+    return ""
+  default = {"https": 443, "http": 80}.get(scheme)
+  if port is not None and port != default:
+    return f"{hostname}:{port}"
+  return hostname
 
 
 def service_surface_host_allows_path(scope) -> bool:
-  """Reserve each configured service host for that service prefix only.
+  """Reserve the shared gateway host for enabled service prefixes only.
 
-  This guard intentionally reads the operator environment rather than the
-  optional service registry. Even a disabled, missing, or malformed registry
-  entry must not turn the dedicated hostname into a second shell/API origin.
+  This guard starts from the operator environment rather than the optional
+  service registry. Even a missing or malformed registry must not turn the
+  gateway hostname into a second shell/API origin. Once the host matches, the
+  requested slug must also be live and explicitly opted into ``public_surface``.
   """
   host = ""
   for name, value in scope.get("headers") or []:
@@ -363,21 +395,28 @@ def service_surface_host_allows_path(scope) -> bool:
       break
   if not host:
     return True
-  for key, raw_origin in os.environ.items():
-    match = _SURFACE_ENV.fullmatch(key)
-    if not match or not raw_origin.strip():
-      continue
-    try:
-      netloc = urlsplit(raw_origin.strip()).netloc.lower()
-    except ValueError:
-      continue
-    if not netloc or host != netloc:
-      continue
-    slug = match.group(1).lower().replace("_", "-")
-    path = scope.get("path") or ""
-    prefix = f"/services/{slug}"
-    return path == prefix or path.startswith(f"{prefix}/")
-  return True
+  raw_origin = os.environ.get(_GATEWAY_ENV, "").strip()
+  if not raw_origin:
+    return True
+  try:
+    parsed_origin = urlsplit(raw_origin)
+  except ValueError:
+    return True
+  gateway = _canonical_authority(parsed_origin.netloc, parsed_origin.scheme)
+  if not gateway or _canonical_authority(host, parsed_origin.scheme) != gateway:
+    return True
+  path = scope.get("path") or ""
+  match = re.match(r"^/services/([a-z0-9][a-z0-9-]{0,62})(?:/|$)", path)
+  if not match:
+    return False
+  try:
+    service = _service_for(match.group(1))
+  except HTTPException:
+    return False
+  if service is None or not service.surface_origin:
+    return False
+  surface = urlsplit(service.surface_origin)
+  return _canonical_authority(surface.netloc, surface.scheme) == gateway
 
 
 @router.get("/api/local-services/{slug}/surface")
@@ -392,7 +431,7 @@ async def local_service_surface(
   if not service.surface_origin:
     raise HTTPException(
       status_code=409,
-      detail="This service needs a dedicated public origin before it can open.",
+      detail="This service needs a public service gateway before it can open.",
     )
   return {
     "slug": slug,
@@ -442,7 +481,7 @@ html,body,#service{{height:100%;margin:0;background:#0f1117;color:#f4f5f8;font:1
 
 @router.get("/services/{slug}/_mobius/surface", include_in_schema=False)
 async def local_service_surface_document(slug: str, request: Request):
-  """Dedicated-origin adapter kept inert until its same-origin child is real."""
+  """Gateway-origin adapter kept inert until its same-origin child is real."""
   service = _service_for(slug)
   if service is None or not _request_matches_surface_origin(request, service):
     raise HTTPException(status_code=404, detail="Local service surface not found.")

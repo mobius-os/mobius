@@ -7,9 +7,11 @@ documents supply their own policies while the bundled proxy owns shell CSP.
 
 from pathlib import Path
 
+from fastapi import Response
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app import main
+from app.main import _STATIC_EMBED_CSP, app
 
 
 def _headers(path="/api/health"):
@@ -46,6 +48,42 @@ def test_frame_exception_is_exactly_scoped_to_embed_document():
   assert _headers("/shell/embed/chat/other").get("x-frame-options") == "SAMEORIGIN"
 
 
+def test_static_embed_policy_authoritatively_replaces_route_headers(monkeypatch):
+  monkeypatch.setattr(
+    main,
+    "_serve_app_static_asset",
+    lambda *_args, **_kwargs: Response(
+      status_code=418,
+      headers={
+        "Content-Security-Policy": "default-src 'none'",
+        "X-Frame-Options": "DENY",
+      },
+    ),
+  )
+
+  response = TestClient(app).get("/app-embeds/by-id/999/index.html")
+
+  assert response.status_code == 418
+  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  assert "x-frame-options" not in response.headers
+
+
+def test_static_embed_policy_survives_unhandled_route_exception(monkeypatch):
+  def _raise(*_args, **_kwargs):
+    raise RuntimeError("static asset failure")
+
+  monkeypatch.setattr(main, "_serve_app_static_asset", _raise)
+
+  response = TestClient(
+    app,
+    raise_server_exceptions=False,
+  ).get("/app-embeds/by-id/999/index.html")
+
+  assert response.status_code == 500
+  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  assert "x-frame-options" not in response.headers
+
+
 def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   """The compose proxy must not silently re-add either frame blocker."""
   caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
@@ -66,11 +104,11 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     if line.startswith("header @chatEmbed >Content-Security-Policy ")
   )
   assert "frame-ancestors 'self'" in ordinary_csp
-  assert "frame-src 'self' {$MOBIUS_SERVICE_TANDOOR_ORIGIN}" in ordinary_csp
+  assert "frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}" in ordinary_csp
   assert "frame-src *" not in ordinary_csp
   assert "frame-ancestors" not in embed_csp
   assert "frame-src 'self'" in embed_csp
-  assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in embed_csp
+  assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in embed_csp
   assert "https://cdn.openai.com" in ordinary_csp
   assert "https://cdn.openai.com" in embed_csp
   static_csp = next(
@@ -80,14 +118,14 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "sandbox allow-scripts" in static_csp
   assert "allow-same-origin" not in static_csp
   assert "frame-ancestors" not in static_csp
-  assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in static_csp
+  assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in static_csp
   service_csp = next(
     line for line in lines
     if line.startswith("?Content-Security-Policy ")
   )
   assert "frame-ancestors 'self' {$FRONTEND_ORIGIN}" in service_csp
-  assert "{$MOBIUS_SERVICE_TANDOOR_ORIGIN} {" in lines
-  assert "@tandoorSurface path /services/tandoor /services/tandoor/*" in lines
+  assert "{$MOBIUS_SERVICE_GATEWAY_ORIGIN} {" in lines
+  assert "@serviceSurface path /services/*" in lines
   assert "respond \"Not found\" 404" in lines
   assert "-X-Frame-Options" in lines
   for name in (
@@ -99,16 +137,16 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     )
 
 
-def test_compose_keeps_optional_service_origin_inert_by_default():
+def test_compose_keeps_optional_service_gateway_inert_by_default():
   compose = (
     Path(__file__).resolve().parents[2] / "docker-compose.yml"
   ).read_text(encoding="utf-8")
   assert (
-    "MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-}"
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}"
     in compose
   )
   assert (
-    "MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-http://tandoor.invalid}"
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-http://services.invalid}"
     in compose
   )
   assert "https://tandoor.${DOMAIN}" not in compose

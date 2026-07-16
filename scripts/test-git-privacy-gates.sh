@@ -65,7 +65,8 @@ fi
 git -C "$repo" reset -q --hard HEAD
 
 printf 'public\n' >"$repo/public.txt"
-git -C "$repo" add public.txt
+printf 'markdown without a code fence\n' >"$repo/public.md"
+git -C "$repo" add public.txt public.md
 (cd "$repo" && scripts/pre-commit.sh >/dev/null) || fail "pre-commit rejected a public path"
 git -C "$repo" commit -qm public
 

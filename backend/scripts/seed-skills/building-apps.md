@@ -4,7 +4,7 @@ The full mini-app contract: component shape, `window.mobius.storage` and its tra
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-scoped `token`, and persists through `window.mobius.storage`. Shell-mounted app frames intentionally omit `allow-same-origin`: their effective origin is opaque (`null`), they cannot read the shell's localStorage/owner JWT, and origin-bound browser stores such as IndexedDB/OPFS are unavailable. Root-relative API fetches still work when they present the scoped bearer; `window.mobius.storage` owns that transport and its offline fallbacks.
 
-**Current standalone limitation:** `/apps/<slug>/` still uses a separate top-level loader which executes the component on the Möbius origin. Do not claim that standalone launch has the opaque shell-frame boundary, and do not use it as the security boundary for untrusted/high-capability code. The platform follow-up is a trusted installable outer PWA shell hosting the existing opaque `app-frame` protocol. A genuinely independent PWA or cookie-backed service belongs on its own dedicated origin, not in an ordinary mini-app.
+**Current standalone limitation:** `/apps/<slug>/` still uses a separate top-level loader which executes the component on the Möbius origin. Do not claim that standalone launch has the opaque shell-frame boundary, and do not use it as the security boundary for untrusted/high-capability code. The platform follow-up is a trusted installable outer PWA shell hosting the existing opaque `app-frame` protocol. A cookie-backed owner-trusted service belongs on the shared service gateway; a mutually untrusted service or genuinely independent PWA needs its own dedicated origin. Neither belongs inside an ordinary mini-app.
 
 ## Choose the execution tier before wrapping
 
@@ -12,14 +12,16 @@ Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-
 |---|---|---|
 | Normal JSX app using scoped storage/chat/fetch | Ordinary shell-mounted mini-app (opaque frame) | Add `allow-same-origin` or read owner storage |
 | Existing packaged static game/tool nested by a wrapper | `/app-embeds/by-id/<appId>/…` entry document, response-sandboxed and heartbeat-gated | Frame `/app-assets/`, reveal on iframe `load`, or grant null-origin credentials |
-| Cookie-backed backend, durable origin storage, its own SW/manifest, independent PWA | Dedicated distinct origin plus a shell-owned direct adapter; ask for a platform integration | Nest `/services/<slug>` below the ordinary opaque app or fall back to the shell origin |
+| Owner-trusted cookie-backed backend which may trust sibling services | Shared service gateway plus a shell-owned direct adapter; ask for a platform integration | Nest `/services/<slug>` below the ordinary opaque app or fall back to the shell origin |
+| Mutually untrusted service or genuinely independent PWA | Dedicated distinct origin plus a shell-owned direct adapter | Put it on the shared gateway or claim that paths create isolation |
 
-A same-site subdomain is preferred for a full service because cookies/XHR can
-work coherently while the origin stays distinct. Its cookies must remain
-host-only, the hostname must expose only its exact service prefix, and DNS/TLS
-plus the upstream application's host/CSRF settings are deployment prerequisites.
-Opacity is a permission boundary, not a substitute for independent PWA
-installability or origin-bound browser features.
+The shared gateway is one origin, configured once, with one path per explicitly
+enabled service. It isolates that owner-trusted group from the Möbius shell but
+does not isolate services from one another: paths do not partition localStorage
+or same-origin fetch. Cookies must remain host-only and path-scoped; the gateway
+host must expose only enabled service prefixes. Use a dedicated origin when a
+service cannot trust its siblings or owns an independent PWA identity. Opacity
+is a permission boundary, not a substitute for origin-bound browser features.
 
 ---
 

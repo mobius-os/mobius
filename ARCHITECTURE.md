@@ -169,7 +169,7 @@ Agent-editable general-purpose modules — several sit on live chat paths, so de
 
 | File | Role |
 |------|------|
-| `bootstrap.py` | First-boot bootstrap (`ensure_store_installed`) that auto-installs the curated app-store mini-app; called idempotently from the FastAPI lifespan |
+| `bootstrap.py` | First-boot bootstrap (`ensure_bootstrap_apps_installed`) that auto-installs the App Store, Memory, and Reflection; called idempotently from the FastAPI lifespan |
 | `chat_log_redaction.py` | Server-side structural redaction for the gated chat-log read API |
 | `chat_media.py` | One-way startup migration that moves old chat images and stored URLs onto the canonical `/media/` path |
 | `http_caching.py` | Range/206 hardening for revalidating `FileResponse`s |
@@ -195,7 +195,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `uploads.py` | Per-chat file upload management |
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
-| `local_services.py` | Guarded loopback proxy plus the dedicated-origin adapter for full backend web apps. A configured service hostname is reserved to its exact `/services/<slug>` prefix, strips upstream frame blockers only on that surface, keeps cookies host-only, and fails closed without an explicit origin |
+| `local_services.py` | Guarded loopback proxy plus the shared gateway-origin adapter for owner-trusted backend web apps. One gateway hostname is reserved to explicitly enabled `/services/<slug>` prefixes, strips upstream frame blockers only there, keeps cookies host-only, and fails closed without an origin or registry opt-in |
 | `standalone.py` | Top-level install/manifest shell for mini-app PWAs. **Known boundary gap:** its current loader executes the app component in the top-level shell origin; it is not yet equivalent to the opaque in-shell app frame |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
@@ -220,11 +220,19 @@ Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI pro
 |---|---|---|
 | Ordinary mini-app | Shell-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default inside the shell. The shell owns install/offline identity; a home-screen shortcut may deep-link through the shell, but opacity alone does not create an independent PWA |
 | Packaged nested document | `/app-embeds/by-id/<id>/…`; every response carries CSP `sandbox` without `allow-same-origin`, scoped `Access-Control-Allow-Origin: null`, and no frame denial | For a game/tool build nested below an ordinary wrapper. Relative subresources work online but an opaque child is not controlled by the shell SW, so only the entry document may be SW-cached; readiness must be a source-bound post-commit heartbeat, never iframe `load` or a null-origin prefetch probe |
-| Full web service / independent PWA | Dedicated distinct origin (prefer a same-site subdomain), shell-owned direct adapter, host-only cookies, exact shell+service ancestor policy; never nested below the opaque wrapper | Required for same-origin cookies/XHR, durable origin storage, service workers, OPFS/IndexedDB and genuine independent installability. The app origin owns its manifest, SW and storage |
+| Owner-trusted full web service | Shared service-gateway origin distinct from the shell, shell-owned direct adapter, path-scoped host-only cookies and exact shell+gateway ancestor policy; never nested below the opaque wrapper | Lowest-friction path for existing full web apps. The gateway isolates the trust group from Möbius, but services on it share an origin and can reach one another |
+| Independent or mutually untrusted service/PWA | Dedicated distinct origin (prefer a same-site subdomain), host-only cookies and exact shell+service ancestor policy | Strong service-to-service isolation plus independent manifest/SW/storage identity; costs one managed origin per isolated service |
 
 Opacity simplifies permissions: no ambient owner JWT, shell storage bleed, DOM
 reach or cross-app authority. It does **not** by itself improve installability,
 offline outboxes, cookies, media APIs or other origin-bound capabilities.
+
+The shared service gateway is intentionally a trust-group boundary, not a
+virtual per-path origin. Paths do not partition localStorage, DOM authority or
+same-origin fetch. Deployment configures one gateway hostname once (a generated
+Railway domain or one self-hosted DNS record), while each service must still opt
+in through `local-services.json`. The gateway host serves no shell, API,
+recovery or non-enabled service paths.
 
 **Standalone gap (not resolved by the table above).** `/apps/<slug>/` currently
 boots the mini-app component directly in a trusted top-level Möbius document and

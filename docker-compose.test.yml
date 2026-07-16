@@ -9,7 +9,7 @@ services:
     environment:
       - DOMAIN=http://localhost:${TEST_PORT:-8001}
       - FRONTEND_ORIGIN=http://localhost:${TEST_PORT:-8001}
-      - MOBIUS_SERVICE_TANDOOR_ORIGIN=http://tandoor.localhost:${TEST_PORT:-8001}
+      - MOBIUS_SERVICE_GATEWAY_ORIGIN=http://services.localhost:${TEST_PORT:-8001}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     ports: !override ["${TEST_PORT:-8001}:${TEST_PORT:-8001}"]
@@ -65,7 +65,7 @@ services:
       - MOBIUS_TEST_RUNTIME=1
       - MOBIUS_TEST_PLATFORM_SOURCE=/workspace
       - BUILD_SHA=${GITHUB_SHA:-unknown}
-      - MOBIUS_SERVICE_TANDOOR_ORIGIN=http://tandoor.localhost:${TEST_PORT:-8001}
+      - MOBIUS_SERVICE_GATEWAY_ORIGIN=http://services.localhost:${TEST_PORT:-8001}
     volumes:
       - test_data:/data
       - ./:/workspace:ro
@@ -190,9 +190,9 @@ services:
       # unrelated `git ls-remote` from failing while discovering the broken
       # outer worktree pointer first.
       - GIT_CEILING_DIRECTORIES=/workspace
-      # Bootstrap fetches the curated store manifest from GitHub on
-      # first boot. Tests must not depend on outbound network — set
-      # this so ensure_store_installed() returns immediately.
+      # Bootstrap fetches curated app manifests from GitHub on first boot.
+      # Tests must not depend on outbound network — set
+      # this so ensure_bootstrap_apps_installed() returns immediately.
       - MOEBIUS_SKIP_BOOTSTRAP=1
     working_dir: /workspace/backend
     entrypoint: ["python", "-m", "pytest", "tests/", "-v"]

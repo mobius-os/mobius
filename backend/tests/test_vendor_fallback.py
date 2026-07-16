@@ -70,6 +70,20 @@ def _spa_active(client):
   )
 
 
+def test_live_vite_asset_route_is_intrinsically_cors_readable(
+  client, monkeypatch, tmp_path,
+):
+  """The dedicated /assets handler must not bypass the opaque-frame policy."""
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  asset = tmp_path / "index-opaque-frame.js"
+  asset.write_text("export default 1", encoding="utf-8")
+  monkeypatch.setattr("app.main._resolve_asset_file", lambda _path: asset)
+  response = client.get("/assets/index-opaque-frame.js")
+  assert response.status_code == 200
+  assert response.headers.get("access-control-allow-origin") == "*"
+
+
 def test_vendor_miss_returns_404_not_html(client):
   if not _spa_active(client):
     pytest.skip("SPA fallback not registered (no static dir in this env)")
