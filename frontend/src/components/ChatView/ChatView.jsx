@@ -2411,11 +2411,11 @@ export default function ChatView({
     // deliberately allowed while sendingRef is true (the runner is
     // parked waiting for the answer), but we still need to prevent the
     // same answer from being submitted twice concurrently.
-    if (sendSilentInFlightRef.current) return
+    if (sendSilentInFlightRef.current) return false
     sendSilentInFlightRef.current = true
     if (!text.trim()) {
       sendSilentInFlightRef.current = false
-      return
+      return false
     }
     // Answer submissions (resolvedAnswers truthy) are allowed mid-turn:
     // the runner is paused on the AskUserQuestion future and is waiting
@@ -2427,36 +2427,11 @@ export default function ChatView({
     // own `submitted` state guards against double-clicks on the same card.
     if ((sendingRef.current || isStreamingRef.current) && !resolvedAnswers) {
       sendSilentInFlightRef.current = false
-      return
+      return false
     }
     sendingRef.current = true
     onMessageStartRef.current?.()
     promotedRef.current = false
-
-    // Local optimistic update of the question block so the UI shows
-    // the answered state immediately (before backend round-trip).
-    if (resolvedAnswers) {
-      commitMessages(prev => {
-        const updated = [...prev]
-        const lastIdx = updated.length - 1
-        if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          const msg = { ...updated[lastIdx] }
-          msg.blocks = (msg.blocks || []).map(b => {
-            if (b.type !== 'question') return b
-            if (questionId && b.question_id !== questionId) return b
-            return { ...b, answers: resolvedAnswers }
-          })
-          updated[lastIdx] = msg
-        }
-        return updated
-      })
-      // When the question is still live in streamItems (not yet promoted
-      // to messages — the turn is mid-flight and messages[-1] is the user
-      // message, not the assistant), the commitMessages patch above has no
-      // target. Also update streamItems so the card visually transitions to
-      // answered regardless of which source is currently rendering it.
-      patchQuestionAnswers(questionId, resolvedAnswers)
-    }
 
     setSending(true)
     setServerRunningState(true)
@@ -2478,6 +2453,28 @@ export default function ChatView({
         answers: resolvedAnswers,
         question_id: questionId,
       })
+      // The 202 means the answer write committed. Settle the durable and live
+      // card sources only now; an optimistic pre-request answer made transient
+      // failures look final and erased the retryable per-tab question draft.
+      if (resolvedAnswers) {
+        commitMessages(prev => {
+          const updated = [...prev]
+          const lastIdx = updated.length - 1
+          if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
+            const msg = { ...updated[lastIdx] }
+            msg.blocks = (msg.blocks || []).map(b => {
+              if (b.type !== 'question') return b
+              if (questionId && b.question_id !== questionId) return b
+              return { ...b, answers: resolvedAnswers }
+            })
+            updated[lastIdx] = msg
+          }
+          return updated
+        })
+        // A mid-turn question may still live in streamItems rather than the
+        // durable message list. Keep both render sources in agreement.
+        patchQuestionAnswers(questionId, resolvedAnswers)
+      }
       // `answer_delivered` resumes the SAME assistant turn. Keep its bridge
       // alive so terminal promotion replaces/extends the active row rather
       // than dropping the question and pre-answer output during the
@@ -2497,6 +2494,7 @@ export default function ChatView({
       // finish and emit its terminal refresh.
       onQuestionAnsweredRef.current?.()
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
+      return true
     } catch (err) {
       setSending(false)
       setServerRunningState(false)
@@ -2507,13 +2505,13 @@ export default function ChatView({
         // than keeping the optimistic answer locally.
         setLiveQuestionId(null)
         fetchMessages({ force: true })
-        sendSilentInFlightRef.current = false
-        return
+        throw err
       }
       commitMessages(prev => [
         ...prev,
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
+      throw err
     } finally {
       sendSilentInFlightRef.current = false
     }

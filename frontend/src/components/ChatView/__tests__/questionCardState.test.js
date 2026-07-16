@@ -14,8 +14,8 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not tell the user the question expired')
   assert.match(component, /\{\(answered \|\| !disabled\) && \(\s*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
-  assert.match(component, /\{answered \? 'Submitted' : 'Submit'\}/,
-    'the retained submit button should explain its answered state')
+  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : 'Submit'\)/,
+    'the retained submit button should explain pending and answered states')
   assert.match(component, /\{\(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
   assert.doesNotMatch(component, /\{!answered && \(\s*<button[\s\S]*?qcard__opt--other/,
@@ -26,6 +26,10 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unsubmitted selections and custom text should be cached')
   assert.match(component, /if \(answered \|\| disabled\) \{\s*clearQuestionDraft\(draftKey\)/,
     'submitted or superseded questions should clear their cached draft')
+  assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted !== false\) setSubmitted\(true\)/,
+    'a card should settle only after the answer request is accepted')
+  assert.match(component, /catch \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
+    'a failed answer should retain its retryable draft')
 })
 
 test('question card css has no stale styling hook', () => {
