@@ -26,6 +26,7 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
     read('../markdown/ImageLightbox.jsx'),
     read('../../Walkthrough/WalkthroughOverlay.jsx'),
     read('../AgentContextInspector.jsx'),
+    read('../ChatSummaryViewer.jsx'),
   ]
 
   for (const source of dialogs) {

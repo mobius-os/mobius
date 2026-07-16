@@ -7,6 +7,8 @@
  *   2. Model / effort / summary / automation — renders
  *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
  *      empty chat where chatInfo hasn't loaded yet.
+ *   3. Chat summary / agent context — opens the two owner-facing continuity
+ *      viewers after the picker.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover

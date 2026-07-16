@@ -13,6 +13,7 @@ envelope and observability event.
 
 from __future__ import annotations
 
+import html
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,11 +178,13 @@ def build_memory_block(
     if not name and not digest:
       continue
     rel = f"chats/{note.parent.name}/index.md"
+    safe_name = html.escape(name or note.parent.name, quote=False)
+    safe_digest = html.escape(digest, quote=False)
     chunk = (
       "<recent_chat>\n"
-      f"Name: {name or note.parent.name}\n"
+      f"Name: {safe_name}\n"
       f"Location: {rel}\n"
-      f"Digest: {digest}\n"
+      f"Digest: {safe_digest}\n"
       "</recent_chat>"
     )
     if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:

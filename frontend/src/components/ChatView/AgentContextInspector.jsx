@@ -291,6 +291,10 @@ function RecentChats({ entries }) {
   )
 }
 
+function hasText(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
 export default function AgentContextInspector({ chatId, onClose }) {
   const [state, setState] = useState({ status: 'loading', data: null, error: '' })
   const dialogRef = useRef(null)
@@ -338,7 +342,7 @@ export default function AgentContextInspector({ chatId, onClose }) {
 
   const sections = useMemo(() => {
     const data = state.data || {}
-    return [
+    const primary = [
       {
         key: 'system_prompt',
         title: 'System prompt',
@@ -356,6 +360,30 @@ export default function AgentContextInspector({ chatId, onClose }) {
         type: 'recent',
       },
     ]
+    const activeContext = [
+      {
+        key: 'app_context',
+        title: 'Current app context',
+        description: 'The app and project details attached to this chat.',
+        value: data.app_context,
+        type: 'markdown',
+      },
+      {
+        key: 'app_report',
+        title: 'App report',
+        description: 'Diagnostics or findings an app attached to the next turn.',
+        value: data.app_report,
+        type: 'markdown',
+      },
+      {
+        key: 'compaction_brief',
+        title: 'Compaction handoff',
+        description: 'The latest handoff used after this chat was compacted.',
+        value: data.compaction_brief,
+        type: 'markdown',
+      },
+    ].filter(section => hasText(section.value))
+    return [...primary, ...activeContext]
   }, [state.data])
 
   return (
