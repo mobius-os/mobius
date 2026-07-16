@@ -241,7 +241,7 @@
 }
 
 .settings__standard-highlight {
-  color: var(--accent);
+  color: var(--green);
   font-weight: inherit;
 }
 
@@ -362,26 +362,6 @@
 
 .settings-bg-row--drop-target {
   background: transparent;
-}
-
-.settings-bg-row--drop-before::before,
-.settings-bg-row--drop-after::after {
-  content: '';
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-.settings-bg-row--drop-before::before {
-  top: -5px;
-}
-
-.settings-bg-row--drop-after::after {
-  bottom: -5px;
 }
 
 .settings-bg-row--off {
