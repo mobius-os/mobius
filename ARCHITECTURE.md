@@ -572,6 +572,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   text block in event order, without hiding, duplicating, or reordering them. Only a
   recovered answer whose POST returns `started` creates a new hidden continuation.
   Switching sources preserves the active row's anchor identity and writes no scroll.
+- **R4a — Attention nudges reveal the usable tail.** Tapping an offscreen question or
+  paused-turn nudge lands at the physical tail, including composer-clearance padding,
+  so the real Submit or Resume action is visible above the overlaid composer. This is
+  a settled `ANCHOR_AT` hold, not `FOLLOW_BOTTOM`; one-shot navigation must not create
+  live-follow intent for later content. It routes through the scroll owner rather than
+  `scrollIntoView`, whose viewport intersection cannot detect composer coverage.
 
 The transition table is intentionally exhaustive; adding a new send or lifecycle
 path means routing it through the same entries rather than inventing another rule:

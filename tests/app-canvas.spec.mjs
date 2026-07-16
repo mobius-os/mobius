@@ -488,14 +488,19 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await drawerToggle.click()
     await expect(drawerToggle).toHaveAttribute('aria-expanded', 'true')
 
-    await Promise.all([
-      frame.evaluate(() => {
-        window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
-      }),
-      page.evaluate(() => {
-        document.querySelector('[aria-label="Toggle navigation"]')?.click()
-      }),
-    ])
+    // Dispatch both requests in one parent-page task. Racing two independent
+    // CDP evaluations lets the drawer render detach the iframe before the
+    // frame-side evaluate is delivered, which tests Playwright scheduling
+    // rather than the shell's traversal arbitration.
+    await page.evaluate(id => {
+      const appFrame = document.querySelector(`iframe[data-app-id="${id}"]`)
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'moebius:nav-pop' },
+        origin: window.location.origin,
+        source: appFrame?.contentWindow,
+      }))
+      document.querySelector('[aria-label="Toggle navigation"]')?.click()
+    }, appId)
     await expect(drawerToggle).toHaveAttribute('aria-expanded', 'false')
     await page.waitForTimeout(300)
     await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible()
