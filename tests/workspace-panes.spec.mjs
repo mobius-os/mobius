@@ -11,7 +11,6 @@
  *   (c) an app iframe survives a cross-pane move with no second frame-init;
  *   (d) split is absent from the context menu at caps;
  *   (e) a projection flip to phone preserves the persisted tree and pane focus;
- *   (f) keyboard-open divider commit + reservation floor — SKIPPED, see below.
  *
  * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
  * and a 2-pane workspace blob is seeded in sessionStorage before the shell
@@ -99,6 +98,13 @@ async function mockApps(page, apps) {
         + '</body></html>',
     }))
   }
+  // AppCanvas waits for an app-scoped token before mounting an online frame.
+  // Without this half of the protocol the frame assertions silently skip.
+  await page.route(/\/api\/auth\/app-token$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ token: 'mock-app-token' }),
+  }))
   return state
 }
 
@@ -157,11 +163,15 @@ async function rememberChatRoot(page, chatId) {
   }, chatId)
 }
 
-async function rememberedChatRootIsCurrent(page, chatId) {
-  return page.evaluate((cid) => (
-    window.__workspacePaneChatRoot
-      === document.querySelector(`[data-tab-key="chat:${cid}"] .chat`)
-  ), chatId)
+async function rememberedChatRootIsCurrent(page) {
+  return page.evaluate(() => {
+    const root = window.__workspacePaneChatRoot
+    const wrapper = root?.closest('.shell__view')
+    // A collapsed single-pane wrapper deliberately drops data-tab-key, so
+    // querying by chat id after the move would report a false remount. The
+    // remembered DOM object's connectivity + active wrapper is the invariant.
+    return !!root?.isConnected && !!wrapper?.classList.contains('shell__view--active')
+  })
 }
 
 /** Read scroll geometry through the remembered root. This keeps working after
@@ -271,7 +281,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.keyboard.press('ArrowRight')
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120)))))
-    expect(await rememberedChatRootIsCurrent(page, a.id), 'no remount across resize').toBe(true)
+    expect(await rememberedChatRootIsCurrent(page), 'no remount across resize').toBe(true)
     const afterResize = await rememberedChatScroll(page)
     expect(afterResize, 'chat A scroller present after resize').not.toBeNull()
     expect(afterResize.nearBottom, 'still following after resize').toBe(true)
@@ -281,7 +291,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await moveOnlyTabToOtherPane(page, 'p0')
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 150)))))
-    await expect.poll(() => rememberedChatRootIsCurrent(page, a.id), {
+    await expect.poll(() => rememberedChatRootIsCurrent(page), {
       timeout: 4000,
       message: 'the same ChatView root survives the cross-pane move',
     }).toBe(true)
@@ -421,16 +431,4 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await expect(otherStrip).toHaveClass(/workspace__strip--focused/)
   })
 
-  // (f) The keyboard-open divider commit must not stick the reservation floor:
-  // opening the soft keyboard shrinks the visual viewport; committing a divider
-  // drag in that window must reserve against the layout-derived floor, not the
-  // keyboard-poisoned height. This needs a faithful visualViewport resize +
-  // keyboard geometry that the mocked route harness cannot produce — there is no
-  // visualViewport-mock pattern in the existing specs and interactive-widget
-  // resize is a real-device behavior. Covered by the live-device smoke instead.
-  test.skip('(f) keyboard-open divider commit does not stick the reservation floor', async () => {
-    // Intentionally skipped: not reachable in the mocked Playwright harness
-    // (no visualViewport/keyboard geometry). See design §2 rotation/keyboard
-    // floor + scripts/live-test.sh for the on-device path.
-  })
 })

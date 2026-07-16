@@ -926,6 +926,13 @@ async function bootTwoAppPanes(page) {
       body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
     }))
   }
+  // AppCanvas requires a scoped token before it mounts an online app frame.
+  // Keep the protocol complete so these navigation checks cannot silently skip.
+  await page.route(/\/api\/auth\/app-token$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ token: 'mock-app-token' }),
+  }))
   // Land on the origin, then seed the flag + workspace blob and re-navigate so
   // the shell boots the two-pane tree with the splits flag on.
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
