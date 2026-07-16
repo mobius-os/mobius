@@ -25,6 +25,7 @@ import {
 } from '../../lib/appPrecache.js'
 import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
 import * as tabModel from './tabModel.js'
+import * as paneModel from './paneModel.js'
 import {
   applyWorkspaceRequestsToFlatTabs,
   workspaceRequestFromSystemEvent,
@@ -407,21 +408,46 @@ export default function Shell() {
   )
 
   // ── Tabs: hold several chats/apps open and swap between them ───────
-  // The tab data model (shape, dedup+cap, persistence, nav mapping,
-  // active-ness) lives in tabModel.js; this is just the shell's single open
-  // set + the wiring to navigation. Switching a tab is ordinary navTo, so the
-  // back button rides the existing navStack — no new history sentinels. The
-  // planned multi-pane workspace gives each pane its own open set from these
-  // same primitives — see ARCHITECTURE.md's "Multi-pane workspace" section.
-  const [openTabs, setOpenTabs] = useState(tabModel.readOpenTabs)
-  useEffect(() => { tabModel.writeOpenTabs(openTabs) }, [openTabs])
+  // The workspace reducer (paneModel.js) is the successor of the flat open set:
+  // it holds a tree of panes, each with its own tabs. PR1 renders the single
+  // degenerate pane, so the shell derives today's flat `openTabs` from it and
+  // every consumer below (strip visibility, the strip render, isTabActive) reads
+  // that derived array unchanged. Switching a tab is still ordinary navTo, so
+  // the back button rides the existing navStack — no new history sentinels. See
+  // ARCHITECTURE.md's "Multi-pane workspace" section and
+  // docs/design/split-pane-workspace.md §1/§8.
+  const [workspaceState, dispatchWorkspace] = useReducer(
+    paneModel.workspaceReducer,
+    undefined,
+    // readWorkspaceRaw guards the sessionStorage read (getItem can throw in a
+    // sandboxed/disabled-storage context) BEFORE parseWorkspace's own try/catch
+    // would run — the old flat path was fully guarded, so this must be too.
+    () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
+      paneModel.readWorkspaceRaw(sessionStorage),
+      { fallbackTabs: tabModel.readOpenTabs() },
+    )),
+  )
+  const workspace = workspaceState.ws
+  const openTabs = useMemo(() => paneModel.flatten(workspace), [workspace])
+  // Dual-write on every workspace commit: the versioned blob is authoritative on
+  // boot, and the legacy flat key is mirrored for one release so a rolled-back
+  // client still finds its tabs. readOpenTabs keeps the LAST MAX_TABS, so the
+  // rollback ordering puts the most relevant tabs (focused pane, active last).
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
+    } catch { /* private mode / quota — workspace stays in memory only */ }
+    tabModel.writeOpenTabs(paneModel.flattenRollbackPriority(workspace))
+  }, [workspace])
   const openInTab = useCallback((kind, id) => {
-    setOpenTabs(prev => tabModel.addTab(prev, kind, id))
+    dispatchWorkspace({ type: 'OPEN_TAB', tab: tabModel.makeTab(kind, id), activate: true })
     const { view, opts } = tabModel.tabNavTarget(tabModel.makeTab(kind, id))
     navTo(view, opts)
   }, [navTo])
+  // Close only the tab; active-ness is still rendered from the global nav triple
+  // in PR1, so dropping a tab never changes the visible view (today's semantics).
   const closeTab = useCallback((kind, id) => {
-    setOpenTabs(prev => tabModel.removeTab(prev, kind, id))
+    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tabModel.makeTab(kind, id)) })
   }, [])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
@@ -432,11 +458,19 @@ export default function Shell() {
       : activeViewRef.current === 'chat' && activeChatIdRef.current != null
         ? tabModel.makeTab('chat', activeChatIdRef.current)
         : null
-    setOpenTabs(prev => applyWorkspaceRequestsToFlatTabs(
-      prev,
-      requests,
-      { protectedTab },
-    ))
+    // Dispatch the resolver as a FUNCTION, not a pre-resolved array: the reducer
+    // runs it against the current flat tabs, so two placements landing in one
+    // React batch compose (the second sees the first) instead of the second
+    // clobbering the first from a stale render snapshot. The flat resolver
+    // (workspacePlacement.js) is otherwise unchanged.
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      resolve: (flatTabs) => applyWorkspaceRequestsToFlatTabs(
+        flatTabs,
+        requests,
+        { protectedTab },
+      ),
+    })
   }, [activeAppIdRef, activeChatIdRef, activeViewRef])
   const tabStripVisible = openTabs.length >= 1
   // Ids of apps that appeared in the fetched list AFTER this session's
@@ -1523,7 +1557,13 @@ export default function Shell() {
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
     // Drop the tab pinned to this chat (local delete only — see deleteApp).
-    setOpenTabs(prev => tabModel.removeTab(prev, 'chat', id))
+    // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
+    // tombstoned chat outside the backend recovery path.
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('chat', id)),
+      reason: 'deleted',
+    })
     if (activeChatId === id) {
       // Exclude the just-deleted id: it's still in `chats` until the
       // refreshChats below, and the reuse filter would otherwise pick it
@@ -1587,7 +1627,13 @@ export default function Shell() {
     // out-of-band delete leaves the tab, which degrades gracefully (clicking it
     // 404s the iframe). Auto-pruning against the live list is unsafe — /api/apps
     // is NetworkFirst, so a transient stale refetch could drop a live tab.
-    setOpenTabs(prev => tabModel.removeTab(prev, 'app', id))
+    // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
+    // tombstoned app outside the backend recovery path.
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
+      reason: 'deleted',
+    })
     if (activeView === 'canvas' && activeAppId === id) {
       setActiveAppId(null)
       setActiveView('chat')
