@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { Moon, Sun } from 'lucide-react'
+import { GripVertical, Moon, Sun } from 'lucide-react'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
@@ -183,7 +183,7 @@ function BackgroundProviderRow({
             }
           }}
         >
-          <span aria-hidden="true">⠿</span>
+          <GripVertical size={18} strokeWidth={2} aria-hidden="true" />
         </button>
       )}
       <div className="settings-bg-row__body">
@@ -206,7 +206,6 @@ function BackgroundProviderRow({
           {effortLabel && (
             <span className="settings-bg-row__effort">{effortLabel} effort</span>
           )}
-          <span className="model-trigger__caret" aria-hidden="true">▾</span>
         </button>
       </div>
       <ModelSheet
@@ -365,7 +364,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
-  const [backgroundReordering, setBackgroundReordering] = useState(false)
   const [backgroundCommitting, setBackgroundCommitting] = useState(false)
   const backgroundDragRef = useRef(null)
   const backgroundCommitRafRef = useRef(null)
@@ -675,7 +673,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     setExpandedAuth(null)
   }, [queryClient])
 
-  async function selectTheme(newMode) {
+  async function toggleTheme() {
     if (themeSwitching) return
 
     // Derive the direction from what the user ACTUALLY SEES, not from
@@ -695,19 +693,17 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       ? eff.mode
       : themeMode
 
-    // The explicit Light / Dark choices can be re-clicked. Treat the already
-    // selected option as a no-op rather than rebuilding and saving it again.
-    if (newMode === currentMode) return
-
-    // Keep the explicit choice in sync with the target we derived from the
-    // visible theme, rather than selecting relative to stale query state.
-    setThemeMode(newMode)
+    // Do not flip the icon state ahead of the palette. toggleTheme seeds the
+    // theme-mode query immediately before it applies the new CSS; the mirror
+    // effect above then updates the icon in the same repaint sequence. The old
+    // local optimistic flip made the control's outlines move first, followed
+    // by the rest of Settings after query cancellation completed.
     setThemeSwitching(true)
     setThemeError('')
 
     // Delegate the full apply/persist/invalidate dance to
-    // themeService — SettingsView keeps only the optimistic UI
-    // state (setThemeMode + setThemeError) and the
+    // themeService — SettingsView keeps only error and busy state while the
+    // theme query remains the visual source of truth for the icon.
     // catch-rollback. themeService.toggleTheme invalidates both
     // theme queries; AppCanvas's useEffect picks that up and
     // postMessages `moebius:frame-theme` to live iframes.
@@ -1150,7 +1146,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   subtitle="Which models appear in chat pickers."
                   statusNode={
                     <span className="provider-row__status-text settings__last-model">
-                      {lastModelLabel ? `Last model: ${lastModelLabel}` : 'No default yet'}
+                      {lastModelLabel ? (
+                        <>
+                          Last model: <span className="settings__standard-highlight">{lastModelLabel}</span>
+                        </>
+                      ) : 'No default yet'}
                     </span>
                   }
                   actionLabel="Configure"
@@ -1168,22 +1168,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 <div className="settings-agent-group__head">
                   <div className="settings-agent-group__title-row">
                     <h3 className="settings__agent-title">Background agents</h3>
-                    <button
-                      type="button"
-                      className="settings-agent-group__reorder"
-                      aria-pressed={backgroundReordering}
-                      onClick={() => {
-                        setBackgroundDrag(null)
-                        setBackgroundReordering(value => !value)
-                      }}
-                    >
-                      {backgroundReordering ? 'Done' : 'Reorder'}
-                    </button>
                   </div>
                   <p className="settings__subtext settings__subtext--tight">
-                    {backgroundReordering
-                      ? 'Drag the handles, or use the arrow keys.'
-                      : 'Tried in order when quota or authentication fails.'}
+                    Tried in order when quota or authentication fails.
                   </p>
                 </div>
                 <div
@@ -1202,7 +1189,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       }
                       dropPosition={backgroundDropPosition}
                       dragStyle={backgroundDragStyleForIndex(index)}
-                      reorderMode={backgroundReordering}
+                      reorderMode
                       rowRef={(node) => {
                         backgroundRowRefs.current[index] = node
                       }}
@@ -1267,41 +1254,30 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           )}
         </section>
 
-        <section className="settings__section settings__section--compact">
-          <div
+        <section className="settings__section settings__section--compact settings__section--appearance">
+          <button
+            type="button"
             className={`settings__appearance${themeSwitching ? ' settings__appearance--switching' : ''}`}
-            role="radiogroup"
-            aria-labelledby="settings-appearance-label"
+            role="switch"
+            aria-checked={themeMode === 'dark'}
             aria-busy={themeSwitching}
+            disabled={themeSwitching}
+            onClick={toggleTheme}
           >
-            <span className="settings__label" id="settings-appearance-label">Appearance</span>
-            <div className="settings__appearance-options">
-              <label className="settings__appearance-option">
-                <input
-                  type="radio"
-                  name="theme-mode"
-                  value="light"
-                  checked={themeMode === 'light'}
-                  onChange={() => selectTheme('light')}
-                  disabled={themeSwitching}
-                />
-                <Sun size={16} strokeWidth={2} aria-hidden="true" />
-                <span>Light</span>
-              </label>
-              <label className="settings__appearance-option">
-                <input
-                  type="radio"
-                  name="theme-mode"
-                  value="dark"
-                  checked={themeMode === 'dark'}
-                  onChange={() => selectTheme('dark')}
-                  disabled={themeSwitching}
-                />
-                <Moon size={16} strokeWidth={2} aria-hidden="true" />
-                <span>Dark</span>
-              </label>
-            </div>
-          </div>
+            <span className="settings__label">Appearance</span>
+            <span className="settings__appearance-icons" aria-hidden="true">
+              <Sun
+                size={16}
+                strokeWidth={2}
+                className={themeMode === 'light' ? 'settings__appearance-icon--active' : ''}
+              />
+              <Moon
+                size={16}
+                strokeWidth={2}
+                className={themeMode === 'dark' ? 'settings__appearance-icon--active' : ''}
+              />
+            </span>
+          </button>
           {themeError && (
             <Alert
               color="danger"
@@ -1341,13 +1317,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               {mobiusVersion.primarySha && (
                 <p className="settings__build">
                   {mobiusVersion.synced ? 'Synced to ' : 'Serving '}
-                  {mobiusVersion.primarySha}
+                  <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
                   {!mobiusVersion.synced && buildDate ? ` · ${buildDate}` : ''}
-                </p>
-              )}
-              {mobiusVersion.localSha && (
-                <p className="settings__build settings__build--local">
-                  Serving local {mobiusVersion.localSha}
                 </p>
               )}
             </div>
