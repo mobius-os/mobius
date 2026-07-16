@@ -330,7 +330,11 @@ def _request_matches_surface_origin(request: Request, service: LocalService) -> 
   if not service.surface_origin:
     return False
   public = urlsplit(service.surface_origin)
-  return request.headers.get("host", "").lower() == public.netloc.lower()
+  expected = _canonical_authority(public.netloc, public.scheme)
+  requested = _canonical_authority(
+    request.headers.get("host", ""), public.scheme,
+  )
+  return bool(expected) and requested == expected
 
 
 def is_public_service_surface_request(scope) -> bool:
@@ -347,7 +351,33 @@ def is_public_service_surface_request(scope) -> bool:
     if name.lower() == b"host":
       host = value.decode("latin-1").lower()
       break
-  return host == urlsplit(service.surface_origin).netloc.lower()
+  surface = urlsplit(service.surface_origin)
+  expected = _canonical_authority(surface.netloc, surface.scheme)
+  return bool(expected) and _canonical_authority(host, surface.scheme) == expected
+
+
+def _canonical_authority(authority: str, scheme: str) -> str:
+  """Canonicalize a Host-header authority for comparison against an origin.
+
+  ``services.example.com``, ``SERVICES.example.com:443``, and
+  ``services.example.com.`` are the same HTTPS authority; a raw string
+  compare treats them as different hosts and fails the guard open. Lowercase
+  the hostname, drop a trailing dot, and elide the scheme's default port so
+  every legal spelling collapses to one form. Returns "" for an authority
+  that cannot be parsed (which then matches nothing).
+  """
+  try:
+    parsed = urlsplit(f"//{authority.strip()}")
+    hostname = (parsed.hostname or "").rstrip(".")
+    port = parsed.port
+  except ValueError:
+    return ""
+  if not hostname:
+    return ""
+  default = {"https": 443, "http": 80}.get(scheme)
+  if port is not None and port != default:
+    return f"{hostname}:{port}"
+  return hostname
 
 
 def service_surface_host_allows_path(scope) -> bool:
@@ -369,10 +399,11 @@ def service_surface_host_allows_path(scope) -> bool:
   if not raw_origin:
     return True
   try:
-    netloc = urlsplit(raw_origin).netloc.lower()
+    parsed_origin = urlsplit(raw_origin)
   except ValueError:
     return True
-  if not netloc or host != netloc:
+  gateway = _canonical_authority(parsed_origin.netloc, parsed_origin.scheme)
+  if not gateway or _canonical_authority(host, parsed_origin.scheme) != gateway:
     return True
   path = scope.get("path") or ""
   match = re.match(r"^/services/([a-z0-9][a-z0-9-]{0,62})(?:/|$)", path)
@@ -382,11 +413,10 @@ def service_surface_host_allows_path(scope) -> bool:
     service = _service_for(match.group(1))
   except HTTPException:
     return False
-  return bool(
-    service is not None
-    and service.surface_origin
-    and urlsplit(service.surface_origin).netloc.lower() == netloc
-  )
+  if service is None or not service.surface_origin:
+    return False
+  surface = urlsplit(service.surface_origin)
+  return _canonical_authority(surface.netloc, surface.scheme) == gateway
 
 
 @router.get("/api/local-services/{slug}/surface")

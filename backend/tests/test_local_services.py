@@ -257,6 +257,51 @@ def test_shared_gateway_host_never_serves_other_platform_paths(
   assert "<!doctype html>" not in response.text.lower()
 
 
+@pytest.mark.parametrize("host", [
+  "services.localhost:80", "SERVICES.localhost", "services.localhost.",
+])
+def test_gateway_guard_covers_every_legal_host_spelling(
+  client, clean_local_services_config, monkeypatch, host,
+):
+  """`host:defaultport`, case, and a trailing dot are the same authority.
+
+  A raw string compare fails open on those spellings, letting the gateway
+  hostname serve shell/API paths again (codex review finding, 2026-07-16).
+  """
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  response = client.get("/api/health", headers={"host": host})
+  assert response.status_code == 404
+  adapter = client.get(
+    "/services/tandoor/_mobius/surface", headers={"host": host},
+  )
+  assert adapter.status_code == 200
+
+
+def test_gateway_guard_requires_explicit_nondefault_port(
+  client, clean_local_services_config, monkeypatch,
+):
+  """An origin pinned to a non-default port only matches that exact port."""
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv(
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost:8001",
+  )
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  gated = client.get("/api/health", headers={"host": "services.localhost:8001"})
+  assert gated.status_code == 404
+  other_port = client.get("/api/health", headers={"host": "services.localhost"})
+  assert other_port.status_code == 200
+
+
 def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
   client, clean_local_services_config, monkeypatch,
 ):
