@@ -1,8 +1,9 @@
 # No catalog app is pinned as a platform core app.
 #
-# The App Store is bootstrapped separately by backend/app/bootstrap.py. Memory,
-# Reflection, Beat Machine, and every other app install from their catalog repos
-# into /data/apps/<slug>, where users and agents can edit/update them normally.
+# The App Store, Memory, and Reflection are bootstrapped by
+# backend/app/bootstrap.py. Beat Machine and every other app install from their
+# catalog repos into /data/apps/<slug>, where users and agents can edit/update
+# them normally.
 #
 # Kept as an empty registry so older tooling can run without a missing-file
 # branch. Format, when intentionally reintroduced for a platform-owned app:

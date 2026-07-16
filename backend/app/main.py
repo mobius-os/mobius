@@ -248,21 +248,19 @@ async def lifespan(app):
         _nt_db.close()
   except Exception as exc:
     _log.error("paused-turn resume notify failed: %s", exc, exc_info=True)
-  # First-boot auto-install of the curated app-store mini-app so a
-  # fresh container shows the store in the drawer immediately. The
-  # bootstrap module is idempotent (no-op if slug='store' already
-  # exists) and swallows its own failures — a GitHub blip must not
-  # crash lifespan and brick the recovery surface.
+  # First-boot auto-install of the App Store, Memory, and Reflection. The
+  # bootstrap module is idempotent and isolates failures so a GitHub blip must
+  # not crash lifespan or prevent another bootstrap app from installing.
   try:
-    from app.bootstrap import ensure_store_installed
+    from app.bootstrap import ensure_bootstrap_apps_installed
     from app.database import SessionLocal as _BootstrapSession
     _bs_db = _BootstrapSession()
     try:
-      await ensure_store_installed(_bs_db)
+      await ensure_bootstrap_apps_installed(_bs_db)
     finally:
       _bs_db.close()
   except Exception as exc:
-    _log.error("bootstrap store install wiring failed: %s", exc, exc_info=True)
+    _log.error("bootstrap app install wiring failed: %s", exc, exc_info=True)
   # Reconcile the DB-independent recovery credential seed with the current
   # owner. Backfills instances that completed setup before the seed
   # existed and keeps it current; idempotent (no write when unchanged) and

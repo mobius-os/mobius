@@ -169,7 +169,7 @@ Agent-editable general-purpose modules — several sit on live chat paths, so de
 
 | File | Role |
 |------|------|
-| `bootstrap.py` | First-boot bootstrap (`ensure_store_installed`) that auto-installs the curated app-store mini-app; called idempotently from the FastAPI lifespan |
+| `bootstrap.py` | First-boot bootstrap (`ensure_bootstrap_apps_installed`) that auto-installs the App Store, Memory, and Reflection; called idempotently from the FastAPI lifespan |
 | `chat_log_redaction.py` | Server-side structural redaction for the gated chat-log read API |
 | `chat_media.py` | One-way startup migration that moves old chat images and stored URLs onto the canonical `/media/` path |
 | `http_caching.py` | Range/206 hardening for revalidating `FileResponse`s |

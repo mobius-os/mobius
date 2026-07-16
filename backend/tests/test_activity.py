@@ -706,24 +706,24 @@ def test_install_endpoint_emits_app_install(client, auth, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
-  """ensure_store_installed → install_from_manifest(source='bootstrap')
+  """ensure_bootstrap_apps_installed → install_from_manifest(source='bootstrap')
   → event records the right source."""
-  from unittest.mock import patch, AsyncMock
-  from app.bootstrap import BOOTSTRAP_STORE_MANIFEST_URL, ensure_store_installed
-  from app import models, install as install_mod
+  from unittest.mock import patch
+  from app.bootstrap import ensure_bootstrap_apps_installed
+  from app import models
 
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
 
   # Have the bootstrap call into the REAL install code path but with
   # the network mocked. Simpler: capture the kwargs and emit the event
   # ourselves to mirror what install_from_manifest does.
-  captured = {}
+  captured = []
 
   async def _fake_install(db, manifest_url, manifest, raw_base, source="url"):
-    captured["source"] = source
+    captured.append(source)
     fake = models.App(
       id=42, name="Store", slug="store",
-      manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
+      manifest_url=manifest_url,
     )
     # Mimic install_from_manifest's log call so the assertion below
     # exercises the wiring contract (bootstrap → source='bootstrap').
@@ -733,12 +733,12 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
     return fake, "install", [], {}, [], "none"
 
   with patch("app.bootstrap.install_from_manifest", _fake_install):
-    await ensure_store_installed(db)
+    await ensure_bootstrap_apps_installed(db)
 
-  assert captured["source"] == "bootstrap"
+  assert captured == ["bootstrap", "bootstrap", "bootstrap"]
   installs = [l for l in _read_lines() if l["ev"] == "app_install"]
-  assert len(installs) == 1
-  assert installs[0]["source"] == "bootstrap"
+  assert len(installs) == 3
+  assert all(event["source"] == "bootstrap" for event in installs)
 
 
 # --- Wiring: storage_write via PUT + DELETE ----------------------------
