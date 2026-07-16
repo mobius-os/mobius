@@ -135,6 +135,13 @@ def test_pre_push_only_runs_frontend_suite_with_complete_dependencies():
   assert "dependency tree unavailable or incomplete" in hook
 
 
+def test_identity_verifier_allows_the_mobius_owned_platform_repo():
+  verifier = (ROOT / "backend/scripts/verify_test_runtime.py").read_text(
+    encoding="utf-8"
+  )
+  assert 'f"safe.directory={PLATFORM_ROOT}"' in verifier
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -232,7 +239,7 @@ def _init_repo(repo: Path):
   _git(repo, "config", "user.email", "test@example.com")
 
 
-def test_local_runner_refuses_tracked_edits_before_docker(tmp_path):
+def test_local_runner_refuses_uncommitted_edits_before_docker(tmp_path):
   repo = tmp_path / "repo"
   _init_repo(repo)
   (repo / "scripts").mkdir()
@@ -252,6 +259,21 @@ def test_local_runner_refuses_tracked_edits_before_docker(tmp_path):
   docker = fake_bin / "docker"
   docker.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
   docker.chmod(0o755)
+  result = subprocess.run(
+    [str(repo / "scripts" / "playwright-local.sh"), "--allow-local-e2e"],
+    cwd=repo,
+    capture_output=True,
+    text=True,
+    env={
+      **_git_env(tmp_path),
+      "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    },
+  )
+  assert result.returncode == 2
+  assert "requires a committed revision" in result.stderr
+
+  _git(repo, "restore", "tracked.txt")
+  (repo / "new-source.py").write_text("untracked\n", encoding="utf-8")
   result = subprocess.run(
     [str(repo / "scripts" / "playwright-local.sh"), "--allow-local-e2e"],
     cwd=repo,
