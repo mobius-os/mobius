@@ -1,4 +1,4 @@
-/** Source-level guards for the inert opaque embedded-chat bootstrap. */
+/** Source-level guards for the inert opaque embedded-chat theme handoff. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -13,6 +13,15 @@ test('ChatEmbed does not load owner theme/storage before authorization', () => {
   assert.doesNotMatch(SOURCE, /\buseTheme\s*\(/)
   assert.doesNotMatch(SOURCE, /localStorage\s*\./)
   assert.match(APP_SOURCE, /if \(EMBED_ROUTE\) beginEphemeralAuth\(\)/)
+})
+
+test('ChatEmbed applies theme returned by the verified session exchange', () => {
+  const verified = SOURCE.indexOf("session.role !== 'participant'")
+  const applied = SOURCE.indexOf('applyThemeToDom(')
+  const authorized = SOURCE.indexOf('setAuthorized(true)')
+  assert.ok(verified !== -1 && applied > verified)
+  assert.ok(authorized > applied)
+  assert.match(SOURCE, /session\.theme\?\.css/)
 })
 
 test('ChatEmbed stays blank until the server capability exchange succeeds', () => {

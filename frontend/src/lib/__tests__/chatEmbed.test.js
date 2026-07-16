@@ -69,9 +69,8 @@ test('isEmbedMessage accepts an opaque parent only when explicitly allowed and s
   const opaque = evt({ origin: 'null', type: INIT, instanceId: 'i' })
   assert.equal(
     isEmbedMessage(opaque, {
-      origin: ORIGIN,
+      origins: [ORIGIN, 'null'],
       expectedSource: SRC,
-      allowOpaqueOrigin: true,
     }),
     true,
   )
@@ -81,9 +80,8 @@ test('isEmbedMessage accepts an opaque parent only when explicitly allowed and s
   )
   assert.equal(
     isEmbedMessage(opaque, {
-      origin: ORIGIN,
+      origins: [ORIGIN, 'null'],
       expectedSource: { name: 'sibling' },
-      allowOpaqueOrigin: true,
     }),
     false,
   )

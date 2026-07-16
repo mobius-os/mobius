@@ -178,8 +178,15 @@
     </div>
     <div id="root"></div>
     <script>
-      // Hide splash immediately on refresh (user already logged in).
-      if (localStorage.getItem('token')) {
+      // The embedded document must remain blank while its one-use capability
+      // is exchanged; never cover that inert state with the full-shell logo.
+      // Only top-level shell loads consult the owner's browser token.
+      var isChatEmbed = window.location.pathname === '/shell/embed/chat'
+      var hasOwnerToken = false
+      if (!isChatEmbed) {
+        try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
+      }
+      if (isChatEmbed || hasOwnerToken) {
         var s = document.getElementById('splash')
         if (s) s.remove()
       }

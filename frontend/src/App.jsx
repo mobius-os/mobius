@@ -19,9 +19,9 @@ import { shellReload } from './hooks/useNavigation.js'
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
 // path, so `/shell/embed/chat` boots the same main.jsx → App. We branch
-// here, BEFORE the setup/login/Shell flow, so the embed renders inside
-// the same PersistQueryClientProvider (ChatView needs the QueryClient +
-// persistence) but with none of the Shell chrome. We prepend Vite's
+// here, BEFORE the setup/login/Shell flow, so the embed renders inside a plain
+// QueryClientProvider: ChatView needs the client, but an opaque document must
+// not touch the owner's persisted cache. We prepend Vite's
 // build-time BASE (with its trailing slash stripped) so the match holds
 // if the bundle is ever built under a sub-path; in this repo BASE is '/',
 // so the comparison is the literal '/shell/embed/chat'.

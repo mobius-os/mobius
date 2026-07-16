@@ -6,6 +6,7 @@ import {
   clearEphemeralAuthSession,
   setEphemeralAuthSession,
 } from '../../api/client.js'
+import { applyThemeToDom } from '../../lib/themeService.js'
 import {
   INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, AUTH_EXPIRING,
   CONTEXT_REQUEST, CONTEXT_RESPONSE,
@@ -140,6 +141,19 @@ export default function ChatEmbed() {
         // one-use exchange. Never let a late response overwrite that newer
         // in-memory handoff; the server independently enforces grant order.
         if (latestAuthorizationIdRef.current !== authorizationId) return
+
+        // The old same-origin renderer loaded /api/theme with the app token.
+        // The stronger contract keeps generic APIs closed: the verified
+        // exchange returns the already-app-visible theme and we apply it only
+        // after the exact chat/instance/role checks above have succeeded.
+        if (session.theme?.css) {
+          applyThemeToDom(
+            session.theme.css,
+            session.theme.bg,
+            session.theme.mode,
+            { animate: false },
+          )
+        }
 
         setEphemeralAuthSession(session.token, msg.instanceId)
         chatIdRef.current = session.chat_id

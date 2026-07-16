@@ -87,6 +87,9 @@ def test_bootstrap_is_one_use_and_session_is_exact_chat(client, owner_token):
   assert session["role"] == "participant"
   assert "chat:read" in session["operations"]
   assert "chat:uploads" in session["operations"]
+  assert isinstance(session["theme"]["css"], str)
+  assert session["theme"]["css"]
+  assert session["theme"]["mode"] in {"light", "dark"}
 
   replay = _exchange(client, capability, session["instance_id"])
   assert replay.status_code == 401

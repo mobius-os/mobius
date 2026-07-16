@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app import auth, models
+from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   Principal, chat_embed_grant_is_latest_consumed, get_principal,
@@ -23,6 +24,7 @@ from app.deps import (
 )
 from app.resource_access import get_active_chat_for_principal
 from app.timeutil import now_naive_utc
+from app.theme import theme_data
 
 router = APIRouter()
 app_router = APIRouter(prefix="/api/app-chats", tags=["app-chat-embed"])
@@ -245,6 +247,10 @@ def exchange_embed_capability(
     "role": claims["role"],
     "operations": claims["operations"],
     "expires_at": session_expires_at.isoformat() + "Z",
+    # Theme data is already visible to the owning app frame. Returning it only
+    # after the one-use exchange lets the nested renderer match the shell
+    # without granting its narrow session access to the generic theme route.
+    "theme": theme_data(get_settings().data_dir),
   }
 
 
