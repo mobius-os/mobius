@@ -174,7 +174,6 @@
 }
 
 .settings__appearance-toggle {
-  position: relative;
   flex-shrink: 0;
   display: inline-grid;
   grid-template-columns: repeat(2, 34px);
@@ -193,34 +192,23 @@
   outline-offset: 2px;
 }
 
-.settings__appearance-thumb {
-  position: absolute;
-  z-index: 0;
-  top: 3px;
-  left: 3px;
+.settings__appearance-option {
+  display: grid;
+  place-items: center;
   width: 34px;
   height: 30px;
   border-radius: 5px;
-  background: var(--surface2);
-  transform: translateX(0);
-  transition: transform 140ms cubic-bezier(0.2, 0, 0, 1);
-}
-
-.settings__appearance-thumb--dark {
-  transform: translateX(34px);
-}
-
-.settings__appearance-toggle svg {
-  position: relative;
-  z-index: 1;
-  justify-self: center;
   color: var(--muted);
-  opacity: 0.48;
-  transition: opacity 120ms ease, color 120ms ease;
+  opacity: 0.68;
 }
 
-.settings__appearance-toggle .settings__appearance-icon--active {
+.settings__appearance-option svg {
+  display: block;
+}
+
+.settings__appearance-option--active {
   color: var(--text);
+  background: var(--surface2);
   opacity: 1;
 }
 
@@ -410,16 +398,50 @@
 /* The body holds the full-width model trigger. */
 .settings-bg-row__body {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
-/* The shared effort control sits directly under the model trigger, aligned
-   with its title. Model selection stays in the sheet; effort is one tap away
-   in the Settings row itself. */
-.settings-bg-row__effort-picker {
-  padding: 0 10px 3px 46px;
+/* Quiet, read-only effort preview inside the model button. The actual shared
+   effort stepper remains in the sheet opened by this whole button. */
+.settings-bg-row__effort-visual {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 68px;
+  padding: 7px 3px;
+}
+
+.settings-bg-row__effort-visual::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 50%;
+  height: 1px;
+  background: var(--border);
+  transform: translateY(-50%);
+}
+
+.settings-bg-row__effort-dot {
+  position: relative;
+  z-index: 1;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.settings-bg-row__effort-dot--filled {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.settings-bg-row__effort-dot--on {
+  transform: scale(1.35);
+  box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
 @media (prefers-reduced-motion: reduce) {

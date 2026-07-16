@@ -14,7 +14,6 @@ import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
 import ModelSheet from '../ui/ModelSheet.jsx'
-import EffortStepper from '../ui/EffortStepper.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
@@ -127,6 +126,10 @@ function BackgroundProviderRow({
   const effortLabel = enabled
     ? (selectedEfforts.find((e) => e.value === row.effort)?.label || '')
     : ''
+  const selectedEffortIndex = Math.max(
+    0,
+    selectedEfforts.findIndex((effort) => effort.value === row.effort),
+  )
   const [sheetOpen, setSheetOpen] = useState(false)
 
   // This row is a fixed provider, so the sheet shows only that
@@ -191,7 +194,7 @@ function BackgroundProviderRow({
           className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
           onClick={() => setSheetOpen(true)}
           aria-haspopup="dialog"
-          aria-label={`${info?.label || row.provider} background model`}
+          aria-label={`${info?.label || row.provider} background model${effortLabel ? `, ${effortLabel} effort` : ''}`}
         >
           <span className="model-trigger__icon">
             {Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}
@@ -202,17 +205,21 @@ function BackgroundProviderRow({
               <span className="model-trigger__id">{selectedModel}</span>
             )}
           </span>
+          {enabled && effortLabel && (
+            <span className="settings-bg-row__effort-visual" aria-hidden="true">
+              {selectedEfforts.map((effort, effortIndex) => (
+                <span
+                  key={effort.value}
+                  className={
+                    'settings-bg-row__effort-dot'
+                    + (effortIndex <= selectedEffortIndex ? ' settings-bg-row__effort-dot--filled' : '')
+                    + (effortIndex === selectedEffortIndex ? ' settings-bg-row__effort-dot--on' : '')
+                  }
+                />
+              ))}
+            </span>
+          )}
         </button>
-        {enabled && effortLabel && (
-          <div className="settings-bg-row__effort-picker">
-            <EffortStepper
-              efforts={selectedEfforts}
-              value={row.effort}
-              onChange={onEffortChange}
-              ariaLabel={`${info?.label || row.provider} reasoning effort`}
-            />
-          </div>
-        )}
       </div>
       <ModelSheet
         open={sheetOpen}
@@ -221,6 +228,9 @@ function BackgroundProviderRow({
         groups={groups}
         provider={enabled ? row.provider : ''}
         model={selectedModel}
+        efforts={efforts}
+        effort={row.effort}
+        onEffortChange={onEffortChange}
         onPick={(pid, id, pickedModel) => {
           const nextEfforts = modelEfforts(efforts, pickedModel)
           onModelChange(id, validEffort(nextEfforts, row.effort))
@@ -1267,19 +1277,17 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               onClick={toggleTheme}
             >
               <span
-                className={`settings__appearance-thumb${themeMode === 'dark' ? ' settings__appearance-thumb--dark' : ''}`}
+                className={`settings__appearance-option${themeMode === 'light' ? ' settings__appearance-option--active' : ''}`}
                 aria-hidden="true"
-              />
-              <Sun
-                size={16}
-                strokeWidth={2}
-                className={themeMode === 'light' ? 'settings__appearance-icon--active' : ''}
-              />
-              <Moon
-                size={16}
-                strokeWidth={2}
-                className={themeMode === 'dark' ? 'settings__appearance-icon--active' : ''}
-              />
+              >
+                <Sun size={17} strokeWidth={1.8} />
+              </span>
+              <span
+                className={`settings__appearance-option${themeMode === 'dark' ? ' settings__appearance-option--active' : ''}`}
+                aria-hidden="true"
+              >
+                <Moon size={17} strokeWidth={1.8} />
+              </span>
             </button>
           </div>
           {themeError && (
