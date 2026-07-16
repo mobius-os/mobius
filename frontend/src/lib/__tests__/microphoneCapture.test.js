@@ -58,3 +58,44 @@ test('shell microphone capture returns mono PCM and releases every resource', as
   assert.equal(contextClosed, true)
   assert.equal(processor.onaudioprocess, null)
 })
+
+test('cancelling shell capture rejects and releases every resource', async () => {
+  let processor
+  let trackStops = 0
+  let contextCloses = 0
+  const node = () => ({ connect() {}, disconnect() {} })
+
+  class FakeAudioContext {
+    constructor() {
+      this.sampleRate = 48000
+      this.state = 'running'
+      this.destination = node()
+    }
+    createMediaStreamSource() { return node() }
+    createScriptProcessor() {
+      processor = { ...node(), onaudioprocess: null }
+      return processor
+    }
+    createGain() { return { ...node(), gain: { value: 1 } } }
+    close() { contextCloses += 1 }
+  }
+
+  const control = await startMicrophoneCapture({
+    mediaDevices: {
+      async getUserMedia() {
+        return { getTracks: () => [{ stop: () => { trackStops += 1 } }] }
+      },
+    },
+    AudioContextCtor: FakeAudioContext,
+  })
+
+  await assert.rejects(control.cancel(), { name: 'AbortError' })
+  assert.equal(trackStops, 1)
+  assert.equal(contextCloses, 1)
+  assert.equal(processor.onaudioprocess, null)
+
+  // Cancellation is idempotent and cannot stop/close the same resources twice.
+  await assert.rejects(control.cancel(), { name: 'AbortError' })
+  assert.equal(trackStops, 1)
+  assert.equal(contextCloses, 1)
+})

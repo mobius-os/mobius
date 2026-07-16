@@ -842,11 +842,7 @@ A non-self external resource referenced at load time — a Google Fonts `<link>`
 
 ## Recording from the microphone
 
-Shell-mounted mini-apps have an opaque origin by design, so calling
-`navigator.mediaDevices.getUserMedia()` inside the app fails with an invalid
-security-origin error. Do not add `allow-same-origin` to fix it. Use the runtime
-bridge; the trusted shell owns microphone access and transfers only bounded mono
-PCM samples back into the exact visible app frame:
+Shell-mounted mini-apps use an opaque origin by design. Direct calls to `navigator.mediaDevices.getUserMedia()` fail with an invalid security-origin error. Do not add `allow-same-origin` to fix it. Use the runtime bridge. The trusted shell owns microphone access and transfers bounded mono pulse-code modulation (PCM) samples to the exact visible app frame:
 
 ```js
 const recording = window.mobius.microphone.start({
@@ -857,7 +853,7 @@ const recording = window.mobius.microphone.start({
 await recording.started          // permission granted; capture is active
 const resultPromise = recording.done
 
-// Later — both calls are safe even while the permission prompt is pending:
+// Later: both calls are safe even while the permission prompt is pending.
 recording.stop()                 // saves what has been captured
 // recording.cancel()            // rejects `done` with AbortError
 
@@ -866,10 +862,7 @@ const { samples, sampleRate } = await resultPromise
 // it using the app's existing audio format.
 ```
 
-The same API records locally in the standalone PWA. Keep a session ref, stop or
-cancel it on unmount/navigation, handle `NotAllowedError` with a useful browser-
-settings message, and never fall back to direct `getUserMedia()` in the opaque
-frame.
+The shell cancels capture when the app becomes hidden, reloads, or receives a freshly built frame. The same API records locally in the standalone progressive web app (PWA), where the shell cannot enforce those lifecycle boundaries. Keep a session ref and cancel it on unmount or navigation. Handle `NotAllowedError` with a useful browser-settings message. Never fall back to direct `getUserMedia()` in the opaque frame.
 
 ---
 

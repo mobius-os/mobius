@@ -151,6 +151,31 @@ function readDeviceInsets() {
   return readSafeAreaInsets(getComputedStyle(_insetProbe))
 }
 
+// Retire the broker session synchronously at shell lifecycle boundaries. The
+// control object does not exist while getUserMedia permission is pending, so
+// the cancellation flag is load-bearing: the async starter checks it before it
+// can announce or deliver anything to a frame that is no longer live.
+function cancelMicrophoneCapture(captureRef, { notifyFrame = false } = {}) {
+  const capture = captureRef.current
+  if (!capture) return
+  captureRef.current = null
+  capture.cancelled = true
+  if (notifyFrame) {
+    // A deactivated canvas stays mounted in the shell's LRU. Settle its runtime
+    // session so returning to that app can start a new recording; samples and
+    // unrelated permission errors remain suppressed by the ownership guards.
+    try {
+      capture.sourceWindow?.postMessage({
+        type: 'moebius:microphone-error',
+        requestId: capture.requestId,
+        name: 'AbortError',
+        message: 'Recording cancelled because the app is no longer active.',
+      }, '*')
+    } catch {}
+  }
+  capture.control?.cancel()
+}
+
 // The first-open loading surface — the emotional peak of a build, so it's
 // accent-forward rather than a generic gray spinner: the app name is present,
 // and shimmer skeleton bars hint a header + list are on their way. Shared by
@@ -325,6 +350,13 @@ export default function AppCanvas({
       cb = (el) => {
         if (el) framesRef.current.set(v, el)
         else {
+          // AppCanvas can temporarily render a service/loading surface without
+          // unmounting itself. Ref removal is the exhaustive boundary for the
+          // exact live document, including those non-component teardown paths.
+          const capture = microphoneCaptureRef.current
+          if (v === liveVersionRef.current && capture?.sourceVersion === v) {
+            cancelMicrophoneCapture(microphoneCaptureRef)
+          }
           framesRef.current.delete(v)
           loadedDocsRef.current.delete(v)
           frameImmersiveRef.current.delete(v)
@@ -552,7 +584,11 @@ export default function AppCanvas({
       if (srcVersion !== liveVersionRef.current) return
 
       if (msg.type === 'moebius:microphone-start') {
-        const requestId = typeof msg.requestId === 'string' ? msg.requestId.slice(0, 120) : ''
+        // Reject, rather than truncate, an invalid correlation id. Truncation
+        // makes every response impossible for the requesting runtime to match.
+        const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 120
+          ? msg.requestId
+          : ''
         const sourceWindow = e.source
         if (!activeRef.current || !requestId) return
         if (microphoneCaptureRef.current) {
@@ -564,7 +600,8 @@ export default function AppCanvas({
         }
 
         const pending = {
-          requestId, sourceWindow, control: null, stopRequested: false, cancelled: false,
+          requestId, sourceWindow, sourceVersion: srcVersion,
+          control: null, stopRequested: false, cancelled: false,
         }
         microphoneCaptureRef.current = pending
         ;(async () => {
@@ -572,14 +609,20 @@ export default function AppCanvas({
             const control = await startMicrophoneCapture({
               maxSeconds: msg.maxSeconds,
               onLevel(level) {
-                if (microphoneCaptureRef.current !== pending || pending.cancelled) return
+                if (microphoneCaptureRef.current !== pending
+                    || pending.cancelled
+                    || !activeRef.current
+                    || pending.sourceVersion !== liveVersionRef.current) return
                 sourceWindow.postMessage({
                   type: 'moebius:microphone-level', requestId, level,
                 }, '*')
               },
             })
             pending.control = control
-            if (microphoneCaptureRef.current !== pending || pending.cancelled) {
+            if (microphoneCaptureRef.current !== pending
+                || pending.cancelled
+                || !activeRef.current
+                || pending.sourceVersion !== liveVersionRef.current) {
               control.done.catch(() => {})
               control.cancel()
               return
@@ -591,7 +634,12 @@ export default function AppCanvas({
             if (pending.stopRequested) control.stop()
 
             const result = await control.done
+            const mayDeliver = microphoneCaptureRef.current === pending
+              && !pending.cancelled
+              && activeRef.current
+              && pending.sourceVersion === liveVersionRef.current
             if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
+            if (!mayDeliver) return
             const samples = result.samples
             try {
               sourceWindow.postMessage({
@@ -605,8 +653,12 @@ export default function AppCanvas({
               }, '*')
             }
           } catch (error) {
+            const mayDeliver = microphoneCaptureRef.current === pending
+              && !pending.cancelled
+              && activeRef.current
+              && pending.sourceVersion === liveVersionRef.current
             if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
-            if (pending.cancelled || error?.name === 'AbortError') return
+            if (!mayDeliver || error?.name === 'AbortError') return
             sourceWindow.postMessage({
               type: 'moebius:microphone-error', requestId,
               name: error?.name || 'Error',
@@ -621,9 +673,7 @@ export default function AppCanvas({
         const capture = microphoneCaptureRef.current
         if (!capture || capture.sourceWindow !== e.source || capture.requestId !== msg.requestId) return
         if (msg.type === 'moebius:microphone-cancel') {
-          capture.cancelled = true
-          microphoneCaptureRef.current = null
-          capture.control?.cancel()
+          cancelMicrophoneCapture(microphoneCaptureRef)
         } else if (capture.control) {
           capture.control.stop()
         } else {
@@ -705,18 +755,20 @@ export default function AppCanvas({
     return () => window.removeEventListener('message', onMessage)
   }, [appId, appSlug, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
 
-  useEffect(() => {
-    if (active) return
+  // Captures belong to the exact visible document that requested them. Cancel
+  // before paint when the canvas becomes hidden or a buffered build is
+  // promoted. A still-mounted hidden frame receives only the correlated
+  // AbortError needed to settle its runtime session; samples and unrelated
+  // permission errors remain gated out.
+  useLayoutEffect(() => {
     const capture = microphoneCaptureRef.current
     if (!capture) return
-    capture.stopRequested = true
-    capture.control?.stop()
-  }, [active])
+    if (active && capture.sourceVersion === swap.liveVersion) return
+    cancelMicrophoneCapture(microphoneCaptureRef, { notifyFrame: !active })
+  }, [active, swap.liveVersion])
 
-  useEffect(() => () => {
-    const capture = microphoneCaptureRef.current
-    microphoneCaptureRef.current = null
-    capture?.control?.cancel()
+  useLayoutEffect(() => () => {
+    cancelMicrophoneCapture(microphoneCaptureRef)
   }, [])
 
   useEffect(() => {
@@ -1090,6 +1142,7 @@ export default function AppCanvas({
     // re-init below then runs the fresh document's handshake (this is exactly
     // why the parent never dedups frame-init).
     if (loadedDocsRef.current.has(v)) {
+      if (v === liveVersionRef.current) cancelMicrophoneCapture(microphoneCaptureRef)
       dispatchSwap({ type: 'live-reload', version: v })
     }
     loadedDocsRef.current.add(v)
