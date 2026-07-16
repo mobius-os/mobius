@@ -3,6 +3,7 @@
 import asyncio
 import fcntl
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,12 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
   monkeypatch.setattr(fw, "_CACHE_DIR", dirs["cache"])
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
+  monkeypatch.setattr(
+    fw,
+    "_BUILT_GLOBAL_CHECK",
+    Path(__file__).resolve().parents[2]
+    / "frontend" / "scripts" / "check-built-globals.mjs",
+  )
   # Keep build comparisons hermetic when the test happens to run in an image
   # that has the production vendor tree mounted at /app/static/vendor.
   monkeypatch.setattr(fw, "_copy_vendor", lambda _dest: None)
@@ -70,6 +77,62 @@ def test_publish_rejects_broken_staging_without_touching_dist(fw_dirs):
   assert not (dist / "assets" / "index-broken.js").exists()
   assert not nxt.exists()
   assert not old.exists()
+
+
+def test_publish_rejects_undeclared_built_identifier_without_touching_dist(
+  fw_dirs,
+):
+  dist, staging, nxt, old = (
+    fw_dirs["dist"], fw_dirs["staging"], fw_dirs["next"], fw_dirs["old"]
+  )
+  _write_build(dist, "old")
+  _write_build(staging, "broken-global")
+  (staging / "assets" / "index-broken-global.js").write_text(
+    "export function cleanup() { clearTimeout(ioBounceTimer) }",
+    encoding="utf-8",
+  )
+
+  with pytest.raises(
+    fw._BuiltGlobalValidationError,
+    match=r"ioBounceTimer.*index-broken-global\.js",
+  ):
+    fw._publish_built_dir(staging, "undeclared global")
+
+  assert (dist / "assets" / "index-old.js").is_file()
+  assert not (dist / "assets" / "index-broken-global.js").exists()
+  assert not nxt.exists()
+  assert not old.exists()
+
+
+def test_publish_rejects_undeclared_identifier_in_root_runtime(fw_dirs):
+  staging = fw_dirs["staging"]
+  _write_build(staging, "broken-root-global")
+  (staging / "mobius-runtime.js").write_text(
+    "export function cleanup() { clearTimeout(rootBounceTimer) }",
+    encoding="utf-8",
+  )
+
+  with pytest.raises(
+    fw._BuiltGlobalValidationError,
+    match=r"rootBounceTimer.*mobius-runtime\.js",
+  ):
+    fw._publish_built_dir(staging, "undeclared root global")
+
+  assert not fw_dirs["next"].exists()
+  assert not fw_dirs["dist"].exists()
+
+
+def test_publish_accepts_declared_and_browser_globals(fw_dirs):
+  staging = fw_dirs["staging"]
+  _write_build(staging, "valid-globals")
+  (staging / "assets" / "index-valid-globals.js").write_text(
+    "const timer = setTimeout(() => window.fetch(new URL('/ok', location)), 1);"
+    " export function cleanup() { clearTimeout(timer) }",
+    encoding="utf-8",
+  )
+
+  assert fw._publish_built_dir(staging, "valid globals") is True
+  assert (fw_dirs["dist"] / "assets" / "index-valid-globals.js").is_file()
 
 
 @pytest.mark.asyncio
@@ -170,6 +233,18 @@ def test_identical_publish_is_skipped_without_event_or_attic(
   assert not fw_dirs["next"].exists()
   assert not (attic.exists() and list(attic.glob("gen-*")))
   assert events == []
+
+
+def test_identical_publish_skips_the_expensive_global_scan(fw_dirs, monkeypatch):
+  _write_build(fw_dirs["dist"], "same")
+  _write_build(fw_dirs["staging"], "same")
+  monkeypatch.setattr(
+    fw,
+    "_validate_built_globals",
+    lambda _built: pytest.fail("identical output should not be reparsed"),
+  )
+
+  assert fw._publish_built_dir(fw_dirs["staging"], "no-op rebuild") is False
 
 
 def test_publish_failure_restores_dirty_flag(monkeypatch):

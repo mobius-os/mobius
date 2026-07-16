@@ -50,7 +50,7 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -64,6 +64,7 @@ import {
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
   startedMessagesFromResponse,
+  stripInternalUserMessageFields,
   systemEventForChat,
 } from './chatRuntimeState.js'
 import {
@@ -2800,6 +2801,18 @@ export default function ChatView({
       }
       if (!content) return
 
+      let queueAfterOptimisticPromote = null
+      function restoreOptimisticSteerQueue() {
+        // Every pendingQueue mutation assigns a fresh array. Restore only if
+        // no other path won the race while the steer request was in flight.
+        if (
+          queueAfterOptimisticPromote !== null
+          && pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote
+        ) {
+          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+        }
+      }
+
       try {
         const steerIsFirstUser = isFirstVisibleUserMessage()
         // Fast-forward is a deliberate visibility action, unlike automatic
@@ -2819,16 +2832,7 @@ export default function ChatView({
         // rows this request is steering; restore the snapshot below if the
         // backend says the turn was not steered.
         pendingQueue.promoteManyByCid(consumePendingCids)
-        const queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
-        const restoreOptimisticSteerQueue = () => {
-          // If another path touched the queue while the POST was in flight
-          // (notably the natural turn-end drain), every pendingQueue mutation
-          // assigns a fresh array. In that case the other path won the race,
-          // so restoring our stale snapshot would resurrect duplicate chips.
-          if (pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote) {
-            pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
-          }
-        }
+        queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingCids,

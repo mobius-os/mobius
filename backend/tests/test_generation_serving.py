@@ -218,6 +218,9 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_NEXT_DIST_DIR", dirs["next"])
   monkeypatch.setattr(fw, "_OLD_DIST_DIR", dirs["old"])
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
+  # Global validation has focused publisher coverage; these fixtures exercise
+  # only generation rotation and contain deliberately tiny placeholder JS.
+  monkeypatch.setattr(fw, "_validate_built_globals", lambda _built: None)
   return dirs
 
 
@@ -250,18 +253,22 @@ def test_first_build_has_no_outgoing_generation(fw_dirs):
   assert not attic.exists() or list(attic.glob("gen-*")) == []
 
 
-def test_attic_prunes_to_keep_three_generations(fw_dirs):
+def test_attic_prunes_to_bounded_rapid_edit_window(fw_dirs):
   dist, nxt, attic = fw_dirs["dist"], fw_dirs["next"], fw_dirs["attic"]
   _fw_build(dist, "g1")
-  for i in range(2, 7):  # publish g2..g6 -> 5 swaps -> 5 outgoing generations
+  for i in range(2, fw._ATTIC_KEEP + 4):
     _fw_build(nxt, f"g{i}")
     fw._replace_dist()
 
   gens = sorted(attic.glob("gen-*"), key=fw._attic_gen_num)
-  # only the three newest outgoing generations survive (g3, g4, g5).
-  assert [p.name for p in gens] == ["gen-3", "gen-4", "gen-5"]
+  assert len(gens) == fw._ATTIC_KEEP
+  assert gens[0].name == "gen-3"
+  assert gens[-1].name == f"gen-{fw._ATTIC_KEEP + 2}"
   assert (attic / "gen-3" / "assets" / "index-g3.js").is_file()
-  assert (attic / "gen-5" / "assets" / "index-g5.js").is_file()
+  assert (
+    attic / f"gen-{fw._ATTIC_KEEP + 2}"
+    / "assets" / f"index-g{fw._ATTIC_KEEP + 2}.js"
+  ).is_file()
   assert not (attic / "gen-1").exists()
   assert not (attic / "gen-2").exists()
 

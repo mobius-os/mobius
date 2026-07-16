@@ -41,7 +41,8 @@ _REBUILD_DIST_DIR = _FRONTEND_DIR / ".dist-rebuild"
 _NEXT_DIST_DIR = _FRONTEND_DIR / ".dist-next"
 _OLD_DIST_DIR = _FRONTEND_DIR / ".dist-old"
 _ATTIC_DIR = _FRONTEND_DIR / ".assets-attic"
-_ATTIC_KEEP = 3
+_ATTIC_KEEP = 64
+_BUILT_GLOBAL_CHECK = _FRONTEND_DIR / "scripts" / "check-built-globals.mjs"
 _CACHE_DIR = _FRONTEND_DIR / ".vite-cache"
 _TMP_DIR = _FRONTEND_DIR / ".vite-tmp"
 # The explicit full-rebuild path gets its own cache/temp dirs: rebuild_shell.sh
@@ -65,6 +66,10 @@ class _StagingChangedDuringPublish(RuntimeError):
 
 class _IncompleteBuild(RuntimeError):
   """Raised when the watched staging tree is not a full Vite generation yet."""
+
+
+class _BuiltGlobalValidationError(RuntimeError):
+  """Raised when a built shell still references an undeclared identifier."""
 
 
 def _acquire_watch_lock():
@@ -117,6 +122,32 @@ def _complete_build(d: Path) -> bool:
     and (d / "sw.js").is_file()
     and (d / "manifest.webmanifest").is_file()
   )
+
+
+def _validate_built_globals(d: Path) -> None:
+  """Reject a complete-looking bundle with undeclared runtime identifiers."""
+  if not _BUILT_GLOBAL_CHECK.is_file():
+    raise _BuiltGlobalValidationError(
+      f"frontend global checker is missing: {_BUILT_GLOBAL_CHECK}"
+    )
+  try:
+    result = subprocess.run(
+      ["node", str(_BUILT_GLOBAL_CHECK), str(d)],
+      cwd=str(_FRONTEND_DIR),
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      timeout=45,
+    )
+  except (OSError, subprocess.TimeoutExpired) as exc:
+    raise _BuiltGlobalValidationError(
+      f"frontend global checker could not run: {exc}"
+    ) from exc
+  if result.returncode != 0:
+    detail = _tail(result.stdout) or (
+      f"frontend global checker exited {result.returncode}"
+    )
+    raise _BuiltGlobalValidationError(detail)
 
 
 def _tail(text: str, limit: int = 4000) -> str:
@@ -374,6 +405,13 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
             "served dist", reason,
           )
           return False
+        try:
+          _validate_built_globals(_NEXT_DIST_DIR)
+        except Exception:
+          # A rejected candidate must not linger as a complete-looking next
+          # generation that a later publisher could mistake for its output.
+          shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
+          raise
         _replace_dist()
         return True
       finally:
