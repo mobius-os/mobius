@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app import models
 from app.database import SessionLocal
+from app.main import _STATIC_EMBED_CSP
 
 
 def _create_app(client, owner_token, name="CubeRun"):
@@ -43,6 +44,12 @@ def _write_static(app_id, relpath, content):
     return target
   finally:
     db.close()
+
+
+def _assert_opaque_embed_policy(response, status_code):
+  assert response.status_code == status_code
+  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  assert "x-frame-options" not in response.headers
 
 
 def test_asset_get_carries_validators_and_revalidate_semantics(
@@ -220,19 +227,50 @@ def test_opaque_embed_alias_preserves_relative_tree_and_sandboxes_document(
   ordinary = client.get(f"/app-assets/by-id/{app['id']}/index.html")
   svg = client.get(f"/app-embeds/by-id/{app['id']}/active.svg")
 
-  assert entry.status_code == 200
-  assert child.status_code == 200
-  assert "x-frame-options" not in entry.headers
-  csp = entry.headers["content-security-policy"]
-  assert "sandbox allow-scripts" in csp
-  assert "allow-same-origin" not in csp
-  assert "frame-ancestors" not in csp
+  _assert_opaque_embed_policy(entry, 200)
+  _assert_opaque_embed_policy(child, 200)
+  _assert_opaque_embed_policy(svg, 200)
   assert entry.headers["access-control-allow-origin"] == "null"
-  assert "sandbox allow-scripts" in child.headers["content-security-policy"]
-  assert "allow-same-origin" not in child.headers["content-security-policy"]
-  assert "sandbox allow-scripts" in svg.headers["content-security-policy"]
-  assert "allow-same-origin" not in svg.headers["content-security-policy"]
   assert ordinary.headers["x-frame-options"] == "SAMEORIGIN"
+
+
+def test_opaque_embed_head_and_revalidation_keep_sandbox_policy(
+  client, owner_token,
+):
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "index.html", "<title>CubeRun</title>")
+  path = f"/app-embeds/by-id/{app['id']}/index.html"
+
+  head = client.head(path)
+  _assert_opaque_embed_policy(head, 200)
+  assert head.content == b""
+
+  first = client.get(path)
+  revalidated = client.get(
+    path,
+    headers={"If-None-Match": first.headers["etag"]},
+  )
+  _assert_opaque_embed_policy(revalidated, 304)
+  assert revalidated.content == b""
+
+
+def test_opaque_embed_error_responses_keep_sandbox_policy(
+  client, owner_token,
+):
+  app = _create_app(client, owner_token)
+
+  missing_app = client.get("/app-embeds/by-id/999999/index.html")
+  _assert_opaque_embed_policy(missing_app, 404)
+
+  missing_file = client.get(
+    f"/app-embeds/by-id/{app['id']}/does-not-exist.js"
+  )
+  _assert_opaque_embed_policy(missing_file, 404)
+
+  invalid_app_id = client.get(
+    "/app-embeds/by-id/not-an-integer/index.html"
+  )
+  _assert_opaque_embed_policy(invalid_app_id, 422)
 
 
 def test_security_guards_run_before_caching(client, owner_token):
