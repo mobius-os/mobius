@@ -419,14 +419,15 @@ export default function Shell() {
   const [workspaceState, dispatchWorkspace] = useReducer(
     paneModel.workspaceReducer,
     undefined,
+    // readWorkspaceRaw guards the sessionStorage read (getItem can throw in a
+    // sandboxed/disabled-storage context) BEFORE parseWorkspace's own try/catch
+    // would run — the old flat path was fully guarded, so this must be too.
     () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
-      sessionStorage.getItem(paneModel.STORAGE_KEY),
+      paneModel.readWorkspaceRaw(sessionStorage),
       { fallbackTabs: tabModel.readOpenTabs() },
     )),
   )
   const workspace = workspaceState.ws
-  const workspaceRef = useRef(workspace)
-  workspaceRef.current = workspace
   const openTabs = useMemo(() => paneModel.flatten(workspace), [workspace])
   // Dual-write on every workspace commit: the versioned blob is authoritative on
   // boot, and the legacy flat key is mirrored for one release so a rolled-back
@@ -457,12 +458,15 @@ export default function Shell() {
       : activeViewRef.current === 'chat' && activeChatIdRef.current != null
         ? tabModel.makeTab('chat', activeChatIdRef.current)
         : null
-    // The flat placement resolver is unchanged; APPLY_FLAT bridges its output
-    // back onto the focused pane's tabs (PR1's single pane == the flat strip).
+    // Dispatch the resolver as a FUNCTION, not a pre-resolved array: the reducer
+    // runs it against the current flat tabs, so two placements landing in one
+    // React batch compose (the second sees the first) instead of the second
+    // clobbering the first from a stale render snapshot. The flat resolver
+    // (workspacePlacement.js) is otherwise unchanged.
     dispatchWorkspace({
-      type: 'APPLY_FLAT',
-      tabs: applyWorkspaceRequestsToFlatTabs(
-        paneModel.flatten(workspaceRef.current),
+      type: 'APPLY_PLACEMENT',
+      resolve: (flatTabs) => applyWorkspaceRequestsToFlatTabs(
+        flatTabs,
         requests,
         { protectedTab },
       ),
@@ -1553,7 +1557,13 @@ export default function Shell() {
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
     // Drop the tab pinned to this chat (local delete only — see deleteApp).
-    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tabModel.makeTab('chat', id)) })
+    // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
+    // tombstoned chat outside the backend recovery path.
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('chat', id)),
+      reason: 'deleted',
+    })
     if (activeChatId === id) {
       // Exclude the just-deleted id: it's still in `chats` until the
       // refreshChats below, and the reuse filter would otherwise pick it
@@ -1617,7 +1627,13 @@ export default function Shell() {
     // out-of-band delete leaves the tab, which degrades gracefully (clicking it
     // 404s the iframe). Auto-pruning against the live list is unsafe — /api/apps
     // is NetworkFirst, so a transient stale refetch could drop a live tab.
-    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tabModel.makeTab('app', id)) })
+    // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
+    // tombstoned app outside the backend recovery path.
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
+      reason: 'deleted',
+    })
     if (activeView === 'canvas' && activeAppId === id) {
       setActiveAppId(null)
       setActiveView('chat')

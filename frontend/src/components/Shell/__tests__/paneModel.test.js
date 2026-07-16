@@ -32,6 +32,21 @@ function splitDepth(node) {
   return 1 + Math.max(splitDepth(node.a), splitDepth(node.b))
 }
 
+// Every split node is well-formed and split ids are unique — the shape parse
+// enforces and every op must preserve.
+function assertLayoutShape(node, splitIds) {
+  if (typeof node === 'string') return
+  assert.ok(node && typeof node === 'object', 'a node is a leaf string or a split')
+  assert.equal(typeof node.id, 'string', 'a split has a string id')
+  assert.ok(!splitIds.has(node.id), 'split ids are unique')
+  splitIds.add(node.id)
+  assert.ok(node.dir === 'row' || node.dir === 'col', 'split dir is row|col')
+  assert.ok(Number.isFinite(node.ratio) && node.ratio >= 0.1 && node.ratio <= 0.9,
+    'split ratio is within [0.1, 0.9]')
+  assertLayoutShape(node.a, splitIds)
+  assertLayoutShape(node.b, splitIds)
+}
+
 // Assert every workspace-wide invariant, so both the op tests and the property
 // suite can lean on one checker.
 function assertInvariants(ws) {
@@ -40,6 +55,7 @@ function assertInvariants(ws) {
   assert.ok(ids.length >= 1, 'at least one leaf')
   assert.ok(ids.length <= paneModel.MAX_PANES, 'leaf count within MAX_PANES')
   assert.ok(splitDepth(ws.layout) <= paneModel.MAX_DEPTH, 'depth within MAX_DEPTH')
+  assertLayoutShape(ws.layout, new Set())
 
   const seenPane = new Set()
   for (const id of ids) {
@@ -56,6 +72,7 @@ function assertInvariants(ws) {
   const seenTab = new Set()
   for (const id of ids) {
     const pane = ws.panes[id]
+    assert.ok(pane.tabs.length <= paneModel.MAX_PANE_TABS, 'pane within MAX_PANE_TABS')
     const keys = pane.tabs.map(tabKey)
     for (const key of keys) {
       assert.ok(!seenTab.has(key), 'a tab is unique workspace-wide')
@@ -249,22 +266,41 @@ test('openTab dedups an already-open tab by focusing its pane, never duplicating
   assertInvariants(after)
 })
 
-test('openTab evicts the oldest background tab at the cap and protects the active one', () => {
+test('openTab eviction is byte-identical to the legacy flat strip (oldest goes)', () => {
+  // Legacy tabModel.addTab kept the last six and evicted the OLDEST
+  // unconditionally, and reopening an existing tab left the flat array unchanged.
+  // PR1's gate is no visible strip change, so [A..F] -> reopen A -> open G must
+  // still yield [B,C,D,E,F,G] — no active-tab protection (that ships with PR3).
   let ws = paneModel.seedFromFlatTabs([])
-  for (let i = 0; i < paneModel.MAX_PANE_TABS; i += 1) {
-    ws = paneModel.openTab(ws, makeTab('chat', `c${i}`), { activate: false })
+  for (const letter of ['A', 'B', 'C', 'D', 'E', 'F']) {
+    ws = paneModel.openTab(ws, makeTab('chat', letter))
   }
-  // Make the OLDEST tab (c0) the active one to prove it is protected.
-  ws = paneModel.setActiveTab(ws, 'p0', 'chat:c0')
-  const before = paneModel.flatten(ws).map(tabKey)
-  assert.equal(before.length, paneModel.MAX_PANE_TABS)
+  assert.deepEqual(
+    paneModel.flatten(ws).map(tabKey),
+    ['chat:A', 'chat:B', 'chat:C', 'chat:D', 'chat:E', 'chat:F'],
+  )
 
-  ws = paneModel.openTab(ws, makeTab('chat', 'new'))
-  const after = paneModel.flatten(ws).map(tabKey)
-  assert.equal(after.length, paneModel.MAX_PANE_TABS, 'stays at the cap')
-  assert.ok(after.includes('chat:c0'), 'the active tab is never evicted')
-  assert.ok(after.includes('chat:new'), 'the newcomer is present')
-  assert.ok(!after.includes('chat:c1'), 'the oldest non-active tab was evicted')
+  // Reopen A: the flat array (order) is unchanged, exactly like legacy.
+  const reopened = paneModel.openTab(ws, makeTab('chat', 'A'))
+  assert.deepEqual(paneModel.flatten(reopened).map(tabKey), paneModel.flatten(ws).map(tabKey))
+
+  const afterG = paneModel.openTab(reopened, makeTab('chat', 'G'))
+  assert.deepEqual(
+    paneModel.flatten(afterG).map(tabKey),
+    ['chat:B', 'chat:C', 'chat:D', 'chat:E', 'chat:F', 'chat:G'],
+    'oldest (A) evicted despite being reopened/active — legacy parity',
+  )
+  assertInvariants(afterG)
+})
+
+test('seedFromFlatTabs caps to the last MAX_PANE_TABS after dedup', () => {
+  const tabs = []
+  for (let i = 0; i < paneModel.MAX_PANE_TABS + 3; i += 1) tabs.push(makeTab('chat', `c${i}`))
+  const ws = paneModel.seedFromFlatTabs(tabs)
+  const flat = paneModel.flatten(ws).map(tabKey)
+  assert.equal(flat.length, paneModel.MAX_PANE_TABS, 'over-cap seed is trimmed')
+  assert.equal(flat.at(-1), 'chat:c8', 'the last tabs are the ones kept')
+  assert.equal(flat[0], 'chat:c3', 'the oldest overflow is dropped')
   assertInvariants(ws)
 })
 
@@ -345,6 +381,29 @@ test('moveTab into an existing pane at an index reorders and re-homes the tab', 
   assertInvariants(moved)
 })
 
+test('moveTab into a full destination pane is a no-op; a same-pane reorder is not', () => {
+  // pB is at cap (6 tabs); pA has one tab to move.
+  const full = []
+  for (let i = 0; i < paneModel.MAX_PANE_TABS; i += 1) full.push(makeTab('chat', `b${i}`))
+  const ws = paneModel.normalize({
+    v: 1,
+    layout: { id: 's0', dir: 'row', a: 'pA', b: 'pB', ratio: 0.5 },
+    panes: {
+      pA: { id: 'pA', tabs: [makeTab('chat', 'a')], activeTabKey: 'chat:a' },
+      pB: { id: 'pB', tabs: full, activeTabKey: 'chat:b0' },
+    },
+    focusedPaneId: 'pA',
+    nextId: 2,
+  })
+  assert.equal(paneModel.moveTab(ws, 'chat:a', { paneId: 'pB', index: 0 }), ws,
+    'a cross-pane move into a capped pane is refused (no eviction contract for a drag)')
+
+  // A reorder within the full pane itself is allowed — the count does not change.
+  const reordered = paneModel.moveTab(ws, 'chat:b5', { paneId: 'pB', index: 0 })
+  assert.equal(tabKey(reordered.panes.pB.tabs[0]), 'chat:b5', 'same-pane reorder still works at cap')
+  assertInvariants(reordered)
+})
+
 test('moveTab refuses a fifth pane and refuses depth beyond two', () => {
   // Four leaves at depth two, one pane carrying a spare tab so the source is not
   // emptied by the move.
@@ -399,6 +458,14 @@ test('moveTab root edge wraps the whole tree in a new split', () => {
   assert.equal(paneIdsOf(three.layout).length, 3)
   assert.equal(paneIdsOf(three.layout)[0], three.focusedPaneId, 'root left-edge is the new first leaf')
   assertInvariants(three)
+})
+
+test('moveTab rejects a malformed edge instead of silently splitting', () => {
+  const seed = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')])
+  assert.equal(paneModel.moveTab(seed, 'chat:b', { paneId: 'p0', edge: 'diagonal' }), seed,
+    'an unknown edge no-ops (would have coerced to a bottom col-split)')
+  assert.equal(paneModel.moveTab(seed, 'chat:b', { root: true, edge: 'sideways' }), seed,
+    'an unknown root edge no-ops too')
 })
 
 test('setActiveTab, focusPane, and setRatio each no-op on unchanged input', () => {
@@ -484,6 +551,23 @@ test('flattenRollbackPriority keeps the focused active tab through legacy trunca
   assert.equal(survivors.at(-1), 'chat:f6', 'and its active tab is the last kept')
 })
 
+test('readWorkspaceRaw survives a throwing storage instead of crashing boot', () => {
+  const throwing = {
+    getItem() { throw new DOMException('The operation is insecure.', 'SecurityError') },
+  }
+  // Must not throw — sessionStorage.getItem can raise in a sandboxed frame, and
+  // the Shell reads it while building the reducer's initial state.
+  assert.equal(paneModel.readWorkspaceRaw(throwing), null)
+  // The null feeds parseWorkspace, which then seeds from the flat fallback.
+  const ws = paneModel.parseWorkspace(paneModel.readWorkspaceRaw(throwing), {
+    fallbackTabs: [makeTab('chat', 'a')],
+  })
+  assert.deepEqual(ws, paneModel.seedFromFlatTabs([makeTab('chat', 'a')]))
+
+  const working = fakeStorage(JSON.stringify(paneModel.seedFromFlatTabs([makeTab('chat', 'z')])))
+  assert.ok(typeof paneModel.readWorkspaceRaw(working) === 'string', 'a healthy storage reads through')
+})
+
 test('serialize/parse round-trips a valid workspace', () => {
   const ws = paneModel.moveTab(
     paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('app', 7)]),
@@ -555,6 +639,65 @@ test('parseWorkspace repairs a recoverable blob instead of falling back', () => 
   assertInvariants(ws)
 })
 
+test('parseWorkspace falls back on a malformed split node', () => {
+  const fallbackTabs = [makeTab('chat', 'seed')]
+  const seed = paneModel.seedFromFlatTabs(fallbackTabs)
+  const bad = JSON.stringify({
+    v: 1,
+    layout: { id: null, dir: 'diagonal', ratio: 0.5, a: 'pA', b: 'pB' },
+    panes: {
+      pA: { id: 'pA', tabs: [makeTab('chat', 'a')], activeTabKey: 'chat:a' },
+      pB: { id: 'pB', tabs: [makeTab('chat', 'b')], activeTabKey: 'chat:b' },
+    },
+    focusedPaneId: 'pA',
+    nextId: 3,
+  })
+  // normalize keeps the split's shape verbatim, so isValidWorkspace is what
+  // catches id:null / dir:'diagonal' and forces the fallback.
+  assert.deepEqual(paneModel.parseWorkspace(bad, { fallbackTabs }), seed)
+})
+
+test('parseWorkspace falls back when a pane exceeds MAX_PANE_TABS', () => {
+  const fallbackTabs = [makeTab('chat', 'seed')]
+  const seed = paneModel.seedFromFlatTabs(fallbackTabs)
+  const over = []
+  for (let i = 0; i < paneModel.MAX_PANE_TABS + 1; i += 1) over.push(makeTab('chat', `c${i}`))
+  const raw = JSON.stringify({
+    v: 1,
+    layout: 'p0',
+    panes: { p0: { id: 'p0', tabs: over, activeTabKey: 'chat:c0' } },
+    focusedPaneId: 'p0',
+    nextId: 1,
+  })
+  // normalize does not trim per-pane tab count; the cap is an accepted-on-read
+  // invariant, so an over-cap blob is rejected rather than silently served.
+  assert.deepEqual(paneModel.parseWorkspace(raw, { fallbackTabs }), seed)
+})
+
+test('normalize recomputes nextId so a stale generator cannot lose a tab', () => {
+  // A persisted two-pane workspace whose stored nextId (1) lags its live ids
+  // (pane p1 exists). The next edge move must NOT mint a colliding p1 and lose a
+  // tab when the duplicate leaf collapses.
+  const persisted = paneModel.parseWorkspace(JSON.stringify({
+    v: 1,
+    layout: { id: 's5', dir: 'row', a: 'p0', b: 'p1', ratio: 0.5 },
+    panes: {
+      p0: { id: 'p0', tabs: [makeTab('chat', 'keep'), makeTab('chat', 'spare')], activeTabKey: 'chat:keep' },
+      p1: { id: 'p1', tabs: [makeTab('chat', 'other')], activeTabKey: 'chat:other' },
+    },
+    focusedPaneId: 'p0',
+    nextId: 1,
+  }), { fallbackTabs: [] })
+  assert.ok(persisted.nextId > 5, 'nextId is recomputed past every live suffix')
+
+  const before = new Set(paneModel.flatten(persisted).map(tabKey))
+  const moved = paneModel.moveTab(persisted, 'chat:spare', { paneId: 'p1', edge: 'right' })
+  const after = new Set(paneModel.flatten(moved).map(tabKey))
+  for (const key of before) assert.ok(after.has(key), `${key} survived the split (no id collision)`)
+  assert.equal(after.size, before.size, 'no tab lost, none duplicated')
+  assertInvariants(moved)
+})
+
 test('reducer no-ops return the same state reference', () => {
   const state = paneModel.initialWorkspaceState(
     paneModel.seedFromFlatTabs([makeTab('chat', 'a')]),
@@ -618,21 +761,81 @@ test('reducer PRUNE clears the undo slot', () => {
   assert.equal(pruned.undo, null, 'PRUNE clears the slot')
 })
 
-test('reducer APPLY_FLAT preserves the active tab and is not undoable', () => {
+test('reducer APPLY_PLACEMENT preserves the active tab and is undoable', () => {
   const seeded = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b'), makeTab('app', 7)])
   const start = { ws: paneModel.setActiveTab(seeded, 'p0', 'chat:a'), undo: { ws: seeded, label: 'prior' } }
   assert.equal(start.ws.panes.p0.activeTabKey, 'chat:a')
 
   const applied = paneModel.workspaceReducer(start, {
-    type: 'APPLY_FLAT',
-    tabs: [makeTab('chat', 'a'), makeTab('app', 7), makeTab('app', 9)],
+    type: 'APPLY_PLACEMENT',
+    resolve: () => [makeTab('chat', 'a'), makeTab('app', 7), makeTab('app', 9)],
   })
   assert.deepEqual(
     paneModel.flatten(applied.ws),
     [makeTab('chat', 'a'), makeTab('app', 7), makeTab('app', 9)],
   )
   assert.equal(applied.ws.panes.p0.activeTabKey, 'chat:a', 'the surviving active tab is kept')
-  assert.equal(applied.undo, start.undo, 'APPLY_FLAT carries the existing slot forward untouched')
+  assert.equal(applied.undo.ws, start.ws, 'placement snapshots the pre-placement workspace (undoable)')
+})
+
+test('reducer APPLY_PLACEMENT composes batched dispatches instead of clobbering', () => {
+  // The former bug: two placements resolved against the same stale render
+  // snapshot, so the second REPLACED the first. A resolve function run against
+  // current reducer state makes the second see the first.
+  const s0 = paneModel.initialWorkspaceState(paneModel.seedFromFlatTabs([makeTab('chat', 'home')]))
+  const s1 = paneModel.workspaceReducer(s0, {
+    type: 'APPLY_PLACEMENT', resolve: (tabs) => [...tabs, makeTab('app', 1)],
+  })
+  const s2 = paneModel.workspaceReducer(s1, {
+    type: 'APPLY_PLACEMENT', resolve: (tabs) => [...tabs, makeTab('app', 2)],
+  })
+  const keys = paneModel.flatten(s2.ws).map(tabKey)
+  assert.ok(keys.includes('app:1'), 'first placement survives the second')
+  assert.ok(keys.includes('app:2'), 'second placement is applied too')
+})
+
+test('reducer clears the slot on any intervening non-undoable change', () => {
+  // Single-slot undo is only for the IMMEDIATELY preceding mutation. A plain
+  // (non-evicting) open after a move must clear the slot so a later UNDO cannot
+  // clobber the open by restoring the stale pre-move snapshot.
+  const start = paneModel.initialWorkspaceState(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
+  )
+  const moved = paneModel.workspaceReducer(start, {
+    type: 'MOVE_TAB', tabKey: 'chat:b', target: { paneId: 'p0', edge: 'right' },
+  })
+  assert.ok(moved.undo, 'the move set the slot')
+  const opened = paneModel.workspaceReducer(moved, {
+    type: 'OPEN_TAB', tab: makeTab('chat', 'later'), activate: true,
+  })
+  assert.equal(opened.undo, null, 'a plain open clears the stale slot')
+  const undone = paneModel.workspaceReducer(opened, { type: 'UNDO_LAST' })
+  assert.equal(undone, opened, 'UNDO_LAST is a no-op — the later tab is not clobbered')
+  assert.ok(paneModel.paneOf(undone.ws, 'chat:later'), 'the later tab is still open')
+})
+
+test('reducer CLOSE_TAB reason:deleted clears the slot; a user close snapshots', () => {
+  const seed = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')])
+
+  // User close (strip ✕) is reversible.
+  const userClose = paneModel.workspaceReducer(
+    { ws: seed, undo: null },
+    { type: 'CLOSE_TAB', tabKey: 'chat:b' },
+  )
+  assert.ok(userClose.undo, 'a user close is undoable')
+  assert.equal(
+    paneModel.workspaceReducer(userClose, { type: 'UNDO_LAST' }).ws, seed,
+    'and UNDO brings the tab back',
+  )
+
+  // Deletion must NOT be resurrectable: the slot is cleared, and any pre-existing
+  // slot is cleared too (an older snapshot could resurrect the deleted resource).
+  const deleteClose = paneModel.workspaceReducer(
+    { ws: seed, undo: { ws: null, label: 'stale' } },
+    { type: 'CLOSE_TAB', tabKey: 'chat:b', reason: 'deleted' },
+  )
+  assert.ok(!paneModel.paneOf(deleteClose.ws, 'chat:b'), 'the tab is gone')
+  assert.equal(deleteClose.undo, null, 'reason:deleted clears the slot — no resurrection')
 })
 
 test('reducer RESET_FLAT clears the slot', () => {

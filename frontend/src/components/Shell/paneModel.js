@@ -56,6 +56,31 @@ function depthOf(node) {
   return 1 + Math.max(depthOf(node.a), depthOf(node.b))
 }
 
+// Every split id in the tree, in-order.
+function splitIdsOf(node, out = []) {
+  if (isSplit(node)) {
+    out.push(node.id)
+    splitIdsOf(node.a, out)
+    splitIdsOf(node.b, out)
+  }
+  return out
+}
+
+// The trailing integer of a generated id ('p12' -> 12, 's3' -> 3), else 0.
+function idSuffix(id) {
+  const m = /(\d+)$/.exec(typeof id === 'string' ? id : '')
+  return m ? parseInt(m[1], 10) : 0
+}
+
+// The valid drop edges; anything else is not a split direction and no-ops.
+const EDGES = new Set(['left', 'right', 'top', 'bottom'])
+
+// Keep only the last MAX_PANE_TABS tabs — the legacy readOpenTabs posture, so a
+// pane never persists over its cap.
+function capTabs(tabs) {
+  return tabs.length > MAX_PANE_TABS ? tabs.slice(tabs.length - MAX_PANE_TABS) : tabs
+}
+
 // Ratio is a's fraction, stored clamped to [0.1, 0.9]; a non-finite ratio is a
 // degenerate split and resets to an even 0.5 (px minimums are a render concern).
 function clampRatio(ratio) {
@@ -243,7 +268,15 @@ export function normalize(ws) {
     focused = nearestSurviving(orderedIds, placed, ws.focusedPaneId)
   }
 
-  const nextId = Number.isInteger(ws.nextId) && ws.nextId > 0 ? ws.nextId : 1
+  // Recompute the id generator from the tree itself rather than trusting the
+  // stored value: a persisted `nextId` that lags the live ids (a corrupt or
+  // rolled-back blob) would mint a colliding `pN`/`sN`, overwrite the existing
+  // node, and lose its tab when the duplicate leaf collapses. Deterministic
+  // repair: one past the largest pane/split suffix in play.
+  let maxId = 0
+  for (const id of Object.keys(panes)) maxId = Math.max(maxId, idSuffix(id))
+  for (const id of splitIdsOf(layout)) maxId = Math.max(maxId, idSuffix(id))
+  const nextId = maxId + 1
   const result = { v: 1, layout, panes, focusedPaneId: focused, nextId }
   return deepEqual(result, ws) ? ws : result
 }
@@ -265,10 +298,11 @@ function commitBounded(ws, candidate) {
   return deepEqual(result, ws) ? ws : result
 }
 
-// Seed a single-pane workspace from today's flat open set. Tabs are sanitized
-// and deduped; the last tab is active (the on-screen one under the flat model).
+// Seed a single-pane workspace from today's flat open set. Tabs are sanitized,
+// deduped, and capped to the last MAX_PANE_TABS (legacy readOpenTabs posture);
+// the last tab is active (the on-screen one under the flat model).
 export function seedFromFlatTabs(tabs) {
-  const clean = dedupTabs(sanitizeTabs(tabs))
+  const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
   return {
@@ -327,13 +361,14 @@ function doOpenTab(ws, tab, { paneId, activate = true } = {}) {
   let tabs = target.tabs
   let evicted = null
   if (tabs.length >= MAX_PANE_TABS) {
-    // Evict the oldest tab that is neither the newcomer (not present yet) nor
-    // the pane's protected active tab — the primary open never silently fails.
-    const victimIdx = tabs.findIndex(t => tabModel.tabKey(t) !== target.activeTabKey)
-    if (victimIdx !== -1) {
-      evicted = tabs[victimIdx]
-      tabs = tabs.filter((_, i) => i !== victimIdx)
-    }
+    // Legacy parity — PR1's gate is "no visible strip change." tabModel.addTab
+    // dropped the OLDEST tab unconditionally, so we do the same: no active-tab
+    // protection here. The design §3.6 protected + named + undoable eviction
+    // (which needs a toast to name what left) ships with PR3's toast UI. The
+    // evicting open still snapshots undo (see the reducer), so a future toast's
+    // Undo already has its restore point.
+    evicted = tabs[0]
+    tabs = tabs.slice(1)
   }
   tabs = [...tabs, clean]
   const candidate = {
@@ -386,11 +421,13 @@ export function moveTab(ws, tabKey, target) {
   if (!src || !target) return ws
   const tab = src.tabs.find(t => tabModel.tabKey(t) === tabKey)
 
-  if (target.root === true && target.edge != null) {
-    return rootSplitMove(ws, src, tab, tabKey, target.edge)
-  }
-  if (target.paneId != null && target.edge != null) {
-    return edgeSplitMove(ws, src, tab, tabKey, target.paneId, target.edge)
+  if (target.edge != null) {
+    // A malformed edge is not a silent bottom-split; reject the whole move so a
+    // corrupt drag payload can't reorganize the workspace behind the user.
+    if (!EDGES.has(target.edge)) return ws
+    if (target.root === true) return rootSplitMove(ws, src, tab, tabKey, target.edge)
+    if (target.paneId != null) return edgeSplitMove(ws, src, tab, tabKey, target.paneId, target.edge)
+    return ws
   }
   if (target.paneId != null) {
     return indexMove(ws, src, tab, tabKey, target.paneId, target.index)
@@ -401,6 +438,11 @@ export function moveTab(ws, tabKey, target) {
 function indexMove(ws, src, tab, tabKey, destId, index) {
   const dest = ws.panes[destId]
   if (!dest) return ws
+  // A cross-pane move into a pane already at its cap is refused (same-reference
+  // no-op) — MAX_PANE_TABS is an invariant, and unlike an open there is no
+  // "evict to make room" contract for a drag. A same-pane reorder is exempt: it
+  // does not change the count.
+  if (destId !== src.id && dest.tabs.length >= MAX_PANE_TABS) return ws
   const panes = { ...ws.panes }
   const srcTabs = src.tabs.filter(t => tabModel.tabKey(t) !== tabKey)
   const base = destId === src.id
@@ -562,11 +604,29 @@ export function visibleTabs(ws) {
   return out
 }
 
+// Recursively validate the layout tree's SHAPE: every node is a leaf string or a
+// well-formed split (string id, dir in {'row','col'}, ratio finite in
+// [0.1,0.9]), and split ids are unique. normalize keeps a corrupt split's fields
+// verbatim (it repairs panes, not split shape), so this is what stops an
+// `{id:null, dir:'diagonal'}` blob from reaching the renderer — parse falls back.
+function isValidLayout(node, splitIds) {
+  if (typeof node === 'string') return true
+  if (!isSplit(node)) return false
+  if (typeof node.id !== 'string' || splitIds.has(node.id)) return false
+  splitIds.add(node.id)
+  if (node.dir !== 'row' && node.dir !== 'col') return false
+  const ratio = Number(node.ratio)
+  if (!Number.isFinite(ratio) || ratio < 0.1 || ratio > 0.9) return false
+  return isValidLayout(node.a, splitIds) && isValidLayout(node.b, splitIds)
+}
+
 // A workspace that survives every invariant with no repair left to do — the gate
 // parseWorkspace applies after normalize to catch what normalize won't rebalance
-// (too deep, too wide) and fall back rather than serve a broken tree.
+// (too deep, too wide, malformed splits) and fall back rather than serve a broken
+// tree.
 function isValidWorkspace(ws) {
   if (!ws || ws.v !== 1 || ws.layout == null || !ws.panes) return false
+  if (!isValidLayout(ws.layout, new Set())) return false
   const ids = leafIds(ws.layout)
   if (ids.length === 0 || ids.length > MAX_PANES) return false
   if (depthOf(ws.layout) > MAX_DEPTH) return false
@@ -582,6 +642,7 @@ function isValidWorkspace(ws) {
   const seenTab = new Set()
   for (const id of ids) {
     const pane = ws.panes[id]
+    if (pane.tabs.length > MAX_PANE_TABS) return false
     const keys = pane.tabs.map(tabModel.tabKey)
     for (const tab of pane.tabs) {
       if (tab.kind === 'app' && !Number.isFinite(Number(tab.id))) return false
@@ -597,6 +658,19 @@ function isValidWorkspace(ws) {
 
 export function serializeWorkspace(ws) {
   return JSON.stringify(ws)
+}
+
+// The raw stored blob, or null if storage is unavailable. sessionStorage.getItem
+// can THROW (SecurityError in a sandboxed frame, disabled storage, a privacy
+// policy), and the caller reads it while evaluating parseWorkspace's argument —
+// outside parseWorkspace's own try/catch. Guarding the read here (the
+// tabModel.readOpenTabs posture) keeps a broken storage from taking down boot.
+export function readWorkspaceRaw(storage) {
+  try {
+    return storage.getItem(STORAGE_KEY)
+  } catch {
+    return null
+  }
 }
 
 // Forgiving read: any structural failure — bad JSON, wrong version, or an
@@ -622,7 +696,10 @@ export function parseWorkspace(raw, { fallbackTabs = [] } = {}) {
 function applyFlat(ws, tabs) {
   const pane = ws.panes[ws.focusedPaneId]
   if (!pane) return ws
-  const clean = dedupTabs(sanitizeTabs(tabs))
+  // Cap defensively so a placement can never persist an over-cap pane; the flat
+  // resolver already trims to tabModel.MAX_TABS, so this is a belt-and-braces
+  // guard on the invariant, not a behavior change.
+  const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
   const keys = clean.map(tabModel.tabKey)
   const active = (pane.activeTabKey != null && keys.includes(pane.activeTabKey))
     ? pane.activeTabKey
@@ -639,15 +716,30 @@ export function initialWorkspaceState(ws) {
 }
 
 // Single-slot-undo reducer over the workspace. state = { ws, undo } where undo
-// is { ws, label } | null. The undoable set is enumerated, not implied (§1):
-// MOVE_TAB, edge-splits (also MOVE_TAB), CLOSE_TAB, an OPEN_TAB that evicted, and
-// SET_RATIO all snapshot the pre-action workspace into the slot. SET_ACTIVE,
-// FOCUS, a plain OPEN_TAB, and APPLY_FLAT change the workspace but carry the
-// existing slot forward untouched. PRUNE and RESET_FLAT clear the slot so Cmd/Z
-// can never resurrect a deleted chat/app. APPLY_FLAT is deliberately NOT
-// undoable: the design lists APPLY_PLACEMENT as undoable, but the PR1 flat bridge
-// mirrors today's non-undoable automatic placement. Returns the SAME state
-// reference on a no-op.
+// is { ws, label } | null.
+//
+// The slot only ever holds the IMMEDIATELY-preceding mutation. This is the
+// invariant that keeps Undo honest: a snapshot carried across an intervening
+// change would, when applied, silently roll that intervening change back too. So
+// every action that changes the workspace either SETS the slot (it is the new
+// undo target) or CLEARS it — never leaves a stale one in place.
+//
+//   Sets the slot (undoable):   CLOSE_TAB (user close), MOVE_TAB / edge-splits,
+//                               an OPEN_TAB that evicted, SET_RATIO,
+//                               APPLY_PLACEMENT.
+//   Clears the slot on change:  SET_ACTIVE, FOCUS, a plain (non-evicting)
+//                               OPEN_TAB, PRUNE, RESET_FLAT, and a CLOSE_TAB
+//                               with reason:'deleted'.
+//
+// PRUNE, RESET_FLAT, and reason:'deleted' close clear even when they change
+// nothing, because the resource is gone and ANY older snapshot could resurrect
+// it — the exact hazard the flat-strip model had no defense against.
+// APPLY_PLACEMENT is undoable (agent rearrangements are reversible per design)
+// and, crucially, takes a `resolve` FUNCTION rather than a pre-resolved array:
+// the reducer runs it against the CURRENT reducer state, so two placements
+// dispatched in one React batch compose (the second sees the first) instead of
+// the second clobbering the first from a stale render snapshot. Returns the SAME
+// state reference on a no-op.
 export function workspaceReducer(state, action) {
   const { ws, undo } = state
   switch (action.type) {
@@ -657,12 +749,21 @@ export function workspaceReducer(state, action) {
         activate: action.activate,
       })
       if (next === ws) return state
+      // Only an evicting open is undoable (its snapshot restores the evicted
+      // tab); a plain open clears the slot like any other non-undoable change.
       return evicted
         ? { ws: next, undo: { ws, label: 'Opened tab' } }
-        : { ws: next, undo }
+        : { ws: next, undo: null }
     }
     case 'CLOSE_TAB': {
       const next = closeTab(ws, action.tabKey)
+      if (action.reason === 'deleted') {
+        // The backing chat/app was deleted; a snapshot here (or any older one)
+        // would resurrect the tab without going through backend recovery. Clear.
+        if (next === ws && undo == null) return state
+        return { ws: next, undo: null }
+      }
+      // User close (the strip ✕): reversible.
       if (next === ws) return state
       return { ws: next, undo: { ws, label: action.label || 'Closed tab' } }
     }
@@ -673,11 +774,11 @@ export function workspaceReducer(state, action) {
     }
     case 'SET_ACTIVE': {
       const next = setActiveTab(ws, action.paneId, action.tabKey)
-      return next === ws ? state : { ws: next, undo }
+      return next === ws ? state : { ws: next, undo: null }
     }
     case 'FOCUS': {
       const next = focusPane(ws, action.paneId)
-      return next === ws ? state : { ws: next, undo }
+      return next === ws ? state : { ws: next, undo: null }
     }
     case 'SET_RATIO': {
       const next = setRatio(ws, action.splitId, action.ratio)
@@ -692,9 +793,12 @@ export function workspaceReducer(state, action) {
       if (next === ws && undo == null) return state
       return { ws: next, undo: null }
     }
-    case 'APPLY_FLAT': {
-      const next = applyFlat(ws, action.tabs)
-      return next === ws ? state : { ws: next, undo }
+    case 'APPLY_PLACEMENT': {
+      // resolve: (flatTabs) => flatTabs' — run against the CURRENT flat tabs so
+      // batched placements compose instead of clobbering each other.
+      const next = applyFlat(ws, action.resolve(flatten(ws)))
+      if (next === ws) return state
+      return { ws: next, undo: { ws, label: 'Workspace placement' } }
     }
     case 'UNDO_LAST': {
       if (!undo) return state
