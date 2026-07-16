@@ -14,7 +14,7 @@ guide gets a fresh clone to a running dev/test loop.
 | `frontend/src/` | React 19 + Vite shell (chat UI, drawer, mini-app iframe canvas). |
 | `skill/core.md` | The agent's system prompt (the "constitution"); read from the live checkout after restart, with an image-baked degraded-boot fallback. |
 | `backend/scripts/seed-skills/` | Per-topic agent skills (building-apps, theming, cron, …), seeded into `/data/shared/skills/` create-if-absent on first boot. |
-| `core-apps/` | Built-in mini-apps (`memory`, `reflection`) shipped with the platform. |
+| `core-apps/` | Legacy snapshots only. Memory and Reflection ship from `mobius-os/app-memory` and `mobius-os/app-reflection`: they are auto-installed on first boot, then remain editable and updatable like any catalog app. |
 | `tests/` | Playwright end-to-end suite (repo root). |
 | `backend/tests/` | pytest backend suite. |
 

@@ -1,19 +1,12 @@
-"""First-boot bootstrap — ensure_store_installed contract.
+"""First-boot bootstrap — ensure_bootstrap_apps_installed contract.
 
-Validates the four behaviors that matter for boot-time correctness:
-  1. Calls install_from_manifest with the pinned store URL when no
-     App with slug='store' exists.
-  2. Skips the install call when one already does.
-  3. Swallows install failures so lifespan can't crash.
-  4. Respects MOEBIUS_SKIP_BOOTSTRAP=1 so tests + offline boots don't
-     hit GitHub.
-
-The FastAPI startup-hook wiring itself isn't exercised here — that's
-TestClient lifecycle territory and the in-process call is a one-liner
-that's easier to read than test.
+Validates the boot-time invariants: ordered installs, canonical manifest
+identity, per-app uninstall policy and failure isolation, legacy migration,
+and the offline-test escape hatch.
 """
 
-from unittest.mock import patch, AsyncMock
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -22,65 +15,132 @@ from app import models
 from app.bootstrap import (
   BOOTSTRAP_STORE_MANIFEST_URL,
   LEGACY_PLATFORM_APP_MANIFEST_URLS,
-  ensure_store_installed,
+  _migrate_legacy_platform_apps,
+  ensure_bootstrap_apps_installed,
 )
 
 
-@pytest.mark.asyncio
-async def test_bootstrap_installs_store_when_absent(db, monkeypatch):
-  """No App with the bootstrap manifest_url → install_from_manifest
-  called with the pinned URL.
+def _install_result(name="App", slug="app", app_id=1, mode="install"):
+  app = models.App(id=app_id, name=name, slug=slug)
+  return app, mode, [], {}, [], "none"
 
-  Pre-assert that no row matches the manifest_url so the test's
-  starting state is unambiguous — a slug='store' row with a different
-  manifest_url would still satisfy "bootstrap absent" under the new
-  identity rule.
-  """
+
+def _bootstrap_urls():
+  return [
+    BOOTSTRAP_STORE_MANIFEST_URL,
+    LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"],
+    LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"],
+  ]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch):
+  """A fresh database installs the store first, then Memory and Reflection."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  assert (
-    db.query(models.App)
-    .filter(models.App.manifest_url == BOOTSTRAP_STORE_MANIFEST_URL)
-    .first()
-  ) is None
-  mock_app = models.App(id=1, name="Store", slug="store")
-  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}, [], "none"))
+  install_mock = AsyncMock(return_value=_install_result())
+
   with patch("app.bootstrap.install_from_manifest", install_mock):
-    await ensure_store_installed(db)
-  assert install_mock.await_count == 1
-  call_kwargs = install_mock.await_args.kwargs
-  assert call_kwargs["manifest_url"] == BOOTSTRAP_STORE_MANIFEST_URL
-  assert call_kwargs["manifest"] is None
-  assert call_kwargs["raw_base"] is None
+    await ensure_bootstrap_apps_installed(db)
+
+  assert install_mock.await_count == 3
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == _bootstrap_urls()
+  for call in install_mock.await_args_list:
+    assert call.kwargs["manifest"] is None
+    assert call.kwargs["raw_base"] is None
+    assert call.kwargs["source"] == "bootstrap"
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
-  """Pre-existing row with the bootstrap manifest_url → install never
-  called.
-
-  Identity is keyed on manifest_url (not slug) so an app the user
-  built that happens to be called "store" doesn't accidentally
-  satisfy this check, and the bootstrapped store's actual slug
-  (which may be 'app-store' if 'store' was taken) doesn't have to
-  be guessed.
-  """
+async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
+  """Store returns after uninstall; Memory stays gone; live Reflection skips."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
-  existing = models.App(
-    name="Store",
-    description="already here",
-    jsx_source="export default function App() {}",
-    slug="app-store",
-    # Install stores the CANONICAL key, not the bare URL — seed that so the
-    # bootstrap's canonical-prefix lookup matches (Codex review round-11 #1).
-    manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
+
+  deleted_at = datetime.now(timezone.utc)
+  db.add_all([
+    models.App(
+      name="Store",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="store",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_STORE_MANIFEST_URL, "store",
+      ),
+      deleted_at=deleted_at,
+    ),
+    models.App(
+      name="Memory",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="memory",
+      manifest_url=_canonical_identity_key(
+        LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], "memory",
+      ),
+      deleted_at=deleted_at,
+    ),
+    models.App(
+      name="Reflection",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="reflection",
+      manifest_url=_canonical_identity_key(
+        LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], "reflection",
+      ),
+    ),
+  ])
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result("Store", "store"))
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  install_mock.assert_awaited_once()
+  assert (
+    install_mock.await_args.kwargs["manifest_url"]
+    == BOOTSTRAP_STORE_MANIFEST_URL
   )
-  db.add(existing)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
+  """Canonical manifest identity, rather than slug, makes installs idempotent."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key
+
+  db.add_all([
+    models.App(
+      name="Store",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="app-store",
+      manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
+    ),
+    models.App(
+      name="Memory",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="memory-custom",
+      manifest_url=_canonical_identity_key(
+        LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], "memory",
+      ),
+    ),
+    models.App(
+      name="Reflection",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="reflection-custom",
+      manifest_url=_canonical_identity_key(
+        LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], "reflection",
+      ),
+    ),
+  ])
   db.commit()
 
   install_mock = AsyncMock()
   with patch("app.bootstrap.install_from_manifest", install_mock):
-    await ensure_store_installed(db)
+    await ensure_bootstrap_apps_installed(db)
   install_mock.assert_not_awaited()
 
 
@@ -90,19 +150,7 @@ async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
 async def test_bootstrap_migrates_active_legacy_platform_rows(
   source_shape, manifest_url_shape, db, monkeypatch,
 ):
-  """The migration is ONE-SHOT: it moves un-migrated baked rows forward through
-  the trusted catalog entry, but never re-fires on a row that already carries a
-  manifest_url.
-
-  Two un-migrated shapes exist. A `platform_core` row still points at
-  /data/platform/core-apps and is migrated regardless of its manifest_url (the
-  catalog install moves it out of that tree, so it stops matching next boot). A
-  `data_apps` row already sits at the steady-state /data/apps/<slug> path, so it
-  only counts as un-migrated while its manifest_url is empty — once the identity
-  is stamped (raw or canonical), re-migrating would re-fetch GitHub every restart
-  and could fast-forward the app past owner review. Matching data_apps + a set
-  manifest_url as legacy was the bug this pins closed.
-  """
+  """The legacy migration remains one-shot and limited to retired sources."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.config import get_settings
   from app.install import _canonical_identity_key
@@ -118,106 +166,89 @@ async def test_bootstrap_migrates_active_legacy_platform_rows(
     "raw": raw_memory_manifest,
     "canonical": _canonical_identity_key(raw_memory_manifest, "memory"),
   }[manifest_url_shape]
-  db.add_all([
-    models.App(
-      name="Memory",
-      description="legacy platform app",
-      jsx_source="export default function App() {}",
-      slug="memory",
-      source_dir=legacy_source,
-      manifest_url=stored_manifest_url,
-    ),
-    models.App(
-      name="Store",
-      description="already here",
-      jsx_source="export default function App() {}",
-      slug="store",
-      manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
-    ),
-  ])
+  db.add(models.App(
+    name="Memory",
+    description="legacy platform app",
+    jsx_source="export default function App() {}",
+    slug="memory",
+    source_dir=legacy_source,
+    manifest_url=stored_manifest_url,
+  ))
   db.commit()
 
-  # A platform-core row is always un-migrated (source still in that tree); a
-  # data_apps row is un-migrated only while its manifest_url is empty.
   should_migrate = source_shape == "platform_core" or manifest_url_shape == "empty"
-
-  mock_app = models.App(id=3, name="Memory", slug="memory")
-  install_mock = AsyncMock(return_value=(mock_app, "update", [], {}, [], "none"))
+  install_mock = AsyncMock(
+    return_value=_install_result("Memory", "memory", app_id=3, mode="update"),
+  )
   with patch("app.bootstrap.install_from_manifest", install_mock):
-    await ensure_store_installed(db)
+    await _migrate_legacy_platform_apps(db)
 
   if should_migrate:
-    assert install_mock.await_count == 1
+    install_mock.assert_awaited_once()
     assert (
       install_mock.await_args.kwargs["manifest_url"]
       == LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
     )
     assert install_mock.await_args.kwargs["source"] == "bootstrap"
   else:
-    assert install_mock.await_count == 0
+    install_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_bootstrap_ignores_unrelated_store_slug(db, monkeypatch):
-  """A user-built app with slug='store' but no bootstrap manifest_url
-  does NOT prevent bootstrap. Under the prior slug-keyed check, this
-  case mis-treated the bootstrapped store as already-installed and
-  skipped the real install.
-  """
+  """A user-built app named store does not satisfy canonical app identity."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  user_built = models.App(
+  db.add(models.App(
     name="Store",
     description="user's own app, unrelated to the bootstrap manifest",
     jsx_source="export default function App() {}",
     slug="store",
     manifest_url=None,
-  )
-  db.add(user_built)
+  ))
   db.commit()
 
-  mock_app = models.App(id=2, name="Store", slug="app-store")
-  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}, [], "none"))
+  install_mock = AsyncMock(return_value=_install_result())
   with patch("app.bootstrap.install_from_manifest", install_mock):
-    await ensure_store_installed(db)
-  assert install_mock.await_count == 1
-  assert (
-    install_mock.await_args.kwargs["manifest_url"]
-    == BOOTSTRAP_STORE_MANIFEST_URL
-  )
+    await ensure_bootstrap_apps_installed(db)
+
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == _bootstrap_urls()
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_logs_but_doesnt_raise_on_network_failure(
+async def test_bootstrap_failure_doesnt_block_remaining_apps(
   db, monkeypatch, caplog,
 ):
-  """install_from_manifest raises HTTPException(502) → returns cleanly.
-
-  Bootstrap failure on first boot must not crash uvicorn — without
-  the server, there's no recovery surface to install the store from.
-  """
+  """A failed first install is logged and the remaining apps still install."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  install_mock = AsyncMock(side_effect=HTTPException(502, "upstream down"))
+  install_mock = AsyncMock(side_effect=[
+    HTTPException(502, "upstream down"),
+    _install_result("Memory", "memory", app_id=2),
+    _install_result("Reflection", "reflection", app_id=3),
+  ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
-    # Should NOT raise — explicit assert on no-exception behavior.
-    await ensure_store_installed(db)
-  assert install_mock.await_count == 1
-  # The failure is logged so an operator can find out why the store
-  # didn't auto-install. Don't pin the exact message — just that it
-  # surfaced as an exception-level record from the bootstrap logger.
+    await ensure_bootstrap_apps_installed(db)
+
+  assert install_mock.await_count == 3
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == _bootstrap_urls()
   bootstrap_errors = [
-    r for r in caplog.records
-    if r.name == "mobius.bootstrap" and r.levelname == "ERROR"
+    record for record in caplog.records
+    if record.name == "mobius.bootstrap" and record.levelname == "ERROR"
   ]
   assert bootstrap_errors, "expected bootstrap failure to log at ERROR"
 
 
 @pytest.mark.asyncio
 async def test_bootstrap_respects_skip_env_var(db, monkeypatch):
-  """MOEBIUS_SKIP_BOOTSTRAP=1 → install_from_manifest never called even
-  when the DB is empty. This is the env var docker-compose.test.yml
-  sets so the test suite can't accidentally reach GitHub."""
+  """MOEBIUS_SKIP_BOOTSTRAP=1 skips migrations and every app install."""
   monkeypatch.setenv("MOEBIUS_SKIP_BOOTSTRAP", "1")
   install_mock = AsyncMock()
-  with patch("app.bootstrap.install_from_manifest", install_mock):
-    await ensure_store_installed(db)
+  migration_mock = AsyncMock()
+  with patch("app.bootstrap.install_from_manifest", install_mock), \
+       patch("app.bootstrap._migrate_legacy_platform_apps", migration_mock):
+    await ensure_bootstrap_apps_installed(db)
   install_mock.assert_not_awaited()
+  migration_mock.assert_not_awaited()

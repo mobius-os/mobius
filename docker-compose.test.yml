@@ -190,9 +190,9 @@ services:
       # unrelated `git ls-remote` from failing while discovering the broken
       # outer worktree pointer first.
       - GIT_CEILING_DIRECTORIES=/workspace
-      # Bootstrap fetches the curated store manifest from GitHub on
-      # first boot. Tests must not depend on outbound network — set
-      # this so ensure_store_installed() returns immediately.
+      # Bootstrap fetches curated app manifests from GitHub on first boot.
+      # Tests must not depend on outbound network — set
+      # this so ensure_bootstrap_apps_installed() returns immediately.
       - MOEBIUS_SKIP_BOOTSTRAP=1
     working_dir: /workspace/backend
     entrypoint: ["python", "-m", "pytest", "tests/", "-v"]
