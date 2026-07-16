@@ -288,6 +288,13 @@ export default function ChatView({
   onComposerFocusHandled = null,
   externalRunSignal = EMPTY_CHAT_RUN_SIGNAL,
   onExternalRunEvent = null,
+  // Multi-pane workspace (design §2): when this chat renders inside a tiled
+  // pane, Shell passes the pane's projected CONTENT height (pane rect minus the
+  // strip). A change means a committed geometry event (divider commit,
+  // projection/mode flip, rotation, pane open/close) — forwarded to the scroll
+  // controller's paneResized() below. Null for a single-pane chat (today's
+  // behavior — the controller's own ResizeObserver owns resize there).
+  paneContentHeight = null,
 }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
@@ -825,6 +832,7 @@ export default function ChatView({
     reapplyActiveMode,
     settleNonPin,
     settleStreamingPin,
+    paneResized,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -839,6 +847,15 @@ export default function ChatView({
       || initialEntryPhase === 'ready',
     initialEntrySettled: initialEntryPhase === 'ready',
   })
+
+  // Forward committed pane-geometry changes to the scroll controller. A new
+  // projected height (divider commit, projection/mode flip, rotation) sets the
+  // layout-derived floor and re-applies the active mode under the reader gate
+  // (design §2). Skipped entirely for single-pane chats (paneContentHeight
+  // null) so today's resize behavior is untouched.
+  useEffect(() => {
+    if (paneContentHeight != null) paneResized(paneContentHeight)
+  }, [paneContentHeight, paneResized])
 
   function makeSendPinIntent(willPin) {
     return {

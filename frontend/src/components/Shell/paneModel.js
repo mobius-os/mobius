@@ -17,6 +17,13 @@
 // workspacePlacement convention, so React can bail on an unchanged tree).
 
 import * as tabModel from './tabModel.js'
+// The render-time px clamp is shared with the divider drag state machine
+// (splitHelper.makeSplit uses the same function). projectLayout below clamps
+// every split's ratio against 280/200 minimums so a stored ratio can never
+// project a pane below the usable floor (design §2, §4). Importing one pure
+// helper keeps paneModel dependency-free of the DOM while reusing the exact
+// clamp semantics the drag layer commits with.
+import { clampRatio as clampRatioPx } from '../../lib/splitHelper.js'
 
 // A pane keeps at most this many tabs; it is the per-pane successor of
 // tabModel.MAX_TABS (whose comment reserved exactly this). Only openTab enforces
@@ -27,6 +34,44 @@ export const MAX_PANE_TABS = 6
 // tree of depth 2 has four leaves). moveTab refuses to cross either bound.
 export const MAX_PANES = 4
 export const MAX_DEPTH = 2
+
+// Responsive breakpoints — capability derives from USABLE CONTENT SIZE, never
+// the user agent (design §4). A mode needs BOTH dimensions to qualify; the
+// otherwise-clause is the phone stack. modeForRect is the single authority the
+// renderer, canSplit, and the (later) resolver all read.
+export const WIDE_MIN_W = 960
+export const WIDE_MIN_H = 600
+export const COMPACT_MIN_W = 700
+export const COMPACT_MIN_H = 520
+
+// Render geometry (pixels are a RENDER concern — the model never stores them).
+// PANE_GAP sits between two sibling panes and is where a divider is drawn;
+// OUTER_MARGIN insets the whole tiled area from the content-box edge.
+export const PANE_GAP = 7
+export const OUTER_MARGIN = 8
+
+// Height of a per-pane tab strip. A pane's CONTENT rect is its pane rect minus
+// this strip row (design §2). The renderer and the divider drag both subtract
+// it, so it lives here as the single source of truth.
+export const STRIP_H = 34
+
+// Multi-pane exposure waits for the pane-aware back/sentinel work (stage B).
+// Until then every user ENTRY POINT into splits — the context-menu split/move
+// items and the phone pane chip/sheet — stays gated off, so stage A ships inert
+// (zero visible change): the renderer paths all exist but are unreachable except
+// via a persisted multi-pane blob, which normalize/parse already tolerate. Flip
+// this (localStorage 'mobius:workspace-splits' = '1') in PR2 stage C. Read once
+// at module load; guarded because localStorage is absent in the test runtime.
+export const WORKSPACE_SPLITS_ENABLED = (() => {
+  try { return localStorage.getItem('mobius:workspace-splits') === '1' } catch { return false }
+})()
+
+// The smallest a pane may be. canSplit refuses a split whose either resulting
+// child would fall below this within the pane's current projected rect — the
+// shared feasibility predicate drag/menu/resolver all consult (design §3.2,
+// §6.2). projectLayout clamps ratios against the same minimums at render time.
+export const MIN_PANE_W = 280
+export const MIN_PANE_H = 200
 
 // sessionStorage key for the serialized workspace; the legacy flat key
 // (tabModel's 'mobius-open-tabs') is dual-written for one release so a rollback
@@ -602,6 +647,271 @@ export function visibleTabs(ws) {
     if (active) out.push(active)
   }
   return out
+}
+
+// ── Projection: the tree → renderable geometry (design §4) ──────────────────
+//
+// projectLayout is the SINGLE geometry authority for every mode. The renderer,
+// canSplit, and the later resolver all consume the same rects — geometry is
+// never computed in two places. Projection is PURE and NEVER mutates ws: it
+// reads the tree/focus and returns positioned rectangles the flat content
+// wrappers are laid into (no reparenting — a move changes only rect vars).
+
+// True when node contains leafId anywhere beneath it.
+function containsLeaf(node, leafId) {
+  if (typeof node === 'string') return node === leafId
+  if (!isSplit(node)) return false
+  return containsLeaf(node.a, leafId) || containsLeaf(node.b, leafId)
+}
+
+// First in-order leaf id of a subtree — the "representative" a compact/phone
+// pair pulls from the sibling subtree when the sibling is itself a split.
+function firstLeaf(node) {
+  if (typeof node === 'string') return node
+  if (!isSplit(node)) return null
+  return firstLeaf(node.a) ?? firstLeaf(node.b)
+}
+
+// The split whose DIRECT child is leafId, plus the side ('a'|'b') it sits on.
+// This is the leaf's IMMEDIATE parent — the split whose sibling subtree the
+// compact/phone projection pairs the focused leaf with.
+function parentOfLeaf(node, leafId) {
+  if (!isSplit(node)) return null
+  if (node.a === leafId) return { split: node, side: 'a' }
+  if (node.b === leafId) return { split: node, side: 'b' }
+  return parentOfLeaf(node.a, leafId) || parentOfLeaf(node.b, leafId)
+}
+
+// Splits from the root to a leaf (0 for the root leaf). A split at this leaf
+// would add one level, so canSplit refuses when depthOfLeaf + 1 > MAX_DEPTH.
+function depthOfLeaf(node, leafId, depth = 0) {
+  if (node === leafId) return depth
+  if (!isSplit(node)) return -1
+  const a = depthOfLeaf(node.a, leafId, depth + 1)
+  if (a !== -1) return a
+  return depthOfLeaf(node.b, leafId, depth + 1)
+}
+
+// Round every field so the renderer writes whole-pixel rects (no sub-pixel
+// seams between abutting panes).
+function normalizeRect(rect) {
+  return {
+    x: Math.round(Number(rect?.x) || 0),
+    y: Math.round(Number(rect?.y) || 0),
+    w: Math.max(0, Math.round(Number(rect?.w) || 0)),
+    h: Math.max(0, Math.round(Number(rect?.h) || 0)),
+  }
+}
+
+// Inset a rect by m on every side — the tiled area's outer margin.
+function insetRect(rect, m) {
+  return {
+    x: rect.x + m,
+    y: rect.y + m,
+    w: Math.max(0, rect.w - 2 * m),
+    h: Math.max(0, rect.h - 2 * m),
+  }
+}
+
+// A ratio-patched COPY of the tree for the divider drag preview — the renderer
+// re-projects each frame with the dragged split's live ratio without a reducer
+// dispatch (design §2: imperative, React-free per frame). Pure; ws untouched.
+function withRatioOverride(node, override) {
+  if (!isSplit(node)) return node
+  if (node.id === override.splitId) return { ...node, ratio: override.ratio }
+  return {
+    ...node,
+    a: withRatioOverride(node.a, override),
+    b: withRatioOverride(node.b, override),
+  }
+}
+
+// Wide mode: full tree walk. Divide each split's box along its own axis at the
+// px-clamped ratio, leaving a PANE_GAP the divider is drawn into, and recurse.
+// Emits one divider per split (each rendered along its own axis, so its ratio
+// maps and it is draggable).
+function layoutTree(node, box, rects, dividers) {
+  if (typeof node === 'string') {
+    rects[node] = { ...box }
+    return
+  }
+  if (!isSplit(node)) return
+  if (node.dir === 'row') {
+    const usable = box.w - PANE_GAP
+    const r = clampRatioPx(node.ratio, usable, MIN_PANE_W, MIN_PANE_W)
+    const wA = Math.round(usable * r)
+    dividers.push({
+      splitId: node.id, dir: 'row',
+      x: box.x + wA, y: box.y, w: PANE_GAP, h: box.h,
+      span: usable, origin: box.x, ratio: r,
+    })
+    layoutTree(node.a, { x: box.x, y: box.y, w: wA, h: box.h }, rects, dividers)
+    layoutTree(
+      node.b,
+      { x: box.x + wA + PANE_GAP, y: box.y, w: usable - wA, h: box.h },
+      rects, dividers,
+    )
+  } else {
+    const usable = box.h - PANE_GAP
+    const r = clampRatioPx(node.ratio, usable, MIN_PANE_H, MIN_PANE_H)
+    const hA = Math.round(usable * r)
+    dividers.push({
+      splitId: node.id, dir: 'col',
+      x: box.x, y: box.y + hA, w: box.w, h: PANE_GAP,
+      span: usable, origin: box.y, ratio: r,
+    })
+    layoutTree(node.a, { x: box.x, y: box.y, w: box.w, h: hA }, rects, dividers)
+    layoutTree(
+      node.b,
+      { x: box.x, y: box.y + hA + PANE_GAP, w: box.w, h: usable - hA },
+      rects, dividers,
+    )
+  }
+}
+
+// Lay two leaves into a box along one axis at a px-clamped ratio, with a gap
+// between them. The compact/phone pair uses this. A divider is emitted only
+// when the pair is rendered along the parent split's OWN axis (withDivider) —
+// a phone pair projected from a 'row' split renders stacked at 0.5 and gets NO
+// divider because the row ratio does not map to a vertical drag (design §4).
+function layoutPair(aId, bId, dir, ratio, box, withDivider, splitId) {
+  const rects = {}
+  if (dir === 'row') {
+    const usable = box.w - PANE_GAP
+    const r = clampRatioPx(ratio, usable, MIN_PANE_W, MIN_PANE_W)
+    const wA = Math.round(usable * r)
+    rects[aId] = { x: box.x, y: box.y, w: wA, h: box.h }
+    rects[bId] = { x: box.x + wA + PANE_GAP, y: box.y, w: usable - wA, h: box.h }
+    const divider = withDivider ? {
+      splitId, dir: 'row', x: box.x + wA, y: box.y, w: PANE_GAP, h: box.h,
+      span: usable, origin: box.x, ratio: r,
+    } : null
+    return { rects, divider }
+  }
+  const usable = box.h - PANE_GAP
+  const r = clampRatioPx(ratio, usable, MIN_PANE_H, MIN_PANE_H)
+  const hA = Math.round(usable * r)
+  rects[aId] = { x: box.x, y: box.y, w: box.w, h: hA }
+  rects[bId] = { x: box.x, y: box.y + hA + PANE_GAP, w: box.w, h: usable - hA }
+  const divider = withDivider ? {
+    splitId, dir: 'col', x: box.x, y: box.y + hA, w: box.w, h: PANE_GAP,
+    span: usable, origin: box.y, ratio: r,
+  } : null
+  return { rects, divider }
+}
+
+// The mode a content box of {w, h} affords. Both dimensions must clear a
+// threshold; otherwise it falls to the phone stack (design §4).
+export function modeForRect({ w, h } = {}) {
+  const width = Number(w) || 0
+  const height = Number(h) || 0
+  if (width >= WIDE_MIN_W && height >= WIDE_MIN_H) return 'wide'
+  if (width >= COMPACT_MIN_W && height >= COMPACT_MIN_H) return 'compact'
+  return 'phone'
+}
+
+// projectLayout(ws, mode, contentRect[, ratioOverride]) → the renderable
+// geometry for the current mode (design §4). Returns:
+//   { visibleLeaves: [paneId...],       — panes that render right now
+//     rects:  { [paneId]: {x,y,w,h} },  — pane rectangles within contentRect
+//     dividers: [{ splitId, dir, x,y,w,h, span, origin, ratio }] }
+//
+// - EXACTLY ONE visible leaf is the pixel-identical single-pane sentinel: rects
+//   is the full contentRect and dividers is empty. The renderer branches on
+//   `visibleLeaves.length === 1` to emit today's DOM verbatim (no pane chrome).
+// - 'wide'    → all leaves, full tree walk, gap + outer margin, a divider per
+//               split.
+// - 'compact' → the focused leaf + its immediate-parent split's sibling (first
+//               in-order leaf of the sibling subtree), laid along the parent's
+//               axis at the parent's ratio; the pair gets a divider.
+// - 'phone'   → the same pair, ALWAYS stacked vertically; the parent's ratio
+//               applies only when its dir is 'col' (else 0.5), and a divider is
+//               present only for a 'col' parent (a 'row' ratio does not map).
+//
+// ratioOverride = { splitId, ratio } | null lets the divider drag re-project
+// each frame with a live ratio without a reducer commit.
+export function projectLayout(ws, mode, contentRect, ratioOverride = null) {
+  const content = normalizeRect(contentRect)
+  const leaves = leafIds(ws.layout).filter(id => ws.panes[id])
+
+  // Single (or zero) leaf → full rect, no chrome. The renderer's parity branch.
+  if (leaves.length <= 1) {
+    const id = leaves[0]
+    return {
+      visibleLeaves: id ? [id] : [],
+      rects: id ? { [id]: { ...content } } : {},
+      dividers: [],
+    }
+  }
+
+  const tree = ratioOverride ? withRatioOverride(ws.layout, ratioOverride) : ws.layout
+  const box = insetRect(content, OUTER_MARGIN)
+
+  if (mode === 'wide') {
+    const rects = {}
+    const dividers = []
+    layoutTree(tree, box, rects, dividers)
+    return {
+      visibleLeaves: leafIds(tree).filter(id => ws.panes[id]),
+      rects,
+      dividers,
+    }
+  }
+
+  // compact / phone: the focused leaf paired with its immediate sibling rep.
+  const focused = ws.panes[ws.focusedPaneId] ? ws.focusedPaneId : leaves[0]
+  const parent = parentOfLeaf(tree, focused)
+  if (!parent) {
+    // A live leaf with ≥2 leaves in the tree always has a parent split; this is
+    // a defensive fall-through only. Show the focused leaf full-bleed.
+    return { visibleLeaves: [focused], rects: { [focused]: { ...content } }, dividers: [] }
+  }
+  const siblingSubtree = parent.side === 'a' ? parent.split.b : parent.split.a
+  const siblingRep = firstLeaf(siblingSubtree)
+  const aId = parent.side === 'a' ? focused : siblingRep
+  const bId = parent.side === 'a' ? siblingRep : focused
+  const parentDir = parent.split.dir
+  const parentRatio = parent.split.ratio
+
+  if (mode === 'compact') {
+    const { rects, divider } = layoutPair(
+      aId, bId, parentDir, parentRatio, box, true, parent.split.id,
+    )
+    return { visibleLeaves: [aId, bId], rects, dividers: divider ? [divider] : [] }
+  }
+
+  // phone — always stacked; ratio maps only for a 'col' parent.
+  const phoneRatio = parentDir === 'col' ? parentRatio : 0.5
+  const { rects, divider } = layoutPair(
+    aId, bId, 'col', phoneRatio, box, parentDir === 'col', parent.split.id,
+  )
+  return { visibleLeaves: [aId, bId], rects, dividers: divider ? [divider] : [] }
+}
+
+// canSplit(ws, paneId, edge, mode, contentRect) — the shared feasibility
+// predicate (design §6.2). True iff a split of paneId on edge is allowed:
+// within MAX_PANES / MAX_DEPTH, permitted by the mode (phone → top/bottom
+// only), and each resulting child clears MIN_PANE_W × MIN_PANE_H inside the
+// pane's CURRENT projected rect. The menu greys out and the resolver degrades
+// on false — a cap or minimum is felt as "no target", never an error.
+export function canSplit(ws, paneId, edge, mode, contentRect) {
+  if (!ws || !ws.panes || !ws.panes[paneId]) return false
+  if (!EDGES.has(edge)) return false
+  if (mode === 'phone' && edge !== 'top' && edge !== 'bottom') return false
+
+  const leaves = leafIds(ws.layout).filter(id => ws.panes[id])
+  if (leaves.length >= MAX_PANES) return false
+  if (depthOfLeaf(ws.layout, paneId, 0) + 1 > MAX_DEPTH) return false
+
+  const rect = projectLayout(ws, mode, normalizeRect(contentRect)).rects[paneId]
+  if (!rect) return false
+  const row = edge === 'left' || edge === 'right'
+  if (row) {
+    const childW = (rect.w - PANE_GAP) / 2
+    return childW >= MIN_PANE_W && rect.h >= MIN_PANE_H
+  }
+  const childH = (rect.h - PANE_GAP) / 2
+  return rect.w >= MIN_PANE_W && childH >= MIN_PANE_H
 }
 
 // Recursively validate the layout tree's SHAPE: every node is a leaf string or a

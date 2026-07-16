@@ -53,6 +53,9 @@ import {
   flushPersistedQueryCache,
 } from '../../queryClient.js'
 import './Shell.css'
+import './workspace.css'
+import WorkspaceChrome from './WorkspaceChrome.jsx'
+import PaneChatView from './PaneChatView.jsx'
 
 // Resolves the service worker to post warm-up messages to. The page is
 // uncontrolled on its very first load (clientsClaim only takes over once
@@ -473,6 +476,111 @@ export default function Shell() {
     })
   }, [activeAppIdRef, activeChatIdRef, activeViewRef])
   const tabStripVisible = openTabs.length >= 1
+
+  // ── Multi-pane workspace projection (design §2/§4) ────────────────────────
+  // A ResizeObserver on .shell__content drives the mode + geometry. projection
+  // is the single geometry authority; with exactly one visible leaf it is the
+  // pixel-identical single-pane sentinel and the renderer emits today's DOM.
+  const contentElRef = useRef(null)
+  const [contentRect, setContentRect] = useState({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = contentElRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      const w = Math.round(el.clientWidth)
+      const h = Math.round(el.clientHeight)
+      setContentRect(prev => (prev.w === w && prev.h === h ? prev : { w, h }))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
+  const projection = useMemo(
+    () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
+    [workspace, workspaceMode, contentRect],
+  )
+  // ≥2 visible leaves is the ONLY trigger for pane chrome; one leaf is today's
+  // shell exactly. Settings is a full-workspace overlay (§9) — while it is up we
+  // suppress the chrome and positioned rects (panes stay mounted but hidden).
+  const multiPane = projection.visibleLeaves.length >= 2
+  const settingsActive = activeView === 'settings'
+  const workspaceChromeActive = multiPane && !settingsActive
+  // tabKey -> the CONTENT rect (pane minus strip) of the active tab of each
+  // visible pane. A content wrapper matching a key is positioned + shown; every
+  // other wrapper keeps the full-bleed hidden pattern.
+  const visibleTabRects = useMemo(() => {
+    const map = new Map()
+    if (!workspaceChromeActive) return map
+    for (const paneId of projection.visibleLeaves) {
+      const pane = workspace.panes[paneId]
+      const rect = projection.rects[paneId]
+      if (!pane || !pane.activeTabKey || !rect) continue
+      map.set(pane.activeTabKey, {
+        x: rect.x, y: rect.y + paneModel.STRIP_H,
+        w: rect.w, h: Math.max(0, rect.h - paneModel.STRIP_H),
+      })
+    }
+    return map
+  }, [workspaceChromeActive, projection, workspace])
+  // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
+  // (stable order — same no-reparent rule as the app iframes). Apps stay in the
+  // id-sorted LRU below; only visible chat panes get a ChatView (phone stack
+  // unmounts the rest, today's chat-switch semantics).
+  const visibleChatPanes = useMemo(() => {
+    if (!multiPane) return []
+    const out = []
+    for (const paneId of projection.visibleLeaves) {
+      const pane = workspace.panes[paneId]
+      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
+      if (active && active.kind === 'chat') out.push({ paneId, chatId: active.id })
+    }
+    return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
+  }, [multiPane, projection, workspace])
+
+  const labelForTab = useCallback((tab) => {
+    if (tab.kind === 'chat') return chats.find(c => String(c.id) === tab.id)?.title || 'Chat'
+    return apps.find(a => String(a.id) === tab.id)?.name || 'App'
+  }, [chats, apps])
+
+  // Per-chat repair callbacks for the tiled panes (design §2 M13 — membership
+  // in the visible set, not equality with one global id). A background pane
+  // whose chat 404'd demotes itself by dropping its tab; nothing touches the
+  // global view.
+  const handlePaneChatMissing = useCallback((missingId) => {
+    knownExistingOffListChatIdsRef.current.delete(missingId)
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('chat', missingId)),
+      reason: 'deleted',
+    })
+  }, [])
+  const handlePaneChatFirstMessage = useCallback((chatId) => {
+    recoveredChatIdsRef.current.delete(chatId)
+  }, [])
+
+  // The tab context menu is the ONLY split path in PR2. Split/Move items exist
+  // only when the workspace-splits flag is on (stage-A inert default); Close tab
+  // is always offered. The top strip attaches this handler only when the flag is
+  // on, so single-pane right-click keeps today's native menu (parity).
+  const [tabMenu, setTabMenu] = useState(null)
+  const openTabMenu = useCallback((e, tab, paneId) => {
+    e.preventDefault()
+    const owner = paneId || paneModel.paneOf(workspace, tabModel.tabKey(tab))?.id
+    if (!owner) return
+    setTabMenu({ x: e.clientX, y: e.clientY, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
+  }, [workspace])
+  const closeTabMenu = useCallback(() => setTabMenu(null), [])
+  useEffect(() => {
+    if (!tabMenu) return
+    const onDown = (e) => { if (!e.target.closest?.('.workspace__menu')) setTabMenu(null) }
+    const onKey = (e) => { if (e.key === 'Escape') setTabMenu(null) }
+    document.addEventListener('pointerdown', onDown, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [tabMenu])
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -1812,7 +1920,7 @@ export default function Shell() {
           self-corrects). Deliberately NOT a ChatView remount — that would
           reset the send-reservation and freeze stream-follow (the reason the
           bespoke split view was parked). */}
-      {tabStripVisible && (
+      {tabStripVisible && !multiPane && (
         <nav className="shell__tabstrip" inert={drawerOpen} aria-label="Open tabs">
           {openTabs.map(tab => {
             const isChat = tab.kind === 'chat'
@@ -1839,6 +1947,9 @@ export default function Shell() {
                     const { view, opts } = tabModel.tabNavTarget(tab)
                     navTo(view, opts)
                   }}
+                  onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED
+                    ? (e) => openTabMenu(e, tab, null)
+                    : undefined}
                 >
                   <TabIcon size={13} aria-hidden="true" />
                   <span className="shell__tab-text">{label}</span>
@@ -1856,7 +1967,7 @@ export default function Shell() {
           })}
         </nav>
       )}
-      <main className="shell__content" inert={drawerOpen}>
+      <main className="shell__content" inert={drawerOpen} ref={contentElRef}>
         {/* Single-mount ChatView, keyed by activeChatId. Switching
             chats unmounts and remounts; ChatView's hide-then-reveal
             scroll-restore (visibility:hidden until lazy renderers
@@ -1866,7 +1977,13 @@ export default function Shell() {
             reset scrollTop after a few rotations. Single-mount with
             hide-then-reveal is structurally simpler and locked in
             by tests. */}
-        {activeView === 'chat' && activeChatId && (
+        {/* Single-mount ChatView — TODAY's exact path, and the ONLY chat
+            render while there is one visible leaf (multiPane false). This is
+            the pixel-identical single-pane guarantee: with one pane the DOM,
+            wiring, and scroll behavior are unchanged. At ≥2 visible leaves the
+            PaneChatView list below takes over (per-chat binding) and this
+            unmounts — a deliberate one-time cost of a split, never a resize. */}
+        {!multiPane && activeView === 'chat' && activeChatId && (
           // Guard the chat view: it renders agent-generated markdown
           // (marked + KaTeX/hljs), the likeliest render-crash source. Keyed
           // by activeChatId so switching chats clears a crashed boundary —
@@ -1939,10 +2056,26 @@ export default function Shell() {
             receive a fresh frame-init from the parent and hit the
             10s "Loading timeout" guard. LRU still controls eviction;
             only DOM order is stable. */}
-        {[...appCache].sort((a, b) => Number(a) - Number(b)).map(id => (
+        {[...appCache].sort((a, b) => Number(a) - Number(b)).map(id => {
+          // No reparenting, ever: the wrapper node and its id-sorted position
+          // are identical across single-pane and tiled renders (design §2). Only
+          // its class/style change — a paned wrapper (active tab of a visible
+          // pane) gets its content rect inline; every other wrapper keeps the
+          // full-bleed hidden pattern. data-tab-key is added only in the tiled
+          // path (the divider drag looks wrappers up by it); single-pane DOM is
+          // byte-for-byte today's.
+          const paned = workspaceChromeActive ? visibleTabRects.get(`app:${id}`) : null
+          const todayActive = activeView === 'canvas' && activeAppId === id
+          return (
           <div
             key={id}
-            className={`shell__view ${activeView === 'canvas' && activeAppId === id ? 'shell__view--active' : ''}`}
+            data-tab-key={multiPane ? `app:${id}` : undefined}
+            className={paned
+              ? 'shell__view shell__view--paned'
+              : `shell__view ${todayActive ? 'shell__view--active' : ''}`}
+            style={paned
+              ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h }
+              : undefined}
           >
             <AppCanvas
               appId={id}
@@ -1967,6 +2100,15 @@ export default function Shell() {
               // app). Only then does the iframe receive the real safe-area
               // insets to pad under the notch; every other (cached, hidden)
               // iframe gets zeros so it never double-pads behind the chrome.
+              //
+              // STAGE-A LIMITATION (documented, intentional): `active` still
+              // keys on the SINGLE global activeAppId, so a second app that is
+              // the active tab of a VISIBLE tiled pane is told frame-visibility
+              // false and pauses its rAF/audio. Splitting `active` is unsafe
+              // here — it also gates the immersive/inset holder (see above), so
+              // a background pane flipped active=true could steal chrome/insets.
+              // Stage B does the full visibility split; multi-pane is flag-off
+              // by default, so this is inert for the stage-A ship.
               immersive={immersiveActive && String(immersiveAppId) === String(id)}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
@@ -1976,7 +2118,46 @@ export default function Shell() {
               onAppError={handleAppError}
             />
           </div>
-        ))}
+          )
+        })}
+        {/* PaneChatView list — one mount per VISIBLE chat pane, chatId-sorted
+            (stable order, same no-reparent rule as the app iframes). Only in the
+            tiled path; single-pane uses the single-mount block above. Each wraps
+            in a .shell__view positioned into its pane's content rect (or hidden
+            when Settings overlays). PaneChatView parameterizes every callback by
+            its own chatId (design §2, M13). */}
+        {multiPane && visibleChatPanes.map(({ chatId }) => {
+          const rect = workspaceChromeActive ? visibleTabRects.get(`chat:${chatId}`) : null
+          return (
+            <div
+              key={chatId}
+              data-tab-key={`chat:${chatId}`}
+              className={rect ? 'shell__view shell__view--paned' : 'shell__view'}
+              style={rect
+                ? { top: rect.y, left: rect.x, width: rect.w, height: rect.h }
+                : undefined}
+            >
+              <PaneChatView
+                chatId={chatId}
+                apps={apps}
+                paneContentHeight={rect ? rect.h : null}
+                chatRunSignals={chatRunSignals}
+                composerFocusRequest={composerFocusRequest}
+                onComposerFocusHandled={handleComposerFocusHandled}
+                onSystemEvent={handleSystemEvent}
+                markStreamingStart={markStreamingStart}
+                markStreamingEnd={markStreamingEnd}
+                markVoiceListening={markVoiceListening}
+                refreshApps={refreshApps}
+                refreshChats={refreshChats}
+                loadTheme={loadTheme}
+                navTo={navTo}
+                onChatMissing={handlePaneChatMissing}
+                onFirstMessage={handlePaneChatFirstMessage}
+              />
+            </div>
+          )
+        })}
         {activeView === 'settings' && (
           <Suspense fallback={(
             <div className="shell__settings-loading" role="status" aria-label="Loading settings">
@@ -1989,6 +2170,24 @@ export default function Shell() {
               focusTarget={settingsFocusTarget}
             />
           </Suspense>
+        )}
+        {/* Chrome layer — sibling AFTER the content wrappers, over the whole
+            content box, carrying its own inert. Only at ≥2 visible leaves and
+            never while Settings overlays. Draws per-pane strips, focus ring,
+            dividers, and the phone overflow chip; no content lives here. */}
+        {workspaceChromeActive && (
+          <WorkspaceChrome
+            inert={drawerOpen}
+            workspace={workspace}
+            projection={projection}
+            mode={workspaceMode}
+            contentRect={contentRect}
+            contentElRef={contentElRef}
+            dispatchWorkspace={dispatchWorkspace}
+            navTo={navTo}
+            labelForTab={labelForTab}
+            onTabContextMenu={openTabMenu}
+          />
         )}
       </main>
       {/* SHELL-provided immersive exit. With the top bar gone the drawer
@@ -2015,6 +2214,69 @@ export default function Shell() {
         action={toast?.action}
         onDismiss={dismissToast}
       />
+      {/* Tab context menu — the ONLY split path in PR2. Fixed-position at the
+          pointer; dismisses on outside pointerdown/Escape (effect above). Split
+          and Move items exist only when the workspace-splits flag is on, so with
+          the flag off (stage-A default) the menu never even opens (the strip
+          handlers are omitted). */}
+      {tabMenu && (() => {
+        const menuPane = workspace.panes[tabMenu.paneId]
+        const otherPaneIds = Object.keys(workspace.panes).filter(pid => pid !== tabMenu.paneId)
+        const canOfferSplit = paneModel.WORKSPACE_SPLITS_ENABLED
+          && menuPane && menuPane.tabs.length >= 2
+        return (
+          <div className="workspace__menu" role="menu" style={{ left: tabMenu.x, top: tabMenu.y }}>
+            {canOfferSplit && [
+              ['right', 'Split right'], ['left', 'Split left'],
+              ['top', 'Split up'], ['bottom', 'Split down'],
+            ]
+              .filter(([edge]) => paneModel.canSplit(workspace, tabMenu.paneId, edge, workspaceMode, contentRect))
+              .map(([edge, label]) => (
+                <button
+                  key={edge}
+                  type="button"
+                  role="menuitem"
+                  className="workspace__menu-item"
+                  onClick={() => {
+                    dispatchWorkspace({ type: 'MOVE_TAB', tabKey: tabMenu.tabKey, target: { paneId: tabMenu.paneId, edge } })
+                    closeTabMenu()
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            {paneModel.WORKSPACE_SPLITS_ENABLED && otherPaneIds.length >= 1 && otherPaneIds.map(pid => {
+              const pane = workspace.panes[pid]
+              const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
+              return (
+                <button
+                  key={pid}
+                  type="button"
+                  role="menuitem"
+                  className="workspace__menu-item"
+                  onClick={() => {
+                    dispatchWorkspace({ type: 'MOVE_TAB', tabKey: tabMenu.tabKey, target: { paneId: pid } })
+                    closeTabMenu()
+                  }}
+                >
+                  Move to {active ? labelForTab(active) : 'pane'}
+                </button>
+              )
+            })}
+            <button
+              type="button"
+              role="menuitem"
+              className="workspace__menu-item"
+              onClick={() => {
+                dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabMenu.tabKey })
+                closeTabMenu()
+              }}
+            >
+              Close tab
+            </button>
+          </div>
+        )
+      })()}
     </div>
   )
 }
