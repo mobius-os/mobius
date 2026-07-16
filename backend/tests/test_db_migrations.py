@@ -152,7 +152,7 @@ def test_fresh_chat_schema_has_database_auto_resume_default():
   assert column.nullable is False
   assert column.default is not None
   assert column.server_default is not None
-  assert str(column.server_default.arg).lower() == "true"
+  assert str(column.server_default.arg).lower() == "false"
 
 
 def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
@@ -182,7 +182,7 @@ def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
     value = conn.execute(text(
       "SELECT auto_resume_on_limit_default FROM owner WHERE id = 1"
     )).scalar_one()
-  assert value in (True, 1)
+  assert value in (False, 0)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -191,4 +191,4 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.nullable is False
   assert column.default is not None
   assert column.server_default is not None
-  assert str(column.server_default.arg).lower() == "true"
+  assert str(column.server_default.arg).lower() == "false"
