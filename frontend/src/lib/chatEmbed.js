@@ -39,10 +39,14 @@ export const INIT = NS + 'init' // hand the embed its config + correlation id
 //
 // Before the child submits a user message it posts CONTEXT_REQUEST to the
 // parent. The parent calls opts.getContext() if provided and posts
-// CONTEXT_RESPONSE back. The child waits ≤50ms then sends regardless —
-// the protocol is best-effort, never blocking.
+// CONTEXT_RESPONSE back. The child waits for a short bounded window then sends
+// regardless — the protocol is best-effort, never an unbounded send blocker.
 export const CONTEXT_REQUEST = NS + 'context-request'  // child → parent: {nonce}
 export const CONTEXT_RESPONSE = NS + 'context-response' // parent → child: {nonce, context}
+// Two opaque-frame postMessage hops can exceed one animation frame on a busy
+// device/CI worker. 250ms remains imperceptible on the exceptional no-response
+// path while avoiding silent context loss under ordinary main-thread pressure.
+export const CONTEXT_RESPONSE_TIMEOUT_MS = 250
 
 // Why no height relay by default: the design (§1.2) calls for a
 // FIXED-HEIGHT panel — ChatView owns its own scroll + spacer, and

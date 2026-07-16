@@ -19,6 +19,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   NS, INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
+  CONTEXT_RESPONSE_TIMEOUT_MS,
   isEmbedMessage, embedUrl, makeEmitter, retainEmbedSessionAfterExchangeFailure,
 } from '../chatEmbed.js'
 
@@ -37,6 +38,11 @@ test('all message types share the moebius:chat-embed: namespace', () => {
   // never be mistaken for an embed message on the shared origin.
   assert.ok(!NS.startsWith('moebius:frame'))
   assert.ok(!NS.startsWith('moebius:nav'))
+})
+
+test('context relay tolerates two busy frame hops without blocking sends indefinitely', () => {
+  assert.ok(CONTEXT_RESPONSE_TIMEOUT_MS >= 250)
+  assert.ok(CONTEXT_RESPONSE_TIMEOUT_MS <= 1000)
 })
 
 test('isEmbedMessage accepts a matching same-origin, same-source, correlated message', () => {

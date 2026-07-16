@@ -9,7 +9,7 @@ import {
 import { applyThemeToDom } from '../../lib/themeService.js'
 import {
   INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, AUTH_EXPIRING,
-  CONTEXT_REQUEST, CONTEXT_RESPONSE,
+  CONTEXT_REQUEST, CONTEXT_RESPONSE, CONTEXT_RESPONSE_TIMEOUT_MS,
   isEmbedMessage, retainEmbedSessionAfterExchangeFailure,
 } from '../../lib/chatEmbed.js'
 import {
@@ -83,7 +83,7 @@ export default function ChatEmbed() {
       const timer = setTimeout(() => {
         pendingContextResolversRef.current.delete(nonce)
         resolve(null)
-      }, 50)
+      }, CONTEXT_RESPONSE_TIMEOUT_MS)
       pendingContextResolversRef.current.set(nonce, (context) => {
         clearTimeout(timer)
         resolve(context)
