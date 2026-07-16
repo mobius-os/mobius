@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
+import { preserveTogglePosition } from './preserveTogglePosition.js'
 
 // Shared shell for "marker" messages — system/product moments that are neither
 // agent prose nor a tool call. A compaction summary is the only marker today;
@@ -15,6 +16,7 @@ import { useState } from 'react'
 // chevron, non-interactive header).
 export default function MarkerCard({ icon, title, subtitle, children }) {
   const [open, setOpen] = useState(false)
+  const headerRef = useRef(null)
   const collapsible = !!children
   const cls = 'chat__marker' + (open ? ' chat__marker--open' : '')
 
@@ -42,9 +44,15 @@ export default function MarkerCard({ icon, title, subtitle, children }) {
     <div className={cls}>
       {collapsible ? (
         <button
+          ref={headerRef}
           type="button"
           className="chat__marker-header"
-          onClick={() => setOpen(o => !o)}
+          // Toggling the compaction body changes height above the scroll anchor;
+          // preserve the reader's position first, like every other disclosure.
+          onClick={() => {
+            preserveTogglePosition(headerRef.current)
+            setOpen(o => !o)
+          }}
           aria-expanded={open}
         >
           {label}

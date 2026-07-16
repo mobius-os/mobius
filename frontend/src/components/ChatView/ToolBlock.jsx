@@ -150,35 +150,58 @@ export default function ToolBlock({ t, chatId }) {
     : (r && r.kind === 'terminal' ? r.exitCode : null)
   const failed = exitCode != null && exitCode !== 0
 
+  // The header content is shared by both shells below so the visual row is
+  // identical whether or not it is interactive.
+  const headerContent = (
+    <>
+      {t.status === 'running' && <span className="chat__tool-spin" />}
+      {/* Skill observability: when the Skill tool loaded a named
+          skill, show its name as a chip so the user can see which
+          skill the agent reached for this turn. */}
+      {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
+      {/* While running, the header speaks owner language ("Running
+          commands…", not "Running Bash..."); once done it shows the raw
+          call (name + input) so what ran stays inspectable. */}
+      <span className="chat__tool-name">
+        {t.status === 'running' ? `${toolActivityLabel(toolName)}…` : label}
+      </span>
+      {failed && (
+        <span className="chat__tool-exit chat__tool-exit--head">exit {exitCode}</span>
+      )}
+      {/* Decorative glyph only — aria-expanded on the button already announces
+          the disclosure state, so keep the arrow out of the accessible name. */}
+      {hasDetail && (
+        <span className="chat__tool-toggle" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      )}
+    </>
+  )
+
   return (
     <div className={
       `chat__tool chat__tool--${t.status || 'done'}${failed ? ' chat__tool--failed' : ''}`
     }>
-      <div
-        ref={headerRef}
-        className="chat__tool-header"
-        onClick={() => {
-          if (!hasDetail) return
-          preserveTogglePosition(headerRef.current)
-          setOpen(o => !o)
-        }}
-      >
-        {t.status === 'running' && <span className="chat__tool-spin" />}
-        {/* Skill observability: when the Skill tool loaded a named
-            skill, show its name as a chip so the user can see which
-            skill the agent reached for this turn. */}
-        {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
-        {/* While running, the header speaks owner language ("Running
-            commands…", not "Running Bash..."); once done it shows the raw
-            call (name + input) so what ran stays inspectable. */}
-        <span className="chat__tool-name">
-          {t.status === 'running' ? `${toolActivityLabel(toolName)}…` : label}
-        </span>
-        {failed && (
-          <span className="chat__tool-exit chat__tool-exit--head">exit {exitCode}</span>
-        )}
-        {hasDetail && <span className="chat__tool-toggle">{open ? '▾' : '▸'}</span>}
-      </div>
+      {hasDetail ? (
+        // A real <button> so the disclosure is keyboard-operable (the old
+        // clickable <div> was not); the toggle logic is otherwise unchanged.
+        <button
+          ref={headerRef}
+          type="button"
+          className="chat__tool-header"
+          onClick={() => {
+            preserveTogglePosition(headerRef.current)
+            setOpen(o => !o)
+          }}
+          aria-expanded={open}
+        >
+          {headerContent}
+        </button>
+      ) : (
+        // Nothing to inspect — a static, non-interactive row (no toggle, no
+        // keyboard affordance) so it doesn't read as a dead button.
+        <div className="chat__tool-header chat__tool-header--static">
+          {headerContent}
+        </div>
+      )}
       {open && hasDetail && (
         <div className="chat__tool-detail">
           {t.input && <pre className="chat__tool-text">{t.input}</pre>}

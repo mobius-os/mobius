@@ -1,17 +1,22 @@
 import { toolBlockFailed } from './toolResultFormat.js'
 import { toolActivityLabel } from './toolActivityLabel.js'
+import { thinkingElapsedMs } from './streamReducers.js'
 
-// Fold runs of adjacent tool entries into one activity node, including a lone
-// tool. This gives single-tool and multi-tool runs the same collapsed header and
-// lets a live single tool become a multi-tool run without swapping visual
+// Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
+// activity node, including a lone entry. A build turn's pre-prose burst is one
+// contiguous stretch of reasoning + tool calls with nothing prose-like between
+// the pieces, so it honestly collapses to ONE quiet line (ActivityStretch)
+// instead of alternating "> Thought" lines and bordered tool cards. Giving
+// single- and multi-entry runs the same collapsed line also lets a lone tool (or
+// lone thinking) grow into a multi-entry stretch without swapping visual
 // primitives. MsgContent applies this to both DB-shaped history blocks and the
-// converted live payload, so source selection cannot reshuffle the active
-// answer.
+// converted live payload, so source selection cannot reshuffle the active answer.
 //
 // Rules:
-//   - any run of entries whose item.type === 'tool' becomes a group
-//   - any non-tool entry (text, question, error) breaks the run and passes
-//     through, so interleave order is preserved exactly
+//   - any run of entries whose item.type is 'tool' OR 'thinking' becomes a group
+//   - any non-activity entry (text, question, error) breaks the run and passes
+//     through, so interleave order is preserved exactly (interleave is sacred —
+//     these are the blocks a reader must not lose the position of)
 //
 // Input: an array of entries, each `{ item, ... }` where `item.type` decides
 // grouping. The rest of the entry (e.g. the caller's original index) is opaque
@@ -19,7 +24,7 @@ import { toolActivityLabel } from './toolActivityLabel.js'
 //
 // Output: an array of nodes, each either `{ single: entry }` or
 // `{ group: [entry, entry, ...] }`. Pure — no React, no mutation of inputs.
-export function groupToolRuns(entries) {
+export function groupActivityRuns(entries) {
   const nodes = []
   let run = []
 
@@ -31,7 +36,8 @@ export function groupToolRuns(entries) {
   }
 
   for (const entry of entries) {
-    if (entry?.item?.type === 'tool') {
+    const type = entry?.item?.type
+    if (type === 'tool' || type === 'thinking') {
       run.push(entry)
     } else {
       flush()
@@ -51,10 +57,10 @@ export function groupToolRuns(entries) {
 // repair with no migration — same spirit as suppressedQuestionToolIndices.
 //
 // CRITICAL: this runs on the ENTRIES array (each `{ item, idx }`) AFTER idx has
-// been assigned from the persisted position, and it PRESERVES the first merged
-// entry's original `idx`. idx is an absolute reference into the persisted
-// msg.blocks (ToolBlock uses it for the lazy GET /tool-output fetch), so
-// re-deriving it from a shortened array would fetch the wrong block / 404. Only
+// been assigned (post-suppression position — see MsgContent), and it PRESERVES
+// the first merged entry's `idx`. idx feeds the React key of every
+// ordinal-keyed entry, so re-deriving it from a shortened array would swap keys
+// under already-mounted rows and force delete+insert remounts. Only
 // truly-adjacent thinking entries merge; anything between them (a tool/text
 // block) breaks the run, so distinct reasoning segments around tool calls stay
 // separate. Pure — new entries, inputs untouched.
@@ -80,10 +86,10 @@ export function coalesceThinkingEntries(entries) {
 
 // Derive the collapsed status of a tool group from its children: a failed tool
 // dominates (so a broken step is visible without expanding), then a running
-// tool, else done. Shared by ToolActivityGroup, which maps this to the header
-// chrome — spinner while 'running', a check on 'done', a Failed chip on
-// 'error' — all readable WITHOUT expanding the card, since the card stays
-// collapsed by default (see ToolActivityGroup).
+// tool, else done. Shared by ActivityStretch (via activityStreamState), which
+// maps this to the header status — spinner while 'running', a danger triangle +
+// exit chip on 'error', no icon on 'done' — all readable WITHOUT expanding,
+// since the stretch stays collapsed by default (see ActivityStretch).
 //
 // "Failed" comes from the result's exit code, NOT a tool status — the stream
 // contract only sets 'running' → 'done' (streamReducers.js), so a failed bash
@@ -113,9 +119,9 @@ export function toolGroupState(tools) {
 //
 // While the run is LIVE, the currently-running tool's activity leads the
 // summary, so the collapsed header reads what is executing NOW rather than the
-// run's first tool. This is the group's liveness signal while collapsed (with
-// the header spinner) now that the card no longer force-opens mid-run — see
-// ToolActivityGroup. The running tool is normally the tail item; when nothing
+// run's first tool. This is the stretch's liveness signal while collapsed (with
+// the header spinner), since the line never force-opens mid-run — see
+// ActivityStretch. The running tool is normally the tail item; when nothing
 // is running (a done/persisted group) the order is plain first-seen.
 // Pure — no React, no mutation of the input array.
 export function toolGroupSummary(tools) {
@@ -133,4 +139,78 @@ export function toolGroupSummary(tools) {
   const head = seen.slice(0, 3).join(' · ')
   const extra = seen.length - 3
   return extra > 0 ? `${head} +${extra}` : head
+}
+
+// Round a live/persisted thinking duration (ms) to whole seconds, clamping any
+// positive sub-second span to 1s so a real reasoning pass never reads "0s".
+function thoughtSeconds(durationMs) {
+  if (!Number.isFinite(durationMs)) return null
+  return Math.max(1, Math.round(durationMs / 1000))
+}
+
+// Spell out the seconds ("12 seconds", "1 second") — the calm reasoning voice
+// today's "> Thought for Ns" disclosure used, reused here verbatim so a
+// thinking-only stretch reads byte-for-byte as it did before the unification.
+function formatSeconds(seconds) {
+  if (!Number.isFinite(seconds)) return null
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+}
+
+// The dim per-block "Thought for Ns" label on an expanded thinking row (and the
+// whole collapsed line for a thinking-only stretch). Drops the old "> " prefix —
+// the timeline rail now supplies the reasoning framing.
+export function thoughtDurationLabel(durationMs) {
+  const secondsText = formatSeconds(thoughtSeconds(durationMs))
+  return secondsText ? `Thought for ${secondsText}` : 'Thought'
+}
+
+// Collapsed status of a whole activity stretch: reuses toolGroupState (running >
+// error > done, failure read from the exit code) but a LIVE thinking tail forces
+// 'running' — while the agent is actively reasoning the line reads in-progress
+// (the pulse dot), and an earlier benign nonzero exit stays quiet until the run
+// settles (running-wins). Empty tools + no live tail settles 'done'.
+export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
+  if (liveThinkingTail) return 'running'
+  return toolGroupState(tools)
+}
+
+// The single localization surface for the collapsed line's primary text. One
+// rule for the whole stretch, computed from its entries + the live hint:
+//   - live thinking tail (no tool running) → "Thinking for Ns" + animated dots
+//   - any tools present → the running-first activity rollup (toolGroupSummary),
+//     the same label live (with the spinner) and settled — activities say WHAT
+//     happened, never "N tool calls" (implementation vocabulary the product
+//     avoids); the step count lives in the header's aria-label instead
+//   - thinking-only → "Thought for Ns" (the reasoning duration IS the content)
+// Cheap on every call (Map lookups + a duration sum), so it runs each render
+// without a memo; the parse-heavy failure state lives in activityStreamState.
+export function activityCollapsedLabel(entries, { live = false, now = Date.now() } = {}) {
+  const tools = entries
+    .filter(e => e?.item?.type === 'tool')
+    .map(e => e.item)
+  const lastItem = entries[entries.length - 1]?.item
+  const liveThinkingTail = live && lastItem?.type === 'thinking'
+  const toolRunning = tools.some(t => t?.status === 'running')
+
+  if (liveThinkingTail && !toolRunning) {
+    const secondsText = formatSeconds(thoughtSeconds(thinkingElapsedMs(lastItem, now)))
+    return { text: `Thinking for ${secondsText || 'a moment'}`, showEllipsis: true }
+  }
+
+  if (tools.length > 0) {
+    return { text: toolGroupSummary(tools), showEllipsis: false }
+  }
+
+  // Sum only the FINITE thinking durations; if none carry one (a thinking block
+  // promoted without a measured span), pass `undefined` so the label reads a bare
+  // "Thought" — matching the old "> Thought" disclosure exactly, rather than the
+  // sub-second clamp turning a missing duration into "1 second".
+  const durations = entries
+    .filter(e => e?.item?.type === 'thinking')
+    .map(e => e.item?.duration_ms)
+    .filter(Number.isFinite)
+  const durationMs = durations.length
+    ? durations.reduce((sum, ms) => sum + ms, 0)
+    : undefined
+  return { text: thoughtDurationLabel(durationMs), showEllipsis: false }
 }

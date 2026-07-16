@@ -170,8 +170,8 @@ export function formatToolResult(output) {
 // terminal envelope with a nonzero exit code. This is the ONLY failure signal a
 // tool block carries — the stream contract never sets a tool `status` beyond
 // 'running' → 'done' (see streamReducers.js), so both the per-block header
-// indicator (ToolBlock) and the group's Failed chip (ToolActivityGroup) derive
-// "failed" from here rather than a status that never arrives.
+// indicator (ToolBlock) and the stretch's exit chip (ActivityStretch, via
+// groupBlocks) derive "failed" from here rather than a status that never arrives.
 export function toolResultFailed(output) {
   const r = formatToolResult(output)
   return r.kind === 'terminal' && r.exitCode != null && r.exitCode !== 0
