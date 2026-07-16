@@ -29,7 +29,7 @@ _GIT_TIMEOUT = 8
 # Filenames and numstat counts are safe metadata (never source contents). Keep
 # a generous ceiling so Contribute can offer a truthful "Show all files" for
 # normal projects while still bounding pathological repositories.
-_PATH_LIST_LIMIT = 500
+_PATH_PREVIEW = 500
 _GITHUB_HTTPS = re.compile(
   r"^https://github\.com/([^/]+)/([^/#]+?)(?:\.git)?/?$", re.IGNORECASE,
 )
@@ -84,12 +84,9 @@ def _canonical_repo(url: str | None) -> str | None:
   return None
 
 
-def _last_path_subject(repo: Path, left: str, right: str, path: str) -> str:
-  proc = _git(repo, "log", "-1", "--format=%s", f"{left}..{right}", "--", path)
-  return proc.stdout.strip() if proc.returncode == 0 else ""
-
-
-def _install_managed_path(repo: Path, left: str, right: str, path: str) -> bool:
+def _install_managed_paths(
+  repo: Path, left: str, right: str, paths: list[str],
+) -> set[str]:
   """Recognize the installer's source-tree adaptations.
 
   Installed apps deliberately replace ``.gitignore``, normalize executable
@@ -98,11 +95,36 @@ def _install_managed_path(repo: Path, left: str, right: str, path: str) -> bool:
   customization makes a clean install look modified.  The install commit is
   the durable provenance signal; ``.gitignore`` also survives later merge
   commits, so it is always installation metadata for app comparisons.
+  One newest-first history scan classifies every changed path. The original
+  implementation ran ``git log -1`` once per file, which made opening Sources
+  scale linearly with the size of an installed app's adaptation commit.
   """
-  if path == ".gitignore":
-    return True
-  subject = _last_path_subject(repo, left, right, path).casefold()
-  return subject.startswith("install:") or subject.startswith("install ")
+  wanted = set(paths)
+  managed = {path for path in wanted if path == ".gitignore"}
+  if not wanted:
+    return managed
+  marker = "__MOBIUS_SOURCE_STATUS_SUBJECT__:"
+  proc = _git(
+    repo, "log", "-z", f"--format={marker}%s", "--name-only", "--no-renames",
+    f"{left}..{right}", "--",
+  )
+  if proc.returncode != 0:
+    return managed
+  subject = ""
+  seen: set[str] = set()
+  for token in proc.stdout.split("\0"):
+    if token.startswith(marker):
+      subject = token.removeprefix(marker).casefold()
+      continue
+    # Git separates the pretty header from the first --name-only path with a
+    # newline even in -z mode; later paths are already clean NUL tokens.
+    path = token.removeprefix("\n")
+    if not path or path not in wanted or path in seen:
+      continue
+    seen.add(path)
+    if subject.startswith("install:") or subject.startswith("install "):
+      managed.add(path)
+  return managed
 
 
 def _diff_summary(
@@ -144,9 +166,19 @@ def _diff_summary(
         add = delete = 0
       insertions += add
       deletions += delete
-    managed = bool(
-      classify_install and _install_managed_path(repo, left, right, path)
+    all_paths.append({
+      "path": path, "insertions": add, "deletions": delete,
+      "binary": binary,
+    })
+  managed_paths = (
+    _install_managed_paths(
+      repo, left, right, [item["path"] for item in all_paths],
     )
+    if classify_install else set()
+  )
+  for item in all_paths:
+    managed = item["path"] in managed_paths
+    add, delete = item["insertions"], item["deletions"]
     if managed:
       managed_files += 1
       managed_insertions += add or 0
@@ -155,14 +187,11 @@ def _diff_summary(
       authored_files += 1
       authored_insertions += add or 0
       authored_deletions += delete or 0
-    all_paths.append({
-      "path": path, "insertions": add, "deletions": delete,
-      "binary": binary, "group": "managed" if managed else "authored",
-    })
+    item["group"] = "managed" if managed else "authored"
   # Owner-authored paths are the decision-bearing part of the comparison, so
-  # keep them visible before install-managed adaptations when the list caps.
+  # keep them visible before install-managed adaptations when the preview caps.
   all_paths.sort(key=lambda item: (item["group"] == "managed", item["path"]))
-  paths = all_paths[:_PATH_LIST_LIMIT]
+  paths = all_paths[:_PATH_PREVIEW]
   return {
     "available": True,
     "files": files,
@@ -293,7 +322,7 @@ def _working_summary(repo: Path) -> dict[str, Any]:
       staged += int(has_staged)
       unstaged += int(has_unstaged)
       group = "staged" if has_staged and not has_unstaged else "unstaged"
-    if len(paths) < _PATH_LIST_LIMIT:
+    if len(paths) < _PATH_PREVIEW:
       paths.append({"path": path, "status": code, "group": group})
     # In -z porcelain, rename/copy records carry the old path as the next item.
     if code[0] in "RC" and i + 1 < len(records):
