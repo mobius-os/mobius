@@ -318,12 +318,15 @@ test.describe('Workspace panes (PR2 gate)', () => {
 
     const iframe = page.locator(`iframe[data-app-id="${APP_ID}"]`)
     await expect(iframe).toHaveCount(1, { timeout: 5000 })
+    // Let the parent's onLoad + token frame-init posts settle outside the page
+    // execution context. The shell may still canonicalize its URL here; a
+    // page-owned timer is destroyed by that navigation and makes the identity
+    // check flaky before the move has even happened.
+    await page.waitForTimeout(300)
     const iframeHandle = await iframe.elementHandle()
     const appFrame = await iframeHandle?.contentFrame()
     expect(appFrame, 'the mocked app frame is mounted').not.toBeNull()
     await appFrame.waitForFunction(() => typeof window.__fi === 'number', { timeout: 4000 })
-    // Let the parent's onLoad + token frame-init posts settle.
-    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
     const initsBefore = await appFrame.evaluate(() => window.__fi)
 
     // Exactly one iframe wrapper for the app before the move.
