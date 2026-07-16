@@ -61,18 +61,26 @@ The workspace can change with you. Themes reshape the shell, Memory keeps durabl
   </tr>
 </table>
 
-## Build toward AGI in public
+## Build Möbius with the community
 
-Möbius is a community-built artificial general intelligence (AGI) project that grows with the needs of its users. It does not claim that general intelligence has already been solved. The project asks what becomes possible when a capable agent can build productive tools, personalize its platform, remember useful context, and learn from real friction.
+Möbius is a community-built artificial general intelligence (AGI) project that grows with the needs of its users. Anyone can build an app or platform change for their own work. When an idea proves useful beyond one person, Contribute gives it a path back to the community for review.
+
+<table>
+  <tr>
+    <td width="33%" align="center"><img src="assets/product/memory-icon.png" width="84" alt="Memory app icon"></td>
+    <td width="33%" align="center"><img src="assets/product/reflection-icon.png" width="84" alt="Reflection app icon"></td>
+    <td width="34%" align="center"><img src="assets/product/contribute-icon.png" width="84" alt="Contribute app icon"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Memory</strong><br>Personalize the platform with context worth keeping.</td>
+    <td align="center"><strong>Reflection</strong><br>Turn repeated friction into the next improvement.</td>
+    <td align="center"><strong>Contribute</strong><br>Share apps and platform changes that can help others.</td>
+  </tr>
+</table>
+
+Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block for everyone.
 
 Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and `/recover` keep those changes reversible.
-
-The improvement loop stays concrete:
-
-1. Build an app for a real need
-2. Notice repeated friction through use, Memory, and Reflection
-3. Turn a useful pattern into a skill, app change, or platform capability
-4. Review and share the parts that should help the wider community
 
 No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
 
