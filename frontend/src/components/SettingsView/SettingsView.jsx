@@ -1177,10 +1177,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               >
                 <div className="settings-agent-group__head">
                   <div className="settings-agent-group__title-row">
-                    <h3 className="settings__agent-title">Background agents</h3>
+                    <h3 className="settings__agent-title">Background models</h3>
                   </div>
                   <p className="settings__subtext settings__subtext--tight">
-                    Tried in order when quota or authentication fails.
+                    Used for memory, reflection, and other automatic tasks. Tried in order.
                   </p>
                 </div>
                 <div
