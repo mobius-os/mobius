@@ -18,6 +18,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const APP_ID = 990001
 
+test.use({ serviceWorkers: 'block' })
 attachCleanup()
 
 /** Mock agent routes, boot the shell (so localStorage/auth is reachable on
@@ -27,7 +28,13 @@ async function bootAndCreateChat(page, label, viewport = { width: 412, height: 9
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
+  const initialAppsResponse = page.waitForResponse(response =>
+    response.request().method() === 'GET'
+    && /\/api\/apps\/?$/.test(response.url()),
+  )
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  const initialApps = await initialAppsResponse
+  await initialApps.finished()
   await page.waitForFunction(
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
@@ -40,8 +47,10 @@ async function bootAndCreateChat(page, label, viewport = { width: 412, height: 9
 /** Make the apps list report one app owned by `chatId`, plus a stubbed frame
  *  so the app iframe mounts cheaply. */
 async function mockOwnedApp(page, chatId) {
+  const state = { requests: 0 }
   await page.route(/\/api\/apps\/(\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
+    state.requests += 1
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -57,6 +66,7 @@ async function mockOwnedApp(page, chatId) {
     status: 200, contentType: 'text/html',
     body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
   }))
+  return state
 }
 
 async function sendMessage(page, text) {
@@ -92,10 +102,11 @@ async function seedTabs(page, tabs) {
 test.describe('Tabs', () => {
   test('strip shows pinned tabs, switches, closes, and keeps the spacer sane', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'tabs')
-    await mockOwnedApp(page, chat.id)
+    const appsMock = await mockOwnedApp(page, chat.id)
     await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
 
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
     await sendMessage(page, 'build me a thing')
 
     // Strip renders both tabs; exactly one (the current chat) is active.
@@ -133,8 +144,9 @@ test.describe('Tabs', () => {
 
   test('no toggle/strip surface when nothing is pinned', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'notabs')
-    await mockOwnedApp(page, chat.id)
+    const appsMock = await mockOwnedApp(page, chat.id)
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
     await sendMessage(page, 'just a chat')
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
     // The parked split view left no toggle behind.
@@ -146,7 +158,7 @@ test.describe('Tabs', () => {
   // the LRU dedups on strict !==, so a string id would sit beside the number.
   test('switching to an app tab does not double-mount the iframe', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'dup')
-    await mockOwnedApp(page, chat.id)
+    const appsMock = await mockOwnedApp(page, chat.id)
     await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
 
     const keyErrors = []
@@ -156,6 +168,7 @@ test.describe('Tabs', () => {
 
     // Open the app numerically first — appCache holds a Number id.
     await page.goto(`${BASE}/shell/?app=${APP_ID}`, { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
     await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 5000 })
 
     // Switch to the chat tab (wait for it to settle), then back to the app tab
