@@ -76,6 +76,14 @@ async function mockOwnedApp(page, chatId) {
       })
     </script></body></html>`,
   }))
+  // AppCanvas deliberately waits for a scoped app token while online. Without
+  // this protocol mock the shell renders its loading surface, so an iframe
+  // lifecycle assertion would be testing an impossible half-mocked app.
+  await page.route(/\/api\/auth\/app-token$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ token: 'mock-app-token' }),
+  }))
   return state
 }
 
