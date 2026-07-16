@@ -135,6 +135,17 @@ def test_pre_push_only_runs_frontend_suite_with_complete_dependencies():
   assert "dependency tree unavailable or incomplete" in hook
 
 
+def test_pre_push_defers_full_backend_suite_to_main_or_explicit_opt_in():
+  hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
+    encoding="utf-8"
+  )
+  assert 'refs/heads/main)' in hook
+  assert 'PUSHES_MAIN=1' in hook
+  assert '${MOBIUS_PREPUSH_FULL:-0}' in hook
+  assert 'this push does not update main' in hook
+  assert 'full suite currently ~7m' in hook
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
