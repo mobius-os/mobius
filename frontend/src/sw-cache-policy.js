@@ -72,15 +72,21 @@ export function isCacheableAssetResponse(response) {
   return CACHEABLE_ASSET_TYPES.some(t => ct.includes(t))
 }
 
-// A sandboxed app frame has the opaque Origin:null and statically imports the
-// public modules under /vendor. The shell service worker precaches those files
-// itself (without an Origin request header), so an older cache may contain a
-// perfectly valid module response without Access-Control-Allow-Origin. When
-// that cached response is handed to the opaque frame Chromium applies CORS and
-// rejects it before the app can mount. Decorate both old cache hits and fresh
-// fetches at the worker boundary; the server emits the same wildcard header so
-// direct and HTTP-cached responses have an identical contract.
-export function withPublicVendorCors(response) {
+// Public modules imported by the sandboxed app frame. Keep this exact: these
+// paths are intentionally readable across the frame's opaque Origin:null, but
+// the rest of the shell stays on the ordinary same-origin policy.
+export function isPublicAppModulePath(pathname) {
+  return pathname === '/mobius-runtime.js' || pathname.startsWith('/vendor/')
+}
+
+// The shell service worker precaches these modules itself (without an Origin
+// request header), so an older cache may contain a valid response without
+// Access-Control-Allow-Origin. When that cached response is handed to the
+// opaque frame Chromium applies CORS and rejects it before the app can mount.
+// Decorate both old cache hits and fresh fetches at the worker boundary; the
+// server emits the same wildcard header so direct and HTTP-cached responses
+// have an identical contract.
+export function withPublicAppModuleCors(response) {
   if (!response) return response
   if (response.headers.get('access-control-allow-origin') === '*') {
     return response
