@@ -844,7 +844,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
+  /* Same hug-the-text rule as .chat__activity-label: the disclosure glyph and
+     exit chip sit right after the name, not at the far edge of the row. */
+  flex: 0 1 auto;
 }
 
 .chat__tool--done .chat__tool-name { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
@@ -1067,7 +1069,11 @@
 }
 
 .chat__activity-label {
-  flex: 1;
+  /* No stretch: the chevron hugs the label text (the ChatGPT idiom) instead of
+     floating at the row's far right edge, so the line reads as one compact
+     unit. The header button is still full-width — only the visual grouping is
+     left-aligned. Long labels still truncate before the chip/chevron clip. */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
