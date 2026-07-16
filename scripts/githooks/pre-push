@@ -5,7 +5,7 @@
 # hurt — merge-conflict markers (which once crash-looped prod), syntax
 # errors, and frontend-unit regressions — BEFORE they're pushed. Fast by
 # design: conflict + syntax checks are instant; frontend-unit (~6s) runs
-# when frontend changed (if node_modules is present); the backend suite
+# when frontend changed (if its dependency tree is complete); the backend suite
 # runs on backend changes via the shared venv (~2m; --no-verify to skip).
 # CI is the backstop for anything skipped (e.g. from a deps-less worktree).
 #
@@ -187,17 +187,19 @@ fi
 # 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
 #    frontend-unit job, so a logic regression is caught here in seconds.
 if changed_match '^frontend/'; then
-  if [ -d "$ROOT/frontend/node_modules" ] && command -v npm >/dev/null 2>&1; then
+  if command -v npm >/dev/null 2>&1 \
+      && (cd frontend && npm ls --depth=0 >/dev/null 2>&1); then
     warn "running frontend-unit…"
     if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
       ok "frontend-unit passed"
     else
       err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; FAIL=1
     fi
-  elif [ ! -d "$ROOT/frontend/node_modules" ]; then
-    warn "frontend changed, no frontend/node_modules here (worktree?) — skipping frontend-unit (CI runs it)."
-  else
+  elif ! command -v npm >/dev/null 2>&1; then
     warn "frontend changed, npm not found — skipping frontend-unit (CI runs it)."
+  else
+    warn "frontend changed, dependency tree unavailable or incomplete — skipping frontend-unit (CI runs it)."
+    warn "  enable: (cd frontend && npm ci), or link the main checkout's frontend/node_modules"
   fi
 fi
 
