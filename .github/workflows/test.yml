@@ -37,10 +37,10 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
-    # The full backend suite is now large enough that cold hosted runners can
-    # reach 5 minutes while tests are still passing. Keep the cap bounded, but
-    # leave headroom so the job fails on assertions instead of a hard cancel.
-    timeout-minutes: 10
+    # The full backend suite now reaches roughly 10 minutes on a cold hosted
+    # runner, plus dependency/setup time. Keep the cap bounded, but leave enough
+    # headroom for pytest to report assertions instead of being killed near 90%.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
