@@ -159,6 +159,9 @@ export const coldRestoredCanvasAppId =
  *                       dispatch — so two events in one React batch observe each
  *                       other.
  *   visiblePaneIds      the renderer's committed set of visible pane ids.
+ *   replaceImplicitBootTab
+ *                       true when the only boot tab is the unpinned home
+ *                       surface, which an explicit deep link replaces.
  *
  * Three load-bearing pieces remain: `openDrawer` pushes a sentinel history
  * entry; `navTo` updates internal state + `navStackRef` and does NOT call
@@ -171,6 +174,7 @@ export default function useNavigation({
   dispatchWorkspace,
   visiblePaneIds,
   blobValid,
+  replaceImplicitBootTab,
 }) {
   // Resolve the initial view AND whether HOME must be seeded beneath it as the
   // back-stack root, in ONE place (resolveInitialNav) — enforces "HOME is always
@@ -649,7 +653,7 @@ export default function useNavigation({
   }, [dispatchWorkspace, workspaceStateRef])
 
   useEffect(() => {
-    const bootPaneId = workspaceStateRef.current.ws.focusedPaneId
+    let bootPaneId = workspaceStateRef.current.ws.focusedPaneId
     if (!historyInitializedRef.current) {
       historyInitializedRef.current = true
       // An EXPLICIT deep link (notification tap, PWA launch-at-app) opens its
@@ -661,16 +665,16 @@ export default function useNavigation({
       // a non-empty pane with no blob — so gate on `blobValid` directly. A seeded
       // chat is validated against the live list by Shell's chat-restore effect.
       const bootPaneEmpty = !workspaceStateRef.current.ws.panes[bootPaneId]?.activeTabKey
+      const openBootTab = (tab) => {
+        dispatchWorkspace(replaceImplicitBootTab
+          ? { type: 'RESET_FLAT', tabs: [tab] }
+          : { type: 'OPEN_TAB', paneId: bootPaneId, tab, activate: true })
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
+      }
       if (deepLink?.view === 'canvas' && deepLink.appId != null) {
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: bootPaneId,
-          tab: tabModel.makeTab('app', deepLink.appId), activate: true,
-        })
+        openBootTab(tabModel.makeTab('app', deepLink.appId))
       } else if (deepLink?.view === 'chat' && deepLink.chatId) {
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: bootPaneId,
-          tab: tabModel.makeTab('chat', deepLink.chatId), activate: true,
-        })
+        openBootTab(tabModel.makeTab('chat', deepLink.chatId))
       } else if (!blobValid && bootPaneEmpty && initialNav.view === 'canvas' && initialNav.appId != null) {
         dispatchWorkspace({
           type: 'OPEN_TAB', paneId: bootPaneId,

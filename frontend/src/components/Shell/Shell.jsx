@@ -91,6 +91,12 @@ export default function Shell() {
     )),
   )
   const workspace = workspaceState.ws
+  // A lone workspace tab with no legacy pinned projection is the shell's
+  // implicit home surface. An explicit cold deep link should replace it rather
+  // than turning ordinary navigation into a two-item pinned strip.
+  const replaceImplicitBootTab = legacyOpenTabs.length === 0
+    && Object.keys(workspace.panes).length === 1
+    && paneModel.flatten(workspace).length <= 1
   // Whether a VALID persisted workspace blob booted this session (not a flat-tab
   // fallback). The nav adapter uses it to make the blob authoritative over the
   // legacy shell-reload triple, seeding from that triple only when absent/invalid
@@ -174,6 +180,7 @@ export default function Shell() {
     dispatchWorkspace,
     visiblePaneIds,
     blobValid,
+    replaceImplicitBootTab,
   })
 
   // Settings is a full-workspace overlay (§9) — while it is up we suppress the

@@ -50,3 +50,14 @@ test('pointer input inside an opaque app frame focuses its owning pane', () => {
   assert.match(shell, /const focusAppPane = useCallback[\s\S]*type: 'FOCUS', paneId: pane\.id/)
   assert.match(shell, /onAppFocus=\{focusAppPane\}/)
 })
+
+test('an explicit deep link replaces an unpinned implicit home tab', () => {
+  assert.match(
+    shell,
+    /const replaceImplicitBootTab = legacyOpenTabs\.length === 0[\s\S]*paneModel\.flatten\(workspace\)\.length <= 1/,
+  )
+  assert.match(
+    navigation,
+    /dispatchWorkspace\(replaceImplicitBootTab[\s\S]*type: 'RESET_FLAT', tabs: \[tab\][\s\S]*type: 'OPEN_TAB'/,
+  )
+})
