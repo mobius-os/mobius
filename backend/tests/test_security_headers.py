@@ -104,11 +104,11 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     if line.startswith("header @chatEmbed >Content-Security-Policy ")
   )
   assert "frame-ancestors 'self'" in ordinary_csp
-  assert "frame-src 'self' {$MOBIUS_SERVICE_TANDOOR_ORIGIN}" in ordinary_csp
+  assert "frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}" in ordinary_csp
   assert "frame-src *" not in ordinary_csp
   assert "frame-ancestors" not in embed_csp
   assert "frame-src 'self'" in embed_csp
-  assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in embed_csp
+  assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in embed_csp
   assert "https://cdn.openai.com" in ordinary_csp
   assert "https://cdn.openai.com" in embed_csp
   static_csp = next(
@@ -118,14 +118,14 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "sandbox allow-scripts" in static_csp
   assert "allow-same-origin" not in static_csp
   assert "frame-ancestors" not in static_csp
-  assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in static_csp
+  assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in static_csp
   service_csp = next(
     line for line in lines
     if line.startswith("?Content-Security-Policy ")
   )
   assert "frame-ancestors 'self' {$FRONTEND_ORIGIN}" in service_csp
-  assert "{$MOBIUS_SERVICE_TANDOOR_ORIGIN} {" in lines
-  assert "@tandoorSurface path /services/tandoor /services/tandoor/*" in lines
+  assert "{$MOBIUS_SERVICE_GATEWAY_ORIGIN} {" in lines
+  assert "@serviceSurface path /services/*" in lines
   assert "respond \"Not found\" 404" in lines
   assert "-X-Frame-Options" in lines
   for name in (
@@ -137,16 +137,16 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     )
 
 
-def test_compose_keeps_optional_service_origin_inert_by_default():
+def test_compose_keeps_optional_service_gateway_inert_by_default():
   compose = (
     Path(__file__).resolve().parents[2] / "docker-compose.yml"
   ).read_text(encoding="utf-8")
   assert (
-    "MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-}"
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}"
     in compose
   )
   assert (
-    "MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-http://tandoor.invalid}"
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-http://services.invalid}"
     in compose
   )
   assert "https://tandoor.${DOMAIN}" not in compose

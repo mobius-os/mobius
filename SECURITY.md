@@ -111,14 +111,20 @@ ancestor problem). `/app-embeds/by-id/` is also frameable, but every response in
 that namespace carries CSP `sandbox` without `allow-same-origin`; the namespace
 exposes only public packaged assets, while protected API access from null
 origins still requires the scoped principal. Ordinary `/app-assets/` remains
-frame-denied. A configured service hostname is reserved
-to its exact `/services/<slug>` prefix and frames only through its direct,
-same-origin-readable adapter; shell/API/recovery paths return 404 there.
+frame-denied. A configured shared service-gateway hostname is reserved to
+explicitly enabled `/services/<slug>` prefixes and frames only through each
+direct, same-origin-readable adapter; shell/API/recovery and non-enabled
+service paths return 404 there. The gateway isolates its owner-trusted service
+group from the Möbius shell, but paths are not origins: services on that
+gateway can reach one another and require dedicated origins when they are not
+mutually trusted.
 
-Opaque shell frames remain the safe default. Full services and genuinely
-independent PWAs use dedicated origins for IndexedDB/OPFS, robust offline
-outboxes, same-origin cookies/XHR and APIs such as `getUserMedia`; that must
-never restore `allow-same-origin` on the shell origin. The current standalone
+Opaque shell frames remain the safe default. Owner-trusted full services may
+share one gateway origin for cookies/XHR and durable origin storage without
+gaining shell authority. Mutually untrusted services and genuinely independent
+PWAs still use dedicated origins for service-to-service isolation, independent
+manifest/SW/storage identity and APIs such as `getUserMedia`. Neither mode may
+restore `allow-same-origin` on the shell origin. The current standalone
 mini-app loader is the documented exception still awaiting outer-shell/frame
 unification.
 

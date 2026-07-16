@@ -15,9 +15,10 @@ services:
     environment:
       - DOMAIN=${DOMAIN}
       - FRONTEND_ORIGIN=https://${DOMAIN}
-      # Caddy needs a valid site label even when the optional surface is off.
-      # The .invalid default is inert and cannot trigger public ACME/DNS work.
-      - MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-http://tandoor.invalid}
+      # Caddy needs a valid site label even when the optional shared service
+      # gateway is off. The .invalid default is inert and cannot trigger
+      # public ACME/DNS work.
+      - MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-http://services.invalid}
     depends_on:
       app:
         condition: service_healthy
@@ -52,9 +53,10 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - DOMAIN=${DOMAIN}
       - FRONTEND_ORIGIN=https://${DOMAIN}
-      # No application default: public_surface fails closed unless the operator
-      # explicitly configures the same origin consumed by Caddy above.
-      - MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-}
+      # No application default: every public_surface fails closed unless the
+      # operator explicitly configures the same shared origin consumed by
+      # Caddy above. One gateway serves all owner-trusted service slugs.
+      - MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}
       # GitHub device-flow sign-in. Defaults to the Möbius OAuth app's
       # public client id (keep in sync with config.py's baked default —
       # an empty env var here would override it and disable device flow).
