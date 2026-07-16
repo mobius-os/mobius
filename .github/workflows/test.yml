@@ -63,6 +63,9 @@ jobs:
       - name: Validate bundled Caddy policy
         run: >-
           docker run --rm
+          -e DOMAIN=localhost
+          -e FRONTEND_ORIGIN=http://localhost
+          -e MOBIUS_SERVICE_TANDOOR_ORIGIN=http://tandoor.localhost
           -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro"
           caddy:2.9-alpine
           caddy validate --config /etc/caddy/Caddyfile
@@ -238,6 +241,7 @@ jobs:
         env:
           CI: '1'
           MOBIUS_URL: http://localhost:8001
+          MOBIUS_TEST_INTERNAL_API: http://localhost:8012
           MOBIUS_USER: admin
           MOBIUS_PASS: admin
 
