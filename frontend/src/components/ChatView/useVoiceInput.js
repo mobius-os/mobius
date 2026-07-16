@@ -14,8 +14,10 @@ import { useState, useRef, useEffect } from 'react'
  * interim is shown live.
  *
  * Sessions restart on onend (mobile Chrome ends sessions after a few seconds
- * of silence). listeningRef stays true across restart gaps so the onChange
- * guard blocks Chrome's textarea direct-fill throughout.
+ * of silence). Manual textarea edits deliberately retire the current speech
+ * session and restart after a short idle window. That makes the owner's edit
+ * the new authoritative base instead of letting a later interim result
+ * overwrite it.
  *
  * @param {object} options
  * @param {(text: string) => void} options.onTranscript
@@ -31,10 +33,9 @@ import { useState, useRef, useEffect } from 'react'
  *   startVoice: () => void,
  *   stopVoice: () => void,
  *   toggleVoice: () => void,
+ *   acceptManualEdit: (text: string) => void,
  * }}
- *   `listeningRef` is the synchronous mirror of `listening`; gate any
- *   `onChange` handlers on it to block Chrome's OS dictation layer
- *   from racing with `onresult` mid-session.
+ *   `listeningRef` is the synchronous mirror of `listening`.
  */
 export default function useVoiceInput({ onTranscript, inputRef }) {
   const [listening, setListening] = useState(false)
@@ -65,6 +66,9 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
     recognitionRef.current = rec
 
     rec.onresult = (e) => {
+      // A manual edit retires its in-flight recognition object before aborting
+      // it. Ignore any result Chrome delivers during that abort race.
+      if (recognitionRef.current !== rec) return
       let interim = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
         // Android Chrome bug: duplicate final events fire with confidence=0 — skip them.
@@ -80,12 +84,16 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
       requestAnimationFrame(() => {
         if (inputRef.current) {
           inputRef.current.style.height = 'auto'
-          inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 160) + 'px'
+          const h = Math.min(inputRef.current.scrollHeight, 280)
+          inputRef.current.style.height = h + 'px'
+          inputRef.current.closest('.chat__pill')
+            ?.classList.toggle('chat__pill--tall', h > 45)
         }
       })
     }
 
     rec.onerror = (e) => {
+      if (recognitionRef.current !== rec) return
       if (e.error === 'not-allowed') {
         listeningRef.current = false
         setListening(false)
@@ -101,6 +109,7 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
     }
 
     rec.onend = () => {
+      if (recognitionRef.current !== rec) return
       recognitionRef.current = null
       if (!listeningRef.current) return  // user stopped — don't restart
       if (voiceFinalRef.current && !voiceFinalRef.current.endsWith(' ')) {
@@ -145,5 +154,36 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
     }
   }
 
-  return { listening, listeningRef, startVoice, stopVoice, toggleVoice }
+  function acceptManualEdit(text) {
+    if (!listeningRef.current) return
+
+    // Preserve the exact owner-edited value as the new dictation base. Add a
+    // separator only inside the speech buffer, so the next spoken word does
+    // not run into the manually typed text.
+    voiceFinalRef.current = text && !text.endsWith(' ') ? text + ' ' : text
+
+    // The current result set may still contain an interim derived from the
+    // pre-edit value. Retire it synchronously before aborting so a late result
+    // cannot clobber the edit, then debounce the replacement session while the
+    // owner is still typing.
+    const rec = recognitionRef.current
+    recognitionRef.current = null
+    rec?.abort()
+    if (restartTimerRef.current !== null) {
+      clearTimeout(restartTimerRef.current)
+    }
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null
+      if (listeningRef.current) startVoiceSession()
+    }, 250)
+  }
+
+  return {
+    listening,
+    listeningRef,
+    startVoice,
+    stopVoice,
+    toggleVoice,
+    acceptManualEdit,
+  }
 }

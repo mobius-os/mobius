@@ -1432,7 +1432,13 @@ export default function ChatView({
     })
   }
 
-  const { listening, listeningRef, stopVoice, toggleVoice } = useVoiceInput({
+  const {
+    listening,
+    listeningRef,
+    stopVoice,
+    toggleVoice,
+    acceptManualEdit,
+  } = useVoiceInput({
     onTranscript: handleComposerInputChange,
     inputRef,
   })
@@ -3700,6 +3706,7 @@ export default function ChatView({
           sending={composerBusy}
           listening={listening}
           listeningRef={listeningRef}
+          onManualVoiceEdit={acceptManualEdit}
           onToggleVoice={toggleVoice}
           onStop={handleStop}
           onSteer={handleSteer}

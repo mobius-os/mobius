@@ -278,7 +278,8 @@ function FileChips({ files, onRemove }) {
  *   inputRef           — for caller to focus/blur (e.g. dismiss keyboard)
  *   sending            — agent is currently streaming
  *   listening          — voice input active
- *   listeningRef       — synchronous mirror (for guarding textarea onChange)
+ *   listeningRef       — synchronous mirror of voice input state
+ *   onManualVoiceEdit  — rebases live dictation onto an owner-edited value
  *   onToggleVoice      — mic button handler
  *   onStop             — stop button handler
  *   onSteer            — fast-forward handler (steer queued msgs into the
@@ -321,6 +322,7 @@ export default function ChatInputBar({
   sending,
   listening,
   listeningRef,
+  onManualVoiceEdit,
   onToggleVoice,
   onStop,
   onSteer,
@@ -387,7 +389,7 @@ export default function ChatInputBar({
   }
 
   function handleTextareaChange(e) {
-    if (listeningRef?.current) return  // voice in progress
+    if (listeningRef?.current) onManualVoiceEdit?.(e.target.value)
     onInputChange(e.target.value)
     e.target.style.height = 'auto'
     const h = Math.min(e.target.scrollHeight, 280)
