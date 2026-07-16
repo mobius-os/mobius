@@ -187,15 +187,17 @@ fi
 # 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
 #    frontend-unit job, so a logic regression is caught here in seconds.
 if changed_match '^frontend/'; then
-  if [ -d "$ROOT/frontend/node_modules" ]; then
+  if [ -d "$ROOT/frontend/node_modules" ] && command -v npm >/dev/null 2>&1; then
     warn "running frontend-unit…"
     if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
       ok "frontend-unit passed"
     else
       err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; FAIL=1
     fi
-  else
+  elif [ ! -d "$ROOT/frontend/node_modules" ]; then
     warn "frontend changed, no frontend/node_modules here (worktree?) — skipping frontend-unit (CI runs it)."
+  else
+    warn "frontend changed, npm not found — skipping frontend-unit (CI runs it)."
   fi
 fi
 

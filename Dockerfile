@@ -352,22 +352,25 @@ RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
 COPY frontend/ ./shell-src/
 RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
 
-# Content fingerprint for scripts/test.sh.  Hash file contents (not paths) in
-# the same stable order as scripts/test-image-fingerprint.sh so host and image
-# layouts may differ without changing the result.
-RUN { \
-      sha256sum /app/test-image-inputs/Dockerfile | cut -d' ' -f1; \
-      sha256sum /app/requirements.txt | cut -d' ' -f1; \
-      sha256sum /app/shell-src/package.json | cut -d' ' -f1; \
-      sha256sum /app/shell-src/package-lock.json | cut -d' ' -f1; \
-      for f in \
-        build-react-vendor.mjs build-codemirror-vendor.mjs \
-        build-recharts-vendor.mjs build-date-fns-vendor.mjs \
-        build-d3-geo-vendor.mjs build-marked-vendor.mjs \
-        build-dompurify-vendor.mjs; do \
-          sha256sum "/app/scripts/$f" | cut -d' ' -f1; \
-      done; \
-    } | sha256sum | cut -d' ' -f1 > /app/test-image-fingerprint
+# Content fingerprint for scripts/test.sh. Stage the exact source layout and
+# invoke the host-side helper itself, keeping one authoritative input list and
+# failing the build if any declared input was not copied into the image.
+COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image-fingerprint.sh
+COPY Dockerfile /tmp/test-image-inputs/Dockerfile
+COPY backend/requirements.txt /tmp/test-image-inputs/backend/requirements.txt
+COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
+COPY backend/scripts/build-react-vendor.mjs \
+     backend/scripts/build-codemirror-vendor.mjs \
+     backend/scripts/build-recharts-vendor.mjs \
+     backend/scripts/build-date-fns-vendor.mjs \
+     backend/scripts/build-d3-geo-vendor.mjs \
+     backend/scripts/build-marked-vendor.mjs \
+     backend/scripts/build-dompurify-vendor.mjs \
+     /tmp/test-image-inputs/backend/scripts/
+RUN MOBIUS_TEST_IMAGE_INPUT_ROOT=/tmp/test-image-inputs \
+      /tmp/test-image-inputs/scripts/test-image-fingerprint.sh \
+      > /app/test-image-fingerprint \
+    && rm -rf /tmp/test-image-inputs
 
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The
