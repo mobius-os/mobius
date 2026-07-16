@@ -34,7 +34,9 @@ _STAGING_POLL_SECS = 1.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
-_FRONTEND_DIR = Path("/data/platform/frontend")
+_FRONTEND_DIR = Path(os.environ.get(
+  "MOBIUS_FRONTEND_DIR", "/data/platform/frontend",
+))
 _DIST_DIR = _FRONTEND_DIR / "dist"
 _STAGING_DIST_DIR = _FRONTEND_DIR / ".dist-staging"
 _REBUILD_DIST_DIR = _FRONTEND_DIR / ".dist-rebuild"

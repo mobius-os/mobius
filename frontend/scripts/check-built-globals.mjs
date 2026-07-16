@@ -2,8 +2,24 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { parse } from '@babel/parser'
-import traverseModule from '@babel/traverse'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+
+// Source-checkout tests mount the current script at /workspace while using the
+// image-baked dependency tree. Resolve Babel from an explicit dependency root
+// when supplied; normal development and production resolve beside this script.
+const scriptFrontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const configuredModules = process.env.MOBIUS_FRONTEND_NODE_MODULES
+const dependencyRoot = configuredModules
+  ? path.resolve(
+      path.basename(configuredModules) === 'node_modules'
+        ? path.dirname(configuredModules)
+        : configuredModules,
+    )
+  : scriptFrontend
+const require = createRequire(path.join(dependencyRoot, 'package.json'))
+const { parse } = require('@babel/parser')
+const traverseModule = require('@babel/traverse')
 
 const traverse = traverseModule.default
 

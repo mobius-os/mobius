@@ -60,6 +60,11 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: pip install -r requirements.txt
+      - name: Install frontend validator deps
+        # Backend publication tests execute the checked-in built-global
+        # validator, whose parser/traversal dependencies live in this lockfile.
+        working-directory: frontend
+        run: npm ci
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site

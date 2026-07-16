@@ -23,6 +23,12 @@ os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 from pathlib import Path as _Path
 
 _static = _Path(__file__).resolve().parents[1] / "static"
+# The warm publisher validates emitted JavaScript with a checked-in Node
+# script. Production uses /data/platform/frontend; host CI must point at the
+# checkout under test before importing app.frontend_watcher.
+os.environ["MOBIUS_FRONTEND_DIR"] = str(
+  _Path(__file__).resolve().parents[2] / "frontend"
+)
 # main.py resolves its baked static dir to /app/static (the image path) unless
 # MOBIUS_BAKED_STATIC_DIR overrides it — off the host that path is absent, so
 # point the override at the stub below (created before app.main imports).
@@ -139,6 +145,7 @@ def fresh_db():
   chat_writer_mod.stop_writer(timeout=5)
   from app.database import SessionLocal as _WriterSession
   chat_writer_mod.start_writer(_WriterSession)
+  assert chat_writer_mod.get_writer()._session_ready.wait(timeout=2)
   import glob as _glob
   import os as _os
   _logs_dir = _os.path.join(

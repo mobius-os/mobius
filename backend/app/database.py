@@ -165,8 +165,15 @@ def database_pool_snapshot() -> dict:
       "max_checkout_ms": _pool_metrics["max_checkout_ms"],
       "last_long_checkout": _pool_metrics["last_long_checkout"],
     }
+  pool_checked_out = call_metric("checkedout")
   current = {
-    "checked_out": call_metric("checkedout"),
+    # NullPool deliberately has no checkedout() method. The event-backed
+    # counter is the cross-pool source of truth and keeps diagnostics complete
+    # on the SQLite production/test path.
+    "checked_out": (
+      checked_out_connections()
+      if pool_checked_out is None else pool_checked_out
+    ),
     "checked_in": call_metric("checkedin"),
     "size": call_metric("size"),
     "overflow": call_metric("overflow"),

@@ -27,7 +27,7 @@ from fastapi.responses import Response
 
 from app import github_auth, source_status
 from app.config import get_settings
-from app.database import engine
+from app.database import checked_out_connections
 from app.storage_io import atomic_write
 
 # The github router's Limiter is a separate instance from app.state.limiter,
@@ -634,11 +634,11 @@ def test_github_capability_releases_db_before_upstream_request(
   """A fan-out of slow GitHub reads must consume sockets, not the DB pool."""
   _write_token(token="gh-app-tok")
   _, app_token = _app_token(client, owner_token, github_access=True)
-  baseline = engine.pool.checkedout()
+  baseline = checked_out_connections()
   checked_out = []
 
   async def fake_forward(_client, _request):
-    checked_out.append(engine.pool.checkedout())
+    checked_out.append(checked_out_connections())
     return Response(content=b'{}', media_type="application/json")
 
   monkeypatch.setattr(github_routes, "_forward_capped", fake_forward)
@@ -851,12 +851,12 @@ def test_review_status_releases_db_before_git_inspection(
     client, owner_token, github_access=True,
   )
   _prepared_real_review(app_id, "review-pool")
-  baseline = engine.pool.checkedout()
+  baseline = checked_out_connections()
   observed = []
   original = github_routes._inspect_prepared_review
 
   def inspect(record, diff_path, github_state):
-    observed.append(engine.pool.checkedout())
+    observed.append(checked_out_connections())
     return original(record, diff_path, github_state)
 
   monkeypatch.setattr(github_routes, "_inspect_prepared_review", inspect)
@@ -1789,12 +1789,12 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
     return _cp("")
 
   gh_calls = []
-  baseline_checked_out = engine.pool.checkedout()
+  baseline_checked_out = checked_out_connections()
   upstream_pool_counts = []
 
   def fake_gh(repo_path, *args, check=True):
     nonlocal fork_ready
-    upstream_pool_counts.append(engine.pool.checkedout())
+    upstream_pool_counts.append(checked_out_connections())
     gh_calls.append(args)
     if args[:2] == ("repo", "fork"):
       fork_ready = True
@@ -2173,11 +2173,11 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
     }
     _write_contribution(app_id, record_id, record, diff_text)
 
-  baseline = engine.pool.checkedout()
+  baseline = checked_out_connections()
   preflight_pool_counts = []
 
   def fake_preflight(rows):
-    preflight_pool_counts.append(engine.pool.checkedout())
+    preflight_pool_counts.append(checked_out_connections())
 
   monkeypatch.setattr(
     "app.routes.github._preflight_prepared_stack",
@@ -3225,10 +3225,10 @@ def test_refresh_releases_db_before_github_network(
   _write_token(token="gh-checks-tok")
   app_id, _ = _app_token(client, owner_token, github_access=True)
   _write_open_pr_record(app_id)
-  baseline = engine.pool.checkedout()
+  baseline = checked_out_connections()
 
   async def fake_graphql(_token, _query, _variables):
-    assert engine.pool.checkedout() == baseline
+    assert checked_out_connections() == baseline
     return {"pr0": {"pullRequest": _pr_node(
       rollup_state="SUCCESS",
       contexts=[],
