@@ -20,6 +20,13 @@ from app.chat_writer import get_writer
 from app.database import SessionLocal
 
 
+def _wait_for_healthy_writer():
+  """Wait for an explicit recovery restart's asynchronous DB boot probe."""
+  writer = get_writer()
+  assert writer._session_ready.wait(timeout=5), chat_writer.writer_readiness()
+  assert chat_writer.writer_readiness() == (True, None)
+
+
 def test_ready_returns_200_when_writer_running(client):
   """With the writer running (the fixture's default), /api/ready is 200."""
   r = client.get("/api/ready")
@@ -59,6 +66,7 @@ def test_ready_returns_503_when_writer_fatal_then_recovers(client):
   # one bound to the test session factory.
   chat_writer.stop_writer(timeout=5)
   chat_writer.start_writer(SessionLocal)
+  _wait_for_healthy_writer()
 
   assert client.get("/api/ready").status_code == 200
 
@@ -238,5 +246,6 @@ def test_run_boot_probe_does_not_report_ready_on_unusable_session(client):
   finally:
     chat_writer.stop_writer(timeout=5)
     chat_writer.start_writer(SessionLocal)
+    _wait_for_healthy_writer()
 
   assert client.get("/api/ready").status_code == 200

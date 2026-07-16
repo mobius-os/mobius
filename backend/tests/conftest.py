@@ -139,6 +139,14 @@ def fresh_db():
   chat_writer_mod.stop_writer(timeout=5)
   from app.database import SessionLocal as _WriterSession
   chat_writer_mod.start_writer(_WriterSession)
+  # start_writer intentionally publishes before its worker opens and probes
+  # the lazy SQLAlchemy session: production readiness must expose that window.
+  # Tests, however, use this fixture as their documented healthy baseline and
+  # some exercise consumer-only recovery seams directly. Wait for the boot
+  # probe so those calls cannot race the writer thread over the same session.
+  _writer = chat_writer_mod.get_writer()
+  assert _writer._session_ready.wait(timeout=5), chat_writer_mod.writer_readiness()
+  assert chat_writer_mod.writer_readiness() == (True, None)
   import glob as _glob
   import os as _os
   _logs_dir = _os.path.join(
