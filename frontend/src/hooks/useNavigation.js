@@ -306,6 +306,13 @@ export default function useNavigation({
   const consumeAppEntry = useCallback((entryId, ownerKey) => {
     if (!entryId) return
     const rec = appEntryOwnersRef.current.get(entryId)
+    // Consumption is idempotent. A Forward→Back traversal or a synthetic/user
+    // race can revisit an already-consumed physical entry; it must not decrement
+    // a different still-live level owned by the same pane/app.
+    if (!rec || rec.status !== 'live') {
+      consumedAppEntryIdsRef.current.add(entryId)
+      return
+    }
     const key = ownerKey || (rec ? ownerKeyOf(rec.paneId, rec.appId) : null)
     if (key) {
       const m = appSentinelCountsRef.current
@@ -371,6 +378,9 @@ export default function useNavigation({
   }, [])
 
   function openDrawer() {
+    // Synchronous guard for a rapid double activation before React has rendered
+    // `drawerOpen=true`. One drawer owns exactly one physical sentinel.
+    if (drawerOpenRef.current) return
     // Do not let a just-issued app history traversal consume a drawer entry
     // pushed after it began. Preserve the user's intent and open once the
     // serialized local-pop pump is idle.
@@ -823,21 +833,39 @@ export default function useNavigation({
         setTimeout(resumeLocalAppPops, 0)
         return
       }
-      // (4) Ordinary app sentinel, routed by the popped source's own tag: forward
-      // moebius:nav-back to that app's unique iframe and decrement its owner
-      // count. Focus follows the app to its CURRENT pane (paneOf), but accounting
-      // keeps the physical entry's ORIGINAL owner key even if the tab moved.
+      // (4) Ordinary app sentinel, routed by the popped source's own tag: restore
+      // its cached app into a visible pane when necessary, forward nav-back to
+      // that app's unique iframe, and decrement its owner count. This restoration
+      // is load-bearing for a direct tab close/focus change, which does not create
+      // a shell nav entry above the still-live app sentinel. Accounting keeps the
+      // physical entry's ORIGINAL owner key even if the tab moved.
       if (source?.kind === 'app' && sourceOwner && sourceOwner.appId != null) {
         const ws = workspaceStateRef.current.ws
         const n = appSentinelCountsRef.current.get(sourceOwnerKey) || 0
-        if (isVisibleApp(ws, sourceOwner.appId) && n > 0) {
-          consumeAppEntry(sourceEntryId, sourceOwnerKey)
-          const pane = paneModel.paneOf(ws, tabModel.tabKey(tabModel.makeTab('app', sourceOwner.appId)))
-          if (pane && pane.id !== ws.focusedPaneId) dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
-          const iframe = document.querySelector(`iframe[data-app-id="${sourceOwner.appId}"]`)
-          if (iframe?.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'moebius:nav-back' }, '*')
+        const iframe = document.querySelector(`iframe[data-app-id="${sourceOwner.appId}"]`)
+        if (iframe?.contentWindow && n > 0) {
+          let pane = paneModel.paneOf(
+            ws,
+            tabModel.tabKey(tabModel.makeTab('app', sourceOwner.appId)),
+          )
+          if (!isVisibleApp(ws, sourceOwner.appId)) {
+            const paneId = ws.panes[sourceOwner.paneId]
+              ? sourceOwner.paneId
+              : ws.focusedPaneId
+            dispatchWorkspace({
+              type: 'OPEN_TAB', paneId,
+              tab: tabModel.makeTab('app', sourceOwner.appId), activate: true,
+            })
+            pane = paneModel.paneOf(
+              workspaceStateRef.current.ws,
+              tabModel.tabKey(tabModel.makeTab('app', sourceOwner.appId)),
+            )
           }
+          consumeAppEntry(sourceEntryId, sourceOwnerKey)
+          if (pane && pane.id !== workspaceStateRef.current.ws.focusedPaneId) {
+            dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
+          }
+          iframe.contentWindow.postMessage({ type: 'moebius:nav-back' }, '*')
           // Defensive re-pump (L1): a queued request behind this one can now run.
           setTimeout(resumeLocalAppPops, 0)
           return

@@ -553,6 +553,17 @@ export default function Shell() {
     const { view, opts } = tabModel.tabNavTarget(tabModel.makeTab(kind, id))
     navTo(view, paneId ? { ...opts, paneId } : opts)
   }, [navTo])
+  // Pointer events inside an iframe do not bubble to its positioned shell
+  // wrapper. The verified live frame sends a tiny focus signal so app panes have
+  // the same click-to-focus semantics as native chat panes.
+  const focusAppPane = useCallback((appId) => {
+    const ws = workspaceStateRef.current.ws
+    const pane = paneModel.paneOf(
+      ws,
+      tabModel.tabKey(tabModel.makeTab('app', appId)),
+    )
+    if (pane) dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
+  }, [dispatchWorkspace])
   // Close only the tab; the derived triple follows the workspace, so dropping the
   // focused pane's active tab activates its neighbour (paneModel.closeTab).
   const closeTab = useCallback((kind, id) => {
@@ -648,23 +659,16 @@ export default function Shell() {
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
   }, [projection, workspace])
 
-  // The rendered set as of the last derivation — the baseline the next derivation
-  // diffs against to identify eviction victims.
-  const prevRenderedRef = useRef(new Set())
-
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
   // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
   // from the projection REGARDLESS of LRU membership and are never evicted, so a
   // MOVE_TAB that makes a never-visited app visible materializes its wrapper in
   // the SAME commit — no post-commit effect, no blank pane (finding B). The set is
   // bounded by APP_CACHE_MAX so it never renders five frames to preserve history
-  // (§4.1.4). Eviction victims are RETIRED here, synchronously in the derivation,
-  // BEFORE this render commits and unmounts their iframes (contract §4.1.2): any
-  // app that was rendered, is not in the new set, and is not still visible is
-  // losing its frame this commit, so its physical entries are marked consumed
-  // before the unmount — the orphan-Back hazard is closed without waiting for the
-  // AppCanvas cleanup backstop. retireAppHistory is idempotent, so the StrictMode
-  // double-render and the onNavReset unmount backstop are both no-ops.
+  // (§4.1.4). AppCanvas retires physical history in a layout-effect cleanup as a
+  // live frame is swapped or unmounted. Keeping retirement out of this derivation
+  // is load-bearing: React may replay or abandon a render, and render-time registry
+  // mutation would retire a frame that remains committed.
   const renderedAppIds = useMemo(() => {
     const result = new Set()
     for (const id of visibleAppIds) result.add(String(id))
@@ -672,21 +676,15 @@ export default function Shell() {
       if (result.size >= APP_CACHE_MAX) break
       result.add(String(id))
     }
-    for (const id of prevRenderedRef.current) {
-      if (!result.has(id) && !visibleAppIds.has(id)) retireAppHistory(id, 'evict')
-    }
-    prevRenderedRef.current = result
     return [...result].sort((a, b) => Number(a) - Number(b))
-    // warmVersion re-derives the set when the warm LRU changes; retireAppHistory
-    // is stable.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleAppIds, warmVersion])
 
   // Maintain the warm LRU as the visible set changes: currently-visible apps are
   // the most-recent entries, and a just-hidden app slides into the warm remainder
   // (capped). Retirement is NOT done here — it happens synchronously in the
   // derivation above, before the unmount (§4.1.2). This effect only rotates the
-  // bounded warm list and bumps the version so the memo re-derives.
+  // bounded warm list and bumps the version so the memo re-derives. AppCanvas's
+  // layout cleanup owns retirement when a resulting eviction actually commits.
   useEffect(() => {
     const visible = [...visibleAppIds].map(String)
     const prevWarm = warmLruRef.current
@@ -2209,16 +2207,15 @@ export default function Shell() {
               // Focused-pane-only: gates safe-area insets + the immersive holder
               // (global last-writer-wins). Single-pane: active === visible.
               active={tabKey === focusedActiveKey}
-              // Painted beneath the drawer scrim but NON-interactive while the
-              // drawer is open, so Android kinetic momentum already in flight is
-              // cancelled (not just new pointer hits, which inert/pointer-events
-              // already block) — sibling 79952de27, re-expressed in workspace
-              // terms: the focused canvas, minus drawer-open.
-              interactive={tabKey === focusedActiveKey && !drawerOpen}
               // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
               // background split's app keeps running and can install sentinels;
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
               visible={visibleAppIds.has(String(id))}
+              // Every visible pane remains painted beneath the modal scrim, but
+              // suspend its iframe interaction while the drawer is open. This
+              // cancels kinetic scrolling already in flight, in addition to the
+              // shell blocking new pointer input.
+              interactive={visibleAppIds.has(String(id)) && !drawerOpen}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
@@ -2228,6 +2225,7 @@ export default function Shell() {
               onNavPush={appNavPush}
               onNavPop={appNavPop}
               onNavReset={appNavReset}
+              onAppFocus={focusAppPane}
               onImmersive={handleImmersive}
               onIntentDelivered={handleAppIntentDelivered}
               onAppError={handleAppError}

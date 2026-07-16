@@ -474,6 +474,8 @@
     //   6. parent posts {type:'moebius:frame-interactivity', interactive}
     //      whenever a shell modal (currently the navigation drawer) suspends or
     //      restores direct input without unpainting/reloading the app.
+    //   7. pointer input posts {type:'moebius:frame-focus'} so the shell can focus
+    //      this app's pane; iframe events do not bubble into the parent wrapper.
     //
     // Origin check: the opaque iframe still sees the parent shell's concrete
     // origin on incoming postMessage events and rejects every other sender.
@@ -507,6 +509,10 @@
           gestureScrollers.add(node);
         }
       }
+    }
+
+    function notifyParentFocus() {
+      window.parent.postMessage({ type: 'moebius:frame-focus' }, window.location.origin);
     }
 
     function cancelScrollerMomentum(element) {
@@ -563,6 +569,7 @@
 
     document.addEventListener('touchstart', rememberGestureScrollers, { capture: true, passive: true });
     document.addEventListener('pointerdown', rememberGestureScrollers, { capture: true, passive: true });
+    document.addEventListener('pointerdown', notifyParentFocus, { capture: true, passive: true });
     document.addEventListener('wheel', rememberGestureScrollers, { capture: true, passive: true });
 
     function renderMountedComponent() {

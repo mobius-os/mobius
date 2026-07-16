@@ -102,9 +102,14 @@ import './AppCanvas.css'
 //      without inventing app-specific deep links.
 //
 //   7. moebius:microphone-*                                bidirectional
-//      Opaque frames cannot call getUserMedia themselves. The visible, active
+//      Opaque frames cannot call getUserMedia themselves. A visible
 //      frame requests a bounded capture; the trusted shell records mono PCM and
 //      transfers only those samples back to that exact contentWindow.
+//
+//   8. {type: 'moebius:frame-focus'}                       frame → parent
+//      Pointer input inside an opaque iframe cannot bubble into its positioned
+//      shell wrapper. The live frame signals the parent so its pane becomes the
+//      focused owner of keyboard and immersive state.
 //
 // Shell-level messages (handled by Shell.jsx, NOT this file):
 //   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
@@ -237,11 +242,6 @@ export default function AppCanvas({
   //     freshly-promoted rebuild) steals chrome/insets from the app on screen.
   // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
   active = true,
-  // Whether the live frame may receive direct interaction. This differs from
-  // `active` while the shell drawer is open: the app remains the visible canvas
-  // behind the scrim, but Android compositor momentum inside a long iframe must
-  // be cancelled so the background cannot keep coasting under the drawer.
-  interactive = active,
   // Whether this app is the active tab of ANY visible pane (design §5). Drives
   // the frame-visibility signal and the nav-push gate — an app visible in a
   // background split still runs and can install nested-view sentinels. `active`
@@ -249,8 +249,13 @@ export default function AppCanvas({
   // safe-area insets + the immersive holder (global last-writer-wins). Defaults
   // to `active` so a single-pane caller (where visible === focused) is unchanged.
   visible = active,
+  // Whether the live frame may receive direct interaction. This differs from
+  // `visible` while the shell drawer is open: each pane remains painted behind
+  // the scrim, but compositor momentum inside its iframe must be cancelled so
+  // background content cannot keep coasting beneath the drawer.
+  interactive = visible,
   pendingIntent = null,
-  onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered, onAppError,
+  onNavPush, onNavPop, onNavReset, onAppFocus, onImmersive, onIntentDelivered, onAppError,
 }) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
@@ -364,6 +369,10 @@ export default function AppCanvas({
           if (v === liveVersionRef.current && capture?.sourceVersion === v) {
             cancelMicrophoneCapture(microphoneCaptureRef)
           }
+          // A service-surface takeover can remove the live iframe without
+          // unmounting AppCanvas or advancing the buffered version. Retire its
+          // host sentinels at this exhaustive document-removal boundary too.
+          if (v === liveVersionRef.current) onNavReset?.(appId)
           framesRef.current.delete(v)
           loadedDocsRef.current.delete(v)
           frameImmersiveRef.current.delete(v)
@@ -592,6 +601,11 @@ export default function AppCanvas({
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
 
+      if (msg.type === 'moebius:frame-focus') {
+        onAppFocus?.(appId)
+        return
+      }
+
       if (msg.type === 'moebius:microphone-start') {
         // Reject, rather than truncate, an invalid correlation id. Truncation
         // makes every response impossible for the requesting runtime to match.
@@ -599,7 +613,7 @@ export default function AppCanvas({
           ? msg.requestId
           : ''
         const sourceWindow = e.source
-        if (!activeRef.current || !requestId) return
+        if (!visibleRef.current || !requestId) return
         if (microphoneCaptureRef.current) {
           sourceWindow.postMessage({
             type: 'moebius:microphone-error', requestId,
@@ -620,7 +634,7 @@ export default function AppCanvas({
               onLevel(level) {
                 if (microphoneCaptureRef.current !== pending
                     || pending.cancelled
-                    || !activeRef.current
+                    || !visibleRef.current
                     || pending.sourceVersion !== liveVersionRef.current) return
                 sourceWindow.postMessage({
                   type: 'moebius:microphone-level', requestId, level,
@@ -630,7 +644,7 @@ export default function AppCanvas({
             pending.control = control
             if (microphoneCaptureRef.current !== pending
                 || pending.cancelled
-                || !activeRef.current
+                || !visibleRef.current
                 || pending.sourceVersion !== liveVersionRef.current) {
               control.done.catch(() => {})
               control.cancel()
@@ -645,7 +659,7 @@ export default function AppCanvas({
             const result = await control.done
             const mayDeliver = microphoneCaptureRef.current === pending
               && !pending.cancelled
-              && activeRef.current
+              && visibleRef.current
               && pending.sourceVersion === liveVersionRef.current
             if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
             if (!mayDeliver) return
@@ -664,7 +678,7 @@ export default function AppCanvas({
           } catch (error) {
             const mayDeliver = microphoneCaptureRef.current === pending
               && !pending.cancelled
-              && activeRef.current
+              && visibleRef.current
               && pending.sourceVersion === liveVersionRef.current
             if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
             if (!mayDeliver || error?.name === 'AbortError') return
@@ -765,19 +779,19 @@ export default function AppCanvas({
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId, appSlug, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
+  }, [appId, appSlug, onNavPush, onNavPop, onAppFocus, onImmersive, onAppError, queryClient])
 
   // Captures belong to the exact visible document that requested them. Cancel
-  // before paint when the canvas becomes hidden or a buffered build is
+  // before paint when the canvas leaves every visible pane or a buffered build is
   // promoted. A still-mounted hidden frame receives only the correlated
   // AbortError needed to settle its runtime session; samples and unrelated
   // permission errors remain gated out.
   useLayoutEffect(() => {
     const capture = microphoneCaptureRef.current
     if (!capture) return
-    if (active && capture.sourceVersion === swap.liveVersion) return
-    cancelMicrophoneCapture(microphoneCaptureRef, { notifyFrame: !active })
-  }, [active, swap.liveVersion])
+    if (visible && capture.sourceVersion === swap.liveVersion) return
+    cancelMicrophoneCapture(microphoneCaptureRef, { notifyFrame: !visible })
+  }, [visible, swap.liveVersion])
 
   useLayoutEffect(() => () => {
     cancelMicrophoneCapture(microphoneCaptureRef)
@@ -851,7 +865,7 @@ export default function AppCanvas({
   // shell count is 0, _anyAppHasSentinels returns false so popstate skips
   // interception and back-gestures through orphan history entries fall through
   // to native handling.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!appId) return
     return () => { onNavReset?.(appId) }
   }, [appId, swap.liveVersion, onNavReset])
@@ -984,7 +998,7 @@ export default function AppCanvas({
     postToFrame(v, { type: 'moebius:frame-visibility', visible })
   }
 
-  function sendInteractivity(v, enabled, visible = activeRef.current) {
+  function sendInteractivity(v, enabled, visible = visibleRef.current) {
     postToFrame(v, {
       type: 'moebius:frame-interactivity',
       interactive: enabled,
@@ -1006,13 +1020,10 @@ export default function AppCanvas({
   // coast visibly beneath the newly-open drawer.
   useLayoutEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
-      // "painted" tracks `visible` post active->visible split (the frame is
-      // painted iff it is the active tab of a visible pane); `interactive` stays
-      // the focused-pane, drawer-aware gate for momentum cancellation.
       sendInteractivity(swap.liveVersion, interactive, visible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, interactive, swap.liveVersion])
+  }, [interactive, visible, swap.liveVersion])
 
   useEffect(() => {
     for (const v of framesRef.current.keys()) {

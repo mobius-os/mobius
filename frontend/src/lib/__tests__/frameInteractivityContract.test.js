@@ -11,17 +11,23 @@ const canvas = readFileSync(resolve(src, 'components/AppCanvas/AppCanvas.jsx'), 
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
 
 test('drawer suspension reaches the live app frame before paint', () => {
-  // The interactive gate is the FOCUSED canvas minus drawer-open. Post the
-  // workspace-reducer refactor (PR2) that is expressed in workspace terms
-  // (tabKey === focusedActiveKey) rather than the legacy activeView/activeAppId
-  // scalars; the behavior (cancel momentum when the drawer opens) is unchanged.
-  assert.match(shell, /interactive=\{tabKey === focusedActiveKey && !drawerOpen\}/)
-  // The layout effect's "painted" argument tracks `visible` after the
-  // active->visible split (a frame is painted iff it is the active tab of a
-  // visible pane); `interactive` stays the focused-pane, drawer-aware gate.
+  assert.match(shell, /interactive=\{visibleAppIds\.has\(String\(id\)\) && !drawerOpen\}/)
   assert.match(canvas, /useLayoutEffect\(\(\) => \{[\s\S]*sendInteractivity\(swap\.liveVersion, interactive, visible\)/)
   assert.match(canvas, /suspendScrolling:\s*visible\s*&&\s*!enabled/)
   assert.match(canvas, /moebius:frame-interactivity/)
+})
+
+test('iframe history retirement runs at the committed layout boundary, never during render', () => {
+  assert.match(
+    canvas,
+    /useLayoutEffect\(\(\) => \{\s*if \(!appId\) return\s*return \(\) => \{ onNavReset\?\.\(appId\) \}/,
+  )
+  const cacheDerivation = shell.slice(
+    shell.indexOf('const renderedAppIds = useMemo'),
+    shell.indexOf('// Maintain the warm LRU'),
+  )
+  assert.ok(cacheDerivation.length > 0)
+  assert.doesNotMatch(cacheDerivation, /retireAppHistory/)
 })
 
 test('frame suspension cancels compositor momentum without changing the resting offset', () => {
