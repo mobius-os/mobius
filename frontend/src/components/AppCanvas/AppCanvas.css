@@ -197,3 +197,44 @@
   color: var(--muted, #999);
   font-family: var(--font, inherit);
 }
+
+.canvas-loading__offline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.canvas-loading__offline-button {
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  background: var(--surface, #1a1a1a);
+  color: var(--text, #e5e5e5);
+  font-family: var(--font, inherit);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.canvas-loading__offline-button--primary {
+  border-color: var(--accent, #8b6cf7);
+  background: var(--accent, #8b6cf7);
+  color: var(--accent-fg, #fff);
+}
+
+.canvas-loading__offline-button--secondary {
+  background: transparent;
+}
+
+.canvas-loading__offline-button:active {
+  transform: scale(0.97);
+}
+
+.canvas-loading__offline-button:focus-visible {
+  outline: 2px solid var(--accent, #8b6cf7);
+  outline-offset: 2px;
+}

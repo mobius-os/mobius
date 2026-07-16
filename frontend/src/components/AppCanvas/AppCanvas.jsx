@@ -899,16 +899,24 @@ export default function AppCanvas({
                     ? 'Open it when you’re ready, or switch to another app.'
                     : serviceSurface.error}
                 </div>
-                <div>
-                  <button type="button" onClick={retryService}>
+                <div className="canvas-loading__offline-actions">
+                  <button
+                    type="button"
+                    className="canvas-loading__offline-button canvas-loading__offline-button--primary"
+                    onClick={retryService}
+                  >
                     {serviceSurface.phase === 'closed'
                       ? `Open ${appName || serviceSurface.slug}` : 'Retry'}
                   </button>
                   {serviceSurface.phase === 'error' && (
-                    <button type="button" onClick={() => {
-                      serviceRequestRef.current += 1
-                      setServiceSurface(current => ({ ...current, phase: 'closed' }))
-                    }}>Close</button>
+                    <button
+                      type="button"
+                      className="canvas-loading__offline-button canvas-loading__offline-button--secondary"
+                      onClick={() => {
+                        serviceRequestRef.current += 1
+                        setServiceSurface(current => ({ ...current, phase: 'closed' }))
+                      }}
+                    >Close</button>
                   )}
                 </div>
               </div>
