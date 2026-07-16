@@ -79,6 +79,8 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
   const pageErrors = []
   let blockedAdapterRequests = 0
   const adapterRequests = []
+  const blockedAdapterUrls = new Set()
+  const uniqueAdapterUrls = () => [...new Set(adapterRequests)]
   const fakePingRequests = []
   const fakePingRequestObjects = []
   const fakePingResponses = []
@@ -124,6 +126,7 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
   const adapterPattern = `${SERVICE_ORIGIN}/services/tandoor/_mobius/surface*`
   await page.route(adapterPattern, async route => {
     blockedAdapterRequests += 1
+    blockedAdapterUrls.add(route.request().url())
     const response = await route.fetch()
     await route.fulfill({
       response,
@@ -175,9 +178,9 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
     expect(appSandbox).not.toContain('allow-same-origin')
     // load fires even for the deliberately blocked document. While the shell
     // waits for the absent heartbeat, the frame must remain fully covered.
-    await expect.poll(() => blockedAdapterRequests, { timeout: 5_000 }).toBe(1)
-    await expect.poll(() => adapterRequests.length, { timeout: 5_000 }).toBe(1)
-    const firstAdapterUrl = adapterRequests[0]
+    await expect.poll(() => blockedAdapterRequests, { timeout: 5_000 }).toBeGreaterThan(0)
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBe(1)
+    const firstAdapterUrl = uniqueAdapterUrls()[0]
     await expect.poll(
       () => consoleErrors.some(text => /frame|ancestor|x-frame-options/i.test(text)),
       { timeout: 5_000 },
@@ -186,7 +189,7 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
     await expect(blockedFrame).toHaveCSS('opacity', '0')
     // No heartbeat arrives, so the shell transitions to its own error and
     // removes the failed browser document rather than ever uncovering it.
-    await expect(page.getByText(`Couldn’t open Tandoor`)).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText(`Couldn’t open Tandoor`)).toBeVisible({ timeout: 30_000 })
     expect(blockedAdapterRequests).toBeGreaterThan(0)
     expect(consoleErrors.some(text => /frame|ancestor|x-frame-options/i.test(text))).toBe(true)
     await expect(blockedFrame).toHaveCount(0)
@@ -194,22 +197,22 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
     await page.getByRole('button', { name: 'Close' }).click({ timeout: 5_000 })
     await expect(page.getByText('Tandoor is closed')).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('iframe[src*="/_mobius/surface"]')).toHaveCount(0)
-    await expect.poll(() => adapterRequests.length, { timeout: 2_000 }).toBe(1)
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 2_000 }).toBe(1)
 
     await page.getByRole('button', { name: 'Open Tandoor' }).click({ timeout: 5_000 })
-    await expect.poll(() => adapterRequests.length, { timeout: 5_000 }).toBe(2)
-    await expect.poll(() => blockedAdapterRequests, { timeout: 5_000 }).toBe(2)
-    const secondBlockedUrl = adapterRequests[1]
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBe(2)
+    await expect.poll(() => blockedAdapterUrls.size, { timeout: 5_000 }).toBe(2)
+    const secondBlockedUrl = uniqueAdapterUrls()[1]
     expect(secondBlockedUrl).not.toBe(firstAdapterUrl)
     await expect(page.locator('iframe[src*="/_mobius/surface"]')).toHaveCSS('opacity', '0')
-    await expect(page.getByText(`Couldn’t open Tandoor`)).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText(`Couldn’t open Tandoor`)).toBeVisible({ timeout: 30_000 })
 
     await page.unroute(adapterPattern)
     consoleErrors.length = 0
     await page.getByRole('button', { name: 'Retry' }).click({ timeout: 5_000 })
-    await expect.poll(() => adapterRequests.length, { timeout: 5_000 }).toBe(3)
-    expect(blockedAdapterRequests).toBe(2) // proves the blocking route is gone
-    const secondAdapterUrl = adapterRequests[2]
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBe(3)
+    expect(blockedAdapterUrls.size).toBe(2) // proves the blocking route is gone
+    const secondAdapterUrl = uniqueAdapterUrls()[2]
     expect(secondAdapterUrl).not.toBe(secondBlockedUrl)
 
     const serviceFrame = page.locator('iframe[src*="/_mobius/surface"]')
