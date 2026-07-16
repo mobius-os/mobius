@@ -7,7 +7,7 @@
  *
  *   (a) a pinned user message keeps its position across a divider drag;
  *   (b) a FOLLOW_BOTTOM chat keeps following AND does not remount across a
- *       divider resize and a cross-pane move (data-mount-id sentinel);
+ *       divider resize and a cross-pane move (same root DOM object);
  *   (c) an app iframe survives a cross-pane move with no second frame-init;
  *   (d) split is absent from the context menu at caps;
  *   (e) a projection flip to phone preserves the persisted tree; focus/back work;
@@ -145,47 +145,56 @@ async function sendInPane(page, chatId, text) {
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
-/** The stable per-mount id of a chat's ChatView root — unchanged unless it
- *  remounts (design §2 no-reparent). */
-async function mountIdOf(page, chatId) {
-  return page.locator(`[data-tab-key="chat:${chatId}"] .chat`).getAttribute('data-mount-id')
+/** Remember the actual ChatView root object. Comparing object identity after a
+ *  move proves the no-reparent invariant without adding test-only markers to
+ *  production markup. */
+async function rememberChatRoot(page, chatId) {
+  return page.evaluate((cid) => {
+    window.__workspacePaneChatRoot = document.querySelector(
+      `[data-tab-key="chat:${cid}"] .chat`,
+    )
+    return !!window.__workspacePaneChatRoot
+  }, chatId)
 }
 
-/** Read scroll geometry of the chat whose ChatView carries `mountId`. Works in
- *  both the paned and the collapsed full-bleed state (keyed on the mount id, not
- *  the pane wrapper). */
-async function scrollByMountId(page, mountId) {
-  return page.evaluate((mid) => {
-    const chat = document.querySelector(`.chat[data-mount-id="${mid}"]`)
-    const scroll = chat?.querySelector('.chat__scroll')
+async function rememberedChatRootIsCurrent(page, chatId) {
+  return page.evaluate((cid) => (
+    window.__workspacePaneChatRoot
+      === document.querySelector(`[data-tab-key="chat:${cid}"] .chat`)
+  ), chatId)
+}
+
+/** Read scroll geometry through the remembered root. This keeps working after
+ *  its pane wrapper moves or the layout collapses. */
+async function rememberedChatScroll(page) {
+  return page.evaluate(() => {
+    const scroll = window.__workspacePaneChatRoot?.querySelector('.chat__scroll')
     if (!scroll) return null
     const gap = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight
     return { scrollTop: scroll.scrollTop, gap, nearBottom: gap < 60 }
-  }, mountId)
+  })
 }
 
 /** Engage FOLLOW_BOTTOM with a real gesture inside a specific pane's scroller
- *  (mirrors second-send-pin's gestureToBottom, scoped by mount id). */
-async function gestureToBottom(page, mountId) {
-  await page.evaluate((mid) => {
-    const chat = document.querySelector(`.chat[data-mount-id="${mid}"]`)
-    const s = chat?.querySelector('.chat__scroll')
+ *  (mirrors second-send-pin's gestureToBottom). */
+async function gestureRememberedChatToBottom(page) {
+  await page.evaluate(() => {
+    const s = window.__workspacePaneChatRoot?.querySelector('.chat__scroll')
     if (!s) return
     s.scrollTop = s.scrollHeight
-  }, mountId)
+  })
   await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
-  await page.evaluate((mid) => {
-    const chat = document.querySelector(`.chat[data-mount-id="${mid}"]`)
-    const s = chat?.querySelector('.chat__scroll')
+  await page.evaluate(() => {
+    const s = window.__workspacePaneChatRoot?.querySelector('.chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     s.scrollTop = Math.max(0, s.scrollTop - 1)
     s.scrollTop = s.scrollHeight
-  }, mountId)
+  })
 }
 
-/** Open the pane-strip context menu for a tab and click "Move to <label>". */
-async function moveTabToOtherPane(page, paneId, tabKey) {
+/** Open a one-tab pane's context menu and click "Move to <label>". */
+async function moveOnlyTabToOtherPane(page, paneId) {
   await page.locator(`[data-pane-strip="${paneId}"] .shell__tab-open`)
     .filter({ has: page.locator('.shell__tab-text') })
     .first()
@@ -250,11 +259,10 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await waitTiled(page)
 
     await sendInPane(page, a.id, 'Follow me')
-    const mid = await mountIdOf(page, a.id)
-    expect(mid, 'chat A should have a mount id').toBeTruthy()
+    expect(await rememberChatRoot(page, a.id), 'chat A should have a root').toBe(true)
 
     // Engage FOLLOW_BOTTOM.
-    await gestureToBottom(page, mid)
+    await gestureRememberedChatToBottom(page)
     await page.evaluate(() => new Promise(r => setTimeout(r, 120)))
 
     // 1) Divider resize via the keyboard (SET_RATIO → re-project → paneResized).
@@ -263,19 +271,21 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.keyboard.press('ArrowRight')
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120)))))
-    expect(await mountIdOf(page, a.id), 'no remount across resize').toBe(mid)
-    const afterResize = await scrollByMountId(page, mid)
+    expect(await rememberedChatRootIsCurrent(page, a.id), 'no remount across resize').toBe(true)
+    const afterResize = await rememberedChatScroll(page)
     expect(afterResize, 'chat A scroller present after resize').not.toBeNull()
     expect(afterResize.nearBottom, 'still following after resize').toBe(true)
 
     // 2) Cross-pane move of chat A itself (p0 collapses to a single pane; the
     //    ChatView must not remount and FOLLOW must re-apply).
-    await moveTabToOtherPane(page, 'p0', `chat:${a.id}`)
+    await moveOnlyTabToOtherPane(page, 'p0')
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 150)))))
-    await expect(page.locator(`.chat[data-mount-id="${mid}"]`))
-      .toHaveCount(1, { timeout: 4000 }) // survived the move — same mount
-    const afterMove = await scrollByMountId(page, mid)
+    await expect.poll(() => rememberedChatRootIsCurrent(page, a.id), {
+      timeout: 4000,
+      message: 'the same ChatView root survives the cross-pane move',
+    }).toBe(true)
+    const afterMove = await rememberedChatScroll(page)
     expect(afterMove, 'chat A scroller present after move').not.toBeNull()
     expect(afterMove.nearBottom, 'still following after cross-pane move').toBe(true)
   })
