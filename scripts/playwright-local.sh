@@ -106,7 +106,11 @@ ln -s "$node_modules_root" "$snapshot_dir/node_modules"
 echo "Building disposable test stack for ${head_sha:0:12} (project: $project)..."
 compose_used=1
 compose build
-compose up -d
+if ! compose up -d; then
+  compose logs --tail 200 app caddy recoveryd || true
+  echo "error: isolated test stack failed to start" >&2
+  exit 1
+fi
 test_port="$(docker port "$caddy_container" "$test_publish_port/tcp" | tail -1 | awk -F: '{print $NF}')"
 internal_test_port="$(docker port "$app_container" 8000/tcp | tail -1 | awk -F: '{print $NF}')"
 if [[ -z "$test_port" || -z "$internal_test_port" ]]; then
@@ -135,7 +139,18 @@ if [[ "$healthy" != "1" ]]; then
   exit 1
 fi
 
-version="$(curl -fsS "http://localhost:${test_port}/api/version")"
+version=""
+for _ in $(seq 1 30); do
+  if version="$(curl -fsS "http://localhost:${test_port}/api/version" 2>/dev/null)"; then
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$version" ]]; then
+  compose logs --tail 200 caddy || true
+  echo "error: timed out waiting for isolated browser proxy" >&2
+  exit 1
+fi
 python3 -c '
 import json, sys
 value = json.loads(sys.argv[1])

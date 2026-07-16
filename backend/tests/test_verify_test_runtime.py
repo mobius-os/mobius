@@ -3,7 +3,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from scripts.verify_test_runtime import validate_runtime
+from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
 
 SHA = "a" * 40
@@ -62,6 +62,37 @@ def test_rejects_checkout_that_differs_from_ci_sha():
   assert any("sha=" in error for error in errors)
 
 
+def test_healthcheck_marks_only_the_mounted_checkout_safe(monkeypatch):
+  captured = {}
+
+  class Result:
+    stdout = f"{SHA}\n"
+
+  def fake_run(command, **kwargs):
+    captured["command"] = command
+    captured["kwargs"] = kwargs
+    return Result()
+
+  monkeypatch.setattr(subprocess, "run", fake_run)
+
+  assert platform_head() == SHA
+  assert captured["command"] == [
+    "git",
+    "-c",
+    f"safe.directory={PLATFORM_ROOT}",
+    "-C",
+    str(PLATFORM_ROOT),
+    "rev-parse",
+    "HEAD",
+  ]
+  assert captured["kwargs"] == {
+    "check": True,
+    "capture_output": True,
+    "text": True,
+    "timeout": 3,
+  }
+
+
 def test_test_compose_pins_runtime_to_mounted_checkout():
   compose = (ROOT / "docker-compose.test.yml").read_text(encoding="utf-8")
   assert "MOBIUS_TEST_RUNTIME=1" in compose
@@ -78,6 +109,8 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   assert 'docker compose -p "${TEST_PROJECT}"' in wrapper
   assert "test-image-fingerprint.sh" in wrapper
   assert "the test runner never rebuilds" in wrapper
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  assert "COPY Dockerfile ./test-image-inputs/Dockerfile" not in dockerfile
 
 
 def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
@@ -133,6 +166,8 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert 'cd "$snapshot_dir"' in runner
   assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1' in runner
   assert 'error: timed out waiting for the isolated test backend' in runner
+  assert 'error: isolated test stack failed to start' in runner
+  assert 'error: timed out waiting for isolated browser proxy' in runner
 
 
 def _git_env(home: Path) -> dict[str, str]:

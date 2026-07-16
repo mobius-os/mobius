@@ -103,13 +103,6 @@ RUN git clone --depth 1 --branch v1.0.6 \
 
 WORKDIR /app
 
-# Keep the dependency-defining Dockerfile in the image so the test wrapper can
-# prove that a prebuilt test image matches the checkout before starting a long
-# suite.  Application source is bind-mounted for tests; this manifest covers
-# the inputs whose effects are baked into the image and cannot be overridden by
-# that mount.
-COPY Dockerfile ./test-image-inputs/Dockerfile
-
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

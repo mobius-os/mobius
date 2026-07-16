@@ -38,6 +38,25 @@ def validate_runtime(version: dict[str, object], head: str, expected: str) -> li
   return errors
 
 
+def platform_head() -> str:
+  """Read the mounted checkout as root without weakening Git globally."""
+  return subprocess.run(
+    [
+      "git",
+      "-c",
+      f"safe.directory={PLATFORM_ROOT}",
+      "-C",
+      str(PLATFORM_ROOT),
+      "rev-parse",
+      "HEAD",
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+    timeout=3,
+  ).stdout.strip()
+
+
 def main() -> int:
   try:
     with urlopen(HEALTH_URL, timeout=3) as response:
@@ -45,13 +64,7 @@ def main() -> int:
         raise RuntimeError(f"health returned HTTP {response.status}")
     with urlopen(VERSION_URL, timeout=3) as response:
       version = json.load(response)
-    head = subprocess.run(
-      ["git", "-C", str(PLATFORM_ROOT), "rev-parse", "HEAD"],
-      check=True,
-      capture_output=True,
-      text=True,
-      timeout=3,
-    ).stdout.strip()
+    head = platform_head()
     errors = validate_runtime(version, head, os.getenv("BUILD_SHA", "unknown"))
     if errors:
       raise RuntimeError("; ".join(errors))
