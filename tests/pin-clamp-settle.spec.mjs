@@ -105,9 +105,18 @@ async function newChat(page) {
 
 async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const previousCount = await page.locator('.chat__msg--user').count()
   await input.fill(text)
   await page.keyboard.press('Enter')
   await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+  // `.chat__scroll` already exists after the first exchange. Waiting only for
+  // that container lets a busy CI worker measure the previous user message
+  // before React commits the new pinned row. Synchronize on the state this
+  // helper is responsible for creating, then allow the pin's layout pass.
+  await expect(page.locator('.chat__msg--user')).toHaveCount(previousCount + 1, {
+    timeout: 3000,
+  })
+  await expect(page.locator('.chat__msg--user').last()).toContainText(text)
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }

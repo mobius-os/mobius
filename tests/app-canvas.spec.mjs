@@ -427,6 +427,11 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       localStorage.setItem('moebius_active_app', String(id))
     }, appId)
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    // The app list intentionally returns empty once before the fixture appears,
+    // so React may replace the first iframe while the canvas settles. Wait for
+    // the mounted handshake before retaining a Frame handle; otherwise a slow
+    // CI worker can hand us the just-detached predecessor.
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
     const frame = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await frame.evaluate(() => {
       window.__navBacks = 0
