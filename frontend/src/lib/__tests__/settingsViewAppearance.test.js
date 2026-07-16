@@ -27,7 +27,7 @@ test('model and synced commit use the same normal-weight standard highlight', ()
   assert.match(view, /Synced to [\s\S]*settings__standard-highlight/)
   assert.doesNotMatch(view, /Serving local \{mobiusVersion\.localSha\}/)
   assert.match(css, /\.settings__last-model\s*\{[^}]*color:\s*var\(--muted\);[^}]*font-weight:\s*400;/s)
-  assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--accent\);[^}]*font-weight:\s*inherit;/s)
+  assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--green\);[^}]*font-weight:\s*inherit;/s)
 })
 
 test('background agents are always draggable without reorder chrome or a trailing caret', () => {
@@ -38,6 +38,8 @@ test('background agents are always draggable without reorder chrome or a trailin
   assert.match(view, /Tried in order when quota or authentication fails\./)
   assert.match(css, /\.settings-bg-row\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s)
   assert.match(css, /\.settings-bg-row__effort\s*\{[^}]*font-weight:\s*400;/s)
+  assert.doesNotMatch(view, /dropPosition|settings-bg-row--drop-before|settings-bg-row--drop-after/)
+  assert.doesNotMatch(css, /settings-bg-row--drop-before|settings-bg-row--drop-after/)
 })
 
 test('appearance indicator waits for the same seeded theme repaint as the palette', () => {

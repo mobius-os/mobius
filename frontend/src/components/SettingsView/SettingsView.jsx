@@ -108,7 +108,6 @@ function BackgroundProviderRow({
   models,
   dragging,
   dropTarget,
-  dropPosition,
   dragStyle,
   reorderMode,
   rowRef,
@@ -152,7 +151,6 @@ function BackgroundProviderRow({
         + (reorderMode ? ' settings-bg-row--reordering' : '')
         + (dragging ? ' settings-bg-row--dragging' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
-        + (dropTarget && dropPosition ? ` settings-bg-row--drop-${dropPosition}` : '')
       }
       style={dragStyle}
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
@@ -1080,9 +1078,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
     return undefined
   }
-  const backgroundDropPosition = backgroundDrag?.toIndex < backgroundDrag?.fromIndex
-    ? 'before'
-    : 'after'
   // The chat model row's status line shows the current default rather
   // than a connection dot ("Last model: Opus 4.8"). Resolve the label
   // from the live registry so it reads the friendly name, falling back
@@ -1187,7 +1182,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                         backgroundDrag?.toIndex === index
                         && backgroundDrag?.fromIndex !== index
                       }
-                      dropPosition={backgroundDropPosition}
                       dragStyle={backgroundDragStyleForIndex(index)}
                       reorderMode
                       rowRef={(node) => {
