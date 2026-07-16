@@ -28,6 +28,29 @@ def write_config(path: Path, services: dict):
   path.write_text(json.dumps({"version": 1, "services": declared}))
 
 
+def install_proxy_spy(monkeypatch, seen: dict):
+  class FakeAsyncClient:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    def build_request(self, method, url, *, headers, content):
+      request = httpx.Request(method, url, headers=headers, content=content)
+      seen["request"] = request
+      return request
+
+    async def send(self, request, *, stream):
+      return httpx.Response(
+        200,
+        stream=httpx.ByteStream(b"proxied"),
+        request=request,
+      )
+
+    async def aclose(self):
+      pass
+
+  monkeypatch.setattr(local_services_module.httpx, "AsyncClient", FakeAsyncClient)
+
+
 def test_stock_instance_exposes_no_local_service(client):
   root = client.get("/services", follow_redirects=False)
   response = client.get("/services/tandoor/", follow_redirects=False)
@@ -68,6 +91,121 @@ def test_bare_configured_service_normalizes_to_trailing_slash(
 
   assert response.status_code == 307
   assert response.headers["location"] == "/services/recipes/"
+
+
+def test_public_surface_shell_request_redirects_with_exact_path_and_query(
+  client, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+
+  response = client.get(
+    "/services/tandoor/recipes%2Fweek/?next=%2Fservices%2Ftandoor%2F&tag=a%20b&tag=",
+    headers={"host": "localhost"},
+    follow_redirects=False,
+  )
+
+  assert response.status_code == 308
+  assert response.headers["location"] == (
+    "http://services.localhost/services/tandoor/recipes%2Fweek/"
+    "?next=%2Fservices%2Ftandoor%2F&tag=a%20b&tag="
+  )
+
+
+def test_public_surface_gateway_request_still_proxies(
+  client, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  seen = {}
+  install_proxy_spy(monkeypatch, seen)
+
+  response = client.get(
+    "/services/tandoor/recipes/", headers={"host": "services.localhost"},
+  )
+
+  assert response.status_code == 200
+  assert response.content == b"proxied"
+  assert str(seen["request"].url) == (
+    "http://127.0.0.1:8123/services/tandoor/recipes/"
+  )
+
+
+@pytest.mark.parametrize("host", [
+  "services.example.com:443", "services.example.com.",
+])
+def test_public_surface_alternate_gateway_authority_proxies_without_redirect(
+  client, clean_local_services_config, monkeypatch, host,
+):
+  monkeypatch.setenv(
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN", "https://services.example.com",
+  )
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  seen = {}
+  install_proxy_spy(monkeypatch, seen)
+
+  response = client.get("/services/tandoor/", headers={"host": host})
+
+  assert response.status_code == 200
+  assert response.content == b"proxied"
+  assert "request" in seen
+
+
+def test_non_public_service_on_shell_host_still_proxies(
+  client, clean_local_services_config, monkeypatch,
+):
+  write_config(clean_local_services_config, {
+    "recipes": {"upstream": "http://127.0.0.1:8123"},
+  })
+  seen = {}
+  install_proxy_spy(monkeypatch, seen)
+
+  response = client.get(
+    "/services/recipes/", headers={"host": "localhost"},
+    follow_redirects=False,
+  )
+
+  assert response.status_code == 200
+  assert response.content == b"proxied"
+  assert "request" in seen
+
+
+def test_public_surface_post_redirects_permanently_with_method_preserved(
+  client, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", "http://services.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+
+  response = client.post(
+    "/services/tandoor?return=%2Frecipes",
+    headers={"host": "localhost"},
+    content=b"title=dinner",
+    follow_redirects=False,
+  )
+
+  assert response.status_code == 308
+  assert response.headers["location"] == (
+    "http://services.localhost/services/tandoor?return=%2Frecipes"
+  )
 
 
 @pytest.mark.parametrize("upstream", [
@@ -370,6 +508,7 @@ def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
   )
   ordinary = client.get(
     "/services/tandoor/", headers={"host": "localhost"},
+    follow_redirects=False,
   )
   assert "x-frame-options" not in public.headers
   policies = public.headers.get_list("content-security-policy")
@@ -377,9 +516,14 @@ def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
   assert f"frame-ancestors 'self' {get_settings().frontend_origin}" in policies
   assert all(policy != "frame-ancestors 'self'" for policy in policies)
   assert "domain=" not in public.headers["set-cookie"].lower()
-  assert ordinary.headers["x-frame-options"] == "SAMEORIGIN"
-  assert "domain=" not in ordinary.headers["set-cookie"].lower()
-  assert "path=/services/tandoor" in ordinary.headers["set-cookie"].lower()
+  assert "path=/services/tandoor" in public.headers["set-cookie"].lower()
+  # The shell origin no longer serves a public_surface service at all — it
+  # redirects to the gateway, so the old shell-host header/cookie assertions
+  # have no response body to apply to.
+  assert ordinary.status_code == 308
+  assert ordinary.headers["location"] == (
+    "http://services.localhost/services/tandoor/"
+  )
 
 
 def test_multiple_owner_trusted_services_share_one_gateway_but_private_service_does_not(

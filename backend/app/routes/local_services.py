@@ -28,6 +28,9 @@ Configuration schema::
     }
   }
 
+Services with ``public_surface`` enabled are served only on the configured
+gateway origin; requests on non-gateway hosts redirect to that gateway.
+
 The gateway deliberately isolates services from the shell, not from one
 another. Cookies remain host-only and should use the service mount path, but
 all public-surface services share origin storage and must therefore be treated
@@ -419,6 +422,25 @@ def _request_matches_surface_origin(request: Request, service: LocalService) -> 
   return bool(expected) and requested == expected
 
 
+def _redirect_to_surface_origin(
+  request: Request, service: LocalService,
+) -> RedirectResponse | None:
+  # A public-surface service is served only on its isolated gateway authority.
+  if not service.surface_origin or _request_matches_surface_origin(request, service):
+    return None
+  raw_path = request.scope.get("raw_path")
+  path = (
+    raw_path.decode("latin-1")
+    if isinstance(raw_path, bytes)
+    else request.url.path
+  )
+  query = request.scope.get("query_string", b"")
+  target = f"{service.surface_origin}{path}"
+  if query:
+    target = f"{target}?{query.decode('latin-1')}"
+  return RedirectResponse(url=target, status_code=308)
+
+
 def is_public_service_surface_request(scope) -> bool:
   """Fail-closed host+path check used by the global frame-header middleware."""
   path = scope.get("path") or ""
@@ -586,10 +608,13 @@ async def local_services_root():
 
 
 @router.api_route("/services/{slug}", methods=_METHODS)
-async def local_service_bare(slug: str):
+async def local_service_bare(slug: str, request: Request):
   service = _service_for(slug)
   if service is None:
     raise HTTPException(status_code=404, detail="Local service not found.")
+  redirect = _redirect_to_surface_origin(request, service)
+  if redirect is not None:
+    return redirect
   return RedirectResponse(url=f"{service.mount_path}/", status_code=307)
 
 
@@ -598,4 +623,7 @@ async def local_service_proxy(slug: str, path: str, request: Request):
   service = _service_for(slug)
   if service is None:
     raise HTTPException(status_code=404, detail="Local service not found.")
+  redirect = _redirect_to_surface_origin(request, service)
+  if redirect is not None:
+    return redirect
   return await _proxy(service, request)
