@@ -542,12 +542,13 @@ export default function Shell() {
   const openTabs = useMemo(() => paneModel.flatten(workspace), [workspace])
   // Becoming a two-tab workspace engages the strip; returning to zero resets it.
   // A single implicit home tab on a fresh session stays visually identical to
-  // the pre-workspace shell. Keep this as a ref so closing from two → one leaves
-  // the remaining explicitly-pinned tab visible, matching the existing contract.
-  const tabStripEngagedRef = useRef(legacyOpenTabs.length > 0)
-  const [, setTabStripVersion] = useState(0)
-  if (openTabs.length >= 2) tabStripEngagedRef.current = true
-  else if (openTabs.length === 0) tabStripEngagedRef.current = false
+  // the pre-workspace shell. State (rather than a render-time ref mutation) keeps
+  // this safe under replayed or abandoned concurrent renders.
+  const [tabStripEngaged, setTabStripEngaged] = useState(legacyOpenTabs.length > 0)
+  useEffect(() => {
+    if (openTabs.length >= 2) setTabStripEngaged(true)
+    else if (openTabs.length === 0) setTabStripEngaged(false)
+  }, [openTabs.length])
   // Dual-write on every workspace commit: the versioned blob is authoritative on
   // boot, and the legacy flat key is mirrored for one release so a rolled-back
   // client still finds its tabs. readOpenTabs keeps the LAST MAX_TABS, so the
@@ -557,11 +558,11 @@ export default function Shell() {
       sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
     } catch { /* private mode / quota — workspace stays in memory only */ }
     tabModel.writeOpenTabs(
-      tabStripEngagedRef.current
+      tabStripEngaged
         ? paneModel.flattenRollbackPriority(workspace)
         : [],
     )
-  }, [workspace])
+  }, [tabStripEngaged, workspace])
   // navTo now owns the OPEN_TAB dispatch (design §1), so openInTab is only a
   // routed navTo — drawer selections, tab activation, CTA, and protocol opens
   // all go through navTo and therefore cannot bypass workspace ownership.
@@ -588,9 +589,8 @@ export default function Shell() {
     // workspace keeps its implicit authority tab while the legacy projection is
     // cleared, exactly matching the pre-workspace shell.
     if (openTabs.length === 1) {
-      tabStripEngagedRef.current = false
+      setTabStripEngaged(false)
       tabModel.writeOpenTabs([])
-      setTabStripVersion(version => version + 1)
       return
     }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tabModel.makeTab(kind, id)) })
@@ -618,7 +618,7 @@ export default function Shell() {
       ),
     })
   }, [activeAppIdRef, activeChatIdRef, activeViewRef])
-  const tabStripVisible = tabStripEngagedRef.current && openTabs.length >= 1
+  const tabStripVisible = tabStripEngaged && openTabs.length >= 1
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
   // tab of each visible pane. A content wrapper matching a key is positioned +

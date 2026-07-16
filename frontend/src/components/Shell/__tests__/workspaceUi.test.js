@@ -35,12 +35,12 @@ test('the compact pane switcher describes its visible pane count', () => {
 })
 
 test('an implicit home tab does not engage the single-pane tab strip', () => {
-  assert.match(shell, /const tabStripEngagedRef = useRef\(legacyOpenTabs\.length > 0\)/)
-  assert.match(shell, /if \(openTabs\.length >= 2\) tabStripEngagedRef\.current = true/)
-  assert.match(shell, /else if \(openTabs\.length === 0\) tabStripEngagedRef\.current = false/)
-  assert.match(shell, /const tabStripVisible = tabStripEngagedRef\.current && openTabs\.length >= 1/)
-  assert.match(shell, /tabStripEngagedRef\.current[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
-  assert.match(shell, /if \(openTabs\.length === 1\) \{[\s\S]*?tabStripEngagedRef\.current = false[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
+  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
+  assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
+  assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
+  assert.match(shell, /const tabStripVisible = tabStripEngaged && openTabs\.length >= 1/)
+  assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
+  assert.match(shell, /if \(openTabs\.length === 1\) \{[\s\S]*?setTabStripEngaged\(false\)[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
 })
 
 test('the pane switcher uses the shared modal focus and dismissal contract', () => {
