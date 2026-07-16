@@ -7,10 +7,11 @@ so this module returns metadata only: refs, ancestry counts, source-diff
 magnitudes, and working-tree counts/path names.  It never fetches, writes, or
 returns source contents.
 
-Platform compares ``HEAD`` with ``origin/main``.  Apps compare ``HEAD`` with
-their installer-owned ``upstream`` branch.  The latter is the last installed
-source, not a promise that the remote catalog was checked just now; callers
-must keep that wording honest.
+Platform compares ``HEAD`` with ``origin/main``.  Apps keep their
+installer-owned ``upstream`` branch as the installed baseline, while also
+reporting last-fetched ``origin`` and configured GitHub-fork topology.  Nothing
+here fetches, so every remote relationship is a view of refs already on disk,
+not a promise that GitHub or the catalog was checked just now.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ _GIT_TIMEOUT = 8
 # Filenames and numstat counts are safe metadata (never source contents). Keep
 # a generous ceiling so Contribute can offer a truthful "Show all files" for
 # normal projects while still bounding pathological repositories.
-_PATH_LIST_LIMIT = 500
+_PATH_PREVIEW = 500
 _GITHUB_HTTPS = re.compile(
   r"^https://github\.com/([^/]+)/([^/#]+?)(?:\.git)?/?$", re.IGNORECASE,
 )
@@ -83,16 +84,72 @@ def _canonical_repo(url: str | None) -> str | None:
   return None
 
 
-def _diff_summary(repo: Path, left: str, right: str) -> dict[str, Any]:
+def _install_managed_paths(
+  repo: Path, left: str, right: str, paths: list[str],
+) -> set[str]:
+  """Recognize the installer's source-tree adaptations.
+
+  Installed apps deliberately replace ``.gitignore``, normalize executable
+  entrypoints, and omit manifest-managed build assets from the editable main
+  tree.  Those changes are real Git differences, but presenting them as owner
+  customization makes a clean install look modified.  The install commit is
+  the durable provenance signal; ``.gitignore`` also survives later merge
+  commits, so it is always installation metadata for app comparisons.
+
+  One newest-first history scan classifies every changed path. The original
+  implementation ran ``git log -1`` once per file, which made opening Sources
+  scale linearly with the size of an installed app's adaptation commit.
+  """
+  wanted = set(paths)
+  managed = {path for path in wanted if path == ".gitignore"}
+  if not wanted:
+    return managed
+  marker = "__MOBIUS_SOURCE_STATUS_SUBJECT__:"
+  proc = _git(
+    repo, "log", "-z", f"--format={marker}%s", "--name-only", "--no-renames",
+    f"{left}..{right}", "--",
+  )
+  if proc.returncode != 0:
+    return managed
+  subject = ""
+  seen: set[str] = set()
+  for token in proc.stdout.split("\0"):
+    if token.startswith(marker):
+      subject = token.removeprefix(marker).casefold()
+      continue
+    # Git separates the pretty header from the first --name-only path with a
+    # newline even in -z mode; later paths are already clean NUL tokens.
+    path = token.removeprefix("\n")
+    if not path or path not in wanted or path in seen:
+      continue
+    seen.add(path)
+    if subject.startswith("install:") or subject.startswith("install "):
+      managed.add(path)
+  return managed
+
+
+def _diff_summary(
+  repo: Path,
+  left: str,
+  right: str,
+  *,
+  classify_install: bool = False,
+) -> dict[str, Any]:
   """Count endpoint tree differences without returning source content."""
   proc = _git(repo, "diff", "--numstat", "--no-renames", left, right, "--")
   if proc.returncode != 0:
     return {
       "available": False, "files": 0, "insertions": 0, "deletions": 0,
-      "binary_files": 0, "paths": [], "truncated": False,
+      "binary_files": 0, "authored_files": 0, "managed_files": 0,
+      "authored_insertions": 0, "authored_deletions": 0,
+      "managed_insertions": 0, "managed_deletions": 0,
+      "paths": [], "truncated": False,
     }
   files = insertions = deletions = binaries = 0
-  paths: list[dict[str, Any]] = []
+  authored_files = managed_files = 0
+  authored_insertions = authored_deletions = 0
+  managed_insertions = managed_deletions = 0
+  all_paths: list[dict[str, Any]] = []
   for line in proc.stdout.splitlines():
     parts = line.split("\t", 2)
     if len(parts) != 3:
@@ -110,20 +167,128 @@ def _diff_summary(repo: Path, left: str, right: str) -> dict[str, Any]:
         add = delete = 0
       insertions += add
       deletions += delete
-    if len(paths) < _PATH_LIST_LIMIT:
-      paths.append({
-        "path": path, "insertions": add, "deletions": delete,
-        "binary": binary,
-      })
+    all_paths.append({
+      "path": path, "insertions": add, "deletions": delete,
+      "binary": binary,
+    })
+  managed_paths = (
+    _install_managed_paths(
+      repo, left, right, [item["path"] for item in all_paths],
+    )
+    if classify_install else set()
+  )
+  for item in all_paths:
+    managed = item["path"] in managed_paths
+    add, delete = item["insertions"], item["deletions"]
+    if managed:
+      managed_files += 1
+      managed_insertions += add or 0
+      managed_deletions += delete or 0
+    else:
+      authored_files += 1
+      authored_insertions += add or 0
+      authored_deletions += delete or 0
+    item["group"] = "managed" if managed else "authored"
+  # Owner-authored paths are the decision-bearing part of the comparison, so
+  # keep them visible before install-managed adaptations when the preview caps.
+  all_paths.sort(key=lambda item: (item["group"] == "managed", item["path"]))
+  paths = all_paths[:_PATH_PREVIEW]
   return {
     "available": True,
     "files": files,
     "insertions": insertions,
     "deletions": deletions,
     "binary_files": binaries,
+    "authored_files": authored_files,
+    "managed_files": managed_files,
+    "authored_insertions": authored_insertions,
+    "authored_deletions": authored_deletions,
+    "managed_insertions": managed_insertions,
+    "managed_deletions": managed_deletions,
     "paths": paths,
     "truncated": files > len(paths),
   }
+
+
+def _comparison_counts(repo: Path, left: str, right: str) -> tuple[int | None, int | None]:
+  proc = _git(repo, "rev-list", "--left-right", "--count", f"{left}...{right}")
+  parts = proc.stdout.split()
+  if proc.returncode == 0 and len(parts) == 2:
+    try:
+      behind, ahead = int(parts[0]), int(parts[1])
+      return ahead, behind
+    except ValueError:
+      pass
+  return None, None
+
+
+def _remote_default_ref(repo: Path, remote: str) -> str | None:
+  symbolic = _git(
+    repo, "symbolic-ref", "--quiet", "--short",
+    f"refs/remotes/{remote}/HEAD",
+  )
+  value = symbolic.stdout.strip()
+  if symbolic.returncode == 0 and value and _rev(repo, value):
+    return value
+  for branch in ("main", "master"):
+    candidate = f"{remote}/{branch}"
+    if _rev(repo, candidate):
+      return candidate
+  return None
+
+
+def _remote_topology(
+  repo: Path,
+  origin_repo: str | None,
+  *,
+  classify_install: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+  """Return sanitized, last-fetched origin/fork positions."""
+  origin_ref = _remote_default_ref(repo, "origin")
+  origin_sha = _rev(repo, origin_ref) if origin_ref else None
+  origin: dict[str, Any] = {
+    "repo": origin_repo,
+    "ref": origin_ref,
+    "sha": origin_sha,
+    "local_ahead": None,
+    "local_behind": None,
+    "local_tree": None,
+  }
+  if origin_ref and _rev(repo, "HEAD"):
+    local_ahead, local_behind = _comparison_counts(repo, origin_ref, "HEAD")
+    origin.update({
+      "local_ahead": local_ahead,
+      "local_behind": local_behind,
+      "local_tree": _diff_summary(
+        repo, origin_ref, "HEAD", classify_install=classify_install,
+      ),
+    })
+  names = _git(repo, "remote").stdout.splitlines()
+  forks: list[dict[str, Any]] = []
+  for name in names:
+    if name == "origin":
+      continue
+    remote_url = _git(repo, "remote", "get-url", name)
+    fork_repo = _canonical_repo(remote_url.stdout.strip()) if remote_url.returncode == 0 else None
+    if not fork_repo or fork_repo.casefold() == (origin_repo or "").casefold():
+      continue
+    fork_ref = _remote_default_ref(repo, name)
+    fork_sha = _rev(repo, fork_ref) if fork_ref else None
+    ahead = behind = None
+    tree = None
+    if origin_ref and fork_ref:
+      ahead, behind = _comparison_counts(repo, origin_ref, fork_ref)
+      tree = _diff_summary(repo, origin_ref, fork_ref)
+    forks.append({
+      "repo": fork_repo,
+      "ref": fork_ref,
+      "sha": fork_sha,
+      "ahead": ahead,
+      "behind": behind,
+      "tree": tree,
+    })
+  forks.sort(key=lambda item: item["repo"].casefold())
+  return origin, forks
 
 
 def _working_summary(repo: Path) -> dict[str, Any]:
@@ -158,7 +323,7 @@ def _working_summary(repo: Path) -> dict[str, Any]:
       staged += int(has_staged)
       unstaged += int(has_unstaged)
       group = "staged" if has_staged and not has_unstaged else "unstaged"
-    if len(paths) < _PATH_LIST_LIMIT:
+    if len(paths) < _PATH_PREVIEW:
       paths.append({"path": path, "status": code, "group": group})
     # In -z porcelain, rename/copy records carry the old path as the next item.
     if code[0] in "RC" and i + 1 < len(records):
@@ -190,6 +355,8 @@ def _project_status(
     "version": version,
     "available": False,
     "canonical_repo": "mobius-os/mobius" if kind == "platform" else None,
+    "origin": None,
+    "forks": [],
     "branch": None,
     "head_sha": None,
     "base_ref": "origin/main" if kind == "platform" else "upstream",
@@ -214,6 +381,12 @@ def _project_status(
     response["canonical_repo"] = (
       _canonical_repo(origin_url) or _canonical_repo(manifest_url)
     )
+  origin, forks = _remote_topology(
+    repo,
+    response["canonical_repo"],
+    classify_install=(kind == "app"),
+  )
+  response.update({"origin": origin, "forks": forks})
 
   response.update({
     "available": bool(head),
@@ -231,21 +404,16 @@ def _project_status(
     response["state"] = "local_only"
     return response
 
-  counts = _git(repo, "rev-list", "--left-right", "--count", f"{base_ref}...HEAD")
-  parts = counts.stdout.split()
-  if counts.returncode == 0 and len(parts) == 2:
-    try:
-      behind, ahead = int(parts[0]), int(parts[1])
-    except ValueError:
-      behind = ahead = None
-  else:
-    behind = ahead = None
-  tree = _diff_summary(repo, base_ref, "HEAD")
+  ahead, behind = _comparison_counts(repo, base_ref, "HEAD")
+  tree = _diff_summary(
+    repo, base_ref, "HEAD", classify_install=(kind == "app"),
+  )
   response.update({"behind": behind, "ahead": ahead, "tree": tree})
 
   has_working = bool(working.get("files"))
   has_conflict = bool(working.get("conflicts") or working.get("merge_active"))
-  has_local = bool(tree.get("files"))
+  has_local = bool(tree.get("authored_files", tree.get("files")))
+  has_managed = bool(tree.get("managed_files"))
   if has_conflict:
     state = "conflict"
   elif has_working:
@@ -256,6 +424,8 @@ def _project_status(
     state = "incoming"
   elif has_local:
     state = "customized"
+  elif has_managed:
+    state = "adapted"
   else:
     state = "aligned"
   response["state"] = state
