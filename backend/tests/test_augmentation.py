@@ -416,10 +416,13 @@ def test_concurrent_cancel_and_append_dont_lose_messages(db, auth, chat):
   async def do_cancel():
     s = SessionLocal()
     try:
-      from app.deps import get_current_owner
+      from app.deps import Principal
       owner = s.query(models.Owner).first()
       await cancel_pending_message(
-        chat_id=chat.id, cid="c-cancel", _=owner, db=s,
+        chat_id=chat.id,
+        cid="c-cancel",
+        principal=Principal(owner=owner, app_id=None, scope="owner"),
+        db=s,
       )
     finally:
       s.close()

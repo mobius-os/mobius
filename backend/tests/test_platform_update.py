@@ -599,6 +599,19 @@ def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
   assert _served_sha(platform) == head
 
 
+def test_status_restart_needed_when_constitution_changed_after_boot(clone_env):
+  origin, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  _local_commit(platform, edits={"skill/core.md": "updated constitution\n"})
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert status["needs_restart"] is True
+
+
 @pytest.mark.asyncio
 async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
   monkeypatch, clone_env,
@@ -629,6 +642,8 @@ def test_paths_need_restart_classifier():
   # a backend RUNTIME file outside backend/app/ (root module, deps) also restarts
   assert pu._paths_need_restart(["backend/config_helper.py"]) is True
   assert pu._paths_need_restart(["backend/requirements.txt"]) is True
+  # the platform constitution is process-cached even though it is not Python
+  assert pu._paths_need_restart(["skill/core.md"]) is True
   # a rename OUT of backend/app (with --no-renames the delete side shows) restarts
   assert pu._paths_need_restart(
     ["docs/admin.py", "backend/app/routes/admin.py"]) is True
@@ -641,6 +656,31 @@ def test_paths_need_restart_classifier():
   assert pu._paths_need_restart([]) is False
   # a path merely CONTAINING backend/app/ but not under it is not runtime code
   assert pu._paths_need_restart(["docs/backend/app/notes.md"]) is False
+  assert pu._paths_need_restart(["skill/building-apps.md"]) is False
+
+
+def test_import_probe_classifier_excludes_constitution_only_change():
+  assert pu._paths_need_import_probe(["skill/core.md"]) is False
+  assert pu._paths_need_import_probe([
+    "skill/core.md", "backend/app/chat.py",
+  ]) is True
+
+
+def test_constitution_only_reconcile_skips_backend_import_probe(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  new = _advance_origin(origin, edits={"skill/core.md": "new rules\n"})
+
+  def unexpected_probe(*_args, **_kwargs):
+    raise AssertionError("constitution-only update must not boot a probe server")
+
+  monkeypatch.setattr(pu, "_import_probe", unexpected_probe)
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "updated"
+  assert res.new_sha == new
 
 
 def test_changed_paths_no_renames_surfaces_deleted_backend(clone_env):

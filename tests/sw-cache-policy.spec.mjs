@@ -7,7 +7,7 @@
  * These are pure functions (frontend/src/sw-cache-policy.js), so no
  * browser/SW context is needed.
  *
- * Run: npx playwright test tests/sw-cache-policy.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-cache-policy.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import {
@@ -16,6 +16,10 @@ import {
   APP_ASSETS_CACHE,
   isCacheableAssetResponse,
   isRangeRequest,
+  isPackagedAppAsset,
+  packagedAppAssetCacheKey,
+  hasOpaqueEmbedSandbox,
+  isCacheableOpaqueEmbedDocument,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
@@ -66,6 +70,35 @@ test.describe('sw cache policy — app-assets poisoned-cache eviction', () => {
 
   test('keeps the current app-assets cache', () => {
     expect(isStaleRuntimeCache(APP_ASSETS_CACHE)).toBe(false)
+  })
+})
+
+test.describe('sw cache policy — opaque packaged documents', () => {
+  test('shares controlled subresource identity but never fetch/document identity', () => {
+    const entry = 'https://mobius.test/app-embeds/by-id/60/index.html'
+    const script = 'https://mobius.test/app-embeds/by-id/60/static/main.deadbeef.js'
+    expect(isPackagedAppAsset(new URL(entry).pathname)).toBe(true)
+    expect(packagedAppAssetCacheKey(entry, { isDocument: true })).toBe(entry)
+    expect(packagedAppAssetCacheKey(entry)).toBe(entry)
+    expect(packagedAppAssetCacheKey(script, { isSubresource: true })).toBe(
+      'https://mobius.test/app-assets/by-id/60/static/main.deadbeef.js'
+    )
+  })
+
+  test('refuses an entry document if CSP sandbox is missing or same-origin', () => {
+    const response = csp => ({
+      status: 200,
+      headers: { get: name => name === 'content-type' ? 'text/html' : csp },
+    })
+    expect(isCacheableOpaqueEmbedDocument(response('sandbox allow-scripts'))).toBe(true)
+    expect(hasOpaqueEmbedSandbox({
+      status: 200,
+      headers: { get: name => name === 'content-security-policy' ? 'sandbox' : 'application/javascript' },
+    })).toBe(true)
+    expect(isCacheableOpaqueEmbedDocument(response("default-src 'self'"))).toBe(false)
+    expect(isCacheableOpaqueEmbedDocument(response(
+      'sandbox allow-scripts allow-same-origin',
+    ))).toBe(false)
   })
 })
 

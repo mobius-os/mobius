@@ -26,8 +26,8 @@ Direct invocation observes the invariant deterministically: the handler
 must have released its session by the time it hands back the
 StreamingResponse. The session passed in has an open connection checked
 out (simulating the auth queries FastAPI's cached get_db sub-dependency
-already ran on it), and the engine here is the app's real engine, whose
-QueuePool is the same pool class Postgres uses in production.
+already ran on it). Checkout observation is pool-agnostic so the same test
+covers production SQLite's NullPool and deployed Postgres's QueuePool.
 """
 
 import pytest
@@ -35,7 +35,7 @@ from sqlalchemy import text
 
 from app import models
 from app.broadcast import create_broadcast, remove_broadcast
-from app.database import SessionLocal, engine
+from app.database import SessionLocal, checked_out_connections
 from app.deps import Principal
 
 
@@ -44,6 +44,12 @@ class _ConnectedRequest:
 
   async def is_disconnected(self):
     return False
+
+
+def _wait_for_writer_connection():
+  """Stabilize the async writer startup before taking pool baselines."""
+  from app.chat_writer import get_writer
+  assert get_writer()._session_ready.wait(timeout=2)
 
 
 def _pinned_session(baseline):
@@ -59,14 +65,14 @@ def _pinned_session(baseline):
   """
   db = SessionLocal()
   db.execute(text("SELECT 1"))
-  assert engine.pool.checkedout() == baseline + 1, (
+  assert checked_out_connections() == baseline + 1, (
     "precondition: the session should pin one pooled connection"
   )
   return db
 
 
 def _assert_pool_drained(baseline, when):
-  held = engine.pool.checkedout() - baseline
+  held = checked_out_connections() - baseline
   assert held == 0, (
     f"{held} pooled DB connection(s) still checked out {when} — "
     "the stream handler is pinning its request session. Release it "
@@ -78,12 +84,15 @@ def _assert_pool_drained(baseline, when):
 async def test_system_stream_releases_db_connection_while_open():
   from app.routes.notify import stream_system_events
 
-  baseline = engine.pool.checkedout()
+  _wait_for_writer_connection()
+  baseline = checked_out_connections()
   db = _pinned_session(baseline)
   try:
     response = await stream_system_events(
       request=_ConnectedRequest(),
-      _owner=models.Owner(username="test"),
+      principal=Principal(
+        owner=models.Owner(username="test"), app_id=None, scope="owner",
+      ),
       db=db,
     )
     gen = response.body_iterator
@@ -104,7 +113,8 @@ async def test_chat_stream_releases_db_connection_while_open():
   from app.routes.chats_stream import stream_chat
 
   chat_id = "sse-pool-test"
-  baseline = engine.pool.checkedout()
+  _wait_for_writer_connection()
+  baseline = checked_out_connections()
   db = _pinned_session(baseline)
   setup = SessionLocal()
   setup.add(models.Chat(id=chat_id, title="sse pool test"))

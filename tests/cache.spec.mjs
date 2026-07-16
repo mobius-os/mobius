@@ -9,10 +9,14 @@
  * The point of these tests is to lock in the no-flash chat-back-nav
  * behavior so future changes don't silently regress it.
  *
- * Run:  npx playwright test tests/cache.spec.mjs
+ * Run:  scripts/playwright-local.sh --allow-local-e2e tests/cache.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { workerChatTitle, workerPrefix, attachCleanup } from './_chatTracker.mjs'
+import {
+  workerChatTitle,
+  registerCreatedChats,
+  attachCleanup,
+} from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -50,7 +54,7 @@ async function ensureChats(page, count = 2) {
     { length: count },
     () => workerChatTitle(workerIndex, testTitle)
   )
-  return page.evaluate(async ({ titles: ts }) => {
+  const ids = await page.evaluate(async ({ titles: ts }) => {
     const tok = localStorage.getItem('token')
     if (!tok) return []
     const ids = []
@@ -67,40 +71,8 @@ async function ensureChats(page, count = 2) {
     }
     return ids
   }, { titles })
-}
-
-async function openDrawer(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
-}
-
-async function clickChatInDrawer(page, index) {
-  // The drawer renders chats in a `.drawer__group` with title "Chats"
-  // (or unlabeled), then apps in another group. Filter strictly to
-  // chat items by excluding `--new`, `--active` styling is irrelevant.
-  await page.evaluate((idx) => {
-    // Find the group whose label is "Chats" or whose first non-"new"
-    // item is a chat. Simpler: walk all groups, take the first that
-    // contains chat-shaped items (text but no app icon, not Settings).
-    const allGroups = document.querySelectorAll('.drawer__group')
-    let chatItems = []
-    for (const g of allGroups) {
-      const items = g.querySelectorAll('.drawer__item')
-      for (const el of items) {
-        if (el.classList.contains('drawer__item--new')) continue
-        const text = el.querySelector('.drawer__item-text')?.textContent?.trim()
-        // Exclude obvious non-chat items.
-        if (!text || text === 'Settings' || text === 'Hello World') continue
-        chatItems.push(el)
-      }
-      if (chatItems.length > 0) break
-    }
-    if (chatItems[idx]) chatItems[idx].click()
-  }, index)
-  await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+  registerCreatedChats(workerIndex, ids)
+  return ids
 }
 
 async function getActiveChatId(page) {
@@ -130,7 +102,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     // BLOCKED. If the cache is doing its job, the chat view still
     // renders and shows the persisted messages.
     await setup(page)
-    await ensureChats(page, 2)
+    const ids = await ensureChats(page, 2)
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('.chat__empty-wrap')
@@ -139,23 +111,9 @@ test.describe('Chat messages cache (TanStack Query)', () => {
       { timeout: 10000 }
     )
 
-    // Use the chat IDs returned by ensureChats directly. Driving via
-    // localStorage + reload is reliable across drawer rendering quirks.
-    // Filter to this worker's chats so concurrent workers' fixtures
-    // don't bleed into the list and shift ids[0]/ids[1].
-    const myPrefix = workerPrefix(test.info().workerIndex)
-    const ids = await page.evaluate(async (prefix) => {
-      const tok = localStorage.getItem('token')
-      const res = await fetch('/api/chats', {
-        headers: { 'Authorization': 'Bearer ' + tok },
-      })
-      const list = await res.json()
-      if (!Array.isArray(list)) return []
-      return list
-        .filter(c => (c.title || '').startsWith(prefix))
-        .map(c => c.id)
-    }, myPrefix)
-    expect(ids.length).toBeGreaterThanOrEqual(2)
+    // Use only the exact fixture IDs returned by ensureChats. The test never
+    // enumerates the owner account or borrows rows created elsewhere.
+    expect(ids).toHaveLength(2)
     const chatA = ids[0]
     const chatB = ids[1]
     expect(chatA).not.toBe(chatB)
@@ -263,7 +221,9 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     // Verifies the persister is actually writing to IndexedDB. The
     // persister key is `mobius-query-cache` (set in queryClient.js).
     await setup(page)
-    await ensureChats(page, 1)
+    const [chatId] = await ensureChats(page, 1)
+    expect(chatId).toBeTruthy()
+    await page.evaluate((id) => localStorage.setItem('moebius_active_chat', id), chatId)
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('.chat__empty-wrap')
@@ -271,9 +231,6 @@ test.describe('Chat messages cache (TanStack Query)', () => {
             || document.querySelector('.chat__form')),
       { timeout: 10000 }
     )
-    await openDrawer(page)
-    await clickChatInDrawer(page, 0)
-
     // The persister throttles writes (1000ms). Wait long enough.
     await page.evaluate(() => new Promise(r => setTimeout(r, 1500)))
 

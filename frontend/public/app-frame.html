@@ -6,7 +6,6 @@
            AppCanvas hydrates it before module import and persists mutations in
            an app-private namespace. No owner credential is ever included. -->
       <script data-mobius-storage-shim>(function () {
-  try { void window.localStorage; return; } catch (e) {}
   var values = Object.create(null);
   var hydrating = false;
   function keys() { return Object.keys(values); }
@@ -31,6 +30,22 @@
     }
   };
   Object.defineProperty(window, 'localStorage', { value: storage, configurable: true });
+  // sessionStorage is also unavailable in an opaque origin. It is intentionally
+  // memory-only: app preferences that need persistence use the localStorage
+  // facade above, while tab-lifetime state must never escape this frame.
+  var sessionValues = Object.create(null);
+  var sessionStorage = {
+    get length() { return Object.keys(sessionValues).length; },
+    key: function (index) { return Object.keys(sessionValues)[index] || null; },
+    getItem: function (key) {
+      key = String(key);
+      return Object.prototype.hasOwnProperty.call(sessionValues, key) ? sessionValues[key] : null;
+    },
+    setItem: function (key, value) { sessionValues[String(key)] = String(value); },
+    removeItem: function (key) { delete sessionValues[String(key)]; },
+    clear: function () { sessionValues = Object.create(null); }
+  };
+  Object.defineProperty(window, 'sessionStorage', { value: sessionStorage, configurable: true });
   window.__mobiusHydrateLocalStorage = function (snapshot) {
     hydrating = true;
     values = Object.create(null);
@@ -152,9 +167,8 @@
     if (themeColorMeta) themeColorMeta.setAttribute('content', bg);
     var colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
     if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', mode === 'light' ? 'light dark' : 'dark light');
-    // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
-    // correct {bg,mode}. The same-origin app-frame shares this localStorage but
-    // has an EMPTY slot, so it must NOT write — else it clobbers the owner's
+    // Persist in the TOP-LEVEL SHELL ONLY for the next shell boot.
+    // Opaque app frames use a memory-only storage shim with an EMPTY slot, so it must NOT write — else it clobbers the owner's
     // real theme with the dark default and the shell re-reads it (drawer bleed).
     try {
       if (window.parent === window) {
@@ -303,6 +317,8 @@
       text-align: left;
       max-height: 200px;
       overflow-y: auto;
+      -webkit-user-select: text;
+      user-select: text;
     }
     .error-actions { display: flex; gap: 10px; margin-top: 4px; }
     .error-btn {
@@ -330,7 +346,7 @@
     <div class="error-detail" id="error-detail"></div>
     <div class="error-actions">
       <button class="error-btn error-btn--reload" onclick="location.reload()">Reload app</button>
-      <button class="error-btn error-btn--report" id="report-btn" onclick="reportError()">Tell agent to fix</button>
+      <button class="error-btn error-btn--report" id="report-btn" onclick="reportError()">Report to agent</button>
     </div>
   </div>
 
@@ -342,7 +358,15 @@
     var capturedError = ''
     var capturedErrorOnce = false  // only the first error is reported (root cause)
 
+    function redactErrorCredentials(detail) {
+      return String(detail || '').replace(
+        /([?&]token=)[^&\s"'<>]+/gi,
+        '$1[redacted]'
+      )
+    }
+
     function showErr(title, detail) {
+      detail = redactErrorCredentials(detail)
       if (!capturedErrorOnce) { capturedError = detail; capturedErrorOnce = true; }
       document.getElementById('error-title').textContent = title
       document.getElementById('error-detail').textContent = detail

@@ -234,6 +234,7 @@ function MsgContentInner({
         return (
           <div key={assistantBlockKey(block, i)}>
             <QuestionCard
+              chatId={chatId}
               questions={block.questions || []}
               questionId={block.question_id}
               answeredMap={answers}
@@ -281,6 +282,7 @@ function MsgContentInner({
                   </label>
                 </div>
                 <Switch
+                  className="chat-policy-switch"
                   id={autoResumeSwitchId}
                   checked={!!autoResumeEnabled}
                   onCheckedChange={onAutoResumeChange}

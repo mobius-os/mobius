@@ -50,10 +50,20 @@ export function hasProtectedEditingContent(el) {
   return true
 }
 
-export function hasActiveChatTurn({ streamingChatIds }) {
-  if (!streamingChatIds) return false
-  if (typeof streamingChatIds.size === 'number') return streamingChatIds.size > 0
-  if (Array.isArray(streamingChatIds)) return streamingChatIds.length > 0
+export function hasActiveChatTurn({ activeView, activeChatId, streamingChatIds }) {
+  // A controlled shell reload must never interrupt the chat the owner is
+  // actively watching. Background runs are different: they are server-owned,
+  // survive the page reload, and reconnect/catch up afterwards. Treating ANY
+  // background run as foreground activity can strand a repaired shell forever
+  // when the owner has several agents working at once.
+  if (activeView !== 'chat' || activeChatId == null || !streamingChatIds) return false
+  const id = String(activeChatId)
+  if (typeof streamingChatIds.has === 'function') {
+    return streamingChatIds.has(activeChatId) || streamingChatIds.has(id)
+  }
+  if (Array.isArray(streamingChatIds)) {
+    return streamingChatIds.some(chatId => String(chatId) === id)
+  }
   return false
 }
 

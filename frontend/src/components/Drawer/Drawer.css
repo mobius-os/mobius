@@ -280,6 +280,7 @@
    the composer pill's focus halo so the platform reads as a
    single design system. */
 .drawer__item:focus-visible,
+.drawer__open-tab:focus-visible,
 .drawer__more:focus-visible,
 .drawer__menu-item:focus-visible,
 .drawer__menu-confirm-btn:focus-visible {
@@ -335,6 +336,44 @@
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;
+}
+
+.drawer__open-tab {
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.12s, color 0.12s, background 0.12s, transform 0.08s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__open-tab:active {
+  transform: scale(0.92);
+  color: var(--text);
+  background: var(--surface);
+}
+
+.drawer__row:focus-within .drawer__open-tab { opacity: 1; }
+
+@media (hover: hover) and (pointer: fine) {
+  .drawer__row:hover .drawer__open-tab { opacity: 1; }
+  .drawer__open-tab:hover {
+    color: var(--text);
+    background: var(--surface);
+  }
+}
+
+@media (hover: none) {
+  .drawer__open-tab { opacity: 0.5; }
 }
 
 /* The ⋮ button matches the row height so its hit area aligns

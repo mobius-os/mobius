@@ -54,9 +54,6 @@ export const shellReload = (() => {
     sessionStorage.removeItem('shell-reload')
     try { return JSON.parse(raw) } catch { return null }
   } catch {
-    // Sandboxed app chat embeds have an opaque origin and therefore no
-    // sessionStorage. Navigation restore belongs to the top-level shell, so
-    // treating unavailable storage as an empty restore is the correct fallback.
     return null
   }
 })()

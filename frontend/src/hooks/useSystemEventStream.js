@@ -1,5 +1,8 @@
 import { useEffect, useRef } from 'react'
-import { BASE, getToken, clearToken, clearQueryCache } from '../api/client.js'
+import {
+  BASE, getToken, getAuthHeaders, isEphemeralAuth,
+  clearToken, clearQueryCache,
+} from '../api/client.js'
 import * as setupSession from '../lib/setupSession.js'
 
 /**
@@ -49,15 +52,20 @@ export default function useSystemEventStream(
         // No token — nothing to authenticate with. Retry once the
         // user logs in (the effect re-runs because Shell remounts
         // on the auth boundary).
+        if (isEphemeralAuth()) setTimeout(connect, 1000)
         return
       }
       controller = new AbortController()
       try {
         const res = await fetch(`${BASE}/api/events/system`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: getAuthHeaders(),
           signal: controller.signal,
         })
         if (res.status === 401) {
+          if (isEphemeralAuth()) {
+            window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
+            throw new Error('EMBED_AUTH_EXPIRED')
+          }
           // Stale / expired token. Reconnecting with the same token would
           // loop forever. Mirror apiFetch's AUTH_EXPIRED path: clear local
           // credentials and reload so the auth boundary takes over.

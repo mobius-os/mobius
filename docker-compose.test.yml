@@ -47,6 +47,7 @@ services:
       - MOBIUS_TEST_RUNTIME=1
       - MOBIUS_TEST_PLATFORM_SOURCE=/workspace
       - BUILD_SHA=${GITHUB_SHA:-unknown}
+      - MOBIUS_SERVICE_TANDOOR_ORIGIN=http://tandoor.localhost:${TEST_PORT:-8001}
     volumes:
       - test_data:/data
       - ./:/workspace:ro
@@ -64,6 +65,16 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  fake-tandoor:
+    image: ${MOBIUS_IMAGE:-mobius-test:ci}
+    network_mode: "service:app"
+    entrypoint: ["python3", "/workspace/tests/fake_tandoor.py"]
+    volumes:
+      - ./:/workspace:ro
+    depends_on:
+      app:
+        condition: service_started
 
   # Frozen recovery floor — a SEPARATE container from the same image, so a
   # broken/crash-looping platform can't take it down. Runs recoveryd (stdlib

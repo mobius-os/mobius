@@ -1415,6 +1415,12 @@ class ChatWriterActor:
     )
     if not applied:
       raise _PersistFailed("AnswerQuestion: no matching question block")
+    # Answering an interactive question is an owner action just like a visible
+    # send. Keep drawer recency separate from generic transcript writes, but do
+    # advance it here so a parked chat returns to the top as soon as the answer
+    # commits (including the same-turn answer-delivery path).
+    from datetime import UTC, datetime
+    chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AnswerQuestion did not persist")
     return True
@@ -1608,6 +1614,7 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("StartTurn: chat not found or deleted")
+    ensure_user_cid(cmd.user_msg)
     existing = list(chat.messages or [])
     pending = list(chat.pending_messages or [])
     incoming_cid = cid_of(cmd.user_msg)
@@ -1726,6 +1733,7 @@ class ChatWriterActor:
       raise _PersistFailed("AppendPending: no matching question block")
     pending = list(chat.pending_messages or [])
     new_msg = dict(cmd.user_msg)
+    ensure_user_cid(new_msg)
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
     # Idempotent append: `cid` is untrusted client input, and a retried POST
@@ -1735,9 +1743,10 @@ class ChatWriterActor:
     # appending a twin. The answer merge above still ran (harmless if already
     # applied). cid is never an auth boundary — this only de-dups retries.
     #
-    # Gate on a present cid: a client that sends none can't be deduped this way
-    # (and two of its distinct sends could share an optimistic ts), so this only
-    # ever fires for a genuine cid-carrying retry.
+    # Every accepted user row has a cid here: client-minted when supplied,
+    # otherwise server-minted above. A caller that retries without supplying
+    # a cid receives a fresh identity (there is no cross-request key to match),
+    # while retries carrying the returned cid remain idempotent.
     incoming_cid = new_msg.get("cid")
     if incoming_cid is not None:
       for existing in pending:
@@ -1824,7 +1833,8 @@ class ChatWriterActor:
     }
     stored_messages: list[dict] = []
     for raw_msg in raw_user_msgs:
-      key = cid_of(raw_msg)
+      new_msg = dict(raw_msg)
+      key = ensure_user_cid(new_msg)
       if key is not None and key in seen_cids:
         log.warning(
           "AppendSteeredUserMessage dropping duplicate steered row "
@@ -1833,7 +1843,6 @@ class ChatWriterActor:
         continue
       if key is not None:
         seen_cids.add(key)
-      new_msg = dict(raw_msg)
       _ensure_unique_ts(new_msg, used_messages)
       msgs.append(new_msg)
       used_messages.append(new_msg)
@@ -2578,15 +2587,40 @@ def cid_of(msg: dict) -> str | None:
   """The stable identity of a user message.
 
   A `cid` is the canonical identity — React key, DOM pin target, queue cancel
-  key, steer dedup key. Current clients mint it (see schemas.SendMessage.cid);
-  card-221 backfilled `cid=legacy-<ts>` onto every legacy user row, so post-
-  migration every user row carries an explicit cid and no read-time derivation
-  is needed. `ts` is display/ordering metadata only. Returns None for a row
-  with no cid.
+  key, steer dedup key. Current clients mint it (see schemas.SendMessage.cid),
+  and the server stamps one when a caller omits it. Card-221 backfilled older
+  rows, but a pre-migration or interrupted-migration row can still be observed;
+  for that legacy-only case derive the same `legacy-<ts>` identity the
+  migration writes. New writes never rely on this fallback. `ts` remains
+  display/ordering metadata for current rows.
   """
   if not isinstance(msg, dict):
     return None
-  return msg.get("cid") or None
+  explicit = msg.get("cid")
+  if explicit:
+    return explicit
+  if msg.get("role") == "user" and msg.get("ts") is not None:
+    return f"legacy-{msg['ts']}"
+  return None
+
+
+def ensure_user_cid(msg: dict) -> str | None:
+  """Stamp and return a durable identity before a user row is persisted.
+
+  Browser clients normally supply their compose-time cid. API and internal
+  callers are allowed to omit it, so the single-writer boundary also enforces
+  the invariant instead of trusting every producer to remember. The minted id
+  is opaque, carries no authority, and stays unchanged across queue, promote,
+  transcript, SSE echo, cancel, and fast-forward paths.
+  """
+  if not isinstance(msg, dict) or msg.get("role") != "user":
+    return None
+  existing = msg.get("cid")
+  if existing:
+    return existing
+  cid = f"server-{secrets.token_urlsafe(18)}"
+  msg["cid"] = cid
+  return cid
 
 
 @dataclass
@@ -2836,12 +2870,10 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
-    # Stamp the row's explicit cid onto the stored row. Post-card-221 every
-    # pending row carries a cid, so this is the identity as-is — stable across
-    # the `_ensure_unique_ts` bump below (cid never rides on ts), which keeps the
-    # stored row's identity byte-identical to the one the consume/steer paths
-    # recorded from the queue snapshot so cid-keyed dedup stays exact.
+    # Preserve an explicit cid, or stamp the legacy fallback before changing
+    # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)
+    ensure_user_cid(msg)
     _ensure_unique_ts(msg, used)
     used.append(msg)
     stored.append(msg)

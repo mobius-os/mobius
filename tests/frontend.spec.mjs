@@ -4,7 +4,7 @@
  * Tests message rendering, input behavior, theme switching, and app canvas.
  * All tests use API interception — no agent tokens consumed.
  *
- * Run: npx playwright test tests/frontend.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/frontend.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
@@ -330,8 +330,10 @@ test.describe('Message rendering', () => {
     // contract is that submitting an answer starts the hidden continuation.
     await expect.poll(() => followupStreamServed).toBe(true)
 
-    // Verify the question card is in answered state (no submit button).
-    await expect(page.locator('.qcard__submit')).toHaveCount(0)
+    // Verify the question card keeps its geometry and grays out its submit
+    // control instead of removing the row underneath the reader.
+    await expect(page.locator('.qcard__submit')).toBeDisabled()
+    await expect(page.locator('.qcard__submit')).toHaveText('Submitted')
   })
 
   test('6c. Question card answer sends hidden message', async ({ page }) => {

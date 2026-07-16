@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getToken, BASE } from '../../api/client.js'
+import { getAuthHeaders, BASE } from '../../api/client.js'
 import {
   isChatStreamSystemEvent,
   shouldForwardChatStreamSystemEvent,
@@ -28,11 +28,14 @@ import { ChatTransportError, chatHttpError } from './sendErrors.js'
 // DO NOT decrease below 2 — it makes streaming feel sluggish.
 const CHARS_PER_FRAME = 3
 
-// Hard cap on the send POST. It returns 202 as soon as the backend registers
-// the broadcast (fast), so this only fires when the request is genuinely
-// stuck (dead socket after mobile sleep, lost network). On abort the send's
-// catch resets the optimistic composer lock instead of hanging in Stop mode.
-const SEND_POST_TIMEOUT_MS = 20000
+// Hard cap on the send POST. It normally returns 202 immediately. Keep this
+// above every bounded backend wait: aborting at 20s while a request was still
+// queued behind SQLAlchemy's former 30s pool checkout produced an ambiguous
+// outcome — ChatView restored the draft as "failed", then the server accepted
+// the already-arrived request and the same text appeared in the transcript.
+// SQLite no longer has that fixed checkout ceiling, but 45s keeps rolling
+// deployments / slower external DBs on the safe side of the same contract.
+const SEND_POST_TIMEOUT_MS = 45000
 
 // Delay before the wake/online reattach surfaces as a visible
 // "Reconnecting…" note. Real mobile reattach can spend time waking the
@@ -569,7 +572,7 @@ export default function useStreamConnection(chatId, {
 
     try {
       const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/stream`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: getAuthHeaders(),
         signal: controller.signal,
       })
 
@@ -1211,10 +1214,7 @@ export default function useStreamConnection(chatId, {
       let res
       const requestInit = {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
         signal: sendCtrl.signal,
       }

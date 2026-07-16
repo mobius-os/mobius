@@ -16,10 +16,11 @@ from app.auth_helpers import TokenSource, get_auth_token_source
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  get_current_owner, reject_cross_site, resolve_media_or_header_owner,
+  Principal, get_owner_or_chat_embed_principal, reject_cross_site,
+  require_chat_embed_operation, resolve_media_or_header_owner,
 )
 from app.path_utils import validate_path_within_base
-from app.resource_access import get_active_chat_or_404
+from app.resource_access import get_active_chat_for_principal
 from app.storage_io import atomic_write, app_dir_usage
 
 # Chat IDs are UUID4 strings (str(uuid.uuid4()), 36 chars with dashes).
@@ -100,12 +101,15 @@ def _unique_name(directory: Path, filename: str) -> str:
 async def upload_files(
   chat_id: str,
   files: List[UploadFile],
-  owner: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
   _validate_chat_id(chat_id)
-  chat = get_active_chat_or_404(db, chat_id)
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:uploads")
+  chat = get_active_chat_for_principal(db, chat_id, principal)
 
   settings = get_settings()
   upload_dir = _resolve_upload_dir(settings.data_dir, chat_id)
@@ -178,18 +182,15 @@ async def upload_files(
 @router.get("/{chat_id}/uploads")
 def list_uploads(
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
-  """Returns the list of uploaded files for a chat.
-
-  Owner-only. A chat's uploads are partner attachments outside any
-  per-app policy, so an app-scoped token must not list them — the
-  gated chat-log capability that would grant scoped app access here
-  is not built yet.
-  """
+  """Returns uploads for an owner or the exact authorized chat embed."""
   _validate_chat_id(chat_id)
-  chat = get_active_chat_or_404(db, chat_id)
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:uploads")
+  chat = get_active_chat_for_principal(db, chat_id, principal)
   return chat.uploads or []
 
 
@@ -201,12 +202,15 @@ def list_uploads(
 def delete_upload(
   chat_id: str,
   filename: str = Path(...),
-  owner: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Removes an uploaded file from disk and from the chat's upload list."""
   _validate_chat_id(chat_id)
-  chat = get_active_chat_or_404(db, chat_id)
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:uploads")
+  chat = get_active_chat_for_principal(db, chat_id, principal)
 
   settings = get_settings()
   upload_dir = pathlib.Path(settings.data_dir) / "chats" / chat_id / "uploads"
@@ -231,15 +235,11 @@ def serve_upload(
 ):
   """Serves an uploaded file. Accepts JWT from header or media token on ?token=.
 
-  Owner-only. The token can come from two sources:
-  - Authorization header: any valid owner JWT (full-session auth, the normal
-    path for programmatic fetches).
-  - ?token= query param: ONLY a short-lived media-scoped token minted by
-    POST /api/chats/{id}/media-token. Owner JWTs are explicitly rejected on
-    this path — they would leak into access logs, browser history, and
-    Referer headers. <img> tags use this path because they can't set headers.
-
-  App tokens are rejected on both paths.
+  An unscoped owner JWT is accepted only in the Authorization header. A
+  short-lived `media` or live-session-chained `chat_embed_media` token is
+  accepted from either header or ?token=, always for its exact media_chat.
+  Owner JWTs are rejected in query strings because they would leak into access
+  logs, history and Referer headers. App/chat_embed tokens are rejected here.
   """
   _validate_chat_id(chat_id)
   resolve_media_or_header_owner(

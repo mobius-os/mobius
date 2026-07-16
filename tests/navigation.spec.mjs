@@ -4,11 +4,40 @@
  * Tests the useNavigation hook: back button between chats, back from app
  * canvas to chat, drawer open/close via back, and pushState/popstate handling.
  *
- * Run:  npx playwright test tests/navigation.spec.mjs
+ * Run:  scripts/playwright-local.sh --allow-local-e2e tests/navigation.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const NAV_CHATS = [
+  ['10000000-0000-4000-8000-000000000001', 'Navigation Alpha'],
+  ['10000000-0000-4000-8000-000000000002', 'Navigation Beta'],
+  ['10000000-0000-4000-8000-000000000003', 'Navigation Gamma'],
+].map(([id, title], index) => ({
+  id,
+  title,
+  created_at: `2026-01-01T00:00:0${index}Z`,
+  updated_at: `2026-01-01T00:00:0${index}Z`,
+  activity_at: `2026-01-01T00:00:0${index}Z`,
+  pinned_at: null,
+  created_by_app_id: null,
+  has_messages: true,
+  running: false,
+  run_status: null,
+}))
+
+function navChatDetail(id) {
+  return {
+    messages: [
+      { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
+      { role: 'assistant', content: 'Fixture response', ts: 1700000000001, blocks: [] },
+    ],
+    total: 2,
+    offset: 0,
+    running: false,
+    pending_messages: [],
+  }
+}
 
 /** Click the Settings entry in the drawer; assumes drawer is open. */
 async function navigateToSettings(page) {
@@ -27,6 +56,30 @@ async function navigateToSettings(page) {
 
 async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
+
+  // Navigation is a client-side contract. Seed an explicit active chat and
+  // mock the complete chat surface so the suite neither reads nor borrows
+  // rows from any backend database.
+  await page.addInitScript(chatId => {
+    localStorage.setItem('moebius_active_chat', chatId)
+  }, NAV_CHATS[0].id)
+  await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(NAV_CHATS),
+    })
+  })
+  await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const id = new URL(route.request().url()).pathname.split('/').pop()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(navChatDetail(id)),
+    })
+  })
 
   // Intercept agent routes.
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>

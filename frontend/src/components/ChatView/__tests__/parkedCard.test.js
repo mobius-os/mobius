@@ -114,10 +114,14 @@ test('auto-resume is a chat-local switch shown only on the active rate-limit car
     'the in-card control has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
-  assert.match(chatSettingsPanel, /Always continue after limits/,
+  assert.match(chatSettingsPanel, /Continue after rate limits/,
     'the durable policy remains manageable in the per-chat settings surface')
-  assert.match(chatSettingsPanel, /Applies only to this chat/,
-    'the management surface names its chat-local scope')
+  assert.doesNotMatch(chatSettingsPanel, /On for this chat|Off for this chat/,
+    'the switch color communicates state without redundant state copy')
+  assert.match(chatSettingsPanel, /className="chat-policy-switch"/,
+    'the settings surface uses the same full-size black/purple switch treatment')
+  assert.match(css, /\.chat-policy-switch button\[role="switch"\]\[data-state="checked"\]/,
+    'the chat switch restores the SDK checked track after the button reset')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {

@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  A community-built AGI app platform. Build the apps you need, shape the workspace around your life, and improve the system through use.
+  An open-source AGI app platform. Build the apps you need, shape the workspace around your life, and help useful work improve productivity for everyone.
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ Apps are ordinary repositories with readable source and a small manifest. Start 
 <table>
   <tr>
     <td width="34%"><img src="assets/product/tandem-iphone.png" alt="Tandem showing a bilingual story with a selected word translated on an iPhone"></td>
-    <td width="66%"><img src="assets/product/atlas-desktop.png" alt="Atlas showing visited and saved countries on an interactive globe"></td>
+    <td width="66%"><img src="assets/product/atlas-desktop.png" alt="Atlas showing a country sidebar beside an interactive globe"></td>
   </tr>
   <tr>
     <td><strong>Tandem:</strong> read generated stories in two languages at your chosen level.</td>
@@ -61,24 +61,26 @@ The workspace can change with you. Themes reshape the shell, Memory keeps durabl
   </tr>
 </table>
 
-## Build Möbius with the community
+## Grow an open-source AGI
 
-Möbius is a community-built artificial general intelligence (AGI) project that grows with the needs of its users. Anyone can build an app or platform change for their own work. When an idea proves useful beyond one person, Contribute gives it a path back to the community for review.
+Möbius is an open-source AGI app platform that grows with the needs of its users. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise productivity for everyone.
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="assets/product/memory-icon.png" width="84" alt="Memory app icon"></td>
-    <td width="33%" align="center"><img src="assets/product/reflection-icon.png" width="84" alt="Reflection app icon"></td>
-    <td width="34%" align="center"><img src="assets/product/contribute-icon.png" width="84" alt="Contribute app icon"></td>
+    <td width="96" align="center"><img src="assets/product/memory-icon.png" width="72" alt="Memory app icon"></td>
+    <td><strong>Memory</strong><br>Personalize the platform with context worth keeping.</td>
   </tr>
   <tr>
-    <td align="center"><strong>Memory</strong><br>Personalize the platform with context worth keeping.</td>
-    <td align="center"><strong>Reflection</strong><br>Turn repeated friction into the next improvement.</td>
-    <td align="center"><strong>Contribute</strong><br>Share apps and platform changes that can help others.</td>
+    <td width="96" align="center"><img src="assets/product/reflection-icon.png" width="72" alt="Reflection app icon"></td>
+    <td><strong>Reflection</strong><br>Turn repeated friction into the next improvement.</td>
+  </tr>
+  <tr>
+    <td width="96" align="center"><img src="assets/product/contribute-icon.png" width="72" alt="Contribute app icon"></td>
+    <td><strong>Contribute</strong><br>Share apps and platform changes that can help others.</td>
   </tr>
 </table>
 
-Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block for everyone.
+Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block that makes the whole ecosystem more capable.
 
 Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and `/recover` keep those changes reversible.
 
@@ -96,7 +98,7 @@ Installing an app means adding its repository URL. Updating the same URL patches
 
 Möbius uses an agent account you already control. Connect one of these providers during setup:
 
-- **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan. See [Using Codex with your ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
+- **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan.
 - **Claude Code**: sign in with a supported Claude Code plan
 
 Möbius uses provider sign-in, so the default setup does not require a separate API key.
@@ -108,6 +110,8 @@ Möbius uses provider sign-in, so the default setup does not require a separate 
 1. Sign in to Möbius Launch
 2. Connect your Railway workspace
 3. Review the deployment and open your Möbius instance
+
+![Möbius Launch showing the three-step Railway deployment flow](assets/product/mobius-launch-deployment.png)
 
 Your chats, files, apps, credentials, and agent activity stay inside that deployment. Möbius Launch stores only the account and infrastructure data needed to create and manage it.
 

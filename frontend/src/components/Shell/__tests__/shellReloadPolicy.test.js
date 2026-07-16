@@ -18,7 +18,7 @@ test('text-editing elements defer shell reloads', () => {
   assert.equal(isTextEditingElement(el('div', { isContentEditable: true })), true)
 })
 
-test('any active chat turn defers shell reloads', () => {
+test('only the actively viewed chat turn defers shell reloads', () => {
   assert.equal(hasActiveChatTurn({
     activeView: 'chat',
     activeChatId: 'c1',
@@ -28,12 +28,12 @@ test('any active chat turn defers shell reloads', () => {
     activeView: 'chat',
     activeChatId: 'c2',
     streamingChatIds: new Set(['c1']),
-  }), true)
+  }), false)
   assert.equal(hasActiveChatTurn({
     activeView: 'canvas',
     activeChatId: 'c1',
     streamingChatIds: new Set(['c1']),
-  }), true)
+  }), false)
   assert.equal(hasActiveChatTurn({
     activeView: 'chat',
     activeChatId: 'c1',

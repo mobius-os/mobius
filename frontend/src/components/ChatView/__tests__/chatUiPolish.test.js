@@ -33,7 +33,8 @@ test('restored chat rows and tool blocks do not replay entrance animation', () =
 
 test('stop action has no visible circular shell', () => {
   const css = stripComments(chatCss)
-  const stopRule = css.match(/\.chat__stop\s*\{[^}]*\}/)?.[0] || ''
+  const stopRules = css.match(/\.chat__stop\s*\{[^}]*\}/g) || []
+  const stopRule = stopRules.find((rule) => /background:\s*transparent/.test(rule)) || ''
   const stopFocusRule = css.match(/\.chat__stop:focus-visible\s*\{[^}]*\}/)?.[0] || ''
   const stopGlyphFocusRule = css.match(/\.chat__stop:focus-visible svg\s*\{[^}]*\}/)?.[0] || ''
 
@@ -58,4 +59,25 @@ test('mobile hold copies immediately without opening an action menu', () => {
     'successful copy should offer subtle haptic confirmation where supported')
   assert.match(chatView, /event\.pointerType !== 'touch'/,
     'desktop text interaction should stay unchanged')
+})
+
+test('web tool activity uses the assistant reading width', () => {
+  const css = stripComments(chatCss)
+  const desktopRule = css.match(/@media\s*\(min-width:\s*720px\)\s*\{\s*\.chat__tools\s*\{[^}]*\}/)?.[0] || ''
+
+  assert.match(desktopRule, /width:\s*min\(100%,\s*720px\)/,
+    'tool activity should grow to the assistant reading measure on web')
+})
+
+test('primary chat actions leave a brief empty beat before replacement', () => {
+  const css = stripComments(chatCss)
+  const actionRule = css.match(/\.chat__send,\s*\.chat__steer,\s*\.chat__stop\s*\{[^}]*\}/)?.[0] || ''
+  const revealFrames = css.match(/@keyframes\s+chat-action-reveal\s*\{[\s\S]*?\n\}/)?.[0] || ''
+
+  assert.match(actionRule, /animation:\s*chat-action-reveal/,
+    'each keyed primary action should run the replacement reveal')
+  assert.match(revealFrames, /0%,\s*44%\s*\{\s*opacity:\s*0/,
+    'the incoming action should remain hidden at the start')
+  assert.match(revealFrames, /100%\s*\{\s*opacity:\s*1/,
+    'the incoming action should then appear')
 })

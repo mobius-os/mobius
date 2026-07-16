@@ -6,7 +6,8 @@
   border: 1px solid var(--border-light, var(--border));
 }
 .qcard--answered {
-  pointer-events: none;
+  /* Keep the card geometry unchanged after submission. Individual controls
+     are disabled, while the Submit slot remains visible as "Submitted". */
 }
 
 .qcard__q + .qcard__q {
@@ -179,6 +180,13 @@
 .qcard__input:focus-visible {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.qcard__input:disabled {
+  /* Keep the submitted custom answer readable but visibly settled. Safari
+     otherwise preserves the active text color through -webkit-text-fill-color. */
+  color: var(--muted);
+  -webkit-text-fill-color: var(--muted);
+  opacity: 1;
 }
 
 .qcard__submit {

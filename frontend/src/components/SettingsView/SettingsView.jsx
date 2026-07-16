@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
+import { GripVertical, Moon, Sun } from 'lucide-react'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
@@ -108,7 +108,6 @@ function BackgroundProviderRow({
   models,
   dragging,
   dropTarget,
-  dropPosition,
   dragStyle,
   reorderMode,
   rowRef,
@@ -127,6 +126,10 @@ function BackgroundProviderRow({
   const effortLabel = enabled
     ? (selectedEfforts.find((e) => e.value === row.effort)?.label || '')
     : ''
+  const selectedEffortIndex = Math.max(
+    0,
+    selectedEfforts.findIndex((effort) => effort.value === row.effort),
+  )
   const [sheetOpen, setSheetOpen] = useState(false)
 
   // This row is a fixed provider, so the sheet shows only that
@@ -152,7 +155,6 @@ function BackgroundProviderRow({
         + (reorderMode ? ' settings-bg-row--reordering' : '')
         + (dragging ? ' settings-bg-row--dragging' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
-        + (dropTarget && dropPosition ? ` settings-bg-row--drop-${dropPosition}` : '')
       }
       style={dragStyle}
       aria-label={`${info?.label || row.provider} background priority ${index + 1}`}
@@ -183,7 +185,7 @@ function BackgroundProviderRow({
             }
           }}
         >
-          <span aria-hidden="true">⠿</span>
+          <GripVertical size={18} strokeWidth={2} aria-hidden="true" />
         </button>
       )}
       <div className="settings-bg-row__body">
@@ -192,7 +194,7 @@ function BackgroundProviderRow({
           className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
           onClick={() => setSheetOpen(true)}
           aria-haspopup="dialog"
-          aria-label={`${info?.label || row.provider} background model`}
+          aria-label={`${info?.label || row.provider} background model${effortLabel ? `, ${effortLabel} effort` : ''}`}
         >
           <span className="model-trigger__icon">
             {Logo ? <Logo /> : (row.provider[0] || '?').toUpperCase()}
@@ -203,10 +205,20 @@ function BackgroundProviderRow({
               <span className="model-trigger__id">{selectedModel}</span>
             )}
           </span>
-          {effortLabel && (
-            <span className="model-trigger__effort">{effortLabel}</span>
+          {enabled && effortLabel && (
+            <span className="settings-bg-row__effort-visual" aria-hidden="true">
+              {selectedEfforts.map((effort, effortIndex) => (
+                <span
+                  key={effort.value}
+                  className={
+                    'settings-bg-row__effort-dot'
+                    + (effortIndex <= selectedEffortIndex ? ' settings-bg-row__effort-dot--filled' : '')
+                    + (effortIndex === selectedEffortIndex ? ' settings-bg-row__effort-dot--on' : '')
+                  }
+                />
+              ))}
+            </span>
           )}
-          <span className="model-trigger__caret" aria-hidden="true">▾</span>
         </button>
       </div>
       <ModelSheet
@@ -279,7 +291,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const versionQuery = versionQueries.current.useQuery()
-  const [lightMode, setLightMode] = useState(false)
+  const [themeMode, setThemeMode] = useState(() => (
+    typeof document !== 'undefined'
+    && document.documentElement.getAttribute('data-theme') === 'light'
+      ? 'light'
+      : 'dark'
+  ))
   const [themeSwitching, setThemeSwitching] = useState(false)
   // Which provider has its inline auth panel expanded. null = none.
   const [expandedAuth, setExpandedAuth] = useState(null)
@@ -316,12 +333,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
-    // resolves to 'dark' actually flips the knob back. The earlier
-    // light-only branch left the toggle stuck on whenever data went
-    // light → dark via refetch (e.g. another tab toggled, or a
+    // resolves to 'dark' actually updates the selected option. The earlier
+    // light-only branch left the control stuck whenever data went
+    // light → dark via refetch (e.g. another tab changed it, or a
     // failed persist's rollback landed via invalidation).
     if (themeModeQuery.data === undefined) return
-    setLightMode(themeModeQuery.data === 'light')
+    setThemeMode(themeModeQuery.data === 'light' ? 'light' : 'dark')
   }, [themeModeQuery.data])
 
   const codexAuthenticated = !!settingsQuery.data?.codex_authenticated
@@ -360,7 +377,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
   const [backgroundDrag, setBackgroundDrag] = useState(null)
-  const [backgroundReordering, setBackgroundReordering] = useState(false)
   const [backgroundCommitting, setBackgroundCommitting] = useState(false)
   const backgroundDragRef = useRef(null)
   const backgroundCommitRafRef = useRef(null)
@@ -674,7 +690,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     if (themeSwitching) return
 
     // Derive the direction from what the user ACTUALLY SEES, not from
-    // the optimistic `lightMode` state. `lightMode` mirrors
+    // the optimistic `themeMode` state. `themeMode` mirrors
     // themeModeQuery.data, which resolves async through the SW and
     // LAGS the painted theme; trusting it computed the toggle in the
     // wrong direction (e.g. after a dark→light toggle, a follow-up
@@ -683,38 +699,38 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     // leaving the UI stuck). getEffectiveTheme().mode reads
     // <html data-theme> — the authoritative value applyThemeToDom
     // last painted — so the direction is always relative to the
-    // visible theme. Fall back to `lightMode` only at very early boot
+    // visible theme. Fall back to `themeMode` only at very early boot
     // before any theme has been applied (mode === null).
     const eff = themeService.getEffectiveTheme()
     const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
       ? eff.mode
-      : (lightMode ? 'light' : 'dark')
-    const newMode = currentMode === 'light' ? 'dark' : 'light'
+      : themeMode
 
-    // Keep the optimistic switch UI in sync with the direction we
-    // just derived from the visible theme (so the knob reflects the
-    // target, not a flip of the stale state).
-    setLightMode(newMode === 'light')
+    // Do not flip the icon state ahead of the palette. toggleTheme seeds the
+    // theme-mode query immediately before it applies the new CSS; the mirror
+    // effect above then updates the icon in the same repaint sequence. The old
+    // local optimistic flip made the control's outlines move first, followed
+    // by the rest of Settings after query cancellation completed.
     setThemeSwitching(true)
     setThemeError('')
 
     // Delegate the full apply/persist/invalidate dance to
-    // themeService — SettingsView keeps only the optimistic UI
-    // state (setLightMode + setThemeError) and the
+    // themeService — SettingsView keeps only error and busy state while the
+    // theme query remains the visual source of truth for the icon.
     // catch-rollback. themeService.toggleTheme invalidates both
     // theme queries; AppCanvas's useEffect picks that up and
     // postMessages `moebius:frame-theme` to live iframes.
     try {
       await themeService.toggleTheme(queryClient, currentMode, api)
     } catch {
-      setLightMode(currentMode === 'light')
+      setThemeMode(currentMode)
       setThemeError(
         'Could not save theme. Check your connection and try again.',
       )
       // Force the mode query to resync with the server. Covers the
       // write-succeeded-but-response-lost case: refetching reads
       // authoritative state, the mirror effect at line 30 picks it
-      // up, and lightMode stops disagreeing with the visible theme.
+      // up, and themeMode stops disagreeing with the visible theme.
       themeQueries.mode.invalidate(queryClient)
       onThemeChange?.()  // reload original theme on error
     } finally {
@@ -1077,9 +1093,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }
     return undefined
   }
-  const backgroundDropPosition = backgroundDrag?.toIndex < backgroundDrag?.fromIndex
-    ? 'before'
-    : 'after'
   // The chat model row's status line shows the current default rather
   // than a connection dot ("Last model: Opus 4.8"). Resolve the label
   // from the live registry so it reads the friendly name, falling back
@@ -1142,9 +1155,13 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   connected
                   subtitle="Which models appear in chat pickers."
                   statusNode={
-                    <StatusDot color="--muted">
-                      {lastModelLabel ? `Last model: ${lastModelLabel}` : 'No default yet'}
-                    </StatusDot>
+                    <span className="provider-row__status-text settings__last-model">
+                      {lastModelLabel ? (
+                        <>
+                          Last model: <span className="settings__standard-highlight">{lastModelLabel}</span>
+                        </>
+                      ) : 'No default yet'}
+                    </span>
                   }
                   actionLabel="Configure"
                   expanded={false}
@@ -1161,22 +1178,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 <div className="settings-agent-group__head">
                   <div className="settings-agent-group__title-row">
                     <h3 className="settings__agent-title">Background agents</h3>
-                    <button
-                      type="button"
-                      className="settings-agent-group__reorder"
-                      aria-pressed={backgroundReordering}
-                      onClick={() => {
-                        setBackgroundDrag(null)
-                        setBackgroundReordering(value => !value)
-                      }}
-                    >
-                      {backgroundReordering ? 'Done' : 'Reorder'}
-                    </button>
                   </div>
                   <p className="settings__subtext settings__subtext--tight">
-                    {backgroundReordering
-                      ? 'Drag the handles, or use the arrow keys.'
-                      : 'Tried in order when quota or authentication fails.'}
+                    Used for memory, reflection, and other automatic tasks. Tried in order.
                   </p>
                 </div>
                 <div
@@ -1193,9 +1197,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                         backgroundDrag?.toIndex === index
                         && backgroundDrag?.fromIndex !== index
                       }
-                      dropPosition={backgroundDropPosition}
                       dragStyle={backgroundDragStyleForIndex(index)}
-                      reorderMode={backgroundReordering}
+                      reorderMode
                       rowRef={(node) => {
                         backgroundRowRefs.current[index] = node
                       }}
@@ -1260,18 +1263,32 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           )}
         </section>
 
-        <section className="settings__section settings__section--compact">
-          <div
-            className="settings__row"
-            onPointerDownCapture={themeService.setThemeTransitionOriginFromEvent}
-          >
-            <span className="settings__label">Dark mode</span>
-            <Switch
-              checked={!lightMode}
-              onCheckedChange={toggleTheme}
+        <section className="settings__section settings__section--compact settings__section--appearance">
+          <div className="settings__appearance">
+            <span className="settings__label">Appearance</span>
+            <button
+              type="button"
+              className="settings__appearance-toggle"
+              role="switch"
+              aria-label="Dark mode"
+              aria-checked={themeMode === 'dark'}
+              aria-busy={themeSwitching}
               disabled={themeSwitching}
-              aria-label="Toggle dark mode"
-            />
+              onClick={toggleTheme}
+            >
+              <span
+                className={`settings__appearance-option${themeMode === 'light' ? ' settings__appearance-option--active' : ''}`}
+                aria-hidden="true"
+              >
+                <Sun size={17} strokeWidth={1.8} />
+              </span>
+              <span
+                className={`settings__appearance-option${themeMode === 'dark' ? ' settings__appearance-option--active' : ''}`}
+                aria-hidden="true"
+              >
+                <Moon size={17} strokeWidth={1.8} />
+              </span>
+            </button>
           </div>
           {themeError && (
             <Alert
@@ -1312,13 +1329,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               {mobiusVersion.primarySha && (
                 <p className="settings__build">
                   {mobiusVersion.synced ? 'Synced to ' : 'Serving '}
-                  {mobiusVersion.primarySha}
+                  <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
                   {!mobiusVersion.synced && buildDate ? ` · ${buildDate}` : ''}
-                </p>
-              )}
-              {mobiusVersion.localSha && (
-                <p className="settings__build settings__build--local">
-                  Serving local {mobiusVersion.localSha}
                 </p>
               )}
             </div>

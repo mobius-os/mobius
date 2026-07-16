@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
-import { getToken, BASE } from '../../../api/client.js'
+import { getToken, isEphemeralAuth, BASE } from '../../../api/client.js'
 import { mediaTokenParam } from '../../../api/mediaToken.js'
 import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
 import { parseImageDims, imageVarsFromDims } from './imageDims.js'
@@ -120,6 +120,10 @@ function resolveStaticImageSrc(href) {
   let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
+    // Embedded-chat bearer material is memory-only and must never enter a URL,
+    // browser history, proxy log or Referer. Authorized chat media follows the
+    // dedicated short-lived media-token path below; other API images stay inert.
+    if (isEphemeralAuth()) return null
     const url = new URL(src, location.origin)
     url.searchParams.set('token', getToken())
     src = url.pathname + url.search

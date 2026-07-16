@@ -47,9 +47,9 @@ from app import models
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, apps_router, auth_router,
-  chat_logs_router, chat_router, chats_router, chats_stream_router,
+  chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, fs_router, github_router, media_router,
-  notifications_router, notify_router, proxy_router, push_router,
+  local_services_router, notifications_router, notify_router, proxy_router, push_router,
   secrets_router, self_reminders_router, settings_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
@@ -613,7 +613,9 @@ class _BodySizeLimitMiddleware:
 # Content-Security-Policy here yet: mini-apps intentionally support user-chosen
 # external resources and a strict shell-wide policy would break that contract.
 # App isolation instead comes from opaque-origin sandboxed frames plus scoped
-# tokens. Clickjacking is covered by X-Frame-Options without a CSP.
+# tokens. Clickjacking is covered by X-Frame-Options without a CSP. Narrow
+# exceptions are the inert embedded-chat bootstrap, response-sandboxed packaged
+# documents, and an explicitly configured dedicated service surface.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
@@ -623,13 +625,31 @@ _SECURITY_HEADERS = [
    b"max-age=31536000; includeSubDomains; preload"),
 ]
 _SECURITY_HEADER_NAMES = frozenset(name for name, _ in _SECURITY_HEADERS)
+_X_FRAME_OPTIONS = b"x-frame-options"
+_OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
+
+
+def _frame_policy_exception(scope) -> bool:
+  """Exact routes whose own isolation permits a non-SAMEORIGIN ancestor."""
+  path = scope.get("path") or ""
+  if path == "/shell/embed/chat" or path.startswith(_OPAQUE_STATIC_EMBED_PREFIX):
+    return True
+  if path.startswith("/services/"):
+    try:
+      from app.routes.local_services import is_public_service_surface_request
+      return is_public_service_surface_request(scope)
+    except Exception:
+      return False
+  return False
 
 
 class _SecurityHeadersMiddleware:
   """Authoritatively sets the platform security headers on every response. Pure
   ASGI so it never buffers a streaming body. It strips any same-named header a
   route may have set first and replaces it with the platform value, so no route
-  can weaken the CSP/HSTS/etc. (the headers must be uniform to be a wall)."""
+  can weaken the HSTS/MIME/etc. wall. Frame-policy exceptions are delegated to
+  exact routes whose own response sandbox or dedicated-origin adapter provides
+  the replacement boundary; ordinary routes retain SAMEORIGIN protection."""
 
   def __init__(self, app):
     self.app = app
@@ -638,13 +658,20 @@ class _SecurityHeadersMiddleware:
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
 
+    response_headers = _SECURITY_HEADERS
+    if _frame_policy_exception(scope):
+      response_headers = [
+        (name, value) for name, value in _SECURITY_HEADERS
+        if name != _X_FRAME_OPTIONS
+      ]
+
     async def _send(message):
       if message["type"] == "http.response.start":
         headers = [
           (k, v) for k, v in message.get("headers", [])
           if k.lower() not in _SECURITY_HEADER_NAMES
         ]
-        headers.extend(_SECURITY_HEADERS)
+        headers.extend(response_headers)
         message["headers"] = headers
       await send(message)
 
@@ -668,6 +695,26 @@ class _DatabaseRequestContextMiddleware:
       reset_database_request_label(token)
 
 
+class _ServiceSurfaceHostMiddleware:
+  """Prevent a dedicated service host from becoming another Möbius origin."""
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] == "http":
+      from app.routes.local_services import service_surface_host_allows_path
+      if not service_surface_host_allows_path(scope):
+        await send({
+          "type": "http.response.start",
+          "status": 404,
+          "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+        })
+        await send({"type": "http.response.body", "body": b"Not found"})
+        return
+    return await self.app(scope, receive, send)
+
+
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
@@ -677,12 +724,32 @@ app.add_middleware(
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allow_headers=["Authorization", "Content-Type"],
+  # The app runtime uses X-Mobius-Version to opt into ETag reads, then
+  # If-Match / If-None-Match for conflict-safe writes. Sandboxed app frames
+  # have the opaque `null` origin, so Chromium preflights these non-simple
+  # headers; omitting them here makes the runtime's versioned request fail
+  # before it ever reaches the authenticated storage route.
+  allow_headers=[
+    "Authorization",
+    "Content-Type",
+    "X-Mobius-Embed-Instance",
+    "X-Mobius-Version",
+    "If-Match",
+    "If-None-Match",
+  ],
+  # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
+  # return the version token that the storage route intentionally emits.
+  expose_headers=["ETag"],
 )
 
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
 # request receives one diagnostic label before middleware can touch the DB.
+# A managed deployment may expose the application directly on more than one
+# hostname without the bundled Caddyfile. Reserve each configured service host
+# before routing so it can never serve the shell, APIs, recovery, or another
+# service prefix.
+app.add_middleware(_ServiceSurfaceHostMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 
@@ -692,6 +759,7 @@ app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
 app.include_router(chat_router)
+app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(chat_logs_router)
@@ -709,6 +777,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
   )
 app.include_router(notify_router)
 app.include_router(proxy_router)
+app.include_router(local_services_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)
@@ -877,6 +946,10 @@ def version():
   settings = get_settings()
   return {"sha": settings.build_sha,
           "build_date": settings.build_date,
+          # Browser setup verifies this dedicated test-container marker before
+          # any write. Localhost is not sufficient evidence because a preview
+          # proxy can still forward to the live app.
+          "test_runtime": os.environ.get("MOBIUS_TEST_RUNTIME") == "1",
           **_served_platform_identity(settings.data_dir),
           **_served_frontend_identity()}
 
@@ -1226,6 +1299,38 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
     asset_path,
     request,
   )
+
+
+_STATIC_EMBED_CSP = (
+  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
+  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
+  "media-src 'self' blob:; worker-src 'self' blob:"
+)
+
+
+@app.api_route(
+  "/app-embeds/by-id/{app_id}/{asset_path:path}",
+  methods=["GET", "HEAD"],
+  include_in_schema=False,
+)
+async def app_owned_opaque_embed_by_id(
+  app_id: int, asset_path: str, request: Request,
+):
+  """Serve a packaged static document under a permanently opaque origin.
+
+  This namespace is intentionally frameable, including by an external site,
+  so every response carries CSP sandbox without allow-same-origin. Relative
+  assets stay below the same alias. Ordinary /app-assets remains protected by
+  SAMEORIGIN and is never the document-navigation surface.
+  """
+  response = _serve_app_static_asset(
+    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    asset_path,
+    request,
+  )
+  response.headers["Content-Security-Policy"] = _STATIC_EMBED_CSP
+  return response
 
 
 @app.api_route(

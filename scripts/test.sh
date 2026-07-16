@@ -2,8 +2,8 @@
 # test.sh — single entrypoint for Möbius's two test layers.
 #
 # Backend tests run inside the mobius-test Docker image (pytest, real
-# environment with esbuild + node + pip deps); frontend tests run on
-# the host (Playwright driving the system Chrome channel locally).
+# environment with esbuild + node + pip deps). Browser E2E is an explicit,
+# host-only opt-in through the disposable Playwright runner.
 # Picking the right invocation by hand is a coin-flip and the slow
 # suite often wins by default — this wrapper makes the choice explicit
 # and visible up front.
@@ -45,10 +45,10 @@ Möbius has two test layers; this wrapper runs either or both.
 
 Flags (mutually exclusive):
   --backend   Full pytest suite in the mobius-test image.    (several minutes)
-  --frontend  Playwright on the host (system Chrome locally). (~2 minutes)
-  --all       Backend first, then frontend. DEFAULT.
+  --frontend  Disposable host-only Playwright stack.         (several minutes)
+  --all       Full backend, then disposable Playwright.      (explicit, expensive)
   --fast      Backend only, skipping the slow Codex SDK tests.
-              Useful for iteration; use --backend before landing.
+              Useful for iteration; DEFAULT. Use --backend before landing.
   --help      Show this message.
 
 Backend runs first under --all because it is slower but catches more
@@ -56,9 +56,9 @@ Backend runs first under --all because it is slower but catches more
 healthy backend image anyway.
 
 Examples:
-  scripts/test.sh              # full sweep
+  scripts/test.sh              # cheap backend sanity check
   scripts/test.sh --fast       # quick sanity check during edits
-  scripts/test.sh --frontend   # just re-run Playwright after a UI tweak
+  scripts/test.sh --frontend   # explicit isolated browser run
 EOF
 }
 
@@ -92,23 +92,12 @@ check_backend_prereqs() {
   fi
 }
 
-# Frontend preflight: Playwright needs (a) the package installed in
-# node_modules, (b) a working Chrome binary. We test both up front
-# because the failure modes otherwise are "Cannot find module" vs
-# "Executable doesn't exist" thrown deep inside the test runner.
+# Browser preflight. The disposable runner performs the Docker, browser, clean
+# revision, and runtime-identity checks itself.
 check_frontend_prereqs() {
   if [ ! -x "${PROJECT_DIR}/node_modules/.bin/playwright" ]; then
     die "Playwright not installed. Run:
-    cd ${PROJECT_DIR} && npm install"
-  fi
-  # `channel: 'chrome'` (per playwright.config.mjs) needs a real Chrome
-  # on PATH. If neither google-chrome nor playwright's bundled browser
-  # is available, point the user at the install command.
-  if ! command -v google-chrome >/dev/null 2>&1 \
-       && ! command -v google-chrome-stable >/dev/null 2>&1 \
-       && [ ! -d "${HOME}/.cache/ms-playwright" ]; then
-    die "No Chrome found on PATH and no Playwright browsers cached. Run:
-    cd ${PROJECT_DIR} && npx playwright install chrome"
+    cd ${PROJECT_DIR} && npm ci"
   fi
 }
 
@@ -143,8 +132,8 @@ run_backend() {
 run_frontend() {
   check_frontend_prereqs
 
-  log "frontend: Playwright (currently ~24 spec files, system Chrome channel)"
-  if (cd "${PROJECT_DIR}" && npx playwright test); then
+  log "frontend: disposable Playwright stack (host-only, one worker)"
+  if (cd "${PROJECT_DIR}" && scripts/playwright-local.sh --allow-local-e2e); then
     FRONTEND_STATUS="PASS"
     log "frontend: PASS"
   else
@@ -169,7 +158,7 @@ summarize() {
 
 # ---- Main -------------------------------------------------------------------
 main() {
-  local mode="all"
+  local mode="fast"
   if [ $# -gt 1 ]; then
     usage >&2
     die "at most one flag accepted, got: $*"
@@ -177,8 +166,8 @@ main() {
   case "${1:-}" in
     --backend)            mode="backend" ;;
     --frontend)           mode="frontend" ;;
-    --all|"")             mode="all" ;;
-    --fast)               mode="fast" ;;
+    --all)                mode="all" ;;
+    --fast|"")            mode="fast" ;;
     --help|-h)            usage; exit 0 ;;
     *)                    usage >&2; die "unknown flag: $1" ;;
   esac

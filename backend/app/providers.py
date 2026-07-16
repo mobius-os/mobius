@@ -428,23 +428,33 @@ def get_skill_path() -> Path | None:
   """Resolves the agent skill file location. Single source of truth.
 
   `chat.py` and the SDK runners (`claude_sdk_runner.py`,
-  `codex_sdk_runner.py`) all call this. The path is independent of
-  `data_dir` — the skill is part
-  of the deployment, not per-instance state, so resolution checks the
-  baked container path first and falls back to the in-repo path for
-  local development. Returns None if neither exists (callers handle
-  skill-less startup gracefully).
+  `codex_sdk_runner.py`) all call this. The constitution belongs to the
+  platform checkout rather than per-instance data, so the checkout-relative
+  copy is authoritative in the normal runtime. The image-baked copy is only a
+  degraded-boot fallback for runs without `/data/platform`. Returns None if
+  neither exists (callers handle skill-less startup gracefully).
   """
   # The CONSTITUTION (core.md) is the system prompt. The detailed how-to
   # skills it points to live agent-editable under /data/shared/skills/
-  # (seeded by init_skills.py). The baked container path wins over the
-  # in-repo path so a deploy always serves the deployed constitution.
+  # (seeded by init_skills.py). Resolve relative to this module so the live
+  # /data/platform clone and ordinary local checkouts each use their own
+  # tracked constitution. /app/skill remains the immutable recovery floor.
   repo = Path(__file__).parent.parent.parent / "skill"
   candidates = [
-    Path("/app/skill/core.md"),
     repo / "core.md",
+    Path("/app/skill/core.md"),
   ]
   return next((p for p in candidates if p.exists()), None)
+
+
+def get_skill_origin(path: Path | None = None) -> str:
+  """Classify the resolved constitution for owner-facing observability."""
+  resolved = get_skill_path() if path is None else path
+  if resolved is None:
+    return "missing"
+  if resolved == Path("/app/skill/core.md"):
+    return "baked_fallback"
+  return "platform"
 
 
 class BaseProvider:

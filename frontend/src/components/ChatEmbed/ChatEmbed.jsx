@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
-import useTheme from '../../hooks/useTheme.js'
-import { getToken, setEmbeddedToken } from '../../api/client.js'
 import {
-  INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR,
+  BASE,
+  clearEphemeralAuthSession,
+  setEphemeralAuthSession,
+} from '../../api/client.js'
+import { applyThemeToDom } from '../../lib/themeService.js'
+import {
+  INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, AUTH_EXPIRING,
   CONTEXT_REQUEST, CONTEXT_RESPONSE,
-  isEmbedMessage,
+  isEmbedMessage, retainEmbedSessionAfterExchangeFailure,
 } from '../../lib/chatEmbed.js'
 import {
   EMPTY_TURN_DONE_GATE,
@@ -14,247 +18,227 @@ import {
 } from '../../lib/chatRunSignal.js'
 import './ChatEmbed.css'
 
-// Stripped-chrome agent-chat embed (capability A, design §1).
-//
-// This is the RENDERER in the embed-as-renderer design: a SEPARATE
-// entry (NOT conditionals threaded through Shell) that mounts the real
-// ChatView scoped to one chatId in a lightweight QueryClient context.
-//
-// It is NOT the trust boundary: the parent supplies its short-lived app JWT,
-// and the app-attributed backend chat contract enforces the real authority.
-//
-// Frame layering is shell → opaque app frame → embed frame, so every
-// postMessage is validated by source + origin + instanceId
-// (lib/chatEmbed.js). The runtime helper (mobius-runtime.js) is the
-// parent: it resolves a chatId (lazy-creating one via the backend
-// contract when the app didn't pass one), opens this iframe at
-// `/shell/embed/chat?chatId=…`, and relays the lifecycle messages we
-// post here back to the app.
-//
-// ChatView is a pure RENDERER over an existing chat — it POSTs to
-// /api/chats/{chatId}/messages and never creates a chat. So this embed
-// always needs a resolved chatId; lazy-create lives in the runtime
-// helper, not here. Without one we render a read-only "no chat" notice
-// rather than ChatView's empty-new-chat composer (which would fail to
-// send with no id to POST to).
-//
-// REMOUNT IS NORMAL. The parent app frame can be evicted (Shell's app
-// LRU), reloaded (app_updated key change, shell rebuild, BFCache), or
-// the embed iframe re-created — any of which remounts this component
-// with a fresh document. We rely on ChatView's durable-chat contract:
-// it reads chatId from props, refetches /api/chats/{id} on mount, and
-// reconnects the SSE catch-up burst if a turn is in flight. So a remount
-// transparently reloads history and rejoins a live turn — no extra state
-// to persist. We just re-announce READY so the parent can re-correlate.
-
-function readChatIdFromUrl() {
-  try {
-    return new URLSearchParams(window.location.search).get('chatId') || null
-  } catch {
-    return null
-  }
-}
-
-function readPickerFromUrl() {
-  try {
-    return new URLSearchParams(window.location.search).get('picker') !== '0'
-  } catch {
-    return true
-  }
-}
-
+// This document is intentionally inert after navigation. The opaque outer app
+// sandbox propagates inward, so it cannot read owner localStorage and does not
+// mount ChatView until a one-use server capability has been exchanged. Source,
+// null-origin and correlation checks below are browser routing guards only;
+// authorization is the server-verified capability/session.
 export default function ChatEmbed() {
-  // Self-theme on mount. The embed branch (App.jsx) renders OUTSIDE
-  // Shell, which is the only other useTheme() caller — so without this
-  // the embed inherits no theme and paints with the unstyled default
-  // tokens (black-on-black in dark, black composer in light). useTheme
-  // reads the persisted theme via React Query (hydrated from IndexedDB,
-  // refetched from /api/theme) and runs applyThemeToDom, so the embed
-  // matches the owner's theme in BOTH modes and live-updates when the
-  // theme query is invalidated (e.g. agent ships a new theme.css). The
-  // server already injects the initial theme block into the served HTML;
-  // this is what keeps the embed correct when the SW serves the
-  // non-injected precache, and what makes light/dark toggles propagate.
-  useTheme()
-  // chatId is normally fixed for the life of this document (the runtime
-  // helper navigates the iframe to change it, which remounts us). INIT
-  // may still supply one if the helper opened us before lazy-create
-  // resolved, so keep it in state.
-  const [chatId, setChatId] = useState(() => readChatIdFromUrl())
-  const [picker, setPicker] = useState(() => readPickerFromUrl())
-  // Top-level opens use the owner's localStorage token. Inside an app frame the
-  // inherited opaque sandbox has no storage access, so wait for INIT to carry
-  // the narrower app token before mounting ChatView and firing API requests.
-  const [tokenReady, setTokenReady] = useState(() => (
-    window.parent === window || !!getToken()
-  ))
-  // quickActions: array of {label, prompt} from the INIT payload. Max 4.
-  // Passed to ChatView which renders them as chips on the embedded empty state.
+  const [authorized, setAuthorized] = useState(false)
+  const [chatId, setChatId] = useState(null)
+  const [picker, setPicker] = useState(true)
   const [quickActions, setQuickActions] = useState(null)
-
-  // The correlation token the parent (app frame) minted in INIT. Until
-  // it arrives our outbound messages omit instanceId; the parent's
-  // isEmbedMessage guard treats those as not-yet-correlated. In practice
-  // INIT lands within the first paint. Null is the honest "not
-  // correlated yet" value.
-  const instanceIdRef = useRef(null)
-  // The window we talk to. Our parent is the app frame (or the shell on a
-  // top-level open). Either way it is `window.parent` and same-origin;
-  // when there is no parent (opened standalone) parent === window.
+  const authorizedRef = useRef(false)
   const parentRef = useRef(typeof window !== 'undefined' ? window.parent : null)
-
-  // Keep postToParent's closure reading the latest chatId without
-  // re-subscribing the listener.
-  const chatIdRef = useRef(chatId)
-  chatIdRef.current = chatId
-  // TURN_DONE can arrive from the per-chat stream or the process-wide run
-  // signal. Arm once per turn and let the first terminal path win, so cross-SSE
-  // delivery order can never post the parent protocol message twice.
+  const instanceIdRef = useRef(null)
+  const chatIdRef = useRef(null)
+  const exchangeRef = useRef({ capability: null, promise: null })
+  const latestAuthorizationIdRef = useRef(null)
+  const refreshTimerRef = useRef(null)
+  const contextNonceRef = useRef(0)
+  const pendingContextResolversRef = useRef(new Map())
   const turnDoneGateRef = useRef(EMPTY_TURN_DONE_GATE)
+
+  function postToParent(type, extra) {
+    const target = parentRef.current
+    if (!target || target === window || !instanceIdRef.current) return
+    // Opaque targets cannot be named as a postMessage targetOrigin. The exact
+    // WindowProxy + instance id constrain in-browser routing; neither is auth.
+    target.postMessage({
+      type,
+      instanceId: instanceIdRef.current,
+      chatId: chatIdRef.current,
+      ...extra,
+    }, '*')
+  }
+
   const armTurnDone = useCallback(() => {
     turnDoneGateRef.current = advanceTurnDoneGate(
-      turnDoneGateRef.current,
-      'message_started',
+      turnDoneGateRef.current, 'message_started',
     ).gate
   }, [])
+
   const notifyTurnDone = useCallback(({ continues = false } = {}) => {
     const result = advanceTurnDoneGate(
       turnDoneGateRef.current,
       continues ? 'stream_continues' : 'stream_finished',
     )
     turnDoneGateRef.current = result.gate
-    if (!result.emit) return
-    postToParent(TURN_DONE)
-  }, [postToParent])
+    if (result.emit) postToParent(TURN_DONE)
+  }, [])
+
   const handleExternalRunEvent = useCallback((eventType) => {
     const result = advanceTurnDoneGate(turnDoneGateRef.current, eventType)
     turnDoneGateRef.current = result.gate
     if (result.emit) postToParent(TURN_DONE)
-  }, [postToParent])
+  }, [])
 
-  // Pending context request resolvers keyed by nonce. The getContext callback
-  // posts CONTEXT_REQUEST to the parent and resolves within ≤50ms timeout.
-  const pendingContextResolversRef = useRef(new Map())
-  let _contextNonce = 0
-
-  // getContext: called by ChatView before submitting a message. Posts a
-  // CONTEXT_REQUEST to the parent, waits ≤50ms for CONTEXT_RESPONSE, then
-  // resolves (with null on timeout). The nonce correlates request ↔ response.
   const getContext = useCallback(() => {
     const target = parentRef.current
-    if (!target || target === window) return Promise.resolve(null)
-    const nonce = `ctx-${++_contextNonce}-${Date.now()}`
+    if (!target || target === window || !instanceIdRef.current) {
+      return Promise.resolve(null)
+    }
+    const nonce = `ctx-${++contextNonceRef.current}-${Date.now()}`
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         pendingContextResolversRef.current.delete(nonce)
         resolve(null)
       }, 50)
-      pendingContextResolversRef.current.set(nonce, (ctx) => {
+      pendingContextResolversRef.current.set(nonce, (context) => {
         clearTimeout(timer)
-        resolve(ctx)
+        resolve(context)
       })
-      target.postMessage(
-        { type: CONTEXT_REQUEST, instanceId: instanceIdRef.current, nonce },
-        '*',
-      )
+      target.postMessage({
+        type: CONTEXT_REQUEST,
+        instanceId: instanceIdRef.current,
+        nonce,
+      }, '*')
     })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  function postToParent(type, extra) {
-    const target = parentRef.current
-    if (!target || target === window) return // opened standalone, no parent
-    target.postMessage(
-      { type, instanceId: instanceIdRef.current, chatId: chatIdRef.current, ...extra },
-      '*',
-    )
-  }
 
   useEffect(() => {
-    // index.html paints a full-screen #splash over the SPA until the
-    // normal AppRoot flow removes it. The embed branch bypasses AppRoot,
-    // so remove it here or it covers the chat forever.
-    try {
-      const splash = document.getElementById('splash')
-      if (splash) splash.remove()
-    } catch {}
-    function onMessage(event) {
-      // Two inbound types: INIT (skip instanceId check — we're learning it)
-      // and CONTEXT_RESPONSE (carries nonce + context for a pending request).
-      // Source + origin are enforced for both.
-      if (!isEmbedMessage(event, {
-        origin: window.location.origin,
-        expectedSource: parentRef.current,
-        // A nested app chat inherits the app frame's opaque origin. Exact
-        // source-window validation remains mandatory, so accepting the
-        // browser's serialized "null" origin does not admit sibling frames.
-        allowOpaqueOrigin: parentRef.current !== window,
-      })) return
-      const msg = event.data
-      if (msg.type === CONTEXT_RESPONSE) {
-        // Dispatch to any pending context resolver keyed by nonce.
-        const resolver = pendingContextResolversRef.current.get(msg.nonce)
-        if (resolver) {
-          pendingContextResolversRef.current.delete(msg.nonce)
-          resolver(msg.context || null)
-        }
+    try { document.getElementById('splash')?.remove() } catch {}
+
+    async function establish(msg) {
+      const capability = msg.bootstrapCapability
+      const authorizationId = msg.authorizationId
+      if (
+        typeof capability !== 'string'
+        || capability.length < 32
+        || typeof authorizationId !== 'string'
+        || authorizationId.length < 8
+        || typeof msg.chatId !== 'string'
+        || typeof msg.instanceId !== 'string'
+      ) return
+      if (exchangeRef.current.capability === capability) {
+        await exchangeRef.current.promise
         return
       }
-      if (msg.type !== INIT) return
-      if (typeof msg.instanceId === 'string') instanceIdRef.current = msg.instanceId
-      if (typeof msg.token === 'string' && msg.token) {
-        setTokenReady(setEmbeddedToken(msg.token))
-      }
-      // The helper may pass an authoritative chatId in INIT (it
-      // lazy-created one after opening us without a query param). Adopt
-      // it when we don't already have one so ChatView mounts the real
-      // chat instead of the no-chat notice.
-      if (msg.chatId && !chatIdRef.current) setChatId(String(msg.chatId))
-      if (typeof msg.picker === 'boolean') setPicker(msg.picker)
-      // Extract quickActions from INIT payload (max 4, filtered in the runtime).
-      if (Array.isArray(msg.quickActions) && msg.quickActions.length > 0) {
-        setQuickActions(msg.quickActions)
-      }
-      // Re-announce, now correlated, so the parent learns the resolved
-      // chatId under the right instanceId.
-      postToParent(READY)
+      if (
+        authorizedRef.current
+        && (msg.chatId !== chatIdRef.current || msg.instanceId !== instanceIdRef.current)
+      ) return
+
+      latestAuthorizationIdRef.current = authorizationId
+      instanceIdRef.current = msg.instanceId
+      const exchange = (async () => {
+        const response = await fetch(`${BASE}/api/app-chat-embeds/session`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${capability}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ instance_id: msg.instanceId }),
+        })
+        if (!response.ok) throw new Error(`authorization failed (${response.status})`)
+        const session = await response.json()
+        if (
+          session.chat_id !== msg.chatId
+          || session.instance_id !== msg.instanceId
+          || session.role !== 'participant'
+        ) throw new Error('authorization response mismatch')
+        // A parent acknowledgement timeout may already have started a newer
+        // one-use exchange. Never let a late response overwrite that newer
+        // in-memory handoff; the server independently enforces grant order.
+        if (latestAuthorizationIdRef.current !== authorizationId) return
+
+        // The old same-origin renderer loaded /api/theme with the app token.
+        // The stronger contract keeps generic APIs closed: the verified
+        // exchange returns the already-app-visible theme and we apply it only
+        // after the exact chat/instance/role checks above have succeeded.
+        if (session.theme?.css) {
+          applyThemeToDom(
+            session.theme.css,
+            session.theme.bg,
+            session.theme.mode,
+            { animate: false },
+          )
+        }
+
+        setEphemeralAuthSession(session.token, msg.instanceId)
+        chatIdRef.current = session.chat_id
+        setChatId(session.chat_id)
+        setPicker(typeof msg.picker === 'boolean' ? msg.picker : true)
+        setQuickActions(Array.isArray(msg.quickActions) ? msg.quickActions : null)
+        setAuthorized(true)
+        authorizedRef.current = true
+
+        if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+        const expiry = Date.parse(session.expires_at)
+        const delay = Number.isFinite(expiry)
+          ? Math.max(1000, expiry - Date.now() - 2 * 60 * 1000)
+          : 10 * 60 * 1000
+        refreshTimerRef.current = setTimeout(() => postToParent(AUTH_EXPIRING), delay)
+        postToParent(READY, { authorizationId })
+      })().catch((error) => {
+        if (latestAuthorizationIdRef.current !== authorizationId) return
+        const retainExisting = retainEmbedSessionAfterExchangeFailure(
+          authorizedRef.current,
+        )
+        if (!retainExisting) {
+          clearEphemeralAuthSession()
+          authorizedRef.current = false
+          setAuthorized(false)
+        }
+        postToParent(ERROR, {
+          phase: 'authorization',
+          authorizationId,
+          refresh: retainExisting,
+          error: error.message || 'authorization failed',
+        })
+      })
+      exchangeRef.current = { capability, promise: exchange }
+      await exchange
     }
+
+    function onMessage(event) {
+      if (!isEmbedMessage(event, {
+        origins: ['null', window.location.origin],
+        expectedSource: parentRef.current,
+      })) return
+      const msg = event.data
+      if (msg.type === INIT) {
+        establish(msg).catch(() => {})
+        return
+      }
+      if (
+        msg.type !== CONTEXT_RESPONSE
+        || msg.instanceId !== instanceIdRef.current
+      ) return
+      const resolver = pendingContextResolversRef.current.get(msg.nonce)
+      if (resolver) {
+        pendingContextResolversRef.current.delete(msg.nonce)
+        resolver(msg.context || null)
+      }
+    }
+
+    function onAuthExpired() {
+      postToParent(AUTH_EXPIRING)
+    }
+
     window.addEventListener('message', onMessage)
-    // Announce mount immediately. The parent's INIT may have been posted
-    // before this listener attached (iframe load race), so send an
-    // uncorrelated READY now too; the parent keys off origin + source and
-    // picks up the instanceId from its own INIT round-trip. Idempotent.
-    postToParent(READY)
+    window.addEventListener('mobius:chat-embed-auth-expired', onAuthExpired)
     return () => {
       window.removeEventListener('message', onMessage)
-      setEmbeddedToken(null)
+      window.removeEventListener('mobius:chat-embed-auth-expired', onAuthExpired)
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+      for (const resolve of pendingContextResolversRef.current.values()) resolve(null)
+      pendingContextResolversRef.current.clear()
+      clearEphemeralAuthSession()
+      authorizedRef.current = false
+      latestAuthorizationIdRef.current = null
     }
-    // Mount-only: refs hold the mutable bits and the listener reads the
-    // latest chatId via chatIdRef. Re-subscribing on chatId change would
-    // drop in-flight INIT handling.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, []) // authorization state is held in refs after the one inert mount
 
-  if (!chatId || !tokenReady) {
-    return (
-      <div className="chat-embed chat-embed--empty">
-        <p className="chat-embed__notice">
-          Starting conversation…
-        </p>
-      </div>
-    )
-  }
+  // Do not render a chat id, loading text, cached data or any active controls
+  // before the server has established the exact scoped principal.
+  if (!authorized || !chatId) return <div className="chat-embed" aria-hidden="true" />
 
   return (
     <ErrorBoundary
       label="chat-embed"
       variant="fullscreen"
-      onReset={() => {
-        // A render crash in ChatView shouldn't strand the embed — tell
-        // the parent, then let the boundary remount the subtree (which
-        // re-runs ChatView's durable reload).
-        postToParent(ERROR, { error: 'render-crash' })
-      }}
+      onReset={() => postToParent(ERROR, { error: 'render-crash' })}
     >
       <div className="chat-embed">
         <ChatView
@@ -270,9 +254,6 @@ export default function ChatEmbed() {
           }}
           onStreamEnd={notifyTurnDone}
           onExternalRunEvent={handleExternalRunEvent}
-          // System events (theme_updated, app_created, …) are Shell-level
-          // concerns. The embed is a chat renderer, so we drop them — but
-          // pass the callback so ChatView never calls an undefined.
           onSystemEvent={() => {}}
         />
       </div>

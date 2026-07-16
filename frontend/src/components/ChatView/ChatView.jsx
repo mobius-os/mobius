@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check } from 'lucide-react'
-import { apiFetch, getToken, BASE } from '../../api/client.js'
+import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
@@ -22,6 +22,7 @@ import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import AgentContextInspector from './AgentContextInspector.jsx'
+import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
@@ -45,12 +46,13 @@ import {
   subscribeProviderSwitch,
 } from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
+import { clearChatQuestionDrafts } from './questionDraft.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -64,6 +66,7 @@ import {
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
   startedMessagesFromResponse,
+  stripInternalUserMessageFields,
   systemEventForChat,
 } from './chatRuntimeState.js'
 import {
@@ -163,6 +166,7 @@ function findUserIndexByCid(messages, cid) {
 export function deleteChatDraft(chatId) {
   try { sessionStorage.removeItem(`draft:${chatId}`) } catch { /* private browsing */ }
   clearFailedSendAttempt(chatId)
+  clearChatQuestionDrafts(chatId)
 }
 
 // Evict the oldest draft: key from sessionStorage so a new draft can land.
@@ -274,6 +278,7 @@ export default function ChatView({
   builtApps = NO_BUILT_APPS,
   onOpenApp,
   onMessageStart,
+  onQuestionAnswered,
   onVoiceListeningChange,
   showPicker = true,
   embedded = false,
@@ -421,7 +426,10 @@ export default function ChatView({
   // observer hook (useOffscreenNudge, below); their booleans are computed near
   // hasPendingQuestion / hasPendingResume where the card finders live.
   const [showInspector, setShowInspector] = useState(false)
+  const [showSummary, setShowSummary] = useState(false)
+  const [visibleTimestampKey, setVisibleTimestampKey] = useState(null)
   const [copyStatus, setCopyStatus] = useState('')
+  const timestampTimerRef = useRef(null)
   const messageHoldRef = useRef(null)
   const suppressMessageClickRef = useRef(null)
   const copyStatusTimerRef = useRef(null)
@@ -446,6 +454,7 @@ export default function ChatView({
   const lastAnnouncedPhaseRef = useRef(null)
 
   useEffect(() => () => {
+    if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
     if (messageHoldRef.current?.timer) clearTimeout(messageHoldRef.current.timer)
     if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current)
   }, [])
@@ -499,6 +508,19 @@ export default function ChatView({
     ) cancelMessageHold()
   }, [cancelMessageHold])
 
+  const showTimestamp = useCallback((event, key) => {
+    if (suppressMessageClickRef.current === key) {
+      suppressMessageClickRef.current = null
+      return
+    }
+    if (window.getSelection?.()?.toString()) return
+    if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
+    setVisibleTimestampKey(key)
+    timestampTimerRef.current = setTimeout(() => {
+      timestampTimerRef.current = null
+      setVisibleTimestampKey(current => current === key ? null : current)
+    }, 2200)
+  }, [])
   useEffect(() => {
     autoResumeRequestRef.current += 1
     autoResumeSavingRef.current = false
@@ -737,6 +759,8 @@ export default function ChatView({
   // declared further down.
   const onMessageStartRef = useRef(onMessageStart)
   onMessageStartRef.current = onMessageStart
+  const onQuestionAnsweredRef = useRef(onQuestionAnswered)
+  onQuestionAnsweredRef.current = onQuestionAnswered
   const onFirstMessageRef = useRef(onFirstMessage)
   onFirstMessageRef.current = onFirstMessage
   const onStreamEndRef = useRef(onStreamEnd)
@@ -797,6 +821,7 @@ export default function ChatView({
     closePreSendGestureWindow,
     freezeForegroundReturn,
     freezeQueuedSubmission,
+    revealConversationTail,
     reapplyActiveMode,
     settleNonPin,
     settleStreamingPin,
@@ -912,7 +937,21 @@ export default function ChatView({
         !terminal204
         && !preserveLocalTurn
         && serverSnapshotBehindLocal(msgs, messagesRef.current)
-      if (!preserveLocalTurn && !staleSnapshot) {
+      if (preserveLocalTurn) {
+        // A new local turn can begin while the mounted copy of the previous
+        // assistant row is still a stale partial. Refresh the durable history,
+        // but retain any optimistic user/queue rows newer than the server page.
+        // Skipping the commit wholesale made the previous completed reply
+        // disappear until a full remount.
+        const refreshed = mergeRecentMessagesIntoLoadedWindow({
+          loadedMessages: messagesRef.current,
+          loadedOffset: offsetRef.current,
+          recentMessages: msgs,
+          recentOffset: data.offset || 0,
+          preserveLocalSuffix: true,
+        })
+        commitMessages(refreshed.messages, refreshed.offset)
+      } else if (!staleSnapshot) {
         const refreshed = mergeRecentMessagesIntoLoadedWindow({
           loadedMessages: messagesRef.current,
           loadedOffset: offsetRef.current,
@@ -1246,7 +1285,14 @@ export default function ChatView({
         const locallyActive = (
           sendingRef.current || isStreamingRef.current
         ) && !externalClaimedRunRef.current
-        if (locallyActive) continue
+        if (locallyActive) {
+          // The local optimistic turn remains authoritative for its suffix,
+          // but completed history still needs server reconciliation. Without
+          // this fetch, an under-promoted previous reply stays missing for the
+          // lifetime of the open tab.
+          await fetchMessages({ force: true })
+          continue
+        }
 
         if (delta.started && !delta.finished) {
           externalClaimedRunRef.current = true
@@ -2445,6 +2491,11 @@ export default function ChatView({
         bridgeHook.markBridged()
         activeAssistantDataKeyRef.current = null
       }
+      // The answer write has committed before the 202 response. Refreshing the
+      // owner's chat list now makes this deliberate interaction visible in
+      // drawer recency immediately, instead of waiting for the resumed turn to
+      // finish and emit its terminal refresh.
+      onQuestionAnsweredRef.current?.()
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
     } catch (err) {
       setSending(false)
@@ -2566,10 +2617,7 @@ export default function ChatView({
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${getToken()}`,
-          },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ chat_id: chatId }),
         })
         let data = null
@@ -2800,6 +2848,20 @@ export default function ChatView({
       }
       if (!content) return
 
+      let queueAfterOptimisticPromote = null
+      function restoreOptimisticSteerQueue() {
+        // If another path touched the queue while the POST was in flight
+        // (notably the natural turn-end drain), every pendingQueue mutation
+        // assigns a fresh array. In that case the other path won the race,
+        // so restoring our stale snapshot would resurrect duplicate chips.
+        if (
+          queueAfterOptimisticPromote !== null
+          && pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote
+        ) {
+          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
+        }
+      }
+
       try {
         const steerIsFirstUser = isFirstVisibleUserMessage()
         // Fast-forward is a deliberate visibility action, unlike automatic
@@ -2819,16 +2881,7 @@ export default function ChatView({
         // rows this request is steering; restore the snapshot below if the
         // backend says the turn was not steered.
         pendingQueue.promoteManyByCid(consumePendingCids)
-        const queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
-        const restoreOptimisticSteerQueue = () => {
-          // If another path touched the queue while the POST was in flight
-          // (notably the natural turn-end drain), every pendingQueue mutation
-          // assigns a fresh array. In that case the other path won the race,
-          // so restoring our stale snapshot would resurrect duplicate chips.
-          if (pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote) {
-            pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
-          }
-        }
+        queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingCids,
@@ -3057,6 +3110,9 @@ export default function ChatView({
     : -1
   const hasLiveAssistantPayload = turnActive && streamItems.length > 0
   const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
+  const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
+    .slice(bridgeMsgIdx + 1)
+    .some(msg => msg?.role === 'user' && !msg.hidden)
   const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
     ? messages[trailingAssistantPartialIdx]
     : null
@@ -3074,6 +3130,7 @@ export default function ChatView({
   const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
     bridgeMsgIdx,
     trailingAssistantPartialIdx,
+    bridgeFollowedByVisibleUser,
     hasLivePayload: hasLiveAssistantPayload,
     bridgeSurface: bridgeAssistantSurface,
     surface: trailingAssistantSurface,
@@ -3335,10 +3392,16 @@ export default function ChatView({
       >
         {buildPhaseStatus}
       </div>
-      {showInspector && (
+      {!embedded && showInspector && (
         <AgentContextInspector
           chatId={chatId}
           onClose={() => setShowInspector(false)}
+        />
+      )}
+      {!embedded && showSummary && (
+        <ChatSummaryViewer
+          chatId={chatId}
+          onClose={() => setShowSummary(false)}
         />
       )}
       {copyStatus && (
@@ -3507,13 +3570,7 @@ export default function ChatView({
                   }
                 : undefined}
               onClick={msg.ts && msg.role === 'user'
-                ? (event) => {
-                    if (suppressMessageClickRef.current === dataKey) {
-                      suppressMessageClickRef.current = null
-                      return
-                    }
-                    event.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible')
-                  }
+                ? (event) => showTimestamp(event, dataKey)
                 : undefined}
             >
               <MsgContent
@@ -3542,7 +3599,7 @@ export default function ChatView({
                 suppressedQuestionKeys={streamItemQuestionKeys}
               />
               {msg.ts && msg.role === 'user' && (
-                <time className="chat__ts">
+                <time className={`chat__ts${visibleTimestampKey === dataKey ? ' chat__ts--visible' : ''}`}>
                   {new Date(msg.ts).toLocaleString([], {
                     month: 'short', day: 'numeric',
                     hour: '2-digit', minute: '2-digit',
@@ -3585,21 +3642,6 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
-        {buildPhaseRail.length > 0 && (
-          <div className="chat__build-rail" role="group" aria-label="Build progress">
-            {buildPhaseRail.map(phase => (
-              <span
-                key={phase.ts}
-                className={`chat__build-phase${
-                  phase.current ? ' chat__build-phase--current' : ''
-                }`}
-              >
-                <span className="chat__build-phase-dot" aria-hidden="true" />
-                <span className="chat__build-phase-label">{phase.label}</span>
-              </span>
-            ))}
-          </div>
-        )}
         {openAppCtas.length > 0 && (
           <div className="chat__open-app">
             {openAppCtas.map(({ app, vm }) => {
@@ -3621,12 +3663,7 @@ export default function ChatView({
           <button
             type="button"
             className="chat__question-nudge"
-            onClick={() => {
-              // USER-initiated scroll — the no-auto-scroll contract only
-              // forbids the app moving the viewport on its own; a tap on
-              // this chip is the user asking to be taken to the card.
-              findPendingQuestionCard()?.scrollIntoView({ block: 'nearest' })
-            }}
+            onClick={revealConversationTail}
           >
             Möbius asked you something — tap to answer
           </button>
@@ -3635,12 +3672,7 @@ export default function ChatView({
           <button
             type="button"
             className="chat__resume-nudge"
-            onClick={() => {
-              // USER-initiated scroll — same contract as the question nudge: a
-              // tap is the user asking to be taken to the card, not the app
-              // moving the viewport on its own.
-              findResumeCard()?.scrollIntoView({ block: 'nearest' })
-            }}
+            onClick={revealConversationTail}
           >
             {pendingResumeBlock?.pause?.resets_at
               ? 'Rate limit reached — tap to resume'
@@ -3653,6 +3685,21 @@ export default function ChatView({
           onRetry={retry}
         />
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
+        {buildPhaseRail.length > 0 && (
+          <div className="chat__build-rail" role="group" aria-label="Build progress">
+            {buildPhaseRail.map(phase => (
+              <span
+                key={phase.ts}
+                className={`chat__build-phase${
+                  phase.current ? ' chat__build-phase--current' : ''
+                }`}
+              >
+                <span className="chat__build-phase-dot" aria-hidden="true" />
+                <span className="chat__build-phase-label">{phase.label}</span>
+              </span>
+            ))}
+          </div>
+        )}
         <ChatInputBar
           input={input}
           onInputChange={handleComposerInputChange}
@@ -3714,6 +3761,8 @@ export default function ChatView({
                 }}
                 providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
+                onOpenSummary={() => setShowSummary(true)}
+                embedded={embedded}
               />
             </>
           }

@@ -32,6 +32,7 @@ from app.chat_writer import (
   alloc_run_token,
   await_ack,
   cid_of,
+  ensure_user_cid,
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
@@ -40,7 +41,9 @@ from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  Principal, get_current_owner, get_principal, reject_cross_site,
+  Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
+  get_current_owner, reject_cross_site,
+  chat_embed_session_is_active, require_chat_embed_operation,
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
@@ -284,11 +287,12 @@ def _user_message_from_body(
     "content": _content_with_uploads(chat, body),
     "ts": int(time.time() * 1000),
   }
-  # Carry the client-minted stable identity into persistence so the row keeps
-  # one identity across optimistic→confirm, reload, and echo. Absent (older
-  # client / legacy) rows derive `legacy-<ts>` lazily via cid_of at read time.
+  # Carry the client-minted identity when present; API clients may omit it, so
+  # stamp an opaque server identity before the row reaches any queue/transcript
+  # command. The writer repeats this invariant for non-HTTP producers.
   if body.cid:
     user_msg["cid"] = body.cid
+  ensure_user_cid(user_msg)
   if body.hidden:
     user_msg["hidden"] = True
   if body.attachments:
@@ -435,10 +439,10 @@ def _selected_force_steer_pending(
   separate rows, but durable rows are reconstructed from the server-owned
   pending queue here; the client cannot forge transcript entries.
 
-  Selection is keyed on the stable `cid` (matched via cid_of, which covers a
-  legacy `legacy-<ts>` derivation). The old content byte-match is GONE — cid
-  binds the request to specific queued rows directly, with no fragile
-  "\n\n"-join contract against the composer text.
+  Selection is keyed on the stable `cid` (matched via cid_of, which retains a
+  legacy `legacy-<ts>` fallback for rows missed by migration). The old content
+  byte-match is GONE — cid binds the request to specific queued rows directly,
+  with no fragile "\n\n"-join contract against the composer text.
   """
   requested_cids = set(body.consume_pending_cids or [])
   if not requested_cids:
@@ -470,7 +474,7 @@ def _user_messages_from_pending(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     # Preserve the stable identity across the queue→transcript hop. A legacy
-    # pending row without a cid gets its `legacy-<ts>` derivation stamped so
+    # pending row without a cid gets its `legacy-<ts>` fallback stamped so
     # the steered transcript row and its echo carry the same value the client
     # will compare against.
     if not msg.get("cid"):
@@ -489,7 +493,7 @@ def _user_messages_from_pending(
 async def send_message(
   body: schemas.SendMessage,
   chat_id: str,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """Saves the user message, starts the agent as a background task,
@@ -500,6 +504,7 @@ async def send_message(
   attributed contract (design §1). Foreign chats are 403; the runner /
   queue / SSE internals are reused unchanged for both actors.
   """
+  require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
 
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
@@ -521,6 +526,15 @@ async def send_message(
   # practice; after that, the durable-transcript fallback below decides
   # whether this is recoverable or genuinely stale.
   if body.answers:
+    # Snapshot the Stop tombstone BEFORE waiting on the queue lock. A Stop
+    # that lands after this request began must still win the race (410); a
+    # Stop that had already completed is different: pressing Submit afterward
+    # is a fresh, explicit request to continue from the durable tail question.
+    # The old unconditional tombstone check made that later Submit impossible
+    # until the whole server restarted and forgot the in-memory tombstone.
+    cancelled_when_submitted = questions.was_cancelled(
+      chat_id, body.question_id,
+    )
     async with chat_queue.get_lock(chat_id):
       _GRACE_ATTEMPTS = 10
       _GRACE_INTERVAL = 0.05  # seconds — total ~500ms
@@ -610,7 +624,10 @@ async def send_message(
           status_code=410,
           detail="The question is no longer accepting answers.",
         )
-      if questions.was_cancelled(chat_id, body.question_id):
+      if (
+        questions.was_cancelled(chat_id, body.question_id)
+        and not cancelled_when_submitted
+      ):
         raise HTTPException(
           status_code=410,
           detail="The question is no longer accepting answers.",
@@ -822,6 +839,13 @@ async def _send_message_locked(
         # runner already does and queue the message instead.
         steered = False
       if steered:
+        # A question tool is a synchronous human pause. Once the owner
+        # explicitly fast-forwards (or a steer-enabled chat auto-steers), the
+        # new message supersedes that pause; leaving its future registered
+        # would strand Codex waiting on a card that the transcript has already
+        # moved past. Retire it only AFTER the provider accepts the steer so a
+        # failed steer still leaves the original question answerable.
+        questions.cancel(chat_id)
         # Persist the steer so a reload renders Q1, A1, Q2, A2: seal the
         # pre-interrupt assistant text (A1) as its own message, append this
         # steered user row at the END, and reset the live sink so the
@@ -1087,7 +1111,7 @@ async def _send_message_locked(
 async def cancel_pending_message(
   chat_id: str,
   cid: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Removes a queued (not-yet-started) user message from the pending
@@ -1100,7 +1124,10 @@ async def cancel_pending_message(
   """
   # Existence check only — the actor's CancelPending does the RMW. The
   # 404 here keeps the route's contract (unknown / deleted chat → 404).
-  get_active_chat_or_404(db, chat_id)
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:send")
+  get_active_chat_for_principal(db, chat_id, principal)
 
   # The actor's CancelPending removes the matching cid and commits — the
   # SOLE runtime mutator of pending_messages, so a DELETE racing a
@@ -1118,7 +1145,7 @@ async def cancel_pending_message(
 async def stream_chat(
   request: Request,
   chat_id: str,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """SSE endpoint: subscribes to the chat's broadcast and streams events.
@@ -1135,7 +1162,11 @@ async def stream_chat(
   """
   # Gate before touching the broadcast. Raises 404 (missing/deleted) or
   # 403 (app token, foreign chat) — matching send_message's surface.
+  require_chat_embed_operation(principal, "chat:stream")
   get_active_chat_for_principal(db, chat_id, principal)
+  embed_session_id = (
+    principal.embed_session_id if principal.scope == "chat_embed" else None
+  )
 
   # Release the DB connection before the stream loop. Like the shell SSE
   # in notify.py, this StreamingResponse would otherwise pin a pooled
@@ -1169,7 +1200,20 @@ async def stream_chat(
     # the queue with no await in between), so the catch-up burst still
     # captures exactly the events present when this subscriber attaches.
     catch_up, queue = bc.subscribe()
+    last_embed_auth_check = 0.0
+
+    def embed_session_active() -> bool:
+      nonlocal last_embed_auth_check
+      if embed_session_id is None:
+        return True
+      now_mono = time.monotonic()
+      if now_mono - last_embed_auth_check < 1.0:
+        return True
+      last_embed_auth_check = now_mono
+      return chat_embed_session_is_active(embed_session_id)
     try:
+      if not embed_session_active():
+        return
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:
@@ -1198,6 +1242,8 @@ async def stream_chat(
 
       # Stream live events from the queue.
       while True:
+        if not embed_session_active():
+          return
         if await request.is_disconnected():
           break
 

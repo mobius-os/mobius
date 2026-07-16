@@ -171,6 +171,10 @@
   max-width: 280px;
   padding: 0 24px;
   text-align: center;
+  /* The generic loading cover is intentionally click-through while an app
+     frame initializes. Error/closed states contain real Retry/Close actions,
+     so restore pointer handling only for this bounded control card. */
+  pointer-events: auto;
 }
 
 .canvas-loading__offline-icon {

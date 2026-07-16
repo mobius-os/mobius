@@ -204,6 +204,37 @@ def test_by_id_route_supports_conditional_requests(client, owner_token):
   assert again.status_code == 304
 
 
+def test_opaque_embed_alias_preserves_relative_tree_and_sandboxes_document(
+  client, owner_token,
+):
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "index.html", '<script src="./child.js"></script>')
+  _write_static(app["id"], "child.js", "parent.postMessage('ready', '*')")
+  _write_static(app["id"], "active.svg", '<svg onload="alert(1)"/>')
+
+  entry = client.get(
+    f"/app-embeds/by-id/{app['id']}/index.html",
+    headers={"Origin": "null"},
+  )
+  child = client.get(f"/app-embeds/by-id/{app['id']}/child.js")
+  ordinary = client.get(f"/app-assets/by-id/{app['id']}/index.html")
+  svg = client.get(f"/app-embeds/by-id/{app['id']}/active.svg")
+
+  assert entry.status_code == 200
+  assert child.status_code == 200
+  assert "x-frame-options" not in entry.headers
+  csp = entry.headers["content-security-policy"]
+  assert "sandbox allow-scripts" in csp
+  assert "allow-same-origin" not in csp
+  assert "frame-ancestors" not in csp
+  assert entry.headers["access-control-allow-origin"] == "null"
+  assert "sandbox allow-scripts" in child.headers["content-security-policy"]
+  assert "allow-same-origin" not in child.headers["content-security-policy"]
+  assert "sandbox allow-scripts" in svg.headers["content-security-policy"]
+  assert "allow-same-origin" not in svg.headers["content-security-policy"]
+  assert ordinary.headers["x-frame-options"] == "SAMEORIGIN"
+
+
 def test_security_guards_run_before_caching(client, owner_token):
   app = _create_app(client, owner_token)
   _write_static(app["id"], "index.html", "<title>CubeRun</title>")

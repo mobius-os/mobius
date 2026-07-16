@@ -37,7 +37,7 @@
  *      asserting only `mobius-*` would miss a regression that dropped
  *      the workbox-precache purge. We seed both and assert both go.
  *
- * Run: npx playwright test tests/bootstrap.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/bootstrap.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

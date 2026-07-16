@@ -23,6 +23,17 @@ def test_version_endpoint_exposes_build_sha(client):
   assert isinstance(body.get("sha"), str) and body["sha"]
 
 
+def test_version_exposes_explicit_test_runtime_marker(client, monkeypatch):
+  monkeypatch.delenv("MOBIUS_TEST_RUNTIME", raising=False)
+  assert client.get("/api/version").json()["test_runtime"] is False
+
+  monkeypatch.setenv("MOBIUS_TEST_RUNTIME", "1")
+  assert client.get("/api/version").json()["test_runtime"] is True
+
+  monkeypatch.setenv("MOBIUS_TEST_RUNTIME", "true")
+  assert client.get("/api/version").json()["test_runtime"] is False
+
+
 def test_build_sha_defaults_to_unknown(monkeypatch):
   monkeypatch.delenv("BUILD_SHA", raising=False)
   assert Settings(**_KW).build_sha == "unknown"

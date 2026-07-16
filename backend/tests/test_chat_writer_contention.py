@@ -513,6 +513,20 @@ def test_append_pending_duplicate_cid_is_idempotent(actor):
   assert [m["cid"] for m in chat["pending_messages"]] == ["c-dup"]
 
 
+def test_writer_stamps_missing_cid_before_pending_persistence(actor):
+  """The actor is the invariant boundary for non-HTTP producers too."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  result = _await(actor.submit(
+    AppendPending(
+      chat_id="c1", run_token="",
+      user_msg={"role": "user", "content": "queued", "ts": 10},
+    )
+  ))
+  cid = result["stored"]["cid"]
+  assert cid.startswith("server-")
+  assert _load_chat()["pending_messages"][0]["cid"] == cid
+
+
 def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
   """AppendSteeredUserMessage dedups by cid: a re-delivered row (same cid)
   is dropped, while two genuinely distinct sends with IDENTICAL text (distinct
@@ -570,6 +584,7 @@ def test_start_turn_is_atomic(actor):
   assert result["history"][-1].content == "build me a todo app"
   chat = _load_chat()
   assert chat["messages"][-1]["content"] == "build me a todo app"
+  assert chat["messages"][-1]["cid"].startswith("server-")
   assert chat["title"] == "build me a todo app"
   assert chat["provider"] == "codex"
   assert chat["run_status"] == "running"

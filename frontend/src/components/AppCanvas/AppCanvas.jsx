@@ -1,7 +1,8 @@
-import { useEffect, useReducer, useRef } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
+import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
 import {
@@ -203,6 +204,9 @@ export default function AppCanvas({
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered, onAppError,
 }) {
   const queryClient = useQueryClient()
+  const [serviceSurface, setServiceSurface] = useState(null)
+  const serviceRequestRef = useRef(0)
+  const serviceFrameRef = useRef(null)
   // Fresh app tokens are persisted for their remaining short lifetime so a
   // fully cached app can cold-boot offline. The cache is app-id scoped and JWT
   // claims are checked on read; the long-lived owner token never enters a frame.
@@ -527,6 +531,38 @@ export default function AppCanvas({
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
 
+      if (msg.type === 'moebius:open-service') {
+        const slug = typeof msg.service === 'string' ? msg.service : ''
+        // A mini-app may only ask for the same-named installed service. The
+        // shell—not the opaque frame—resolves the private configured origin.
+        if (!activeRef.current || !slug || slug !== appSlug) return
+        const requestId = ++serviceRequestRef.current
+        setServiceSurface({ slug, phase: 'checking', url: null, error: null })
+        ;(async () => {
+          try {
+            const surface = await api.services.surface(slug)
+            if (serviceRequestRef.current !== requestId) return
+            const url = new URL(surface.url)
+            const expectedPath = `/services/${encodeURIComponent(slug)}/_mobius/surface`
+            if (url.origin === window.location.origin || url.pathname !== expectedPath) {
+              throw new Error('Service origin must be separate from Möbius.')
+            }
+            const correlation = globalThis.crypto?.randomUUID?.()
+              || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+            setServiceSurface({
+              slug, phase: 'loading', url: url.href, origin: url.origin,
+              correlation, error: null,
+            })
+          } catch (error) {
+            if (serviceRequestRef.current !== requestId) return
+            const message = error?.message || 'Service is unavailable.'
+            setServiceSurface({ slug, phase: 'error', url: null, error: message })
+            try { e.source?.postMessage({ type: 'moebius:service-error', service: slug, error: message }, '*') } catch {}
+          }
+        })()
+        return
+      }
+
       // Mini-app back-nav protocol (see useNavigation.appNavPush / appNavPop).
       // The app announces nested-view enter/exit; the shell installs a real
       // top-level history sentinel so Android's swipe-back has something to
@@ -566,7 +602,41 @@ export default function AppCanvas({
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
+  }, [appId, appSlug, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
+
+  useEffect(() => {
+    // A response from the previously mounted app must never replace the new
+    // app's canvas with a service surface.
+    serviceRequestRef.current += 1
+    setServiceSurface(null)
+  }, [appId, version])
+
+  useEffect(() => {
+    if (serviceSurface?.phase !== 'loading') return
+    const onReady = (event) => {
+      if (event.source !== serviceFrameRef.current?.contentWindow) return
+      if (event.origin !== serviceSurface.origin) return
+      const message = event.data || {}
+      if (message.type !== 'moebius:service-ready'
+          || message.service !== serviceSurface.slug
+          || message.correlation !== serviceSurface.correlation) return
+      setServiceSurface(current => current?.correlation === serviceSurface.correlation
+        ? { ...current, phase: 'ready' } : current)
+    }
+    window.addEventListener('message', onReady)
+    const id = setTimeout(() => {
+      setServiceSurface(current => current?.phase === 'loading'
+        ? { ...current, phase: 'error', error: 'The service did not finish loading.' }
+        : current)
+    }, 15000)
+    return () => {
+      clearTimeout(id)
+      window.removeEventListener('message', onReady)
+    }
+  }, [
+    serviceSurface?.phase, serviceSurface?.url, serviceSurface?.origin,
+    serviceSurface?.slug, serviceSurface?.correlation,
+  ])
 
   // Two setup keys intentionally coordinate catalog apps. Fan those safe,
   // explicit mutations across mounted opaque frames without exposing their
@@ -790,6 +860,61 @@ export default function AppCanvas({
         <div className="canvas-loading" aria-live="polite">
           <CanvasLoadingBrand appName={appName} />
         </div>
+      </div>
+    )
+  }
+
+  if (serviceSurface) {
+    const loaded = serviceSurface.phase === 'ready'
+    const retryService = () => setServiceSurface(current => {
+      if (!current?.url) return null // remount wrapper only after explicit Retry
+      const correlation = globalThis.crypto?.randomUUID?.()
+        || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      return { ...current, phase: 'loading', correlation, error: null }
+    })
+    return (
+      <div className="canvas-wrap" data-service-surface={serviceSurface.slug}>
+        {serviceSurface.url && ['loading', 'ready'].includes(serviceSurface.phase) && (
+          <iframe
+            ref={serviceFrameRef}
+            className="canvas canvas--live"
+            style={{ opacity: loaded ? 1 : 0 }}
+            src={serviceSurfaceFrameUrl(serviceSurface.url, serviceSurface.correlation)}
+            title={appName || serviceSurface.slug}
+            sandbox="allow-scripts allow-forms allow-popups allow-downloads allow-same-origin allow-top-navigation-by-user-activation"
+            allow="clipboard-read; clipboard-write; fullscreen"
+          />
+        )}
+        {!loaded && (
+          <div className="canvas-loading" aria-live="polite">
+            {['error', 'closed'].includes(serviceSurface.phase) ? (
+              <div className="canvas-loading__offline">
+                <div className="canvas-loading__offline-title">
+                  {serviceSurface.phase === 'closed'
+                    ? `${appName || serviceSurface.slug} is closed`
+                    : `Couldn’t open ${appName || serviceSurface.slug}`}
+                </div>
+                <div className="canvas-loading__offline-detail">
+                  {serviceSurface.phase === 'closed'
+                    ? 'Open it when you’re ready, or switch to another app.'
+                    : serviceSurface.error}
+                </div>
+                <div>
+                  <button type="button" onClick={retryService}>
+                    {serviceSurface.phase === 'closed'
+                      ? `Open ${appName || serviceSurface.slug}` : 'Retry'}
+                  </button>
+                  {serviceSurface.phase === 'error' && (
+                    <button type="button" onClick={() => {
+                      serviceRequestRef.current += 1
+                      setServiceSurface(current => ({ ...current, phase: 'closed' }))
+                    }}>Close</button>
+                  )}
+                </div>
+              </div>
+            ) : <CanvasLoadingBrand appName={appName} />}
+          </div>
+        )}
       </div>
     )
   }

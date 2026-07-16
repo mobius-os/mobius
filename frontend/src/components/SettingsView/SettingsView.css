@@ -156,22 +156,6 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  /* Override the apps-sdk-ui Switch tokens so the dark-mode toggle
-     reads at the same scale as our earlier bespoke 48x28 switch.
-     The SDK ships smaller defaults tuned for the OpenAI design
-     system; these locals scope the bump so it doesn't bleed into
-     other future Switch usages. Accent palette wired in so the
-     ON state uses the Möbius purple. */
-  --switch-track-width: 48px;
-  --switch-track-height: 28px;
-  --switch-thumb-size: 22px;
-  --switch-thumb-offset: 3px;
-  --switch-track-color: var(--border);
-  --switch-track-color-hover: var(--surface2);
-  --switch-track-color-checked: var(--accent);
-  --switch-track-color-disabled: var(--surface);
-  --switch-track-color-checked-disabled: var(--accent-dim);
-  --color-ring: var(--accent);
 }
 
 /* Top-align a row whose label spans two lines (label + subtext), so the
@@ -181,39 +165,69 @@
   align-items: flex-start;
 }
 
-/* Tailwind v4's Preflight resets button backgrounds in the base
-   layer, which fights the SDK Switch's component-layer
-   `background: var(--switch-track-color-*)` rules and leaves the
-   track transparent. Targeting the Switch button directly from
-   our settings scope gives a higher-specificity wins-over-base
-   override. Mirrors what the SDK does, just at a layer Tailwind's
-   base can't reset. */
-.settings__row button[role="switch"] {
-  background: var(--switch-track-color);
-  /* Tailwind v4 Preflight ALSO zeros border-radius on ALL
-     buttons in an UNLAYERED rule that beats the SDK Switch's
-     layered `.Track { border-radius: var(--radius-full) }`.
-     The thumb (a <span>) is unaffected so it renders circular,
-     but the track stayed a sharp rectangle — the toggle looked
-     like a square on prod even though the thumb was round.
-     Same fix pattern as the background override above. */
-  border-radius: var(--radius-full, 9999px);
-}
-.settings__row button[role="switch"][data-state="checked"] {
-  background: var(--switch-track-color-checked);
-}
-.settings__row button[role="switch"][data-disabled] {
-  background: var(--switch-track-color-disabled);
-}
-.settings__row button[role="switch"][data-disabled][data-state="checked"] {
-  background: var(--switch-track-color-checked-disabled);
+.settings__appearance {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
 }
 
-/* The bespoke `.settings__toggle*` rules that used to live below
-   here were deleted: SettingsView.jsx renders the SDK <Switch>
-   from `@openai/apps-sdk-ui/components/Switch`, which carries its
-   own track + knob markup, so the custom toggle classes were
-   unreachable. Removed instead of left as dead weight. */
+.settings__appearance-toggle {
+  flex-shrink: 0;
+  display: inline-grid;
+  grid-template-columns: repeat(2, 34px);
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.settings__appearance-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings__appearance-option {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 30px;
+  border-radius: 5px;
+  color: var(--muted);
+  opacity: 0.68;
+}
+
+.settings__appearance-option svg {
+  display: block;
+}
+
+.settings__appearance-option--active {
+  color: var(--text);
+  background: var(--surface2);
+  opacity: 1;
+}
+
+.settings__appearance-toggle:disabled {
+  cursor: wait;
+}
+
+/* The chat model is informational, not a live status. Keep it in the normal
+   secondary-text color and weight so the model name does not read like a
+   link, warning, or selected action. */
+.settings__last-model {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.settings__standard-highlight {
+  color: var(--green);
+  font-weight: inherit;
+}
 
 /* Provider rows + .settings__providers wrapper styles live in
    ../ProviderAuth/ProviderAuth.css since the component is shared
@@ -259,32 +273,6 @@
   color: var(--text);
 }
 
-.settings-agent-group__reorder {
-  min-width: 44px;
-  min-height: 44px;
-  margin: -12px -8px -8px 0;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.settings-agent-group__reorder:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .settings-agent-group__reorder:hover {
-    background: var(--surface2);
-  }
-}
-
 /* Möbius update cluster: the status line stacks ABOVE the build identity, so a
    short status ("Up to date") never shares a flex row with the build string and
    wraps mid-phrase. A vertical stack reads as one calm unit; the trailing action
@@ -306,11 +294,6 @@
   color: var(--muted);
 }
 
-.settings__build--local {
-  margin-top: -3px;
-  opacity: 0.72;
-}
-
 .settings__btn--nowrap { white-space: nowrap; }
 
 .settings-bg-list {
@@ -326,10 +309,10 @@
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
   min-height: 54px;
-  padding: 8px;
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface) 68%, var(--bg));
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -351,40 +334,22 @@
 }
 
 .settings-bg-row--dragging {
-  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
   opacity: 0.96;
 }
 
+.settings-bg-row--dragging .model-trigger,
+.settings-bg-row--drop-target .model-trigger {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
+}
+
 .settings-bg-row--drop-target {
-  border-color: color-mix(in srgb, var(--accent) 66%, var(--border));
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-}
-
-.settings-bg-row--drop-before::before,
-.settings-bg-row--drop-after::after {
-  content: '';
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-.settings-bg-row--drop-before::before {
-  top: -5px;
-}
-
-.settings-bg-row--drop-after::after {
-  bottom: -5px;
+  background: transparent;
 }
 
 .settings-bg-row--off {
-  background: color-mix(in srgb, var(--surface) 50%, var(--bg));
-  border-color: color-mix(in srgb, var(--border) 64%, transparent);
+  background: transparent;
   opacity: 0.78;
 }
 
@@ -419,6 +384,10 @@
   outline-offset: 1px;
 }
 
+.settings-bg-row__drag-handle svg {
+  display: block;
+}
+
 @media (hover: hover) and (pointer: fine) {
   .settings-bg-row__drag-handle:hover {
     color: var(--text);
@@ -429,9 +398,50 @@
 /* The body holds the full-width model trigger. */
 .settings-bg-row__body {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+}
+
+/* Quiet, read-only effort preview inside the model button. The actual shared
+   effort stepper remains in the sheet opened by this whole button. */
+.settings-bg-row__effort-visual {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 68px;
+  padding: 7px 3px;
+}
+
+.settings-bg-row__effort-visual::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 50%;
+  height: 1px;
+  background: var(--border);
+  transform: translateY(-50%);
+}
+
+.settings-bg-row__effort-dot {
+  position: relative;
+  z-index: 1;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.settings-bg-row__effort-dot--filled {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.settings-bg-row__effort-dot--on {
+  transform: scale(1.35);
+  box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -442,7 +452,7 @@
 
 @media (max-width: 620px) {
   .settings-bg-row {
-    padding-inline: 6px;
+    padding-inline: 0;
   }
 
   .settings-bg-row--reordering {

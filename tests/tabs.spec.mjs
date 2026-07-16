@@ -10,7 +10,7 @@
  * Runs against the deployed app with agent + apps routes intercepted — no
  * agent tokens consumed.
  *
- * Run: MOBIUS_URL=http://localhost:8079 npx playwright test tests/tabs.spec.mjs --project=tests
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/tabs.spec.mjs --project=tests
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'

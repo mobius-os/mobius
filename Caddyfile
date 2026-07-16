@@ -1,12 +1,24 @@
 {$DOMAIN} {
     encode gzip
 
+    # The embedded-chat bootstrap document is intentionally nested below an
+    # opaque app frame. That ancestor can satisfy neither X-Frame-Options:
+    # SAMEORIGIN nor CSP frame-ancestors 'self'. Keep the exception exact and
+    # retain the rest of the resource/security policy while the blank document
+    # establishes its server-verified one-use capability.
+    @chatEmbed path /shell/embed/chat
+    @staticEmbed path /app-embeds/by-id/*
+    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/*
+
     header {
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        Permissions-Policy "camera=(), geolocation=()"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Defer replacements until after reverse_proxy copies the backend
+        # response. Without `>`, the mirrored backend values are appended and
+        # browsers receive comma-joined duplicates such as
+        # `X-Content-Type-Options: nosniff, nosniff`.
+        >X-Content-Type-Options "nosniff"
+        >Referrer-Policy "strict-origin-when-cross-origin"
+        >Permissions-Policy "camera=(), geolocation=()"
+        >Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         # script-src notes:
         #   'unsafe-inline' — cannot be removed: index.html, app-frame.html,
         #   standalone.py, and recover_html.py all contain inline <script>
@@ -18,8 +30,11 @@
         #   calls are governed by script-src; removing the origin would break
         #   every mini-app that uses those libraries at runtime. Removing it
         #   requires vendoring all three libraries under /vendor (like three.js).
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
     }
+    header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
+    header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' {$MOBIUS_SERVICE_TANDOOR_ORIGIN}; frame-ancestors 'self'"
+    header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
+    header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:"
 
     # Recovery floor lives in the separate recoveryd container (its own
     # cgroup + pid1) so a broken or crash-looping platform can't take
@@ -31,4 +46,28 @@
     }
 
     reverse_proxy app:8000
+}
+
+# Full backend web services need their own cookie/storage origin and therefore
+# cannot descend from the ordinary opaque mini-app frame. Tandoor is the first
+# concrete service surface. The backend reads this same variable; production
+# points it at a DNS-backed HTTPS host. Caddy supplies the exact two-ancestor
+# CSP only when the backend did not; normal responses retain their stricter
+# backend/upstream policy without a duplicate or conflicting replacement.
+{$MOBIUS_SERVICE_TANDOOR_ORIGIN} {
+    @tandoorSurface path /services/tandoor /services/tandoor/*
+    handle @tandoorSurface {
+        encode gzip
+        header {
+            >X-Content-Type-Options "nosniff"
+            >Referrer-Policy "strict-origin-when-cross-origin"
+            >Permissions-Policy "camera=(), geolocation=()"
+            ?Content-Security-Policy "frame-ancestors 'self' {$FRONTEND_ORIGIN}"
+            -X-Frame-Options
+        }
+        reverse_proxy app:8000
+    }
+    handle {
+        respond "Not found" 404
+    }
 }

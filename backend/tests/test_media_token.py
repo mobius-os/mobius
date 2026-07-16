@@ -105,6 +105,16 @@ def test_serve_upload_with_media_token(client, auth, chat):
   assert r.status_code == 200
 
 
+def test_serve_upload_with_media_token_in_header(client, auth, chat):
+  """Header transport does not widen a media token beyond its exact chat."""
+  name = _upload_file(client, auth, chat, b"hello-header-media")
+  token_r = client.post(f"/api/chats/{chat.id}/media-token", headers=auth)
+  media_headers = {"Authorization": f"Bearer {token_r.json()['token']}"}
+  assert client.get(
+    f"/api/chats/{chat.id}/uploads/{name}", headers=media_headers,
+  ).status_code == 200
+
+
 def test_serve_upload_rejects_owner_jwt_on_query_param(client, auth, chat):
   """GET /uploads/{file}?token=<owner-jwt> must return 403.
 
@@ -148,6 +158,27 @@ def test_serve_upload_rejects_media_token_for_wrong_chat(client, auth, chat, db)
     params={"token": media_token},
   )
   assert r.status_code == 403
+  header_r = client.get(
+    f"/api/chats/{chat.id}/uploads/{name}",
+    headers={"Authorization": f"Bearer {media_token}"},
+  )
+  assert header_r.status_code == 403
+
+
+def test_media_token_never_inherits_owner_or_generic_authority(
+  client, auth, chat,
+):
+  media = client.post(f"/api/chats/{chat.id}/media-token", headers=auth).json()["token"]
+  headers = {"Authorization": f"Bearer {media}"}
+  responses = [
+    client.get("/api/chats", headers=headers),
+    client.get("/api/apps/", headers=headers),
+    client.get("/api/storage/apps/1/private.json", headers=headers),
+    client.get(
+      "/api/admin/activity?since=2020-01-01T00:00:00Z", headers=headers,
+    ),
+  ]
+  assert [response.status_code for response in responses] == [403] * len(responses)
 
 
 def test_serve_upload_rejects_app_token_on_query_param(client, auth, chat, db):

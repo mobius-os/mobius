@@ -1,5 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import './QuestionCard.css'
+import {
+  clearQuestionDraft,
+  questionDraftKey,
+  readQuestionDraft,
+  writeQuestionDraft,
+} from './questionDraft.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -12,13 +18,38 @@ function resolveAnswer(answer, otherText) {
 }
 
 
-export default function QuestionCard({ questions, questionId, answeredMap, onAnswer, disabled }) {
-  const [answers, setAnswers] = useState({})
-  const [otherTexts, setOtherTexts] = useState({})
+export default function QuestionCard({
+  chatId,
+  questions,
+  questionId,
+  answeredMap,
+  onAnswer,
+  disabled,
+}) {
+  const draftKey = questionDraftKey(chatId, questionId, questions)
+  const [answers, setAnswers] = useState(
+    () => readQuestionDraft(draftKey).answers,
+  )
+  const [otherTexts, setOtherTexts] = useState(
+    () => readQuestionDraft(draftKey).otherTexts,
+  )
   const [submitted, setSubmitted] = useState(false)
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
+
+  // ChatView is keyed by chat, so switching away remounts this card. Keep an
+  // unsubmitted selection in the same per-tab cache as composer drafts; the
+  // owner can inspect another chat and return without rebuilding their answer.
+  // A completed or superseded card clears its draft instead of leaving stale
+  // choices attached to transcript history.
+  useEffect(() => {
+    if (answered || disabled) {
+      clearQuestionDraft(draftKey)
+      return
+    }
+    writeQuestionDraft(draftKey, answers, otherTexts)
+  }, [draftKey, answers, otherTexts, answered, disabled])
 
   const allAnswered = questions.every(q => {
     const a = answers[q.question]
@@ -99,6 +130,20 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
 
         const answeredValue = displayAnswers[q.question]
           || (submitted ? resolveAnswer(answers[q.question], otherTexts[q.question]) : '')
+        const answeredArr = answered && isMulti
+          ? (answeredValue ? answeredValue.split(', ').map(s => s.trim()) : [])
+          : []
+        const unmatchedAnswers = answered
+          ? (isMulti
+              ? answeredArr.filter(v => !q.options?.some(o => o.label === v))
+              : (answeredValue && !q.options?.some(o => o.label === answeredValue)
+                  ? [answeredValue]
+                  : []))
+          : []
+        const answeredWithOther = unmatchedAnswers.length > 0
+        const selectionCount = answered
+          ? (isMulti ? answeredArr.length : (answeredValue ? 1 : 0))
+          : selectedArr.length
 
         return (
           <div key={qi} className="qcard__q">
@@ -110,10 +155,10 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
                 (□ checkbox for multi, ○ radio for single). */}
-            {!answered && !disabled && (
+            {(!disabled || answered) && (
               <div className="qcard__hint">
                 {isMulti
-                  ? `Select all that apply${selectedArr.length ? ` · ${selectedArr.length} selected` : ''}`
+                  ? `Select all that apply${selectionCount ? ` · ${selectionCount} selected` : ''}`
                   : 'Choose one'}
               </div>
             )}
@@ -125,19 +170,12 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
               role={isMulti ? 'group' : 'radiogroup'}
               aria-label={q.question}
             >
-              {/* For multi-select answered state, parse the comma-joined
-                  value back into an array so each chosen option highlights
-                  correctly. Without this split, isChosen = (fullString ===
-                  opt.label) was always false and a fallback span rendered
-                  the whole joined string instead of individual chips. */}
+              {/* For multi-select answered state, the comma-joined value is
+                  parsed above so each chosen option highlights correctly. */}
               {(() => {
-                const answeredArr = answered && isMulti
-                  ? (answeredValue ? answeredValue.split(', ').map(s => s.trim()) : [])
-                  : null
-
                 return q.options?.map((opt, oi) => {
                   const isChosen = answered
-                    ? (isMulti ? (answeredArr?.includes(opt.label) ?? false) : answeredValue === opt.label)
+                    ? (isMulti ? answeredArr.includes(opt.label) : answeredValue === opt.label)
                     : false
                   const isActive = answered
                     ? isChosen
@@ -173,13 +211,12 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
                   )
                 })
               })()}
-              {!answered && (
               <button
                 type="button"
                 role={isMulti ? 'checkbox' : 'radio'}
-                aria-checked={isOtherSelected}
-                className={`qcard__opt qcard__opt--other${isOtherSelected ? ' qcard__opt--on' : ''}`}
-                onClick={() => selectOther(q.question)}
+                aria-checked={answered ? answeredWithOther : isOtherSelected}
+                className={`qcard__opt qcard__opt--other${(answered ? answeredWithOther : isOtherSelected) ? ' qcard__opt--on' : ''}${answered && !answeredWithOther ? ' qcard__opt--dim' : ''}`}
+                onClick={answered ? undefined : () => selectOther(q.question)}
                 disabled={inactive}
               >
                 <span
@@ -188,28 +225,17 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
                 />
                 Other
               </button>
-              )}
-              {/* Fallback span for "other" text answers that don't match
-                  any known option label. For multi-select, show the unmatched
-                  entries; for single-select, show the whole value. */}
-              {answered && isMulti && (() => {
-                const answeredArr = answeredValue ? answeredValue.split(', ').map(s => s.trim()) : []
-                const unmatched = answeredArr.filter(v => !q.options?.some(o => o.label === v))
-                if (unmatched.length === 0) return null
-                return <span className="qcard__opt qcard__opt--on">{unmatched.join(', ')}</span>
-              })()}
-              {answered && !isMulti && answeredValue && !q.options?.some(o => o.label === answeredValue) && (
-                <span className="qcard__opt qcard__opt--on">{answeredValue}</span>
-              )}
             </div>
-            {isOtherSelected && !answered && (
+            {(isOtherSelected || answeredWithOther) && (
               <input
                 className="qcard__input"
                 type="text"
                 aria-label={`Other answer for: ${q.question}`}
                 placeholder="Type your answer…"
                 autoComplete="off"
-                value={otherTexts[q.question] || ''}
+                value={answered
+                  ? unmatchedAnswers.join(', ')
+                  : (otherTexts[q.question] || '')}
                 onChange={e => setOtherText(q.question, e.target.value)}
                 disabled={inactive}
                 autoFocus
@@ -224,14 +250,14 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
           </div>
         )
       })}
-      {!answered && !disabled && (
+      {(answered || !disabled) && (
         <button
           type="button"
           className="qcard__submit"
           onClick={handleSubmit}
-          disabled={!allAnswered || disabled}
+          disabled={!allAnswered || disabled || answered}
         >
-          Submit
+          {answered ? 'Submitted' : 'Submit'}
         </button>
       )}
     </div>
