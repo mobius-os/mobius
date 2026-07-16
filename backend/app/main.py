@@ -1153,14 +1153,15 @@ def _public_static_headers(path: str) -> dict[str, str]:
   """Headers required when public shell assets cross an opaque app origin.
 
   Sandboxed app frames intentionally have the effective origin ``null`` and
-  import the public modules under ``/vendor``.  Those files are also fetched
-  and cached by the shell service worker without an Origin header.  CORS
-  middleware can decorate a direct opaque-origin request, but it cannot repair
-  that already-cached response when the worker later returns it to the frame.
-  Make the public vendor response intrinsically cross-origin readable so both
-  the HTTP cache and the service-worker cache preserve the contract.
+  import ``/mobius-runtime.js`` plus public modules under ``/vendor``. Those
+  files are also fetched and cached by the shell service worker without an
+  Origin header. CORS middleware can decorate a direct opaque-origin request,
+  but it cannot repair that already-cached response when the worker later
+  returns it to the frame. Make every public app import intrinsically
+  cross-origin readable so both the HTTP cache and the service-worker cache
+  preserve the contract.
   """
-  if path.split("/", 1)[0] == "vendor":
+  if path == "mobius-runtime.js" or path.split("/", 1)[0] == "vendor":
     return {"Access-Control-Allow-Origin": "*"}
   return {}
 

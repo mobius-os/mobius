@@ -19,7 +19,7 @@ import {
   packagedAppAssetCacheKey,
   isStaleRuntimeCache,
   supersededVersionKeys,
-  withPublicVendorCors,
+  withPublicAppImportCors,
 } from '../../sw-cache-policy.js'
 
 test('runtime cache cleanup keeps current cache names', () => {
@@ -44,12 +44,12 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
 })
 
-test('cached public vendor responses are readable from opaque app frames', async () => {
+test('cached public app imports are readable from opaque app frames', async () => {
   const original = new Response('export default 1', {
     status: 200,
     headers: { 'Content-Type': 'text/javascript' },
   })
-  const repaired = withPublicVendorCors(original)
+  const repaired = withPublicAppImportCors(original)
   assert.notEqual(repaired, original)
   assert.equal(repaired.headers.get('access-control-allow-origin'), '*')
   assert.equal(await repaired.text(), 'export default 1')
@@ -57,8 +57,8 @@ test('cached public vendor responses are readable from opaque app frames', async
   const alreadyReadable = new Response('ok', {
     headers: { 'Access-Control-Allow-Origin': '*' },
   })
-  assert.equal(withPublicVendorCors(alreadyReadable), alreadyReadable)
-  assert.equal(withPublicVendorCors(null), null)
+  assert.equal(withPublicAppImportCors(alreadyReadable), alreadyReadable)
+  assert.equal(withPublicAppImportCors(null), null)
 })
 
 test('hashed packaged-app asset names are immutable', () => {
