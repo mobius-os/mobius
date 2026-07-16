@@ -241,6 +241,31 @@ source_env_file() {
   return 0
 }
 
+# ── prod environment resolution ─────────────────────────────────────
+canonical_env_path() {
+  local git_common canonical_root
+  git_common=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  [ -n "$git_common" ] || return 1
+  canonical_root="$(dirname "$git_common")"
+  [ "$canonical_root" != "$REPO_ROOT" ] || return 1
+  [ -f "$canonical_root/.env" ] || return 1
+  printf '%s\n' "$canonical_root/.env"
+}
+
+env_value_from_file() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 1
+  (
+    # .env is shell syntax in this repo. Read it in a subshell so resolving one
+    # missing setting cannot overwrite an explicitly exported deploy setting.
+    set +u
+    set -a
+    # shellcheck disable=SC1090
+    . "$file" >/dev/null
+    printf '%s' "${!key:-}"
+  )
+}
+
 ensure_prod_env() {
   if [ "$TARGET" != "prod" ]; then return 0; fi
   if [ -n "${DOMAIN:-}" ]; then return 0; fi
@@ -271,7 +296,69 @@ ensure_prod_env() {
   fi
 }
 
+resolve_prod_service_gateway_origin() {
+  [ "$TARGET" = "prod" ] || return 0
+  local value="${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}" source="environment"
+  local file candidate canonical_env=""
+
+  # DOMAIN is commonly exported explicitly for a worktree deploy. In that
+  # case ensure_prod_env intentionally does not source .env, but the gateway
+  # still has to come from the canonical checkout rather than disappearing
+  # from the rendered edge fragment and its final verification.
+  if [ -z "$value" ]; then
+    canonical_env=$(canonical_env_path || true)
+    for file in "$REPO_ROOT/.env" "$canonical_env"; do
+      [ -n "$file" ] || continue
+      candidate=$(env_value_from_file "$file" MOBIUS_SERVICE_GATEWAY_ORIGIN || true)
+      if [ -n "$candidate" ]; then
+        value="$candidate"
+        source="$file"
+        break
+      fi
+    done
+  fi
+
+  if [ -n "$value" ]; then
+    if ! value=$(python3 - "$value" "$DOMAIN" <<'PY'
+import re
+import sys
+from urllib.parse import urlsplit
+
+raw, shell_host = sys.argv[1:]
+try:
+  parsed = urlsplit(raw.strip())
+  port = parsed.port
+except ValueError:
+  raise SystemExit(1)
+host = (parsed.hostname or "").rstrip(".").lower()
+if (
+  parsed.scheme != "https"
+  or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host)
+  or parsed.username is not None
+  or parsed.password is not None
+  or parsed.query
+  or parsed.fragment
+  or parsed.path not in ("", "/")
+  or host == shell_host.rstrip(".").lower()
+  or port is not None and not 1 <= port <= 65535
+):
+  raise SystemExit(1)
+authority = host if port in (None, 443) else f"{host}:{port}"
+print(f"https://{authority}")
+PY
+    ); then
+      fail "MOBIUS_SERVICE_GATEWAY_ORIGIN must be a separate HTTPS origin without credentials, a path, query, or fragment."
+      exit 1
+    fi
+    [ "$source" = "environment" ] || info "loaded service gateway origin from $source"
+  fi
+  MOBIUS_SERVICE_GATEWAY_ORIGIN="$value"
+  export MOBIUS_SERVICE_GATEWAY_ORIGIN
+}
+# ── end prod environment resolution ──────────────────────────────
+
 ensure_prod_env
+resolve_prod_service_gateway_origin
 
 # ── proxy topology — sampled ONCE, then frozen ──────────────────────────
 # The shared edge proxy (its own compose stack; see the edge repo's README)
@@ -363,13 +450,9 @@ install_edge_fragment() {
     fail "Set MOBIUS_EDGE_DIR to the edge checkout, or restore it, then re-run."
     exit 1
   fi
-  # ensure_prod_env skips .env when DOMAIN is pre-exported, so the gateway
-  # origin can be unset here even though the canonical .env carries it. Fall
-  # back to that file before concluding the gateway is unconfigured.
-  local gw="${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}"
-  if [ -z "$gw" ] && [ -f "$REPO_ROOT/.env" ]; then
-    gw=$(sed -n 's/^MOBIUS_SERVICE_GATEWAY_ORIGIN=//p' "$REPO_ROOT/.env" | tail -1)
-  fi
+  # Resolved once before topology selection so rendering and final verification
+  # use the same normalized value, including from a linked worktree.
+  local gw="$MOBIUS_SERVICE_GATEWAY_ORIGIN"
   case "$DOMAIN" in
     *[!A-Za-z0-9.-]*|"") fail "DOMAIN '$DOMAIN' is not a bare hostname; refusing to render the edge fragment"; exit 1 ;;
   esac
