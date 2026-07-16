@@ -46,6 +46,11 @@
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
 //     outcome distinguishes shell ownership from standalone fallback and
 //     request failures; see building-apps.md.
+//   window.mobius.microphone.start(opts)          -> recording session
+//     session.started resolves once capture begins; session.done resolves to
+//     {samples: Float32Array, sampleRate}; stop()/cancel() work before or after
+//     permission resolves. In-shell capture is brokered by the trusted parent
+//     because the app frame's opaque origin cannot call getUserMedia directly.
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. In the default
 // shell mount the app has an opaque origin, so IndexedDB/OPFS/SQLite-wasm are
@@ -3321,6 +3326,228 @@ function appTokenClaims(token) {
   }
 }
 
+// ── Microphone bridge ────────────────────────────────────────────────────────
+// An opaque sandboxed frame is intentionally not a valid getUserMedia security
+// origin. The in-shell path asks AppCanvas to capture bounded mono PCM and send
+// only the samples back to this exact frame. The standalone host is top-level,
+// so it uses the same public API with a local capture implementation.
+export function makeMicrophone() {
+  let active = null
+
+  function start(options = {}) {
+    if (active) throw new Error('Another recording is already in progress.')
+    const requestId = globalThis.crypto?.randomUUID?.()
+      || `mic-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const maxValue = Number(options.maxSeconds)
+    const maxSeconds = Number.isFinite(maxValue) ? Math.max(0.1, Math.min(60, maxValue)) : 30
+    const onLevel = typeof options.onLevel === 'function' ? options.onLevel : null
+    let started = false
+    let settled = false
+    let startedResolve
+    let startedReject
+    let doneResolve
+    let doneReject
+    let localControl = null
+    let stopRequested = false
+
+    const startedPromise = new Promise((resolve, reject) => {
+      startedResolve = resolve
+      startedReject = reject
+    })
+    const donePromise = new Promise((resolve, reject) => {
+      doneResolve = resolve
+      doneReject = reject
+    })
+    // A caller commonly awaits `started` before attaching to `done`; mark both
+    // as observed immediately so a permission rejection never becomes a noisy
+    // transient unhandled-rejection report.
+    startedPromise.catch(() => {})
+    donePromise.catch(() => {})
+
+    function clear() {
+      if (active === session) active = null
+      window.removeEventListener('message', onMessage)
+    }
+
+    function fail(name, message) {
+      if (settled) return
+      settled = true
+      const error = new Error(message || 'Microphone recording failed.')
+      error.name = name || 'Error'
+      if (!started) startedReject(error)
+      doneReject(error)
+      clear()
+    }
+
+    function complete(result) {
+      if (settled) return
+      settled = true
+      if (!started) {
+        started = true
+        startedResolve({ sampleRate: result.sampleRate })
+      }
+      doneResolve(result)
+      clear()
+    }
+
+    function onMessage(event) {
+      if (event.source !== window.parent || event.origin !== window.location.origin) return
+      const msg = event.data
+      if (!msg || msg.requestId !== requestId) return
+      if (msg.type === 'moebius:microphone-started') {
+        if (settled || started) return
+        started = true
+        startedResolve({ sampleRate: Number(msg.sampleRate) || 44100 })
+        if (stopRequested) {
+          window.parent.postMessage({ type: 'moebius:microphone-stop', requestId }, window.location.origin)
+        }
+      } else if (msg.type === 'moebius:microphone-level') {
+        if (!settled && onLevel) {
+          try { onLevel(Math.max(0, Math.min(1, Number(msg.level) || 0))) } catch (e) {}
+        }
+      } else if (msg.type === 'moebius:microphone-result') {
+        const samples = msg.samples instanceof Float32Array
+          ? msg.samples
+          : new Float32Array(msg.samples || 0)
+        complete({ samples, sampleRate: Number(msg.sampleRate) || 44100 })
+      } else if (msg.type === 'moebius:microphone-error') {
+        fail(msg.name, msg.message)
+      }
+    }
+
+    function stop() {
+      if (settled) return donePromise
+      stopRequested = true
+      if (window.parent === window) {
+        if (started) localControl?.stop()
+      } else if (started) {
+        window.parent.postMessage({ type: 'moebius:microphone-stop', requestId }, window.location.origin)
+      }
+      return donePromise
+    }
+
+    function cancel() {
+      if (settled) return
+      if (window.parent === window) {
+        localControl?.cancel()
+      } else {
+        window.parent.postMessage({ type: 'moebius:microphone-cancel', requestId }, window.location.origin)
+      }
+      fail('AbortError', 'Recording cancelled.')
+    }
+
+    const session = {
+      started: startedPromise,
+      done: donePromise,
+      stop,
+      cancel,
+    }
+    active = session
+
+    if (window.parent !== window) {
+      window.addEventListener('message', onMessage)
+      window.parent.postMessage({
+        type: 'moebius:microphone-start', requestId, maxSeconds,
+      }, window.location.origin)
+      return session
+    }
+
+    // Standalone PWA: capture locally, but preserve the exact same session API.
+    ;(async () => {
+      let stream
+      let context
+      let source
+      let processor
+      let silent
+      let timer
+      let localSettled = false
+      const chunks = []
+      let sampleCount = 0
+
+      function cleanup() {
+        clearTimeout(timer)
+        if (processor) processor.onaudioprocess = null
+        for (const node of [processor, silent, source]) {
+          try { node?.disconnect?.() } catch (e) {}
+        }
+        stream?.getTracks?.().forEach((track) => track.stop())
+        try { context?.close?.() } catch (e) {}
+      }
+
+      function finishLocal(cancelled) {
+        if (localSettled) return
+        localSettled = true
+        cleanup()
+        if (cancelled) {
+          fail('AbortError', 'Recording cancelled.')
+          return
+        }
+        const samples = new Float32Array(sampleCount)
+        let offset = 0
+        for (const chunk of chunks) {
+          samples.set(chunk, offset)
+          offset += chunk.length
+        }
+        complete({ samples, sampleRate: context.sampleRate })
+      }
+
+      localControl = {
+        stop: () => finishLocal(false),
+        cancel: () => finishLocal(true),
+      }
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('Microphone recording is unavailable in this browser.')
+        }
+        const Ctor = window.AudioContext || window.webkitAudioContext
+        if (!Ctor) throw new Error('Audio recording is unavailable in this browser.')
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        })
+        if (settled) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+        context = new Ctor()
+        if (context.state === 'suspended') await context.resume?.()
+        source = context.createMediaStreamSource(stream)
+        processor = context.createScriptProcessor(4096, 1, 1)
+        silent = context.createGain()
+        silent.gain.value = 0
+        source.connect(processor)
+        processor.connect(silent)
+        silent.connect(context.destination)
+        const maxFrames = Math.max(1, Math.round(context.sampleRate * maxSeconds))
+        processor.onaudioprocess = (event) => {
+          if (localSettled) return
+          const input = event.inputBuffer.getChannelData(0)
+          const remaining = maxFrames - sampleCount
+          const chunk = new Float32Array(input.subarray(0, Math.min(input.length, remaining)))
+          chunks.push(chunk)
+          sampleCount += chunk.length
+          if (onLevel) {
+            let peak = 0
+            for (let i = 0; i < chunk.length; i += 1) peak = Math.max(peak, Math.abs(chunk[i]))
+            try { onLevel(Math.min(1, peak)) } catch (e) {}
+          }
+          if (sampleCount >= maxFrames) finishLocal(false)
+        }
+        started = true
+        startedResolve({ sampleRate: context.sampleRate })
+        if (stopRequested) finishLocal(false)
+        else timer = setTimeout(() => finishLocal(false), maxSeconds * 1000 + 100)
+      } catch (error) {
+        cleanup()
+        fail(error?.name, error?.message)
+      }
+    })()
+
+    return session
+  }
+
+  return { start }
+}
+
 function tokenMatchesRuntime(token, appId, appInstanceId) {
   const claims = appTokenClaims(token)
   if (!claims || claims.scope !== 'app' || String(claims.app_id) !== String(appId)) {
@@ -3354,6 +3581,7 @@ export function init({ appId, appInstanceId = null, getToken }) {
   }
   const storage = makeStorage({ appId, appInstanceId, getToken: scopedToken })
   const signal = makeSignal(appId, storage, appInstanceId)
+  const microphone = makeMicrophone()
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -3381,6 +3609,7 @@ export function init({ appId, appInstanceId = null, getToken }) {
     // window.mobius.createUseDocument(React)`.
     createUseDocument: (React) => createUseDocument(storage, React),
     signal,
+    microphone,
     chat: makeChat({ appId, getToken: scopedToken, storage }),
     nav: makeNav(),
     split: makeSplit(),

@@ -15,6 +15,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   appChatMetadataBody,
+  makeMicrophone,
   makeNav,
   makeSignal,
   overlayPending,
@@ -141,6 +142,93 @@ test('nav helper waits for ack before owning a back entry', async () => {
     assert.equal(backed, true)
     assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
   })
+})
+
+test('microphone bridge correlates shell capture and exposes PCM to the app', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const levels = []
+    const session = makeMicrophone().start({ maxSeconds: 8, onLevel: (v) => levels.push(v) })
+    const start = parent.messages.at(-1).data
+    assert.equal(start.type, 'moebius:microphone-start')
+    assert.equal(start.maxSeconds, 8)
+
+    window.emit({
+      type: 'moebius:microphone-started', requestId: start.requestId, sampleRate: 48000,
+    })
+    assert.deepEqual(await session.started, { sampleRate: 48000 })
+    window.emit({
+      type: 'moebius:microphone-level', requestId: start.requestId, level: 0.6,
+    })
+    session.stop()
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:microphone-stop')
+
+    const samples = new Float32Array([0.1, -0.2, 0.3])
+    window.emit({
+      type: 'moebius:microphone-result', requestId: start.requestId,
+      sampleRate: 48000, samples,
+    })
+    const result = await session.done
+    assert.equal(result.sampleRate, 48000)
+    assert.deepEqual([...result.samples], [...samples])
+    assert.deepEqual(levels, [0.6])
+  })
+})
+
+test('microphone bridge can cancel while permission is still pending', async () => {
+  await withFakeWindow(async ({ parent }) => {
+    const session = makeMicrophone().start({ maxSeconds: 4 })
+    session.cancel()
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:microphone-cancel')
+    await assert.rejects(session.started, { name: 'AbortError' })
+    await assert.rejects(session.done, { name: 'AbortError' })
+  })
+})
+
+test('standalone microphone can stop while permission is still pending', async () => {
+  const previousWindow = globalThis.window
+  const previousNavigator = globalThis.navigator
+  let grant
+  let trackStopped = false
+  const node = () => ({ connect() {}, disconnect() {} })
+  class FakeAudioContext {
+    constructor() { this.sampleRate = 8000; this.state = 'running'; this.destination = node() }
+    createMediaStreamSource() { return node() }
+    createScriptProcessor() { return { ...node(), onaudioprocess: null } }
+    createGain() { return { ...node(), gain: { value: 1 } } }
+    close() {}
+  }
+  const standalone = {
+    location: { origin: 'https://mobius.test' },
+    AudioContext: FakeAudioContext,
+    addEventListener() {},
+    removeEventListener() {},
+  }
+  standalone.parent = standalone
+  globalThis.window = standalone
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        getUserMedia: () => new Promise((resolve) => { grant = resolve }),
+      },
+    },
+  })
+  try {
+    const session = makeMicrophone().start({ maxSeconds: 2 })
+    session.stop()
+    grant({ getTracks: () => [{ stop: () => { trackStopped = true } }] })
+    assert.deepEqual(await session.started, { sampleRate: 8000 })
+    const result = await session.done
+    assert.equal(result.sampleRate, 8000)
+    assert.equal(result.samples.length, 0)
+    assert.equal(trackStopped, true)
+  } finally {
+    globalThis.window = previousWindow
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: previousNavigator,
+    })
+  }
 })
 
 test('nav helper ignores same-origin messages from non-parent frames', async () => {

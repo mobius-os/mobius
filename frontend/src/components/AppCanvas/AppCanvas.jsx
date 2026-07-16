@@ -12,6 +12,7 @@ import {
 } from '../../lib/appFrameStorage.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
+import { startMicrophoneCapture } from '../../lib/microphoneCapture.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -99,6 +100,11 @@ import './AppCanvas.css'
 //      One-shot shell intent delivered after the app has mounted. Used by
 //      catalog surfaces that open an app directly into a setup/settings path
 //      without inventing app-specific deep links.
+//
+//   7. moebius:microphone-*                                bidirectional
+//      Opaque frames cannot call getUserMedia themselves. The visible, active
+//      frame requests a bounded capture; the trusted shell records mono PCM and
+//      transfers only those samples back to that exact contentWindow.
 //
 // Shell-level messages (handled by Shell.jsx, NOT this file):
 //   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
@@ -218,6 +224,7 @@ export default function AppCanvas({
   const [serviceSurface, setServiceSurface] = useState(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
+  const microphoneCaptureRef = useRef(null)
   // Fresh app tokens are persisted for their remaining short lifetime so a
   // fully cached app can cold-boot offline. The cache is app-id scoped and JWT
   // claims are checked on read; the long-lived owner token never enters a frame.
@@ -544,6 +551,87 @@ export default function AppCanvas({
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
 
+      if (msg.type === 'moebius:microphone-start') {
+        const requestId = typeof msg.requestId === 'string' ? msg.requestId.slice(0, 120) : ''
+        const sourceWindow = e.source
+        if (!activeRef.current || !requestId) return
+        if (microphoneCaptureRef.current) {
+          sourceWindow.postMessage({
+            type: 'moebius:microphone-error', requestId,
+            name: 'InvalidStateError', message: 'Another recording is already in progress.',
+          }, '*')
+          return
+        }
+
+        const pending = {
+          requestId, sourceWindow, control: null, stopRequested: false, cancelled: false,
+        }
+        microphoneCaptureRef.current = pending
+        ;(async () => {
+          try {
+            const control = await startMicrophoneCapture({
+              maxSeconds: msg.maxSeconds,
+              onLevel(level) {
+                if (microphoneCaptureRef.current !== pending || pending.cancelled) return
+                sourceWindow.postMessage({
+                  type: 'moebius:microphone-level', requestId, level,
+                }, '*')
+              },
+            })
+            pending.control = control
+            if (microphoneCaptureRef.current !== pending || pending.cancelled) {
+              control.done.catch(() => {})
+              control.cancel()
+              return
+            }
+            sourceWindow.postMessage({
+              type: 'moebius:microphone-started', requestId,
+              sampleRate: control.sampleRate,
+            }, '*')
+            if (pending.stopRequested) control.stop()
+
+            const result = await control.done
+            if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
+            const samples = result.samples
+            try {
+              sourceWindow.postMessage({
+                type: 'moebius:microphone-result', requestId,
+                sampleRate: result.sampleRate, samples,
+              }, '*', [samples.buffer])
+            } catch {
+              sourceWindow.postMessage({
+                type: 'moebius:microphone-result', requestId,
+                sampleRate: result.sampleRate, samples,
+              }, '*')
+            }
+          } catch (error) {
+            if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
+            if (pending.cancelled || error?.name === 'AbortError') return
+            sourceWindow.postMessage({
+              type: 'moebius:microphone-error', requestId,
+              name: error?.name || 'Error',
+              message: error?.message || 'Microphone recording failed.',
+            }, '*')
+          }
+        })()
+        return
+      }
+
+      if (msg.type === 'moebius:microphone-stop' || msg.type === 'moebius:microphone-cancel') {
+        const capture = microphoneCaptureRef.current
+        if (!capture || capture.sourceWindow !== e.source || capture.requestId !== msg.requestId) return
+        if (msg.type === 'moebius:microphone-cancel') {
+          capture.cancelled = true
+          microphoneCaptureRef.current = null
+          capture.control?.cancel()
+        } else if (capture.control) {
+          capture.control.stop()
+        } else {
+          capture.stopRequested = true
+        }
+        return
+      }
+
       if (msg.type === 'moebius:open-service') {
         const slug = typeof msg.service === 'string' ? msg.service : ''
         // A mini-app may only ask for the same-named installed service. The
@@ -616,6 +704,20 @@ export default function AppCanvas({
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [appId, appSlug, onNavPush, onNavPop, onImmersive, onAppError, queryClient])
+
+  useEffect(() => {
+    if (active) return
+    const capture = microphoneCaptureRef.current
+    if (!capture) return
+    capture.stopRequested = true
+    capture.control?.stop()
+  }, [active])
+
+  useEffect(() => () => {
+    const capture = microphoneCaptureRef.current
+    microphoneCaptureRef.current = null
+    capture?.control?.cancel()
+  }, [])
 
   useEffect(() => {
     // A response from the previously mounted app must never replace the new

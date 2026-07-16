@@ -840,6 +840,37 @@ deep-link fallback so one provider failure cannot blank the app.
 
 A non-self external resource referenced at load time — a Google Fonts `<link>`/`@import`, any off-origin CDN script or stylesheet — can do worse than fail silently under the `default-src 'self'` CSP: it can HANG the in-app browser so the page never finishes loading and the whole app goes non-interactive (taps and anchors dead, "loading timeout"). So when the owner reports BOTH "X doesn't work" AND "loading timeout" in the same breath, treat the hang as the primary signal and grep the app for off-origin references first — it is not a scroll/offset bug. Vendor the font/asset same-origin or drop it; bundle fonts as a `@font-face` over a self-hosted file, never a CDN link.
 
+## Recording from the microphone
+
+Shell-mounted mini-apps have an opaque origin by design, so calling
+`navigator.mediaDevices.getUserMedia()` inside the app fails with an invalid
+security-origin error. Do not add `allow-same-origin` to fix it. Use the runtime
+bridge; the trusted shell owns microphone access and transfers only bounded mono
+PCM samples back into the exact visible app frame:
+
+```js
+const recording = window.mobius.microphone.start({
+  maxSeconds: 8,                 // clamped to 0.1–60 seconds
+  onLevel: (level) => drawMeter(level), // optional 0–1 peak level
+})
+
+await recording.started          // permission granted; capture is active
+const resultPromise = recording.done
+
+// Later — both calls are safe even while the permission prompt is pending:
+recording.stop()                 // saves what has been captured
+// recording.cancel()            // rejects `done` with AbortError
+
+const { samples, sampleRate } = await resultPromise
+// samples is a mono Float32Array. Create an AudioBuffer, encode it, or persist
+// it using the app's existing audio format.
+```
+
+The same API records locally in the standalone PWA. Keep a session ref, stop or
+cancel it on unmount/navigation, handle `NotAllowedError` with a useful browser-
+settings message, and never fall back to direct `getUserMedia()` in the opaque
+frame.
+
 ---
 
 ## Agent-powered mini-apps
