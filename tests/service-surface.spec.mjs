@@ -179,8 +179,7 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
     // load fires even for the deliberately blocked document. While the shell
     // waits for the absent heartbeat, the frame must remain fully covered.
     await expect.poll(() => blockedAdapterRequests, { timeout: 5_000 }).toBeGreaterThan(0)
-    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBe(1)
-    const firstAdapterUrl = uniqueAdapterUrls()[0]
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBeGreaterThan(0)
     await expect.poll(
       () => consoleErrors.some(text => /frame|ancestor|x-frame-options/i.test(text)),
       { timeout: 5_000 },
@@ -193,26 +192,41 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
     expect(blockedAdapterRequests).toBeGreaterThan(0)
     expect(consoleErrors.some(text => /frame|ancestor|x-frame-options/i.test(text))).toBe(true)
     await expect(blockedFrame).toHaveCount(0)
+    // A first-load service-worker handoff may reload the shell and therefore
+    // create a fresh correlated surface before the user acts. Treat every URL
+    // observed during that stabilization window as the baseline; the contract
+    // below is one new correlation per explicit Open/Retry, not one request for
+    // the entire browser lifetime.
+    const baselineAdapterUrls = uniqueAdapterUrls()
+    const baselineBlockedCount = blockedAdapterUrls.size
+    expect(baselineAdapterUrls.length).toBeGreaterThan(0)
+    expect(baselineBlockedCount).toBe(baselineAdapterUrls.length)
 
     await page.getByRole('button', { name: 'Close' }).click({ timeout: 5_000 })
     await expect(page.getByText('Tandoor is closed')).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('iframe[src*="/_mobius/surface"]')).toHaveCount(0)
-    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 2_000 }).toBe(1)
+    await page.waitForTimeout(500)
+    expect(uniqueAdapterUrls()).toEqual(baselineAdapterUrls)
 
     await page.getByRole('button', { name: 'Open Tandoor' }).click({ timeout: 5_000 })
-    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBe(2)
-    await expect.poll(() => blockedAdapterUrls.size, { timeout: 5_000 }).toBe(2)
-    const secondBlockedUrl = uniqueAdapterUrls()[1]
-    expect(secondBlockedUrl).not.toBe(firstAdapterUrl)
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 })
+      .toBe(baselineAdapterUrls.length + 1)
+    await expect.poll(() => blockedAdapterUrls.size, { timeout: 5_000 })
+      .toBe(baselineBlockedCount + 1)
+    const secondBlockedUrl = uniqueAdapterUrls().at(-1)
+    expect(baselineAdapterUrls).not.toContain(secondBlockedUrl)
     await expect(page.locator('iframe[src*="/_mobius/surface"]')).toHaveCSS('opacity', '0')
     await expect(page.getByText(`Couldn’t open Tandoor`)).toBeVisible({ timeout: 30_000 })
 
+    const blockedUrlCount = uniqueAdapterUrls().length
+    const blockedRouteCount = blockedAdapterUrls.size
     await page.unroute(adapterPattern)
     consoleErrors.length = 0
     await page.getByRole('button', { name: 'Retry' }).click({ timeout: 5_000 })
-    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 }).toBe(3)
-    expect(blockedAdapterUrls.size).toBe(2) // proves the blocking route is gone
-    const secondAdapterUrl = uniqueAdapterUrls()[2]
+    await expect.poll(() => uniqueAdapterUrls().length, { timeout: 5_000 })
+      .toBe(blockedUrlCount + 1)
+    expect(blockedAdapterUrls.size).toBe(blockedRouteCount) // proves the blocking route is gone
+    const secondAdapterUrl = uniqueAdapterUrls().at(-1)
     expect(secondAdapterUrl).not.toBe(secondBlockedUrl)
 
     const serviceFrame = page.locator('iframe[src*="/_mobius/surface"]')
