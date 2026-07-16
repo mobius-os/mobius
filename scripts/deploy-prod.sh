@@ -273,43 +273,128 @@ ensure_prod_env() {
 
 ensure_prod_env
 
+# ── proxy topology — sampled ONCE, then frozen ──────────────────────────
+# The shared edge proxy (its own compose stack; see the edge repo's README)
+# owns ports 80/443 on this host. When it is running, this repo's bundled
+# caddy service must NOT start, app + recoveryd join the external edge-mobius
+# network via the docker-compose.prod.yml overlay (declared on the service, so
+# every recreate carries the membership — no post-recreate repair hooks), and
+# this deploy installs the rendered edge fragment below.
+#
+# Frozen up front because every later decision — overlay files in
+# COMPOSE_ARGS, cutover service selection, rollback service selection,
+# fragment install — must see ONE consistent topology. Re-sampling live
+# docker state at each call site would let an edge restart mid-deploy flip
+# the answers and, e.g., start the bundled caddy against edge-owned ports.
+EDGE_TOPOLOGY="self-hosted"
+if [ "$TARGET" = "prod" ]; then
+  if docker inspect -f '{{.State.Running}}' edge-caddy 2>/dev/null | grep -q true; then
+    EDGE_TOPOLOGY="edge"
+    COMPOSE_ARGS+=(-f docker-compose.yml -f docker-compose.prod.yml)
+  elif docker inspect -f '{{.State.Running}}' deploy-caddy-1 2>/dev/null | grep -q true; then
+    fail "the retired legacy proxy (deploy-caddy-1) still owns ports 80/443."
+    fail "This script now deploys behind the shared edge proxy (edge-caddy);"
+    fail "run the edge cutover first, or stop deploy-caddy-1 to self-host."
+    exit 1
+  fi
+fi
+
 external_prod_caddy_running() {
-  [ "$TARGET" = "prod" ] &&
-    docker inspect -f '{{.State.Running}}' deploy-caddy-1 2>/dev/null | grep -q true
+  [ "$TARGET" = "prod" ] && [ "$EDGE_TOPOLOGY" = "edge" ]
 }
 
-ensure_external_caddy_route() {
-  if ! external_prod_caddy_running; then return 0; fi
-  if ! docker network inspect deploy_default >/dev/null 2>&1; then
-    warn "deploy-caddy-1 is running, but deploy_default network is missing; public proxy may not reach ${CONTAINER}."
-    return 0
-  fi
-  # The public Caddy in this host's outer deploy project proxies to
-  # http://mobius:8000 on deploy_default. Recreating the app from this repo's
-  # compose project puts it on mobius_default, so reconnect it to the proxy
-  # network after every cutover. `network connect` is idempotent for our
-  # purposes: "already exists" means the route is already present.
-  if docker network connect --alias mobius --alias app deploy_default "$CONTAINER" 2>/dev/null; then
-    ok "connected ${CONTAINER} to deploy_default for external Caddy"
-  else
-    info "${CONTAINER} already connected to deploy_default, or Docker reported no-op"
-  fi
+# External networks referenced by the overlay must exist before compose up.
+# Creation is idempotent and safe: the edge stack declares the same name as
+# external, so whichever side runs first wins and both attach to one network.
+ensure_edge_network() {
+  docker network inspect edge-mobius >/dev/null 2>&1 && return 0
+  intent "docker network create edge-mobius"
+  docker network create edge-mobius >/dev/null
 }
 
-# The recovery floor runs as a SEPARATE always-up container (mobius-recoveryd)
-# that the outer deploy-caddy routes /recover* to by container name. Like the
-# app, the compose override joins it to deploy_default; this is the idempotent
-# belt-and-suspenders reconnect for the case where the override lacks the
-# recoveryd entry (older checkout). No alias needed — deploy-caddy targets the
-# container name mobius-recoveryd directly.
-ensure_recoveryd_proxy_route() {
-  if ! external_prod_caddy_running; then return 0; fi
-  if ! docker network inspect deploy_default >/dev/null 2>&1; then return 0; fi
-  if docker network connect deploy_default mobius-recoveryd 2>/dev/null; then
-    ok "connected mobius-recoveryd to deploy_default for external Caddy"
-  else
-    info "mobius-recoveryd already connected to deploy_default, or Docker reported no-op"
+# The bundled Caddyfile is the single routing source of truth for BOTH
+# topologies: the self-host compose runs it directly with runtime env, and the
+# shared-edge topology installs the same file with the {$VAR} placeholders
+# rendered here (the edge proxy carries no Möbius env on purpose). Rendering
+# rather than mounting keeps prod at permanent parity with the file CI
+# validates — the pre-edge setup drifted for months because the external proxy
+# had its own hand-written copy of these vhosts.
+#
+# EDGE_CSP_MODE=report-only downgrades the shell Content-Security-Policy to
+# Report-Only for a staged rollout (violations appear in the browser console
+# without breaking the page); default is enforce.
+install_edge_fragment() {
+  external_prod_caddy_running || return 0
+  local edge_dir="${MOBIUS_EDGE_DIR:-$HOME/projects/edge}"
+  if [ ! -x "$edge_dir/edgectl" ]; then
+    # A missing installer must not silently pass the later public checks
+    # against a STALE fragment and misreport new routing/CSP as shipped.
+    fail "edge topology detected but $edge_dir/edgectl is missing — cannot install the rendered fragment."
+    fail "Set MOBIUS_EDGE_DIR to the edge checkout, or restore it, then re-run."
+    exit 1
   fi
+  # ensure_prod_env skips .env when DOMAIN is pre-exported, so the gateway
+  # origin can be unset here even though the canonical .env carries it. Fall
+  # back to that file before concluding the gateway is unconfigured.
+  local gw="${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}"
+  if [ -z "$gw" ] && [ -f "$REPO_ROOT/.env" ]; then
+    gw=$(sed -n 's/^MOBIUS_SERVICE_GATEWAY_ORIGIN=//p' "$REPO_ROOT/.env" | tail -1)
+  fi
+  case "$DOMAIN" in
+    *[!A-Za-z0-9.-]*|"") fail "DOMAIN '$DOMAIN' is not a bare hostname; refusing to render the edge fragment"; exit 1 ;;
+  esac
+  case "$gw" in
+    ""|https://[A-Za-z0-9]*) : ;;
+    *) fail "MOBIUS_SERVICE_GATEWAY_ORIGIN '$gw' is not an https origin; refusing to render the edge fragment"; exit 1 ;;
+  esac
+  local rendered
+  rendered=$(mktemp)
+  if [ -n "$gw" ]; then
+    sed -e "s|{\$DOMAIN}|${DOMAIN}|g" \
+        -e "s|{\$MOBIUS_SERVICE_GATEWAY_ORIGIN}|${gw}|g" \
+        -e "s|{\$FRONTEND_ORIGIN}|https://${DOMAIN}|g" \
+        "$REPO_ROOT/Caddyfile" > "$rendered"
+  else
+    # No gateway configured: the bundled compose parks the vhost on an inert
+    # .invalid label, but the edge installer rightly rejects hostnames the
+    # manifest does not assign — so drop the gateway site block entirely
+    # (brace-depth walk, since the block nests handlers).
+    info "MOBIUS_SERVICE_GATEWAY_ORIGIN not configured — rendering fragment without the gateway vhost"
+    sed -e "s|{\$DOMAIN}|${DOMAIN}|g" \
+        -e "s|{\$FRONTEND_ORIGIN}|https://${DOMAIN}|g" \
+        "$REPO_ROOT/Caddyfile" \
+      | awk '
+          /^\{\$MOBIUS_SERVICE_GATEWAY_ORIGIN\} \{/ { skip = 1; depth = 0 }
+          skip {
+            n = gsub(/\{/, "{"); m = gsub(/\}/, "}")
+            depth += n - m
+            if (depth <= 0) skip = 0
+            next
+          }
+          { print }
+        ' > "$rendered"
+  fi
+  if grep -qF '{$' "$rendered"; then
+    fail "rendered edge fragment still contains {\$...} placeholders the render step does not know:"
+    grep -nF '{$' "$rendered" | sed 's/^/    /' >&2
+    rm -f "$rendered"
+    exit 1
+  fi
+  if [ "${EDGE_CSP_MODE:-enforce}" = "report-only" ]; then
+    sed -i 's|>Content-Security-Policy |>Content-Security-Policy-Report-Only |g' "$rendered"
+    info "edge fragment CSP rendered as Report-Only (EDGE_CSP_MODE=report-only)"
+  fi
+  # edgectl is transactional: a bad render never replaces the installed
+  # fragment, a failed reload restores it, and the previously SERVED fragment
+  # stays available as `edgectl rollback mobius`.
+  if "$edge_dir/edgectl" install mobius "$rendered"; then
+    ok "edge fragment installed (mobius.Caddyfile rendered for ${DOMAIN})"
+  else
+    rm -f "$rendered"
+    fail "edgectl rejected the rendered fragment — public routing unchanged; fix and re-run"
+    exit 1
+  fi
+  rm -f "$rendered"
 }
 
 # Parse the build-cache size out of `docker system df` and return GB as
@@ -594,12 +679,19 @@ attempt_rollback() {
     return 1
   fi
   warn "auto-rolling back ${CONTAINER} to the previous image (${IMAGE_TAG} = ${PREV_IMAGE:0:19}…)"
-  intent "docker tag ${PREV_IMAGE} ${IMAGE_TAG} && docker compose ${COMPOSE_ARGS[*]} up -d --force-recreate"
+  # With an external edge proxy on 80/443, an unselected recreate would also
+  # start the bundled caddy service, whose port bindings collide with the
+  # edge and fail the rollback exactly when it must not. Select the services
+  # this script manages in that topology; a self-hosted (bundled-caddy)
+  # rollback keeps the full-project recreate.
+  local rollback_services=()
+  if external_prod_caddy_running; then rollback_services=(app recoveryd); fi
+  intent "docker tag ${PREV_IMAGE} ${IMAGE_TAG} && docker compose ${COMPOSE_ARGS[*]} up -d --force-recreate ${rollback_services[*]}"
   if ! docker tag "$PREV_IMAGE" "$IMAGE_TAG"; then
     fail "rollback: could not re-tag ${IMAGE_TAG} → ${PREV_IMAGE:0:19}… — recover ${CONTAINER} manually."
     return 1
   fi
-  if ! docker compose "${COMPOSE_ARGS[@]}" up -d --force-recreate; then
+  if ! docker compose "${COMPOSE_ARGS[@]}" up -d --force-recreate "${rollback_services[@]}"; then
     fail "rollback: 'compose up -d --force-recreate' failed — recover ${CONTAINER} manually."
     return 1
   fi
@@ -951,28 +1043,43 @@ fi
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
 presence_gate "cutover (recreate ${CONTAINER})"
+RECOVERYD_CUTOVER_FAILED=0
 if external_prod_caddy_running; then
-  info "external deploy-caddy-1 owns ports 80/443; updating app + recoveryd services"
+  info "external edge-caddy owns ports 80/443; updating app + recoveryd services"
+  ensure_edge_network
   docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
   intent "docker compose ${COMPOSE_ARGS[*]} up -d app"
   docker compose "${COMPOSE_ARGS[@]}" up -d app
-  ensure_external_caddy_route
   # Recover the recovery floor onto the new image too. The recovery agent runs
   # as full root, so its container carries the read_only + cap_drop guardrail
   # (base compose) — recreating it here from the freshly-built image is how the
   # guardrailed recoveryd stays reproducible instead of a hand-run container.
-  # Best-effort: a recoveryd hiccup must NOT roll back a healthy app deploy.
+  # A recoveryd failure must NOT roll back a healthy app deploy, but it must
+  # not pass silently either: the deploy exits nonzero at the end (the flag
+  # below) because a prod without its recovery floor is one platform bug away
+  # from being unrecoverable.
   intent "docker compose ${COMPOSE_ARGS[*]} up -d recoveryd"
   if docker compose "${COMPOSE_ARGS[@]}" up -d recoveryd; then
-    ensure_recoveryd_proxy_route
-    if docker exec mobius-recoveryd sh -c \
-      "curl -fsS -o /dev/null http://localhost:8001/recover/health" 2>/dev/null; then
+    # recoveryd's healthcheck allows a 10s start_period; probing once right
+    # after `up -d` would false-fail every deploy. Poll within a bounded
+    # window instead.
+    _recoveryd_ok=0
+    for _i in $(seq 1 30); do
+      if docker exec mobius-recoveryd sh -c \
+        "curl -fsS -o /dev/null http://localhost:8001/recover/health" 2>/dev/null; then
+        _recoveryd_ok=1; break
+      fi
+      sleep 1
+    done
+    if [ "$_recoveryd_ok" = "1" ]; then
       ok "recovery floor (mobius-recoveryd) healthy on the new image"
     else
-      warn "recoveryd recreated but /recover/health not yet 200 — check mobius-recoveryd"
+      fail "recoveryd recreated but /recover/health did not answer within 30s — the recovery floor is DOWN"
+      RECOVERYD_CUTOVER_FAILED=1
     fi
   else
-    warn "recoveryd cutover failed — app deploy is unaffected; recover it manually"
+    fail "recoveryd cutover failed — app deploy is unaffected, but the recovery floor is NOT on the new image"
+    RECOVERYD_CUTOVER_FAILED=1
   fi
 else
   intent "docker compose ${COMPOSE_ARGS[*]} up -d"
@@ -994,6 +1101,15 @@ wait_for_cutover "ready_code" "writer ready" \
   "readiness check never returned 200 — the chat-persistence writer is not serving"
 
 run_deploy_canary
+
+# ── step 2b: install the rendered edge fragment ────────────────────────
+# After the app is verified healthy so a failed cutover never ships new
+# routing, but before step 4's public checks so they exercise the fragment
+# this deploy just rendered.
+if external_prod_caddy_running; then
+  step "[2b/4] install edge fragment"
+  install_edge_fragment
+fi
 
 # ── step 3: rebuild the served platform frontend ───────────────────────
 # The authoritative frontend source and dist now live in /data/platform. After
@@ -1187,6 +1303,36 @@ if [ -n "$PUBLIC_URL" ]; then
     fail "internal is healthy but public reverse-proxy returned non-200; check Caddy."
     exit 1
   fi
+
+  # The recovery floor must be publicly reachable through the proxy — it is
+  # the way back in when the platform itself is broken, so a deploy that
+  # silently severed /recover* routing is a failed deploy even with a healthy
+  # app.
+  rcode_pub=$(curl -sk -o /dev/null -w '%{http_code}' "https://${DOMAIN}/recover/health" || echo "000")
+  if [ "$rcode_pub" = "200" ]; then
+    ok "public  /recover/health: ${rcode_pub}"
+  else
+    fail "public  /recover/health: ${rcode_pub} — the recovery floor is not reachable through the proxy."
+    if external_prod_caddy_running; then
+      fail "If this deploy's fragment caused it: <edge>/edgectl rollback mobius restores the previously served routing."
+    fi
+    exit 1
+  fi
+
+  # Service gateway origin (when configured): a non-/services path must fail
+  # closed with 404 — anything else means the gateway host is either not
+  # routed (000/5xx) or serving shell content (200), both wrong.
+  gw_origin="${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}"
+  if [ -n "$gw_origin" ] && [ "$gw_origin" != "http://services.invalid" ]; then
+    gcode=$(curl -sk -o /dev/null -w '%{http_code}' "${gw_origin}/" || echo "000")
+    if [ "$gcode" = "404" ]; then
+      ok "gateway  ${gw_origin}/ fails closed: ${gcode}"
+    else
+      fail "gateway  ${gw_origin}/ returned ${gcode} (expected 404) — check the edge fragment + gateway routing."
+      fail "If this deploy's fragment caused it: <edge>/edgectl rollback mobius restores the previously served routing."
+      exit 1
+    fi
+  fi
 fi
 
 # Tell open PWAs to reload onto the freshly-rebuilt shell. Only now —
@@ -1212,5 +1358,11 @@ fi
 # refcount. Best-effort — a prune failure must not fail a successful deploy.
 info "reclaiming the superseded image (dangling only)…"
 docker image prune -f >/dev/null 2>&1 || true
+
+if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]; then
+  fail "deploy verified healthy, BUT the recovery floor cutover failed (see step 2 above)."
+  fail "Fix mobius-recoveryd before walking away — a prod without recovery is one bug from unrecoverable."
+  exit 1
+fi
 
 printf '\n%sdeploy complete%s\n' "$C_GREEN$C_BOLD" "$C_RESET"

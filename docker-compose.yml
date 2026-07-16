@@ -91,7 +91,7 @@ services:
   #
   # recoveryd is the SOLE recovery surface — the in-process `/recover`
   # implementation has been retired. Both fronts route `/recover*` here:
-  # in prod the external root-owned deploy-caddy proxies `/recover*` ->
+  # in prod the external edge proxy proxies `/recover*` ->
   # recoveryd:8001 (recoveryd joins the deploy network so Caddy can reach
   # it), and the bundled Caddy (`Caddyfile`) routes it with a
   # `handle /recover* { reverse_proxy recoveryd:8001 }` block ahead of its

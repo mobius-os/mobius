@@ -439,7 +439,7 @@ The removals not yet done at HEAD are noted in the last bullet:
 - **Recovery is a SEPARATE CONTAINER, not a process inside the platform.**
   `recoveryd` runs from the same image with its own command + `restart:
   unless-stopped`, mounts the same `/data`, and is routed by the external
-  `deploy-caddy` at `/recover*` *independently of platform health* (with an
+  edge proxy at `/recover*` *independently of platform health* (with an
   auto-surfaced broken-state page when `:8000` is down). It must be a separate
   container — the adversarial review confirmed prod pid1 `exec`s uvicorn, so a
   backgrounded supervisor inside the platform container dies with it. **Two tiers:**

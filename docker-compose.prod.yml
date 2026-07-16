@@ -1,0 +1,34 @@
+# Overlay for a host where a shared edge proxy (edge-caddy) owns ports
+# 80/443 and this repo's bundled caddy service is NOT run. Layered by
+# scripts/deploy-prod.sh as `-f docker-compose.yml -f docker-compose.prod.yml`
+# when it detects the edge proxy.
+#
+# app + recoveryd join the external `edge-mobius` trust-zone network HERE,
+# declaratively, so every recreate carries the membership — the old
+# post-recreate `docker network connect` repair hook could strand the public
+# proxy whenever a recreate raced it. The aliases match the upstream names in
+# the bundled Caddyfile (app:8000 / recoveryd:8001), which deploy-prod.sh
+# renders into the edge fragment — one routing source of truth for both the
+# self-host and shared-edge topologies.
+#
+# `default` must be re-declared alongside the edge network: naming ANY
+# network on a service drops compose's implicit default attachment, and
+# recoveryd reaches the app's health endpoint over the project network.
+services:
+  app:
+    networks:
+      default: {}
+      edge-mobius:
+        aliases:
+          - app
+          - mobius
+  recoveryd:
+    networks:
+      default: {}
+      edge-mobius:
+        aliases:
+          - recoveryd
+
+networks:
+  edge-mobius:
+    external: true

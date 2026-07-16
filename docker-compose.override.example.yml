@@ -1,5 +1,8 @@
-# Use this override when adding Möbius to an existing Caddy instance.
-# Copy to docker-compose.override.yml and adjust the network name.
+# Use this override when adding Möbius to an existing reverse proxy.
+# Copy to docker-compose.override.yml and adjust the network name to the
+# external Docker network your proxy joins. (docker-compose.prod.yml is the
+# committed instance of this pattern for a host running the shared edge
+# proxy; scripts/deploy-prod.sh layers it automatically there.)
 services:
   caddy:
     profiles: ["disabled"]
@@ -7,16 +10,24 @@ services:
     build: .
     container_name: mobius
     networks:
-      - deploy_default
+      default: {}
+      edge-mobius:
+        # The bundled Caddyfile proxies app:8000; an external proxy importing
+        # or mirroring it needs the same name resolvable on this network.
+        aliases:
+          - app
+          - mobius
   # The recovery floor (recoveryd) must also join the external proxy network so
-  # the outer Caddy can route /recover* to `mobius-recoveryd:8001`. It reaches
-  # the platform for its health probe via the `app` alias on this same network.
+  # the outer proxy can route /recover* to it independently of platform health.
   # The guardrail (read_only + cap_drop + the recoveryd-only recovery_live
   # volume) is defined in the base docker-compose.yml and carries through here.
   recoveryd:
     networks:
-      - deploy_default
+      default: {}
+      edge-mobius:
+        aliases:
+          - recoveryd
 
 networks:
-  deploy_default:
+  edge-mobius:
     external: true

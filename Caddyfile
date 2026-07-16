@@ -6,9 +6,13 @@
     # SAMEORIGIN nor CSP frame-ancestors 'self'. Keep the exception exact and
     # retain the rest of the resource/security policy while the blank document
     # establishes its server-verified one-use capability.
+    # /recover* is excluded from the frame-policy replacements below because
+    # recoveryd sets STRICTER headers (X-Frame-Options: DENY, frame-ancestors
+    # 'none'); replacing them here would silently weaken the recovery surface
+    # to SAMEORIGIN/'self'.
     @chatEmbed path /shell/embed/chat
     @staticEmbed path /app-embeds/by-id/*
-    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/*
+    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover*
 
     header {
         # Defer replacements until after reverse_proxy copies the backend
@@ -31,9 +35,16 @@
         #   every mini-app that uses those libraries at runtime. Removing it
         #   requires vendoring all three libraries under /vendor (like three.js).
     }
+    # img-src includes blob: — the shell creates object URLs for upload
+    # previews (useFileUpload), the image lightbox, and install-sheet icon
+    # previews; without blob: those render as broken images under an
+    # enforced policy.
     header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
-    header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
-    header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
+    header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
+    # The embedded chat mounts the full ChatView (upload previews, image
+    # lightbox), so its img-src needs blob: for the same object URLs as the
+    # shell policy above.
+    header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'"
     header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:"
 
     # Recovery floor lives in the separate recoveryd container (its own
