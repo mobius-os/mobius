@@ -174,14 +174,9 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         {state === 'error' && exitCode != null && (
           <span className="chat__activity-chip">exit {exitCode}</span>
         )}
-        <span className="chat__activity-toggle" aria-hidden="true">
-          <svg
-            className={`chat__chevron${open ? '' : ' chat__chevron--collapsed'}`}
-            width="10" height="10" viewBox="0 0 10 10" fill="none"
-          >
-            <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
+        {/* No chevron: the line IS the affordance (owner call, 2026-07-16).
+            aria-expanded still announces the disclosure state, and the open
+            timeline below makes the expanded state visually obvious. */}
       </button>
       {open && (
         <div className="chat__activity-timeline">

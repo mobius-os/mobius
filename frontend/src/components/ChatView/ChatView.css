@@ -1093,12 +1093,6 @@
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
-.chat__activity-toggle {
-  flex-shrink: 0;
-  display: inline-flex;
-  color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
-}
-
 /* Rotating disclosure chevron shared by the activity + marker cards, matching
    the queued-tray chevron idiom: the SVG points down when open and rotates to
    point right when collapsed, easing the transform so the state change reads as

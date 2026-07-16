@@ -5,9 +5,10 @@
 # hurt — merge-conflict markers (which once crash-looped prod), syntax
 # errors, and frontend-unit regressions — BEFORE they're pushed. Fast by
 # design: conflict + syntax checks are instant; frontend-unit (~6s) runs
-# when frontend changed (if its dependency tree is complete); the backend suite
-# runs on backend changes via the shared venv (~2m; --no-verify to skip).
-# CI is the backstop for anything skipped (e.g. from a deps-less worktree).
+# when frontend changed (if its dependency tree is complete). The full backend
+# suite currently takes about seven minutes, so it runs before updates to main
+# (and on explicit MOBIUS_PREPUSH_FULL=1 requests), while topic/backup pushes
+# start the required PR CI immediately. CI is the backstop for anything skipped.
 #
 # Install: scripts/install-hooks.sh (copies this into the shared hooks
 # dir, so every worktree is covered). Privacy failures must never be bypassed.
@@ -58,6 +59,8 @@ err()  { printf '%s[pre-push]%s %s\n' "$c_err" "$c_off" "$*" >&2; }
 # the real guarantee is GitHub branch protection on main (owner-only).
 ZERO=0000000000000000000000000000000000000000
 PUSH_REFS="$PP_TMP/push-refs"
+HAS_PUSH_REFS=0
+PUSHES_MAIN=0
 if [ -t 0 ]; then
   : >"$PUSH_REFS"
 else
@@ -65,8 +68,10 @@ else
 fi
 while read -r _local_ref local_sha remote_ref remote_sha; do
   [ -n "${remote_ref:-}" ] || continue
+  HAS_PUSH_REFS=1
   case "$remote_ref" in
     refs/heads/main)
+      PUSHES_MAIN=1
       if [ "$local_sha" = "$ZERO" ]; then
         err "refusing to delete main"
         err "recover: git fetch origin && git rebase origin/main && scripts/land.sh"
@@ -83,6 +88,17 @@ done <"$PUSH_REFS"
 if [ "$FAIL" -ne 0 ]; then
   err "push blocked before running slow checks."
   exit 1
+fi
+
+# A direct/manual hook invocation remains a full diagnostic. Real pushes only
+# pay for the seven-minute backend suite when they update main; topic branches
+# get the same full coverage from required PR CI without delaying publication.
+# The opt-in is useful before publishing a risky backend topic branch.
+RUN_FULL_BACKEND=0
+if [ "$HAS_PUSH_REFS" -eq 0 ] \
+    || [ "$PUSHES_MAIN" -eq 1 ] \
+    || [ "${MOBIUS_PREPUSH_FULL:-0}" = "1" ]; then
+  RUN_FULL_BACKEND=1
 fi
 
 # Commits being pushed = everything on HEAD not yet on origin/main.
@@ -222,12 +238,16 @@ if changed_match '^(backend/scripts/package-static-app\.mjs|scripts/package-stat
   fi
 fi
 
-# 5. Backend pytest — only if a local venv exists AND backend changed.
-#    No venv → skip with a one-time setup hint (CI still runs the suite).
-if changed_match '^backend/'; then
+# 5. Backend pytest — required before main updates, optional on topic/backup
+#    pushes, and only possible when the shared local venv exists.
+if changed_match '^backend/' && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
+  warn "backend changed, but this push does not update main —"
+  warn "  skipping full pytest (required PR CI runs it)."
+  warn "  enable locally: MOBIUS_PREPUSH_FULL=1 git push …"
+elif changed_match '^backend/'; then
   VENV="$MAIN/backend/.venv/bin/python"
   if [ -x "$VENV" ]; then
-    warn "running backend pytest (full suite ~2m; bypass with --no-verify)…"
+    warn "running backend pytest (full suite currently ~7m)…"
     # Sibling sessions all share this ONE venv (+ its SQLite fixtures + esbuild),
     # so two full suites at once thrash CPU/IO and BOTH crawl — a push can look
     # like it "hangs" for many minutes when it is really contending with another
