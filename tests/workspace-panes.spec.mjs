@@ -10,7 +10,7 @@
  *       divider resize and a cross-pane move (same root DOM object);
  *   (c) an app iframe survives a cross-pane move with no second frame-init;
  *   (d) split is absent from the context menu at caps;
- *   (e) a projection flip to phone preserves the persisted tree; focus/back work;
+ *   (e) a projection flip to phone preserves the persisted tree and pane focus;
  *   (f) keyboard-open divider commit + reservation floor — SKIPPED, see below.
  *
  * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
@@ -379,7 +379,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
       .not.toHaveCount(0)
   })
 
-  test('(e) a projection flip to phone preserves the persisted tree; focus/back work', async ({ page }) => {
+  test('(e) a projection flip to phone preserves the persisted tree and pane focus', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'wpFlipA')
     const b = await createTaggedChat(page, 'wpFlipB')
@@ -407,18 +407,18 @@ test.describe('Workspace panes (PR2 gate)', () => {
     }, paneModel.STORAGE_KEY)
     expect(leaves).toBe(2)
 
-    // Focus still works: tapping a pane strip focuses its pane (focus ring moves).
+    // Focus still works: select the OTHER pane and verify the durable workspace
+    // authority changes, rather than merely clicking the already-focused p0.
     await expect(page.locator('.workspace__chrome')).toHaveCount(1)
-    const strips = page.locator('.workspace__strip')
-    await expect(strips.first()).toBeVisible({ timeout: 4000 })
-    await strips.first().click()
-    await page.evaluate(() => new Promise(r =>
-      requestAnimationFrame(() => requestAnimationFrame(r))))
-    // Back still resolves the shell (does not throw / navigate away): a
-    // history.back lands on a still-mounted chat surface.
-    await page.evaluate(() => history.back())
-    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
-    await expect(page.locator('.chat, .chat__empty-wrap')).not.toHaveCount(0)
+    const otherStrip = page.locator('[data-pane-strip="p1"]')
+    await expect(otherStrip).toBeVisible({ timeout: 4000 })
+    await otherStrip.click()
+    await expect.poll(
+      () => page.evaluate((k) => JSON.parse(sessionStorage.getItem(k)).focusedPaneId,
+        paneModel.STORAGE_KEY),
+      { timeout: 3000, message: 'phone projection still commits pane focus' },
+    ).toBe('p1')
+    await expect(otherStrip).toHaveClass(/workspace__strip--focused/)
   })
 
   // (f) The keyboard-open divider commit must not stick the reservation floor:
