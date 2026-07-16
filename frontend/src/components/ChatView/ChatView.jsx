@@ -79,6 +79,7 @@ import {
   saveFailedSendAttempt,
   sendAttemptIsDurable,
 } from './sendAttemptRecovery.js'
+import { persistComposerDraft } from './composerDraft.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -167,27 +168,6 @@ export function deleteChatDraft(chatId) {
   try { sessionStorage.removeItem(`draft:${chatId}`) } catch { /* private browsing */ }
   clearFailedSendAttempt(chatId)
   clearChatQuestionDrafts(chatId)
-}
-
-// Evict the oldest draft: key from sessionStorage so a new draft can land.
-// Oldest = smallest numeric suffix after the colon; that's the chat that
-// was least recently opened (chats get integer IDs assigned in order).
-function evictOldestDraft() {
-  try {
-    const draftKeys = []
-    for (let i = 0; i < sessionStorage.length; i++) {
-      const key = sessionStorage.key(i)
-      if (key?.startsWith('draft:')) draftKeys.push(key)
-    }
-    if (draftKeys.length === 0) return
-    // Sort ascending by the numeric part; remove the oldest (lowest ID).
-    draftKeys.sort((a, b) => {
-      const na = parseInt(a.slice(6), 10) || 0
-      const nb = parseInt(b.slice(6), 10) || 0
-      return na - nb
-    })
-    sessionStorage.removeItem(draftKeys[0])
-  } catch { /* ignore */ }
 }
 
 function tailResumableBlock(messages) {
@@ -358,7 +338,14 @@ export default function ChatView({
   if (!initialComposerRef.current) {
     initialComposerRef.current = readInitialComposer(chatId)
   }
-  const [input, setInput] = useState(() => initialComposerRef.current.input)
+  const [input, setInputState] = useState(() => initialComposerRef.current.input)
+  function setComposerInput(nextInput) {
+    // Navigation can unmount this component before React flushes passive
+    // effects. Keep every composer transition durable at the state boundary,
+    // whether it came from typing, voice, restoration, or send cleanup.
+    persistComposerDraft(chatId, nextInput)
+    setInputState(nextInput)
+  }
   const [sendFailure, setSendFailure] = useState(() => (
     initialComposerRef.current.failedAttempt
       ? 'Möbius is checking whether your previous message reached the chat…'
@@ -1407,7 +1394,7 @@ export default function ChatView({
   function handleComposerInputChange(nextInput) {
     clearFailedAttempt()
     setSendFailure(null)
-    setInput(nextInput)
+    setComposerInput(nextInput)
   }
 
   function handleComposerAddFiles(fileList) {
@@ -1426,7 +1413,7 @@ export default function ChatView({
     text,
     { focus = false, preserveFailedAttempt = false } = {},
   ) {
-    if (preserveFailedAttempt) setInput(text)
+    if (preserveFailedAttempt) setComposerInput(text)
     else handleComposerInputChange(text)
     requestAnimationFrame(() => {
       const el = inputRef.current
@@ -1540,21 +1527,11 @@ export default function ChatView({
   }
 
   // Persist draft so it survives leaving and re-entering the chat.
+  // This remains as a safety net for programmatic input changes (restores,
+  // voice transcription, send cleanup). Direct owner edits are saved
+  // synchronously in handleComposerInputChange above.
   useEffect(() => {
-    try {
-      if (input) sessionStorage.setItem(`draft:${chatId}`, input)
-      else sessionStorage.removeItem(`draft:${chatId}`)
-    } catch (e) {
-      // QuotaExceededError: evict the oldest draft: key and retry once so the
-      // current chat's draft is always fresh.
-      if (e?.name === 'QuotaExceededError' || e?.code === 22) {
-        evictOldestDraft()
-        try {
-          if (input) sessionStorage.setItem(`draft:${chatId}`, input)
-        } catch { /* still no room — skip */ }
-      }
-      // Otherwise private browsing / storage disabled — silently skip.
-    }
+    persistComposerDraft(chatId, input)
   }, [input, chatId])
 
   // Auto-size textarea when a draft is restored. Cap matches the
@@ -1690,7 +1667,7 @@ export default function ChatView({
         if (failedAttempt) {
           if (sendAttemptIsDurable(failedAttempt, msgs, data.pending_messages)) {
             clearFailedAttempt()
-            setInput('')
+            setComposerInput('')
             clearFiles()
             setSendFailure(null)
           } else {
@@ -2021,7 +1998,7 @@ export default function ChatView({
       const queuedPinIntent = sendPinIntent
       rememberQueuedPinIntent(cid, queuedPinIntent)
       inlineSteerPinIntentRef.current = queuedPinIntent
-      setInput('')
+      setComposerInput('')
       clearComposerFilesForSend()
       if (inputRef.current) {
         inputRef.current.style.height = 'auto'
@@ -2221,7 +2198,7 @@ export default function ChatView({
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
-    setInput('')
+    setComposerInput('')
     clearComposerFilesForSend()
     if (inputRef.current) {
       inputRef.current.style.height = 'auto'
