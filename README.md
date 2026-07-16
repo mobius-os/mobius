@@ -17,15 +17,15 @@
 <p align="center">
   <a href="https://mobius.you/"><strong>Launch Möbius</strong></a> ·
   <a href="https://mobius-os.github.io/apps/">Browse apps</a> ·
-  <a href="#build-a-möbius-app">Build an app</a> ·
+  <a href="#ask-for-what-you-need">Ask your agent</a> ·
   <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
 ## Build apps around the way you work
 
-Möbius is a self-hosted workspace where a coding agent builds apps beside the conversation. Describe what you need, inspect the result, and keep the app in the same place where you use it.
+Möbius is a self-hosted workspace where your agent builds apps beside the conversation. Describe what you need, inspect the result, and keep the app in the same place where you use it.
 
-Apps are ordinary repositories with readable source and a small manifest. Start with a community app, change it for your workflow, or build the missing piece with your agent.
+You do not need to know how Möbius apps are built. Start with a community app or tell your agent what would make your work easier. It can create the missing piece, adapt an existing app, and keep refining it from your feedback.
 
 <table>
   <tr>
@@ -39,6 +39,16 @@ Apps are ordinary repositories with readable source and a small manifest. Start 
 </table>
 
 Other apps can be as personal as the trip they support. Brazil 2026 keeps an itinerary, local phrases, weather, packing, and a journal together. News prepares a daily digest around the topics you care about.
+
+## Ask for what you need
+
+Open a chat and describe the outcome you want in your own words. For example:
+
+- “Build me a simple meal planner that remembers our favourite recipes.”
+- “Add a weekly view and quicker task entry to my planner.”
+- “Make the whole workspace calmer and easier to read on my phone.”
+
+Your agent takes care of building it, opens a working version beside the conversation, and checks it as it works. You can react to what you see and keep asking for changes. The result can stay private to your Möbius or, when it could help others, be prepared for review as a community contribution.
 
 ## Use the same workspace on phone and web
 
@@ -92,7 +102,7 @@ The App Store includes tools for notes, tasks, skills, memory, reflection, devel
 
 ![The Möbius App Store](assets/product/app-store.png)
 
-Installing an app means adding its repository URL. Updating the same URL patches the code while keeping the app's data.
+Install a community app from the catalog, then ask your agent to make it yours. Updates preserve the app's data and your local changes.
 
 ## Bring agent access
 
@@ -161,22 +171,11 @@ never the Möbius shell, API, or recovery surface. Because paths are not origins
 services on the gateway form one trust group; use a separate origin for a
 service which must not trust its siblings.
 
-## Build a Möbius app
-
-A Möbius app needs a `mobius.json` manifest and an `index.jsx` component. The component receives `{ appId, token }` and stores data through the app storage API.
-
-Start with these references:
-
-- [Building apps](backend/scripts/seed-skills/building-apps.md): app structure, storage, permissions, themes, and publishing
-- [App component shapes](backend/scripts/seed-skills/app-component-shapes.md): supported React component contracts
-- [Architecture](ARCHITECTURE.md): platform boundaries and the complete manifest reference
-- [Community app catalog](https://github.com/mobius-os): working apps to inspect and fork
-
 ## Contribute to the platform
 
 Möbius grows through apps, platform changes, testing, and discussion. A local improvement can stay private or become a reviewed contribution through the Contribute app and GitHub.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development loop and [ARCHITECTURE.md](ARCHITECTURE.md) for the system map.
+If you want to work on the platform itself, read [CONTRIBUTING.md](CONTRIBUTING.md) for the development loop and [ARCHITECTURE.md](ARCHITECTURE.md) for the system map.
 
 ## License
 
