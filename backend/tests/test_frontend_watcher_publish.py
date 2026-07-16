@@ -3,6 +3,7 @@
 import asyncio
 import fcntl
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,12 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
   monkeypatch.setattr(fw, "_CACHE_DIR", dirs["cache"])
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
+  monkeypatch.setattr(
+    fw,
+    "_BUILT_GLOBAL_CHECK",
+    Path(__file__).resolve().parents[2]
+    / "frontend" / "scripts" / "check-built-globals.mjs",
+  )
   # Keep build comparisons hermetic when the test happens to run in an image
   # that has the production vendor tree mounted at /app/static/vendor.
   monkeypatch.setattr(fw, "_copy_vendor", lambda _dest: None)

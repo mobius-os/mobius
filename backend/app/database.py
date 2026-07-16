@@ -159,14 +159,20 @@ def database_pool_snapshot() -> dict:
       return None
 
   with _pool_metrics_lock:
+    tracked_checked_out = _pool_metrics["checked_out"]
     lifetime = {
       "checkouts": _pool_metrics["checkouts"],
       "long_checkouts": _pool_metrics["long_checkouts"],
       "max_checkout_ms": _pool_metrics["max_checkout_ms"],
       "last_long_checkout": _pool_metrics["last_long_checkout"],
     }
+  pool_checked_out = call_metric("checkedout")
   current = {
-    "checked_out": call_metric("checkedout"),
+    # NullPool deliberately exposes no checkedout() method. The event-backed
+    # counter is the authoritative cross-pool value in that case.
+    "checked_out": (
+      tracked_checked_out if pool_checked_out is None else pool_checked_out
+    ),
     "checked_in": call_metric("checkedin"),
     "size": call_metric("size"),
     "overflow": call_metric("overflow"),

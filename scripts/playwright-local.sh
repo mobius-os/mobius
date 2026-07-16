@@ -94,6 +94,12 @@ compose() {
 cleanup() {
   if [[ "$compose_used" == "1" ]]; then
     compose down -v --remove-orphans >/dev/null 2>&1 || true
+    # Refresh the bounded tag after Compose releases its containers. Doing
+    # this again at teardown keeps the cache reference authoritative even if
+    # a failed run or an engine cleanup dropped the earlier tag.
+    if [[ "$keep_cache" == "1" ]]; then
+      docker image tag "$image_name" "$cache_image" >/dev/null 2>&1 || true
+    fi
     docker image rm "$image_name" >/dev/null 2>&1 || true
   fi
   rm -rf "$run_dir"

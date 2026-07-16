@@ -107,7 +107,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // First send (fresh turn): 202 starts the turn; the held-open
       // /stream below keeps sending=true.
       if (body.content === 'first message') {
-        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'started' }),
+        })
       }
 
       // Second send while streaming: the queue path. Return a SERVER ts so
@@ -211,7 +215,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
-        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'started' }),
+        })
       }
       const ts = queueCount === 0 ? TS1 : TS2
       const position = queueCount + 1
@@ -298,7 +306,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
-        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'started' }),
+        })
       }
       return route.fulfill({
         status: 202,

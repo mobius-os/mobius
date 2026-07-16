@@ -12,6 +12,7 @@ Three coupled guarantees:
 """
 
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -218,6 +219,12 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_NEXT_DIST_DIR", dirs["next"])
   monkeypatch.setattr(fw, "_OLD_DIST_DIR", dirs["old"])
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
+  monkeypatch.setattr(
+    fw,
+    "_BUILT_GLOBAL_CHECK",
+    Path(__file__).resolve().parents[2]
+    / "frontend" / "scripts" / "check-built-globals.mjs",
+  )
   return dirs
 
 
