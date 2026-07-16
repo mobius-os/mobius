@@ -4,7 +4,7 @@ import { getToken, BASE } from '../../api/client.js'
 /**
  * Hook encapsulating file upload state and API calls for chat attachments.
  *
- * @param {{ chatId: string }} options
+ * @param {{ chatId: string, initialFiles?: Array }} options
  * @returns {{
  *   files: Array,
  *   addFiles: (fileList: File[]) => Promise<void>,
@@ -14,8 +14,8 @@ import { getToken, BASE } from '../../api/client.js'
  *   releaseFiles: (files: Array) => void,
  * }}
  */
-export default function useFileUpload({ chatId }) {
-  const [files, setFiles] = useState([])
+export default function useFileUpload({ chatId, initialFiles = [] }) {
+  const [files, setFiles] = useState(() => initialFiles)
   // Keep a ref in sync so the unmount cleanup can revoke object URLs
   // without closing over a stale `files` state value.
   const filesRef = useRef(files)

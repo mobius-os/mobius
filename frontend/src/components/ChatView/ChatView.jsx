@@ -71,6 +71,12 @@ import {
   sendDraftIdentity,
 } from './sendAttemptIdentity.js'
 import {
+  clearFailedSendAttempt,
+  loadFailedSendAttempt,
+  saveFailedSendAttempt,
+  sendAttemptIsDurable,
+} from './sendAttemptRecovery.js'
+import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
   buildPhaseRailViewModel,
@@ -156,6 +162,7 @@ function findUserIndexByCid(messages, cid) {
 // instead of leaving the orphaned key behind.
 export function deleteChatDraft(chatId) {
   try { sessionStorage.removeItem(`draft:${chatId}`) } catch { /* private browsing */ }
+  clearFailedSendAttempt(chatId)
 }
 
 // Evict the oldest draft: key from sessionStorage so a new draft can land.
@@ -196,18 +203,22 @@ const DRAFT_AUTOSEND_PREFIX = 'draft-autosend:'
 
 function readInitialComposer(chatId) {
   try {
+    const failedAttempt = loadFailedSendAttempt(chatId)
     const pending = sessionStorage.getItem(PENDING_DRAFT_KEY)
+    if (pending && failedAttempt) clearFailedSendAttempt(chatId)
     const saved = sessionStorage.getItem(`draft:${chatId}`) || ''
-    const input = pending || saved
+    const input = pending || failedAttempt?.text || saved
     const autoSendDraft =
       sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) ||
       sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`)
     return {
       input,
       autoSend: !!input && autoSendDraft === input,
+      failedAttempt: pending ? null : failedAttempt,
+      attachments: pending ? [] : (failedAttempt?.attachments || []),
     }
   } catch {
-    return { input: '', autoSend: false }
+    return { input: '', autoSend: false, failedAttempt: null, attachments: [] }
   }
 }
 
@@ -336,7 +347,11 @@ export default function ChatView({
     initialComposerRef.current = readInitialComposer(chatId)
   }
   const [input, setInput] = useState(() => initialComposerRef.current.input)
-  const [sendFailure, setSendFailure] = useState(null)
+  const [sendFailure, setSendFailure] = useState(() => (
+    initialComposerRef.current.failedAttempt
+      ? 'Möbius is checking whether your previous message reached the chat…'
+      : null
+  ))
   const [autoSendPendingDraft, setAutoSendPendingDraft] = useState(
     () => initialComposerRef.current.autoSend,
   )
@@ -705,7 +720,7 @@ export default function ChatView({
   // If a POST's acknowledgement is lost, the composer is restored with the
   // same logical message identity. An unchanged retry reuses its cid so the
   // backend can acknowledge the durable row instead of starting a twin turn.
-  const failedSendAttemptRef = useRef(null)
+  const failedSendAttemptRef = useRef(initialComposerRef.current.failedAttempt)
 
   // Ref mirrors of prop callbacks. doSend / doSendSilent are
   // memoized via useCallback; if these props were listed in the
@@ -1307,29 +1322,49 @@ export default function ChatView({
     clearFiles,
     restoreFiles,
     releaseFiles,
-  } = useFileUpload({ chatId })
+  } = useFileUpload({
+    chatId,
+    initialFiles: initialComposerRef.current.attachments,
+  })
+
+  function clearFailedAttempt() {
+    failedSendAttemptRef.current = null
+    clearFailedSendAttempt(chatId)
+  }
+
+  function rememberFailedAttempt(attempt) {
+    failedSendAttemptRef.current = attempt
+    saveFailedSendAttempt(chatId, attempt)
+  }
 
   // Reuse a failed attempt id only while the restored composer is genuinely
   // untouched. Once the owner edits text or attachments—even if they later
   // recreate the same visible draft—that is a new compose action and gets a
   // new cid on send.
   function handleComposerInputChange(nextInput) {
-    failedSendAttemptRef.current = null
+    clearFailedAttempt()
+    setSendFailure(null)
     setInput(nextInput)
   }
 
   function handleComposerAddFiles(fileList) {
-    failedSendAttemptRef.current = null
+    clearFailedAttempt()
+    setSendFailure(null)
     return addFiles(fileList)
   }
 
   function handleComposerRemoveFile(fileId) {
-    failedSendAttemptRef.current = null
+    clearFailedAttempt()
+    setSendFailure(null)
     return removeFile(fileId)
   }
 
-  function restoreComposerText(text, { focus = false } = {}) {
-    setInput(text)
+  function restoreComposerText(
+    text,
+    { focus = false, preserveFailedAttempt = false } = {},
+  ) {
+    if (preserveFailedAttempt) setInput(text)
+    else handleComposerInputChange(text)
     requestAnimationFrame(() => {
       const el = inputRef.current
       if (!el) return
@@ -1348,7 +1383,7 @@ export default function ChatView({
   }
 
   const { listening, listeningRef, stopVoice, toggleVoice } = useVoiceInput({
-    onTranscript: (text) => setInput(text),
+    onTranscript: handleComposerInputChange,
     inputRef,
   })
   // Report only WHETHER dictation is live (the shell tracks a single boolean,
@@ -1588,6 +1623,19 @@ export default function ChatView({
         if (cancelled) return
         if (fetchGenRef.current !== gen) return
         const msgs = data.messages || []
+        const failedAttempt = failedSendAttemptRef.current
+        if (failedAttempt) {
+          if (sendAttemptIsDurable(failedAttempt, msgs, data.pending_messages)) {
+            clearFailedAttempt()
+            setInput('')
+            clearFiles()
+            setSendFailure(null)
+          } else {
+            setSendFailure(
+              'That message didn’t reach the chat. It’s ready in the composer—try again.',
+            )
+          }
+        }
         // Snapshot the per-chat runtime config (provider/model/effort) BEFORE
         // the behind-local guard below. This is independent of the messages
         // snapshot, and the guard's early-return used to skip it — so after any
@@ -1864,7 +1912,7 @@ export default function ChatView({
       if (usesComposerFiles) releaseFiles(composerFileSnapshot)
     }
     function restoreComposerAfterFailedSend() {
-      restoreComposerText(text)
+      restoreComposerText(text, { preserveFailedAttempt: true })
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
@@ -1931,7 +1979,7 @@ export default function ChatView({
           attachments.length > 0 ? attachments : undefined,
           { queueOnly: true, cid },
         )
-        failedSendAttemptRef.current = null
+        clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
         if (result?.status === 'duplicate') {
           // A stale local queue decision can race an already-durable retry.
@@ -2075,7 +2123,12 @@ export default function ChatView({
         pendingQueue.cancelByCid(queuedMsg.cid)
         forgetQueuedPinIntent({ cid: queuedMsg.cid })
         inlineSteerPinIntentRef.current = null
-        failedSendAttemptRef.current = { cid, draftIdentity }
+        rememberFailedAttempt({
+          cid,
+          draftIdentity,
+          text,
+          attachments: composerFileSnapshot,
+        })
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online }))
       }
@@ -2155,7 +2208,7 @@ export default function ChatView({
         // selector goes blind after the ack re-render.
         { cid },
       )
-      failedSendAttemptRef.current = null
+      clearFailedAttempt()
       releaseComposerFilesAfterAccepted()
       if (result?.status === 'duplicate') {
         const durableRows = startedMessagesFromResponse(result)
@@ -2241,7 +2294,12 @@ export default function ChatView({
       setSending(false)
       sendingRef.current = false
       setServerRunningState(false)
-      failedSendAttemptRef.current = { cid, draftIdentity }
+      rememberFailedAttempt({
+        cid,
+        draftIdentity,
+        text,
+        attachments: composerFileSnapshot,
+      })
       restoreComposerAfterFailedSend()
       // The POST never reached/finished on the server, so remove the optimistic
       // user bubble and keep the text in the composer. Otherwise a transient

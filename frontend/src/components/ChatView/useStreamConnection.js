@@ -20,6 +20,7 @@ import {
   writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
 } from './streamSnapshotCache.js'
+import { ChatTransportError, chatHttpError } from './sendErrors.js'
 
 // Characters revealed per frame at 60fps.
 // 3 chars/frame × 60fps = ~180 chars/sec — fast but smooth.
@@ -1208,23 +1209,29 @@ export default function useStreamConnection(chatId, {
       const sendCtrl = new AbortController()
       const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
       let res
+      const requestInit = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify(body),
+        signal: sendCtrl.signal,
+      }
       try {
-        res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/messages`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${getToken()}`,
-          },
-          body: JSON.stringify(body),
-          signal: sendCtrl.signal,
-        })
+        try {
+          res = await fetch(
+            `${BASE}/api/chats/${chatIdRef.current}/messages`, requestInit,
+          )
+        } catch (error) {
+          if (error?.name === 'AbortError') throw error
+          throw new ChatTransportError(error)
+        }
       } finally {
         clearTimeout(sendTimer)
       }
       if (!res.ok) {
-        const error = new Error(`HTTP ${res.status}`)
-        error.status = res.status
-        throw error
+        throw await chatHttpError(res)
       }
       const data = await res.json()
       responseData = data

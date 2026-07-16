@@ -31,6 +31,9 @@ def test_limit_glibc_arenas_caps_the_process_before_threads(monkeypatch):
   assert mallopt.calls == [(allocator._M_ARENA_MAX, 2)]
   assert mallopt.argtypes == (allocator.ctypes.c_int, allocator.ctypes.c_int)
   assert mallopt.restype is allocator.ctypes.c_int
+  assert allocator.allocator_status() == {
+    "arena_cap": 2, "applied": True, "source": "mallopt",
+  }
 
 
 def test_limit_glibc_arenas_is_a_noop_without_glibc(monkeypatch):
@@ -38,6 +41,7 @@ def test_limit_glibc_arenas_is_a_noop_without_glibc(monkeypatch):
   monkeypatch.setattr(allocator.ctypes, "CDLL", lambda _name: object())
 
   assert allocator.limit_glibc_arenas() is False
+  assert allocator.allocator_status()["source"] == "unsupported"
 
 
 def test_limit_glibc_arenas_rejects_invalid_caps(monkeypatch):
@@ -47,6 +51,7 @@ def test_limit_glibc_arenas_rejects_invalid_caps(monkeypatch):
 
   monkeypatch.setattr(allocator.ctypes, "CDLL", unexpected_load)
   assert allocator.limit_glibc_arenas(0) is False
+  assert allocator.allocator_status()["source"] == "invalid"
   assert allocator.limit_glibc_arenas(True) is False
 
 
@@ -58,3 +63,17 @@ def test_limit_glibc_arenas_preserves_operator_setting(monkeypatch):
 
   monkeypatch.setattr(allocator.ctypes, "CDLL", unexpected_load)
   assert allocator.limit_glibc_arenas(2) is False
+  assert allocator.allocator_status() == {
+    "arena_cap": 4, "applied": True, "source": "environment",
+  }
+
+
+def test_invalid_operator_setting_is_observable_not_claimed_as_applied(monkeypatch):
+  monkeypatch.setenv("MALLOC_ARENA_MAX", "not-a-number")
+
+  assert allocator.limit_glibc_arenas(2) is False
+  assert allocator.allocator_status() == {
+    "arena_cap": None,
+    "applied": False,
+    "source": "environment_invalid",
+  }

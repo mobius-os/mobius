@@ -15,10 +15,12 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app import models
+from app.allocator import allocator_status
 from app.broadcast import get_all_active_broadcasts
+from app.browser_profiles import browser_profile_status
 from app.chat import live_run_health_fields
 from app.config import get_settings
-from app.database import get_db
+from app.database import database_pool_snapshot, get_db
 from app.deps import get_current_owner
 from app.runner_registry import RunnerKind, registry
 
@@ -135,7 +137,15 @@ def debug_status(
     "starting": list(registry.starting_chat_ids()),
     "broadcasts": broadcasts,
     "parked_runs": parked_runs,
+    "database_pool": database_pool_snapshot(),
   }
+  try:
+    from app.frontend_watcher import watcher_health
+    result["frontend_watcher"] = watcher_health()
+  except Exception:
+    result["frontend_watcher"] = {"status": "unavailable", "running": False}
+  result["allocator"] = allocator_status()
+  result["browser_profiles"] = browser_profile_status()
   if reconciliation_failed:
     result["reconciliation_failed"] = True
   if media_migration_failed:

@@ -142,14 +142,6 @@
   position: relative;  /* makes this the offsetParent for children */
 }
 
-/* Chat scroll: always hidden, never reveals on scroll. Mirrors the
-   global default in index.css after the on-scroll reveal mechanism
-   was retired. ALL invariants in ARCHITECTURE.md's "Chat scroll + steer
-   contract" still hold: overflow, spacer math,
-   scrollTop, overflow-anchor, useScrollMode listeners are untouched. */
-.chat__scroll { scrollbar-width: none; }
-.chat__scroll::-webkit-scrollbar { width: 0; height: 0; }
-
 /* ── Message list ──────────────────────────────────── */
 
 .chat__list {

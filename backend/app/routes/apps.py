@@ -1253,6 +1253,9 @@ async def update_preview(
   repo = Path(app.source_dir)
   if not app_git.is_repo(repo):
     raise HTTPException(status_code=400, detail="App is not a git repo.")
+  target_app_id = app.id
+  upstream_commit = app.upstream_commit
+  db.close()
 
   async with fs_locks.source_dir_lock(str(repo)):
     merge = await asyncio.to_thread(app_git.merge_upstream, repo)
@@ -1261,16 +1264,16 @@ async def update_preview(
       _materialize_conflict_files, repo, conflict_paths,
     )
     upstream_diff = await asyncio.to_thread(
-      _upstream_diff, repo, app.upstream_commit,
+      _upstream_diff, repo, upstream_commit,
     )
     upstream_version = await asyncio.to_thread(
-      _upstream_version, repo, app.upstream_commit,
+      _upstream_version, repo, upstream_commit,
     )
   return schemas.UpdatePreviewOut(
-    app_id=app.id,
+    app_id=target_app_id,
     status=merge.status,
     upstream_version=upstream_version,
-    upstream_commit=app.upstream_commit,
+    upstream_commit=upstream_commit,
     conflict_paths=conflict_paths,
     conflicts=conflicts,
     upstream_diff=upstream_diff,
@@ -2558,14 +2561,18 @@ def get_module(
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="Module not found.")
   path = Path(app.compiled_path)
+  etag = _etag_for_app(app)
+  offline_capable = bool(app.offline_capable)
+  # FileResponse streams after this function returns. Do not make the stream's
+  # lifetime the database checkout's lifetime.
+  db.close()
   if not path.exists():
     raise HTTPException(
       status_code=404, detail="Compiled module not found on disk."
     )
 
-  etag = _etag_for_app(app)
   if etag:
-    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
+    not_modified = _not_modified_if_match(request, etag, offline_capable)
     if not_modified is not None:
       return not_modified
 
@@ -2576,7 +2583,7 @@ def get_module(
   # The SW caches modules for every installed app regardless of this header;
   # the header only gates the separate standalone-navigation cache and
   # offline write/open semantics.
-  if app.offline_capable:
+  if offline_capable:
     headers["X-Mobius-Offline"] = "1"
   # The module is a REVALIDATING response (no-cache + stable ETag), so it
   # must never answer a 206. A `Range: bytes=0-0` probe of a FileResponse
@@ -2604,18 +2611,22 @@ async def validate_app(
   agent can use to decide whether to offer debugging.
   """
   app = live_app_or_404(db, app_id)
+  app_name = app.name
+  jsx_source = app.jsx_source
+  compiled_path = app.compiled_path
+  db.close()
 
   issues = []
 
-  if not app.jsx_source:
+  if not jsx_source:
     issues.append("No JSX source stored in database.")
-  if not app.compiled_path:
+  if not compiled_path:
     issues.append("No compiled path set — compilation may have failed.")
   else:
-    path = Path(app.compiled_path)
+    path = Path(compiled_path)
     if not path.exists():
       issues.append(
-        f"Compiled file missing at {app.compiled_path}."
+        f"Compiled file missing at {compiled_path}."
       )
     else:
       js = path.read_text(encoding="utf-8")
@@ -2660,8 +2671,8 @@ async def validate_app(
         pass  # node not available — skip this check
 
   return {
-    "app_id": app.id,
-    "name": app.name,
+    "app_id": app_id,
+    "name": app_name,
     "valid": len(issues) == 0,
     "issues": issues,
   }

@@ -204,23 +204,36 @@ def notify_owner(
     "actions": actions,
   }
 
-  subs = (
-    db.query(models.PushSubscription)
-    .filter(models.PushSubscription.owner_id == owner_id)
-    .all()
-  )
-  stale_ids = []
-  for sub in subs:
-    sub_info = {
+  subscriptions = [
+    {
+      "id": sub.id,
       "endpoint": sub.endpoint,
-      "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
+      "p256dh": sub.p256dh,
+      "auth": sub.auth,
+    }
+    for sub in (
+      db.query(models.PushSubscription)
+      .filter(models.PushSubscription.owner_id == owner_id)
+      .all()
+    )
+  ]
+  # Web Push is remote I/O and may wait on several endpoints. Copy the four
+  # scalar fields we need, then release the checkout before delivery. If stale
+  # subscriptions are found, the reusable Session checks out again only for
+  # the short delete transaction below.
+  db.close()
+  stale_ids = []
+  for sub in subscriptions:
+    sub_info = {
+      "endpoint": sub["endpoint"],
+      "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
     }
     try:
       alive = send_push(sub_info, payload)
       if not alive:
-        stale_ids.append(sub.id)
+        stale_ids.append(sub["id"])
     except Exception:
-      logger.exception("push delivery failed for sub %s", sub.id[:8])
+      logger.exception("push delivery failed for sub %s", sub["id"][:8])
 
   if stale_ids:
     db.query(models.PushSubscription).filter(

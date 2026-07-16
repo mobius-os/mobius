@@ -108,8 +108,16 @@ export function makeServer() {
     }
     const listMatch = url.match(/\/api\/storage\/apps-list\/[^/]+\/(.*?)(?:\?.*)?$/)
     if (method === 'GET' && listMatch) {
-      const includeContent = new URL(url, 'https://mobius.test')
-        .searchParams.get('include_content') === 'true'
+      const parsed = new URL(url, 'https://mobius.test')
+      const includeContent = parsed.searchParams.get('include_content') === 'true'
+      const limit = Math.max(1, Number(parsed.searchParams.get('limit')) || 500)
+      let after = ''
+      try {
+        after = Buffer.from(
+          parsed.searchParams.get('cursor') || '',
+          'base64url',
+        ).toString('utf8')
+      } catch {}
       const prefix = decodeURIComponent(listMatch[1] || '').replace(/^\/+|\/+$/g, '')
       const base = prefix ? `${prefix}/` : ''
       const byName = new Map()
@@ -131,7 +139,14 @@ export function makeServer() {
           byName.set(name, entry)
         }
       }
-      return res(200, { entries: [...byName.values()], next_cursor: null })
+      const remaining = [...byName.values()]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .filter(entry => entry.name > after)
+      const entries = remaining.slice(0, limit)
+      const nextCursor = remaining.length > entries.length
+        ? Buffer.from(entries.at(-1).name).toString('base64url')
+        : null
+      return res(200, { entries, next_cursor: nextCursor })
     }
     const m = url.match(/\/api\/storage\/apps\/[^/]+\/(.+?)(\?.*)?$/)
     const path = m ? decodeURIComponent(m[1]) : null

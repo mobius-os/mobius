@@ -158,7 +158,8 @@ if [ -n "$PY" ]; then
   # Read into an array so a path with spaces survives — unquoted $PY would
   # word-split it, and a quoted "$PY" would pass the whole list as one arg.
   mapfile -t _py < <(printf '%s\n' "$PY")
-  if python3 -m py_compile "${_py[@]}" 2>"$PP_TMP/py"; then
+  if PYTHONPYCACHEPREFIX="$PP_TMP/pycache" \
+       python3 -m py_compile "${_py[@]}" 2>"$PP_TMP/py"; then
     ok "python syntax ok (${#_py[@]} file(s))"
   else
     err "python syntax errors:"; sed 's/^/    /' "$PP_TMP/py" >&2; FAIL=1

@@ -124,6 +124,26 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
   assert future_value in (False, 0)
 
 
+def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
+  db_path = tmp_path / "legacy-live-assistant.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR(64) PRIMARY KEY, title VARCHAR(255), "
+      "updated_at DATETIME)"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  cols = {c["name"] for c in inspect(eng).get_columns("chats")}
+  assert "live_assistant" in cols
+
+
 def test_fresh_chat_schema_has_database_auto_resume_default():
   """Fresh create_all DDL must match the upgraded-table contract."""
   column = models.Chat.__table__.c.auto_resume_on_limit

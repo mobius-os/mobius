@@ -174,7 +174,7 @@
        app wants insets only while immersive). Folded into _frame_etag via
        sha256(app-frame.html), so installed PWAs revalidate the frame on the
        next open and purge the stale safe-rect-only frame from the SW cache. -->
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer">
   <script type="importmap">
   {
@@ -262,17 +262,9 @@
        News report renders in its own iframe, so its body text is unaffected. */
     body { -webkit-user-select: none; user-select: none; }
     input, textarea, [contenteditable], [contenteditable] * { -webkit-user-select: text; user-select: text; }
-    /* Prevent iOS Safari page-level pinch-zoom. user-scalable=no in the
-       viewport meta is ignored by iOS Safari; touch-action: pan-x pan-y
-       on html/body is the CSS-level lock. Mini-apps that need their own
-       pinch (e.g. image lightboxes) set touch-action: none on their own
-       interactive surface to override this. */
-    html, body { touch-action: pan-x pan-y; }
-    /* Always-hidden scrollbars in mini-app frames — matches the shell's
-       global default after the on-scroll reveal mechanism was retired
-       (owner preference: scrollbars never show, in any surface). */
-    html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
-    *::-webkit-scrollbar { width: 0; height: 0; }
+    /* Keep taps responsive while preserving the browser's native pinch zoom.
+       Custom gesture surfaces can still opt into touch-action:none locally. */
+    html, body { touch-action: manipulation; }
     html, body, #root { height: 100%; }
     /* html must be opaque too (body already is): an inner scroller overscrolling
        on Android otherwise reveals the transparent root as a warm color-scheme

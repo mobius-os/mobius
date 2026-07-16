@@ -98,6 +98,26 @@ test('list can batch JSON content in one bounded server request', async () => {
   )
 })
 
+test('content listings page at the server byte-budget boundary', async () => {
+  const { server } = freshEnv()
+  globalThis.indexedDB = {
+    open() { throw new DOMException('denied', 'SecurityError') },
+  }
+  const s = await newStorage()
+  for (let i = 0; i < 33; i++) {
+    server.seed(`records/${String(i).padStart(2, '0')}.json`, { id: i })
+  }
+
+  const entries = await s.list('records', { includeContent: true })
+  assert.equal(entries.length, 33)
+  assert.equal(entries.every(entry => Object.hasOwn(entry, 'content')), true)
+  const listRequests = server.log.filter(
+    request => request.url.includes('/apps-list/'),
+  )
+  assert.equal(listRequests.length, 3)
+  assert.equal(listRequests.every(request => request.url.includes('limit=16')), true)
+})
+
 test('batched list content keeps a newer queued JSON write visible', async () => {
   const { server } = freshEnv()
   const s = await newStorage()

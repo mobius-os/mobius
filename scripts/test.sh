@@ -17,7 +17,10 @@ set -euo pipefail
 # primary clone when this wrapper was invoked from a linked worktree, which is
 # exactly where agents do most review/fix-forward work.
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TEST_IMAGE="mobius-test:ci"
+_checkout_name="$(basename "$PROJECT_DIR" | tr -cs '[:alnum:]_.-' '-')"
+_checkout_id="$(printf '%s' "$PROJECT_DIR" | cksum | cut -d' ' -f1)"
+TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-${_checkout_name}-${_checkout_id}}"
+TEST_IMAGE="${MOBIUS_IMAGE:-mobius-test:ci}"
 # Slow Codex SDK tests — excluded by --fast. The cost is real (each
 # SDK contract test spins up a Thread/TurnHandle dance) and they cover
 # a narrow surface compared to the rest of the suite.
@@ -66,7 +69,26 @@ EOF
 check_backend_prereqs() {
   if ! docker image inspect "${TEST_IMAGE}" >/dev/null 2>&1; then
     die "Image ${TEST_IMAGE} not found. Build it first:
-    cd ${PROJECT_DIR} && docker compose -p mobius-test -f docker-compose.test.yml build"
+    cd ${PROJECT_DIR} && docker compose -p ${TEST_PROJECT} -f docker-compose.test.yml build"
+  fi
+
+  local expected actual
+  expected="$("${PROJECT_DIR}/scripts/test-image-fingerprint.sh")"
+  actual="$(docker run --rm --entrypoint sh "${TEST_IMAGE}" -c \
+    'test -r /app/test-image-fingerprint && cat /app/test-image-fingerprint' \
+    2>/dev/null || true)"
+  if [ "${actual}" != "${expected}" ]; then
+    if [ "${MOBIUS_ALLOW_UNVERIFIED_TEST_IMAGE:-0}" = "1" ]; then
+      log "backend: WARNING — using unverified image ${TEST_IMAGE} by explicit override"
+      return
+    fi
+    die "Image ${TEST_IMAGE} is stale or predates dependency fingerprints.
+    Expected: ${expected}
+    Found:    ${actual:-missing}
+    Rebuild explicitly (the test runner never rebuilds):
+    cd ${PROJECT_DIR} && docker compose -p ${TEST_PROJECT} -f docker-compose.test.yml build
+    If the baked dependencies are known to be unchanged, set
+    MOBIUS_ALLOW_UNVERIFIED_TEST_IMAGE=1 for this run."
   fi
 }
 
@@ -107,7 +129,7 @@ run_backend() {
   fi
 
   log "backend: ${summary}"
-  if (cd "${PROJECT_DIR}" && docker compose -p mobius-test \
+  if (cd "${PROJECT_DIR}" && docker compose -p "${TEST_PROJECT}" \
         -f docker-compose.test.yml run --rm --no-deps \
         --entrypoint python pytest -m pytest "${pytest_args[@]}" tests/); then
     BACKEND_STATUS="PASS"

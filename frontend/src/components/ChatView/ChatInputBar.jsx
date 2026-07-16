@@ -433,8 +433,8 @@ export default function ChatInputBar({
       {(sendFailure || offline) && (
         <div
           className={`chat__offline-note${sendFailure ? ' chat__offline-note--error' : ''}`}
-          role={sendFailure ? 'alert' : 'status'}
-          aria-live={sendFailure ? 'assertive' : 'polite'}
+          role="status"
+          aria-live="polite"
           aria-atomic="true"
         >
           {sendFailure || "You're offline — chat needs a connection."}
@@ -455,6 +455,8 @@ export default function ChatInputBar({
               onKeyDown={handleKeyDown}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"
+              name="message"
+              autoComplete="off"
               rows={1}
             />
             {rightButtons}

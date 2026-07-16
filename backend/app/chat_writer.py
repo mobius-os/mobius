@@ -1252,7 +1252,9 @@ class ChatWriterActor:
       # (the marker's own ack is None).  Cleared only after the commit and
       # its ack succeed.
       self._inflight_ack = pending.ack
-      result = self._persist_message(db, pending.chat_id, pending.snapshot)
+      result = self._persist_live_message(
+        db, pending.chat_id, pending.snapshot,
+      )
       _safe_set_result(pending.ack, result)
       self._inflight_ack = None
       # The committed snapshot was popped from `_pending`/`_outstanding`; if no
@@ -1266,11 +1268,11 @@ class ChatWriterActor:
     if isinstance(cmd, PersistError):
       # Fire-and-forget like PersistTranscript: an unwritten error state is
       # repaired by a later Finalize/snapshot; never raises.
-      return self._persist_message(db, cmd.chat_id, cmd.snapshot)
+      return self._persist_live_message(db, cmd.chat_id, cmd.snapshot)
     if isinstance(cmd, PersistTranscript):
       # Defensive: a directly-enqueued PersistTranscript (no current path
       # does this) still commits its own snapshot.
-      return self._persist_message(db, cmd.chat_id, cmd.snapshot)
+      return self._persist_live_message(db, cmd.chat_id, cmd.snapshot)
     if isinstance(cmd, QuestionCommit):
       # Save-before-broadcast: the commit MUST land before the ack resolves
       # so the runner only broadcasts the card after the question_id
@@ -1344,6 +1346,12 @@ class ChatWriterActor:
     if hasattr(db, "record_commit"):
       return self._commit_snapshot(db, snapshot)
     return update_last_assistant_message(db, chat_id, snapshot)
+
+  def _persist_live_message(self, db, chat_id: str, snapshot: dict) -> bool:
+    """Replace only the bounded in-flight assistant snapshot."""
+    if hasattr(db, "record_commit"):
+      return self._commit_snapshot(db, snapshot)
+    return update_live_assistant(db, chat_id, snapshot)
 
   def _persist_message_required(self, db, chat_id: str, snapshot: dict):
     """Must-persist variant of `_persist_message`, returning a `_WriteOutcome`.
@@ -1661,6 +1669,14 @@ class ChatWriterActor:
     _ensure_unique_ts(cmd.user_msg, existing)
     existing.append(cmd.user_msg)
     chat.messages = existing
+    # Allocate the current assistant's stable display id while history and the
+    # queue are already in memory. Streaming snapshots can then update only the
+    # small live value without rereading the historical JSON blob.
+    chat.live_assistant = {
+      "role": "assistant",
+      "blocks": [],
+      "ts": next_message_ts(existing + pending),
+    }
     if len(existing) == 1:
       chat.title = cmd.title_source[:40] or "New chat"
     chat.run_status = "running"
@@ -2062,6 +2078,13 @@ class ChatWriterActor:
       raise _PersistFailed("PromotePending: malformed queue head") from exc
     chat.messages = existing + stored_messages
     chat.pending_messages = remaining_pending
+    chat.live_assistant = {
+      "role": "assistant",
+      "blocks": [],
+      "ts": next_message_ts(
+        chat.messages + list(chat.pending_messages or [])
+      ),
+    }
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
@@ -2152,6 +2175,7 @@ class ChatWriterActor:
       chat.title = cmd.title
     if cmd.messages is not None:
       chat.messages = cmd.messages
+      chat.live_assistant = None
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("ReplaceTranscript did not persist")
@@ -2970,9 +2994,16 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
     # First write of this turn's assistant message — stamp a ts greater
     # than every persisted AND queued message so the bridge gate and the
     # frontend's ts-keyed rendering get a stable, collision-free id.
-    message["ts"] = next_message_ts(msgs + list(chat.pending_messages or []))
+    live_ts = (
+      chat.live_assistant.get("ts")
+      if isinstance(chat.live_assistant, dict) else None
+    )
+    message["ts"] = live_ts or next_message_ts(
+      msgs + list(chat.pending_messages or [])
+    )
     msgs.append(message)
   chat.messages = msgs
+  chat.live_assistant = None
   return (
     _WriteOutcome.APPLIED
     if _commit_or_rollback(db)
@@ -2992,6 +3023,67 @@ def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
   return _apply_last_assistant_message(db, chat_id, message) is not (
     _WriteOutcome.DROPPED
   )
+
+
+def update_live_assistant(db, chat_id: str, message: dict) -> bool:
+  """Persist the current assistant snapshot without rewriting history."""
+  if not chat_id:
+    return True
+  from datetime import UTC, datetime
+  from app.models import Chat
+
+  row = db.execute(
+    select(Chat.live_assistant).where(
+      Chat.id == chat_id,
+      Chat.deleted_at.is_(None),
+    )
+  ).first()
+  if row is None:
+    return True
+  existing = row[0] if isinstance(row[0], dict) else None
+  snapshot = copy.deepcopy(message)
+  state = None
+  answer_source = existing
+  if existing is None:
+    # QuestionCommit intentionally clears the live field after merging the
+    # barrier into history. The first resumed snapshot reads that trailing
+    # assistant once so it preserves the stable ts and any submitted answers.
+    state = db.execute(
+      select(Chat.messages, Chat.pending_messages).where(Chat.id == chat_id)
+    ).first()
+    messages = list(state[0] or []) if state is not None else []
+    if messages and messages[-1].get("role") == "assistant":
+      answer_source = messages[-1]
+  if answer_source is not None:
+    snapshot["ts"] = answer_source.get("ts")
+    existing_answers = {
+      question_block_key(block): block["answers"]
+      for block in (answer_source.get("blocks") or [])
+      if block.get("type") == "question" and block.get("answers")
+    }
+    for block in snapshot.get("blocks") or []:
+      if block.get("type") == "question" and not block.get("answers"):
+        answers = existing_answers.get(question_block_key(block))
+        if answers:
+          block["answers"] = answers
+  if snapshot.get("ts") is None:
+    # A turn created by a pre-column process pays one historical read. Every
+    # later snapshot reuses the allocated timestamp from `live_assistant`.
+    if state is None:
+      state = db.execute(
+        select(Chat.messages, Chat.pending_messages).where(Chat.id == chat_id)
+      ).first()
+    if state is None:
+      return True
+    snapshot["ts"] = next_message_ts(
+      list(state[0] or []) + list(state[1] or [])
+    )
+  db.execute(
+    update(Chat)
+    .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
+    .values(live_assistant=snapshot, updated_at=datetime.now(UTC))
+  )
+  return _commit_or_rollback(db)
 
 
 def finalize_response_outcome(db, chat_id: str, assistant_blocks: list):
@@ -3033,6 +3125,23 @@ def apply_answers_to_last_question(
 
   msgs = list(chat.messages or [])
 
+  def sync_live_answer(match_id: str | None) -> bool:
+    live = copy.deepcopy(chat.live_assistant)
+    if not isinstance(live, dict):
+      return False
+    blocks = live.get("blocks") or []
+    candidates = blocks if match_id is not None else reversed(blocks)
+    for block in candidates:
+      if block.get("type") != "question":
+        continue
+      if match_id is not None and block.get("question_id") != match_id:
+        continue
+      block["answers"] = answers
+      chat.live_assistant = live
+      flag_modified(chat, "live_assistant")
+      return True
+    return False
+
   if question_id:
     # Identity match: scan every assistant message's question blocks for
     # the exact id. Precise — never falls back to "latest".
@@ -3047,8 +3156,9 @@ def apply_answers_to_last_question(
           block["answers"] = answers
           chat.messages = msgs  # rebind so SQLAlchemy detects the mutation
           flag_modified(chat, "messages")
+          sync_live_answer(question_id)
           return True
-    return False
+    return sync_live_answer(question_id)
 
   # No question_id supplied — preserve the legacy latest-question
   # behaviour (older clients that don't send the id).
@@ -3065,8 +3175,9 @@ def apply_answers_to_last_question(
         block["answers"] = answers
         chat.messages = msgs  # rebind so SQLAlchemy detects JSON mutation
         flag_modified(chat, "messages")
+        sync_live_answer(None)
         return True
-  return False
+  return sync_live_answer(None)
 
 
 # -- module singleton + lifespan accessors -------------------------------

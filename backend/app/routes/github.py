@@ -2345,6 +2345,10 @@ async def submit_contribution(
       db=db,
       expected_nonce=expected_nonce,
     )
+  # The durable claim is complete. Git/fork/GitHub work below can take tens of
+  # seconds; return the checkout now and let each short nonce recheck lazily
+  # acquire its own connection after the slow boundary.
+  db.close()
 
   try:
     plan = claimed.get("plan") or {}
@@ -2356,6 +2360,7 @@ async def submit_contribution(
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
       record = _mark_submit_failure(
         app_id=app_id,
         record_path=record_path,
@@ -2371,6 +2376,7 @@ async def submit_contribution(
     message = "Could not submit this PR. Leave feedback so your agent can retry."
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
       record = _mark_submit_failure(
         app_id=app_id, record_path=record_path, message=message,
       )
@@ -2381,6 +2387,7 @@ async def submit_contribution(
 
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
     current = _read_record(record_path)
     if current.get("status") != "submitting":
       raise HTTPException(
@@ -2534,6 +2541,7 @@ async def cleanup_contribution_staging(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
     record_path, _ = _record_paths(app_id, record_id)
     record = _read_record(record_path)
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
@@ -2931,6 +2939,11 @@ async def refresh_contribution_checks(
   read server-side and never returned to the caller.
   """
   _validate_submit_app(app_id, principal, db)
+  owner_id = principal.owner.id
+  # Everything until notification persistence is GitHub/filesystem work. The
+  # request session is deliberately reusable: notify_owner will check out only
+  # for its short writes after all remote reads have completed.
+  db.close()
   token = github_auth.get_token()
   if not token:
     raise HTTPException(status_code=401, detail="GitHub not connected.")
@@ -2997,7 +3010,7 @@ async def refresh_contribution_checks(
   for payload in pending_notifications:
     notify_owner(
       db,
-      principal.owner.id,
+      owner_id,
       title=payload["title"],
       body=payload["body"],
       source_type="app",

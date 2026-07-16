@@ -6,14 +6,6 @@
   justify-content: center;
   padding: 24px;
   box-sizing: border-box;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.setup::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
 }
 
 .setup__card {

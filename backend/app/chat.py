@@ -1157,7 +1157,8 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       continue
     try:
       queued = len(chat.pending_messages or [])
-      msgs = list(chat.messages or [])
+      from app.chat_transcript import materialized_messages
+      msgs = materialized_messages(chat)
       note = "This turn was paused when Möbius restarted."
       if queued:
         # The queue is PRESERVED across the restart (it is NOT cleared
@@ -1264,6 +1265,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         new_msg["ts"] = _next_message_ts(msgs)
         msgs.append(new_msg)
       chat.messages = msgs
+      chat.live_assistant = None
       # Preserve chat.pending_messages: clearing the run marker (below)
       # drops the chat into the markerless-queue state that self-heals on
       # the next user POST's stale-pending drain. We do NOT auto-drain at
@@ -3894,6 +3896,16 @@ DEFAULT_VIEWPORT_WIDTH = 412
 DEFAULT_VIEWPORT_HEIGHT = 915
 
 
+def bounded_agent_browser_args(existing: str | None) -> str:
+  """Preserve operator Chromium flags while supplying safe cache defaults."""
+  parts = [part.strip() for part in str(existing or "").split(",") if part.strip()]
+  if not any(part.startswith("--disk-cache-size=") for part in parts):
+    parts.append("--disk-cache-size=33554432")
+  if not any(part.startswith("--media-cache-size=") for part in parts):
+    parts.append("--media-cache-size=16777216")
+  return ",".join(parts)
+
+
 def viewport_env(viewport: dict | None) -> dict[str, str]:
   """Returns the VIEWPORT_* env vars for an agent turn.
 
@@ -4213,8 +4225,8 @@ async def _run_chat_impl_with_db(
   # across hundreds of chats (4+ GiB was observed on the production volume).
   # Keep cookies, localStorage, IndexedDB, and service-worker state intact while
   # bounding only regenerable HTTP/media cache data per profile.
-  base_env["AGENT_BROWSER_ARGS"] = (
-    "--disk-cache-size=33554432,--media-cache-size=16777216"
+  base_env["AGENT_BROWSER_ARGS"] = bounded_agent_browser_args(
+    os.environ.get("AGENT_BROWSER_ARGS"),
   )
 
   # Get the provider first — needed for auth check.

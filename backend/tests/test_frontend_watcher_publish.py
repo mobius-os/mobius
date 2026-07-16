@@ -257,7 +257,7 @@ def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):
   assert env["MOBIUS_VITE_CACHE"] == str(fw_dirs["cache"])
   assert env["TMPDIR"] == str(fw_dirs["tmp"])
   assert env["CHOKIDAR_USEPOLLING"] == "1"
-  assert env["CHOKIDAR_INTERVAL"] == "500"
+  assert env["CHOKIDAR_INTERVAL"] == "1000"
   assert "--max-old-space-size=512" in env["NODE_OPTIONS"]
   assert "--watch" in cmd
   assert ".dist-staging" in cmd
@@ -276,6 +276,43 @@ def test_warm_watcher_has_a_cross_process_singleton_lease(fw_dirs):
   second = fw._acquire_watch_lock()
   fcntl.flock(second, fcntl.LOCK_UN)
   second.close()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_retries_a_contended_watcher(monkeypatch):
+  calls = 0
+
+  class Handler:
+    def close(self):
+      pass
+
+    def health(self):
+      return {
+        "running": True, "pid": 123, "rss_bytes": 1024,
+        "staging_dirty": False, "lease_path": "/tmp/watch.lock",
+      }
+
+  def start(_loop):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise RuntimeError("frontend warm watcher already active")
+    return None, Handler()
+
+  monkeypatch.setattr(fw, "start_watcher", start)
+  monkeypatch.setattr(fw, "_WATCH_LEASE_RETRY_INITIAL", 0.01)
+  supervisor = fw._FrontendSupervisor(asyncio.get_running_loop())
+  try:
+    await supervisor.start()
+    for _ in range(50):
+      if supervisor.health()["status"] == "running":
+        break
+      await asyncio.sleep(0.005)
+    assert calls == 2
+    assert supervisor.health()["status"] == "running"
+    assert supervisor.health()["pid"] == 123
+  finally:
+    supervisor.close()
 
 
 def test_vite_env_preserves_operator_resource_overrides(fw_dirs, monkeypatch):

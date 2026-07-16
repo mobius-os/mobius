@@ -1736,9 +1736,12 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
     return _cp("")
 
   gh_calls = []
+  baseline_checked_out = engine.pool.checkedout()
+  upstream_pool_counts = []
 
   def fake_gh(repo_path, *args, check=True):
     nonlocal fork_ready
+    upstream_pool_counts.append(engine.pool.checkedout())
     gh_calls.append(args)
     if args[:2] == ("repo", "fork"):
       fork_ready = True
@@ -1771,6 +1774,8 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
   assert not any(call[:2] == ("pr", "list") for call in gh_calls)
   assert ("checkout", "-q", "develop") in git_calls
+  assert upstream_pool_counts
+  assert set(upstream_pool_counts) == {baseline_checked_out}
 
   stored = json.loads(
     (Path(get_settings().data_dir) / "apps" / str(app_id) /
@@ -3152,6 +3157,29 @@ def test_refresh_no_records_is_noop(client, owner_token, monkeypatch):
                   headers={"Authorization": f"Bearer {owner_token}"})
   assert r.status_code == 200
   assert r.json() == {"refreshed": [], "notified": 0}
+
+
+def test_refresh_releases_db_before_github_network(
+  client, owner_token, monkeypatch,
+):
+  _write_token(token="gh-checks-tok")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _write_open_pr_record(app_id)
+  baseline = engine.pool.checkedout()
+
+  async def fake_graphql(_token, _query, _variables):
+    assert engine.pool.checkedout() == baseline
+    return {"pr0": {"pullRequest": _pr_node(
+      rollup_state="SUCCESS",
+      contexts=[],
+    )}}
+
+  monkeypatch.setattr(github_routes, "_github_graphql_json", fake_graphql)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/refresh",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200, response.text
 
 
 def test_refresh_persists_checks_classifies_and_notifies(

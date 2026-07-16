@@ -31,7 +31,14 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
-from app.database import Base, SessionLocal, engine, run_migrations
+from app.database import (
+  Base,
+  SessionLocal,
+  engine,
+  reset_database_request_label,
+  run_migrations,
+  set_database_request_label,
+)
 from app.http_caching import strip_range
 from app import models
 # providers and push are on the agent's write surface; deferred into
@@ -330,8 +337,8 @@ async def lifespan(app):
     from pathlib import Path as _Path
     _frontend_src = _Path("/data/platform/frontend/src")
     if _frontend_src.is_dir():
-      from app.frontend_watcher import start_watcher as start_frontend_watcher
-      _frontend_observer, _frontend_handler = start_frontend_watcher(
+      from app.frontend_watcher import start_supervised_watcher
+      _frontend_observer, _frontend_handler = await start_supervised_watcher(
         _asyncio.get_running_loop(),
       )
   except Exception as exc:
@@ -345,6 +352,7 @@ async def lifespan(app):
   _wedged_sweep_task = None
   _stalled_live_task = None
   _reset_park_task = None
+  _browser_profile_task = None
   try:
     from app.chat import (
       sweep_reset_parks,
@@ -403,6 +411,42 @@ async def lifespan(app):
           _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
+
+    async def _browser_profile_loop():
+      # Keep boot latency predictable; the first quota scan is low-priority.
+      await _asyncio.sleep(300)
+      while True:
+        try:
+          from app.browser_profiles import (
+            chat_activity_snapshot,
+            enforce_browser_profile_quota,
+          )
+          from app.runner_registry import registry as _runner_registry
+          _bp_db = _SweepSession()
+          try:
+            _chat_snapshot = chat_activity_snapshot(_bp_db)
+          finally:
+            _bp_db.close()
+          _profile_result = await _asyncio.to_thread(
+            enforce_browser_profile_quota,
+            settings.data_dir,
+            _chat_snapshot,
+            _runner_registry.all_alive_chat_ids(),
+          )
+          if _profile_result["reclaimed_bytes"]:
+            _log.info(
+              "agent-browser profile quota reclaimed %d bytes",
+              _profile_result["reclaimed_bytes"],
+            )
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error(
+            "agent-browser profile quota failed: %s", _exc, exc_info=True,
+          )
+        await _asyncio.sleep(24 * 60 * 60)
+
+    _browser_profile_task = _asyncio.create_task(_browser_profile_loop())
   except Exception as exc:
     _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
   try:
@@ -415,6 +459,8 @@ async def lifespan(app):
       _stalled_live_task.cancel()
     if _reset_park_task is not None:
       _reset_park_task.cancel()
+    if _browser_profile_task is not None:
+      _browser_profile_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
@@ -606,6 +652,23 @@ class _SecurityHeadersMiddleware:
     return await self.app(scope, receive, _send)
 
 
+class _DatabaseRequestContextMiddleware:
+  """Attributes connection checkout time to the owning HTTP request."""
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+    label = f'{scope.get("method", "?")} {scope.get("path", "/")}'
+    token = set_database_request_label(label)
+    try:
+      return await self.app(scope, receive, send)
+    finally:
+      reset_database_request_label(token)
+
+
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
@@ -618,9 +681,11 @@ app.add_middleware(
   allow_headers=["Authorization", "Content-Type"],
 )
 
-# Added last → outermost, so the security headers land on every response,
-# including error responses and CORS-handled preflights.
+# Security remains outside CORS and request-size enforcement so its headers
+# land on those generated responses. Request context is outermost so every
+# request receives one diagnostic label before middleware can touch the DB.
 app.add_middleware(_SecurityHeadersMiddleware)
+app.add_middleware(_DatabaseRequestContextMiddleware)
 
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)

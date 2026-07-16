@@ -144,6 +144,10 @@ class PlatformStatus(TypedDict):
   needs_restart: bool
   current_build_sha: str | None
   recorded_upstream_sha: str | None
+  # Latest fetched origin/main commit that is already contained in local main.
+  # Unlike recorded_upstream_sha, this remains correct after a manual/agent
+  # rebase that did not run the updater's marker-maintenance path.
+  contained_upstream_sha: str | None
   seed_required: bool
   conflict_paths: list[str]
   # The resolver chat opened for an in-progress conflict, so Settings can link
@@ -926,6 +930,9 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   rolled_back = ROLLED_BACK_FLAG.exists()
   restart_needed = RESTART_NEEDED_FLAG.exists() or _platform_tree_needs_restart(repo)
   local = _local_branch(repo)
+  target = _rev(repo, DEFAULT_TARGET_REF)
+  target_contained = bool(target) and _is_ancestor(repo, target, local)
+  contained_upstream_sha = target if target_contained else upstream_sha
 
   if conflict:
     flag = _read_conflict_flag() or {}
@@ -933,12 +940,13 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, current_build_sha=image_sha,
-      recorded_upstream_sha=upstream_sha, seed_required=False,
+      recorded_upstream_sha=upstream_sha,
+      contained_upstream_sha=contained_upstream_sha,
+      seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
     )
 
-  target = _rev(repo, DEFAULT_TARGET_REF)
-  available = bool(target) and not _is_ancestor(repo, target, local)
+  available = bool(target) and not target_contained
 
   if rolled_back:
     # An update is available but its last apply failed the import probe.
@@ -954,6 +962,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   return PlatformStatus(
     state=state.value, available=available, needs_restart=restart_needed,
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
+    contained_upstream_sha=contained_upstream_sha,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
   )
 

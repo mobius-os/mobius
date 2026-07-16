@@ -95,6 +95,7 @@ def _load_chat(chat_id="c1"):
     # Detach plain copies so the caller can inspect after the session closes.
     return {
       "messages": list(chat.messages or []),
+      "live_assistant": chat.live_assistant,
       "pending_messages": list(chat.pending_messages or []),
       "session_id": chat.session_id,
       "provider": chat.provider,
@@ -187,7 +188,9 @@ def test_snapshot_then_answer_survives(actor):
     )
   )
   chat = _load_chat()
-  last = chat["messages"][-1]
+  # Coalescible streaming state remains in the bounded live slot; the answer
+  # mutates that same durable snapshot without forcing a full-history rewrite.
+  last = chat["live_assistant"]
   assert last["role"] == "assistant"
   block = last["blocks"][0]
   assert block["question_id"] == "q1"
@@ -1234,7 +1237,7 @@ def test_persist_error_writes_error_snapshot_to_row(actor):
   )
   assert _await(fut) is True
   chat = _load_chat()
-  blocks = chat["messages"][-1]["blocks"]
+  blocks = chat["live_assistant"]["blocks"]
   assert any(
     b.get("type") == "error" and b.get("content") == "provider error"
     for b in blocks

@@ -4,7 +4,8 @@ function shortSha(value) {
 }
 
 export function platformVersionIdentity(platform, version) {
-  const syncedSha = shortSha(platform?.recorded_upstream_sha)
+  const syncedSha = shortSha(platform?.contained_upstream_sha)
+    || shortSha(platform?.recorded_upstream_sha)
   const servedSha = shortSha(version?.served_sha) || shortSha(version?.sha)
   return {
     primarySha: syncedSha || servedSha,

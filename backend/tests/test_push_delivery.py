@@ -1,4 +1,5 @@
 from app import models
+from app.database import engine
 from app.push import notify_owner
 
 
@@ -19,8 +20,10 @@ def _owner_with_subscription(db):
 def test_notify_owner_sends_normal_agent_push(db, auth, monkeypatch):
   owner = _owner_with_subscription(db)
   sent = []
+  baseline = engine.pool.checkedout()
 
   def fake_send_push(subscription_info, payload):
+    assert engine.pool.checkedout() == baseline
     sent.append((subscription_info, payload))
     return True
 

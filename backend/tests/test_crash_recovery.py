@@ -106,6 +106,29 @@ def test_reconcile_finalizes_running_tool_block(db):
   assert any(b["type"] == "error" for b in blocks)
 
 
+def test_reconcile_merges_bounded_live_snapshot_before_restart_note(db):
+  _make_chat(
+    db,
+    "live-snapshot",
+    run_status="running",
+    messages=[{"role": "user", "content": "keep this", "ts": 1}],
+    live_assistant={
+      "role": "assistant",
+      "blocks": [{"type": "text", "content": "partial survives"}],
+      "ts": 2,
+    },
+  )
+
+  assert chat_mod.reconcile_interrupted_chats(db) == ["live-snapshot"]
+
+  db.expire_all()
+  row = db.get(models.Chat, "live-snapshot")
+  assert row.live_assistant is None
+  assert row.messages[-1]["ts"] == 2
+  assert row.messages[-1]["blocks"][0]["content"] == "partial survives"
+  assert row.messages[-1]["blocks"][-1]["type"] == "error"
+
+
 def test_reconcile_appends_turn_when_no_assistant_message(db):
   """If the process died before any assistant content persisted, the
   interruption becomes a standalone assistant turn rather than mutating

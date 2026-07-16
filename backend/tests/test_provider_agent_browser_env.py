@@ -1,6 +1,7 @@
 from app.chat import (
   DEFAULT_VIEWPORT_HEIGHT,
   DEFAULT_VIEWPORT_WIDTH,
+  bounded_agent_browser_args,
   viewport_env,
 )
 from app.providers import ClaudeProvider, CodexProvider
@@ -51,6 +52,12 @@ def test_claude_and_codex_use_same_agent_browser_session_name(tmp_path):
 
   assert claude_env["AGENT_BROWSER_SESSION"] == "chat-same-chat"
   assert codex_env["AGENT_BROWSER_SESSION"] == "chat-same-chat"
+
+
+def test_browser_cache_defaults_preserve_operator_flags_and_overrides():
+  assert bounded_agent_browser_args("--no-sandbox,--disk-cache-size=123") == (
+    "--no-sandbox,--disk-cache-size=123,--media-cache-size=16777216"
+  )
 
 
 # VIEWPORT_WIDTH/HEIGHT belong to the same agent-browser env contract:

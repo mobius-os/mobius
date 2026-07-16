@@ -11,12 +11,39 @@ container image. For ad-hoc DB queries the agent should use raw
 `sqlite3` from stdlib — that path doesn't touch this file at all.
 """
 
+import logging
+import os
+import threading
+import time
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import get_settings
+
+
+_log = logging.getLogger(__name__)
+_request_label: ContextVar[str] = ContextVar(
+  "mobius_database_request_label", default="background",
+)
+_checkout_warn_seconds = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
+_pool_metrics_lock = threading.Lock()
+_pool_metrics = {
+  "checkouts": 0,
+  "long_checkouts": 0,
+  "max_checkout_ms": 0,
+  "last_long_checkout": None,
+}
+
+
+def set_database_request_label(label: str) -> Token:
+  return _request_label.set(label)
+
+
+def reset_database_request_label(token: Token) -> None:
+  _request_label.reset(token)
 
 
 def _make_engine():
@@ -40,6 +67,38 @@ def _make_engine():
   eng = create_engine(
     settings.database_url, connect_args=connect_args, **pool_kwargs
   )
+
+  @event.listens_for(eng, "checkout")
+  def _track_checkout(_dbapi_conn, connection_record, _connection_proxy):
+    label = _request_label.get()
+    connection_record.info["mobius_checkout"] = (time.monotonic(), label)
+    with _pool_metrics_lock:
+      _pool_metrics["checkouts"] += 1
+
+  @event.listens_for(eng, "checkin")
+  def _track_checkin(_dbapi_conn, connection_record):
+    started = connection_record.info.pop("mobius_checkout", None)
+    if not started:
+      return
+    started_at, label = started
+    elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
+    is_long = elapsed_ms >= round(_checkout_warn_seconds * 1000)
+    with _pool_metrics_lock:
+      _pool_metrics["max_checkout_ms"] = max(
+        _pool_metrics["max_checkout_ms"], elapsed_ms,
+      )
+      if is_long:
+        _pool_metrics["long_checkouts"] += 1
+        _pool_metrics["last_long_checkout"] = {
+          "request": label,
+          "duration_ms": elapsed_ms,
+        }
+    if is_long:
+      _log.warning(
+        "Database connection checked out for %dms by %s",
+        elapsed_ms,
+        label,
+      )
   if is_sqlite:
     # SQLite under concurrent writes:
     # - WAL lets readers run while a single writer writes (no
@@ -68,6 +127,39 @@ engine = _make_engine()
 SessionLocal = sessionmaker(
   autocommit=False, autoflush=False, bind=engine
 )
+
+
+def database_pool_snapshot() -> dict:
+  """Owner-safe pool pressure and checkout-lifetime diagnostics."""
+  pool = engine.pool
+
+  def call_metric(name: str):
+    method = getattr(pool, name, None)
+    if not callable(method):
+      return None
+    try:
+      return int(method())
+    except (TypeError, ValueError):
+      return None
+
+  with _pool_metrics_lock:
+    lifetime = {
+      "checkouts": _pool_metrics["checkouts"],
+      "long_checkouts": _pool_metrics["long_checkouts"],
+      "max_checkout_ms": _pool_metrics["max_checkout_ms"],
+      "last_long_checkout": _pool_metrics["last_long_checkout"],
+    }
+  current = {
+    "checked_out": call_metric("checkedout"),
+    "checked_in": call_metric("checkedin"),
+    "size": call_metric("size"),
+    "overflow": call_metric("overflow"),
+  }
+  return {
+    "type": type(pool).__name__,
+    "current": {key: value for key, value in current.items() if value is not None},
+    "lifetime": lifetime,
+  }
 
 
 class Base(DeclarativeBase):
@@ -113,6 +205,12 @@ def run_migrations(eng) -> None:
       with eng.connect() as conn:
         conn.execute(text(
           "ALTER TABLE chats ADD COLUMN title_locked BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        conn.commit()
+    if "live_assistant" not in chats_cols:
+      with eng.connect() as conn:
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN live_assistant JSON NULL"
         ))
         conn.commit()
   if "chat_id" not in apps_cols:

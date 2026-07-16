@@ -79,6 +79,10 @@ class Chat(Base):
   # drops back to the agent summary / first message and gets re-derived.
   title_locked = Column(Boolean, nullable=False, default=False)
   messages = Column(JSON, nullable=False, default=list)
+  # Current in-flight assistant state is separate from immutable history so a
+  # streaming update never rewrites every prior message. Finalize and startup
+  # recovery merge this bounded value into `messages`.
+  live_assistant = Column(JSON, nullable=True, default=None)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)

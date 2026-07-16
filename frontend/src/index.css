@@ -119,13 +119,6 @@ body, h1, h2, h3, h4, h5, h6, p, ul, ol, li, dl, dd, figure, blockquote, fieldse
   padding: var(--menu-item-padding, 0.375rem 0.5rem);
 }
 
-/* Always-hidden scrollbars across the whole app. The owner's standing
-   preference: the on-scroll thin-bar reveal that lived here (toggled
-   by the now-deleted useScrollbarAutohide hook via .is-scrolling on
-   :root) is removed — scrollbars never show, in any surface. */
-html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
-*::-webkit-scrollbar { width: 0; height: 0; }
-
 /* Paint every top-level layer with the active app background. Android gesture
    navigation can expose the root/html backing layer at the bottom edge during
    keyboard and viewport-fit transitions; leaving it unpainted leaks the UA's
@@ -257,13 +250,10 @@ html {
   background-color: var(--bg, #0d0d0d);
 }
 
-/* Prevent iOS Safari (which ignores user-scalable=no in the viewport
-   meta) from intercepting two-finger spread as a page-level pinch-zoom.
-   pan-x pan-y allows one-finger scrolling; pinch-zoom is blocked at the
-   document root. Elements that implement their own pinch (e.g.
-   .lightbox-image) declare touch-action: none directly and override this. */
+/* Keep taps responsive while preserving native pinch zoom. Elements that own
+   a custom gesture (for example the image lightbox) override this locally. */
 html, body {
-  touch-action: pan-x pan-y;
+  touch-action: manipulation;
 }
 
 /* Accessibility: respect prefers-reduced-motion. Collapses all
@@ -424,21 +414,6 @@ textarea:focus-visible {
    (ChatView.css invariant #6) says ONE focus halo, on
    `.chat__pill:focus-within` only. Do not reintroduce a form-
    level focus ring without re-reading that contract. */
-
-/* Hide drawer scrollbars cleanly */
-.drawer,
-.drawer__body,
-.drawer__group,
-.drawer *[class*="scroll"] {
-  scrollbar-width: none;
-}
-.drawer::-webkit-scrollbar,
-.drawer__body::-webkit-scrollbar,
-.drawer__group::-webkit-scrollbar,
-.drawer *[class*="scroll"]::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
 
 .shell__wordmark {
   color: var(--text);

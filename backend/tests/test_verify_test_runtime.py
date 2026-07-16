@@ -62,6 +62,22 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert 'python3", "/app/scripts/verify_test_runtime.py"' in compose
 
 
+def test_test_wrapper_isolates_compose_and_rejects_stale_images():
+  wrapper = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
+  assert 'TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-' in wrapper
+  assert 'TEST_IMAGE="${MOBIUS_IMAGE:-mobius-test:ci}"' in wrapper
+  assert 'docker compose -p "${TEST_PROJECT}"' in wrapper
+  assert "test-image-fingerprint.sh" in wrapper
+  assert "the test runner never rebuilds" in wrapper
+
+
+def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
+  hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
+    encoding="utf-8"
+  )
+  assert 'PYTHONPYCACHEPREFIX="$PP_TMP/pycache"' in hook
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"

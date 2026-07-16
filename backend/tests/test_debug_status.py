@@ -24,9 +24,30 @@ def test_debug_status_shape_matches_golden(client, auth):
   r = client.get("/api/debug/status", headers=auth)
 
   assert r.status_code == 200
+  payload = r.json()
+  pool = payload.pop("database_pool")
+  assert pool["type"]
+  assert pool["current"]["checked_out"] >= 1
+  assert pool["lifetime"]["checkouts"] >= 1
+  assert pool["lifetime"]["long_checkouts"] >= 0
+  assert pool["lifetime"]["max_checkout_ms"] >= 0
+  watcher = payload.pop("frontend_watcher")
+  assert watcher["status"] in {
+    "starting", "waiting_for_lease", "running", "stopped", "unavailable",
+  }
+  assert isinstance(watcher["running"], bool)
+  allocator = payload.pop("allocator")
+  assert allocator["source"] in {
+    "not_attempted", "environment", "mallopt", "mallopt_rejected",
+    "unsupported", "invalid",
+  }
+  assert isinstance(allocator["applied"], bool)
+  browser_profiles = payload.pop("browser_profiles")
+  assert browser_profiles["profile_count"] >= 0
+  assert browser_profiles["reclaimed_bytes"] >= 0
   golden_path = Path(__file__).with_name("golden_debug_status.json")
   expected = json.loads(golden_path.read_text(encoding="utf-8"))
-  assert r.json() == expected
+  assert payload == expected
 
 
 def test_debug_status_surfaces_media_migration_failure(client, auth):

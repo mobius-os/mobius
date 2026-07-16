@@ -30,9 +30,10 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.75
-_STAGING_POLL_SECS = 0.5
+_STAGING_POLL_SECS = 1.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
+_WATCH_LEASE_RETRY_INITIAL = 1.0
 _FRONTEND_DIR = Path("/data/platform/frontend")
 _DIST_DIR = _FRONTEND_DIR / "dist"
 _STAGING_DIST_DIR = _FRONTEND_DIR / ".dist-staging"
@@ -55,6 +56,7 @@ _PUBLISH_LOCK = threading.RLock()
 _ACTIVE_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
+_ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
 
 
 class _StagingChangedDuringPublish(RuntimeError):
@@ -83,6 +85,10 @@ def _acquire_watch_lock():
     raise RuntimeError(
       f"frontend warm watcher already active for {_FRONTEND_DIR}"
     ) from exc
+  lock_fh.seek(0)
+  lock_fh.truncate()
+  lock_fh.write(f"{os.getpid()}\n")
+  lock_fh.flush()
   return lock_fh
 
 
@@ -249,9 +255,10 @@ def _vite_env(
   # chokidar underneath, so force polling rather than reintroducing a Python
   # source watcher beside Vite's own watch mode.
   env["CHOKIDAR_USEPOLLING"] = "1"
-  # 500ms remains below the watcher's existing publish debounce, while halving
-  # polling churn across the large editable frontend tree.
-  env["CHOKIDAR_INTERVAL"] = env.get("CHOKIDAR_INTERVAL", "500")
+  # One second remains below the publication debounce and is fast enough for
+  # an interactive agent edit, while halving both source-tree stat churn and
+  # the staging signature scans versus the prior 500ms cadence.
+  env["CHOKIDAR_INTERVAL"] = env.get("CHOKIDAR_INTERVAL", "1000")
   # Rollup's warm watch graph is intentionally long-lived, but V8 otherwise
   # expands toward the container limit and retains close to a gigabyte. Keep a
   # predictable ceiling while preserving an explicit operator override.
@@ -476,9 +483,10 @@ class _FrontendHandler:
         self._watch_thread.start()
         self._stage_thread.start()
       except Exception:
-        fcntl.flock(self._watch_lock_fh, fcntl.LOCK_UN)
-        self._watch_lock_fh.close()
-        self._watch_lock_fh = None
+        # One thread may already be running when the second .start() fails.
+        # close() terminates and joins that partial startup before releasing
+        # the lease, so a retry cannot inherit an orphan poll/watch thread.
+        self.close()
         raise
 
   def close(self) -> None:
@@ -507,6 +515,29 @@ class _FrontendHandler:
     self._refresh_staging_signature()
     self._cancel_pending_publish()
     return self._publish_dirty_sync(reason)
+
+  def health(self) -> dict:
+    with self._proc_lock:
+      proc = self._watch_proc
+      pid = proc.pid if proc is not None and proc.poll() is None else None
+    rss_bytes = None
+    if pid is not None:
+      try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+          if line.startswith("VmRSS:"):
+            rss_bytes = int(line.split()[1]) * 1024
+            break
+      except (OSError, ValueError, IndexError):
+        pass
+    with self._state_lock:
+      staging_dirty = self._staging_dirty
+    return {
+      "running": pid is not None,
+      "pid": pid,
+      "rss_bytes": rss_bytes,
+      "staging_dirty": staging_dirty,
+      "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
+    }
 
   def _on_loop_thread(self) -> bool:
     return threading.get_ident() == self._loop_thread_id
@@ -720,6 +751,109 @@ def start_watcher(
       _ACTIVE_WATCHER = handler
   log.info("frontend warm watcher started on %s", _FRONTEND_DIR)
   return None, handler
+
+
+class _FrontendSupervisor:
+  """Retries lease acquisition and exposes watcher health to operators."""
+
+  def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    self._loop = loop
+    self._handler: _FrontendHandler | None = None
+    self._task: asyncio.Task | None = None
+    self._closed = asyncio.Event()
+    self._status = "starting"
+    self._last_error: str | None = None
+    self._retry_in_seconds: float | None = None
+
+  async def start(self) -> None:
+    if self._attempt_start():
+      return
+    self._task = self._loop.create_task(self._retry_loop())
+
+  def _attempt_start(self) -> bool:
+    try:
+      _, handler = start_watcher(self._loop)
+    except Exception as exc:
+      self._status = "waiting_for_lease"
+      self._last_error = str(exc)
+      log.warning("frontend watcher unavailable; will retry: %s", exc)
+      return False
+    self._handler = handler
+    self._status = "running"
+    self._last_error = None
+    self._retry_in_seconds = None
+    return True
+
+  async def _retry_loop(self) -> None:
+    backoff = _WATCH_LEASE_RETRY_INITIAL
+    while not self._closed.is_set():
+      self._retry_in_seconds = backoff
+      try:
+        await asyncio.wait_for(self._closed.wait(), timeout=backoff)
+        return
+      except asyncio.TimeoutError:
+        pass
+      if self._attempt_start():
+        return
+      backoff = min(backoff * 2, _WATCH_RESTART_BACKOFF_MAX)
+
+  def close(self) -> None:
+    self._status = "stopped"
+    self._closed.set()
+    if self._task is not None:
+      self._task.cancel()
+      self._task = None
+    if self._handler is not None:
+      self._handler.close()
+      self._handler = None
+    global _ACTIVE_SUPERVISOR
+    if _ACTIVE_SUPERVISOR is self:
+      _ACTIVE_SUPERVISOR = None
+
+  def health(self) -> dict:
+    detail = self._handler.health() if self._handler is not None else {
+      "running": False,
+      "pid": None,
+      "rss_bytes": None,
+      "staging_dirty": False,
+      "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
+    }
+    return {
+      "status": self._status,
+      "last_error": self._last_error,
+      "retry_in_seconds": self._retry_in_seconds,
+      **detail,
+    }
+
+
+async def start_supervised_watcher(
+  loop: asyncio.AbstractEventLoop,
+) -> tuple[None, _FrontendSupervisor]:
+  global _ACTIVE_SUPERVISOR
+  supervisor = _FrontendSupervisor(loop)
+  _ACTIVE_SUPERVISOR = supervisor
+  await supervisor.start()
+  return None, supervisor
+
+
+def watcher_health() -> dict:
+  supervisor = _ACTIVE_SUPERVISOR
+  if supervisor is not None:
+    return supervisor.health()
+  watcher = _active_watcher()
+  if watcher is not None:
+    return {"status": "running", "last_error": None,
+            "retry_in_seconds": None, **watcher.health()}
+  return {
+    "status": "stopped",
+    "running": False,
+    "pid": None,
+    "rss_bytes": None,
+    "staging_dirty": False,
+    "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
+    "last_error": None,
+    "retry_in_seconds": None,
+  }
 
 
 def _cli() -> int:

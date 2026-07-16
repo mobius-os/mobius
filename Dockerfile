@@ -103,6 +103,13 @@ RUN git clone --depth 1 --branch v1.0.6 \
 
 WORKDIR /app
 
+# Keep the dependency-defining Dockerfile in the image so the test wrapper can
+# prove that a prebuilt test image matches the checkout before starting a long
+# suite.  Application source is bind-mounted for tests; this manifest covers
+# the inputs whose effects are baked into the image and cannot be overridden by
+# that mount.
+COPY Dockerfile ./test-image-inputs/Dockerfile
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -344,6 +351,23 @@ RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
 # /data/platform/frontend/node_modules can symlink to it at runtime.
 COPY frontend/ ./shell-src/
 RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
+
+# Content fingerprint for scripts/test.sh.  Hash file contents (not paths) in
+# the same stable order as scripts/test-image-fingerprint.sh so host and image
+# layouts may differ without changing the result.
+RUN { \
+      sha256sum /app/test-image-inputs/Dockerfile | cut -d' ' -f1; \
+      sha256sum /app/requirements.txt | cut -d' ' -f1; \
+      sha256sum /app/shell-src/package.json | cut -d' ' -f1; \
+      sha256sum /app/shell-src/package-lock.json | cut -d' ' -f1; \
+      for f in \
+        build-react-vendor.mjs build-codemirror-vendor.mjs \
+        build-recharts-vendor.mjs build-date-fns-vendor.mjs \
+        build-d3-geo-vendor.mjs build-marked-vendor.mjs \
+        build-dompurify-vendor.mjs; do \
+          sha256sum "/app/scripts/$f" | cut -d' ' -f1; \
+      done; \
+    } | sha256sum | cut -d' ' -f1 > /app/test-image-fingerprint
 
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The

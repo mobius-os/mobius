@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app import activity, chat_log_redaction as redact, models
+from app.chat_transcript import materialized_messages
 from app.database import get_db
 from app.deps import Principal, get_principal, require_app_permission
 from app.resource_access import get_active_chat_or_404
@@ -83,7 +84,7 @@ def list_chat_logs(
 
   items = []
   for c in rows:
-    msgs = c.messages or []
+    msgs = materialized_messages(c)
     items.append({
       "id": c.id,
       # Title is derived from the first user message → scrub it like
@@ -125,7 +126,7 @@ def get_chat_log(
   _gate_summary(principal, db)
 
   chat = get_active_chat_or_404(db, chat_id)
-  messages = redact.redact_messages(chat.messages or [])
+  messages = redact.redact_messages(materialized_messages(chat))
 
   if principal.app_id is not None:
     activity.log_event(

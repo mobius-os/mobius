@@ -433,6 +433,24 @@ def test_check_for_updates_syncs_marker_when_local_already_contains_origin(clone
   assert pu.recorded_upstream_sha(platform) == new
 
 
+def test_status_reports_contained_origin_when_updater_marker_is_stale(clone_env):
+  origin, platform = clone_env
+  stale_marker = pu.recorded_upstream_sha(platform)
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 89")})
+  _git(platform, "fetch", "-q", "origin")
+  _git(platform, "merge", "--ff-only", "-q", "origin/main")
+  _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_B = 2", "LINE_B = 'LOCAL STATUS'")})
+  _git(platform, "branch", "-f", "upstream", stale_marker)
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  assert status["recorded_upstream_sha"] == stale_marker
+  assert status["contained_upstream_sha"] == new
+
+
 # --- owner Apply rebuilds stale frontend dist after frontend updates ----------
 
 def test_touched_frontend_detects_frontend_only_changes(clone_env):

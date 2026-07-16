@@ -676,7 +676,8 @@ def get_chat(
   of the first message in this page) and `total` (total message count).
   """
   chat = get_active_chat_or_404(db, chat_id)
-  all_msgs = chat.messages or []
+  from app.chat_transcript import materialized_messages
+  all_msgs = materialized_messages(chat)
   total = len(all_msgs)
   if before is not None:
     start = max(0, before - limit)
