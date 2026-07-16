@@ -44,7 +44,11 @@ fetch('/services/tandoor/api/ping',{credentials:'same-origin'})
     self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'; frame-ancestors 'self'")
     self.send_header(
       "Set-Cookie",
-      "fake_tandoor=session; Domain=.localhost; Path=/services/tandoor; SameSite=Lax",
+      # Chromium treats localhost and tandoor.localhost as cross-site. Model a
+      # cookie that an embedded service may set in that topology; the proxy
+      # still has to remove Domain=.localhost and make it host-only.
+      "fake_tandoor=session; Domain=.localhost; Path=/services/tandoor; "
+      "SameSite=None; Secure",
     )
     self.send_header("Content-Length", str(len(body)))
     self.end_headers()

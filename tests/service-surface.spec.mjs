@@ -272,6 +272,8 @@ test('service adapter stays branded until heartbeat, then preserves cookies and 
     expect(cookie?.domain).toBe(new URL(SERVICE_ORIGIN).hostname)
     expect(cookie?.domain.startsWith('.')).toBe(false)
     expect(cookie?.path).toBe('/services/tandoor')
+    expect(cookie?.sameSite).toBe('None')
+    expect(cookie?.secure).toBe(true)
     const childHost = new URL(SERVICE_ORIGIN)
     childHost.hostname = `child.${childHost.hostname}`
     childHost.pathname = '/services/tandoor/'
