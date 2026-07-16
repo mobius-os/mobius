@@ -89,6 +89,7 @@ _GQL_NOISE = re.compile(
 )
 _GQL_WRITE_OP = re.compile(r"\b(?:mutation|subscription)\b", re.IGNORECASE)
 _CONTRIBUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_MAX_CONTRIBUTION_RECORD_BYTES = 64 * 1024
 _GITHUB_REPO = re.compile(
   r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
 )
@@ -167,10 +168,17 @@ def _record_paths(app_id: int, record_id: str) -> tuple[Path, Path]:
 
 def _read_record(path: Path) -> dict:
   try:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    with path.open("rb") as handle:
+      raw = handle.read(_MAX_CONTRIBUTION_RECORD_BYTES + 1)
   except FileNotFoundError:
     raise HTTPException(status_code=404, detail="Contribution not found.")
-  except (OSError, ValueError):
+  except OSError:
+    raise HTTPException(status_code=400, detail="Contribution record is invalid.")
+  if len(raw) > _MAX_CONTRIBUTION_RECORD_BYTES:
+    raise HTTPException(status_code=400, detail="Contribution record is too large.")
+  try:
+    data = json.loads(raw)
+  except (UnicodeDecodeError, ValueError):
     raise HTTPException(status_code=400, detail="Contribution record is invalid.")
   if not isinstance(data, dict):
     raise HTTPException(status_code=400, detail="Contribution record is invalid.")
@@ -2170,7 +2178,11 @@ def _review_status_problem(
   }
 
 
-def _inspect_prepared_review(record: dict, diff_path: Path) -> dict:
+def _inspect_prepared_review(
+  record: dict,
+  diff_path: Path,
+  github_state: dict,
+) -> dict:
   """Read-only local preflight for one prepared review.
 
   This deliberately stops before every remote/network check. Its job is to
@@ -2196,10 +2208,9 @@ def _inspect_prepared_review(record: dict, diff_path: Path) -> dict:
     _assert_coauthor_trailer(repo, branch)
 
     stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
-    state = github_auth.read_state() or {}
-    login = str(state.get("login") or "")
+    login = str(github_state.get("login") or "")
     if stack and login and _GITHUB_LOGIN.match(login):
-      author_name, author_email = _connected_git_identity(state, login)
+      author_name, author_email = _connected_git_identity(github_state, login)
       _assert_head_attribution(
         repo,
         branch,
@@ -2237,6 +2248,9 @@ async def contribution_review_status(
   branch and stored diff.
   """
   _validate_submit_app(app_id, principal, db)
+  # Authorization is complete. Ledger and git inspection may queue behind app
+  # or source locks, so do not reserve a pooled connection while waiting.
+  db.close()
   contribution_dir = _contributions_dir(app_id)
   async with fs_locks.app_storage_lock(app_id):
     records = []
@@ -2247,6 +2261,9 @@ async def contribution_review_status(
           records.append(record)
 
   prepared = [record for record in records if record.get("status") == "prepared"]
+  # The credential metadata is a file-backed resource shared by every review;
+  # snapshot it once instead of reopening it for each prepared stack layer.
+  github_state = github_auth.read_state() or {}
   structural_problems: dict[str, dict] = {}
   stack_ids = {
     str(((record.get("plan") or {}).get("stack") or {}).get("id") or "")
@@ -2306,6 +2323,7 @@ async def contribution_review_status(
         _inspect_prepared_review,
         record,
         diff_path,
+        github_state,
       ))
 
   return {
@@ -2338,6 +2356,9 @@ async def submit_contribution(
   own storage after the same server-side freshness checks pass.
   """
   expected_nonce = _validate_submit_app(app_id, principal, db)
+  # Never wait for the storage lock while retaining the authorization query's
+  # connection. The nonce is rechecked inside the lock before the claim.
+  db.close()
   async with fs_locks.app_storage_lock(app_id):
     claimed, record_path, diff_path = _claim_record(
       app_id=app_id,
@@ -2425,6 +2446,7 @@ async def submit_contribution_stack(
   deliberately limited to connected owners with upstream push permission.
   """
   expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
   async with fs_locks.app_storage_lock(app_id):
     rows = _claim_stack_records(
       app_id=app_id,
@@ -2432,6 +2454,9 @@ async def submit_contribution_stack(
       db=db,
       expected_nonce=expected_nonce,
     )
+  # Every private layer now has a durable `submitting` claim. The remaining
+  # preflight and GitHub operations are slow and own no database state.
+  db.close()
 
   try:
     repo_paths = sorted({
@@ -2461,6 +2486,7 @@ async def submit_contribution_stack(
         except ContributionSubmitError as exc:
           async with fs_locks.app_storage_lock(app_id):
             _recheck_submit_app(db, app_id, expected_nonce)
+            db.close()
             snapshots = _mark_stack_submit_failure(
               rows,
               exc.message,
@@ -2478,6 +2504,7 @@ async def submit_contribution_stack(
 
         async with fs_locks.app_storage_lock(app_id):
           _recheck_submit_app(db, app_id, expected_nonce)
+          db.close()
           current = _read_record(row["record_path"])
           if current.get("status") != "submitting":
             raise ContributionSubmitError(
@@ -2500,6 +2527,7 @@ async def submit_contribution_stack(
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
       snapshots = _mark_stack_submit_failure(
         rows,
         exc.message,
@@ -2514,6 +2542,7 @@ async def submit_contribution_stack(
     message = "Could not submit this PR stack. Leave feedback so your agent can retry."
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
       snapshots = _mark_stack_submit_failure(rows, message)
     raise HTTPException(
       status_code=500,
@@ -2522,6 +2551,7 @@ async def submit_contribution_stack(
 
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
     snapshots = _stack_record_snapshots(rows)
   return {"records": snapshots, "submitted": submitted_urls}
 
@@ -2539,6 +2569,7 @@ async def cleanup_contribution_staging(
 ):
   """Delete a terminal contribution's disposable local clone only."""
   expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
@@ -2642,8 +2673,12 @@ def _read_record_tolerant(path: Path) -> dict | None:
   """Reads a contribution record, returning None (not raising) on a missing
   or corrupt file so one bad record can't abort a whole refresh sweep."""
   try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
+    with path.open("rb") as handle:
+      raw = handle.read(_MAX_CONTRIBUTION_RECORD_BYTES + 1)
+    if len(raw) > _MAX_CONTRIBUTION_RECORD_BYTES:
+      return None
+    data = json.loads(raw)
+  except (OSError, UnicodeDecodeError, ValueError):
     return None
   return data if isinstance(data, dict) else None
 

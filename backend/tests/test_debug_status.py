@@ -39,7 +39,7 @@ def test_debug_status_shape_matches_golden(client, auth):
   allocator = payload.pop("allocator")
   assert allocator["source"] in {
     "not_attempted", "environment", "mallopt", "mallopt_rejected",
-    "unsupported", "invalid",
+    "unsupported", "environment_invalid",
   }
   assert isinstance(allocator["applied"], bool)
   browser_profiles = payload.pop("browser_profiles")

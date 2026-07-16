@@ -38,6 +38,7 @@ from app.chat_writer import (
   get_writer,
 )
 from app.database import SessionLocal
+from app.chat_transcript import materialized_messages
 from app.runner_registry import RunnerKind, registry
 
 
@@ -139,7 +140,7 @@ def _chat_row(chat_id: str):
     row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     return {
       "run_status": row.run_status,
-      "messages": list(row.messages or []),
+      "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
     }
   finally:

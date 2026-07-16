@@ -38,6 +38,7 @@ from app.broadcast import (
   set_active_broadcast,
 )
 from app.chat_writer import Barrier, get_writer
+from app.chat_transcript import materialized_messages
 from app.deps import Principal
 from app.routes.notify import NotifyBody
 
@@ -174,8 +175,9 @@ def test_non_question_save_routes_to_actor_off_loop(db, chat):
   _drain_actor()
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-  assert row.messages and row.messages[-1].get("role") == "assistant"
-  assert any(b.get("type") == "tool" for b in row.messages[-1]["blocks"])
+  messages = materialized_messages(row)
+  assert messages and messages[-1].get("role") == "assistant"
+  assert any(b.get("type") == "tool" for b in messages[-1]["blocks"])
 
 
 def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
@@ -192,20 +194,20 @@ def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
 
   seen: dict = {}
   from app import chat_writer as chat_writer_mod
-  original = chat_writer_mod.update_last_assistant_message
+  original = chat_writer_mod.update_live_assistant
 
   def spy(db_, chat_id, message):
     seen["commit_thread"] = threading.get_ident()
     return original(db_, chat_id, message)
 
-  chat_writer_mod.update_last_assistant_message = spy
+  chat_writer_mod.update_live_assistant = spy
   try:
     seen["loop_thread"] = threading.get_ident()
     sink._last_save = 0.0
     sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
     _drain_actor()
   finally:
-    chat_writer_mod.update_last_assistant_message = original
+    chat_writer_mod.update_live_assistant = original
 
   assert "commit_thread" in seen, "the actor never ran the commit"
   assert seen["commit_thread"] != seen["loop_thread"], (
@@ -250,7 +252,7 @@ def test_error_event_routes_to_persist_error(db, chat):
 
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-  blocks = row.messages[-1]["blocks"]
+  blocks = materialized_messages(row)[-1]["blocks"]
   assert any(
     b.get("type") == "error" and b.get("message") == "boom" for b in blocks
   )

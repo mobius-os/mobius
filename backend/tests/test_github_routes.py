@@ -843,6 +843,59 @@ def test_review_status_catches_local_drift_before_send(
   assert (repo / "index.jsx").read_text() == "export default 3\n"
 
 
+def test_review_status_releases_db_before_git_inspection(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _prepared_real_review(app_id, "review-pool")
+  baseline = engine.pool.checkedout()
+  observed = []
+  original = github_routes._inspect_prepared_review
+
+  def inspect(record, diff_path, github_state):
+    observed.append(engine.pool.checkedout())
+    return original(record, diff_path, github_state)
+
+  monkeypatch.setattr(github_routes, "_inspect_prepared_review", inspect)
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert observed == [baseline]
+
+
+def test_review_status_skips_oversized_records_without_loading_them(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id) /
+    "contributions" / "oversized.json"
+  )
+  record_path.parent.mkdir(parents=True, exist_ok=True)
+  record_path.write_text(json.dumps({
+    "id": "oversized",
+    "type": "pr",
+    "status": "prepared",
+    "padding": "x" * (64 * 1024),
+  }))
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["records"] == []
+
+
 def test_review_status_catches_noncanonical_stored_diff(
   client, owner_token,
 ):
@@ -2120,9 +2173,15 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
     }
     _write_contribution(app_id, record_id, record, diff_text)
 
+  baseline = engine.pool.checkedout()
+  preflight_pool_counts = []
+
+  def fake_preflight(rows):
+    preflight_pool_counts.append(engine.pool.checkedout())
+
   monkeypatch.setattr(
     "app.routes.github._preflight_prepared_stack",
-    lambda rows: None,
+    fake_preflight,
   )
   calls = []
 
@@ -2157,6 +2216,7 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
   assert body["records"][1]["last_submit_base_branch"] == (
     f"stack/{stack_id}/01-stream"
   )
+  assert preflight_pool_counts == [baseline]
 
 
 def test_submit_contribution_stack_preserves_open_parent_when_child_fails(

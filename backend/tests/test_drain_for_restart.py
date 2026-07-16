@@ -19,6 +19,7 @@ from app import chat as chat_mod
 from app import models
 from app.broadcast import create_broadcast
 from app.chat_writer import Barrier, get_writer
+from app.chat_transcript import materialized_messages
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
@@ -74,7 +75,7 @@ def _chat(chat_id: str):
   try:
     row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     return {
-      "messages": list(row.messages or []),
+      "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
       "run_status": row.run_status,
     }
