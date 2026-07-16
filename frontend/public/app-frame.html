@@ -280,6 +280,12 @@
        Custom gesture surfaces can still opt into touch-action:none locally. */
     html, body { touch-action: manipulation; }
     html, body, #root { height: 100%; }
+    /* The shell keeps the selected app painted behind its drawer scrim, but the
+       app must not remain an independent touch target while that modal surface
+       is open. The shell also removes the outer iframe from hit-testing; this
+       inner guard closes the nested-frame edge and is toggled by the
+       moebius:frame-interactivity message below. */
+    html[data-mobius-frame-suspended] #root { pointer-events: none !important; }
     /* html must be opaque too (body already is): an inner scroller overscrolling
        on Android otherwise reveals the transparent root as a warm color-scheme
        tint behind app content. Same theme token, so no visible change otherwise. */
@@ -465,6 +471,9 @@
     //      overlay and this frame's error panel becomes visible.
     //   5. parent may later post {type:'moebius:frame-theme', ...}
     //      to update theme without reloading the iframe.
+    //   6. parent posts {type:'moebius:frame-interactivity', interactive}
+    //      whenever a shell modal (currently the navigation drawer) suspends or
+    //      restores direct input without unpainting/reloading the app.
     //
     // Origin check: the opaque iframe still sees the parent shell's concrete
     // origin on incoming postMessage events and rejects every other sender.
@@ -480,6 +489,81 @@
     let tokenRefreshResolve = null;
     let mountedRoot = null;
     let mountedComponent = null;
+    let suspendedScrollFrame = null;
+    const suspendedScrollOffsets = new Map();
+    // Scroll owners involved in the latest direct gesture. Remembering the
+    // composed path lets us stop momentum in an app-owned overflow scroller as
+    // well as the document scroller, without walking every node when the drawer
+    // opens. Nested third-party frames stay covered by the outer iframe guard.
+    const gestureScrollers = new Set();
+
+    function rememberGestureScrollers(event) {
+      gestureScrollers.clear();
+      if (document.scrollingElement) gestureScrollers.add(document.scrollingElement);
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      for (const node of path) {
+        if (!(node instanceof Element)) continue;
+        if (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth) {
+          gestureScrollers.add(node);
+        }
+      }
+    }
+
+    function cancelScrollerMomentum(element) {
+      if (!element) return;
+      const left = element.scrollLeft;
+      const top = element.scrollTop;
+      const maxLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+      const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      // Android's compositor fling is not cancelled by inert or
+      // pointer-events:none, and assigning the SAME scroll offset is a no-op.
+      // A reversible one-pixel nudge is the smallest synchronous scroll that
+      // cancels it while leaving the app at the exact offset the owner saw.
+      if (maxTop > 0) {
+        element.scrollTop = top < maxTop ? top + 1 : Math.max(0, top - 1);
+        element.scrollTop = top;
+      } else if (maxLeft > 0) {
+        element.scrollLeft = left < maxLeft ? left + 1 : Math.max(0, left - 1);
+        element.scrollLeft = left;
+      }
+    }
+
+    function stopSuspendedScrollHold() {
+      if (suspendedScrollFrame !== null) cancelAnimationFrame(suspendedScrollFrame);
+      suspendedScrollFrame = null;
+      suspendedScrollOffsets.clear();
+    }
+
+    function holdSuspendedScroll() {
+      for (const [element, offset] of suspendedScrollOffsets) {
+        element.scrollLeft = offset.left;
+        element.scrollTop = offset.top;
+      }
+      suspendedScrollFrame = requestAnimationFrame(holdSuspendedScroll);
+    }
+
+    function setFrameInteractivity(interactive, suspendScrolling) {
+      document.documentElement.toggleAttribute('data-mobius-frame-suspended', !interactive);
+      stopSuspendedScrollHold();
+      if (interactive || !suspendScrolling) return;
+      if (document.scrollingElement) gestureScrollers.add(document.scrollingElement);
+      for (const scroller of gestureScrollers) {
+        cancelScrollerMomentum(scroller);
+        suspendedScrollOffsets.set(scroller, {
+          left: scroller.scrollLeft,
+          top: scroller.scrollTop,
+        });
+      }
+      // A single DOM scroll can still lose a race with Android's compositor.
+      // Hold the exact offset for the lifetime of the drawer, then release it
+      // when the frame becomes interactive again. This also prevents an app's
+      // own timer from moving its background while the modal surface is open.
+      if (suspendedScrollOffsets.size > 0) holdSuspendedScroll();
+    }
+
+    document.addEventListener('touchstart', rememberGestureScrollers, { capture: true, passive: true });
+    document.addEventListener('pointerdown', rememberGestureScrollers, { capture: true, passive: true });
+    document.addEventListener('wheel', rememberGestureScrollers, { capture: true, passive: true });
 
     function renderMountedComponent() {
       if (!mountedRoot || !mountedComponent || !currentToken) return;
@@ -884,6 +968,10 @@
       }
       if (msg.type === 'moebius:frame-insets') {
         applyInsets(msg.insets);
+        return;
+      }
+      if (msg.type === 'moebius:frame-interactivity') {
+        setFrameInteractivity(msg.interactive === true, msg.suspendScrolling === true);
         return;
       }
       if (msg.type === 'moebius:storage-sync') {

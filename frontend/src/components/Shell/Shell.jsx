@@ -2090,6 +2090,13 @@ export default function Shell() {
               // LRU holds whatever id type planted it, activeAppId whatever
               // navigation set.
               active={activeView === 'canvas' && String(activeAppId) === String(id)}
+              // Keep the selected app painted beneath the modal scrim, but
+              // suspend its iframe interaction while the drawer is open. This
+              // cancels Android kinetic scrolling already in flight (not just
+              // new pointer hits, which inert/pointer-events already block).
+              interactive={activeView === 'canvas'
+                && String(activeAppId) === String(id)
+                && !drawerOpen}
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
               appSlug={apps.find(a => String(a.id) === String(id))?.slug}

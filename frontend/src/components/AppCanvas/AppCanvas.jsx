@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
@@ -62,6 +62,12 @@ import './AppCanvas.css'
 //      component's `theme` value updates, and we postMessage the new
 //      CSS so the iframe refreshes without remounting — preserves
 //      in-app state).
+//
+//   3b. {type: 'moebius:frame-interactivity', interactive} parent → frame
+//      Separates "still painted" from "may receive interaction". When the
+//      drawer opens over the selected app, the frame stays visible beneath the
+//      scrim but synchronously cancels any Android compositor scroll already in
+//      flight. Hidden/incoming frames receive false too.
 //
 // Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-ack` /
 // `nav-push-rejected` / `nav-back`) is handled below — see the
@@ -200,6 +206,11 @@ export default function AppCanvas({
   //     freshly-promoted rebuild) steals chrome/insets from the app on screen.
   // Defaults true so any caller that omits it keeps apps un-paused (back-compat).
   active = true,
+  // Whether the live frame may receive direct interaction. This differs from
+  // `active` while the shell drawer is open: the app remains the visible canvas
+  // behind the scrim, but Android compositor momentum inside a long iframe must
+  // be cancelled so the background cannot keep coasting under the drawer.
+  interactive = active,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered, onAppError,
 }) {
@@ -327,6 +338,8 @@ export default function AppCanvas({
   liveVersionRef.current = swap.liveVersion
   const activeRef = useRef(active)
   activeRef.current = active
+  const interactiveRef = useRef(interactive)
+  interactiveRef.current = interactive
 
   function postToFrame(v, message) {
     // A sandboxed frame without allow-same-origin has an opaque origin, so the
@@ -805,12 +818,32 @@ export default function AppCanvas({
     postToFrame(v, { type: 'moebius:frame-visibility', visible })
   }
 
+  function sendInteractivity(v, enabled, visible = activeRef.current) {
+    postToFrame(v, {
+      type: 'moebius:frame-interactivity',
+      interactive: enabled,
+      suspendScrolling: visible && !enabled,
+    })
+  }
+
   useEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
       sendVisibility(swap.liveVersion, active)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, swap.liveVersion])
+
+  // Layout timing is deliberate. A drawer-open render removes the shell canvas
+  // from hit-testing and sends this message before paint; app-frame.html then
+  // cancels any already-running Android kinetic scroll inside the iframe. A
+  // passive effect left one more compositor frame for Klix's long document to
+  // coast visibly beneath the newly-open drawer.
+  useLayoutEffect(() => {
+    if (loadedDocsRef.current.has(swap.liveVersion)) {
+      sendInteractivity(swap.liveVersion, interactive, active)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, interactive, swap.liveVersion])
 
   useEffect(() => {
     for (const v of framesRef.current.keys()) {
@@ -966,6 +999,11 @@ export default function AppCanvas({
     // here; the live frame gets the real active verdict. Promotion re-sends
     // via the [active, swap.liveVersion] effect above.
     sendVisibility(v, v === liveVersionRef.current ? activeRef.current : false)
+    sendInteractivity(
+      v,
+      v === liveVersionRef.current ? interactiveRef.current : false,
+      v === liveVersionRef.current ? activeRef.current : false,
+    )
   }
 
   // The frames to render: the live (visible) frame, plus a hidden incoming frame
