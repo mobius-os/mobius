@@ -6,6 +6,8 @@ const css = readFileSync(
   new URL('../workspace.css', import.meta.url),
   'utf8',
 )
+const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 
 test('the phone pane switcher keeps a 44px touch target', () => {
   const rule = css.match(/\.workspace__pane-chip\s*\{[\s\S]*?\}/)?.[0] || ''
@@ -17,4 +19,15 @@ test('the workspace menu avoids an oversized border-and-shadow card', () => {
   assert.match(rule, /border:\s*1px/)
   assert.match(rule, /box-shadow:\s*0 4px 8px/)
   assert.doesNotMatch(rule, /box-shadow:[^;]*(?:1[6-9]|[2-9]\d)px/)
+})
+
+test('the workspace menu is labeled, edge-clamped, and arrow-key navigable', () => {
+  assert.match(shell, /aria-label="Tab actions"/)
+  assert.match(shell, /window\.innerWidth - rect\.width - gutter/)
+  assert.match(shell, /e\.key === 'ArrowDown'/)
+  assert.match(shell, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\)/)
+})
+
+test('the compact pane switcher describes its visible pane count', () => {
+  assert.match(chrome, /aria-label=\{`Show panes, \$\{projection\.visibleLeaves\.length\} of \$\{allLeaves\.length\} visible`\}/)
 })

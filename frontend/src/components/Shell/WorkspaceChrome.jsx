@@ -315,8 +315,9 @@ export default function WorkspaceChrome({
           type="button"
           className="workspace__pane-chip"
           style={{ left: chipHostRect.x + chipHostRect.w - 60, top: chipHostRect.y + 5 }}
-          aria-haspopup="dialog"
-          aria-expanded={sheetOpen}
+        aria-haspopup="dialog"
+        aria-expanded={sheetOpen}
+        aria-label={`Show panes, ${projection.visibleLeaves.length} of ${allLeaves.length} visible`}
           onClick={() => setSheetOpen(true)}
         >
           <Layers size={13} aria-hidden="true" />

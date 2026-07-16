@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Minimize2, X, MessageSquare, AppWindow } from 'lucide-react'
 import Drawer from '../Drawer/Drawer.jsx'
@@ -740,6 +740,31 @@ export default function Shell() {
     setTabMenu({ x: e.clientX, y: e.clientY, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
   }, [workspace])
   const closeTabMenu = useCallback(() => setTabMenu(null), [])
+  const tabMenuRef = useRef(null)
+  // A context menu must be keyboard-ready when it appears, and pointer
+  // coordinates near a viewport edge must not place actions off-screen.
+  useLayoutEffect(() => {
+    if (!tabMenu || !tabMenuRef.current) return
+    const menu = tabMenuRef.current
+    const rect = menu.getBoundingClientRect()
+    const gutter = 8
+    menu.style.left = `${Math.max(gutter, Math.min(tabMenu.x, window.innerWidth - rect.width - gutter))}px`
+    menu.style.top = `${Math.max(gutter, Math.min(tabMenu.y, window.innerHeight - rect.height - gutter))}px`
+    menu.querySelector('[role="menuitem"]')?.focus()
+  }, [tabMenu])
+  const handleTabMenuKeyDown = useCallback((e) => {
+    const items = [...(tabMenuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
+    if (items.length === 0) return
+    const current = Math.max(0, items.indexOf(document.activeElement))
+    let next = null
+    if (e.key === 'ArrowDown') next = (current + 1) % items.length
+    else if (e.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = items.length - 1
+    if (next == null) return
+    e.preventDefault()
+    items[next].focus()
+  }, [])
   useEffect(() => {
     if (!tabMenu) return
     const onDown = (e) => { if (!e.target.closest?.('.workspace__menu')) setTabMenu(null) }
@@ -2343,7 +2368,14 @@ export default function Shell() {
         const canOfferSplit = paneModel.WORKSPACE_SPLITS_ENABLED
           && menuPane && menuPane.tabs.length >= 2
         return (
-          <div className="workspace__menu" role="menu" style={{ left: tabMenu.x, top: tabMenu.y }}>
+          <div
+            ref={tabMenuRef}
+            className="workspace__menu"
+            role="menu"
+            aria-label="Tab actions"
+            style={{ left: tabMenu.x, top: tabMenu.y }}
+            onKeyDown={handleTabMenuKeyDown}
+          >
             {canOfferSplit && [
               ['right', 'Split right'], ['left', 'Split left'],
               ['top', 'Split up'], ['bottom', 'Split down'],
