@@ -1,7 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { makeEmbedAuthorizationHandoff } from '../../../public/mobius-runtime.js'
+import {
+  makeEmbedAuthorizationHandoff,
+  makeEmbedFrameReveal,
+} from '../../../public/mobius-runtime.js'
 
 function fakeTimers() {
   let nextId = 0
@@ -118,4 +121,85 @@ test('destroy cancels pending acknowledgement and scheduled retry work', async (
   second.handoff.destroy()
   assert.equal(second.timers.size, 0)
   assert.deepEqual(second.posts.map((post) => post.capability), ['grant-1'])
+})
+
+test('embedded frame reveals only after two committed animation frames', () => {
+  let nextId = 0
+  const frames = new Map()
+  const events = []
+  const reveal = makeEmbedFrameReveal({
+    reveal: () => events.push('revealed'),
+    scheduleFrame: (callback) => {
+      const id = ++nextId
+      frames.set(id, callback)
+      return id
+    },
+    cancelFrame: (id) => frames.delete(id),
+  })
+
+  assert.equal(reveal.ready(() => events.push('ready')), true)
+  assert.equal(reveal.ready(() => events.push('duplicate')), false)
+  assert.deepEqual(events, [])
+
+  let pending = [...frames.entries()]
+  frames.clear()
+  pending[0][1]()
+  assert.deepEqual(events, [], 'first frame only schedules the paint frame')
+
+  pending = [...frames.entries()]
+  frames.clear()
+  pending[0][1]()
+  assert.deepEqual(events, ['revealed', 'ready'])
+})
+
+test('destroyed embedded frame never reveals from queued animation work', () => {
+  let nextId = 0
+  const frames = new Map()
+  let revealed = false
+  const reveal = makeEmbedFrameReveal({
+    reveal: () => { revealed = true },
+    scheduleFrame: (callback) => {
+      const id = ++nextId
+      frames.set(id, callback)
+      return id
+    },
+    cancelFrame: (id) => frames.delete(id),
+  })
+
+  reveal.ready()
+  reveal.destroy()
+  assert.equal(frames.size, 0)
+  assert.equal(revealed, false)
+})
+
+test('visual ready waits for the reveal transition to settle', () => {
+  let nextId = 0
+  const frames = new Map()
+  const events = []
+  let finishTransition = null
+  const reveal = makeEmbedFrameReveal({
+    reveal: () => events.push('revealed'),
+    settle: (done) => {
+      finishTransition = done
+      return () => { finishTransition = null }
+    },
+    scheduleFrame: (callback) => {
+      const id = ++nextId
+      frames.set(id, callback)
+      return id
+    },
+    cancelFrame: (id) => frames.delete(id),
+  })
+
+  reveal.ready(() => events.push('ready'))
+  let pending = [...frames.values()]
+  frames.clear()
+  pending[0]()
+  pending = [...frames.values()]
+  frames.clear()
+  pending[0]()
+  assert.deepEqual(events, ['revealed'])
+
+  finishTransition()
+  assert.deepEqual(events, ['revealed', 'ready'])
 })
