@@ -977,6 +977,10 @@ agent-browser-profiles/
 generated/
 logs/
 cron-logs/
+# Memory is an optional system app, but while installed it owns a durable Git
+# repository here. Keep the outer /data safety-net repo from treating that
+# repository as an untracked submodule; Memory owns its history directly.
+shared/memory/repository/
 # platform/ has its OWN git repo; exclude it from the outer /data repo so
 # `git add -A` from /data doesn't treat it as an untracked submodule. Its source
 # is tracked by its own git, not /data's.
@@ -1009,11 +1013,11 @@ EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
 # Drop accidental nested git repos under /data, but preserve the intentional
-# per-app repos at /data/apps/<slug>/.git and the platform git at
+# per-app repos at /data/apps/<slug>/.git, Memory's optional graph repo at
+# /data/shared/memory/repository/.git, and the platform git at
 # /data/platform/.git. The outer /data repo ignores those repos so `git add -A`
-# does not try to treat them as submodules, while the installer/update path can
-# still keep each manifest-installed app's upstream/main history across
-# container restarts.
+# does not try to treat them as submodules, while their owning lifecycle can
+# still keep history across container restarts.
 # Contribution checkouts under /data/contrib and legacy /data/contributions are
 # intentional durable repos too: prepared review cards point at their exact
 # commits and the approved Send path re-verifies that history before pushing.
@@ -1025,6 +1029,7 @@ chown mobius:mobius /data/.gitignore 2>/dev/null || true
 find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   -type d -name '.git' \
   ! -regex '/data/apps/[^/]+/\.git' \
+  ! -regex '/data/shared/memory/repository/\.git' \
   ! -regex '/data/platform/\.git' \
   ! -path '/data/contrib/*' \
   ! -path '/data/contributions/*' \

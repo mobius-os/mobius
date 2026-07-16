@@ -133,6 +133,14 @@ def test_boot_never_executes_app_owned_cron_declarations():
   assert "Never execute app-owned init-cron.sh at boot" in text
 
 
+def test_boot_preserves_the_optional_memory_apps_git_repository():
+  text = ENTRYPOINT.read_text(encoding="utf-8")
+
+  assert "shared/memory/repository/" in text
+  assert "! -regex '/data/shared/memory/repository/\\.git'" in text
+  assert "Memory's optional graph repo" in text
+
+
 def test_install_rollback_never_executes_app_owned_cron_declarations():
   text = INSTALL.read_text(encoding="utf-8")
   assert '["bash", str(Path(o) / "init-cron.sh")]' not in text
