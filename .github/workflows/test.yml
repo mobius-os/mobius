@@ -61,8 +61,14 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
       - name: Validate bundled Caddy policy
+        # Caddy expands these placeholders inside its container. Keep the
+        # validation values non-empty and production-shaped so both site
+        # blocks and the cross-origin CSP are actually parsed.
         run: >-
           docker run --rm
+          -e DOMAIN=mobius.example.test
+          -e FRONTEND_ORIGIN=https://mobius.example.test
+          -e MOBIUS_SERVICE_TANDOOR_ORIGIN=https://tandoor.example.test
           -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro"
           caddy:2.9-alpine
           caddy validate --config /etc/caddy/Caddyfile
