@@ -22,6 +22,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/steer-queued.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -71,6 +72,7 @@ async function sendMessage(page, text) {
 // events never arrive (the app-canvas spec hit the identical class). These
 // tests mock the network and do not exercise SW behavior, so block it.
 test.use({ serviceWorkers: 'block' })
+attachCleanup()
 
 test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('fast-forward button appears, POSTs force_steer with the right payload, and clears the tray', async ({ page }) => {
@@ -300,6 +302,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     const messagePosts = []
     let streamConnections = 0
+    let durableMessages = []
+    let durablePending = []
+    let durableRunning = false
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -307,6 +312,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       try { body = JSON.parse(req.postData() || '{}') } catch { /* empty */ }
       messagePosts.push(body)
       if (body.force_steer) {
+        durablePending = []
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -316,21 +322,31 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        const message = {
+          role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+        }
+        durableMessages = [message]
+        durableRunning = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'started',
-            message: {
-              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
-            },
+            message,
           }),
         })
       }
+      const pendingMessage = {
+        role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
+      }
+      durablePending = [pendingMessage]
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'queued', ts: QUEUE_TS, position: 1 }),
+        body: JSON.stringify({
+          status: 'queued', ts: QUEUE_TS, position: 1,
+          pending_message: pendingMessage,
+        }),
       })
     })
 
@@ -348,6 +364,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       )
       window.__steerQueuedStreamMock = {
         connections: 0,
+        initialRequested: false,
+        emitInitial: null,
         emitSteer: null,
       }
       window.fetch = async (input, init) => {
@@ -357,10 +375,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           let emitSteer
           const body = new ReadableStream({
             start(controller) {
-              controller.enqueue(encodeSse([
+              const emitInitial = () => controller.enqueue(encodeSse([
                 { type: 'catch_up_done' },
                 { type: 'text', content: preSteer },
               ]))
+              window.__steerQueuedStreamMock.emitInitial = emitInitial
+              if (window.__steerQueuedStreamMock.initialRequested) emitInitial()
               emitSteer = (steeredMessages = []) => {
                 const messages = Array.isArray(steeredMessages) && steeredMessages.length > 0
                   ? steeredMessages
@@ -389,9 +409,55 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     }, { preSteer: PRE_STEER, postSteer: POST_STEER, queuedText: QUEUED_TEXT, queueTs: QUEUE_TS })
 
     await setupChat(page)
-    await newChat(page)
+    const chat = await createTaggedChat(page, 'steer-held-position')
+    expect(chat?.id).toBeTruthy()
+    await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          messages: durableMessages,
+          total: durableMessages.length,
+          offset: 0,
+          running: durableRunning,
+          pending_messages: durablePending,
+        }),
+      })
+    })
+    await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{
+          id: chat.id,
+          title: chat.title,
+          updated_at: new Date().toISOString(),
+          activity_at: new Date().toISOString(),
+          pinned_at: null,
+          has_messages: durableMessages.length > 0,
+          created_by_app_id: null,
+          run_status: durableRunning ? 'running' : 'idle',
+          running: durableRunning,
+        }]),
+      })
+    })
+    await page.goto(`${BASE}/shell/chat/${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 
     await sendMessage(page, 'first message')
+    // A real stream cannot replay assistant output from this turn before the
+    // POST has persisted and acknowledged its canonical user row. Holding the
+    // mock's initial catch-up burst until that row renders keeps the fixture
+    // faithful to that ordering instead of manufacturing a pre-ack replay.
+    await expect(page.locator('.chat__msg--user')).toBeVisible({ timeout: 5000 })
+    await page.evaluate(() => {
+      const mock = window.__steerQueuedStreamMock
+      if (!mock) return
+      mock.initialRequested = true
+      mock.emitInitial?.()
+    })
     await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
     // The pre-steer assistant text streams in.
     await page.waitForFunction(
