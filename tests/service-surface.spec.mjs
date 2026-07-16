@@ -71,7 +71,13 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
   const previousBody = previousConfig.ok() ? await previousConfig.text() : null
   const config = JSON.stringify({
     version: 1,
-    services: { tandoor: { upstream: FAKE_UPSTREAM, public_surface: true } },
+    services: {
+      tandoor: {
+        upstream: FAKE_UPSTREAM,
+        access: 'upstream_auth',
+        public_surface: true,
+      },
+    },
   })
   const writeConfig = body => request.put(
     `${BASE}/api/fs/write?path=local-services.json`,
