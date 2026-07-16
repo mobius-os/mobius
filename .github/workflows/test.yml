@@ -207,16 +207,38 @@ jobs:
           # checkout under test. Checking both the baked identity and the
           # actively served clone prevents a future seed/fallback change from
           # reintroducing false-green or false-red PR checks.
-          curl -fsS http://localhost:8001/api/version | python3 -c '
+          # Compose starts Caddy immediately after the app healthcheck turns
+          # green. On a cold hosted runner, Caddy can accept the first TCP
+          # connection while its upstream transport is still settling and
+          # reset that one request. Treat public proxy readiness as its own
+          # bounded gate instead of assuming app health makes the proxy
+          # synchronously ready.
+          version_file="$RUNNER_TEMP/mobius-test-version.json"
+          identity_ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS --connect-timeout 2 --max-time 4 \
+                 http://localhost:8001/api/version >"$version_file" 2>/dev/null \
+               && python3 - "$version_file" <<'PY'
           import json, os, sys
-          version = json.load(sys.stdin)
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              version = json.load(handle)
           expected = os.environ["GITHUB_SHA"]
           fields = ("sha", "served_sha", "platform_sha")
           wrong = {name: version.get(name) for name in fields if version.get(name) != expected}
           if wrong:
               raise SystemExit(f"runtime identity mismatch: expected {expected}; got {wrong}")
-          print(f"Runtime identity matches checkout: {expected}")
-          '
+          PY
+            then
+              identity_ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$identity_ready" != 1 ]; then
+            echo "Public test proxy did not expose the expected runtime identity." >&2
+            exit 1
+          fi
+          echo "Runtime identity matches checkout: $GITHUB_SHA"
 
       - name: Set up Node with npm cache
         uses: actions/setup-node@v5
