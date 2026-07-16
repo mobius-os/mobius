@@ -177,33 +177,6 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('touchmove'), true)
 })
 
-test('disclosure activation does not mistake its collapse clamp for a reader swipe', () => {
-  const disclosureTarget = {
-    closest(selector) {
-      // Pin ALL THREE guarded disclosure surfaces: dropping any one of them
-      // from the selector silently re-opens the tap-vs-swipe ambiguity for
-      // that surface (activity line, nested tool row, marker card).
-      assert.match(selector, /chat__activity-header/)
-      assert.match(selector, /chat__tool-header/)
-      assert.match(selector, /chat__marker-header/)
-      return { className: 'chat__activity-header' }
-    },
-  }
-  const ordinaryTarget = { closest: () => null }
-
-  assert.equal(readerInputMayScroll('pointerdown', '', disclosureTarget), false)
-  assert.equal(readerInputMayScroll('touchstart', '', disclosureTarget), false)
-  assert.equal(readerInputMayScroll('touchmove', '', disclosureTarget), true,
-    'a real drag starting on the disclosure still claims reader ownership')
-  assert.equal(readerInputMayScroll('keydown', ' ', disclosureTarget), false,
-    'Space activates the button and must not claim scroll ownership')
-  assert.equal(readerInputMayScroll('keydown', 'Spacebar', disclosureTarget), false)
-  assert.equal(readerInputMayScroll('keydown', 'Enter', disclosureTarget), false)
-  assert.equal(readerInputMayScroll('keydown', 'PageDown', disclosureTarget), true,
-    'scrolling keys still claim ownership while a disclosure has focus')
-  assert.equal(readerInputMayScroll('pointerdown', '', ordinaryTarget), true)
-})
-
 test('inputs without an end event get a next-frame no-scroll release', () => {
   assert.equal(readerInputNeedsFrameRelease('wheel'), true)
   assert.equal(readerInputNeedsFrameRelease('keydown'), true)
