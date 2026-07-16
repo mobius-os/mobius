@@ -19,7 +19,11 @@ import {
   readStoredStreamSnapshot,
   writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
+  flushStoredStreamSnapshot,
+  registerMountedChat,
+  unregisterMountedChat,
 } from './streamSnapshotCache.js'
+import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
 
 // Characters revealed per frame at 60fps.
@@ -504,6 +508,29 @@ export default function useStreamConnection(chatId, {
     lastGoodItemsRef.current = stored
     _setStreamItems(stored)
   }, [chatId])
+
+  // Multi-pane snapshot throttle lifecycle (design §2 "Perf budget"). Counting
+  // this mounted ChatView arms the >=250ms trailing-edge throttle in
+  // streamSnapshotCache ONLY once a second chat is mounted; a lone chat writes
+  // synchronously (byte-identical). The flush half of the contract runs here:
+  // pagehide and the shell-reload handoff must land the pending trailing write
+  // synchronously, and so must this hook's own unmount — otherwise the
+  // remount/reconnect fallback could roll back to a stale frame across the
+  // handoff. ChatView drives the visibility-swap flush (a pane hidden) via
+  // flushStreamSnapshot below; the terminal-promotion flush lives in the `done`
+  // / EOF paths.
+  useEffect(() => {
+    registerMountedChat()
+    const flushSelf = () => flushStoredStreamSnapshot(activeStreamChatIdRef.current)
+    window.addEventListener('pagehide', flushSelf)
+    window.addEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
+    return () => {
+      window.removeEventListener('pagehide', flushSelf)
+      window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, flushSelf)
+      flushSelf()
+      unregisterMountedChat()
+    }
+  }, [])
 
   useEffect(() => {
     function trackMaxHeight() {
@@ -1002,6 +1029,11 @@ export default function useStreamConnection(chatId, {
             // next turn (a queued continuation streams on the same hook and
             // must not inherit a stale answer for a re-used question key).
             answersByQuestionKeyRef.current.clear()
+            // Terminal promotion (design §2 flush contract): land the final
+            // streamed frame synchronously before the promote, so a reload
+            // landing between `done` and ChatView's clearStreamItems restores
+            // the terminal content, not a coalesced-away earlier frame.
+            flushStoredStreamSnapshot(activeStreamChatIdRef.current)
             // Promote before flipping `isStreaming` false. `flushBuffer()`,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
             // synchronous, so the old rAF delay was unnecessary and created a
@@ -1031,7 +1063,9 @@ export default function useStreamConnection(chatId, {
       if (!wantsReconnectRef.current) {
         // EOF without an explicit done is still terminal here. Promote and
         // clear running state in the same batch so the final live row does not
-        // briefly collapse into the generic thinking dots.
+        // briefly collapse into the generic thinking dots. Flush the pending
+        // trailing snapshot first (terminal-promotion flush, design §2).
+        flushStoredStreamSnapshot(activeStreamChatIdRef.current)
         clearReconnectingNote()
         onStreamEndRef.current?.()
         setIsStreaming(false)
@@ -1474,6 +1508,13 @@ export default function useStreamConnection(chatId, {
     })
   }
 
+  // Flush the pending trailing stream snapshot on demand. ChatView calls this
+  // on the visibility-swap boundary (a pane hidden) — the one flush trigger the
+  // hook can't observe on its own — completing the design §2 flush contract.
+  const flushStreamSnapshot = useCallback(() => {
+    flushStoredStreamSnapshot(activeStreamChatIdRef.current)
+  }, [])
+
   return {
     streamItems,
     latestItemsRef,
@@ -1488,5 +1529,6 @@ export default function useStreamConnection(chatId, {
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
+    flushStreamSnapshot,
   }
 }
