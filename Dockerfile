@@ -137,25 +137,12 @@ fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
 console.log('cli-release-dates.json:',JSON.stringify(out));" \
     || echo '{}' > /app/cli-release-dates.json
 
-COPY backend/app ./app/
-COPY backend/scripts ./scripts/
-COPY skill/ ./skill/
-COPY core-apps/ ./core-apps/
-COPY protected-files.txt ./protected-files.txt
-
-# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
-# in its OWN container (same image, command `python3 -P /app/recovery/
-# recoveryd.py`). It imports ZERO app.* code and survives a fully-broken
-# platform. Baked root-owned + chmod a-w so even root can't modify it in
-# place and the agent (mobius) cannot touch it; recoveryd self-checks this
-# at startup and refuses to run if any file is writable. This is the floor
-# of the recovery story, distinct from the platform-baked backend floor.
-COPY backend/recovery ./recovery/
-RUN chmod -R a-w /app/recovery
-
-# Frontend static files + app-frame served by FastAPI.
-COPY --from=frontend /build/dist ./static/
-COPY frontend/public/app-frame.html ./app-frame.html
+# Install the runtime shell dependency tree from manifests alone. Application
+# source is copied after the self-hosted vendor layers below, so an ordinary
+# frontend edit rebuilds the bundle without also repeating this npm install or
+# the unrelated React/Recharts/date-fns vendor builds.
+COPY frontend/package.json frontend/package-lock.json* ./shell-src/
+RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
 
 # Self-hosted vendor libs for mini-app import maps. Pinned via npm
 # install at image build time, served same-origin under /vendor/ with
@@ -340,10 +327,30 @@ RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
          /app/static/vendor/dompurify@3.4.11 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
 
-# Full frontend source with installed node_modules. /app/shell-src is kept so
-# /data/platform/frontend/node_modules can symlink to it at runtime.
+# Application-owned source comes after dependency and self-hosted vendor
+# layers. This keeps ordinary backend/frontend edits on the cheap trailing
+# build path while preserving exactly the same runtime filesystem layout.
+COPY backend/app ./app/
+COPY backend/scripts ./scripts/
+COPY skill/ ./skill/
+COPY core-apps/ ./core-apps/
+COPY protected-files.txt ./protected-files.txt
+
+# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
+# in its OWN container (same image, command `python3 -P /app/recovery/
+# recoveryd.py`). It imports ZERO app.* code and survives a fully-broken
+# platform. Baked root-owned + chmod a-w so even root can't modify it in
+# place and the agent (mobius) cannot touch it; recoveryd self-checks this
+# at startup and refuses to run if any file is writable. This is the floor
+# of the recovery story, distinct from the platform-baked backend floor.
+COPY backend/recovery ./recovery/
+RUN chmod -R a-w /app/recovery
+
+# Frontend static files + app-frame served by FastAPI, plus the full source
+# tree retained for /data/platform/frontend/node_modules to link at runtime.
+COPY --from=frontend /build/dist ./static/
+COPY frontend/public/app-frame.html ./app-frame.html
 COPY frontend/ ./shell-src/
-RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
 
 # Content fingerprint for scripts/test.sh. Stage the exact source layout and
 # invoke the host-side helper itself, keeping one authoritative input list and
