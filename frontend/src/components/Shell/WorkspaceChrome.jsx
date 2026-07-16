@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { MessageSquare, AppWindow, X, Layers } from 'lucide-react'
 import * as tabModel from './tabModel.js'
 import {
   projectLayout, STRIP_H, WORKSPACE_SPLITS_ENABLED,
 } from './paneModel.js'
 import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 
 // The chrome layer for a tiled (≥2 visible leaves) workspace (design §2). It is
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
@@ -137,6 +138,15 @@ export default function WorkspaceChrome({
   onTabContextMenu,
 }) {
   const [sheetOpen, setSheetOpen] = useState(false)
+  const sheetRef = useRef(null)
+  const sheetCloseRef = useRef(null)
+  const closeSheet = useCallback(() => setSheetOpen(false), [])
+  useDialogFocus({
+    open: sheetOpen,
+    containerRef: sheetRef,
+    initialFocusRef: sheetCloseRef,
+    onClose: closeSheet,
+  })
 
   const focusPane = useCallback((paneId) => {
     dispatchWorkspace({ type: 'FOCUS', paneId })
@@ -256,7 +266,7 @@ export default function WorkspaceChrome({
     && hasOverflow
 
   const pickPane = useCallback((paneId) => {
-    setSheetOpen(false)
+    closeSheet()
     const pane = workspace.panes[paneId]
     const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
     if (active) {
@@ -265,7 +275,7 @@ export default function WorkspaceChrome({
     } else {
       dispatchWorkspace({ type: 'FOCUS', paneId })
     }
-  }, [dispatchWorkspace, navTo, workspace.panes])
+  }, [closeSheet, dispatchWorkspace, navTo, workspace.panes])
 
   const focusRect = projection.rects[workspace.focusedPaneId]
   const chipHostRect = focusRect || projection.rects[projection.visibleLeaves[0]]
@@ -315,9 +325,9 @@ export default function WorkspaceChrome({
           type="button"
           className="workspace__pane-chip"
           style={{ left: chipHostRect.x + chipHostRect.w - 60, top: chipHostRect.y + 5 }}
-        aria-haspopup="dialog"
-        aria-expanded={sheetOpen}
-        aria-label={`Show panes, ${projection.visibleLeaves.length} of ${allLeaves.length} visible`}
+          aria-haspopup="dialog"
+          aria-expanded={sheetOpen}
+          aria-label={`Show panes, ${projection.visibleLeaves.length} of ${allLeaves.length} visible`}
           onClick={() => setSheetOpen(true)}
         >
           <Layers size={13} aria-hidden="true" />
@@ -326,14 +336,27 @@ export default function WorkspaceChrome({
       )}
 
       {showChip && sheetOpen && (
-        <div className="workspace__sheet-scrim" onPointerDown={() => setSheetOpen(false)}>
+        <div className="workspace__sheet-scrim" onPointerDown={closeSheet}>
           <div
+            ref={sheetRef}
             className="workspace__sheet"
             role="dialog"
+            aria-modal="true"
             aria-label="Switch pane"
             onPointerDown={(e) => e.stopPropagation()}
           >
-            <div className="workspace__sheet-title">Panes</div>
+            <div className="workspace__sheet-head">
+              <div className="workspace__sheet-title">Panes</div>
+              <button
+                ref={sheetCloseRef}
+                type="button"
+                className="workspace__sheet-close"
+                aria-label="Close pane switcher"
+                onClick={closeSheet}
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
             {allLeaves.map(paneId => {
               const pane = workspace.panes[paneId]
               const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)

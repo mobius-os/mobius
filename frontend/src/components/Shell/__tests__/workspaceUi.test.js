@@ -31,3 +31,10 @@ test('the workspace menu is labeled, edge-clamped, and arrow-key navigable', () 
 test('the compact pane switcher describes its visible pane count', () => {
   assert.match(chrome, /aria-label=\{`Show panes, \$\{projection\.visibleLeaves\.length\} of \$\{allLeaves\.length\} visible`\}/)
 })
+
+test('the pane switcher uses the shared modal focus and dismissal contract', () => {
+  assert.match(chrome, /useDialogFocus\(\{[\s\S]*?open: sheetOpen/)
+  assert.match(chrome, /initialFocusRef: sheetCloseRef/)
+  assert.match(chrome, /aria-modal="true"/)
+  assert.match(chrome, /aria-label="Close pane switcher"/)
+})
