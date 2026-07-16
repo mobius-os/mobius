@@ -299,13 +299,6 @@ export default function ChatView({
   // useEffect below always fires regardless and writes the fresh data
   // back via `commitMessages`, so any miss self-heals on next remount.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-  // Stable per-mount id, surfaced as data-mount-id on the root. The central
-  // no-reparent invariant (design §2) is that a divider drag or cross-pane move
-  // changes a pane's rect but never remounts its ChatView (which would recreate
-  // the stream, scroll controller, and draft). This id is the observable proof:
-  // it survives re-renders and changes only on a genuine remount, so
-  // tests/workspace-panes.spec.mjs can assert it is unchanged across a move.
-  const [mountId] = useState(() => `cv-${Math.random().toString(36).slice(2, 10)}`)
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const offsetRef = useRef(offset)
@@ -3412,7 +3405,6 @@ export default function ChatView({
   return (
     <div
       ref={chatRef}
-      data-mount-id={mountId}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
     >
       {/* Single polite live region — announces state transitions only.
