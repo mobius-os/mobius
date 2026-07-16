@@ -52,6 +52,7 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
   assert "@chatEmbed path /shell/embed/chat" in lines
   assert "@staticEmbed path /app-embeds/by-id/*" in lines
+  assert "@publicVendor path /vendor/*" in lines
   assert "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/*" in lines
   assert 'header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"' in lines
   assert not any(
@@ -81,6 +82,7 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "allow-same-origin" not in static_csp
   assert "frame-ancestors" not in static_csp
   assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in static_csp
+  assert 'header @publicVendor >Access-Control-Allow-Origin "*"' in lines
   service_csp = next(
     line for line in lines
     if line.startswith("?Content-Security-Policy ")

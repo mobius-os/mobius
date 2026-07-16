@@ -8,6 +8,7 @@
     # establishes its server-verified one-use capability.
     @chatEmbed path /shell/embed/chat
     @staticEmbed path /app-embeds/by-id/*
+    @publicVendor path /vendor/*
     @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/*
 
     header {
@@ -35,6 +36,11 @@
     header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' {$MOBIUS_SERVICE_TANDOOR_ORIGIN}; frame-ancestors 'self'"
     header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
     header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:"
+    # Mini-app frames deliberately have an opaque Origin:null and import these
+    # immutable public modules. The shell service worker may warm /vendor with
+    # an ordinary same-origin request and later replay that response inside the
+    # opaque frame, so the cached response itself must always carry CORS.
+    header @publicVendor >Access-Control-Allow-Origin "*"
 
     # Recovery floor lives in the separate recoveryd container (its own
     # cgroup + pid1) so a broken or crash-looping platform can't take
