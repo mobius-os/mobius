@@ -641,7 +641,7 @@ class _BodySizeLimitMiddleware:
 # App isolation instead comes from opaque-origin sandboxed frames plus scoped
 # tokens. Clickjacking is covered by X-Frame-Options without a CSP. Narrow
 # exceptions are the inert embedded-chat bootstrap, response-sandboxed packaged
-# documents, and an explicitly configured dedicated service surface.
+# documents, and an explicitly configured shared service-gateway surface.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
@@ -685,7 +685,7 @@ class _SecurityHeadersMiddleware:
   route may have set first and replaces it with the platform value, so no route
   can weaken the HSTS/MIME/etc. wall. Opaque static embeds get their enforced
   response sandbox here alongside their frame-policy exception. Other frame
-  exceptions are exact routes whose inert response or dedicated-origin adapter
+  exceptions are exact routes whose inert response or gateway-origin adapter
   provides the replacement boundary; ordinary routes retain SAMEORIGIN."""
 
   def __init__(self, app):
@@ -764,7 +764,7 @@ class _DatabaseRequestContextMiddleware:
 
 
 class _ServiceSurfaceHostMiddleware:
-  """Prevent a dedicated service host from becoming another Möbius origin."""
+  """Prevent the service gateway host from becoming another Möbius origin."""
 
   def __init__(self, app):
     self.app = app
@@ -1193,12 +1193,12 @@ def _public_static_headers(path: str) -> dict[str, str]:
   """Headers required when public shell assets cross an opaque app origin.
 
   Sandboxed app frames intentionally have the effective origin ``null`` and
-  import both ``/mobius-runtime.js`` and the public modules under ``/vendor``.
-  Those files are also fetched and cached by the shell service worker without
-  an Origin header.  CORS middleware can decorate a direct opaque-origin
-  request, but it cannot repair that already-cached response when the worker
-  later returns it to the frame.  Make the public app modules intrinsically
-  cross-origin readable so both the HTTP cache and service-worker cache
+  import ``/mobius-runtime.js`` plus public modules under ``/vendor``. Those
+  files are also fetched and cached by the shell service worker without an
+  Origin header. CORS middleware can decorate a direct opaque-origin request,
+  but it cannot repair that already-cached response when the worker later
+  returns it to the frame. Make every public app import intrinsically
+  cross-origin readable so both the HTTP cache and the service-worker cache
   preserve the contract.
   """
   if path == "mobius-runtime.js" or path.split("/", 1)[0] == "vendor":

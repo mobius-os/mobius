@@ -83,7 +83,7 @@ jobs:
           docker run --rm
           -e DOMAIN=mobius.example.test
           -e FRONTEND_ORIGIN=https://mobius.example.test
-          -e MOBIUS_SERVICE_TANDOOR_ORIGIN=https://tandoor.example.test
+          -e MOBIUS_SERVICE_GATEWAY_ORIGIN=https://services.example.test
           -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro"
           caddy:2.9-alpine
           caddy validate --config /etc/caddy/Caddyfile

@@ -38,13 +38,13 @@ fetch('/services/tandoor/api/ping',{credentials:'same-origin'})
 </script>"""
     self.send_response(200)
     self.send_header("Content-Type", "text/html; charset=utf-8")
-    # Deliberately incompatible upstream policy: the dedicated proxy must
+    # Deliberately incompatible upstream policy: the gateway proxy must
     # remove/replace it for the adapter -> service -> shell ancestor chain.
     self.send_header("X-Frame-Options", "SAMEORIGIN")
     self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'; frame-ancestors 'self'")
     self.send_header(
       "Set-Cookie",
-      # Chromium treats localhost and tandoor.localhost as cross-site. Model a
+      # Chromium treats localhost and services.localhost as cross-site. Model a
       # cookie that an embedded service may set in that topology; the proxy
       # still has to remove Domain=.localhost and make it host-only.
       "fake_tandoor=session; Domain=.localhost; Path=/services/tandoor; "

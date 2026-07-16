@@ -86,7 +86,7 @@ export function isPublicAppModulePath(pathname) {
 // Decorate both old cache hits and fresh fetches at the worker boundary; the
 // server emits the same wildcard header so direct and HTTP-cached responses
 // have an identical contract.
-export function withPublicAppModuleCors(response) {
+export function withPublicAppImportCors(response) {
   if (!response) return response
   if (response.headers.get('access-control-allow-origin') === '*') {
     return response

@@ -59,7 +59,7 @@ import {
   APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
   isPublicAppModulePath,
-  withPublicAppModuleCors,
+  withPublicAppImportCors,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
   isPackagedAppAsset,
@@ -76,7 +76,7 @@ import {
   entriesToTrim,
 } from './sw-cache-policy.js'
 
-const isPublicAppModuleRequest = request => {
+const isPublicAppImportRequest = request => {
   try {
     return isPublicAppModulePath(new URL(request.url).pathname)
   } catch {
@@ -84,17 +84,17 @@ const isPublicAppModuleRequest = request => {
   }
 }
 
-// Repair public app-module responses at the service-worker boundary, including
-// entries written by an older release before the server made them intrinsically
+// Repair public app imports at the service-worker boundary, including entries
+// written by an older release before the server made them intrinsically
 // CORS-readable. This hook runs on precache hits as well as fresh installs.
-const publicAppModuleCorsPlugin = {
+const publicAppImportCorsPlugin = {
   cachedResponseWillBeUsed: async ({ request, cachedResponse }) =>
-    isPublicAppModuleRequest(request)
-      ? withPublicAppModuleCors(cachedResponse)
+    isPublicAppImportRequest(request)
+      ? withPublicAppImportCors(cachedResponse)
       : cachedResponse,
   fetchDidSucceed: async ({ request, response }) =>
-    isPublicAppModuleRequest(request)
-      ? withPublicAppModuleCors(response)
+    isPublicAppImportRequest(request)
+      ? withPublicAppImportCors(response)
       : response,
 }
 
@@ -226,7 +226,7 @@ const VENDORED_MEMORY_GRAPH = [
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
-addPlugins([publicAppModuleCorsPlugin])
+addPlugins([publicAppImportCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
   ...VENDORED_REACT,
@@ -275,7 +275,7 @@ registerRoute(
     url.origin === self.location.origin && url.pathname.startsWith('/vendor/'),
   new CacheFirst({
     cacheName: VENDOR_CACHE,
-    plugins: [assetCacheGuard, publicAppModuleCorsPlugin],
+    plugins: [assetCacheGuard, publicAppImportCorsPlugin],
   }),
 )
 

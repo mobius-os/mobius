@@ -2108,6 +2108,61 @@ function makeEmbedEmitter() {
   return { emit, on }
 }
 
+// Hold a newly-created chat iframe at opacity 0 until the child has completed
+// its authorized first commit. READY currently arrives in the same task as the
+// child's React state update, so two animation frames give that update one
+// complete layout/paint opportunity before the parent reveals the frame. Keep
+// this in the shared runtime: every app embedding chat should get a stable
+// first paint without having to reinvent an onReady cover.
+export function makeEmbedFrameReveal({
+  reveal,
+  settle = (done) => { done() },
+  scheduleFrame = (callback) => requestAnimationFrame(callback),
+  cancelFrame = (id) => cancelAnimationFrame(id),
+} = {}) {
+  let firstFrame = null
+  let secondFrame = null
+  let settleCleanup = null
+  let revealed = false
+  let destroyed = false
+
+  function ready(onRevealed) {
+    if (destroyed || revealed) return false
+    revealed = true
+    firstFrame = scheduleFrame(() => {
+      firstFrame = null
+      secondFrame = scheduleFrame(() => {
+        secondFrame = null
+        if (destroyed) return
+        try { if (typeof reveal === 'function') reveal() } catch (e) {}
+        const finish = () => {
+          if (destroyed) return
+          settleCleanup = null
+          try { if (typeof onRevealed === 'function') onRevealed() } catch (e) {}
+        }
+        try {
+          settleCleanup = typeof settle === 'function' ? settle(finish) : null
+        } catch (e) {
+          finish()
+        }
+      })
+    })
+    return true
+  }
+
+  function destroy() {
+    destroyed = true
+    if (firstFrame != null) cancelFrame(firstFrame)
+    if (secondFrame != null) cancelFrame(secondFrame)
+    try { if (typeof settleCleanup === 'function') settleCleanup() } catch (e) {}
+    firstFrame = null
+    secondFrame = null
+    settleCleanup = null
+  }
+
+  return { ready, destroy }
+}
+
 let _embedSeq = 0
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
@@ -2421,7 +2476,12 @@ function makeChat({ appId, getToken, storage }) {
     function createEmbedFrame() {
       const frame = document.createElement('iframe')
       frame.title = 'Agent chat'
-      frame.style.cssText = 'width:100%;height:100%;border:0;display:block'
+      const reduceMotion = typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      frame.style.cssText = (
+        'width:100%;height:100%;border:0;display:block;opacity:0;pointer-events:none;'
+        + (reduceMotion ? '' : 'transition:opacity 120ms ease;')
+      )
       // The outer app sandbox already makes every descendant opaque. Keep the
       // nested declaration equally explicit: this document never regains shell
       // origin storage/JWT authority.
@@ -2433,6 +2493,44 @@ function makeChat({ appId, getToken, storage }) {
       return frame
     }
     let iframe = createEmbedFrame()
+
+    function makeFrameRevealController(targetFrame) {
+      const animated = !!targetFrame.style.transition
+      return makeEmbedFrameReveal({
+        reveal: () => { targetFrame.style.opacity = '1' },
+        settle: (done) => {
+          if (!animated) {
+            targetFrame.style.pointerEvents = 'auto'
+            done()
+            return undefined
+          }
+          let finished = false
+          let timer = null
+          const finish = () => {
+            if (finished) return
+            finished = true
+            targetFrame.removeEventListener('transitionend', onTransitionEnd)
+            if (timer != null) clearTimeout(timer)
+            targetFrame.style.pointerEvents = 'auto'
+            done()
+          }
+          const onTransitionEnd = (event) => {
+            if (event.target === targetFrame && event.propertyName === 'opacity') finish()
+          }
+          targetFrame.addEventListener('transitionend', onTransitionEnd)
+          // A detached/backgrounded frame may not dispatch transitionend.
+          // Keep visual-ready bounded rather than stranding an app cover.
+          timer = setTimeout(finish, 180)
+          return () => {
+            finished = true
+            targetFrame.removeEventListener('transitionend', onTransitionEnd)
+            if (timer != null) clearTimeout(timer)
+          }
+        },
+      })
+    }
+
+    let frameReveal = makeFrameRevealController(iframe)
 
     // Sanitize quickActions: max 4, each must have string label + prompt.
     const quickActions = Array.isArray(opts.quickActions)
@@ -2620,7 +2718,9 @@ function makeChat({ appId, getToken, storage }) {
       const previous = iframe
       previous.removeEventListener('load', sendInit)
       authorizationHandoff?.destroy()
+      frameReveal?.destroy()
       iframe = createEmbedFrame()
+      frameReveal = makeFrameRevealController(iframe)
       hasAuthorizedOnce = false
       authorizationHandoff = createAuthorizationHandoff()
       iframe.addEventListener('load', sendInit)
@@ -2644,7 +2744,11 @@ function makeChat({ appId, getToken, storage }) {
         }
         if (!hasAuthorizedOnce) {
           hasAuthorizedOnce = true
-          emit('ready', { chatId })
+          // `ready` is now visually truthful: callers receive it only after
+          // the authorized child has had two frames to commit and the iframe
+          // itself is revealed. Authorization acknowledgement above remains
+          // immediate, so the one-use handoff timeout is never held open by UI.
+          frameReveal.ready(() => emit('ready', { chatId }))
         }
       } else if (msg.type === EMBED_MESSAGE_SENT) {
         emit('message-sent', { chatId })
@@ -2712,6 +2816,7 @@ function makeChat({ appId, getToken, storage }) {
         window.removeEventListener('message', onMessage)
         iframe.removeEventListener('load', sendInit)
         authorizationHandoff?.destroy()
+        frameReveal?.destroy()
         revokeEmbed(chatId, instanceId)
         if (selectEl && onChatSelectChange) {
           selectEl.removeEventListener('change', onChatSelectChange)

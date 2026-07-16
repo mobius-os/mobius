@@ -407,6 +407,33 @@ textarea:focus-visible {
 
 /* Drawer slide transition is owned by Drawer.css (SDK motion tokens). */
 
+/* Touch devices: any element that customizes its scrollbar
+   (scrollbar-width/scrollbar-color/::-webkit-scrollbar) makes Chromium
+   Android swap the auto-hiding overlay for a persistent classic track.
+   On coarse pointers hide the track entirely; scrolling itself is
+   unaffected. Desktop (pointer: fine) keeps its scrollbars. */
+@media (pointer: coarse) {
+  .drawer__scroll,
+  .mmm__body,
+  .urm__body,
+  .chat__tool-detail,
+  .chat-summary__body,
+  .chat__marker-body,
+  .composer-popover {
+    scrollbar-width: none;
+  }
+
+  .drawer__scroll::-webkit-scrollbar,
+  .mmm__body::-webkit-scrollbar,
+  .urm__body::-webkit-scrollbar,
+  .chat__tool-detail::-webkit-scrollbar,
+  .chat-summary__body::-webkit-scrollbar,
+  .chat__marker-body::-webkit-scrollbar,
+  .composer-popover::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* NOTE: the `.chat__form:focus-within` box-shadow that lived here
    was REMOVED. It drew an outer rectangle around the pill + +
    button when the textarea was focused — visible as a "bounding

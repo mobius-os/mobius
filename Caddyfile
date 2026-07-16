@@ -32,7 +32,7 @@
         #   requires vendoring all three libraries under /vendor (like three.js).
     }
     header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
-    header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' {$MOBIUS_SERVICE_TANDOOR_ORIGIN}; frame-ancestors 'self'"
+    header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'"
     header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:"
 
@@ -48,15 +48,15 @@
     reverse_proxy app:8000
 }
 
-# Full backend web services need their own cookie/storage origin and therefore
-# cannot descend from the ordinary opaque mini-app frame. Tandoor is the first
-# concrete service surface. The backend reads this same variable; production
-# points it at a DNS-backed HTTPS host. Caddy supplies the exact two-ancestor
-# CSP only when the backend did not; normal responses retain their stricter
-# backend/upstream policy without a duplicate or conflicting replacement.
-{$MOBIUS_SERVICE_TANDOOR_ORIGIN} {
-    @tandoorSurface path /services/tandoor /services/tandoor/*
-    handle @tandoorSurface {
+# Full backend web services cannot descend from the ordinary opaque mini-app
+# frame. Owner-trusted services instead share this one gateway origin, which
+# isolates them from the Möbius shell while avoiding one public hostname per
+# service. The backend registry still decides which /services/<slug> prefixes
+# are enabled; every other path on this host fails closed. Services on this
+# gateway share an origin with each other and therefore form one trust group.
+{$MOBIUS_SERVICE_GATEWAY_ORIGIN} {
+    @serviceSurface path /services/*
+    handle @serviceSurface {
         encode gzip
         header {
             >X-Content-Type-Options "nosniff"

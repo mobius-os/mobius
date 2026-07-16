@@ -20,7 +20,7 @@ import {
   packagedAppAssetCacheKey,
   isStaleRuntimeCache,
   supersededVersionKeys,
-  withPublicAppModuleCors,
+  withPublicAppImportCors,
 } from '../../sw-cache-policy.js'
 
 test('runtime cache cleanup keeps current cache names', () => {
@@ -45,19 +45,19 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
 })
 
-test('only public app modules cross the opaque app-frame origin', () => {
+test('only public app imports cross the opaque app-frame origin', () => {
   assert.equal(isPublicAppModulePath('/vendor/react@19.2.7/react.mjs'), true)
   assert.equal(isPublicAppModulePath('/mobius-runtime.js'), true)
   assert.equal(isPublicAppModulePath('/vendorfoo/module.mjs'), false)
   assert.equal(isPublicAppModulePath('/assets/index.js'), false)
 })
 
-test('cached public app modules are readable from opaque app frames', async () => {
+test('cached public app imports are readable from opaque app frames', async () => {
   const original = new Response('export default 1', {
     status: 200,
     headers: { 'Content-Type': 'text/javascript' },
   })
-  const repaired = withPublicAppModuleCors(original)
+  const repaired = withPublicAppImportCors(original)
   assert.notEqual(repaired, original)
   assert.equal(repaired.headers.get('access-control-allow-origin'), '*')
   assert.equal(await repaired.text(), 'export default 1')
@@ -65,8 +65,8 @@ test('cached public app modules are readable from opaque app frames', async () =
   const alreadyReadable = new Response('ok', {
     headers: { 'Access-Control-Allow-Origin': '*' },
   })
-  assert.equal(withPublicAppModuleCors(alreadyReadable), alreadyReadable)
-  assert.equal(withPublicAppModuleCors(null), null)
+  assert.equal(withPublicAppImportCors(alreadyReadable), alreadyReadable)
+  assert.equal(withPublicAppImportCors(null), null)
 })
 
 test('hashed packaged-app asset names are immutable', () => {
