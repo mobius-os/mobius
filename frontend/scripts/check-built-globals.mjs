@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 // Source-checkout tests mount the current script at /workspace while using the
-// image-baked dependency tree. Resolve Babel from an explicit dependency root
+// image-baked dependency tree. Resolve analyzer dependencies from an explicit root
 // when supplied; normal development and production resolve beside this script.
 const scriptFrontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const configuredModules = process.env.MOBIUS_FRONTEND_NODE_MODULES
@@ -18,10 +18,8 @@ const dependencyRoot = configuredModules
     )
   : scriptFrontend
 const require = createRequire(path.join(dependencyRoot, 'package.json'))
-const { parse } = require('@babel/parser')
-const traverseModule = require('@babel/traverse')
-
-const traverse = traverseModule.default
+const { parse } = require('acorn')
+const { analyze } = require('eslint-scope')
 
 // Vite bundles application and dependency code together. These are the
 // runtime globals intentionally supplied by JavaScript, the browser, a service
@@ -43,7 +41,7 @@ const ALLOWED_GLOBALS = new Set([
   'undefined', 'unescape', 'URIError', 'WeakMap', 'WeakRef', 'WeakSet',
   'WebAssembly',
 
-  // Window + DOM globals used by the shell and bundled UI dependencies.
+  // Window, DOM, and worker globals used by the shell and its dependencies.
   'AbortController', 'AbortSignal', 'atob', 'Blob', 'BroadcastChannel', 'btoa',
   'caches', 'cancelAnimationFrame', 'clearInterval', 'clearTimeout', 'console',
   'createImageBitmap', 'crypto', 'CSS', 'CustomEvent', 'document', 'DOMParser',
@@ -70,52 +68,60 @@ const ALLOWED_GLOBALS = new Set([
 function jsFiles(buildDir) {
   const files = []
   const assetsDir = path.join(buildDir, 'assets')
+  const isJavaScript = name => name.endsWith('.js') || name.endsWith('.mjs')
 
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, entry.name)
       if (entry.isDirectory()) walk(file)
-      else if (entry.isFile() && entry.name.endsWith('.js')) files.push(file)
+      else if (entry.isFile() && isJavaScript(entry.name)) files.push(file)
     }
   }
 
   if (fs.existsSync(assetsDir)) walk(assetsDir)
-  const sw = path.join(buildDir, 'sw.js')
-  if (fs.existsSync(sw)) files.push(sw)
+  // Vendor assets are managed separately. Inspect Vite assets and root
+  // modules such as sw.js and mobius-runtime.js.
+  for (const entry of fs.readdirSync(buildDir, { withFileTypes: true })) {
+    if (entry.isFile() && isJavaScript(entry.name)) {
+      files.push(path.join(buildDir, entry.name))
+    }
+  }
   return files.sort()
 }
 
 function findUnbound(buildDir) {
   const failures = new Map()
-
   for (const file of jsFiles(buildDir)) {
     let ast
     try {
       ast = parse(fs.readFileSync(file, 'utf8'), {
-        sourceType: 'unambiguous',
-        plugins: ['importMeta', 'topLevelAwait'],
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        locations: true,
+        ranges: true,
       })
     } catch (error) {
-      const rel = path.relative(buildDir, file)
-      throw new Error(`could not parse ${rel}: ${error.message}`)
+      throw new Error(`could not parse ${path.relative(buildDir, file)}: ${error.message}`)
     }
 
-    traverse(ast, {
-      ReferencedIdentifier(identifierPath) {
-        const { name, loc } = identifierPath.node
-        if (ALLOWED_GLOBALS.has(name)) return
-        if (identifierPath.scope.hasBinding(name, true)) return
-
-        const spots = failures.get(name) || []
-        if (spots.length < 6) {
-          const rel = path.relative(buildDir, file)
-          spots.push(`${rel}:${loc?.start.line ?? '?'}:${loc?.start.column ?? '?'}`)
-        }
-        failures.set(name, spots)
-      },
+    const scopeManager = analyze(ast, {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      optimistic: true,
+      ignoreEval: true,
     })
+    for (const reference of scopeManager.globalScope.through) {
+      const { name, loc } = reference.identifier
+      if (ALLOWED_GLOBALS.has(name)) continue
+      const spots = failures.get(name) || []
+      if (spots.length < 6) {
+        spots.push(
+          `${path.relative(buildDir, file)}:${loc?.start.line ?? '?'}:${loc?.start.column ?? '?'}`,
+        )
+      }
+      failures.set(name, spots)
+    }
   }
-
   return failures
 }
 
