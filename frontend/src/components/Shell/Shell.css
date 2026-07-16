@@ -152,6 +152,18 @@
   z-index: 1;
 }
 
+/* `inert` is the semantic/modal contract, but mobile engines have historically
+   differed on whether an inert ancestor fully removes a cross-origin iframe
+   from native touch hit-testing. Make the physical contract explicit too: an
+   open drawer cannot scroll or activate the app canvas behind it. The drawer
+   and scrim are siblings above this content, so their own gestures are
+   unaffected. */
+.shell__content[inert] {
+  pointer-events: none;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
 /* `.shell__view` wraps each persisted view (ChatView, AppCanvas).
    All views are laid out simultaneously (position: absolute, inset
    0) and toggled via `visibility` + `pointer-events`. Why not

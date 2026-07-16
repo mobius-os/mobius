@@ -20,6 +20,7 @@ test('service failure actions render as separated touch-sized buttons', () => {
   const button = css.match(/\.canvas-loading__offline-button\s*\{([^}]*)\}/)?.[1] || ''
 
   assert.match(actions, /display:\s*flex/)
+  assert.match(actions, /flex-wrap:\s*wrap/)
   assert.match(actions, /gap:\s*10px/)
   assert.match(button, /min-height:\s*44px/)
 })
