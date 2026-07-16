@@ -109,6 +109,7 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
   assert "auto_resume_on_limit" in cols
   assert cols["auto_resume_on_limit"]["nullable"] is False
   assert cols["auto_resume_on_limit"]["default"] is not None
+  assert "system_prompt_snapshot_id" in cols
   with eng.connect() as conn:
     value = conn.execute(text(
       "SELECT auto_resume_on_limit FROM chats WHERE id = 'legacy'"

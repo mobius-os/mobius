@@ -105,7 +105,7 @@ compose() {
   INTERNAL_TEST_PORT="$internal_publish_port" \
   RECOVERY_TEST_PORT="$recovery_publish_port" \
   BUILD_SHA=unknown \
-    GITHUB_SHA="$head_sha" \
+  GITHUB_SHA="$head_sha" \
     docker compose -p "$project" -f "$snapshot_dir/docker-compose.test.yml" \
       --project-directory "$snapshot_dir" "$@"
 }

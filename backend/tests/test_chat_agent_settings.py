@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from app import models
 from app.providers import effective_agent_settings
 from app.schemas import AgentSettingsOverride, ChatPatch
 
@@ -692,3 +693,11 @@ def test_run_chat_passes_deployed_skill_and_picker_settings(
 
   assert captured["skill_text"] == "DEPLOYED-SKILL"
   assert captured["agent_settings"]["model"] == "claude-opus-4-5"
+  db.expire_all()
+  persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  assert persisted.system_prompt_snapshot_id
+  snapshot = db.get(
+    models.SystemPromptSnapshot, persisted.system_prompt_snapshot_id,
+  )
+  assert snapshot is not None
+  assert snapshot.content == "DEPLOYED-SKILL"

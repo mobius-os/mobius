@@ -117,6 +117,34 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  # One-time semantic migration for the per-chat prompt boundary. Existing
+  # chats were started before the snapshot column existed, so freeze their
+  # currently effective base + system-app prompt now, before serving requests.
+  # Empty drafts remain unsnapshotted and pick up the live app set when their
+  # first turn actually starts.
+  try:
+    from app.chat import (
+      _chat_settings_dict,
+      _custom_system_prompt,
+      _read_skill_text,
+    )
+    from app.system_prompts import backfill_started_chat_prompt_snapshots
+    with SessionLocal() as db:
+      count = backfill_started_chat_prompt_snapshots(
+        db,
+        lambda chat: (
+          _custom_system_prompt(_chat_settings_dict(chat))
+          or _read_skill_text()
+        ),
+      )
+      db.commit()
+    if count:
+      _log.info("captured system prompt snapshots for %s existing chats", count)
+  except Exception as exc:
+    # Keep the recovery surface available. A chat still snapshots before its
+    # next provider call, and the failure is visible for operator repair.
+    _log.error("system prompt snapshot backfill failed: %s", exc, exc_info=True)
+
   # Fix old chat-image storage forward to the canonical media/ path before
   # serving requests. The migration is idempotent and removes the need for a
   # permanent compatibility route in the live API.

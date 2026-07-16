@@ -72,6 +72,18 @@ class Owner(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class SystemPromptSnapshot(Base):
+  """Deduplicated immutable prompt bytes captured at a chat's first turn."""
+
+  __tablename__ = "system_prompt_snapshots"
+
+  # sha256(content), so identical platform/app compositions across many chats
+  # occupy one row and updates naturally create a new immutable identity.
+  id = Column(String(64), primary_key=True)
+  content = Column(Text, nullable=False)
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
 class Chat(Base):
   """A chat conversation with the agent."""
 
@@ -103,6 +115,14 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Content-addressed system-prompt snapshot selected when this chat starts
+  # its first turn. The provider receives the referenced bytes on every API
+  # call (provider SDKs are stateless at that boundary), but Möbius never
+  # recomposes installed-app fragments for an already-started chat. Installing,
+  # updating, or uninstalling a system app therefore affects only chats that
+  # start afterwards. Nullable is the migration/empty-chat state: the first
+  # turn snapshots it atomically before invoking a provider.
+  system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
   # Per-chat policy for provider-limit recovery. Kept out of
   # agent_settings_json because that blob is snapshotted/mirrored as SDK
   # runtime configuration; mixing this policy into it can skip first-send
@@ -440,9 +460,9 @@ class App(Base):
   # for the agent and SW; no server-side enforcement. Example shape:
   #   {"reads": true, "writes": "queued", "execution": "full", "precache": []}
   offline_contract = Column(JSON, nullable=True, default=None)
-  # Optional root-level markdown file contributed to the agent system prompt.
-  # Only live installed rows are composed; soft-uninstall is therefore the
-  # activation gate even though the app's source tree remains recoverable.
+  # Optional root-level markdown file contributed to new chat prompt snapshots.
+  # Only live installed rows are composed at chat start. Soft-uninstall changes
+  # future chats while existing snapshots and app data remain recoverable.
   system_prompt_file = Column(String(255), nullable=True, default=None)
   # Explicit manifest identity for apps that participate in the agent/system
   # lifecycle.  This flag grants nothing by itself; the individual manifest

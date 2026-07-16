@@ -34,8 +34,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "system_prompt": (
         {
           "file": system_prompt,
-          "scope": "all_agent_chats",
-          "activation": "next_turn",
+          "scope": "chats_started_while_installed",
+          "activation": "chat_start",
         }
         if system_prompt else None
       ),

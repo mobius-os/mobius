@@ -342,7 +342,7 @@ export default function AgentContextInspector({ chatId, onClose }) {
       {
         key: 'system_prompt',
         title: 'System prompt',
-        description: 'Rules and capabilities that shape every response.',
+        description: 'Core rules plus installed system-app additions, captured once when the chat\u2019s first turn starts.',
         value: data.system_prompt,
         type: 'markdown',
       },

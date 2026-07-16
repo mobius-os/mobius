@@ -61,7 +61,10 @@ def test_preview_returns_server_derived_contract_and_digest(
   assert body["capability_contract"] == contract
   assert body["capability_digest"] == digest
   assert body["capability_contract"]["agent"]["system_prompt"]["scope"] == (
-    "all_agent_chats"
+    "chats_started_while_installed"
+  )
+  assert body["capability_contract"]["agent"]["system_prompt"]["activation"] == (
+    "chat_start"
   )
   assert body["capability_contract"]["background"]["authority"] == (
     "scoped_system_job"

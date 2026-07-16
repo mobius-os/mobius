@@ -538,6 +538,13 @@ def run_migrations(eng) -> None:
       _add.append(
         "ALTER TABLE chats ADD COLUMN agent_settings_json JSON"
       )
+    if "system_prompt_snapshot_id" not in chats_cols:
+      # Existing and empty chats start NULL. The first turn after this
+      # migration captures one immutable, content-addressed prompt snapshot;
+      # later app installs/updates/uninstalls cannot change that chat's prompt.
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN system_prompt_snapshot_id VARCHAR(64) NULL"
+      )
     if "auto_resume_on_limit" not in chats_cols:
       # Chat-local provider-limit recovery policy. Automatic continuation is
       # the initial default; any later owner selection remains stored per chat.
