@@ -737,6 +737,10 @@ registerRoute(
 // cached index.html for /recover, so the user landed on the shell instead of the
 // recovery page (and recovery was unreachable exactly when it's needed most).
 
+// Legacy instance-local mounts remain an extension point for installations
+// that predate the reserved /services namespace. Stock Möbius ships none.
+const PROXIED_APP_SUBTREES = []
+
 // Owner-configured backend web services live under one reserved namespace.
 // They are server-served, multi-page applications rather than SPA routes, so
 // every depth below /services/ must reach the guarded backend proxy.  The
@@ -758,6 +762,8 @@ registerRoute(new NavigationRoute(
       // app instead of the built website.
       /^\/sites(\/|$)/,
       /^\/services(\/|$)/,
+      // Legacy instance-local mounts remain supported as an extension point.
+      ...PROXIED_APP_SUBTREES,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
     ],
   },

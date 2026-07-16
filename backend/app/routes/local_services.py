@@ -21,6 +21,7 @@ Configuration schema::
     "services": {
       "tandoor": {
         "upstream": "http://127.0.0.1:8123",
+        "access": "upstream_auth",
         "public_surface": true
       }
     }
@@ -29,7 +30,9 @@ Configuration schema::
 The public ``/services/<slug>`` prefix is preserved on the upstream request.
 Backend applications must therefore be configured to serve from that same
 base path.  This keeps redirects, cookie paths, forms, static assets, and API
-URLs coherent without unsafe response-body rewriting.
+URLs coherent without unsafe response-body rewriting. The upstream application
+owns user authentication: configuration must acknowledge that explicitly, and
+the proxy never forwards a Möbius bearer token to it.
 """
 
 from __future__ import annotations
@@ -73,6 +76,16 @@ _HOP_BY_HOP = {
   b"transfer-encoding",
   b"upgrade",
   b"content-length",
+}
+_PRIVATE_REQUEST_HEADERS = {
+  "authorization",
+  "host",
+  "proxy-authorization",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-prefix",
+  "x-forwarded-proto",
+  "x-script-name",
 }
 
 
@@ -200,10 +213,17 @@ def _service_for(slug: str) -> LocalService | None:
       return None
     entry = services[slug]
     if not isinstance(entry, dict) or not set(entry).issubset(
-      {"upstream", "public_surface"}
-    ) or "upstream" not in entry:
+      {"upstream", "access", "public_surface"}
+    ) or not {"upstream", "access"}.issubset(entry):
       raise ServiceConfigError(
         f"service {slug!r} has unsupported configuration fields"
+      )
+    # Browser navigations cannot attach the owner's localStorage bearer token.
+    # Requiring this explicit declaration prevents an agent from accidentally
+    # publishing an unauthenticated dev server through the public Möbius host.
+    if entry["access"] != "upstream_auth":
+      raise ServiceConfigError(
+        f"service {slug!r} must explicitly declare access=upstream_auth"
       )
     return LocalService(
       slug=slug,
@@ -224,13 +244,22 @@ def _forwarded_request_headers(request: Request, service: LocalService) -> dict[
   headers = {
     key: value
     for key, value in request.headers.items()
-    if key.lower().encode("latin-1") not in _HOP_BY_HOP and key.lower() != "host"
+    if (
+      key.lower().encode("latin-1") not in _HOP_BY_HOP
+      and key.lower() not in _PRIVATE_REQUEST_HEADERS
+    )
   }
-  public_host = request.headers.get("host")
+  origin = (
+    service.surface_origin
+    if _request_matches_surface_origin(request, service)
+    else get_settings().frontend_origin
+  )
+  public = urlsplit(origin)
+  public_host = public.netloc
   if public_host:
     headers["host"] = public_host
     headers["x-forwarded-host"] = public_host
-  public_scheme = urlsplit(get_settings().frontend_origin).scheme
+  public_scheme = public.scheme
   headers["x-forwarded-proto"] = (
     public_scheme if public_scheme in {"http", "https"} else request.url.scheme
   )
@@ -238,7 +267,58 @@ def _forwarded_request_headers(request: Request, service: LocalService) -> dict[
     request.client.host if request.client else "127.0.0.1"
   )
   headers["x-script-name"] = service.mount_path
+  headers["x-forwarded-prefix"] = service.mount_path
   return headers
+
+
+def _rewrite_location(value: str, service: LocalService, request: Request) -> str:
+  """Keep absolute loopback redirects on the public Möbius origin."""
+  parsed = urlsplit(value)
+  upstream = urlsplit(service.upstream)
+  try:
+    same_upstream = (
+      parsed.scheme == upstream.scheme
+      and parsed.hostname == upstream.hostname
+      and (parsed.port or 80) == (upstream.port or 80)
+    )
+  except ValueError:
+    same_upstream = False
+  if not same_upstream:
+    return value
+  origin = (
+    service.surface_origin
+    if _request_matches_surface_origin(request, service)
+    else get_settings().frontend_origin
+  )
+  public = urlsplit(origin)
+  return parsed._replace(scheme=public.scheme, netloc=public.netloc).geturl()
+
+
+def _rewrite_set_cookie(value: str, service: LocalService) -> str:
+  """Confine upstream cookies to their service and the public host."""
+  parts = [part.strip() for part in value.split(";")]
+  if not parts:
+    return value
+  attrs: list[str] = []
+  saw_path = False
+  mount = service.mount_path
+  for attr in parts[1:]:
+    name, separator, raw_value = attr.partition("=")
+    lowered = name.strip().lower()
+    if lowered == "domain":
+      continue
+    if lowered == "path":
+      saw_path = True
+      path = raw_value.strip() if separator else ""
+      if path != mount and not path.startswith(f"{mount}/"):
+        path = f"{mount}/"
+      attrs.append(f"Path={path}")
+      continue
+    if attr:
+      attrs.append(attr)
+  if not saw_path:
+    attrs.append(f"Path={mount}/")
+  return "; ".join([parts[0], *attrs])
 
 
 def _upstream_url(service: LocalService, request: Request) -> str:
@@ -308,14 +388,15 @@ async def _proxy(service: LocalService, request: Request) -> Response:
       )
       if not value:
         continue
-    if public_surface and lower == b"set-cookie":
-      # Service cookies must remain host-only. An upstream Domain attribute
-      # could otherwise deliberately or accidentally spill a session cookie
-      # onto the shell's parent domain.
-      parts = [part.strip() for part in value.split(b";")]
-      value = b"; ".join(
-        part for part in parts if not part.lower().startswith(b"domain=")
-      )
+    if lower == b"location":
+      value = _rewrite_location(
+        value.decode("latin-1"), service, request,
+      ).encode("latin-1")
+    elif lower == b"set-cookie":
+      # Cookies are always host-only and confined to this service mount.
+      value = _rewrite_set_cookie(
+        value.decode("latin-1"), service,
+      ).encode("latin-1")
     response.raw_headers.append((name, value))
   if public_surface:
     response.raw_headers.append((

@@ -195,7 +195,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `uploads.py` | Per-chat file upload management |
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
-| `local_services.py` | Guarded loopback proxy plus the dedicated-origin adapter for full backend web apps. A configured service hostname is reserved to its exact `/services/<slug>` prefix, strips upstream frame blockers only on that surface, keeps cookies host-only, and fails closed without an explicit origin |
+| `local_services.py` | Guarded loopback proxy plus the dedicated-origin adapter for full backend web apps. Each service requires an explicit `upstream_auth` declaration; Möbius authority headers are stripped, cookies and redirects stay confined to `/services/<slug>`, a configured service hostname is reserved to that exact prefix, frame blockers are relaxed only on that surface, and invalid configuration fails closed |
 | `standalone.py` | Top-level install/manifest shell for mini-app PWAs. **Known boundary gap:** its current loader executes the app component in the top-level shell origin; it is not yet equivalent to the opaque in-shell app frame |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
