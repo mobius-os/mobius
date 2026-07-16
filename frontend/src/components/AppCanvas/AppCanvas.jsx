@@ -242,6 +242,13 @@ export default function AppCanvas({
   // behind the scrim, but Android compositor momentum inside a long iframe must
   // be cancelled so the background cannot keep coasting under the drawer.
   interactive = active,
+  // Whether this app is the active tab of ANY visible pane (design §5). Drives
+  // the frame-visibility signal and the nav-push gate — an app visible in a
+  // background split still runs and can install nested-view sentinels. `active`
+  // (the FOCUSED pane's app) stays focused-pane-only and continues to gate
+  // safe-area insets + the immersive holder (global last-writer-wins). Defaults
+  // to `active` so a single-pane caller (where visible === focused) is unchanged.
+  visible = active,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onImmersive, onIntentDelivered, onAppError,
 }) {
@@ -379,6 +386,8 @@ export default function AppCanvas({
   activeRef.current = active
   const interactiveRef = useRef(interactive)
   interactiveRef.current = interactive
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
 
   function postToFrame(v, message) {
     // A sandboxed frame without allow-same-origin has an opaque origin, so the
@@ -721,8 +730,11 @@ export default function AppCanvas({
       if (msg.type === 'moebius:nav-push') {
         // A cached frame remains mounted while another app/chat/settings is
         // visible. It may retire an entry it already owns, but it must never
-        // install a NEW top-level history entry over somebody else's view.
-        const ok = activeRef.current ? onNavPush?.(appId) : false
+        // install a NEW top-level history entry while off-screen. Gate on
+        // VISIBLE (active tab of any visible pane), not focused — a background
+        // split's app is still interactive (contract §3.3.6). The shell's own
+        // isVisibleApp re-checks pane ownership as the authority.
+        const ok = visibleRef.current ? onNavPush?.(appId) : false
         // Echo the iframe's optional requestId on both ack and reject so the app
         // can correlate when multiple nav-pushes are in flight. Apps that don't
         // pass a requestId get undefined back (backwards compatible).
@@ -982,10 +994,10 @@ export default function AppCanvas({
 
   useEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
-      sendVisibility(swap.liveVersion, active)
+      sendVisibility(swap.liveVersion, visible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, swap.liveVersion])
+  }, [visible, swap.liveVersion])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then
@@ -994,10 +1006,13 @@ export default function AppCanvas({
   // coast visibly beneath the newly-open drawer.
   useLayoutEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
-      sendInteractivity(swap.liveVersion, interactive, active)
+      // "painted" tracks `visible` post active->visible split (the frame is
+      // painted iff it is the active tab of a visible pane); `interactive` stays
+      // the focused-pane, drawer-aware gate for momentum cancellation.
+      sendInteractivity(swap.liveVersion, interactive, visible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, interactive, swap.liveVersion])
+  }, [visible, interactive, swap.liveVersion])
 
   useEffect(() => {
     for (const v of framesRef.current.keys()) {
@@ -1151,13 +1166,16 @@ export default function AppCanvas({
     sendInsets(v)
     // A booting incoming frame is invisible by construction and must not
     // start audio/rAF work before promotion, so it learns `visible:false`
-    // here; the live frame gets the real active verdict. Promotion re-sends
-    // via the [active, swap.liveVersion] effect above.
-    sendVisibility(v, v === liveVersionRef.current ? activeRef.current : false)
+    // here; the live frame gets the real visible verdict. Promotion re-sends
+    // via the [visible, swap.liveVersion] effect above. Interactivity is a
+    // separate gate (drawer-open momentum cancel); its "painted" argument tracks
+    // `visible` post active->visible split, its enabled argument tracks
+    // `interactive` (focused pane, drawer-aware).
+    sendVisibility(v, v === liveVersionRef.current ? visibleRef.current : false)
     sendInteractivity(
       v,
       v === liveVersionRef.current ? interactiveRef.current : false,
-      v === liveVersionRef.current ? activeRef.current : false,
+      v === liveVersionRef.current ? visibleRef.current : false,
     )
   }
 

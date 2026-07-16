@@ -4,8 +4,6 @@ import { Minimize2, X, MessageSquare, AppWindow } from 'lucide-react'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
-import ChatView from '../ChatView/ChatView.jsx'
-import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, apiFetch, BASE, clearAppRuntimeData } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
@@ -18,12 +16,11 @@ import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
-import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
+import { bumpChatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
-import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import {
@@ -76,16 +73,118 @@ const SHELL_RELOAD_RECHECK_MS = 6000
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
+  // ── Workspace reducer — the single live authority for pane contents, per-pane
+  // active tabs, and focus (design §1). Declared ABOVE useNavigation so the
+  // adapter derives its legacy triple from it. Init: forgiving read of the
+  // versioned blob (readWorkspaceRaw guards the throwing sessionStorage.getItem
+  // before parseWorkspace's own try/catch), else the legacy flat seed.
+  const [workspaceState, dispatchWorkspaceRaw] = useReducer(
+    paneModel.workspaceReducer,
+    undefined,
+    () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
+      paneModel.readWorkspaceRaw(sessionStorage),
+      { fallbackTabs: tabModel.readOpenTabs() },
+    )),
+  )
+  const workspace = workspaceState.ws
+  // Ref-side reducer preview: this wrapper advances a ref copy of the reducer
+  // state SYNCHRONOUSLY before the raw React dispatch, so two navigation/
+  // placement events in one React 18 batch observe each other (design §1). Every
+  // caller uses this wrapper — no raw dispatch survives it.
+  const workspaceStateRef = useRef(workspaceState)
+  workspaceStateRef.current = workspaceState
+  // Set after useNavigation (needs navStackRef): retargets in-memory restorable
+  // routes off a pane the reducer just removed (design §5.1.3).
+  const onPaneClosedRef = useRef(null)
+  const dispatchWorkspace = useCallback((action) => {
+    const prev = workspaceStateRef.current
+    const next = paneModel.workspaceReducer(prev, action)
+    workspaceStateRef.current = next
+    // A reducer transition that dropped a pane (last-tab close or move) leaves
+    // its dead paneId in in-memory routes; retarget them to the surviving focus
+    // synchronously (using prev/next), before any restore reads them.
+    if (next.ws !== prev.ws
+        && Object.keys(next.ws.panes).length < Object.keys(prev.ws.panes).length) {
+      onPaneClosedRef.current?.(prev.ws, next.ws)
+    }
+    dispatchWorkspaceRaw(action)
+  }, [])
+
+  // ── Multi-pane projection (design §2/§4) — computed BEFORE useNavigation so
+  // the adapter learns the committed visible pane set. A ResizeObserver on
+  // .shell__content drives the mode + geometry; projection is the single
+  // geometry authority (one visible leaf is the pixel-identical single-pane
+  // sentinel and the renderer emits today's DOM).
+  const contentElRef = useRef(null)
+  const [contentRect, setContentRect] = useState({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = contentElRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      const w = Math.round(el.clientWidth)
+      const h = Math.round(el.clientHeight)
+      setContentRect(prev => {
+        if (prev.w === w && prev.h === h) return prev
+        // Flag-off single-pane never tiles, so a content-size change would
+        // re-render Shell for a projection nothing reads. Skip it while the
+        // splits flag is off and the tree is a lone leaf (finding F).
+        if (!paneModel.WORKSPACE_SPLITS_ENABLED
+            && Object.keys(workspaceStateRef.current.ws.panes).length <= 1) return prev
+        return { w, h }
+      })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
+  const projection = useMemo(
+    () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
+    [workspace, workspaceMode, contentRect],
+  )
+  // ≥2 visible leaves is the ONLY trigger for pane chrome; one leaf is today's
+  // shell exactly.
+  const multiPane = projection.visibleLeaves.length >= 2
+  // The committed visible pane set the nav adapter reads. Settings-open is
+  // applied separately inside isVisibleApp, so it is NOT excluded here.
+  const visiblePaneIds = useMemo(() => new Set(projection.visibleLeaves), [projection])
+
   const {
-    activeView, setActiveView,
-    activeAppId, setActiveAppId,
-    activeChatId, setActiveChatId,
+    activeView,
+    activeAppId,
+    activeChatId,
     drawerOpen, openDrawer, closeDrawer,
     navTo, backFiredRef, drawerPushedRef, navStackRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
-    appNavPush, appNavPop, appNavReset,
-  } = useNavigation()
+    appNavPush, appNavPop, appNavReset, retireAppHistory,
+  } = useNavigation({
+    workspace,
+    workspaceStateRef,
+    dispatchWorkspace,
+    visiblePaneIds,
+  })
+
+  // Settings is a full-workspace overlay (§9) — while it is up we suppress the
+  // chrome and positioned rects (panes stay mounted but hidden).
+  const settingsActive = activeView === 'settings'
+  const workspaceChromeActive = multiPane && !settingsActive
+  // navTo is a per-render function; stable callbacks (handleAppError, passed to
+  // AppCanvas's []-dep message listener) reach the latest one through this ref
+  // so their identity never churns and the listener never re-registers.
+  const navToRef = useRef(navTo)
+  navToRef.current = navTo
+  // Wire the pane-close route retargeting (design §5.1.3). navStackRef is stable,
+  // so recreating this closure each render is behaviourally identical; the
+  // reducer moves focus to the surviving sibling on a pane removal, so retargeting
+  // dead-pane routes to nextWs.focusedPaneId lands them on a live pane. Physical
+  // history hints that can't be rewritten degrade via restoreRoute's dead-hint
+  // fallback.
+  onPaneClosedRef.current = (prevWs, nextWs) => {
+    const survivor = nextWs.focusedPaneId
+    const dead = new Set(Object.keys(prevWs.panes).filter(id => !nextWs.panes[id]))
+    navStackRef.current = navStackRef.current.map(r =>
+      (r && dead.has(r.paneId) ? { ...r, paneId: survivor } : r))
+  }
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
@@ -106,16 +205,19 @@ export default function Shell() {
     const app = apps.find(a => String(a.id) === String(id))
     return appVersionKey(app?.updated_at)
   }, [apps])
-  // LRU cache of recently-visited app IDs (most-recent first).
-  // Each entry stays mounted as a hidden iframe so re-opening it via
-  // drawer-tap or back-nav is instant — no module re-fetch, no
-  // WebGL re-init, no app-side data refetch. Bounded by APP_CACHE_MAX
-  // to keep memory predictable on phones (each Three.js / WebGL app
-  // can hold tens of MB).
+  // Warm LRU of recently-VISIBLE app ids (most-recent first) — the unpinned
+  // remainder of the iframe budget. Each rendered app stays mounted as a hidden
+  // iframe so re-opening it is instant (no module re-fetch, no WebGL re-init).
+  // A ref + version counter (not state) because the rendered set is DERIVED
+  // synchronously from visibleAppIds ∪ this: visible ids are always pinned, and
+  // a post-commit effect would blank a pane whose newly-activated app was never
+  // in the LRU (design §2/§4, finding B). Bounded to keep phone memory
+  // predictable (each Three.js / WebGL app can hold tens of MB).
   const APP_CACHE_MAX = 4
-  const [appCache, setAppCache] = useState(
-    () => (coldRestoredCanvasAppId != null ? [coldRestoredCanvasAppId] : [])
+  const warmLruRef = useRef(
+    coldRestoredCanvasAppId != null ? [String(coldRestoredCanvasAppId)] : []
   )
+  const [warmVersion, setWarmVersion] = useState(0)
   const [appIntents, setAppIntents] = useState({})
   // Ids ever observed PRESENT in a fetched /api/apps list. The eviction
   // effect below treats an app as uninstalled only on a genuine
@@ -211,6 +313,17 @@ export default function Shell() {
     // immediate background revalidation. This follows the synchronous event
     // above so view-owned anchors are captured before the first await.
     await awaitCacheFlushBeforeReload(flushPersistedQueryCache(queryClient))
+    // Workspace-first restore (§5.3.10): synchronously persist the latest
+    // workspace blob (tree/focus/active tabs are authoritative on boot) and the
+    // compatibility triple derived from its focused pane, so a valid blob wins
+    // over shellReload.active* and this handoff never destroys the just-persisted
+    // pane state.
+    try {
+      sessionStorage.setItem(
+        paneModel.STORAGE_KEY,
+        paneModel.serializeWorkspace(workspaceStateRef.current.ws),
+      )
+    } catch { /* private mode / quota — the in-memory workspace still boots */ }
     sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
     // Match the manifest scope so the post-reload page lands inside
     // the installed PWA's declared scope — writing `/` here would
@@ -397,40 +510,13 @@ export default function Shell() {
   // guarantees the has_messages flag is now true and the reuse guard
   // (which reads has_messages from the chats query) is reliable again.
   const recoveredChatIdsRef = useRef(new Set())
-  // The built-app CTA list is DERIVED from the apps query's `chat_id` column —
-  // no client mirror, no sessionStorage, no app_built round-trip. Memoize on a
-  // primitive signature (id:updated_at joined) rather than on `apps` identity:
-  // every app_updated returns a fresh `apps` array, but ChatView's
-  // builtApps-keyed effects must NOT re-fire unless THIS chat's derived content
-  // actually changed. When the signature is unchanged the memo returns the same
-  // reference, so an unrelated app's refetch is a no-op for the CTA effects.
-  const builtApps = useMemo(
-    () => derivedBuiltApps(apps, activeChatId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [builtAppsSignature(apps, activeChatId)],
-  )
+  // Every mounted chat pane derives its OWN built-app CTA list per chatId inside
+  // PaneChatView (builtAppState.js), so Shell no longer holds a global builtApps
+  // bound to a single activeChatId.
 
-  // ── Tabs: hold several chats/apps open and swap between them ───────
-  // The workspace reducer (paneModel.js) is the successor of the flat open set:
-  // it holds a tree of panes, each with its own tabs. PR1 renders the single
-  // degenerate pane, so the shell derives today's flat `openTabs` from it and
-  // every consumer below (strip visibility, the strip render, isTabActive) reads
-  // that derived array unchanged. Switching a tab is still ordinary navTo, so
-  // the back button rides the existing navStack — no new history sentinels. See
-  // ARCHITECTURE.md's "Multi-pane workspace" section and
-  // docs/design/split-pane-workspace.md §1/§8.
-  const [workspaceState, dispatchWorkspace] = useReducer(
-    paneModel.workspaceReducer,
-    undefined,
-    // readWorkspaceRaw guards the sessionStorage read (getItem can throw in a
-    // sandboxed/disabled-storage context) BEFORE parseWorkspace's own try/catch
-    // would run — the old flat path was fully guarded, so this must be too.
-    () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
-      paneModel.readWorkspaceRaw(sessionStorage),
-      { fallbackTabs: tabModel.readOpenTabs() },
-    )),
-  )
-  const workspace = workspaceState.ws
+  // ── Tabs: the flat projection of the workspace (the reducer + wrapper are
+  // declared above useNavigation). openTabs is the in-order flat walk that
+  // today's single top strip renders.
   const openTabs = useMemo(() => paneModel.flatten(workspace), [workspace])
   // Dual-write on every workspace commit: the versioned blob is authoritative on
   // boot, and the legacy flat key is mirrored for one release so a rolled-back
@@ -442,13 +528,15 @@ export default function Shell() {
     } catch { /* private mode / quota — workspace stays in memory only */ }
     tabModel.writeOpenTabs(paneModel.flattenRollbackPriority(workspace))
   }, [workspace])
-  const openInTab = useCallback((kind, id) => {
-    dispatchWorkspace({ type: 'OPEN_TAB', tab: tabModel.makeTab(kind, id), activate: true })
+  // navTo now owns the OPEN_TAB dispatch (design §1), so openInTab is only a
+  // routed navTo — drawer selections, tab activation, CTA, and protocol opens
+  // all go through navTo and therefore cannot bypass workspace ownership.
+  const openInTab = useCallback((kind, id, paneId) => {
     const { view, opts } = tabModel.tabNavTarget(tabModel.makeTab(kind, id))
-    navTo(view, opts)
+    navTo(view, paneId ? { ...opts, paneId } : opts)
   }, [navTo])
-  // Close only the tab; active-ness is still rendered from the global nav triple
-  // in PR1, so dropping a tab never changes the visible view (today's semantics).
+  // Close only the tab; the derived triple follows the workspace, so dropping the
+  // focused pane's active tab activates its neighbour (paneModel.closeTab).
   const closeTab = useCallback((kind, id) => {
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tabModel.makeTab(kind, id)) })
   }, [])
@@ -477,37 +565,9 @@ export default function Shell() {
   }, [activeAppIdRef, activeChatIdRef, activeViewRef])
   const tabStripVisible = openTabs.length >= 1
 
-  // ── Multi-pane workspace projection (design §2/§4) ────────────────────────
-  // A ResizeObserver on .shell__content drives the mode + geometry. projection
-  // is the single geometry authority; with exactly one visible leaf it is the
-  // pixel-identical single-pane sentinel and the renderer emits today's DOM.
-  const contentElRef = useRef(null)
-  const [contentRect, setContentRect] = useState({ w: 0, h: 0 })
-  useEffect(() => {
-    const el = contentElRef.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => {
-      const w = Math.round(el.clientWidth)
-      const h = Math.round(el.clientHeight)
-      setContentRect(prev => (prev.w === w && prev.h === h ? prev : { w, h }))
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-  const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
-  const projection = useMemo(
-    () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
-    [workspace, workspaceMode, contentRect],
-  )
-  // ≥2 visible leaves is the ONLY trigger for pane chrome; one leaf is today's
-  // shell exactly. Settings is a full-workspace overlay (§9) — while it is up we
-  // suppress the chrome and positioned rects (panes stay mounted but hidden).
-  const multiPane = projection.visibleLeaves.length >= 2
-  const settingsActive = activeView === 'settings'
-  const workspaceChromeActive = multiPane && !settingsActive
-  // tabKey -> the CONTENT rect (pane minus strip) of the active tab of each
-  // visible pane. A content wrapper matching a key is positioned + shown; every
-  // other wrapper keeps the full-bleed hidden pattern.
+  // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
+  // tab of each visible pane. A content wrapper matching a key is positioned +
+  // shown; every other wrapper keeps the full-bleed hidden pattern.
   const visibleTabRects = useMemo(() => {
     const map = new Map()
     if (!workspaceChromeActive) return map
@@ -516,18 +576,51 @@ export default function Shell() {
       const rect = projection.rects[paneId]
       if (!pane || !pane.activeTabKey || !rect) continue
       map.set(pane.activeTabKey, {
+        paneId,
         x: rect.x, y: rect.y + paneModel.STRIP_H,
         w: rect.w, h: Math.max(0, rect.h - paneModel.STRIP_H),
       })
     }
     return map
   }, [workspaceChromeActive, projection, workspace])
+  // The focused pane's active tab key (null under Settings). Drives the
+  // AppCanvas focused-pane-only `active` prop (insets + immersive holder).
+  const focusedActiveKey = settingsActive
+    ? null
+    : (workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null)
+  // The tabKey shown full-bleed in single-pane, non-settings mode. Null in
+  // multi-pane (positioned via visibleTabRects) or under Settings. This is what
+  // makes the derived triple, not a legacy global scalar, decide which single
+  // wrapper is visible (finding C).
+  const fullBleedKey = multiPane ? null : focusedActiveKey
+  // The string app ids that are the active tab of a visible pane (Settings
+  // overlays everything). Drives the AppCanvas `visible` prop + the pinned set
+  // of the synchronous iframe-cache derivation (design §2/§4).
+  const visibleAppIds = useMemo(
+    () => (settingsActive ? new Set() : paneModel.visibleAppIds(workspace, projection.visibleLeaves)),
+    [settingsActive, workspace, projection],
+  )
+  // The chat ids that are the active tab of a visible pane — membership, not
+  // equality with one global id, is what a pane-aware attention/repair rule
+  // tests (design §2 M13, finding D-iii).
+  const visibleChatIds = useMemo(() => {
+    const set = new Set()
+    if (settingsActive) return set
+    for (const paneId of projection.visibleLeaves) {
+      const pane = workspace.panes[paneId]
+      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
+      if (active && active.kind === 'chat') set.add(String(active.id))
+    }
+    return set
+  }, [settingsActive, workspace, projection])
+  const visibleChatIdsRef = useRef(visibleChatIds)
+  useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
   // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
-  // (stable order — same no-reparent rule as the app iframes). Apps stay in the
-  // id-sorted LRU below; only visible chat panes get a ChatView (phone stack
-  // unmounts the rest, today's chat-switch semantics).
+  // — for EVERY mode including single-pane (finding A): DOM identity across 1↔2
+  // panes is the invariant, so the first split never remounts the visible chat.
+  // Stable order (same no-reparent rule as the app iframes). Panes stay mounted
+  // (hidden) behind the Settings overlay, exactly like the app iframes.
   const visibleChatPanes = useMemo(() => {
-    if (!multiPane) return []
     const out = []
     for (const paneId of projection.visibleLeaves) {
       const pane = workspace.panes[paneId]
@@ -535,17 +628,63 @@ export default function Shell() {
       if (active && active.kind === 'chat') out.push({ paneId, chatId: active.id })
     }
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
-  }, [multiPane, projection, workspace])
+  }, [projection, workspace])
+
+  // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
+  // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
+  // from the projection REGARDLESS of LRU membership and are never evicted, so a
+  // MOVE_TAB that makes a never-visited app visible materializes its wrapper in
+  // the SAME commit — no post-commit effect, no blank pane (finding B).
+  const renderedAppIds = useMemo(() => {
+    const result = new Set()
+    for (const id of visibleAppIds) result.add(String(id))
+    for (const id of warmLruRef.current) {
+      if (result.size >= APP_CACHE_MAX) break
+      result.add(String(id))
+    }
+    return [...result].sort((a, b) => Number(a) - Number(b))
+    // warmVersion re-derives the set when the warm LRU changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleAppIds, warmVersion])
+  // The rendered set as of the last maintenance pass — the baseline the next
+  // pass diffs against to identify eviction victims (never the current set,
+  // which already dropped them).
+  const prevRenderedRef = useRef(new Set())
+
+  // Maintain the warm LRU as the visible set changes: currently-visible apps are
+  // the most-recent entries, and a just-hidden app slides into the warm
+  // remainder (capped, so the rendered set is never > APP_CACHE_MAX — never five
+  // frames to preserve history, §4.1.4). Any app that leaves the rendered set is
+  // RETIRED (contract §4): its physical entries are marked consumed so a later
+  // Back discards them atomically. AppCanvas's onNavReset cleanup fires inside
+  // the same unmount commit — before any Back event can process — so the orphan-
+  // Back hazard is closed regardless; this explicit retire is the idempotent
+  // primary path, never a visible app.
+  useEffect(() => {
+    const visible = [...visibleAppIds].map(String)
+    const prevWarm = warmLruRef.current
+    const merged = [...visible, ...prevWarm.filter(id => !visible.includes(id))].slice(0, APP_CACHE_MAX)
+    const nextRendered = new Set(merged)   // visible ⊆ merged; = the memo's set
+    for (const id of prevRenderedRef.current) {
+      if (!nextRendered.has(id) && !visibleAppIds.has(id)) retireAppHistory(id)
+    }
+    prevRenderedRef.current = nextRendered
+    const changed = merged.length !== prevWarm.length || merged.some((id, i) => id !== prevWarm[i])
+    if (changed) {
+      warmLruRef.current = merged
+      setWarmVersion(v => v + 1)
+    }
+  }, [visibleAppIds, retireAppHistory])
 
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'chat') return chats.find(c => String(c.id) === tab.id)?.title || 'Chat'
     return apps.find(a => String(a.id) === tab.id)?.name || 'App'
   }, [chats, apps])
 
-  // Per-chat repair callbacks for the tiled panes (design §2 M13 — membership
-  // in the visible set, not equality with one global id). A background pane
-  // whose chat 404'd demotes itself by dropping its tab; nothing touches the
-  // global view.
+  // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
+  // whose chat reports a real 404 drops its tab; the derived triple follows the
+  // workspace. If that collapses the workspace to the sole empty root and a live
+  // chat remains, seed the current first chat into it (contract §1.4.12).
   const handlePaneChatMissing = useCallback((missingId) => {
     knownExistingOffListChatIdsRef.current.delete(missingId)
     dispatchWorkspace({
@@ -553,7 +692,18 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tabModel.makeTab('chat', missingId)),
       reason: 'deleted',
     })
-  }, [])
+    const ws = workspaceStateRef.current.ws
+    const focused = ws.panes[ws.focusedPaneId]
+    if (Object.keys(ws.panes).length === 1 && !focused?.activeTabKey) {
+      const fallback = chatsRef.current.find(c => String(c.id) !== String(missingId))
+      if (fallback) {
+        dispatchWorkspace({
+          type: 'OPEN_TAB', paneId: ws.focusedPaneId,
+          tab: tabModel.makeTab('chat', fallback.id), activate: true,
+        })
+      }
+    }
+  }, [dispatchWorkspace, workspaceStateRef])
   const handlePaneChatFirstMessage = useCallback((chatId) => {
     recoveredChatIdsRef.current.delete(chatId)
   }, [])
@@ -679,9 +829,11 @@ export default function Shell() {
     })
   }, [])
 
+  // Clear the attention dot for EVERY visible chat pane — membership in the
+  // visible set, not equality with one global id (design §2 M13).
   useEffect(() => {
-    if (activeView === 'chat') clearChatAttention(activeChatId)
-  }, [activeChatId, activeView, clearChatAttention])
+    for (const cid of visibleChatIds) clearChatAttention(cid)
+  }, [visibleChatIds, clearChatAttention])
 
   // New-app arrival dot. `appBaselineRef` holds every id the session has
   // already accounted for (the apps present at the first live fetch, plus any
@@ -699,10 +851,8 @@ export default function Shell() {
   // (drawer tap, back-nav, moebius:open-app) because it keys on the active
   // canvas rather than a single onSelect handler.
   useEffect(() => {
-    if (activeView === 'canvas' && activeAppId != null) {
-      clearAppAttention(activeAppId)
-    }
-  }, [activeAppId, activeView, clearAppAttention])
+    for (const id of visibleAppIds) clearAppAttention(Number(id))
+  }, [visibleAppIds, clearAppAttention])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of
   // the app holding an immersive request (or null); it's APPLIED — bar
@@ -744,23 +894,16 @@ export default function Shell() {
   // dead provider" failure mode without polling.
   const providerAuth = useProviderAuthStatus()
 
-  // Maintain the LRU: when activeAppId changes, move it to the front
-  // of the cache (mounting it if new). Caps at APP_CACHE_MAX; the
-  // tail is evicted (its iframe unmounts, freeing memory).
-  useEffect(() => {
-    if (activeAppId === null || activeAppId === undefined) return
-    setAppCache(prev => {
-      const filtered = prev.filter(id => id !== activeAppId)
-      return [activeAppId, ...filtered].slice(0, APP_CACHE_MAX)
-    })
-  }, [activeAppId])
+  // The warm LRU is now maintained by the synchronous cache-derivation effect
+  // above (keyed on visibleAppIds), which pins every visible app and retires an
+  // evicted frame's history before unmount. No separate activeAppId-rotation
+  // effect is needed.
 
   // Cross-session recency for SW cache warming. The persisted LRU read
   // once at mount (useState initializer, so the persist effect below
-  // can't clobber it first) feeds the warm-on-load effect; every LRU
-  // rotation then MERGES into storage rather than overwriting, keeping
-  // depth WARM_APP_LIMIT across sessions (the in-memory list holds only
-  // APP_CACHE_MAX ids). Failures degrade to pinned-only warming.
+  // can't clobber it first) feeds the warm-on-load effect; every rendered-set
+  // change then MERGES into storage rather than overwriting, keeping depth
+  // WARM_APP_LIMIT across sessions. Failures degrade to pinned-only warming.
   const [initialAppLru] = useState(() => {
     try {
       return parseStoredAppLru(localStorage.getItem(APP_LRU_STORAGE_KEY))
@@ -769,14 +912,14 @@ export default function Shell() {
   useEffect(() => {
     // The empty mount state carries no recency information — persisting
     // it would erase the previous session's signal before it's used.
-    if (appCache.length === 0) return
+    if (renderedAppIds.length === 0) return
     try {
       const stored = parseStoredAppLru(localStorage.getItem(APP_LRU_STORAGE_KEY))
       localStorage.setItem(
-        APP_LRU_STORAGE_KEY, JSON.stringify(mergeAppLru(appCache, stored)),
+        APP_LRU_STORAGE_KEY, JSON.stringify(mergeAppLru(renderedAppIds, stored)),
       )
     } catch { /* storage unavailable (private mode) — warming degrades */ }
-  }, [appCache])
+  }, [renderedAppIds])
 
   // Posts a precache-warming message to the service worker for one app.
   // The SW handler (moebius:precache-app in sw.js) fetches frame + module
@@ -813,22 +956,17 @@ export default function Shell() {
     } catch { /* best-effort — warming must never break the shell */ }
   }, [queryClient])
 
-  // Evict tombstoned apps from the LRU. When an app is uninstalled
-  // (feature 110 soft-delete) it drops out of /api/apps, the server
-  // 404s its /module + /frame, and `app_updated` fires → refreshApps.
-  // But the hidden AppCanvas iframe stays mounted as long as its id is
-  // in appCache, so it re-fetches /module, 404s, and shows an error
-  // canvas that lingers until the next navigation. Reconcile the cache
-  // against the live apps list: any cached id no longer present is
-  // dropped so its AppCanvas unmounts. If the tombstoned app is the
-  // ACTIVE canvas, fall back to the chat view so the user isn't left
-  // staring at the error canvas (feature 114).
+  // Pane-aware tombstone eviction (design §1). When an app is uninstalled out of
+  // band (feature 110 soft-delete) it drops out of /api/apps and the server 404s
+  // its /module + /frame, but its iframe stays mounted (a workspace tab and/or a
+  // warm cached frame). Reconcile against the live list: a confirmed-gone app has
+  // its history retired, its nav-stack routes scrubbed, and its tab CLOSED in ITS
+  // OWN pane — the reducer activates that pane's neighbour or collapses it, never
+  // globally demoting the focused pane unless that IS the pane it closes.
   //
-  // Gate on a live-confirmed list (isSuccess + isFetchedAfterMount),
-  // mirroring the chat-demotion effect above: a transiently-empty
-  // `apps` (cold cache, a refetch that resolved to []) must not evict
-  // valid cached apps. This is bookkeeping only — render still iterates
-  // the id-sorted snapshot, never appCache's LRU order directly.
+  // Gate on a live-confirmed list (isSuccess + isFetchedAfterMount): a
+  // transiently-empty `apps` (cold cache, a refetch that resolved to []) must not
+  // evict valid apps.
   const appsLiveFetched = appsQuery.isSuccess && appsQuery.isFetchedAfterMount
   useEffect(() => {
     if (!appsLiveFetched) return
@@ -836,61 +974,48 @@ export default function Shell() {
     // Record everything the live list currently shows, so a later
     // disappearance reads as a real uninstall rather than a never-seen id.
     for (const id of liveIds) seenAppIdsRef.current.add(id)
-    if (appCache.length === 0) return
-    // Evict only ids that were once present and are now gone — a genuine
-    // present→absent transition. A cached id we've never seen in a fetched
-    // list yet (just-opened app whose query hasn't caught up) is left alone
-    // until the list confirms it; this is the open-app stale-list race guard.
-    //
-    // Never evict an app that a back-stack entry still points at. `/api/apps/`
-    // is NetworkFirst, so a drawer-open refetch can resolve to a stale
-    // cache-fallback list that transiently omits a still-installed app; if
-    // that app is a back target, evicting it here scrubs it from navStackRef
-    // and the back-gesture skips it (A→B→C then back landed on A, not B).
-    // A genuine LOCAL uninstall scrubs the nav-stack via deleteApp, so this
-    // generic list-reconciliation must not.
-    const navHeldAppIds = new Set(
+    // Candidates: every mounted app frame (rendered set) plus every app tab.
+    const candidates = new Set(renderedAppIds.map(String))
+    for (const tab of openTabs) if (tab.kind === 'app') candidates.add(String(tab.id))
+    if (candidates.size === 0) return
+    // Never evict an app a back-stack entry still points at (a NetworkFirst
+    // /api/apps refetch can transiently omit a still-installed app; a real LOCAL
+    // uninstall scrubs the stack via deleteApp). A currently-VISIBLE tombstone is
+    // NOT exempt — it must be closed even if an earlier visit also left it on the
+    // stack (contract §5.1.2). String-normalized comparison throughout.
+    const navHeld = new Set(
       navStackRef.current
         .filter(e => e.view === 'canvas' && e.appId != null)
-        .map(e => e.appId)
+        .map(e => String(e.appId))
     )
-    // The ACTIVE canvas is never exempt: an app deleted out-of-band while it is
-    // the current view must still be evicted so the shell falls back to chat
-    // (feature 114), even when an earlier visit also left it on the back-stack
-    // (chat→A→B→A leaves A both active AND a back target). Only genuine back
-    // targets get the stale-list protection.
-    if (activeView === 'canvas' && activeAppId != null) {
-      navHeldAppIds.delete(activeAppId)
-    }
-    const stale = appCache.filter(
-      id => !navHeldAppIds.has(id)
-        && !liveIds.has(id)
-        && seenAppIdsRef.current.has(id)
-    )
+    for (const vid of visibleAppIds) navHeld.delete(vid)
+    // Confirmed stale: seen present before, gone now, and not a protected back
+    // target. A just-opened app not yet seen present survives (stale-list race).
+    const stale = [...candidates].filter(sid => {
+      const nid = Number(sid)
+      return !navHeld.has(sid) && !liveIds.has(nid) && seenAppIdsRef.current.has(nid)
+    })
     if (stale.length === 0) return
-    // Evict exactly the confirmed-stale ids — NOT every id absent from
-    // liveIds. A just-opened app we've not yet seen present is absent from
-    // liveIds for one render but must survive; filtering on `stale` (which
-    // already excludes never-seen ids) keeps it mounted.
     const staleSet = new Set(stale)
-    setAppCache(prev => prev.filter(id => !staleSet.has(id)))
-    // Drop any back-stack entries pointing at a now-dead app so a later
-    // back-gesture can't restore the canvas of an uninstalled app (which
-    // would render a blank `<main>` — its iframe is evicted). Mirrors the
-    // navStack scrub deleteChat does for deleted chats.
     navStackRef.current = navStackRef.current.filter(
-      e => !(e.view === 'canvas' && stale.includes(e.appId))
+      e => !(e.view === 'canvas' && staleSet.has(String(e.appId)))
     )
-    // If we're sitting ON the tombstoned app, leave the canvas for the
-    // chat view directly (not navTo — there's no meaningful "back to the
-    // app" target to push; the app is gone). setActiveView last so the
-    // canvas->chat flip only happens once activeView's payload is set.
-    if (activeView === 'canvas' && stale.includes(activeAppId)) {
-      setActiveAppId(null)
-      setActiveView('chat')
+    for (const sid of stale) {
+      retireAppHistory(sid)
+      dispatchWorkspace({
+        type: 'CLOSE_TAB',
+        tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
+        reason: 'deleted',
+      })
     }
-  }, [apps, appsLiveFetched, appCache, activeView, activeAppId,
-      navStackRef, setActiveAppId, setActiveView])
+    // Drop any warm-only stale frame (not a tab, so CLOSE_TAB was a no-op for it)
+    // so its 404'ing iframe unmounts.
+    if (warmLruRef.current.some(id => staleSet.has(String(id)))) {
+      warmLruRef.current = warmLruRef.current.filter(id => !staleSet.has(String(id)))
+      setWarmVersion(v => v + 1)
+    }
+  }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
+      navStackRef, retireAppHistory, dispatchWorkspace])
 
   // New-app dot detection (state + open-clear live up beside the chat
   // attention machinery). First live list = the session baseline; anything
@@ -929,17 +1054,24 @@ export default function Shell() {
     if (coldRestoredCanvasAppId == null) return
     const live = new Set(apps.map(a => a.id))
     if (live.has(coldRestoredCanvasAppId)) return
-    // Restored app is gone (uninstalled since): evict the seeded iframe so
-    // it can't sit stuck-mounted (the present->absent eviction above never
-    // fires for an id that was never seen present this session), and demote
-    // the canvas to chat if we're sitting on it.
-    setAppCache(prev => prev.filter(id => id !== coldRestoredCanvasAppId))
-    if (activeView === 'canvas'
-        && Number(activeAppId) === Number(coldRestoredCanvasAppId)) {
-      setActiveAppId(null)
-      setActiveView('chat')
+    // Restored app is gone (uninstalled since): retire its history and evict the
+    // seeded warm frame so it can't sit stuck-mounted (the present->absent
+    // eviction above never fires for an id never seen present this session). If a
+    // tab was seeded for it (fallback boot), close it in its pane; if the
+    // authoritative workspace never contained it, this is a no-op (contract
+    // §1.4.6).
+    retireAppHistory(coldRestoredCanvasAppId)
+    dispatchWorkspace({
+      type: 'CLOSE_TAB',
+      tabKey: tabModel.tabKey(tabModel.makeTab('app', coldRestoredCanvasAppId)),
+      reason: 'deleted',
+    })
+    const sid = String(coldRestoredCanvasAppId)
+    if (warmLruRef.current.some(id => String(id) === sid)) {
+      warmLruRef.current = warmLruRef.current.filter(id => String(id) !== sid)
+      setWarmVersion(v => v + 1)
     }
-  }, [appsLiveFetched, apps, activeView, activeAppId, setActiveAppId, setActiveView])
+  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace])
 
   // Warm the SW app-code cache once per shell load for the apps the user
   // is most likely to open next — pinned + most-recent (the persisted
@@ -1022,14 +1154,18 @@ export default function Shell() {
         sessionStorage.removeItem('pending-draft-autosend')
         sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
       } catch {}
-      // Set view and chatId together to avoid flashing the previous chat.
-      setActiveView('chat')
-      setActiveChatId(buildingChatId)
+      // Open the building chat in the crashed app's OWN pane (fallback: focused
+      // pane) so a background app's crash report lands beside it (contract §1.4.7).
+      const ownerPane = paneModel.paneOf(
+        workspaceStateRef.current.ws,
+        tabModel.tabKey(tabModel.makeTab('app', appId)),
+      )
+      navToRef.current('chat', { chatId: buildingChatId, paneId: ownerPane?.id })
       refreshChats()
     } else {
       newChatRef.current?.({ draft: report, forceNew: true })
     }
-  }, [refreshChats, setActiveView, setActiveChatId])
+  }, [refreshChats, workspaceStateRef])
 
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated
@@ -1102,10 +1238,18 @@ export default function Shell() {
       return
     }
     if (!prev) {
-      // No restored chat target exists yet. Demote immediately to the
-      // newest listed chat, or let the bootstrap effect create one if the
-      // owner has no listed chats.
-      setActiveChatId(chats[0]?.id || null)
+      // No restored chat target. Seed the newest listed chat into the focused/
+      // root pane ONLY if it has no active tab — never overwrite an active app
+      // pane merely to maintain a remembered chat id (contract §1.4.8). If the
+      // owner has no listed chats, the bootstrap effect creates one.
+      const ws = workspaceStateRef.current.ws
+      const focused = ws.panes[ws.focusedPaneId]
+      if (!focused?.activeTabKey && chats[0]) {
+        dispatchWorkspace({
+          type: 'OPEN_TAB', paneId: ws.focusedPaneId,
+          tab: tabModel.makeTab('chat', chats[0].id), activate: true,
+        })
+      }
       chatsLoadedRef.current = true
       return
     }
@@ -1141,7 +1285,23 @@ export default function Shell() {
         if (cancelled || activeChatIdRef.current !== probedChatId) return
         if (res.status === 404) {
           knownExistingOffListChatIdsRef.current.delete(probedChatId)
-          setActiveChatId(chats[0]?.id || null)
+          // The restored chat is genuinely gone: close its tab in its pane. If
+          // that leaves the sole empty root and a live chat remains, seed the
+          // fallback into it (contract §1.4.9).
+          dispatchWorkspace({
+            type: 'CLOSE_TAB',
+            tabKey: tabModel.tabKey(tabModel.makeTab('chat', probedChatId)),
+            reason: 'deleted',
+          })
+          const ws = workspaceStateRef.current.ws
+          const focused = ws.panes[ws.focusedPaneId]
+          const fallback = chats.find(c => c.id !== probedChatId)
+          if (!focused?.activeTabKey && fallback) {
+            dispatchWorkspace({
+              type: 'OPEN_TAB', paneId: ws.focusedPaneId,
+              tab: tabModel.makeTab('chat', fallback.id), activate: true,
+            })
+          }
         } else if (res.ok) {
           // Exists but is unlisted because it is app-attributed or the drawer
           // list is lagging a fresh chat. Memoize only the positive off-list
@@ -1160,7 +1320,7 @@ export default function Shell() {
     return () => { cancelled = true }
   }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,
       chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
-      refreshChats, setActiveChatId, activeChatIdRef])
+      refreshChats, dispatchWorkspace, workspaceStateRef, activeChatIdRef])
 
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
 
@@ -1295,10 +1455,10 @@ export default function Shell() {
         // final durable transcript.
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
-        if (
-          activeViewRef.current !== 'chat'
-          || String(chatId) !== String(activeChatIdRef.current || '')
-        ) {
+        // Attention iff the finished chat is NOT visible in ANY pane — membership
+        // in the visible set, not equality with one global id, so a chat visible
+        // in a background split gets no false dot (finding D-iii).
+        if (!visibleChatIdsRef.current.has(String(chatId))) {
           setAttentionChatIds(prev => {
             if (prev.has(chatId)) return prev
             const next = new Set(prev)
@@ -1615,9 +1775,14 @@ export default function Shell() {
     // push left an immediate Back/Forward race before React's route effect ran.
     if (recordsHistory) navTo('chat', { chatId })
     else {
+      // Non-history path: no back-target push, but the workspace still owns what
+      // renders — open the new chat into the focused pane (contract §1.4.10).
       closeDrawer()
-      setActiveView('chat')
-      setActiveChatId(chatId)
+      const ws = workspaceStateRef.current.ws
+      dispatchWorkspace({
+        type: 'OPEN_TAB', paneId: ws.focusedPaneId,
+        tab: tabModel.makeTab('chat', chatId), activate: true,
+      })
     }
     if (focusComposer) requestComposerFocus(chatId)
   }
@@ -1666,13 +1831,17 @@ export default function Shell() {
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
     // Drop the tab pinned to this chat (local delete only — see deleteApp).
     // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
-    // tombstoned chat outside the backend recovery path.
+    // tombstoned chat outside the backend recovery path. CLOSE_TAB already
+    // activates the pane's neighbour tab when one exists; only if that leaves
+    // the focused pane EMPTY (we deleted its sole/active tab) do we open a fresh
+    // chat — so a background sibling tab is preserved rather than overridden.
     dispatchWorkspace({
       type: 'CLOSE_TAB',
       tabKey: tabModel.tabKey(tabModel.makeTab('chat', id)),
       reason: 'deleted',
     })
-    if (activeChatId === id) {
+    const focusedAfterClose = workspaceStateRef.current.ws.panes[workspaceStateRef.current.ws.focusedPaneId]
+    if (!focusedAfterClose?.activeTabKey) {
       // Exclude the just-deleted id: it's still in `chats` until the
       // refreshChats below, and the reuse filter would otherwise pick it
       // (empty + was active) and navigate straight back into a 404 chat.
@@ -1723,29 +1892,28 @@ export default function Shell() {
       // Other non-2xx (e.g. 404 = already gone) — fall through to local
       // cleanup so the app doesn't linger as a phantom in the UI.
     }
-    // Evict the app from the LRU cache so its iframe unmounts immediately.
-    // The eviction effect (appsLiveFetched) would also catch it on the next
-    // refreshApps, but evicting inline is faster and avoids a transient
-    // "app is gone but iframe is still visible" state.
-    setAppCache(prev => prev.filter(cachedId => cachedId !== id))
+    // Retire this app's physical history + evict any warm frame before unmount
+    // (contract §4.1.5), then scrub the nav-stack, then close its tab. The
+    // CLOSE_TAB(reason:'deleted') owns the view transition — the derived triple
+    // follows the workspace to the pane's neighbour/collapse; no global demote.
+    retireAppHistory(id)
+    const sid = String(id)
+    if (warmLruRef.current.some(cid => String(cid) === sid)) {
+      warmLruRef.current = warmLruRef.current.filter(cid => String(cid) !== sid)
+      setWarmVersion(v => v + 1)
+    }
     navStackRef.current = navStackRef.current.filter(
-      e => !(e.view === 'canvas' && e.appId === id)
+      e => !(e.view === 'canvas' && String(e.appId) === sid)
     )
     // Drop the tab pinned to this app. Only LOCAL deletes prune the strip; an
     // out-of-band delete leaves the tab, which degrades gracefully (clicking it
-    // 404s the iframe). Auto-pruning against the live list is unsafe — /api/apps
-    // is NetworkFirst, so a transient stale refetch could drop a live tab.
-    // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
-    // tombstoned app outside the backend recovery path.
+    // 404s the iframe). reason:'deleted' clears the undo slot so Cmd/Z can't
+    // resurrect a tombstoned app outside the backend recovery path.
     dispatchWorkspace({
       type: 'CLOSE_TAB',
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
-    if (activeView === 'canvas' && activeAppId === id) {
-      setActiveAppId(null)
-      setActiveView('chat')
-    }
     await refreshApps()
     showToast('App deleted', {
       duration: 5000,
@@ -1785,10 +1953,16 @@ export default function Shell() {
       showToast("Couldn't delete app data.", { variant: 'error' })
       return
     }
-    // The server rotated this app's immutable storage generation under the
-    // write lock. Unmount the old runtime before clearing its local mirror and
-    // token so no old-generation queue can refresh into the empty generation.
-    setAppCache(prev => prev.filter(cachedId => cachedId !== id))
+    // The server rotated this app's immutable storage generation under the write
+    // lock. The remount rides versionForApp's bump (refreshApps below); we just
+    // retire the old frame's physical history — its replacement starts with an
+    // empty internal nav stack (contract §4.1.5) — and drop any warm-only frame.
+    retireAppHistory(id)
+    const sid = String(id)
+    if (warmLruRef.current.some(cid => String(cid) === sid)) {
+      warmLruRef.current = warmLruRef.current.filter(cid => String(cid) !== sid)
+      setWarmVersion(v => v + 1)
+    }
     clearAppFrameStorage(id)
     clearCachedAppToken(id)
     await clearAppRuntimeData(id)
@@ -1968,154 +2142,58 @@ export default function Shell() {
         </nav>
       )}
       <main className="shell__content" inert={drawerOpen} ref={contentElRef}>
-        {/* Single-mount ChatView, keyed by activeChatId. Switching
-            chats unmounts and remounts; ChatView's hide-then-reveal
-            scroll-restore (visibility:hidden until lazy renderers
-            settle) makes that remount visually seamless. We tried
-            multi-mount LRU caching to avoid remount entirely, but
-            the resulting DOM-reorder on every chat-switch silently
-            reset scrollTop after a few rotations. Single-mount with
-            hide-then-reveal is structurally simpler and locked in
-            by tests. */}
-        {/* Single-mount ChatView — TODAY's exact path, and the ONLY chat
-            render while there is one visible leaf (multiPane false). This is
-            the pixel-identical single-pane guarantee: with one pane the DOM,
-            wiring, and scroll behavior are unchanged. At ≥2 visible leaves the
-            PaneChatView list below takes over (per-chat binding) and this
-            unmounts — a deliberate one-time cost of a split, never a resize. */}
-        {!multiPane && activeView === 'chat' && activeChatId && (
-          // Guard the chat view: it renders agent-generated markdown
-          // (marked + KaTeX/hljs), the likeliest render-crash source. Keyed
-          // by activeChatId so switching chats clears a crashed boundary —
-          // a broken chat doesn't strand the whole shell.
-          <ErrorBoundary key={activeChatId} variant="inline" label="chat">
-          <ChatView
-            key={activeChatId}
-            chatId={activeChatId}
-            externalRunSignal={chatRunSignal(chatRunSignals, activeChatId)}
-            onStreamEnd={({ continues } = {}) => {
-              // ChatView calls this when the agent turn finishes
-              // streaming. Keep the running marker across queued
-              // continuations; the successor turn owns the next finish.
-              if (!continues) markStreamingEnd(activeChatId)
-              refreshApps()
-              loadTheme()
-              refreshChats()
-            }}
-            onFirstMessage={() => {
-              // The chat has its first message — has_messages is now
-              // reliably true, so remove it from the recovered-chat guard.
-              recoveredChatIdsRef.current.delete(activeChatId)
-              refreshChats()
-            }}
-            onSystemEvent={handleSystemEvent}
-            onChatMissing={(missingId) => {
-              // ChatView's own load returned a real 404: this chat is gone
-              // (deleted out-of-band, or an off-list chat the restore probe had
-              // memoized as existing). Drop the stale memo so it can't re-hold
-              // it, and demote to a live chat if it's still the active view.
-              knownExistingOffListChatIdsRef.current.delete(missingId)
-              if (String(activeChatIdRef.current) === String(missingId)) {
-                // Read the CURRENT chats (chatsRef), not the possibly-stale
-                // `chats` captured in ChatView's load-effect closure — else a
-                // late 404 could demote to null instead of the newest chat.
-                setActiveChatId(chatsRef.current[0]?.id || null)
-              }
-            }}
-            builtApps={builtApps}
-            onOpenApp={(appId) => {
-              // The CTA is DERIVED from the apps this chat owns, so it is
-              // durable: opening it, sending a new message, or reloading never
-              // retires it. It flips its label to "Open {name}" when the turn
-              // ends, and stays as a route back to the app the chat built.
-              navTo('canvas', { appId })
-            }}
-            onMessageStart={() => {
-              // User just sent a message — the agent is about to
-              // stream a response. Mark this chat as streaming so the
-              // drawer's pulse dot picks it up immediately (no
-              // round-trip wait for the first SSE event).
-              markStreamingStart(activeChatId)
-            }}
-            onQuestionAnswered={refreshChats}
-            onVoiceListeningChange={markVoiceListening}
-            composerFocusRequest={composerFocusRequest}
-            onComposerFocusHandled={handleComposerFocusHandled}
-          />
-          </ErrorBoundary>
-        )}
-        {/* Multi-iframe LRU cache: render every recently-visited app
-            as its own persisted iframe; only the matching one is
-            visible. Re-opening a cached app via drawer-tap or back-
-            nav is instant (no iframe reload). Cap is APP_CACHE_MAX.
+        {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
+            wrappers (chatId-sorted) as ONE flat sibling set, never reparented.
+            A wrapper is positioned (--paned) when its tab is a visible pane's
+            active tab in the tiled path, full-bleed (--active) when it is the
+            focused pane's active tab in single-pane, else hidden. DOM identity
+            is preserved across 1↔2 panes — the first split changes rects, never
+            remounts (finding A). */}
 
-            Render order is sorted by id (stable across LRU rotations)
-            so React never calls insertBefore to reorder the wrappers
-            on app-switch. Reordering keyed children causes Chrome to
-            reload the sandboxed iframes inside, which then never
-            receive a fresh frame-init from the parent and hit the
-            10s "Loading timeout" guard. LRU still controls eviction;
-            only DOM order is stable. */}
-        {[...appCache].sort((a, b) => Number(a) - Number(b)).map(id => {
-          // No reparenting, ever: the wrapper node and its id-sorted position
-          // are identical across single-pane and tiled renders (design §2). Only
-          // its class/style change — a paned wrapper (active tab of a visible
-          // pane) gets its content rect inline; every other wrapper keeps the
-          // full-bleed hidden pattern. data-tab-key is added only in the tiled
-          // path (the divider drag looks wrappers up by it); single-pane DOM is
-          // byte-for-byte today's.
-          const paned = workspaceChromeActive ? visibleTabRects.get(`app:${id}`) : null
-          const todayActive = activeView === 'canvas' && activeAppId === id
+        {/* App iframes — the rendered set is derived synchronously (visibleAppIds
+            ∪ warm LRU), id-sorted so React never reparents (a sandbox reparent =
+            reload). */}
+        {renderedAppIds.map(id => {
+          const tabKey = `app:${id}`
+          const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
+          const fullBleed = !paned && tabKey === fullBleedKey
+          const app = apps.find(a => String(a.id) === String(id))
           return (
           <div
             key={id}
-            data-tab-key={multiPane ? `app:${id}` : undefined}
+            data-tab-key={multiPane ? tabKey : undefined}
             className={paned
               ? 'shell__view shell__view--paned'
-              : `shell__view ${todayActive ? 'shell__view--active' : ''}`}
+              : `shell__view ${fullBleed ? 'shell__view--active' : ''}`}
             style={paned
               ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h }
               : undefined}
+            // Clicking a visible pane focuses it (chat panes are not opaque; app
+            // iframes swallow interior clicks, so this catches wrapper padding —
+            // interior app focus rides the runtime bridge later). Only in the
+            // tiled path (finding D-i).
+            onPointerDownCapture={paned ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
             <AppCanvas
               appId={id}
-              // True only while this app is the visible canvas. Mirrors the
-              // .shell__view--active class above (which toggles visibility).
-              // Two consumers inside AppCanvas: the frame-visibility signal
-              // (apps pause background work — audio, rAF — when hidden) and
-              // the immersive gate (the immersive holder is global
-              // last-writer-wins, so a hidden cached app — or its rebuilt
-              // frame promoting in the background — must not steal
-              // chrome/insets from the active app). String-normalized: the
-              // LRU holds whatever id type planted it, activeAppId whatever
-              // navigation set.
-              active={activeView === 'canvas' && String(activeAppId) === String(id)}
-              // Keep the selected app painted beneath the modal scrim, but
-              // suspend its iframe interaction while the drawer is open. This
-              // cancels Android kinetic scrolling already in flight (not just
-              // new pointer hits, which inert/pointer-events already block).
-              interactive={activeView === 'canvas'
-                && String(activeAppId) === String(id)
-                && !drawerOpen}
+              // Focused-pane-only: gates safe-area insets + the immersive holder
+              // (global last-writer-wins). Single-pane: active === visible.
+              active={tabKey === focusedActiveKey}
+              // Painted beneath the drawer scrim but NON-interactive while the
+              // drawer is open, so Android kinetic momentum already in flight is
+              // cancelled (not just new pointer hits, which inert/pointer-events
+              // already block) — sibling 79952de27, re-expressed in workspace
+              // terms: the focused canvas, minus drawer-open.
+              interactive={tabKey === focusedActiveKey && !drawerOpen}
+              // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
+              // background split's app keeps running and can install sentinels;
+              // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
+              visible={visibleAppIds.has(String(id))}
               version={versionForApp(id)}
-              appName={apps.find(a => String(a.id) === String(id))?.name}
-              appSlug={apps.find(a => String(a.id) === String(id))?.slug}
-              offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
+              appName={app?.name}
+              appSlug={app?.slug}
+              offlineCapable={!!app?.offline_capable}
               pendingIntent={appIntents[String(id)] || null}
-              // Immersive is APPLIED only while this app is the active holder
-              // (immersiveActive already requires the canvas view + active
-              // app). Only then does the iframe receive the real safe-area
-              // insets to pad under the notch; every other (cached, hidden)
-              // iframe gets zeros so it never double-pads behind the chrome.
-              //
-              // STAGE-A LIMITATION (documented, intentional): `active` still
-              // keys on the SINGLE global activeAppId, so a second app that is
-              // the active tab of a VISIBLE tiled pane is told frame-visibility
-              // false and pauses its rAF/audio. Splitting `active` is unsafe
-              // here — it also gates the immersive/inset holder (see above), so
-              // a background pane flipped active=true could steal chrome/insets.
-              // Stage B does the full visibility split; multi-pane is flag-off
-              // by default, so this is inert for the stage-A ship.
               immersive={immersiveActive && String(immersiveAppId) === String(id)}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
@@ -2127,27 +2205,31 @@ export default function Shell() {
           </div>
           )
         })}
-        {/* PaneChatView list — one mount per VISIBLE chat pane, chatId-sorted
-            (stable order, same no-reparent rule as the app iframes). Only in the
-            tiled path; single-pane uses the single-mount block above. Each wraps
-            in a .shell__view positioned into its pane's content rect (or hidden
-            when Settings overlays). PaneChatView parameterizes every callback by
-            its own chatId (design §2, M13). */}
-        {multiPane && visibleChatPanes.map(({ chatId }) => {
-          const rect = workspaceChromeActive ? visibleTabRects.get(`chat:${chatId}`) : null
+        {/* Chat panes — one PaneChatView per VISIBLE chat pane for EVERY mode,
+            chatId-sorted (stable order). The single visible chat renders through
+            the SAME list (full-bleed) so a split never remounts it (finding A).
+            PaneChatView parameterizes every callback by its own chatId + paneId. */}
+        {visibleChatPanes.map(({ paneId, chatId }) => {
+          const tabKey = `chat:${chatId}`
+          const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
+          const fullBleed = !paned && tabKey === fullBleedKey
           return (
             <div
               key={chatId}
-              data-tab-key={`chat:${chatId}`}
-              className={rect ? 'shell__view shell__view--paned' : 'shell__view'}
-              style={rect
-                ? { top: rect.y, left: rect.x, width: rect.w, height: rect.h }
+              data-tab-key={multiPane ? tabKey : undefined}
+              className={paned
+                ? 'shell__view shell__view--paned'
+                : `shell__view ${fullBleed ? 'shell__view--active' : ''}`}
+              style={paned
+                ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h }
                 : undefined}
+              onPointerDownCapture={paned ? () => dispatchWorkspace({ type: 'FOCUS', paneId }) : undefined}
             >
               <PaneChatView
                 chatId={chatId}
+                paneId={paneId}
                 apps={apps}
-                paneContentHeight={rect ? rect.h : null}
+                paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
                 composerFocusRequest={composerFocusRequest}
                 onComposerFocusHandled={handleComposerFocusHandled}

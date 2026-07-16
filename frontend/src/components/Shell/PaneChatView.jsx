@@ -22,6 +22,7 @@ import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
 // scroll controller (design §2, constraint 1).
 function PaneChatView({
   chatId,
+  paneId,
   apps,
   paneContentHeight,
   chatRunSignals,
@@ -62,9 +63,12 @@ function PaneChatView({
     markStreamingStart(chatId)
   }, [chatId, markStreamingStart])
 
+  // Open the app the CTA points at into THIS pane (design §5, finding D-ii), so
+  // a background chat's "Open app" lands beside it rather than in the globally
+  // focused pane.
   const handleOpenApp = useCallback((appId) => {
-    navTo('canvas', { appId })
-  }, [navTo])
+    navTo('canvas', { appId, paneId })
+  }, [navTo, paneId])
 
   const handleChatMissing = useCallback((missingId) => {
     onChatMissing?.(missingId, chatId)

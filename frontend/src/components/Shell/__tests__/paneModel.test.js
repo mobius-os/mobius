@@ -1151,3 +1151,85 @@ test('property: random op sequences keep every invariant and stay normalize-stab
     }
   }
 })
+
+// ── Stage-B pure helpers ────────────────────────────────────────────────────
+
+test('focusedContentRoute derives the legacy triple from the focused pane', () => {
+  const chatWs = paneModel.seedFromFlatTabs([makeTab('chat', 'c1')])
+  assert.deepEqual(paneModel.focusedContentRoute(chatWs),
+    { view: 'chat', chatId: 'c1', appId: null, paneId: 'p0' })
+
+  // App ids come back numeric (through tabModel.tabNavTarget), never parsed here.
+  const appWs = paneModel.seedFromFlatTabs([makeTab('app', 5)])
+  assert.deepEqual(paneModel.focusedContentRoute(appWs),
+    { view: 'canvas', chatId: null, appId: 5, paneId: 'p0' })
+
+  // An empty focused pane resolves to the empty chat surface.
+  const emptyWs = paneModel.seedFromFlatTabs([])
+  assert.deepEqual(paneModel.focusedContentRoute(emptyWs),
+    { view: 'chat', chatId: null, appId: null, paneId: 'p0' })
+})
+
+// A three-leaf tree row(col(p1,p3), p2), with p1/p2 apps and p3 a chat.
+function threeLeafAppWs() {
+  return paneModel.normalize({
+    v: 1,
+    layout: {
+      id: 's1', dir: 'row', ratio: 0.5,
+      a: { id: 's2', dir: 'col', ratio: 0.5, a: 'p1', b: 'p3' },
+      b: 'p2',
+    },
+    panes: {
+      p1: { id: 'p1', tabs: [makeTab('app', 5)], activeTabKey: tabKey(makeTab('app', 5)) },
+      p2: { id: 'p2', tabs: [makeTab('chat', 'c')], activeTabKey: tabKey(makeTab('chat', 'c')) },
+      p3: { id: 'p3', tabs: [makeTab('app', 9)], activeTabKey: tabKey(makeTab('app', 9)) },
+    },
+    focusedPaneId: 'p1',
+    nextId: 4,
+  })
+}
+
+test('visibleAppIds returns only apps that are the active tab of a visible leaf', () => {
+  const ws = threeLeafAppWs()
+  // p3 (app 9) is hidden when only p1+p2 are visible.
+  assert.deepEqual([...paneModel.visibleAppIds(ws, ['p1', 'p2'])].sort(), ['5'])
+  // All leaves: both app panes count; the chat pane never does.
+  assert.deepEqual([...paneModel.visibleAppIds(ws)].sort(), ['5', '9'])
+  // A chat-only visible set yields no app ids.
+  assert.deepEqual([...paneModel.visibleAppIds(ws, ['p2'])], [])
+})
+
+test('projectLayout clamps a dragged ANCESTOR ratio against child SUBTREE minima', () => {
+  // row(row(p1,p2), p3) at 1400x900. Dragging the root divider toward 0.1 must
+  // NOT starve the inner leaves: the left subtree needs two MIN_PANE_W + a gap,
+  // so p1/p2 stay ≥ 280 (finding E-i — a per-leaf clamp yields ~137px here).
+  const ws = paneModel.normalize({
+    v: 1,
+    layout: {
+      id: 's1', dir: 'row', ratio: 0.5,
+      a: { id: 's2', dir: 'row', ratio: 0.5, a: 'p1', b: 'p2' },
+      b: 'p3',
+    },
+    panes: {
+      p1: { id: 'p1', tabs: [makeTab('chat', 'a')], activeTabKey: tabKey(makeTab('chat', 'a')) },
+      p2: { id: 'p2', tabs: [makeTab('chat', 'b')], activeTabKey: tabKey(makeTab('chat', 'b')) },
+      p3: { id: 'p3', tabs: [makeTab('chat', 'c')], activeTabKey: tabKey(makeTab('chat', 'c')) },
+    },
+    focusedPaneId: 'p1',
+    nextId: 4,
+  })
+  const proj = paneModel.projectLayout(ws, 'wide', { x: 0, y: 0, w: 1400, h: 900 },
+    { splitId: 's1', ratio: 0.1 })
+  assert.ok(proj.rects.p1.w >= paneModel.MIN_PANE_W, `p1 ${proj.rects.p1.w} >= ${paneModel.MIN_PANE_W}`)
+  assert.ok(proj.rects.p2.w >= paneModel.MIN_PANE_W, `p2 ${proj.rects.p2.w} >= ${paneModel.MIN_PANE_W}`)
+})
+
+test('canSplit judges the first split against the POST-inset box, not the full rect', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  // 407px-high phone: (407-7)/2 == 200 looks OK, but after the multi-leaf inset
+  // (391-7)/2 == 192 < MIN_PANE_H, so the split must NOT be offered (finding E-ii).
+  assert.equal(paneModel.canSplit(ws, 'p0', 'top', 'phone', { w: 400, h: 407 }), false)
+  assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 400, h: 407 }), false)
+  // A taller phone clears MIN_PANE_H even after the inset.
+  assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 400, h: 520 }), true)
+})

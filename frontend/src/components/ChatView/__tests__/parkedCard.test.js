@@ -17,6 +17,7 @@ const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const paneChatView = readFileSync(new URL('../../Shell/PaneChatView.jsx', import.meta.url), 'utf8')
 const chatEmbed = readFileSync(new URL('../../ChatEmbed/ChatEmbed.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
 const settingsView = readFileSync(
@@ -135,8 +136,13 @@ test('an enabled policy stays cancellable after the viewer clock reaches reset',
 })
 
 test('a system-announced auto-resume reconnects the mounted chat surface', () => {
-  assert.match(shell, /externalRunSignal=\{chatRunSignal\(chatRunSignals, activeChatId\)\}/,
-    'Shell must forward monotonic run activity to the mounted ChatView')
+  // Every mounted chat surface is now a PaneChatView (one per visible chat pane,
+  // including the single-pane case): Shell forwards the run-signal MAP, and each
+  // pane derives its own monotonic run activity by its own chatId.
+  assert.match(shell, /chatRunSignals=\{chatRunSignals\}/,
+    'Shell must forward the run-signal map to the mounted chat surface (PaneChatView)')
+  assert.match(paneChatView, /externalRunSignal=\{chatRunSignal\(chatRunSignals, chatId\)\}/,
+    'PaneChatView must forward per-chat monotonic run activity to its ChatView')
   assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,
     'the mounted chat must refresh the promoted continuation row')
   assert.match(chatView, /Promise\.resolve\(connectToStream\(true\)\)/,

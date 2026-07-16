@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 
 import {
   isMobiusNavState,
-  isVisibleAppOwner,
+  isTopmostAppEntry,
   navEntryIndex,
   navEntryId,
   navState,
   navTraversalDirection,
+  ownerKeyOf,
   pushNavEntry,
   replaceNavEntry,
   updateCurrentNavEntry,
@@ -55,12 +56,49 @@ test('navTraversalDirection compares tagged shell positions', () => {
   ), 'forward')
 })
 
-test('only the visible canvas app owns app-level history', () => {
-  assert.equal(isVisibleAppOwner('canvas', 7, '7'), true)
-  assert.equal(isVisibleAppOwner('chat', 7, 7), false)
-  assert.equal(isVisibleAppOwner('settings', 7, 7), false)
-  assert.equal(isVisibleAppOwner('canvas', 8, 7), false)
-  assert.equal(isVisibleAppOwner('canvas', null, 7), false)
+test('ownerKeyOf is a stable, unambiguous (paneId, appId) key', () => {
+  // String-normalized and JSON-array separated so ids containing ':' cannot
+  // collide, and equal (paneId, appId) pairs produce equal keys regardless of
+  // number-vs-string form.
+  assert.equal(ownerKeyOf('p0', 7), ownerKeyOf('p0', '7'))
+  assert.notEqual(ownerKeyOf('p0', 7), ownerKeyOf('p1', 7))
+  assert.notEqual(ownerKeyOf('p:0', '1'), ownerKeyOf('p', '0:1'))
+})
+
+test('isTopmostAppEntry enforces all seven queue-until-topmost conditions', () => {
+  const entryId = 'e-app-1'
+  const appState = navState('app', { index: 3, entryId })
+  const registry = new Map([[entryId, { paneId: 'p0', appId: '7', status: 'live' }]])
+  const head = { targetEntryId: entryId, ownerKey: ownerKeyOf('p0', '7') }
+  const base = { state: appState, head, inFlight: false, drawerOpen: false, registry, consumed: new Set() }
+
+  // All conditions satisfied → topmost.
+  assert.equal(isTopmostAppEntry(base), true)
+  // (a) no head.
+  assert.equal(isTopmostAppEntry({ ...base, head: null }), false)
+  // (b) a pop already in flight.
+  assert.equal(isTopmostAppEntry({ ...base, inFlight: true }), false)
+  // (c) drawer open.
+  assert.equal(isTopmostAppEntry({ ...base, drawerOpen: true }), false)
+  // (d) current tagged state is not an app entry.
+  assert.equal(isTopmostAppEntry({ ...base, state: navState('nav', { index: 3, entryId }) }), false)
+  // (e) the current entryId is not the head's target.
+  assert.equal(
+    isTopmostAppEntry({ ...base, state: navState('app', { index: 3, entryId: 'other' }) }),
+    false,
+  )
+  // (f) the registry record's owner no longer matches the head's ownerKey (moved).
+  assert.equal(
+    isTopmostAppEntry({ ...base, registry: new Map([[entryId, { paneId: 'p1', appId: '7', status: 'live' }]]) }),
+    false,
+  )
+  // (f) the registry record is no longer live.
+  assert.equal(
+    isTopmostAppEntry({ ...base, registry: new Map([[entryId, { paneId: 'p0', appId: '7', status: 'consumed' }]]) }),
+    false,
+  )
+  // (g) the entry is already consumed/retired.
+  assert.equal(isTopmostAppEntry({ ...base, consumed: new Set([entryId]) }), false)
 })
 
 // pushNavEntry / replaceNavEntry write to BOTH stores. Mock the two browser

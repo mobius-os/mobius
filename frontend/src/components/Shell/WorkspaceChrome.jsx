@@ -142,15 +142,15 @@ export default function WorkspaceChrome({
     dispatchWorkspace({ type: 'FOCUS', paneId })
   }, [dispatchWorkspace])
 
-  // Tab activation in a pane: make it the pane's active tab, focus the pane, and
-  // route the legacy nav triple (stage A still derives active-ness from it).
+  // Tab activation in a pane routes entirely through navTo (design §1): navTo's
+  // one OPEN_TAB into `paneId` activates the tab AND focuses the pane, and its
+  // back-target snapshot is the pane we're leaving. Pre-dispatching SET_ACTIVE/
+  // FOCUS here would advance the workspace ref before navTo snapshots it, making
+  // the just-activated tab its own (wrong) back-target.
   const activateTab = useCallback((paneId, tab) => {
-    const key = tabModel.tabKey(tab)
-    dispatchWorkspace({ type: 'SET_ACTIVE', paneId, tabKey: key })
-    dispatchWorkspace({ type: 'FOCUS', paneId })
     const { view, opts } = tabModel.tabNavTarget(tab)
-    navTo(view, opts)
-  }, [dispatchWorkspace, navTo])
+    navTo(view, { ...opts, paneId })
+  }, [navTo])
 
   const closeTab = useCallback((tab) => {
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tab) })
@@ -258,11 +258,12 @@ export default function WorkspaceChrome({
   const pickPane = useCallback((paneId) => {
     setSheetOpen(false)
     const pane = workspace.panes[paneId]
-    dispatchWorkspace({ type: 'FOCUS', paneId })
     const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
     if (active) {
       const { view, opts } = tabModel.tabNavTarget(active)
-      navTo(view, opts)
+      navTo(view, { ...opts, paneId })
+    } else {
+      dispatchWorkspace({ type: 'FOCUS', paneId })
     }
   }, [dispatchWorkspace, navTo, workspace.panes])
 

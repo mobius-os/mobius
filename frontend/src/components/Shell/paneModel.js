@@ -374,6 +374,43 @@ export function paneOf(ws, tabKey) {
   return null
 }
 
+// The legacy `{view, chatId, appId, paneId}` route describing the FOCUSED pane's
+// active tab — the projection `useNavigation` derives its compatibility triple
+// from (design §1 ownership boundary). Numeric app conversion goes through
+// tabModel.tabNavTarget (hard constraint 3), never an independent parse. An
+// empty focused pane resolves to the empty chat surface. The paneId is always
+// the focused pane so a snapshot route carries its own placement hint.
+export function focusedContentRoute(ws) {
+  const paneId = ws.focusedPaneId
+  const pane = ws.panes[paneId]
+  const activeKey = pane?.activeTabKey
+  if (pane && activeKey) {
+    const tab = pane.tabs.find(t => tabModel.tabKey(t) === activeKey)
+    if (tab) {
+      const { view, opts } = tabModel.tabNavTarget(tab)
+      if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
+      return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
+    }
+  }
+  return { view: 'chat', chatId: null, appId: null, paneId }
+}
+
+// The string app ids that are the active tab of one of `visibleLeaves` (or every
+// leaf when omitted). This is the pinned set the synchronous iframe-cache
+// derivation unions with the warm LRU (design §2/§4) and the set the app
+// visibility gate (`isVisibleApp`) and frame-visibility forwarding read.
+export function visibleAppIds(ws, visibleLeaves) {
+  const set = new Set()
+  const leaves = visibleLeaves || leafIds(ws.layout)
+  for (const paneId of leaves) {
+    const pane = ws.panes[paneId]
+    if (!pane || !pane.activeTabKey) continue
+    const active = pane.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
+    if (active && active.kind === 'app') set.add(String(active.id))
+  }
+  return set
+}
+
 // Open a tab and report whether the open forced an eviction (the reducer needs
 // that to decide undoability — an evicting open is undoable, a plain one is not).
 function doOpenTab(ws, tab, { paneId, activate = true } = {}) {
@@ -726,10 +763,25 @@ function withRatioOverride(node, override) {
   }
 }
 
+// The minimum px extent a SUBTREE needs along one axis ('w' or 'h'). A leaf needs
+// one pane minimum; a same-axis split needs both children's minima plus the gap
+// between them; a cross-axis split needs the larger child. Dragging an ANCESTOR
+// divider must reserve each child SUBTREE's aggregate minimum, not a single leaf
+// minimum — otherwise row(row(p1,p2),p3) dragged toward a clamp projects the
+// inner leaves far below MIN_PANE_W (finding E-i).
+function subtreeMinExtent(node, axis) {
+  if (!isSplit(node)) return axis === 'w' ? MIN_PANE_W : MIN_PANE_H
+  const a = subtreeMinExtent(node.a, axis)
+  const b = subtreeMinExtent(node.b, axis)
+  const sameAxis = (node.dir === 'row' && axis === 'w') || (node.dir === 'col' && axis === 'h')
+  return sameAxis ? a + PANE_GAP + b : Math.max(a, b)
+}
+
 // Wide mode: full tree walk. Divide each split's box along its own axis at the
 // px-clamped ratio, leaving a PANE_GAP the divider is drawn into, and recurse.
 // Emits one divider per split (each rendered along its own axis, so its ratio
-// maps and it is draggable).
+// maps and it is draggable). Each child's clamp reserves that child SUBTREE's
+// aggregate minimum (subtreeMinExtent), not a single leaf's.
 function layoutTree(node, box, rects, dividers) {
   if (typeof node === 'string') {
     rects[node] = { ...box }
@@ -738,7 +790,7 @@ function layoutTree(node, box, rects, dividers) {
   if (!isSplit(node)) return
   if (node.dir === 'row') {
     const usable = box.w - PANE_GAP
-    const r = clampRatioPx(node.ratio, usable, MIN_PANE_W, MIN_PANE_W)
+    const r = clampRatioPx(node.ratio, usable, subtreeMinExtent(node.a, 'w'), subtreeMinExtent(node.b, 'w'))
     const wA = Math.round(usable * r)
     dividers.push({
       splitId: node.id, dir: 'row',
@@ -753,7 +805,7 @@ function layoutTree(node, box, rects, dividers) {
     )
   } else {
     const usable = box.h - PANE_GAP
-    const r = clampRatioPx(node.ratio, usable, MIN_PANE_H, MIN_PANE_H)
+    const r = clampRatioPx(node.ratio, usable, subtreeMinExtent(node.a, 'h'), subtreeMinExtent(node.b, 'h'))
     const hA = Math.round(usable * r)
     dividers.push({
       splitId: node.id, dir: 'col',
@@ -903,8 +955,15 @@ export function canSplit(ws, paneId, edge, mode, contentRect) {
   if (leaves.length >= MAX_PANES) return false
   if (depthOfLeaf(ws.layout, paneId, 0) + 1 > MAX_DEPTH) return false
 
-  const rect = projectLayout(ws, mode, normalizeRect(contentRect)).rects[paneId]
+  const content = normalizeRect(contentRect)
+  const projected = projectLayout(ws, mode, content)
+  let rect = projected.rects[paneId]
   if (!rect) return false
+  // Going 1 leaf → 2 introduces the outer margin the single-pane projection
+  // omits (it returns the full content rect). Judge feasibility against the
+  // POST-split usable box, else a first split is offered that then lands
+  // children below the minimum once the inset applies (finding E-ii).
+  if (projected.visibleLeaves.length <= 1) rect = insetRect(content, OUTER_MARGIN)
   const row = edge === 'left' || edge === 'right'
   if (row) {
     const childW = (rect.w - PANE_GAP) / 2

@@ -63,11 +63,36 @@ export function navTraversalDirection(
   return current != null && destination === current ? 'same' : 'unknown'
 }
 
-export function isVisibleAppOwner(view, activeAppId, candidateAppId) {
-  return view === 'canvas'
-    && activeAppId != null
-    && candidateAppId != null
-    && String(activeAppId) === String(candidateAppId)
+// Canonical key for a per-pane app sentinel owner. A physical app history entry
+// belongs to the (paneId, appId) that pushed it — NOT to the app id alone: a
+// moved app keeps historical pane tags, and two visible apps can interleave
+// physical entries, so keying counts only by app id would let one app's nav-pop
+// decrement another's entry (design §5). JSON-array stringification is an
+// unambiguous separator (a raw `${a}:${b}` collides on ids containing ':').
+export function ownerKeyOf(paneId, appId) {
+  return JSON.stringify([String(paneId), String(appId)])
+}
+
+// Pure "my tagged entry is topmost" predicate for the single-FIFO local-pop
+// pump (design §5, contract §3.3.2). All seven conditions must hold at the
+// instant before `history.back()`: (a) the caller passes the global queue head
+// as `head`; (b) no local pop is in flight; (c) the drawer is not open; (d) the
+// current tagged shell state is `kind:'app'`; (e) its entryId is the head's
+// target; (f) that registry record is still `live` and its (paneId,appId)
+// equals the head's ownerKey; (g) it is not already consumed/retired. Extracted
+// as a pure function so the queue-until-topmost rule is unit-testable.
+export function isTopmostAppEntry({ state, head, inFlight, drawerOpen, registry, consumed }) {
+  if (!head) return false                                   // (a)
+  if (inFlight) return false                                // (b)
+  if (drawerOpen) return false                              // (c)
+  if (!isMobiusNavState(state) || state.kind !== 'app') return false  // (d)
+  const entryId = navEntryId(state)
+  if (!entryId || entryId !== head.targetEntryId) return false        // (e)
+  const rec = registry?.get(entryId)                        // (f)
+  if (!rec || rec.status !== 'live') return false
+  if (ownerKeyOf(rec.paneId, rec.appId) !== head.ownerKey) return false
+  if (consumed?.has(entryId)) return false                  // (g)
+  return true
 }
 
 function mirrorCurrentEntry(state) {
