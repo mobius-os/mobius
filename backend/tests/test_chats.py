@@ -3,7 +3,7 @@
 import asyncio
 from uuid import uuid4
 
-from app import questions
+from app import memory, questions
 from app.pending_questions import PendingQuestion
 
 
@@ -30,6 +30,59 @@ def test_delete_chat_cancels_orphan_pending_question(client, auth, chat):
     assert pending.future.done()
 
   asyncio.run(go())
+
+
+def test_agent_context_includes_evolving_chat_summary(
+  client, auth, chat, monkeypatch,
+):
+  monkeypatch.setattr(
+    "app.compaction.load_cumulative_summary",
+    lambda _data_dir, chat_id: (
+      "The cumulative handoff." if chat_id == chat.id else None
+    ),
+  )
+  monkeypatch.setattr(
+    "app.memory.load_chat_summary_metadata",
+    lambda _data_dir, chat_id: {
+      "description": "A one-line summary" if chat_id == chat.id else None,
+      "digest": "The bounded digest." if chat_id == chat.id else None,
+    },
+  )
+  monkeypatch.setattr(
+    "app.memory.build_memory_block",
+    lambda *_args, **_kwargs: memory.MemoryBlock(
+      text="<recent_chat>...</recent_chat>",
+      loaded=["chats/older/index.md"],
+      entries=[{
+        "name": "Older chat",
+        "location": "chats/older/index.md",
+        "digest": "A bounded digest.",
+      }],
+      mode="recent_chats",
+    ),
+  )
+
+  response = client.get(
+    f"/api/chats/{chat.id}/agent-context",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  payload = response.json()
+  assert {
+    key: payload[key]
+    for key in ("chat_description", "chat_digest", "chat_summary")
+  } == {
+    "chat_description": "A one-line summary",
+    "chat_digest": "The bounded digest.",
+    "chat_summary": "The cumulative handoff.",
+  }
+  assert payload["recent_chat_entries"] == [{
+    "name": "Older chat",
+    "location": "chats/older/index.md",
+    "digest": "A bounded digest.",
+  }]
+  assert payload["system_prompt_origin"] in {"platform", "baked_fallback"}
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

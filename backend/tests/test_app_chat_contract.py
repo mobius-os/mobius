@@ -51,14 +51,15 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   assert owner_view.status_code == 200
   assert owner_view.json()["created_by_app_id"] == app_id
 
-  # The embedded renderer loads the same durable transcript with its scoped
-  # app token; the principal gate limits it to this app's own chat.
+  # The generic app token may create/own the chat but cannot become the nested
+  # renderer principal. The renderer must exchange a one-use capability for its
+  # exact chat/session; that positive path is pinned in
+  # test_chat_embed_capability.py.
   app_view = client.get(
     f"/api/chats/{chat_id}",
     headers={"Authorization": f"Bearer {app_token}"},
   )
-  assert app_view.status_code == 200, app_view.text
-  assert app_view.json()["id"] == chat_id
+  assert app_view.status_code == 403, app_view.text
 
   # The app can send to its own chat (202 — accepted + runner spawned).
   r = client.post(

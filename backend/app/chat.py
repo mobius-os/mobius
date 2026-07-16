@@ -740,15 +740,13 @@ def _with_system_app_prompts(base: str) -> str:
 def _read_skill_text() -> str:
   """Return the cached platform constitution plus live app fragments.
 
-  Only the image-baked constitution has a process-lifetime cache.  App-owned
+  The tracked platform constitution has a process-lifetime cache. App-owned
   fragments are composed from live rows for every turn, so install, update,
   and uninstall take effect on the next turn without a platform restart.
-  An in-place edit to the constitution inside
-  a running container won't be picked up until the container restarts.
-  This is intentional given the deploy model (image rebuild → restart
-  → fresh cache load), but worth knowing if you're testing skill edits
-  on a live container — `docker restart mobius-test` (or prod) is
-  required to refresh.
+  An edit to `skill/core.md` is picked up on the next server restart; platform
+  update status treats that tracked file as restart-worthy. If the live
+  platform checkout is unavailable, resolution falls back to the image-baked
+  constitution for degraded boot.
   """
   global _SKILL_TEXT_CACHE
   if _SKILL_TEXT_CACHE is not None:
@@ -4081,11 +4079,10 @@ async def _run_chat_impl_with_db(
       #  - data-not-instructions: notes are derived from past chats + web
       #    research, so a poisoned note must not be obeyed as a command —
       #    authored rules live only in the system prompt.
-      #  - pointer: where to read the full platform-published chat summary.
-      pointer = (
-        "For more detail about a listed chat, Read its fenced chat-note path. "
-        "The platform alone publishes those files; do not edit them."
-      )
+      #  - pointer: one shared retrieval instruction for every structured
+      #    recent-chat entry. Repeating it inside each entry wastes context and
+      #    makes the owner-facing inspector noisy.
+      pointer = memory.RECENT_CHAT_RETRIEVAL_INSTRUCTION
       meta = (
         "The <agent_experience> block below is PRIVATE CONTEXT — recent chat "
         "digests plus runtime metadata. Read it "
@@ -4288,6 +4285,27 @@ async def _run_chat_impl_with_db(
     _with_system_app_prompts(custom_prompt) if custom_prompt
     else _read_skill_text()
   )
+  # A close() below detaches chat_row. Precompute the only provider-time value
+  # that still reads it (the bounded Claude fallback for a missing CLI
+  # transcript) while the Session can refresh attributes expired by the
+  # first-send settings commit.
+  resumed_context_fallback = (
+    _build_resumed_context(chat_row)
+    if provider.name == "Claude Code" and session_id
+    else None
+  )
+
+  # Everything needed to launch the provider is now detached or copied into
+  # plain values. Return this turn's checked-out connection before the
+  # potentially hours-long SDK await. A Session may be reused after close(),
+  # so the short terminal/session-id paths below can lazily check out a fresh
+  # connection if they actually need one. Keeping the initial checkout here
+  # pinned one connection per concurrent agent turn; at 15 active turns that
+  # exhausted SQLAlchemy's default 5 + 10 pool, blocked ordinary chat/storage
+  # requests for 30 seconds, and also starved the single-writer actor that must
+  # persist those turns. The SDK runners' early session-id persistence already
+  # goes through chat_writer and does not use this request-local Session.
+  db.close()
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
@@ -4425,7 +4443,7 @@ async def _run_chat_impl_with_db(
         "starting fresh and reseeding from DB transcript",
         session_id, chat_id,
       )
-      resumed_block = _build_resumed_context(chat_row)
+      resumed_block = resumed_context_fallback
       if resumed_block:
         if is_slash_command:
           user_message = f"{user_message}\n\n{resumed_block}"

@@ -47,10 +47,11 @@
 //     outcome distinguishes shell ownership from standalone fallback and
 //     request failures; see building-apps.md.
 //
-// "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
-// ignore it and use raw IndexedDB / OPFS / SQLite-wasm directly (same-origin
-// iframe → all browser storage works), or talk to its own backend. The
-// platform provides the on-ramp; it never gates the escape hatch.
+// "No walls": this runtime is the easy DEFAULT, not a cage. In the default
+// shell mount the app has an opaque origin, so IndexedDB/OPFS/SQLite-wasm are
+// unavailable and this scoped runtime is the durable storage path. A future
+// reviewed per-app-origin mode can add those APIs without restoring shell-origin
+// privilege; an app may always talk to its own backend through scoped routes.
 //
 // Storage conflict policy: last-write-wins at the path granularity. The newest
 // PUT/DELETE for a path supersedes any earlier one — enforced by coalescing
@@ -2044,11 +2045,12 @@ export function makeSignal(appId, storage, appInstanceId = null) {
 
 // ── Agent-chat embed (capability A, design §1) ──────────────────────
 //
-// `window.mobius.chat(opts)` mounts the real ChatView (the shell's chat
-// UI) inside a nested same-origin iframe at the shell embed route, so an
-// app gets a live agent conversation WITHOUT reimplementing chat. The
-// embed is a RENDERER, never the trust boundary (§0b): a same-origin app
-// already holds the owner JWT, so enforcement is server-side.
+// `window.mobius.chat(opts)` mounts the real ChatView inside a nested iframe.
+// The outer app sandbox propagates its opaque origin inward. Navigation is
+// inert; this runtime mints a one-use server grant and transfers it in memory,
+// and the child exchanges it for a short-lived exact-chat session. Neither
+// frame receives the owner JWT. Window/source checks route protocol messages;
+// server capability verification is the authorization boundary.
 // `picker` defaults true; set picker:false for a model-locked chat with
 // no model/effort/provider picker while keeping attach files + send.
 //
@@ -2064,6 +2066,7 @@ const EMBED_READY = EMBED_NS + 'ready'
 const EMBED_MESSAGE_SENT = EMBED_NS + 'message-sent'
 const EMBED_TURN_DONE = EMBED_NS + 'turn-done'
 const EMBED_ERROR = EMBED_NS + 'error'
+const EMBED_AUTH_EXPIRING = EMBED_NS + 'auth-expiring'
 // Context protocol — mirrored from src/lib/chatEmbed.js; keep in sync.
 const EMBED_CONTEXT_REQUEST = EMBED_NS + 'context-request'
 const EMBED_CONTEXT_RESPONSE = EMBED_NS + 'context-response'
@@ -2142,6 +2145,101 @@ export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) 
   return body
 }
 
+// Coordinates one-use bootstrap grants for both initial authorization and
+// session refresh. Every retry mints a NEW grant: an exchange response can be
+// lost after the server consumes the previous grant, so replaying it is never
+// a recovery strategy. Delays are bounded; retries continue until success or
+// the frame is replaced/destroyed.
+export function makeEmbedAuthorizationHandoff({
+  mint,
+  post,
+  onAttemptError = () => {},
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  retryDelays = [250, 1000, 3000, 5000],
+  acknowledgementTimeoutMs = 5000,
+  makeAuthorizationId = () => (
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `authorization-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  ),
+}) {
+  let destroyed = false
+  let pending = null
+  let retryTimer = null
+  let retryIndex = 0
+
+  function clearPending() {
+    if (pending && pending.timer != null) clearTimer(pending.timer)
+    pending = null
+  }
+
+  function scheduleRetry() {
+    if (destroyed || retryTimer != null) return
+    const delays = retryDelays.length ? retryDelays : [1000]
+    const delay = delays[Math.min(retryIndex, delays.length - 1)]
+    retryIndex += 1
+    retryTimer = setTimer(() => {
+      retryTimer = null
+      attempt()
+    }, delay)
+  }
+
+  function failCurrent(authorizationId, error) {
+    if (destroyed || !pending || pending.id !== authorizationId) return false
+    clearPending()
+    try { onAttemptError(error) } catch (e) {}
+    scheduleRetry()
+    return true
+  }
+
+  async function attempt() {
+    if (destroyed || pending || retryTimer != null) return
+    const authorizationId = makeAuthorizationId()
+    const marker = { id: authorizationId, timer: null }
+    pending = marker
+    let capability
+    try {
+      capability = await mint()
+    } catch (error) {
+      failCurrent(authorizationId, error)
+      return
+    }
+    if (destroyed || pending !== marker) return
+    try {
+      post({ authorizationId, capability })
+    } catch (error) {
+      failCurrent(authorizationId, error)
+      return
+    }
+    marker.timer = setTimer(() => {
+      failCurrent(authorizationId, new Error('embedded-chat authorization timed out'))
+    }, acknowledgementTimeoutMs)
+  }
+
+  return {
+    start() { attempt() },
+    refresh() { attempt() },
+    ready(authorizationId) {
+      if (destroyed || !pending || pending.id !== authorizationId) return false
+      clearPending()
+      if (retryTimer != null) clearTimer(retryTimer)
+      retryTimer = null
+      retryIndex = 0
+      return true
+    },
+    failed(authorizationId, error) {
+      return failCurrent(authorizationId, error)
+    },
+    destroy() {
+      destroyed = true
+      clearPending()
+      if (retryTimer != null) clearTimer(retryTimer)
+      retryTimer = null
+    },
+  }
+}
+
 function makeChat({ appId, getToken, storage }) {
   // Lazily create a chat the agent turn can be attributed to, via the
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
@@ -2166,9 +2264,8 @@ function makeChat({ appId, getToken, storage }) {
   }
 
   async function createChat(opts) {
-    // Root-relative, same as storage above — the app frame is same-origin
-    // with the shell, so /api/app-chats resolves regardless of the deploy
-    // prefix the browser uses for the embed iframe src.
+    // Root-relative, same host as storage above. The app document has an
+    // opaque effective origin, but its scoped bearer authorizes this request.
     const res = await appChatFetch('/api/app-chats', {
       method: 'POST',
       headers: {
@@ -2207,6 +2304,35 @@ function makeChat({ appId, getToken, storage }) {
     if (!res.ok) {
       throw new Error(`window.mobius.chat: update failed (${res.status})`)
     }
+  }
+
+  async function mintEmbedCapability(chatId, instanceId) {
+    const res = await appChatFetch(
+      `/api/app-chats/${encodeURIComponent(chatId)}/embed-capability`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instance_id: instanceId }),
+      },
+    )
+    if (!res.ok) {
+      throw new Error(`window.mobius.chat: authorize failed (${res.status})`)
+    }
+    const data = await res.json()
+    if (!data || typeof data.capability !== 'string') {
+      throw new Error('window.mobius.chat: authorize failed (missing capability)')
+    }
+    return data.capability
+  }
+
+  async function revokeEmbed(chatId, instanceId) {
+    if (!chatId || !instanceId) return
+    try {
+      await appChatFetch(
+        `/api/app-chats/${encodeURIComponent(chatId)}/embed-sessions/${encodeURIComponent(instanceId)}`,
+        { method: 'DELETE' },
+      )
+    } catch (e) {}
   }
 
   // Open the embed in a nested iframe inside `mount` (an element the app
@@ -2276,7 +2402,9 @@ function makeChat({ appId, getToken, storage }) {
       ? String(opts.scope).trim()
       : ''
     const controlsOn = opts.controls === true || (opts.controls !== false && !!scopeValue)
-    const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
+    let instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
+    let hasAuthorizedOnce = false
+    let authorizationHandoff = null
     // Sticky 'ready'/'error' so a handler attached after `await chat(...)`
     // still observes the embed's mount-time READY (see makeEmbedEmitter).
     const { emit, on: onEvent } = makeEmbedEmitter()
@@ -2286,27 +2414,25 @@ function makeChat({ appId, getToken, storage }) {
     if (typeof opts.onMessageSent === 'function') onEvent('message-sent', opts.onMessageSent)
     if (typeof opts.onError === 'function') onEvent('error', opts.onError)
 
-    function embedSrcFor(id) {
-      const params = new URLSearchParams()
-      if (id) params.set('chatId', id)
-      if (!pickerOn) params.set('picker', '0')
-      const qs = params.toString()
-      return qs ? `/shell/embed/chat?${qs}` : '/shell/embed/chat'
+    function embedSrcFor() {
+      return '/shell/embed/chat'
     }
 
-    const iframe = document.createElement('iframe')
-    iframe.title = 'Agent chat'
-    // Fixed-height panel (design §1.2): the app sizes `mount`; the iframe
-    // fills it. We deliberately do NOT relay content height across the
-    // three frames — ChatView owns its own scroll + spacer.
-    iframe.style.cssText = 'width:100%;height:100%;border:0;display:block'
-    // Same sandbox as the app frame so ChatView (which reads the owner
-    // JWT from localStorage and hits /api/chats) works same-origin.
-    iframe.setAttribute(
-      'sandbox',
-      'allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation',
-    )
-    iframe.src = embedSrcFor(chatId)
+    function createEmbedFrame() {
+      const frame = document.createElement('iframe')
+      frame.title = 'Agent chat'
+      frame.style.cssText = 'width:100%;height:100%;border:0;display:block'
+      // The outer app sandbox already makes every descendant opaque. Keep the
+      // nested declaration equally explicit: this document never regains shell
+      // origin storage/JWT authority.
+      frame.setAttribute(
+        'sandbox',
+        'allow-scripts allow-forms allow-popups allow-top-navigation-by-user-activation',
+      )
+      frame.src = embedSrcFor()
+      return frame
+    }
+    let iframe = createEmbedFrame()
 
     // Sanitize quickActions: max 4, each must have string label + prompt.
     const quickActions = Array.isArray(opts.quickActions)
@@ -2377,9 +2503,12 @@ function makeChat({ appId, getToken, storage }) {
       if (selectEl) selectEl.disabled = true
       try {
         await updateChat(nextId, opts)
+        const nextInstanceId = `${appId}:${++_embedSeq}:${Date.now()}`
+        await revokeEmbed(previousId, instanceId)
         chatId = nextId
+        instanceId = nextInstanceId
         savePersistedId(chatId)
-        iframe.src = embedSrcFor(chatId)
+        replaceEmbedFrame()
       } catch (e) {
         if (selectEl) selectEl.value = previousId || ''
         emit('error', { chatId: previousId, error: errorText(e) })
@@ -2391,9 +2520,15 @@ function makeChat({ appId, getToken, storage }) {
     async function startNewChat() {
       if (newChatButton) newChatButton.disabled = true
       try {
-        chatId = await createChat(opts)
+        const previousId = chatId
+        const previousInstanceId = instanceId
+        const nextId = await createChat(opts)
+        const nextInstanceId = `${appId}:${++_embedSeq}:${Date.now()}`
+        await revokeEmbed(previousId, previousInstanceId)
+        chatId = nextId
+        instanceId = nextInstanceId
         savePersistedId(chatId)
-        iframe.src = embedSrcFor(chatId)
+        replaceEmbedFrame()
         await refreshChatOptions()
         if (selectEl) selectEl.value = chatId
       } catch (e) {
@@ -2444,55 +2579,86 @@ function makeChat({ appId, getToken, storage }) {
       renderChatOptions([])
     }
 
-    async function sendInit() {
-      const w = iframe.contentWindow
-      if (!w) return
-      const msg = { type: EMBED_INIT, instanceId, chatId: chatId || undefined, picker: pickerOn }
-      if (quickActions && quickActions.length > 0) msg.quickActions = quickActions
-      // The chat iframe is nested under the app's opaque-origin sandbox. Pass
-      // only this app's scoped token, in memory, after the document load; the
-      // child cannot read the owner's localStorage and must never receive the
-      // owner JWT. scopedToken() also verifies app id + instance nonce.
-      let token = null
-      try { token = await getToken() } catch (e) {}
-      if (token) msg.token = token
-      w.postMessage(msg, '*')
+    function createAuthorizationHandoff() {
+      const targetFrame = iframe
+      const targetChatId = chatId
+      const targetInstanceId = instanceId
+      return makeEmbedAuthorizationHandoff({
+        mint: () => mintEmbedCapability(targetChatId, targetInstanceId),
+        post: ({ authorizationId, capability }) => {
+          if (
+            targetFrame !== iframe
+            || targetChatId !== chatId
+            || targetInstanceId !== instanceId
+            || !targetFrame.contentWindow
+          ) throw new Error('embedded-chat frame was replaced')
+          // The bearer is transferred only in memory. `*` is required for an
+          // opaque target; source/instance/authorization ids are routing guards,
+          // while the one-use server exchange is the authorization boundary.
+          const msg = {
+            type: EMBED_INIT,
+            instanceId: targetInstanceId,
+            chatId: targetChatId,
+            authorizationId,
+            bootstrapCapability: capability,
+            picker: pickerOn,
+          }
+          if (quickActions && quickActions.length > 0) msg.quickActions = quickActions
+          targetFrame.contentWindow.postMessage(msg, '*')
+        },
+        onAttemptError: (error) => {
+          emit('error', { chatId: targetChatId, error: errorText(error) })
+        },
+      })
+    }
+
+    function sendInit() {
+      authorizationHandoff?.start()
+    }
+
+    function replaceEmbedFrame() {
+      const previous = iframe
+      previous.removeEventListener('load', sendInit)
+      authorizationHandoff?.destroy()
+      iframe = createEmbedFrame()
+      hasAuthorizedOnce = false
+      authorizationHandoff = createAuthorizationHandoff()
+      iframe.addEventListener('load', sendInit)
+      if (previous.parentNode) previous.parentNode.replaceChild(iframe, previous)
     }
 
     function onMessage(e) {
-      // §1.4 hardening: three same-origin frames share this origin, so
-      // origin alone is insufficient — also require the message to come
-      // from THIS embed's contentWindow and carry OUR instanceId.
-      if (e.origin !== window.location.origin && e.origin !== 'null') return
+      if (e.origin !== 'null' && e.origin !== window.location.origin) return
       if (e.source !== iframe.contentWindow) return
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       if (typeof msg.type !== 'string' || !msg.type.startsWith(EMBED_NS)) return
-      if (msg.instanceId && msg.instanceId !== instanceId) return
+      if (msg.instanceId !== instanceId) return
       if (msg.type === EMBED_READY) {
-        // The child's mount-time READY is intentionally uncorrelated. INIT sent
-        // from the iframe load handler can race ahead of React's message
-        // listener, so use this first READY as the one retry. The child replies
-        // to that INIT with our instanceId; correlated READY messages below do
-        // not re-send INIT and cannot form a handshake loop.
-        if (!msg.instanceId) {
-          sendInit().catch(() => {})
-          return
-        }
-        // The embed resolved its chatId (e.g. it was opened without one
-        // and INIT carried it, or a future lazy path). Adopt it, and
-        // re-persist if it differs from what we saved.
+        if (!authorizationHandoff?.ready(msg.authorizationId)) return
+        // Adopt and persist the chat only after the server-authorized exchange
+        // for this exact attempt succeeded.
         if (msg.chatId) {
           const resolved = String(msg.chatId)
           if (resolved !== chatId) { chatId = resolved; savePersistedId(chatId) }
         }
-        emit('ready', { chatId })
+        if (!hasAuthorizedOnce) {
+          hasAuthorizedOnce = true
+          emit('ready', { chatId })
+        }
       } else if (msg.type === EMBED_MESSAGE_SENT) {
         emit('message-sent', { chatId })
       } else if (msg.type === EMBED_TURN_DONE) {
         emit('turn-done', { chatId })
+      } else if (msg.type === EMBED_ERROR && msg.phase === 'authorization') {
+        authorizationHandoff?.failed(
+          msg.authorizationId,
+          new Error(msg.error || 'embedded-chat authorization failed'),
+        )
       } else if (msg.type === EMBED_ERROR) {
         emit('error', { chatId, error: msg.error })
+      } else if (msg.type === EMBED_AUTH_EXPIRING) {
+        authorizationHandoff?.refresh()
       } else if (msg.type === EMBED_CONTEXT_REQUEST) {
         // The child is asking for current app state before submitting a message.
         // Call opts.getContext() if provided; reply even if absent (nonce
@@ -2523,6 +2689,7 @@ function makeChat({ appId, getToken, storage }) {
     // the embed document's scripts have run and its own message listener
     // is registered — so the single INIT reaches it without a race, the
     // same handshake AppCanvas ↔ app-frame.html rely on.
+    authorizationHandoff = createAuthorizationHandoff()
     window.addEventListener('message', onMessage)
     iframe.addEventListener('load', sendInit)
     frameMount.appendChild(iframe)
@@ -2533,8 +2700,8 @@ function makeChat({ appId, getToken, storage }) {
 
     return {
       get chatId() { return chatId },
-      instanceId,
-      iframe,
+      get instanceId() { return instanceId },
+      get iframe() { return iframe },
       on(event, cb) {
         // Delegates to the sticky emitter: a 'ready'/'error' that already
         // fired (the mount-time READY) replays to a late handler.
@@ -2544,6 +2711,8 @@ function makeChat({ appId, getToken, storage }) {
       destroy() {
         window.removeEventListener('message', onMessage)
         iframe.removeEventListener('load', sendInit)
+        authorizationHandoff?.destroy()
+        revokeEmbed(chatId, instanceId)
         if (selectEl && onChatSelectChange) {
           selectEl.removeEventListener('change', onChatSelectChange)
         }

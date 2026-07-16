@@ -3,8 +3,17 @@ import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-const AUTH_FILE = 'tests/.auth/state.json'
+const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
 const isCI = !!process.env.CI
+const localInternalTls = process.env.MOBIUS_LOCAL_E2E_INTERNAL_TLS === '1'
+
+if (!isCI && process.env.MOBIUS_LOCAL_E2E !== '1') {
+  throw new Error(
+    'Local Playwright E2E is opt-in because it builds a disposable Möbius ' +
+    'backend and database. Prefer the GitHub PR checks. For a focused local ' +
+    'run, use scripts/playwright-local.sh --allow-local-e2e <spec or --grep>.'
+  )
+}
 
 /** Resolve the Chrome-for-Testing binary already installed for agent-browser.
  * Möbius images ship that browser even when the conventional system `chrome`
@@ -55,9 +64,9 @@ export default defineConfig({
   retries: 1,
   // Per-file parallelism. Within a file, tests stay sequential
   // because many spec files share state via send-then-read patterns
-  // (the streaming and queue tests in particular). Across files
-  // is safe: auth.setup.mjs wipes chats before the suite starts,
-  // and each spec file's tests operate on chats they create.
+  // (the streaming and queue tests in particular). Across files is safe
+  // because the run uses a disposable database and specs operate on explicit
+  // fixtures they create or mock.
   fullyParallel: false,
   // Match CI's worker count locally too. The previous local=4 setting
   // saturated mobius-test (single SQLite, single uvicorn) and produced
@@ -83,7 +92,10 @@ export default defineConfig({
       : localChrome
         ? {
             browserName: 'chromium',
-            launchOptions: { executablePath: localChrome },
+            launchOptions: {
+              executablePath: localChrome,
+              ...(localInternalTls ? { args: ['--ignore-certificate-errors'] } : {}),
+            },
           }
         : { channel: 'chrome' }),
     // Capture diagnostics for failure analysis on CI.
@@ -118,9 +130,21 @@ export default defineConfig({
       // Exclude SSE-timing specs from this project — they get their
       // own project below with retries=0 so a 50%-flake regression
       // can't be papered over by the global retries=1.
-      testIgnore: /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
+      testIgnore: [
+        /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
+        /\.unauth\.spec\.mjs$/,
+      ],
       dependencies: ['auth'],
       use: { storageState: AUTH_FILE },
+    },
+    {
+      // Security checks that must prove their result without a login or owner
+      // state. Keeping these in a dependency-free project prevents auth.setup
+      // failures from masking whether the hostile request was actually tested.
+      name: 'tests-unauthenticated',
+      testMatch: /\.unauth\.spec\.mjs$/,
+      use: { storageState: { cookies: [], origins: [] } },
+      retries: 0,
     },
     {
       // SSE-timing-sensitive specs: a 50%-pass-rate regression here

@@ -28,6 +28,7 @@ from app.database import get_db
 from app.deps import (
   get_current_owner,
   get_current_owner_or_app,
+  get_owner_app_or_chat_embed_for_models,
   reject_cross_site,
 )
 from app.schemas import (
@@ -344,7 +345,7 @@ async def list_model_registry(
     description="When true, bypass the 5-minute cache and re-fetch "
     "upstream. Used by the manage-models modal's explicit refresh.",
   ),
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
 ) -> ModelRegistryResponse:
   """Returns the registry of available models per provider.
 
@@ -367,7 +368,7 @@ owner_router = APIRouter(prefix="/api/owner", tags=["owner"])
 
 @owner_router.get("/model-prefs")
 def get_model_prefs(
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
 ) -> dict:
   """Returns the owner's model-picker preferences.
 

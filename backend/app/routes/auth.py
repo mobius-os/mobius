@@ -22,7 +22,8 @@ from app import auth, models, schemas
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  get_current_owner, get_current_owner_or_app, reject_cross_site,
+  get_current_owner, get_current_owner_or_app,
+  get_owner_app_or_chat_embed_for_models, reject_cross_site,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -493,7 +494,7 @@ async def provider_status(
 
 @router.get("/providers/status")
 async def providers_status(
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
 ):
   """Returns connection status for ALL registered providers.
 
@@ -530,7 +531,7 @@ def _claude_tier(model_id: str) -> str | None:
 
 @router.get("/providers/models")
 async def providers_models(
-  owner: models.Owner = Depends(get_current_owner_or_app),
+  owner: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
 ):
   """Per-provider model list for mini-app pickers.
 

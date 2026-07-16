@@ -365,6 +365,17 @@ test('unrelated stale mount bridge remains history when the new turn has no DB p
   }), -1)
 })
 
+test('a later visible user row retires a stale mount bridge before new stream output exists', () => {
+  assert.equal(chooseActiveAssistantMirrorIndex({
+    bridgeMsgIdx: 1,
+    trailingAssistantPartialIdx: -1,
+    bridgeFollowedByVisibleUser: true,
+    hasLivePayload: false,
+    bridgeSurface: { hideMessage: false, suppressStream: false },
+    surface: { hideMessage: false, suppressStream: false },
+  }), -1, 'the completed previous reply stays in history during the empty-stream handoff')
+})
+
 test('active row data-key is latched for both live-first and DB-first source switches', () => {
   const synthetic = chooseActiveAssistantDataKey({
     latched: null,

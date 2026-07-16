@@ -195,7 +195,8 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `uploads.py` | Per-chat file upload management |
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
-| `standalone.py` | Top-level routes that make a mini-app installable as its own PWA (own importmap) |
+| `local_services.py` | Guarded loopback proxy plus the dedicated-origin adapter for full backend web apps. A configured service hostname is reserved to its exact `/services/<slug>` prefix, strips upstream frame blockers only on that surface, keeps cookies host-only, and fails closed without an explicit origin |
+| `standalone.py` | Top-level install/manifest shell for mini-app PWAs. **Known boundary gap:** its current loader executes the app component in the top-level shell origin; it is not yet equivalent to the opaque in-shell app frame |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
 | `notify.py` | System-event notifications to active broadcasts |
@@ -212,6 +213,30 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `recover_html.py` | HTML templates for the recovery page (no `router`; used by `recover.py`) |
 
 Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI proxy lived there and was removed; mini-apps reach the agent via `window.mobius.chat`, `POST /api/apps/{id}/run-job`, or cron — not a synchronous AI endpoint.
+
+## App execution tiers
+
+| Tier | Boundary and capability | UX / standalone consequence |
+|---|---|---|
+| Ordinary mini-app | Shell-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default inside the shell. The shell owns install/offline identity; a home-screen shortcut may deep-link through the shell, but opacity alone does not create an independent PWA |
+| Packaged nested document | `/app-embeds/by-id/<id>/…`; every response carries CSP `sandbox` without `allow-same-origin`, scoped `Access-Control-Allow-Origin: null`, and no frame denial | For a game/tool build nested below an ordinary wrapper. Relative subresources work online but an opaque child is not controlled by the shell SW, so only the entry document may be SW-cached; readiness must be a source-bound post-commit heartbeat, never iframe `load` or a null-origin prefetch probe |
+| Full web service / independent PWA | Dedicated distinct origin (prefer a same-site subdomain), shell-owned direct adapter, host-only cookies, exact shell+service ancestor policy; never nested below the opaque wrapper | Required for same-origin cookies/XHR, durable origin storage, service workers, OPFS/IndexedDB and genuine independent installability. The app origin owns its manifest, SW and storage |
+
+Opacity simplifies permissions: no ambient owner JWT, shell storage bleed, DOM
+reach or cross-app authority. It does **not** by itself improve installability,
+offline outboxes, cookies, media APIs or other origin-bound capabilities.
+
+**Standalone gap (not resolved by the table above).** `/apps/<slug>/` currently
+boots the mini-app component directly in a trusted top-level Möbius document and
+reads the owner JWT there. The component can therefore read shell localStorage
+even though its in-shell version cannot. The bounded follow-up is to turn that
+route into a trusted installable outer shell which owns auth/manifest/SW/error
+chrome and hosts the existing `app-frame.html` protocol in an opaque iframe.
+Until that lands, do not describe ordinary mini-app isolation as applying to
+standalone launches or use `/apps/<slug>/` as the security boundary for
+untrusted/high-capability code. CubeRun's nested game document remains opaque,
+but its current standalone wrapper does not; Tandoor's service surface opens
+only through the authenticated shell adapter and is not a standalone mini-app.
 
 ## Frontend (`frontend/src/`)
 
@@ -285,7 +310,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 | File | Role |
 |------|------|
-| `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps; same code for the in-shell iframe (`app-frame.html`) and the standalone PWA (`routes/standalone.py`). Offline outbox + read-through cache live here |
+| `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps; used by the opaque in-shell iframe and the current (not yet opaque) standalone loader. Offline outbox + read-through cache live here |
 | `frontend/public/app-frame.html` | The mini-app frame: importmap (React/recharts/date-fns/three from `/vendor/...`), error UI, postMessage init |
 | `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
@@ -316,7 +341,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — baked `skill/core.md`; `chat._read_skill_text()` caches only this platform text for the process lifetime. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. Prompt composition reads live (`deleted_at IS NULL`) app rows in stable id order for every turn, so install/uninstall takes effect on the next turn without restarting or changing an already-running turn. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer, and compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, immutable-generation publisher, and retrieval telemetry; no router/fact note is injected. Uninstall removes its prompt, skill, and jobs immediately while leaving core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. Prompt composition reads live (`deleted_at IS NULL`) app rows in stable id order for every turn, so install/uninstall takes effect on the next turn without restarting or changing an already-running turn. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer, and compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, immutable-generation publisher, and retrieval telemetry; no router/fact note is injected. Uninstall removes its prompt, skill, and jobs immediately while leaving core chat summaries intact.
 
 ## Data layout (`/data/` volume)
 
@@ -444,7 +469,7 @@ The removals not yet done at HEAD are noted in the last bullet:
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.3 (2026-07-15).** This section is the
+**Owner-authoritative contract — v1.5 (2026-07-15).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -528,6 +553,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   while wheel/scrolling-key input that produces no scroll releases on the next frame;
   only after a real scroll lands does the short momentum window begin. A bounded
   dead-man remains the final escape hatch for an interrupted gesture.
+- **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
+  or paused-turn nudge is an explicit one-shot reading action: it lands at the
+  physical tail, including the list's composer-clearance padding, so the card's
+  Submit or Resume control is visible above the overlaid composer. It becomes a
+  settled `ANCHOR_AT` hold rather than `FOLLOW_BOTTOM`; revealing an attention
+  control must not manufacture future live-follow intent. Both actions route
+  through the scroll controller instead of calling `scrollIntoView`, because
+  viewport intersection alone cannot detect that the absolutely-positioned
+  composer is covering the target.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as
@@ -560,6 +594,7 @@ path means routing it through the same entries rather than inventing another rul
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | same mode and active assistant row | None |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
+| Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 
 Controller structure is part of the contract, not an implementation detail:
 
@@ -708,7 +743,6 @@ The generation bump is the key invariant. A dying `_run_chat_impl` rechecks owne
 AskUserQuestion is a shared pending-future lifecycle plus a shared `question` stream event; Claude and Codex differ only at the SDK boundary. `backend/app/pending_questions.py:PendingQuestion` carries `question_id`, `questions`, `future`, and optional `run_token`; `backend/app/questions.py` owns the module-level `_pending` registry (`get`, `claim_if`, `cancel`). Claude registers the pending question in `claude_sdk_runner.py:can_use_tool` for the `AskUserQuestion` tool, persists the card via `_ChatEventSink.publish_question()`, awaits the future, and returns `PermissionResultAllow(updated_input={questions, answers})`. Codex installs `_install_request_user_input_handler()` on `codex._client._sync._approval_handler`, enables `features.default_mode_request_user_input=true`, handles `item/tool/requestUserInput`, marshals from the SDK worker thread into the loop with `run_coroutine_threadsafe` (a ~420s bridge timeout), and translates Möbius's text-keyed answers into Codex's id-keyed `{answers:{qid:{answers:[...]}}}` shape.
 
 The answer POST is intercepted before normal send handling in `backend/app/routes/chats_stream.py:send_message` whenever `body.answers` is truthy. The route waits ~500ms for a just-broadcast pending entry, checks `question_id` identity when supplied, persists the answer FIRST through the writer actor's `AnswerQuestion`, then `questions.claim_if(chat_id, pending)` before resolving the future. That ordering is load-bearing: a concurrent Stop can cancel and pop the pending entry while the answer write awaits its ack, and resolving a cancelled/superseded future would feed the answer to the wrong SDK call. On success the route publishes `answers_applied` and returns `status:"answer_delivered"` plus `answer_turn:"same"`, which `useStreamConnection.js:sendMessage` treats as terminal for the POST without reconnecting the SSE. Durable-question recovery instead returns `status:"started"` plus `answer_turn:"new"`. The dedicated `answer_turn` field owns frontend row/bridge semantics; the status fallback exists only for rolling compatibility with older backends. A stale/missing pending question returns `410` rather than falling through and sending the answer as a new user turn.
-
 **Question settlement invariant:** live stream items, a persisted partial, and the settled transcript are alternate sources for one active assistant row. An in-process answer resumes that same row; the live-to-durable handoff preserves the question, its answer, and all pre/post-answer thinking, tool, and text blocks in event order without hiding, duplicating, or reordering them. Only a recovered answer with `answer_turn:"new"` creates a separate hidden continuation. Unknown future modes fail closed to a separate boundary so an existing question row is never overwritten.
 
 Three frontend gates must stay aligned. `StreamingMessage.jsx` renders live question events with `QuestionCard` and NO disabled prop (the runner is paused while `sending`/`isStreaming` can still be true); `QuestionCard.jsx` does accept a `disabled` prop, but only `MsgContent.jsx` passes it, for non-answerable persisted cards. `ChatView.jsx:doSendSilent` allows submissions carrying `resolvedAnswers` through both `sendingRef` and `isStreamingRef`, uses `sendSilentInFlightRef` as the synchronous double-submit guard, optimistically patches message + stream question answers, and sends a hidden message with `answers` + `question_id`. Persistence identity lives in `chat_writer.py`: `apply_answers_to_last_question()` writes by exact `question_id` when present, and both the live-snapshot and final-merge paths carry existing answers forward by `events.question_block_key()` so later streaming snapshots don't wipe them. Do not key answer carry by block position, do not resolve the pending future before the writer ack, and do not make live cards inherit global send/stream disabled state.
@@ -826,14 +860,27 @@ The drawer is modeled as a *virtual route*: opening it pushes one history entry 
 
 ## Service worker + offline
 
-Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/apps.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
+Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/apps.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
 
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
 
+Packaged static documents use a separate rule. `/app-embeds/` entry documents
+retain their own response-sandboxed cache key. A response-sandboxed opaque child
+is not controlled by the shell worker, so its relative JS/CSS/media requests use
+normal network/HTTP caching and have no packaged-static offline guarantee. Only
+an actual SW-controlled subresource request may normalize to the ordinary
+`/app-assets/by-id/…` identity; fetch/XHR and document requests retain the embed
+namespace, preventing a sandboxed entry response from aliasing onto the ordinary
+protected lane. No recursive crawler is implied: a future offline-capable package
+needs an explicit manifest/static-assets warm contract. The controlled-page
+regression pins the cached entry as packaged content rather than shell HTML.
+
 Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.7, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
-Shell rebuilds apply on idle: `Shell.jsx` defers `shell_rebuilt` while any chat is
-streaming, then performs the controlled SW handoff/reload. The idle boundary alone
+Shell rebuilds apply on idle: `Shell.jsx` defers `shell_rebuilt` while the chat the
+owner is actively viewing is streaming, then performs the controlled SW handoff/reload.
+Background chat runs are server-owned and reconnect after the reload; they must not
+strand a repaired shell indefinitely when several agents are working. The idle boundary alone
 is not a transcript-persistence boundary—terminal promotion updates the in-memory
 TanStack cache synchronously while its normal IndexedDB mirror is throttled. Before
 the intentional reload, `flushPersistedQueryCache()` writes the current allowlisted

@@ -84,6 +84,7 @@ export function mergeRecentMessagesIntoLoadedWindow({
   loadedOffset,
   recentMessages,
   recentOffset,
+  preserveLocalSuffix = false,
 }) {
   const recent = Array.isArray(recentMessages) ? recentMessages : []
   const fallback = {
@@ -98,7 +99,7 @@ export function mergeRecentMessagesIntoLoadedWindow({
   }
 
   const prefixLength = recentOffset - loadedOffset
-  if (prefixLength <= 0 || prefixLength > loadedMessages.length || recent.length === 0) {
+  if (prefixLength < 0 || prefixLength > loadedMessages.length || recent.length === 0) {
     return fallback
   }
 
@@ -113,8 +114,15 @@ export function mergeRecentMessagesIntoLoadedWindow({
     if (!loadedId || loadedId !== recentId) return fallback
   }
 
+  const localSuffix = preserveLocalSuffix
+    ? loadedMessages.slice(prefixLength + overlapLength)
+    : []
   return {
-    messages: [...loadedMessages.slice(0, prefixLength), ...recent],
+    messages: [
+      ...loadedMessages.slice(0, prefixLength),
+      ...recent,
+      ...localSuffix,
+    ],
     offset: loadedOffset,
   }
 }

@@ -60,6 +60,10 @@ import {
   isCacheableAssetResponse,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
+  isPackagedAppAsset,
+  packagedAppAssetCacheKey,
+  hasOpaqueEmbedSandbox,
+  isCacheableOpaqueEmbedDocument,
   isRangeRequest,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
@@ -302,10 +306,42 @@ const appAssetsTrimPlugin = {
   },
 }
 
+const packagedAssetCacheKeyPlugin = {
+  cacheKeyWillBeUsed: async ({ request }) => {
+    const isDocument = request.mode === 'navigate'
+      || request.destination === 'document'
+    return packagedAppAssetCacheKey(request.url, {
+      isDocument,
+      // fetch()/XHR has an empty destination. Preserve its namespace rather
+      // than letting a response-sandboxed entry alias onto /app-assets.
+      isSubresource: !isDocument && !!request.destination,
+    })
+  },
+}
+
+const packagedAssetUpdateGuard = {
+  cacheWillUpdate: async ({ request, response }) => {
+    const url = new URL(request.url)
+    const documentRequest = request.mode === 'navigate'
+      || request.destination === 'document'
+    if (url.pathname.startsWith('/app-embeds/')) {
+      // Namespace-wide invariant: a fetch/XHR must not put an unsandboxed
+      // response into the same cache identity a later navigation can read.
+      if (!hasOpaqueEmbedSandbox(response)) return null
+      if (documentRequest) {
+        return isCacheableOpaqueEmbedDocument(response) ? response : null
+      }
+    }
+    return response?.status === 200 ? response : null
+  },
+}
+
 registerRoute(
   ({ url, request }) =>
     url.origin === self.location.origin &&
     isImmutableAppAsset(url.pathname) &&
+    request.mode !== 'navigate' &&
+    request.destination !== 'document' &&
     !isRangeRequest(request),
   new CacheFirst({
     cacheName: APP_ASSETS_CACHE,
@@ -314,6 +350,7 @@ registerRoute(
         cacheWillUpdate: async ({ response }) =>
           isCacheableAppAssetResponse(response) ? response : null,
       },
+      packagedAssetCacheKeyPlugin,
       appAssetsTrimPlugin,
     ],
   }),
@@ -321,12 +358,18 @@ registerRoute(
 registerRoute(
   ({ url, request }) =>
     url.origin === self.location.origin &&
-    url.pathname.startsWith('/app-assets/') &&
-    !isImmutableAppAsset(url.pathname) &&
+    isPackagedAppAsset(url.pathname) &&
+    (!isImmutableAppAsset(url.pathname)
+      || request.mode === 'navigate'
+      || request.destination === 'document') &&
     !isRangeRequest(request),
   new StaleWhileRevalidate({
     cacheName: APP_ASSETS_CACHE,
-    plugins: [appAssetsTrimPlugin],
+    plugins: [
+      packagedAssetCacheKeyPlugin,
+      packagedAssetUpdateGuard,
+      appAssetsTrimPlugin,
+    ],
   }),
 )
 
@@ -669,31 +712,18 @@ registerRoute(
 // cached index.html for /recover, so the user landed on the shell instead of the
 // recovery page (and recovery was unreachable exactly when it's needed most).
 
-// Reverse-proxied backend apps whose subtrees must bypass the SPA nav fallback.
-//
-// A stock Möbius reverse-proxies nothing, so this ships EMPTY. It is the
-// extension point for the pattern where an instance's agent runs a real backend
-// web app (a Django/Rails/etc. server it launched locally) and mounts it under
-// the Möbius origin via a backend reverse-proxy route it added to THIS
-// instance's platform clone — mini-apps are sandboxed iframes and cannot BE a
-// server, so a browser reaches such an app only through that proxy.
-//
-// Those subtrees are server-served and MULTI-PAGE, exactly like /recover and
-// /sites: the single-segment catch-all at the end of the denylist covers only a
-// bare `/foo/` root, so without an explicit entry every DEEP navigation
-// (/foo/setup/, /foo/accounts/login/, form-POST redirects) is served the
-// precached index.html and the embedded app bounces back to the shell. Adding a
-// root regex here sends its whole subtree to the network. The agent extends this
-// list in its own clone, e.g.:  const PROXIED_APP_SUBTREES = [/^\/recipes(\/|$)/]
-//
-// Empty here on purpose: no single instance's app is baked into the shipped shell.
-const PROXIED_APP_SUBTREES = []
+// Owner-configured backend web services live under one reserved namespace.
+// They are server-served, multi-page applications rather than SPA routes, so
+// every depth below /services/ must reach the guarded backend proxy.  The
+// concrete service map is private data (`/data/local-services.json`), never
+// compiled into the stock shell or edited into this service worker.
 
 registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
   {
     denylist: [
       /^\/app-assets\//,
+      /^\/app-embeds\//,
       /^\/apps\//,
       /^\/recover(\/|$)/,
       /^\/shell\/embed(\/|$)/,
@@ -702,8 +732,7 @@ registerRoute(new NavigationRoute(
       // cached index.html for a published URL, so opening it showed the Möbius
       // app instead of the built website.
       /^\/sites(\/|$)/,
-      // Instance-configured reverse-proxied app subtrees (empty in stock Möbius).
-      ...PROXIED_APP_SUBTREES,
+      /^\/services(\/|$)/,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
     ],
   },
@@ -727,7 +756,8 @@ registerRoute(
 // everything else. matchPrecache resolves the content-hashed entry.
 setCatchHandler(async ({ request, url }) => {
   if (request.destination !== 'document') return Response.error()
-  if (url.pathname.startsWith('/app-assets/')) {
+  if (url.pathname.startsWith('/app-assets/')
+      || url.pathname.startsWith('/app-embeds/')) {
     return (await matchPrecache('/offline.html')) || Response.error()
   }
   if (!url.pathname.startsWith('/apps/')) {

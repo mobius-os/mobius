@@ -184,7 +184,7 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   assert db.query(models.Owner).first().provider == "claude"
 
   sibling = client.get(f"/api/chats/{other['id']}", headers=auth).json()
-  assert sibling["auto_resume_on_limit"] is False
+  assert sibling["auto_resume_on_limit"] is True
 
   cleared = client.patch(
     f"/api/chats/{chat.id}",
@@ -206,19 +206,54 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   assert disabled["agent_settings_json"] is None
 
 
+def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
+  """The last explicit choice seeds new chats without rewriting old ones."""
+  initial = client.post(
+    "/api/chats", headers=auth, json={"title": "initial"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{initial['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is True
+
+  client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"auto_resume_on_limit": False},
+  )
+  inherited_off = client.post(
+    "/api/chats", headers=auth, json={"title": "inherits off"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{inherited_off['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is False
+
+  client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+  inherited_on = client.post(
+    "/api/chats", headers=auth, json={"title": "inherits on"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{inherited_on['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is True
+  assert client.get(
+    f"/api/chats/{inherited_off['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is False
+
+
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(
   client, auth, chat,
 ):
   _write_global_settings({
-    "auto_resume_on_limit": True,
+    "auto_resume_on_limit": False,
     "model": "claude-opus-4-7",
   })
   detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
-  assert detail["auto_resume_on_limit"] is False
+  assert detail["auto_resume_on_limit"] is True
   # Reads ignore the removed owner-global key. The one-way file cleanup is a
   # boot migration (covered in test_settings), not a racy write from GET.
   assert _read_global_settings() == {
-    "auto_resume_on_limit": True,
+    "auto_resume_on_limit": False,
     "model": "claude-opus-4-7",
   }
 

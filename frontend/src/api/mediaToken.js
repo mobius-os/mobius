@@ -8,12 +8,14 @@
  * into server access logs, browser history, and Referer headers.
  *
  * Instead, this helper fetches a 15-minute media-scoped token from
- * POST /api/chats/{id}/media-token, caches it for ~10 minutes per chat, and
- * auto-refreshes on 401. The serve routes only accept media-scoped tokens on
- * ?token= — owner JWTs are explicitly rejected.
+ * POST /api/chats/{id}/media-token and caches it for ~10 minutes per chat.
+ * An <img> request cannot run application retry logic, so a 401 is not
+ * automatically retried; embedded-session changes invalidate the cache entry
+ * before the next URL is built. The serve routes only accept media-scoped
+ * tokens on ?token= — owner JWTs are explicitly rejected.
  */
 
-import { BASE, apiFetch } from './client.js'
+import { BASE, apiFetch, getAuthSessionCacheKey } from './client.js'
 
 // Per-chat token cache: { token: string, expiresAt: number }
 // Cache for 10 minutes (server TTL is 15 min, giving 5 min buffer for clock skew
@@ -32,8 +34,9 @@ const _cache = new Map()
  * @returns {Promise<string>} e.g. "?token=eyJ..." or ""
  */
 export async function mediaTokenParam(chatId) {
+  const authKey = getAuthSessionCacheKey()
   const cached = _cache.get(chatId)
-  if (cached && cached.expiresAt > Date.now()) {
+  if (cached && cached.authKey === authKey && cached.expiresAt > Date.now()) {
     return `?token=${cached.token}`
   }
   try {
@@ -43,6 +46,7 @@ export async function mediaTokenParam(chatId) {
     if (!data.token) return ''
     _cache.set(chatId, {
       token: data.token,
+      authKey,
       expiresAt: Date.now() + _CACHE_MS,
     })
     return `?token=${data.token}`

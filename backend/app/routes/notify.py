@@ -15,7 +15,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.orm import Session
@@ -28,7 +28,11 @@ from app.broadcast import (
   get_system_broadcast,
 )
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  Principal, chat_embed_session_is_active, get_owner_or_chat_embed_principal,
+  get_current_owner, reject_cross_site,
+  require_chat_embed_operation,
+)
 from app.events import SYSTEM_EVENT_TYPES
 
 router = APIRouter(tags=["notify"])
@@ -47,7 +51,7 @@ _LABEL_MAX = 80
 # Catch-up-unsafe events: they ride the system broadcast alone and are NEVER
 # fanned out to per-chat broadcasts, because a chat reconnect replaying an old
 # copy from its event log would fire a spurious shell apply (or a stale
-# failure toast). SystemBroadcast has no replay, so one delivery per client —
+# failure signal). SystemBroadcast has no replay, so one delivery per client —
 # no frontend dedup needed. app_build_failed's live producer
 # (app_watcher._publish_app_build_failed) already publishes system-bus-only and
 # never hits this route, but it is listed here so a hypothetical POST stays
@@ -199,7 +203,7 @@ def notify(
 @router.get("/api/events/system")
 async def stream_system_events(
   request: Request,
-  _owner: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   """Shell-level SSE: streams system events for the lifetime of the
@@ -221,16 +225,37 @@ async def stream_system_events(
   # used (FastAPI caches the get_db sub-dependency within a request), so
   # auth has already completed against it; closing now returns the
   # connection immediately and get_db's own finally close is a no-op.
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:stream")
+  embedded_chat_id = principal.chat_id if principal.scope == "chat_embed" else None
+  embed_session_id = (
+    principal.embed_session_id if principal.scope == "chat_embed" else None
+  )
   db.close()
   queue = get_system_broadcast().subscribe()
 
   async def generate():
+    last_embed_auth_check = 0.0
+
+    def embed_session_active() -> bool:
+      nonlocal last_embed_auth_check
+      if embed_session_id is None:
+        return True
+      now_mono = time.monotonic()
+      if now_mono - last_embed_auth_check < 1.0:
+        return True
+      last_embed_auth_check = now_mono
+      return chat_embed_session_is_active(embed_session_id)
+
     try:
       # Hello so the client knows the connection is live before any
       # real event arrives. EventSource clients ignore unknown types
       # but the message still flushes Caddy / nginx buffers.
       yield f"data: {json.dumps({'type': 'system_stream_open'})}\n\n"
       while True:
+        if not embed_session_active():
+          return
         if await request.is_disconnected():
           break
         try:
@@ -239,6 +264,8 @@ async def stream_system_events(
           )
         except asyncio.TimeoutError:
           yield ": keepalive\n\n"
+          continue
+        if embedded_chat_id is not None and str(event.get("chatId") or "") != embedded_chat_id:
           continue
         yield f"data: {json.dumps(event)}\n\n"
     finally:

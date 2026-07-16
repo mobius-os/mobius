@@ -1771,12 +1771,13 @@ async def update_icon(
 
   Authorized for the owner OR for an app-scoped token whose
   `app_id` matches the path — the app can manage its own visual
-  identity, but cannot touch a sibling app's icon. The standalone
-  install card lives at `/apps/<slug>/` where the page context
-  has an app-scoped token in `localStorage['token']` (minted by
-  `claim-token` on first render), so requiring owner-only here
-  would 403 the upload from the install surface. To revert to
-  the auto-generated letter icon, send a zero-byte body.
+  identity, but cannot touch a sibling app's icon. The current standalone
+  install page is a trusted top-level Möbius document and reads the owner JWT
+  from `localStorage['token']`; its app component still shares that document
+  until the documented opaque-outer-shell migration lands. The scoped branch
+  remains for app-frame/direct app callers, not as a claim that today's
+  standalone component is isolated. To revert to the auto-generated letter
+  icon, send a zero-byte body.
   """
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(

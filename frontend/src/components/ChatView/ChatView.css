@@ -355,8 +355,8 @@
 .chat__msg--user { align-items: flex-end; }
 .chat__msg--assistant { align-items: flex-start; }
 
-/* Tap-to-toggle timestamp below user messages.
-   Absolutely positioned so it doesn't shift content below. */
+/* Tap-to-show timestamp below user messages. ChatView clears the visible state
+   automatically after a short glance, so the row never remains expanded. */
 .chat__ts {
   font-size: 11px;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
@@ -398,6 +398,98 @@
 @keyframes chat-copy-toast-in {
   from { opacity: 0; transform: translate(-50%, 6px); }
 }
+
+/* ── Evolving chat summary ─────────────────────────── */
+.chat-summary__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 210;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.46);
+}
+.chat-summary {
+  width: min(680px, 100%);
+  max-height: min(720px, calc(100% - 16px));
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.3);
+}
+.chat-summary__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.chat-summary__title { margin: 0; font-size: 18px; line-height: 1.3; }
+.chat-summary__subtitle { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.chat-summary__close {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin: -7px -7px 0 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+}
+.chat-summary__close:active { background: var(--surface2); }
+.chat-summary__body { min-height: 0; overflow-y: auto; }
+.chat-summary__state {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+}
+.chat-summary__state--error { color: var(--danger); }
+.chat-summary__layers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.chat-summary__layer {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.chat-summary__layer-head {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-summary__layer-head h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.chat-summary__layer-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.chat-summary__layer-body {
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.chat-summary__layer-body--plain { white-space: pre-wrap; }
+.chat-summary__layer-body > :first-child { margin-top: 0; }
+.chat-summary__layer-body > :last-child { margin-bottom: 0; }
+.chat-summary__empty { margin: 0; color: var(--muted); }
 
 /* ── Bubble content ────────────────────────────────── */
 
@@ -501,6 +593,36 @@
   grid-column: 1 / -1;
   color: var(--danger);
   font-size: 12px;
+}
+
+/* Keep Settings' black/purple semantics at a compact chat-menu scale.
+   Tailwind's unlayered button reset otherwise wins over the SDK component
+   layer and erases the track, leaving only a floating white thumb. */
+.chat-policy-switch {
+  --switch-track-width: 36px;
+  --switch-track-height: 20px;
+  --switch-thumb-size: 16px;
+  --switch-thumb-offset: 2px;
+  --switch-track-color: var(--border);
+  --switch-track-color-hover: var(--surface2);
+  --switch-track-color-checked: var(--accent);
+  --switch-track-color-disabled: var(--surface);
+  --switch-track-color-checked-disabled: var(--accent-dim);
+  --color-ring: var(--accent);
+}
+
+.chat-policy-switch button[role="switch"] {
+  background: var(--switch-track-color);
+  border-radius: var(--radius-full, 9999px);
+}
+.chat-policy-switch button[role="switch"][data-state="checked"] {
+  background: var(--switch-track-color-checked);
+}
+.chat-policy-switch button[role="switch"][data-disabled] {
+  background: var(--switch-track-color-disabled);
+}
+.chat-policy-switch button[role="switch"][data-disabled][data-state="checked"] {
+  background: var(--switch-track-color-checked-disabled);
 }
 /* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
    Rendered only on the tail resumable interrupt note; re-sends "continue".
@@ -691,6 +813,15 @@
   margin: 4px 0;
   padding-left: 6px;
   max-width: min(100%, 480px);
+}
+
+/* On roomy screens tool activity follows the same reading measure as the
+   assistant's output instead of shrinking to a narrow secondary column. */
+@media (min-width: 720px) {
+  .chat__tools {
+    width: min(100%, 720px);
+    max-width: min(100%, 720px);
+  }
 }
 
 .chat__text + .chat__tools { margin-top: 10px; }
@@ -1330,6 +1461,19 @@
     box-shadow 0.16s ease,
     transform 0.08s ease;
 }
+
+/* Primary meanings share one slot. Hold the replacement invisible for a
+   brief beat so Send/Fast-forward clears before Stop is revealed. */
+.chat__send,
+.chat__steer,
+.chat__stop {
+  animation: chat-action-reveal 0.16s ease-out both;
+}
+
+@keyframes chat-action-reveal {
+  0%, 44% { opacity: 0; }
+  100% { opacity: 1; }
+}
 .chat__action:focus { outline: none; }
 .chat__action:focus-visible {
   outline: 2px solid var(--accent);
@@ -1552,24 +1696,19 @@
   gap: 1px;
 }
 
-/* Hairline divider between the Attach section and the picker
-   section so the popover reads as two distinct groups. */
+/* Hairline divider between Attach and the picker. The popover owns the one
+   scroll surface; a nested model-list scroller hid the continuation control
+   above summary rows on phones and made their visible order misleading. */
 .composer-popover__section--picker {
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  max-height: min(34dvh, 300px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  -webkit-overflow-scrolling: touch;
 }
 
-.composer-popover__section--picker::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+.composer-popover__section--context {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light);
 }
 
 /* Generic popover row — used by the Attach files entry. Same
@@ -1990,13 +2129,15 @@
 }
 
 /* ── Build-milestone rail ──────────────────────────── */
-/* A slim, non-interactive progress rail in the foot, above the open-app CTA:
-   one dot+label per milestone the building agent emitted this turn. Frosted so
-   it reads as a card over the chat scrolling behind the transparent foot, muted
-   so it stays quiet next to the composer. The most recent phase is emphasized;
-   earlier ones dim to compact history. Entrance is transform/opacity ONLY — the
-   foot's ResizeObserver publishes --composer-h off its height, so a height
-   animation would fight the composer clearance. */
+/* A slim, non-interactive progress rail in the foot, directly above the composer:
+   one dot+label per milestone the building agent emitted this turn. Attention,
+   connection, queue, and open-app notices deliberately stack ABOVE this rail so
+   nothing interrupts its relationship to the chat controls. Frosted so it reads
+   as a card over the chat scrolling behind the transparent foot, muted so it
+   stays quiet next to the composer. The most recent phase is emphasized; earlier
+   ones dim to compact history. Entrance is transform/opacity ONLY — the foot's
+   ResizeObserver publishes --composer-h off its height, so a height animation
+   would fight the composer clearance. */
 .chat__build-rail {
   max-width: 720px;
   margin: 0 auto 8px;
@@ -2056,6 +2197,9 @@
 @media (prefers-reduced-motion: reduce) {
   .chat__build-rail,
   .chat__copy-toast { animation: none; }
+  .chat__send,
+  .chat__steer,
+  .chat__stop { animation: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */

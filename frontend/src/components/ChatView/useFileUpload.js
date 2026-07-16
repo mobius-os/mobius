@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { getToken, BASE } from '../../api/client.js'
+import { getAuthHeaders, BASE } from '../../api/client.js'
 
 /**
  * Hook encapsulating file upload state and API calls for chat attachments.
@@ -52,7 +52,7 @@ export default function useFileUpload({ chatId, initialFiles = [] }) {
         fd.append('files', fileList[i])
         const res = await fetch(`${BASE}/api/chats/${chatId}/uploads`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${getToken()}` },
+          headers: getAuthHeaders(),
           body: fd,
         })
         if (!res.ok) {
@@ -89,7 +89,7 @@ export default function useFileUpload({ chatId, initialFiles = [] }) {
     if (removing?.status === 'done' && removing.name) {
       fetch(`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(removing.name)}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: getAuthHeaders(),
       }).catch(() => {})
     }
   }

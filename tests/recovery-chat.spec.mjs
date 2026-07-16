@@ -12,7 +12,7 @@
  * exercise the create-a-chat-then-use-it flow rather than the old
  * single-chat shortcut.
  *
- * Run: npx playwright test tests/recovery-chat.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/recovery-chat.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 

@@ -120,8 +120,8 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
       "SELECT auto_resume_on_limit FROM chats "
       "WHERE id = 'new-after-upgrade'"
     )).scalar_one()
-  assert value in (False, 0)
-  assert future_value in (False, 0)
+  assert value in (True, 1)
+  assert future_value in (True, 1)
 
 
 def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
@@ -151,4 +151,43 @@ def test_fresh_chat_schema_has_database_auto_resume_default():
   assert column.nullable is False
   assert column.default is not None
   assert column.server_default is not None
-  assert str(column.server_default.arg).lower() == "false"
+  assert str(column.server_default.arg).lower() == "true"
+
+
+def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
+  db_path = tmp_path / "legacy-owner.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, username VARCHAR(64), "
+      "hashed_password VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "INSERT INTO owner (id, username, hashed_password) "
+      "VALUES (1, 'owner', 'hash')"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  cols = {c["name"]: c for c in inspect(eng).get_columns("owner")}
+  assert "auto_resume_on_limit_default" in cols
+  assert cols["auto_resume_on_limit_default"]["nullable"] is False
+  with eng.connect() as conn:
+    value = conn.execute(text(
+      "SELECT auto_resume_on_limit_default FROM owner WHERE id = 1"
+    )).scalar_one()
+  assert value in (True, 1)
+
+
+def test_fresh_owner_schema_has_auto_resume_default():
+  column = models.Owner.__table__.c.auto_resume_on_limit_default
+
+  assert column.nullable is False
+  assert column.default is not None
+  assert column.server_default is not None
+  assert str(column.server_default.arg).lower() == "true"

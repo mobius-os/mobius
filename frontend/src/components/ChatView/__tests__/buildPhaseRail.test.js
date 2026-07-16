@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -9,6 +10,8 @@ import {
   latestBuildPhaseAnnouncement,
   railAtRunStart,
 } from '../buildPhaseRail.js'
+
+const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 test('buildPhaseFromEvent extracts label + ts and trims the label', () => {
   assert.deepEqual(
@@ -69,6 +72,28 @@ test('latestBuildPhaseAnnouncement announces the newest phase, empty when none',
 
 test('railAtRunStart resets to the shared empty rail', () => {
   assert.equal(railAtRunStart(), EMPTY_BUILD_PHASE_RAIL)
+})
+
+test('build rail is the final footer status strip directly above the composer', () => {
+  const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
+  const composer = chatView.indexOf('<ChatInputBar', footStart)
+  const foot = chatView.slice(footStart, composer)
+  const rail = foot.indexOf('className="chat__build-rail"')
+
+  assert.ok(footStart >= 0 && composer > footStart && rail >= 0,
+    'the footer, build rail, and composer must all be present')
+  for (const notice of [
+    'className="chat__open-app"',
+    'className="chat__question-nudge"',
+    'className="chat__resume-nudge"',
+    '<ConnectionStatus',
+    '<QueuedMessages',
+  ]) {
+    const noticeIndex = foot.indexOf(notice)
+    assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
+    assert.ok(noticeIndex < rail,
+      `${notice} must stack above the build rail, never between it and the composer`)
+  }
 })
 
 test('a send that merely enqueues preserves the in-flight build rail', () => {

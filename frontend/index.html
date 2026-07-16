@@ -35,6 +35,34 @@
     <script defer src="/vendor/katex@0.17.0/katex.min.js"></script>
     <title>Möbius</title>
     <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- The exact embedded-chat route is intentionally frameable below an
+         opaque app ancestor. Both Web Storage getters throw for that document,
+         so install empty, memory-only facades before any shared shell module or
+         pre-paint code runs. They contain no owner state or credential and the
+         document remains inert until its server capability exchange succeeds. -->
+    <script data-mobius-chat-embed-storage-shim>(function () {
+      if (window.location.pathname !== '/shell/embed/chat') return;
+      function memoryStorage() {
+        var values = Object.create(null);
+        return {
+          get length() { return Object.keys(values).length; },
+          key: function (index) { return Object.keys(values)[index] || null; },
+          getItem: function (key) {
+            key = String(key);
+            return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null;
+          },
+          setItem: function (key, value) { values[String(key)] = String(value); },
+          removeItem: function (key) { delete values[String(key)]; },
+          clear: function () { values = Object.create(null); }
+        };
+      }
+      Object.defineProperty(window, 'localStorage', {
+        value: memoryStorage(), configurable: true
+      });
+      Object.defineProperty(window, 'sessionStorage', {
+        value: memoryStorage(), configurable: true
+      });
+    })();</script>
     <!-- Theme-as-data: the server serializes the effective theme
          ({css,bg,mode}) into this slot on every request. The pre-paint
          script below reads it (falling back to persisted localStorage,
@@ -130,9 +158,8 @@
     if (themeColorMeta) themeColorMeta.setAttribute('content', bg);
     var colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
     if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', mode === 'light' ? 'light dark' : 'dark light');
-    // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
-    // correct {bg,mode}. The same-origin app-frame shares this localStorage but
-    // has an EMPTY slot, so it must NOT write — else it clobbers the owner's
+    // Persist in the TOP-LEVEL SHELL ONLY for the next shell boot.
+    // Opaque app frames use a memory-only storage shim with an EMPTY slot, so it must NOT write — else it clobbers the owner's
     // real theme with the dark default and the shell re-reads it (drawer bleed).
     try {
       if (window.parent === window) {
@@ -151,12 +178,14 @@
     </div>
     <div id="root"></div>
     <script>
-      // The nested chat has its own lightweight start state; never cover it with
-      // the full-shell brand splash. Top-level refreshes can still skip the
-      // splash when the owner token is locally available.
+      // The embedded document must remain blank while its one-use capability
+      // is exchanged; never cover that inert state with the full-shell logo.
+      // Only top-level shell loads consult the owner's browser token.
       var isChatEmbed = window.location.pathname === '/shell/embed/chat'
       var hasOwnerToken = false
-      try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
+      if (!isChatEmbed) {
+        try { hasOwnerToken = !!localStorage.getItem('token') } catch (_) {}
+      }
       if (isChatEmbed || hasOwnerToken) {
         var s = document.getElementById('splash')
         if (s) s.remove()
@@ -187,7 +216,10 @@
       // triggers a fresh sw.js fetch from network so deploys take
       // effect immediately. Belt-and-suspenders with the server-side
       // header in main.py.
-      if (window.parent === window && 'serviceWorker' in navigator) {
+      // The chat embed lives in an opaque sandbox: merely reading
+      // navigator.serviceWorker throws there, and it must not register or
+      // control a worker anyway. Keep the stripped route entirely in-memory.
+      if (window.location.pathname !== '/shell/embed/chat' && 'serviceWorker' in navigator) {
         // The flag prevents a reload loop during one update handoff. Clear it
         // on the next page load so later shell rebuilds in the same PWA
         // session can still auto-activate.
@@ -354,7 +386,7 @@
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —
       // browser may deny without prompting.
-      if (window.parent === window && navigator.storage && navigator.storage.persist) {
+      if (window.location.pathname !== '/shell/embed/chat' && navigator.storage && navigator.storage.persist) {
         navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => {})
       }
     </script>

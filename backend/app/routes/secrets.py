@@ -28,7 +28,9 @@ class SecretWrite(BaseModel):
 
 
 def _authorize_app(db: Session, principal: Principal, app_id: int) -> models.App:
-  if principal.scope not in (None, "app"):
+  # Generic authentication emits only the explicit owner/app principals. The
+  # narrow chat/media scopes are denied before they can touch the secret store.
+  if principal.scope not in ("owner", "app"):
     raise HTTPException(
       status_code=403, detail="This token cannot access app secrets."
     )

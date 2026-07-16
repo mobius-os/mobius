@@ -5,9 +5,7 @@
   inset: 0;
   z-index: 9999;
   background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
   animation: lightbox-fade-in 0.15s ease;
 }
 @keyframes lightbox-fade-in {
@@ -16,23 +14,28 @@
 }
 .lightbox-content {
   position: relative;
-  max-width: 92vw;
-  max-height: 92vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
 }
 .lightbox-image {
-  max-width: 92vw;
-  max-height: 82vh;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
   object-fit: contain;
   border-radius: 8px;
   touch-action: none;
-  transition: transform 0.1s ease-out;
   user-select: none;
+  will-change: transform;
 }
 .lightbox-actions {
+  position: absolute;
+  z-index: 2;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
   display: flex;
   gap: 8px;
 }
@@ -40,8 +43,8 @@
   background: rgba(255, 255, 255, 0.12);
   border: none;
   color: #fff;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -51,6 +54,10 @@
 }
 .lightbox-btn:hover {
   background: rgba(255, 255, 255, 0.25);
+}
+.lightbox-btn:active {
+  background: rgba(255, 255, 255, 0.32);
+  transform: scale(0.96);
 }
 
 /* Brief "!" shown in place of the download icon when the fetch fails. */

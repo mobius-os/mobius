@@ -12,8 +12,9 @@ pending question's future is resolved or cancelled by one of:
   (a) the user-answer POST → resolves with the answers dict, or
   (b) `stop_chat` / `stop_chat_for` → cancels the future.
 
-If neither user answer nor stop fires, the future may remain pending
-forever. This is intentional: the question card blocks the user's chat UI,
+If neither user answer, stop, nor an accepted steering message fires, the
+future may remain pending forever. This is intentional: the question card
+blocks the user's chat UI,
 so a silent timeout would silently drop their turn. Resolving with no
 answer would be worse than blocking — the agent would interpret the empty
 payload as a real choice and proceed with garbage state. If the process
@@ -127,7 +128,8 @@ def was_cancelled(chat_id: str, question_id: str | None = None) -> bool:
 def cancel(chat_id: str) -> None:
   """Cancels and drops any live AskUserQuestion for the chat.
 
-  Idempotent on a missing entry. Pop-first ordering is functionally
+  Used by both explicit Stop and an accepted steer that supersedes the open
+  question. Idempotent on a missing entry. Pop-first ordering is functionally
   equivalent to today's get + cancel + pop (single-thread asyncio
   means no concurrent caller can slip between operations) but reads
   cleaner and removes the temptation to re-fetch by chat_id.

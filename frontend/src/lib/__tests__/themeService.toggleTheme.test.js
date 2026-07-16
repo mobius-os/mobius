@@ -34,8 +34,14 @@ function makeDomStub() {
   const statusBar = { content: 'black', getAttribute: (k) => statusBar[k], setAttribute: (k, v) => { statusBar[k] = v } }
   const documentElement = {
     _attrs: {},
+    _classes: new Set(),
     getAttribute: (k) => documentElement._attrs[k],
     setAttribute: (k, v) => { documentElement._attrs[k] = v },
+    classList: {
+      add: (...names) => names.forEach(name => documentElement._classes.add(name)),
+      remove: (...names) => names.forEach(name => documentElement._classes.delete(name)),
+      contains: (name) => documentElement._classes.has(name),
+    },
     // applyThemeToDom now syncs the inline --bg (BUG 2); capture it.
     style: { _props: {}, setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
   }
@@ -567,13 +573,15 @@ test('NAV REGRESSION — Settings toggleTheme avoids View Transition snapshot na
   let viewTransitionCalled = false
   dom.document.startViewTransition = () => {
     viewTransitionCalled = true
-    throw new Error('Settings theme toggle must use the CSS transition path')
+    throw new Error('Settings theme toggle must use the atomic paint path')
   }
 
   const result = await themeService.toggleTheme(qc, 'dark', api)
 
   assert.equal(viewTransitionCalled, false,
     'theme toggles from Settings should not invoke document.startViewTransition')
+  assert.equal(dom.document.documentElement.classList.contains('theme-transitioning'), false,
+    'theme toggles from Settings should not animate descendant colors independently')
   assert.equal(result.newMode, 'light')
   assert.equal(dom.document.body.style.background, '#f0eeeb')
 })

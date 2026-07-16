@@ -106,6 +106,67 @@ def test_typical_project_returns_its_complete_changed_filename_list():
   assert result["tree"]["files"] == 25
   assert len(result["tree"]["paths"]) == 25
   assert result["tree"]["truncated"] is False
+
+
+def test_install_managed_app_deltas_do_not_look_like_customization():
+  repo = _repo()
+  (repo / ".gitignore").write_text("dist/\n", encoding="utf-8")
+  (repo / "runner.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  _git(repo, "add", ".gitignore", "runner.sh")
+  _commit(repo, "install: Demo v1.0.0")
+
+  result = source_status.build_app_status(_app(repo))
+  assert result is not None
+  assert result["state"] == "adapted"
+  assert result["tree"]["files"] == 2
+  assert result["tree"]["authored_files"] == 0
+  assert result["tree"]["managed_files"] == 2
+  assert {path["group"] for path in result["tree"]["paths"]} == {"managed"}
+
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "local source edit")
+  customized = source_status.build_app_status(_app(repo))
+  assert customized is not None
+  assert customized["state"] == "customized"
+  assert customized["tree"]["authored_files"] == 1
+  assert customized["tree"]["managed_files"] == 2
+  assert customized["tree"]["paths"][0]["path"] == "index.jsx"
+  assert customized["tree"]["paths"][0]["group"] == "authored"
+
+
+def test_sanitized_origin_and_fork_topology_uses_last_fetched_refs():
+  repo = _repo()
+  base = _git(repo, "rev-parse", "HEAD")
+  _git(repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+  _git(repo, "remote", "add", "fork", "git@github.com:owner/demo.git")
+  _git(repo, "update-ref", "refs/remotes/origin/main", base)
+  (repo / "fork-only.js").write_text("fork\n", encoding="utf-8")
+  _git(repo, "add", "fork-only.js")
+  fork_sha = _commit(repo, "fork work")
+  _git(repo, "update-ref", "refs/remotes/fork/main", fork_sha)
+
+  result = source_status.build_app_status(_app(repo))
+  assert result is not None
+  assert result["origin"]["repo"] == "example/demo"
+  assert result["origin"]["ref"] == "origin/main"
+  assert result["origin"]["sha"] == base
+  assert result["origin"]["local_ahead"] == 1
+  assert result["origin"]["local_behind"] == 0
+  assert result["origin"]["local_tree"]["files"] == 1
+  assert len(result["forks"]) == 1
+  fork = result["forks"][0]
+  assert fork["repo"] == "owner/demo"
+  assert fork["ref"] == "fork/main"
+  assert fork["sha"] == fork_sha
+  assert fork["ahead"] == 1
+  assert fork["behind"] == 0
+  assert fork["tree"]["files"] == 1
+  payload = repr(result)
+  assert "git@github.com" not in payload
+  assert "https://github.com" not in payload
+
+
 def test_diverged_counts_and_sanitized_github_identity():
   repo = _repo()
   _git(repo, "checkout", "-q", "upstream")

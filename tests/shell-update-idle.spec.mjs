@@ -10,9 +10,9 @@
  *      no popup — and the live turn keeps rendering.
  *   2. passive shell_rebuilt generations stay coalesced while an idle chat is
  *      visible, so source-save bursts cannot interrupt a reader.
- *   3. deliberate shell_apply_now still reloads exactly ONCE at the idle
- *      boundary, captures the current anchor, carries the terminal transcript
- *      across that reload, and does not loop.
+ *   3. a deliberate shell_apply_now that lands mid-turn reloads exactly ONCE
+ *      at the idle boundary, captures the current anchor, carries the terminal
+ *      transcript across that reload, and does not loop.
  *   4. after a REAL SW update (a genuinely new, WAITING worker), an idle apply
  *      lands the page on the NEW generation — controlled by the registration's
  *      ACTIVE worker with nothing left waiting. Deliberate-apply cases assert
@@ -37,7 +37,7 @@
  * Reloads are observed via a sessionStorage load counter bumped in an init
  * script that runs on every navigation (including reload).
  *
- * Run: npx playwright test tests/shell-update-idle.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/shell-update-idle.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'

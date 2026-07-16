@@ -12,7 +12,7 @@ guide gets a fresh clone to a running dev/test loop.
 |------|-----------------|
 | `backend/app/` | FastAPI backend (app factory `main.py`, routers under `routes/`, SQLAlchemy models, chat/SSE plumbing). |
 | `frontend/src/` | React 19 + Vite shell (chat UI, drawer, mini-app iframe canvas). |
-| `skill/core.md` | The agent's system prompt (the "constitution"); baked into the image. |
+| `skill/core.md` | The agent's system prompt (the "constitution"); read from the live checkout after restart, with an image-baked degraded-boot fallback. |
 | `backend/scripts/seed-skills/` | Per-topic agent skills (building-apps, theming, cron, …), seeded into `/data/shared/skills/` create-if-absent on first boot. |
 | `core-apps/` | Built-in mini-apps (`memory`, `reflection`) shipped with the platform. |
 | `tests/` | Playwright end-to-end suite (repo root). |
@@ -80,15 +80,20 @@ returning always preserves the exact visible anchor and never restores
 auto-scroll to a newer tail. New send and lifecycle paths must use the shared
 state machine rather than deriving intent from geometry alone.
 
-**End-to-end (Playwright).** From the repo root, against a running `mobius-test`
-container on port 8001 (the suite defaults to `http://localhost:8001`, owner
-`admin/admin`):
+**End-to-end (Playwright).** Comprehensive browser checks run in GitHub after a
+PR is opened. Do not point raw Playwright, an auth setup, or a preview proxy at
+a live Möbius backend. For a rare local reproduction, first commit the exact
+revision, then run the host-only disposable wrapper from a Docker-capable host:
 
 ```bash
 npm ci && npx playwright install --with-deps chrome
-npx playwright test                       # full suite
-npx playwright test tests/navigation.spec.mjs   # one file
+scripts/playwright-local.sh --allow-local-e2e tests/navigation.spec.mjs
 ```
+
+The wrapper clones that committed revision into temporary storage, builds a
+separate backend/database/credential set on random ports, uses one browser
+worker, and tears the stack down. It intentionally refuses tracked uncommitted
+changes so the browser tests and served runtime cannot drift apart.
 
 ## Dev loop: live app rebuild
 

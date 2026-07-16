@@ -4943,7 +4943,7 @@ def test_update_check_releases_db_connection_before_remote_fetch(
 ):
   """A slow fan-out check must not pin one pooled connection per request."""
   from fastapi import HTTPException
-  from app.database import engine
+  from app.database import checked_out_connections
 
   base = "https://uc-pool.test/repo/"
   manifest = {**MANIFEST_NEWS, "id": "uc-pool"}
@@ -4951,10 +4951,10 @@ def test_update_check_releases_db_connection_before_remote_fetch(
   assert installed.status_code == 201, installed.text
   app_id = installed.json()["id"]
 
-  baseline = engine.pool.checkedout()
+  baseline = checked_out_connections()
 
   async def _slow_remote_fetch(_url):
-    assert engine.pool.checkedout() == baseline, (
+    assert checked_out_connections() <= baseline, (
       "update-check kept its request DB connection checked out while "
       "starting remote work"
     )

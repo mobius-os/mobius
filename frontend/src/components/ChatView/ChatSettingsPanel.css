@@ -55,12 +55,6 @@
   line-height: 1.4;
 }
 
-.csp__automation-sub {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 .csp__automation-error {
   margin: 2px 10px 6px;
   color: var(--danger);

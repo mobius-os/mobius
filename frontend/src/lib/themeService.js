@@ -128,6 +128,16 @@ export function setThemeTransitionOriginFromEvent(event) {
 }
 
 function runThemeTransition(mutateDom, options = {}) {
+  // Some controls need an atomic palette swap rather than an animated
+  // document transition. In particular, Settings previously eased every
+  // descendant independently, which made borders lead surfaces. Keep the
+  // transition system for external theme updates, but let the local toggle
+  // opt out completely so the whole palette changes in one paint.
+  if (options.animate === false) {
+    nextThemeTransitionOrigin = null
+    mutateDom()
+    return
+  }
   const preferViewTransition = options.preferViewTransition !== false
   if (!shouldAnimateThemeChange()) {
     nextThemeTransitionOrigin = null
@@ -412,12 +422,11 @@ export async function toggleTheme(queryClient, currentMode, api) {
   // the same tick as the visual change.
   await _cancelThemeQueries(queryClient)
   _seedThemeQueries(queryClient, newCss, newBg, newMode)
-  // The Settings toggle sits on the shell's back-stack sentinel. On mobile
-  // Chromium/PWA builds, combining a user tap, the View Transitions snapshot
-  // layer, and the Navigation API can occasionally consume that sentinel and
-  // restore the previous chat. Use the explicit CSS color transition for this
-  // user-tap path; it is still smooth, but avoids browser navigation machinery.
-  applyThemeToDom(newCss, newBg, newMode, { preferViewTransition: false })
+  // The Settings toggle sits on the shell's back-stack sentinel, so it must not
+  // use a View Transition snapshot. It also opts out of the per-element CSS
+  // fallback: an atomic paint keeps borders, fills, and text in lockstep while
+  // the small toggle thumb supplies the interaction motion locally.
+  applyThemeToDom(newCss, newBg, newMode, { animate: false })
 
   try {
     // Refresh SWR's local /api/theme body before notify.send can provoke a
@@ -435,7 +444,7 @@ export async function toggleTheme(queryClient, currentMode, api) {
   } catch (err) {
     _seedThemeQueries(queryClient, currentCss, oldBg, currentMode)
     await _refreshThemeSwCache(currentCss, oldBg, currentMode)
-    applyThemeToDom(currentCss, oldBg, currentMode, { preferViewTransition: false })
+    applyThemeToDom(currentCss, oldBg, currentMode, { animate: false })
     throw err
   }
 

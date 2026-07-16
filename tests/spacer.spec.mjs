@@ -5,8 +5,8 @@
  * tokens consumed.  Tests the spacer formula, ResizeObserver, scroll
  * restoration, and chat-switching edge cases.
  *
- * Run:  npx playwright test tests/spacer.spec.mjs
- * Debug: npx playwright test tests/spacer.spec.mjs --headed --debug
+ * Run:  scripts/playwright-local.sh --allow-local-e2e tests/spacer.spec.mjs
+ * Debug: scripts/playwright-local.sh --allow-local-e2e tests/spacer.spec.mjs --headed --debug
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'

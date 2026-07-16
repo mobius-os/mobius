@@ -31,7 +31,6 @@ import {
   workspaceRequestsForBuiltApps,
 } from './workspacePlacement.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
-import { shellRebuildFailureMessage } from '../../lib/shellRebuildFailure.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
   freshChatBuiltApps,
@@ -40,6 +39,10 @@ import {
   withoutAppFlagged,
 } from './newAppAttention.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
+import {
+  currentReusableEmptyChat,
+  detailIsUntouchedEmptyChat,
+} from './newChatPolicy.js'
 import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
@@ -192,8 +195,8 @@ export default function Shell() {
       clearTimeout(shellReloadTimerRef.current)
       shellReloadTimerRef.current = null
     }
-    // Capture view-owned transient state synchronously, before the
-    // service-worker handoff can let layout/data change underneath it.
+    // Capture view-owned transient state synchronously, before the async query
+    // flush or service-worker handoff can let layout/data change underneath it.
     // ChatView uses this to persist the exact visible message anchor.
     window.dispatchEvent(new Event(BEFORE_SHELL_RELOAD_EVENT))
     // ChatView promotes terminal stream items into the in-memory query cache
@@ -1186,11 +1189,11 @@ export default function Shell() {
       // reloads.
       requestShellReload({ passive: ev.type === 'shell_rebuilt' })
     } else if (ev.type === 'shell_rebuild_failed') {
-      // System-bus-only, delivered once — no dedup stamp.
-      showToast(shellRebuildFailureMessage(ev), {
-        variant: 'error',
-        duration: 10000,
-      })
+      // Deliberately silent in the owner UI. The atomic publisher keeps the
+      // previous shell running, and watcher failures commonly describe a
+      // transient intermediate state during a multi-file agent edit. The
+      // producer logs the diagnostic and retries; an explicit operation such
+      // as a platform update reports its own failure where it was initiated.
     }
   }, [
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
@@ -1365,14 +1368,10 @@ export default function Shell() {
   }, [apps, navTo, refreshApps, refreshChats])
 
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer } = {}) {
-    // Reuse the most-recently-updated empty chat if one exists; only
-    // POST a fresh row when no empty is available. Safe to reuse now
-    // that create_chat leaves agent_settings_json NULL — an untouched
-    // empty reads the live global default from agent-settings.json on
-    // render, so the user always sees their most recent model/effort
-    // pick. (Before, create_chat snapshotted defaults at creation time
-    // and reuse surfaced that stale snapshot, which is what made the
-    // empty-chat reuse path buggy in the first place.)
+    // Keep the active chat when it is still an untouched blank; only POST a
+    // fresh row when this explicit New-chat action needs one. Never borrow an
+    // off-screen blank: another browser may have started it while this tab's
+    // chat-list cache still says has_messages=false.
     //
     // `forceNew` bypasses reuse for callers that NEED a fresh row —
     // moebius:new-chat events (the ChatView wouldn't remount on the
@@ -1385,42 +1384,34 @@ export default function Shell() {
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
     let chatId
-    // Reuse the most-recently-updated empty chat if one exists — INCLUDING
-    // the one we're already on. An earlier fix excluded the active chat (to
-    // avoid a no-op setActiveChatId), but that backfired: a tap on a blank
-    // chat then spawned a SECOND blank, or hopped to an identical-looking
-    // spare, and repeated taps ping-ponged between indistinguishable empties
-    // — which is the "+ New chat does nothing" report. Reusing
-    // deterministically (active included) means blanks never accumulate and a
-    // tap on a blank simply keeps you on it (the drawer closing is the
-    // acknowledgement). One exception: a `draft` must land on a chat that
-    // REMOUNTS ChatView to deliver the pending draft, and setActiveChatId to
-    // the current id won't remount — so draft calls still skip the active
-    // chat. forceNew bypasses reuse entirely.
-    //
-    // Also exclude any chat that's mid-stream: the cached `has_messages`
-    // flag lags the send, so for a beat after the user sends, the chat
-    // they just sent to still reads has_messages=false — reusing it would
-    // drop them onto a running turn instead of a blank chat (another flavor
-    // of "+ New chat did nothing"). streamingChatIds is marked synchronously
-    // on message start, so it closes that stale-cache window.
-    const empty = !forceNew && [...chats]
-      .filter(c => !c.has_messages
-        // `exclude` skips a chat the caller knows is invalid — e.g. the
-        // just-deleted active chat, still present in `chats` until the
-        // post-delete refreshChats lands (else reuse would re-open it).
-        && (exclude == null || String(c.id) !== String(exclude))
-        && !streamingChatIds.has(c.id)
-        && (!draft || String(c.id) !== String(activeChatIdRef.current))
-        // Exclude recently-recovered chats: an Undo may restore a chat
-        // whose has_messages=true hasn't propagated yet (optimistic delete
-        // left the cache with the tombstoned state). Reusing such a chat
-        // would silently navigate back into the just-recovered item instead
-        // of a genuine empty. The id is cleared once ChatView reports the
-        // first message (has_messages is then reliably true).
-        && !recoveredChatIdsRef.current.has(c.id))
-      .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
-      [0]
+    let empty = currentReusableEmptyChat(chatsRef.current, {
+      activeChatId: activeChatIdRef.current,
+      draft: !!draft,
+      exclude,
+      forceNew: !!forceNew,
+      recoveredChatIds: recoveredChatIdsRef.current,
+      streamingChatIds: streamingChatIdsRef.current,
+    })
+
+    // The list is intentionally only a candidate source. Cross-client sends
+    // can make has_messages stale, so online reuse needs one fresh, bounded
+    // detail read. Any error or unfamiliar response fails closed to creating
+    // a new row rather than opening somebody else's newly-running chat.
+    if (empty && online) {
+      try {
+        const res = await apiFetch(
+          `/chats/${encodeURIComponent(empty.id)}?limit=1`,
+          { timeoutMs: 5000 },
+        )
+        const detail = res.ok ? await res.json() : null
+        if (!detailIsUntouchedEmptyChat(detail)) {
+          empty = null
+          void refreshChats()
+        }
+      } catch {
+        empty = null
+      }
+    }
     if (empty) {
       chatId = empty.id
     } else {
@@ -1883,6 +1874,7 @@ export default function Shell() {
               // round-trip wait for the first SSE event).
               markStreamingStart(activeChatId)
             }}
+            onQuestionAnswered={refreshChats}
             onVoiceListeningChange={markVoiceListening}
             composerFocusRequest={composerFocusRequest}
             onComposerFocusHandled={handleComposerFocusHandled}

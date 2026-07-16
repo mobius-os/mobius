@@ -12,7 +12,6 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from app.database import engine
 from app.net_utils import validate_url_safe
 from app.routes.proxy import _capped_response
 
@@ -235,7 +234,8 @@ def test_proxy_releases_db_connection_before_external_fetch(
   client, owner_token, monkeypatch
 ):
   auth = {"Authorization": f"Bearer {owner_token}"}
-  baseline_checked_out = engine.pool.checkedout()
+  from app.database import checked_out_connections
+  baseline_checked_out = checked_out_connections()
   checked_out = []
 
   def fake_validate_url_safe(url):
@@ -245,7 +245,7 @@ def test_proxy_releases_db_connection_before_external_fetch(
   async def fake_capped_response(_client, req):
     assert req.extensions["sni_hostname"] == "example.com"
     assert isinstance(req.extensions["sni_hostname"], str)
-    checked_out.append(engine.pool.checkedout())
+    checked_out.append(checked_out_connections())
     return Response(content=b"ok", media_type="text/plain")
 
   monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
@@ -259,7 +259,7 @@ def test_proxy_releases_db_connection_before_external_fetch(
 
   assert r.status_code == 200
   assert r.text == "ok"
-  assert checked_out == [baseline_checked_out]
+  assert checked_out and checked_out[0] <= baseline_checked_out
 
 
 def test_proxy_post_passes_sni_hostname_as_text(

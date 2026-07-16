@@ -3,13 +3,14 @@
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app import auth, models
 from app.config import get_settings
 from app.database import SessionLocal, get_db
+from app.timeutil import now_naive_utc
 
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
@@ -47,7 +48,7 @@ def reject_cross_site(request: Request) -> None:
       scheme, _, token = authorization.partition(" ")
       if origin == "null" and scheme.lower() == "bearer" and token:
         payload = auth.decode_access_token(token)
-        if payload and payload.get("scope") == "app":
+        if payload and payload.get("scope") in {"app", "chat_embed"}:
           return
       raise HTTPException(
         status_code=403,
@@ -88,7 +89,36 @@ class Principal:
   owner: models.Owner
   app_id: int | None
   app_instance_id: str | None = None
-  scope: str | None = None
+  scope: str = "owner"
+  chat_id: str | None = None
+  embed_instance_id: str | None = None
+  embed_session_id: str | None = None
+  embed_role: str | None = None
+  operations: frozenset[str] = frozenset()
+
+
+def chat_embed_grant_is_latest_consumed(
+  db: Session,
+  grant: models.ChatEmbedGrant | None,
+) -> bool:
+  """Whether no higher-order grant for this frame has ever been consumed.
+
+  A merely minted replacement is not authority: the old session remains valid
+  until refresh exchange succeeds. Once any higher-id grant is consumed, the
+  older row can never become authoritative again—even after that replacement
+  expires or is explicitly revoked. This is the correctness rule; eager
+  revoked_at updates during exchange are only cleanup.
+  """
+  if grant is None:
+    return False
+  newer_consumed = db.query(models.ChatEmbedGrant.token_hash).filter(
+    models.ChatEmbedGrant.app_id == grant.app_id,
+    models.ChatEmbedGrant.chat_id == grant.chat_id,
+    models.ChatEmbedGrant.instance_id == grant.instance_id,
+    models.ChatEmbedGrant.id > grant.id,
+    models.ChatEmbedGrant.consumed_at.isnot(None),
+  ).first()
+  return newer_consumed is None
 
 
 def _resolve_owner(
@@ -139,10 +169,10 @@ def resolve_owner_only(token: str, db: Session) -> models.Owner:
   the same logic wired to the OAuth2 header dependency.
   """
   owner, payload = _resolve_owner(token, db)
-  if payload.get("scope") == "app":
+  if payload.get("scope") is not None:
     raise HTTPException(
       status_code=403,
-      detail="App tokens cannot access this endpoint.",
+      detail="Only an owner token can access this endpoint.",
     )
   return owner
 
@@ -165,19 +195,14 @@ def resolve_media_or_header_owner(
   browser history, and Referer headers. A media token is 15 minutes, scoped
   to one chat, and only appears in URLs for that chat's own resources.
 
-  App tokens are rejected on both paths.
+  Genuine unscoped owner tokens remain broad when carried in the header. Media
+  and embedded-media tokens are accepted from either transport only for their
+  exact ``media_chat``. Every other scoped principal is rejected centrally.
   """
   owner, payload = _resolve_owner(token, db)
   scope = payload.get("scope")
-  if scope == "app":
-    raise HTTPException(
-      status_code=403,
-      detail="App tokens cannot access media routes.",
-    )
-  if from_query:
-    # Query-param path: only short-lived media tokens are accepted.
-    # Owner JWTs on ?token= are the vulnerability being fixed.
-    if scope != "media":
+  if scope is None:
+    if from_query:
       raise HTTPException(
         status_code=403,
         detail=(
@@ -185,12 +210,52 @@ def resolve_media_or_header_owner(
           "Use a media token (POST /api/chats/{id}/media-token)."
         ),
       )
-    if payload.get("media_chat") != chat_id:
+    return owner
+  if scope not in {"media", "chat_embed_media"}:
+    raise HTTPException(status_code=403, detail="Token scope is not valid for media.")
+  if payload.get("media_chat") != chat_id:
+    raise HTTPException(
+      status_code=403,
+      detail="Media token is not valid for this chat.",
+    )
+  if scope == "chat_embed_media":
+    app_id = payload.get("app_id")
+    app_nonce = payload.get("app_nonce")
+    session_id = payload.get("embed_session")
+    now = now_naive_utc()
+    grant = db.query(models.ChatEmbedGrant).filter(
+      models.ChatEmbedGrant.session_id == session_id,
+    ).first()
+    app = db.query(models.App).filter(
+      models.App.id == app_id,
+      models.App.deleted_at.is_(None),
+    ).first() if isinstance(app_id, int) else None
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+    if (
+      not isinstance(app_id, int)
+      or not isinstance(app_nonce, str)
+      or not isinstance(session_id, str)
+      or grant is None
+      or grant.revoked_at is not None
+      or grant.session_expires_at is None
+      or grant.session_expires_at <= now
+      or grant.app_id != app_id
+      or grant.app_nonce != app_nonce
+      or grant.chat_id != chat_id
+      or grant.owner_epoch != owner.token_epoch
+      or app is None
+      or app.token_nonce != app_nonce
+      or chat is None
+      or chat.created_by_app_id != app_id
+      or not chat_embed_grant_is_latest_consumed(db, grant)
+    ):
       raise HTTPException(
-        status_code=403,
-        detail="Media token is not valid for this chat.",
+        status_code=401,
+        detail="Embedded-chat media session is no longer valid.",
       )
-  # Header path (from_query=False): any valid non-app owner token is accepted.
   return owner
 
 
@@ -249,6 +314,84 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
   return app_id
 
 
+def _enforce_chat_embed_scope(
+  payload: dict,
+  db: Session,
+  request_instance_id: str | None,
+) -> dict | None:
+  """Validate a dedicated embedded-chat session against live server state.
+
+  Browser origins, frame/window identity and correlation ids are not consumed
+  here as authorization. Authority is the signed ``chat_embed`` token plus the
+  database-backed session row; the instance header is an additional binding
+  carried by the authorized client, not a substitute for either.
+  """
+  if payload.get("scope") != "chat_embed":
+    return None
+  app_id = payload.get("app_id")
+  app_nonce = payload.get("app_nonce")
+  chat_id = payload.get("chat_id")
+  instance_id = payload.get("embed_instance")
+  session_id = payload.get("embed_session")
+  role = payload.get("embed_role")
+  operations = payload.get("embed_ops")
+  if (
+    not isinstance(app_id, int)
+    or not isinstance(app_nonce, str)
+    or not isinstance(chat_id, str)
+    or not isinstance(instance_id, str)
+    or not isinstance(session_id, str)
+    or not isinstance(role, str)
+    or not isinstance(operations, list)
+    or not all(isinstance(op, str) for op in operations)
+  ):
+    raise HTTPException(status_code=401, detail="Malformed chat embed token.")
+  if request_instance_id != instance_id:
+    raise HTTPException(status_code=401, detail="Chat embed instance mismatch.")
+
+  app = db.query(models.App).filter(
+    models.App.id == app_id,
+    models.App.deleted_at.is_(None),
+  ).first()
+  if app is None or app.token_nonce != app_nonce:
+    raise HTTPException(status_code=401, detail="Chat embed app is no longer valid.")
+  grant = db.query(models.ChatEmbedGrant).filter(
+    models.ChatEmbedGrant.session_id == session_id,
+  ).first()
+  now = now_naive_utc()
+  if (
+    grant is None
+    or grant.revoked_at is not None
+    or grant.consumed_at is None
+    or grant.session_expires_at is None
+    or grant.session_expires_at <= now
+    or grant.app_id != app_id
+    or grant.app_nonce != app_nonce
+    or grant.chat_id != chat_id
+    or grant.instance_id != instance_id
+    or grant.role != role
+    or grant.owner_epoch != payload.get("epoch", 0)
+    or frozenset(grant.operations_json or []) != frozenset(operations)
+    or not chat_embed_grant_is_latest_consumed(db, grant)
+  ):
+    raise HTTPException(status_code=401, detail="Chat embed session is invalid.")
+  chat = db.query(models.Chat).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if chat is None or chat.created_by_app_id != app_id:
+    raise HTTPException(status_code=403, detail="Chat embed no longer owns this chat.")
+  return {
+    "app_id": app_id,
+    "app_nonce": app_nonce,
+    "chat_id": chat_id,
+    "instance_id": instance_id,
+    "session_id": session_id,
+    "role": role,
+    "operations": frozenset(operations),
+  }
+
+
 def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
   """Resolves an owner (from a full OR app-scoped token string).
 
@@ -261,6 +404,8 @@ def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
   deleted/reused-id app token can't read shared storage either.
   """
   owner, payload = _resolve_owner(token, db)
+  if payload.get("scope") not in (None, "app"):
+    raise HTTPException(status_code=403, detail="Token scope is not valid here.")
   _enforce_app_scope(payload, db)
   return owner
 
@@ -302,21 +447,129 @@ def get_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Same as get_current_owner_or_app but also exposes the token's app_id.
+  """Resolve only the generic owner/app principal.
 
-  The app-scope validation (malformed app_id, deleted app, reused-id
-  nonce mismatch) is shared with resolve_owner_or_app via
-  _enforce_app_scope, so the numeric per-app routes and the shared
-  routes reject a stale app token identically.
+  Embedded-chat sessions are deliberately fail-closed here. Only the narrowly
+  enumerated ChatView routes use ``get_chat_view_principal`` below; this keeps a
+  valid exact-chat bearer from accidentally inheriting storage, app-management,
+  GitHub, notification, logging, or future app-token powers.
   """
   owner, payload = _resolve_owner(token, db)
+  if payload.get("scope") not in (None, "app"):
+    raise HTTPException(status_code=403, detail="Token scope is not valid here.")
   app_id = _enforce_app_scope(payload, db)
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
-    scope=payload.get("scope"),
+    scope="app" if app_id is not None else "owner",
   )
+
+
+def get_chat_view_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+  embed_instance_id: str | None = Header(
+    default=None, alias="X-Mobius-Embed-Instance",
+  ),
+) -> Principal:
+  """Resolve owner/app or a server-verified exact-chat embed principal.
+
+  This dependency is intentionally private to the explicit ChatView route
+  allowlist. Every call site must additionally invoke
+  ``require_chat_embed_operation`` with the operation implemented by that
+  endpoint; exact-chat ownership alone is never enough.
+  """
+  owner, payload = _resolve_owner(token, db)
+  embed = _enforce_chat_embed_scope(payload, db, embed_instance_id)
+  if embed is None:
+    if payload.get("scope") not in (None, "app"):
+      raise HTTPException(status_code=403, detail="Token scope is not valid here.")
+    app_id = _enforce_app_scope(payload, db)
+    return Principal(
+      owner=owner,
+      app_id=app_id,
+      app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+      scope="app" if app_id is not None else "owner",
+    )
+  return Principal(
+    owner=owner,
+    app_id=embed["app_id"],
+    app_instance_id=embed["app_nonce"],
+    scope="chat_embed",
+    chat_id=embed["chat_id"],
+    embed_instance_id=embed["instance_id"],
+    embed_session_id=embed["session_id"],
+    embed_role=embed["role"],
+    operations=embed["operations"],
+  )
+
+
+def get_owner_or_chat_embed_principal(
+  principal: Principal = Depends(get_chat_view_principal),
+) -> Principal:
+  """Preserve an owner-only route while admitting its exact embed principal.
+
+  Historically owner-only ChatView endpoints must continue rejecting generic
+  app tokens during dependency resolution (before path/body validation). The
+  dedicated chat-embed principal is the sole scoped exception.
+  """
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  return principal
+
+
+def require_chat_embed_operation(principal: Principal, operation: str) -> None:
+  """Require one operation only when the caller is a chat-embed session."""
+  if principal.scope == "chat_embed" and operation not in principal.operations:
+    raise HTTPException(
+      status_code=403,
+      detail=f"Chat embed operation not allowed: {operation}.",
+    )
+
+
+def chat_embed_session_is_active(session_id: str | None) -> bool:
+  """Detached liveness check for long-lived embedded SSE responses."""
+  if not session_id:
+    return False
+  db = SessionLocal()
+  try:
+    grant = db.query(models.ChatEmbedGrant).filter(
+      models.ChatEmbedGrant.session_id == session_id,
+    ).first()
+    app = db.query(models.App).filter(
+      models.App.id == grant.app_id,
+      models.App.deleted_at.is_(None),
+    ).first() if grant is not None else None
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == grant.chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first() if grant is not None else None
+    owner = db.query(models.Owner).first()
+    return bool(
+      grant is not None
+      and grant.revoked_at is None
+      and grant.consumed_at is not None
+      and grant.session_expires_at is not None
+      and grant.session_expires_at > now_naive_utc()
+      and app is not None
+      and app.token_nonce == grant.app_nonce
+      and chat is not None
+      and chat.created_by_app_id == grant.app_id
+      and owner is not None
+      and owner.token_epoch == grant.owner_epoch
+      and chat_embed_grant_is_latest_consumed(db, grant)
+    )
+  finally:
+    db.close()
+
+
+def get_owner_app_or_chat_embed_for_models(
+  principal: Principal = Depends(get_chat_view_principal),
+) -> models.Owner:
+  """Read-only model/provider registry dependency for owner/app/embed actors."""
+  require_chat_embed_operation(principal, "models:read")
+  return principal.owner
 
 
 # Ordered tiers for permission keys whose values form a ladder. Each

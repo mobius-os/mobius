@@ -113,6 +113,32 @@ test('R4: a non-overlapping or rewritten recent page replaces stale loaded histo
   })
 })
 
+test('a local turn refreshes completed history while preserving its optimistic suffix', () => {
+  const loaded = [
+    { role: 'user', cid: 'u1', ts: 1, content: 'Earlier question' },
+    { role: 'assistant', ts: 2, content: 'Stale partial' },
+    { role: 'user', cid: 'u2', ts: 3, content: 'New local turn', optimistic: true },
+  ]
+  const recent = [
+    { role: 'user', cid: 'u1', ts: 1, content: 'Earlier question' },
+    { role: 'assistant', ts: 2, content: 'Completed previous reply' },
+  ]
+
+  const refreshed = mergeRecentMessagesIntoLoadedWindow({
+    loadedMessages: loaded,
+    loadedOffset: 0,
+    recentMessages: recent,
+    recentOffset: 0,
+    preserveLocalSuffix: true,
+  })
+
+  assert.deepEqual(refreshed.messages, [
+    recent[0],
+    recent[1],
+    loaded[2],
+  ])
+})
+
 test('cidOf returns the row cid, else null (no read-time derivation)', () => {
   // Post-card-221 every user row carries an explicit cid (client-minted, or a
   // backfilled `legacy-<ts>`); cidOf returns it as-is and no longer derives one

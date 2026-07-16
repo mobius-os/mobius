@@ -18,8 +18,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  NS, INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT,
-  isEmbedMessage, embedUrl, makeEmitter,
+  NS, INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
+  isEmbedMessage, embedUrl, makeEmitter, retainEmbedSessionAfterExchangeFailure,
 } from '../chatEmbed.js'
 
 const ORIGIN = 'https://mobius.example'
@@ -30,7 +30,7 @@ function evt({ origin = ORIGIN, source = SRC, type, instanceId, chatId } = {}) {
 }
 
 test('all message types share the moebius:chat-embed: namespace', () => {
-  for (const t of [INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT]) {
+  for (const t of [INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING]) {
     assert.ok(t.startsWith(NS), `${t} must start with ${NS}`)
   }
   // Distinct from the app-frame protocol so a stray frame message can
@@ -47,6 +47,16 @@ test('isEmbedMessage accepts a matching same-origin, same-source, correlated mes
   )
 })
 
+test('isEmbedMessage accepts an opaque null-origin message only when explicitly allowed', () => {
+  const e = evt({ origin: 'null', type: READY, instanceId: 'opaque-i' })
+  assert.equal(isEmbedMessage(e, {
+    origins: ['null', ORIGIN], expectedSource: SRC, instanceId: 'opaque-i',
+  }), true)
+  assert.equal(isEmbedMessage(e, {
+    origin: ORIGIN, expectedSource: SRC, instanceId: 'opaque-i',
+  }), false)
+})
+
 test('isEmbedMessage rejects a cross-origin message even with the right source', () => {
   const e = evt({ origin: 'https://evil.example', type: READY, instanceId: 'i' })
   assert.equal(
@@ -59,9 +69,8 @@ test('isEmbedMessage accepts an opaque parent only when explicitly allowed and s
   const opaque = evt({ origin: 'null', type: INIT, instanceId: 'i' })
   assert.equal(
     isEmbedMessage(opaque, {
-      origin: ORIGIN,
+      origins: [ORIGIN, 'null'],
       expectedSource: SRC,
-      allowOpaqueOrigin: true,
     }),
     true,
   )
@@ -71,9 +80,8 @@ test('isEmbedMessage accepts an opaque parent only when explicitly allowed and s
   )
   assert.equal(
     isEmbedMessage(opaque, {
-      origin: ORIGIN,
+      origins: [ORIGIN, 'null'],
       expectedSource: { name: 'sibling' },
-      allowOpaqueOrigin: true,
     }),
     false,
   )
@@ -119,13 +127,16 @@ test('isEmbedMessage skips the source check when expectedSource is absent', () =
   )
 })
 
-test('embedUrl builds the route with and without a chatId, honoring base', () => {
+test('embedUrl never serializes chat configuration or bearer material', () => {
   assert.equal(embedUrl(), '/shell/embed/chat')
-  assert.equal(embedUrl({ chatId: 'abc' }), '/shell/embed/chat?chatId=abc')
-  // A chatId with URL-significant characters is encoded.
-  assert.equal(embedUrl({ chatId: 'a b/c' }), '/shell/embed/chat?chatId=a%20b%2Fc')
-  // Deploy prefix (e.g. /proxy/8001) is prepended.
-  assert.equal(embedUrl({ base: '/proxy/8001', chatId: 'x' }), '/proxy/8001/shell/embed/chat?chatId=x')
+  assert.equal(embedUrl({ chatId: 'abc', capability: 'secret' }), '/shell/embed/chat')
+  assert.equal(embedUrl({ base: '/proxy/8001', chatId: 'x' }), '/proxy/8001/shell/embed/chat')
+})
+
+test('only a failed refresh retains an already-authorized embedded session', () => {
+  assert.equal(retainEmbedSessionAfterExchangeFailure(true), true)
+  assert.equal(retainEmbedSessionAfterExchangeFailure(false), false)
+  assert.equal(retainEmbedSessionAfterExchangeFailure(undefined), false)
 })
 
 // makeEmitter is the sticky-emit core that mobius-runtime.js's makeChat

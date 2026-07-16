@@ -4,9 +4,9 @@
  *
  *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
- *   2. Model / effort — renders <ChatSettingsPanel> when a chatInfo
- *      is available; omitted on a fresh empty chat where chatInfo
- *      hasn't loaded yet.
+ *   2. Model / effort / summary / automation — renders
+ *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
+ *      empty chat where chatInfo hasn't loaded yet.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover
@@ -60,6 +60,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
+import { FileText, Info } from 'lucide-react'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 
 export default function ComposerPopover({
@@ -81,6 +82,8 @@ export default function ComposerPopover({
   onAutoResumeChange,
   providerSwitchState,
   onOpenInspector,
+  onOpenSummary,
+  embedded = false,
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -142,6 +145,11 @@ export default function ComposerPopover({
   function handleOpenInspector() {
     setOpen(false)
     onOpenInspector?.()
+  }
+
+  function handleOpenSummary() {
+    setOpen(false)
+    onOpenSummary?.()
   }
 
   return (
@@ -223,22 +231,42 @@ export default function ComposerPopover({
               />
             </div>
           )}
-          <div className="composer-popover__section">
+          {!embedded && (
+          <div className="composer-popover__section composer-popover__section--context">
+            <button
+              type="button"
+              className="composer-popover__row"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={handleOpenSummary}
+            >
+              <span className="composer-popover__row-icon" aria-hidden="true">
+                <FileText width={18} height={18} />
+              </span>
+              <span className="composer-popover__row-main">
+                <span className="composer-popover__row-title">Chat summary</span>
+                <span className="composer-popover__row-sub">
+                  Name, digest, full handoff
+                </span>
+              </span>
+            </button>
             <button
               type="button"
               className="composer-popover__row"
               onPointerDown={(e) => e.preventDefault()}
               onClick={handleOpenInspector}
             >
-              <span className="composer-popover__row-icon" aria-hidden="true">ⓘ</span>
+              <span className="composer-popover__row-icon" aria-hidden="true">
+                <Info width={18} height={18} />
+              </span>
               <span className="composer-popover__row-main">
                 <span className="composer-popover__row-title">What the agent knows</span>
                 <span className="composer-popover__row-sub">
-                  Prompt, memory, app context
+                  System prompt and recent chats
                 </span>
               </span>
             </button>
           </div>
+          )}
         </div>
       )}
     </div>
