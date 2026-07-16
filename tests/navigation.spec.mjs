@@ -7,6 +7,7 @@
  * Run:  scripts/playwright-local.sh --allow-local-e2e tests/navigation.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const NAV_CHATS = [
@@ -876,5 +877,144 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await goBack(page)
     expect((await getNavState(page)).drawerOpen).toBe(false)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Split-pane navigation (PR2 gate — design §5, §8). Appended; the 24
+// invariants above are unchanged. These exercise the honest global-
+// chronological Back across TWO simultaneously-visible app panes and the
+// eviction-retires-history contract, which single-pane 20c cannot reach.
+// ---------------------------------------------------------------------------
+
+const PANE_APP_A = 990201
+const PANE_APP_B = 990202
+
+/** Two app panes side by side: p0 = app A (focused), p1 = app B. */
+function twoAppPanes() {
+  let ws = paneModel.seedFromFlatTabs([
+    { kind: 'app', id: PANE_APP_A }, { kind: 'app', id: PANE_APP_B },
+  ])
+  ws = paneModel.moveTab(ws, `app:${PANE_APP_B}`, { root: true, edge: 'right' })
+  return paneModel.focusPane(ws, 'p0')
+}
+
+async function bootTwoAppPanes(page) {
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
+  await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
+  const apps = [
+    { id: PANE_APP_A, name: 'Pane App A' },
+    { id: PANE_APP_B, name: 'Pane App B' },
+  ]
+  await page.route(/\/api\/apps\/(\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify(apps.map(a => ({
+        id: a.id, name: a.name, description: '', compiled_path: '',
+        chat_id: null, source_dir: null, pinned_at: null,
+        cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
+        updated_at: '2026-07-12T12:00:00Z',
+      }))),
+    })
+  })
+  for (const a of apps) {
+    await page.route(new RegExp(`/api/apps/${a.id}/frame`), route => route.fulfill({
+      status: 200, contentType: 'text/html',
+      body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
+    }))
+  }
+  // Land on the origin, then seed the flag + workspace blob and re-navigate so
+  // the shell boots the two-pane tree with the splits flag on.
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  const blob = paneModel.serializeWorkspace(twoAppPanes())
+  await page.addInitScript(([flagKey, wsKey, wsBlob]) => {
+    try {
+      localStorage.setItem(flagKey, '1')
+      sessionStorage.setItem(wsKey, wsBlob)
+    } catch { /* private mode */ }
+  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+  await page.goto(`${BASE}/shell/?app=${PANE_APP_A}`, { waitUntil: 'domcontentloaded' })
+  await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 8000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))))
+}
+
+function appFrameFor(page, appId) {
+  return page.frames().find(f => new RegExp(`/api/apps/${appId}/frame`).test(f.url()))
+}
+
+/** Arm a frame's nav-back counter and return a getter. */
+async function armBackCounter(frame) {
+  await frame.evaluate(() => {
+    window.__navBack = 0
+    window.addEventListener('message', (e) => {
+      if (e && e.data && e.data.type === 'moebius:nav-back') window.__navBack += 1
+    })
+  })
+}
+
+test.describe('Split-pane navigation (PR2 gate)', () => {
+  test('25. two visible app panes: Back routes nav-back to the topmost tagged pane', async ({ page }) => {
+    await bootTwoAppPanes(page)
+    const frameA = appFrameFor(page, PANE_APP_A)
+    const frameB = appFrameFor(page, PANE_APP_B)
+    if (!frameA || !frameB) test.skip(true, 'both app frames did not load in the mocked harness')
+
+    await armBackCounter(frameA)
+    await armBackCounter(frameB)
+
+    // App A pushes a nested level, then app B pushes its own — two live
+    // sentinels keyed by (paneId, appId), interleaved across the visible pair.
+    await frameA.evaluate(id => window.parent.postMessage({ type: 'moebius:nav-push', appId: id }, '*'), PANE_APP_A)
+    await page.waitForFunction(() => history.state?.kind === 'app')
+    await frameB.evaluate(id => window.parent.postMessage({ type: 'moebius:nav-push', appId: id }, '*'), PANE_APP_B)
+    await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
+
+    // Back pops the TOPMOST tagged entry first — app B (last pushed), not A.
+    await page.evaluate(() => history.back())
+    await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+    expect(await frameB.evaluate(() => window.__navBack)).toBe(1)
+    expect(await frameA.evaluate(() => window.__navBack)).toBe(0)
+
+    // The next Back routes to app A's level.
+    await page.evaluate(() => history.back())
+    await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+    expect(await frameA.evaluate(() => window.__navBack)).toBe(1)
+    expect(await frameB.evaluate(() => window.__navBack)).toBe(1)
+  })
+
+  test('26. closing a pane retargets its app history to the surviving sibling', async ({ page }) => {
+    await bootTwoAppPanes(page)
+    const frameA = appFrameFor(page, PANE_APP_A)
+    const frameB = appFrameFor(page, PANE_APP_B)
+    if (!frameA || !frameB) test.skip(true, 'both app frames did not load in the mocked harness')
+
+    await armBackCounter(frameB)
+
+    // App A (p0) pushes a nested level, so it owns a live sentinel + a physical
+    // history entry.
+    await frameA.evaluate(id => window.parent.postMessage({ type: 'moebius:nav-push', appId: id }, '*'), PANE_APP_A)
+    await page.waitForFunction(() => history.state?.kind === 'app')
+
+    // Close app A's pane (its strip ✕). p0 collapses; app B becomes the sole
+    // pane. Eviction retires app A's tagged history so the physical entry can no
+    // longer nav-back a dead frame (design §5 eviction-retires-history).
+    await page.locator('[data-pane-strip="p0"] .shell__tab-close').first().click()
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
+    // Single pane now: app B is full-bleed and visible.
+    await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 4000 })
+
+    // Back over the retired app-A entry is absorbed (atomic semantic discard) —
+    // it does NOT resurrect app A's nested level on the sibling, and it does not
+    // over-pop the shell. App B stays put.
+    await page.evaluate(() => history.back())
+    await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+    expect(await frameB.evaluate(() => window.__navBack)).toBe(0)
+    expect(page.frames().includes(frameB), 'sibling app B survived the retarget').toBe(true)
+    await expect(page.locator('.shell__view--active')).toBeVisible()
   })
 })

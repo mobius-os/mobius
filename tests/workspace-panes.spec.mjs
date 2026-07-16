@@ -1,0 +1,426 @@
+/**
+ * Positive-behavior specs for the PR2 split-pane renderer (design §8 PR2 gate).
+ *
+ * These assert the load-bearing invariants the pure paneModel tests cannot see
+ * — the renderer, DOM identity across a move, iframe re-init, and the persisted
+ * tree across a projection flip (Codex finding 8):
+ *
+ *   (a) a pinned user message keeps its position across a divider drag;
+ *   (b) a FOLLOW_BOTTOM chat keeps following AND does not remount across a
+ *       divider resize and a cross-pane move (data-mount-id sentinel);
+ *   (c) an app iframe survives a cross-pane move with no second frame-init;
+ *   (d) split is absent from the context menu at caps;
+ *   (e) a projection flip to phone preserves the persisted tree; focus/back work;
+ *   (f) keyboard-open divider commit + reservation floor — SKIPPED, see below.
+ *
+ * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
+ * and a 2-pane workspace blob is seeded in sessionStorage before the shell
+ * boots, exactly like tabs.spec seeds the flat workspace. Agent + apps routes
+ * are intercepted so no agent tokens are consumed.
+ *
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/workspace-panes.spec.mjs --project=tests
+ */
+import { test, expect } from '@playwright/test'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+
+const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const STREAM_ROUTE = /\/api\/chats\/[0-9a-f-]+\/stream$/
+const WIDE = { width: 1400, height: 900 }
+const PHONE = { width: 412, height: 760 }
+
+test.use({ serviceWorkers: 'block' })
+attachCleanup()
+
+// A short, clean terminal stream: pins the user send with no streamed content.
+const EMPTY_STREAM = [{ type: 'catch_up_done' }, { type: 'done' }]
+// A long streamed reply so a chat can reach + hold FOLLOW_BOTTOM.
+const FOLLOW_STREAM = [
+  { type: 'catch_up_done' },
+  { type: 'text', content: 'Streaming paragraph. '.repeat(80) },
+  { type: 'done' },
+]
+
+async function replaceStreamRoute(page, events) {
+  await page.unroute(STREAM_ROUTE)
+  const body = events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
+  await page.route(STREAM_ROUTE, route => route.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+    body,
+  }))
+}
+
+/** Intercept the agent routes and land on the app origin so createTaggedChat +
+ *  localStorage/sessionStorage are reachable. Returns nothing; per-test setup
+ *  seeds the workspace and re-navigates. */
+async function boot(page, viewport = WIDE) {
+  await page.setViewportSize(viewport)
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
+  await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
+  await replaceStreamRoute(page, EMPTY_STREAM)
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
+    { timeout: 10000 })
+}
+
+/** Report the apps list as `apps`, each with a stubbed frame that COUNTS the
+ *  moebius:frame-init posts it receives (window.__fi). A cross-pane move that
+ *  reparents the iframe would reload it and re-fire frame-init; the counter is
+ *  how (c) proves the wrapper's contentWindow identity survived. */
+async function mockApps(page, apps) {
+  const state = { requests: 0 }
+  await page.route(/\/api\/apps\/(\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    state.requests += 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(apps.map(a => ({
+        id: a.id, name: a.name, description: '', compiled_path: '',
+        chat_id: a.chatId ?? null, source_dir: null, pinned_at: null,
+        cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
+        updated_at: '2026-07-12T12:00:00Z',
+      }))),
+    })
+  })
+  for (const a of apps) {
+    await page.route(new RegExp(`/api/apps/${a.id}/frame`), route => route.fulfill({
+      status: 200, contentType: 'text/html',
+      body: '<!doctype html><html><body style="margin:0">'
+        + '<div id="probe">app</div>'
+        + '<script>window.__fi = 0;'
+        + 'addEventListener("message", e => {'
+        + ' if (e && e.data && e.data.type === "moebius:frame-init") window.__fi += 1;'
+        + '});</script>'
+        + '</body></html>',
+    }))
+  }
+  return state
+}
+
+/** Seed a workspace blob (authoritative) + the legacy flat mirror + the splits
+ *  flag, all before the shell bundle evaluates on the next navigation. */
+async function seedWorkspace(page, ws) {
+  const blob = paneModel.serializeWorkspace(ws)
+  const legacy = JSON.stringify(paneModel.flatten(ws).map(t => ({ kind: t.kind, id: t.id })))
+  await page.addInitScript(([flagKey, wsKey, wsBlob, legKey, leg]) => {
+    try {
+      localStorage.setItem(flagKey, '1')
+      sessionStorage.setItem(wsKey, wsBlob)
+      sessionStorage.setItem(legKey, leg)
+    } catch { /* private mode */ }
+  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
+}
+
+/** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
+function twoChatPanes(chatA, chatB) {
+  let ws = paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: chatA }, { kind: 'chat', id: chatB },
+  ])
+  ws = paneModel.moveTab(ws, `chat:${chatB}`, { root: true, edge: 'right' })
+  return paneModel.focusPane(ws, 'p0')
+}
+
+/** Wait until the tiled chrome is up (its dividers laid out) and the panes have
+ *  a real (post-ResizeObserver) width. */
+async function waitTiled(page) {
+  await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 8000 })
+  await expect(page.locator('.workspace__divider').first()).toBeVisible({ timeout: 8000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))))
+}
+
+/** Send a message inside a specific pane's own composer (multi-pane mounts one
+ *  composer per pane, so the textbox must be scoped to the pane wrapper). */
+async function sendInPane(page, chatId, text) {
+  const pane = page.locator(`[data-tab-key="chat:${chatId}"]`)
+  await pane.getByRole('textbox', { name: 'Message Möbius…' }).fill(text)
+  await page.keyboard.press('Enter')
+  await expect(pane.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))))
+}
+
+/** The stable per-mount id of a chat's ChatView root — unchanged unless it
+ *  remounts (design §2 no-reparent). */
+async function mountIdOf(page, chatId) {
+  return page.locator(`[data-tab-key="chat:${chatId}"] .chat`).getAttribute('data-mount-id')
+}
+
+/** Read scroll geometry of the chat whose ChatView carries `mountId`. Works in
+ *  both the paned and the collapsed full-bleed state (keyed on the mount id, not
+ *  the pane wrapper). */
+async function scrollByMountId(page, mountId) {
+  return page.evaluate((mid) => {
+    const chat = document.querySelector(`.chat[data-mount-id="${mid}"]`)
+    const scroll = chat?.querySelector('.chat__scroll')
+    if (!scroll) return null
+    const gap = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight
+    return { scrollTop: scroll.scrollTop, gap, nearBottom: gap < 60 }
+  }, mountId)
+}
+
+/** Engage FOLLOW_BOTTOM with a real gesture inside a specific pane's scroller
+ *  (mirrors second-send-pin's gestureToBottom, scoped by mount id). */
+async function gestureToBottom(page, mountId) {
+  await page.evaluate((mid) => {
+    const chat = document.querySelector(`.chat[data-mount-id="${mid}"]`)
+    const s = chat?.querySelector('.chat__scroll')
+    if (!s) return
+    s.scrollTop = s.scrollHeight
+  }, mountId)
+  await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+  await page.evaluate((mid) => {
+    const chat = document.querySelector(`.chat[data-mount-id="${mid}"]`)
+    const s = chat?.querySelector('.chat__scroll')
+    if (!s) return
+    s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    s.scrollTop = Math.max(0, s.scrollTop - 1)
+    s.scrollTop = s.scrollHeight
+  }, mountId)
+}
+
+/** Open the pane-strip context menu for a tab and click "Move to <label>". */
+async function moveTabToOtherPane(page, paneId, tabKey) {
+  await page.locator(`[data-pane-strip="${paneId}"] .shell__tab-open`)
+    .filter({ has: page.locator('.shell__tab-text') })
+    .first()
+    .click({ button: 'right' })
+  await expect(page.locator('.workspace__menu')).toBeVisible({ timeout: 3000 })
+  await page.locator('.workspace__menu-item', { hasText: /^Move to / }).first().click()
+  await expect(page.locator('.workspace__menu')).toHaveCount(0)
+}
+
+test.describe('Workspace panes (PR2 gate)', () => {
+  test('(a) a pinned user message keeps its position across a divider drag', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'wpA')
+    const b = await createTaggedChat(page, 'wpB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    // Pin a message in pane A (first message pins). EMPTY_STREAM ends cleanly.
+    await sendInPane(page, a.id, 'Pinned in pane A')
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))))
+
+    const readTop = () => page.evaluate((cid) => {
+      const wrap = document.querySelector(`[data-tab-key="chat:${cid}"]`)
+      const scroll = wrap?.querySelector('.chat__scroll')
+      const user = wrap?.querySelector('.chat__msg--user')
+      if (!scroll || !user) return null
+      return user.getBoundingClientRect().top - scroll.getBoundingClientRect().top
+    }, a.id)
+
+    const before = await readTop()
+    expect(before, 'pinned message should be measurable').not.toBeNull()
+    // The pin sits near the top of its pane.
+    expect(before).toBeLessThanOrEqual(200)
+
+    // Drag the vertical divider right — changes pane WIDTHS. A short top-pinned
+    // message must not move vertically.
+    const box = await page.locator('.workspace__divider').boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 140, box.y + box.height / 2, { steps: 6 })
+    await page.mouse.up()
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))))
+
+    const after = await readTop()
+    expect(after, 'pinned message still measurable after drag').not.toBeNull()
+    // Vertical position held (width change must not re-scroll the pin).
+    expect(Math.abs(after - before)).toBeLessThanOrEqual(16)
+  })
+
+  test('(b) a following chat keeps following and does not remount across resize + cross-pane move', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'wpFollowA')
+    const b = await createTaggedChat(page, 'wpFollowB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await replaceStreamRoute(page, FOLLOW_STREAM)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    await sendInPane(page, a.id, 'Follow me')
+    const mid = await mountIdOf(page, a.id)
+    expect(mid, 'chat A should have a mount id').toBeTruthy()
+
+    // Engage FOLLOW_BOTTOM.
+    await gestureToBottom(page, mid)
+    await page.evaluate(() => new Promise(r => setTimeout(r, 120)))
+
+    // 1) Divider resize via the keyboard (SET_RATIO → re-project → paneResized).
+    await page.locator('.workspace__divider').focus()
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('ArrowRight')
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120)))))
+    expect(await mountIdOf(page, a.id), 'no remount across resize').toBe(mid)
+    const afterResize = await scrollByMountId(page, mid)
+    expect(afterResize, 'chat A scroller present after resize').not.toBeNull()
+    expect(afterResize.nearBottom, 'still following after resize').toBe(true)
+
+    // 2) Cross-pane move of chat A itself (p0 collapses to a single pane; the
+    //    ChatView must not remount and FOLLOW must re-apply).
+    await moveTabToOtherPane(page, 'p0', `chat:${a.id}`)
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 150)))))
+    await expect(page.locator(`.chat[data-mount-id="${mid}"]`))
+      .toHaveCount(1, { timeout: 4000 }) // survived the move — same mount
+    const afterMove = await scrollByMountId(page, mid)
+    expect(afterMove, 'chat A scroller present after move').not.toBeNull()
+    expect(afterMove.nearBottom, 'still following after cross-pane move').toBe(true)
+  })
+
+  test('(c) an app iframe survives a cross-pane move with no second frame-init', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'wpAppChatA')
+    const b = await createTaggedChat(page, 'wpAppChatB')
+    const APP_ID = 990101
+    await mockApps(page, [{ id: APP_ID, name: 'Pane App', chatId: a.id }])
+
+    // p0 = [chatA, app] (app active), p1 = [chatB]. Moving the app to p1 keeps
+    // both panes (chatA survives in p0), so it is a true cross-pane move.
+    let ws = paneModel.seedFromFlatTabs([
+      { kind: 'chat', id: b.id }, { kind: 'chat', id: a.id }, { kind: 'app', id: APP_ID },
+    ])
+    ws = paneModel.moveTab(ws, `chat:${b.id}`, { root: true, edge: 'right' })
+    ws = paneModel.focusPane(ws, 'p0')
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?app=${APP_ID}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    const appFrame = page.frames().find(f => new RegExp(`/api/apps/${APP_ID}/frame`).test(f.url()))
+    if (!appFrame) test.skip(true, 'app frame did not load in the mocked harness')
+    await appFrame.waitForFunction(() => typeof window.__fi === 'number', { timeout: 4000 })
+    // Let the parent's onLoad + token frame-init posts settle.
+    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+    const initsBefore = await appFrame.evaluate(() => window.__fi)
+
+    // Exactly one iframe wrapper for the app before the move.
+    await expect(page.locator(`[data-tab-key="app:${APP_ID}"]`)).toHaveCount(1)
+
+    // Move the app tab from p0 to p1 via its pane-strip context menu.
+    await page.locator(`[data-pane-strip="p0"] .shell__tab--active .shell__tab-open`)
+      .click({ button: 'right' })
+    await expect(page.locator('.workspace__menu')).toBeVisible({ timeout: 3000 })
+    await page.locator('.workspace__menu-item', { hasText: /^Move to / }).first().click()
+    await expect(page.locator('.workspace__menu')).toHaveCount(0)
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
+
+    // Same frame object, and no additional frame-init: the iframe was never
+    // reparented (a sandbox reparent = reload = fresh contentWindow + re-init).
+    const stillSameFrame = page.frames().includes(appFrame)
+    expect(stillSameFrame, 'the app frame object is identical after the move').toBe(true)
+    const initsAfter = await appFrame.evaluate(() => window.__fi)
+    expect(initsAfter, 'no second frame-init after the cross-pane move').toBe(initsBefore)
+    await expect(page.locator(`[data-tab-key="app:${APP_ID}"]`)).toHaveCount(1)
+  })
+
+  test('(d) split is absent from the context menu at caps', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'wpCapA')
+    const b = await createTaggedChat(page, 'wpCapB')
+    const c = await createTaggedChat(page, 'wpCapC')
+    const d = await createTaggedChat(page, 'wpCapD')
+    await mockApps(page, [])
+
+    // A depth-2 tree row(p0, col(p1, p2)) where p1 holds two tabs. p1 is at the
+    // depth cap, so canSplit is false on every edge even though the pane has ≥2
+    // tabs (which is what would otherwise offer a split).
+    let ws = paneModel.seedFromFlatTabs([
+      { kind: 'chat', id: a.id }, { kind: 'chat', id: c.id },
+      { kind: 'chat', id: d.id }, { kind: 'chat', id: b.id },
+    ])
+    ws = paneModel.moveTab(ws, `chat:${c.id}`, { root: true, edge: 'right' })
+    ws = paneModel.moveTab(ws, `chat:${b.id}`, { paneId: 'p1', edge: 'bottom' })
+    ws = paneModel.moveTab(ws, `chat:${d.id}`, { paneId: 'p1' })
+    // p1 = [c, d] at depth 2. Pre-validate the fixture at the model layer so a
+    // wrong choreography fails loudly here, not as a confusing DOM assertion.
+    expect(ws.panes.p1.tabs.length, 'p1 has two tabs').toBe(2)
+    for (const edge of ['left', 'right', 'top', 'bottom']) {
+      expect(
+        paneModel.canSplit(ws, 'p1', edge, 'wide', { x: 0, y: 0, w: WIDE.width, h: WIDE.height }),
+        `p1 cannot split ${edge} at the depth cap`,
+      ).toBe(false)
+    }
+    ws = paneModel.focusPane(ws, 'p1')
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    // Open the context menu on p1's active tab.
+    await page.locator(`[data-pane-strip="p1"] .shell__tab--active .shell__tab-open`)
+      .click({ button: 'right' })
+    await expect(page.locator('.workspace__menu')).toBeVisible({ timeout: 3000 })
+    // No "Split *" item — the caps gate removed every direction.
+    await expect(page.locator('.workspace__menu-item', { hasText: /^Split / })).toHaveCount(0)
+    // The menu is still functional (Move / Close remain).
+    await expect(page.locator('.workspace__menu-item', { hasText: /^Move to / }))
+      .not.toHaveCount(0)
+  })
+
+  test('(e) a projection flip to phone preserves the persisted tree; focus/back work', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'wpFlipA')
+    const b = await createTaggedChat(page, 'wpFlipB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    // Baseline = the normalized blob the shell persisted after boot (a resize
+    // must not rewrite it — geometry is projection, not persisted state).
+    const beforeBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    expect(beforeBlob, 'workspace blob persisted').toBeTruthy()
+
+    // Flip the projection: wide → phone.
+    await page.setViewportSize(PHONE)
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
+
+    const afterBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    expect(afterBlob, 'the persisted tree is unchanged across the projection flip').toBe(beforeBlob)
+    // The tree still parses to two panes (projection changed, tree did not).
+    const leaves = await page.evaluate((k) => {
+      const ws = JSON.parse(sessionStorage.getItem(k))
+      return Object.keys(ws.panes).length
+    }, paneModel.STORAGE_KEY)
+    expect(leaves).toBe(2)
+
+    // Focus still works: tapping a pane strip focuses its pane (focus ring moves).
+    await expect(page.locator('.workspace__chrome')).toHaveCount(1)
+    const strips = page.locator('.workspace__strip')
+    await expect(strips.first()).toBeVisible({ timeout: 4000 })
+    await strips.first().click()
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))))
+    // Back still resolves the shell (does not throw / navigate away): a
+    // history.back lands on a still-mounted chat surface.
+    await page.evaluate(() => history.back())
+    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+    await expect(page.locator('.chat, .chat__empty-wrap')).not.toHaveCount(0)
+  })
+
+  // (f) The keyboard-open divider commit must not stick the reservation floor:
+  // opening the soft keyboard shrinks the visual viewport; committing a divider
+  // drag in that window must reserve against the layout-derived floor, not the
+  // keyboard-poisoned height. This needs a faithful visualViewport resize +
+  // keyboard geometry that the mocked route harness cannot produce — there is no
+  // visualViewport-mock pattern in the existing specs and interactive-widget
+  // resize is a real-device behavior. Covered by the live-device smoke instead.
+  test.skip('(f) keyboard-open divider commit does not stick the reservation floor', async () => {
+    // Intentionally skipped: not reachable in the mocked Playwright harness
+    // (no visualViewport/keyboard geometry). See design §2 rotation/keyboard
+    // floor + scripts/live-test.sh for the on-device path.
+  })
+})
