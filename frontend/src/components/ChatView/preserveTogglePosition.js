@@ -1,3 +1,20 @@
+// A fast close→open can happen before ResizeObserver replaces the provisional
+// collapse reservation. Remember the exact baseline so the next toggle can
+// unwind only OUR still-present write instead of stacking another body height
+// on top. WeakMap keeps the bookkeeping DOM-lifetime scoped.
+const provisionalSpacer = new WeakMap()
+
+function unwindProvisionalSpacer(spacer) {
+  const pending = provisionalSpacer.get(spacer)
+  if (!pending) return
+  // If normal layout already wrote a different value, it owns the spacer now;
+  // never roll that authoritative calculation back to our stale baseline.
+  if (Math.abs((spacer.offsetHeight || 0) - pending.primedHeight) <= 1) {
+    spacer.style.height = `${pending.baselineHeight}px`
+  }
+  provisionalSpacer.delete(spacer)
+}
+
 export function preserveTogglePosition(anchorEl) {
   if (!anchorEl || typeof requestAnimationFrame !== 'function') return
   const scroller = anchorEl.closest?.('.chat__scroll')
@@ -10,8 +27,10 @@ export function preserveTogglePosition(anchorEl) {
   // outer height synchronously so total scroll height stays constant across the
   // React commit; the observer replaces this provisional value with its normal
   // spacer calculation on the next layout pass.
+  const spacer = scroller.querySelector?.('.spacer-dynamic')
+  if (spacer) unwindProvisionalSpacer(spacer)
+
   if (anchorEl.getAttribute?.('aria-expanded') === 'true') {
-    const spacer = scroller.querySelector?.('.spacer-dynamic')
     const body = anchorEl.nextElementSibling
     if (spacer && body) {
       const rectHeight = body.getBoundingClientRect?.().height || 0
@@ -22,7 +41,10 @@ export function preserveTogglePosition(anchorEl) {
       const marginBottom = Number.parseFloat(styles?.marginBottom) || 0
       const removedHeight = rectHeight + marginTop + marginBottom
       if (removedHeight > 0) {
-        spacer.style.height = `${(spacer.offsetHeight || 0) + removedHeight}px`
+        const baselineHeight = spacer.offsetHeight || 0
+        const primedHeight = baselineHeight + removedHeight
+        spacer.style.height = `${primedHeight}px`
+        provisionalSpacer.set(spacer, { baselineHeight, primedHeight })
       }
     }
   }

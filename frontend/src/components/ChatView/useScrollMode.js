@@ -534,21 +534,10 @@ export function gestureLayoutRetryDelay(gestureWindowUntil, now) {
 }
 
 
-/** Only input whose default action can move the chat begins reader ownership.
+/** Only keys whose default action can move the chat begin reader ownership.
  * Text entry and activating controls inside a message must not freeze layout
- * until the no-scroll dead-man expires. A disclosure tap is especially
- * important here: collapsing its body can clamp scrollTop and emit a synthetic
- * scroll event. Treating that clamp as the start of a swipe holds the smaller
- * spacer for the 250ms momentum window, so the viewport moves once on collapse
- * and again when layout ownership returns. A real drag that starts on a
- * disclosure still produces touchmove, which claims reader ownership below. */
-export function readerInputMayScroll(type, key = '', target = null) {
-  if ((type === 'pointerdown' || type === 'touchstart')
-      && target?.closest?.(
-        '.chat__activity-header, .chat__tool-header, .chat__marker-header',
-      )) {
-    return false
-  }
+ * until the no-scroll dead-man expires. */
+export function readerInputMayScroll(type, key = '') {
   if (type !== 'keydown') return true
   return [
     'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', 'Tab', ' ',
@@ -1441,7 +1430,7 @@ export default function useScrollMode({
       })
     }
     const onUserInput = (event) => {
-      if (!readerInputMayScroll(event?.type, event?.key, event?.target)) return
+      if (!readerInputMayScroll(event?.type, event?.key)) return
       // Input and its first scroll event are ordered, but not guaranteed to be
       // less than 250ms apart under a busy renderer. Keep layout ownership
       // suspended until that first event actually lands; after it, the normal
