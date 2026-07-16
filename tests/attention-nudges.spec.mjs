@@ -100,7 +100,10 @@ for (const scenario of SCENARIOS) {
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
+          // The build-phase rail is a live-run surface. Keep the fixture's
+          // stream active so the mocked build_phase event below is actually
+          // consumed before we assert its layout beside the nudge.
+          running: true,
           pending_messages: [],
         }),
       })
