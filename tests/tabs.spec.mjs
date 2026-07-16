@@ -65,7 +65,16 @@ async function mockOwnedApp(page, chatId) {
   })
   await page.route(new RegExp(`/api/apps/${APP_ID}/frame`), route => route.fulfill({
     status: 200, contentType: 'text/html',
-    body: '<!doctype html><html><body style="margin:0"><div id="probe">app</div></body></html>',
+    body: `<!doctype html><html><body style="margin:0"><div id="probe">app</div><script>
+      document.addEventListener('pointerdown', function () {
+        window.parent.postMessage({ type: 'moebius:frame-focus' }, window.location.origin)
+      })
+      window.addEventListener('message', function (event) {
+        if (event.data && event.data.type === 'moebius:frame-interactivity') {
+          document.body.dataset.interactive = String(event.data.interactive)
+        }
+      })
+    </script></body></html>`,
   }))
   return state
 }
@@ -191,5 +200,54 @@ test.describe('Tabs', () => {
     // Exactly one iframe wrapper for the single app — no string/number duplicate.
     await expect(page.locator('.shell__view')).toHaveCount(1)
     expect(keyErrors, keyErrors.join('\n')).toHaveLength(0)
+  })
+
+  test('split mode tiles, focuses both content types, suspends apps, and collapses cleanly', async ({ page }) => {
+    const chat = await bootAndCreateChat(page, 'split', { width: 1200, height: 800 })
+    const appsMock = await mockOwnedApp(page, chat.id)
+    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
+    await page.addInitScript(() => localStorage.setItem('mobius:workspace-splits', '1'))
+
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
+
+    const appTab = page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open')
+    await appTab.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Split right' }).click()
+
+    await expect(page.locator('.workspace__strip')).toHaveCount(2)
+    await expect(page.locator('.shell__view--paned')).toHaveCount(2)
+    const rects = await page.locator('.shell__view--paned').evaluateAll(nodes => nodes.map(node => {
+      const r = node.getBoundingClientRect()
+      return { x: r.x, y: r.y, w: r.width, h: r.height }
+    }))
+    expect(rects.every(r => r.w >= 280 && r.h >= 200)).toBe(true)
+    expect(Math.abs(rects[0].x - rects[1].x)).toBeGreaterThan(100)
+
+    // Native chat content focuses its pane through wrapper capture.
+    await page.locator('.chat').dispatchEvent('pointerdown')
+    await expect(page.locator('.workspace__strip--focused')).toContainText(chat.title)
+
+    // Opaque iframe input uses the explicit frame-focus bridge.
+    await page.locator(`iframe[data-app-id="${APP_ID}"]`).evaluate(frame => {
+      frame.contentDocument.querySelector('#probe').dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true }),
+      )
+    })
+    await expect(page.locator('.workspace__strip--focused')).toContainText('Demo App')
+
+    // The global drawer suspends kinetic interaction in every visible app pane.
+    await page.locator('.shell__brand').click()
+    await expect.poll(() => page.locator(`iframe[data-app-id="${APP_ID}"]`).evaluate(
+      frame => frame.contentDocument.body.dataset.interactive,
+    )).toBe('false')
+    await page.evaluate(() => history.back())
+    await expect(page.locator('.drawer')).not.toHaveClass(/drawer--open/)
+
+    // Closing the app's sole pane collapses back to the unchanged single-pane UI.
+    await page.locator('.workspace__strip', { hasText: 'Demo App' }).locator('.shell__tab-close').click()
+    await expect(page.locator('.workspace__strip')).toHaveCount(0)
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(1)
+    await expect(page.locator('.chat')).toBeVisible()
   })
 })
