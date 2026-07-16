@@ -7,9 +7,11 @@ documents supply their own policies while the bundled proxy owns shell CSP.
 
 from pathlib import Path
 
+from fastapi import Response
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app import main
+from app.main import _STATIC_EMBED_CSP, app
 
 
 def _headers(path="/api/health"):
@@ -44,6 +46,42 @@ def test_embedded_chat_allows_opaque_origin_app_ancestor():
 
 def test_frame_exception_is_exactly_scoped_to_embed_document():
   assert _headers("/shell/embed/chat/other").get("x-frame-options") == "SAMEORIGIN"
+
+
+def test_static_embed_policy_authoritatively_replaces_route_headers(monkeypatch):
+  monkeypatch.setattr(
+    main,
+    "_serve_app_static_asset",
+    lambda *_args, **_kwargs: Response(
+      status_code=418,
+      headers={
+        "Content-Security-Policy": "default-src 'none'",
+        "X-Frame-Options": "DENY",
+      },
+    ),
+  )
+
+  response = TestClient(app).get("/app-embeds/by-id/999/index.html")
+
+  assert response.status_code == 418
+  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  assert "x-frame-options" not in response.headers
+
+
+def test_static_embed_policy_survives_unhandled_route_exception(monkeypatch):
+  def _raise(*_args, **_kwargs):
+    raise RuntimeError("static asset failure")
+
+  monkeypatch.setattr(main, "_serve_app_static_asset", _raise)
+
+  response = TestClient(
+    app,
+    raise_server_exceptions=False,
+  ).get("/app-embeds/by-id/999/index.html")
+
+  assert response.status_code == 500
+  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  assert "x-frame-options" not in response.headers
 
 
 def test_bundled_caddy_mirrors_exact_embed_frame_exception():
