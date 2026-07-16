@@ -78,12 +78,16 @@ export default function Shell() {
   // adapter derives its legacy triple from it. Init: forgiving read of the
   // versioned blob (readWorkspaceRaw guards the throwing sessionStorage.getItem
   // before parseWorkspace's own try/catch), else the legacy flat seed.
+  // Capture the legacy projection once. Besides seeding a missing workspace, an
+  // empty value distinguishes the implicit home tab from a strip the user had
+  // actually engaged. The workspace still owns rendering either way.
+  const [legacyOpenTabs] = useState(() => tabModel.readOpenTabs())
   const [workspaceState, dispatchWorkspaceRaw] = useReducer(
     paneModel.workspaceReducer,
     undefined,
     () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
       paneModel.readWorkspaceRaw(sessionStorage),
-      { fallbackTabs: tabModel.readOpenTabs() },
+      { fallbackTabs: legacyOpenTabs },
     )),
   )
   const workspace = workspaceState.ws
@@ -536,6 +540,14 @@ export default function Shell() {
   // declared above useNavigation). openTabs is the in-order flat walk that
   // today's single top strip renders.
   const openTabs = useMemo(() => paneModel.flatten(workspace), [workspace])
+  // Becoming a two-tab workspace engages the strip; returning to zero resets it.
+  // A single implicit home tab on a fresh session stays visually identical to
+  // the pre-workspace shell. Keep this as a ref so closing from two → one leaves
+  // the remaining explicitly-pinned tab visible, matching the existing contract.
+  const tabStripEngagedRef = useRef(legacyOpenTabs.length > 0)
+  const [, setTabStripVersion] = useState(0)
+  if (openTabs.length >= 2) tabStripEngagedRef.current = true
+  else if (openTabs.length === 0) tabStripEngagedRef.current = false
   // Dual-write on every workspace commit: the versioned blob is authoritative on
   // boot, and the legacy flat key is mirrored for one release so a rolled-back
   // client still finds its tabs. readOpenTabs keeps the LAST MAX_TABS, so the
@@ -544,7 +556,11 @@ export default function Shell() {
     try {
       sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
     } catch { /* private mode / quota — workspace stays in memory only */ }
-    tabModel.writeOpenTabs(paneModel.flattenRollbackPriority(workspace))
+    tabModel.writeOpenTabs(
+      tabStripEngagedRef.current
+        ? paneModel.flattenRollbackPriority(workspace)
+        : [],
+    )
   }, [workspace])
   // navTo now owns the OPEN_TAB dispatch (design §1), so openInTab is only a
   // routed navTo — drawer selections, tab activation, CTA, and protocol opens
@@ -567,8 +583,18 @@ export default function Shell() {
   // Close only the tab; the derived triple follows the workspace, so dropping the
   // focused pane's active tab activates its neighbour (paneModel.closeTab).
   const closeTab = useCallback((kind, id) => {
+    // In the single-pane parity path, closing the sole strip item means
+    // "unpin this surface", not "remove the content currently on screen". The
+    // workspace keeps its implicit authority tab while the legacy projection is
+    // cleared, exactly matching the pre-workspace shell.
+    if (openTabs.length === 1) {
+      tabStripEngagedRef.current = false
+      tabModel.writeOpenTabs([])
+      setTabStripVersion(version => version + 1)
+      return
+    }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tabModel.makeTab(kind, id)) })
-  }, [])
+  }, [openTabs.length])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
@@ -592,7 +618,7 @@ export default function Shell() {
       ),
     })
   }, [activeAppIdRef, activeChatIdRef, activeViewRef])
-  const tabStripVisible = openTabs.length >= 1
+  const tabStripVisible = tabStripEngagedRef.current && openTabs.length >= 1
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
   // tab of each visible pane. A content wrapper matching a key is positioned +
@@ -733,14 +759,21 @@ export default function Shell() {
   // is always offered. The top strip attaches this handler only when the flag is
   // on, so single-pane right-click keeps today's native menu (parity).
   const [tabMenu, setTabMenu] = useState(null)
+  const tabMenuRef = useRef(null)
+  const tabMenuReturnFocusRef = useRef(null)
   const openTabMenu = useCallback((e, tab, paneId) => {
     e.preventDefault()
     const owner = paneId || paneModel.paneOf(workspace, tabModel.tabKey(tab))?.id
     if (!owner) return
+    tabMenuReturnFocusRef.current = e.currentTarget
     setTabMenu({ x: e.clientX, y: e.clientY, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
   }, [workspace])
-  const closeTabMenu = useCallback(() => setTabMenu(null), [])
-  const tabMenuRef = useRef(null)
+  const closeTabMenu = useCallback((restoreFocus = true) => {
+    setTabMenu(null)
+    if (!restoreFocus) return
+    const returnTarget = tabMenuReturnFocusRef.current
+    queueMicrotask(() => returnTarget?.focus?.({ preventScroll: true }))
+  }, [])
   // A context menu must be keyboard-ready when it appears, and pointer
   // coordinates near a viewport edge must not place actions off-screen.
   useLayoutEffect(() => {
@@ -767,15 +800,15 @@ export default function Shell() {
   }, [])
   useEffect(() => {
     if (!tabMenu) return
-    const onDown = (e) => { if (!e.target.closest?.('.workspace__menu')) setTabMenu(null) }
-    const onKey = (e) => { if (e.key === 'Escape') setTabMenu(null) }
+    const onDown = (e) => { if (!e.target.closest?.('.workspace__menu')) closeTabMenu(false) }
+    const onKey = (e) => { if (e.key === 'Escape') closeTabMenu() }
     document.addEventListener('pointerdown', onDown, true)
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('pointerdown', onDown, true)
       document.removeEventListener('keydown', onKey, true)
     }
-  }, [tabMenu])
+  }, [closeTabMenu, tabMenu])
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
