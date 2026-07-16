@@ -161,6 +161,13 @@ import os, sqlite3, sys
 old, new, name = sys.argv[1], sys.argv[2], sys.argv[3]
 newdir = os.environ["NEWDIR"]
 con = sqlite3.connect(os.environ["DB"]); cur = con.cursor()
+if not cur.execute(
+    "select 1 from sqlite_master where type='table' and name='apps'"
+).fetchone():
+    # A fresh image can contain the database file before FastAPI creates its
+    # schema.  The filesystem/crontab migration below is deliberately
+    # independent, so skip only this database step without a noisy traceback.
+    sys.exit(0)
 o = cur.execute("select id, source_dir from apps where slug=?", (old,)).fetchone()
 n = cur.execute("select id, source_dir from apps where slug=?", (new,)).fetchone()
 if o and not n:

@@ -160,6 +160,24 @@ def test_new_only_state_is_a_clean_noop(tmp_path):
   assert live_crontab == crontab
 
 
+def test_pre_schema_database_skips_db_step_without_traceback(tmp_path):
+  data_dir = tmp_path / "data"
+  db_dir = data_dir / "db"
+  db_dir.mkdir(parents=True)
+  sqlite3.connect(db_dir / "ultimate.db").close()
+  old_dir = data_dir / "apps" / "mind"
+  old_dir.mkdir(parents=True)
+  (old_dir / "index.jsx").write_text("legacy source")
+
+  result, _ = _run_migration(tmp_path, data_dir)
+
+  assert result.returncode == 0
+  assert "Traceback" not in result.stdout
+  assert "no such table" not in result.stdout
+  assert not old_dir.exists()
+  assert (data_dir / "apps" / "memory" / "index.jsx").read_text() == "legacy source"
+
+
 def test_half_migrated_source_dir_is_repaired(tmp_path):
   data_dir = tmp_path / "data"
   _init_db(
