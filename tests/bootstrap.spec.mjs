@@ -43,6 +43,13 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
+// These tests use page.route() to pin the shell's API responses. Once the
+// production service worker claims the page, its fetch handler bypasses those
+// routes and makes the mocked 401 race-dependent. Cache Storage itself remains
+// available with workers blocked, so the logout test still exercises the real
+// apiFetch 401 -> clearQueryCache -> reload flow and observes its cache wipe.
+test.use({ serviceWorkers: 'block' })
+
 /** Route the shell's network surface so the bootstrap seam sees a
  *  deterministic "authenticated owner, zero chats" world:
  *   - GET /api/chats → [] (the empty-list precondition)
@@ -227,7 +234,13 @@ test.describe('Logout cache wipe', () => {
     await page.route(/\/api\/chats\/[^/]+\/stream$/, route =>
       route.fulfill({ status: 204, body: '' })
     )
+    const initialChatsResponse = page.waitForResponse(response =>
+      response.request().method() === 'GET'
+      && /\/api\/chats\/?$/.test(response.url()),
+    )
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    const initialChats = await initialChatsResponse
+    await initialChats.finished()
     await waitForShell(page)
 
     // Seed Cache Storage with a representative entry under each prefix
@@ -255,9 +268,11 @@ test.describe('Logout cache wipe', () => {
     // wipe's effect is observable on the reloaded (now logged-out)
     // page. Stubbing window.location.reload is unreliable in Chromium
     // anyway (the property resists reassignment).
-    await page.route(/\/api\/chats\/?$/, route =>
-      route.fulfill({ status: 401, body: '{"detail":"Not signed in"}' })
-    )
+    let forced401Count = 0
+    await page.route(/\/api\/chats\/?(?:\?.*)?$/, route => {
+      forced401Count += 1
+      return route.fulfill({ status: 401, body: '{"detail":"Not signed in"}' })
+    })
 
     // Trigger a real apiFetch through the live client: opening the
     // drawer runs Shell's `if (drawerOpen) refreshChats()` effect,
@@ -268,6 +283,7 @@ test.describe('Logout cache wipe', () => {
       const btn = document.querySelector('[aria-expanded]')
       if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
     })
+    await expect.poll(() => forced401Count, { timeout: 5000 }).toBeGreaterThan(0)
 
     // Wait through the apiFetch-deferred reload. The token was cleared,
     // so the reloaded page shows the login form — wait for it so we read
