@@ -156,3 +156,16 @@ def test_main_boots_when_app_watcher_start_raises(monkeypatch):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["boot_id"]
+
+
+def test_lifespan_does_not_shadow_module_session_factory():
+  """A late local import must not break earlier startup migrations.
+
+  ``SessionLocal`` is imported at module scope and used near the start of the
+  lifespan. Assigning or importing that name anywhere inside the function
+  makes it local for the whole function, raising ``UnboundLocalError`` before
+  the later statement runs.
+  """
+  from app.main import lifespan
+
+  assert "SessionLocal" not in lifespan.__code__.co_varnames

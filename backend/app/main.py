@@ -263,7 +263,6 @@ async def lifespan(app):
   # was built to prevent).
   try:
     from pathlib import Path as _Path
-    from app.database import SessionLocal
     from app import models as _models
     _db = SessionLocal()
     try:
