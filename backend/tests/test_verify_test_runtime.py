@@ -120,6 +120,14 @@ def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
   assert 'PYTHONPYCACHEPREFIX="$PP_TMP/pycache"' in hook
 
 
+def test_pre_push_only_runs_frontend_suite_with_complete_dependencies():
+  hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
+    encoding="utf-8"
+  )
+  assert "npm ls --depth=0" in hook
+  assert "dependency tree unavailable or incomplete" in hook
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
