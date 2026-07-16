@@ -1015,7 +1015,11 @@ test.describe('Scroll position', () => {
       const el = document.querySelector('.chat__scroll')
       const img = document.querySelector('.md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
-        && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
+        // The retained ChatView deliberately reveals its already-settled DOM
+        // immediately. Do not mistake the still-complete initial image for the
+        // delayed authoritative return image we are exercising here.
+        && !!img?.src.includes('entry-image-return.png') && !!img.complete
+        && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
     await page.waitForTimeout(500)
 
