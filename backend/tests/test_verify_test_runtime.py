@@ -312,3 +312,5 @@ def test_hosted_e2e_runs_for_prs_and_long_lived_branches_only():
   assert "github.event_name == 'pull_request'" in e2e
   assert "github.ref == 'refs/heads/main'" in e2e
   assert "refs/heads/integration/" in e2e
+  assert "needs: privacy" in e2e
+  assert "needs: backend" not in e2e
