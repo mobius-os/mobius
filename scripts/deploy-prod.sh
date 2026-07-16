@@ -288,15 +288,31 @@ ensure_prod_env
 # the answers and, e.g., start the bundled caddy against edge-owned ports.
 EDGE_TOPOLOGY="self-hosted"
 if [ "$TARGET" = "prod" ]; then
-  if docker inspect -f '{{.State.Running}}' edge-caddy 2>/dev/null | grep -q true; then
-    EDGE_TOPOLOGY="edge"
-    COMPOSE_ARGS+=(-f docker-compose.yml -f docker-compose.prod.yml)
-  elif docker inspect -f '{{.State.Running}}' deploy-caddy-1 2>/dev/null | grep -q true; then
-    fail "the retired legacy proxy (deploy-caddy-1) still owns ports 80/443."
-    fail "This script now deploys behind the shared edge proxy (edge-caddy);"
-    fail "run the edge cutover first, or stop deploy-caddy-1 to self-host."
-    exit 1
-  fi
+  EDGE_CONTAINER_STATE=$(
+    docker inspect -f '{{.State.Status}}' edge-caddy 2>/dev/null || true
+  )
+  case "$EDGE_CONTAINER_STATE" in
+    running)
+      EDGE_TOPOLOGY="edge"
+      COMPOSE_ARGS+=(-f docker-compose.yml -f docker-compose.prod.yml)
+      ;;
+    "")
+      if docker inspect -f '{{.State.Running}}' deploy-caddy-1 2>/dev/null | grep -q true; then
+        fail "the retired legacy proxy (deploy-caddy-1) still owns ports 80/443."
+        fail "This script now deploys behind the shared edge proxy (edge-caddy);"
+        fail "run the edge cutover first, or stop deploy-caddy-1 to self-host."
+        exit 1
+      fi
+      ;;
+    *)
+      # An existing edge stack defines this host's topology even while it is
+      # unhealthy. Starting the bundled Caddy in that window would silently
+      # seize the edge-owned ports and replace every other routed service.
+      fail "edge-caddy exists but is ${EDGE_CONTAINER_STATE}; refusing to fall back to bundled Caddy."
+      fail "Restore the shared edge proxy, then re-run the deploy."
+      exit 1
+      ;;
+  esac
 fi
 
 external_prod_caddy_running() {
@@ -310,6 +326,20 @@ ensure_edge_network() {
   docker network inspect edge-mobius >/dev/null 2>&1 && return 0
   intent "docker network create edge-mobius"
   docker network create edge-mobius >/dev/null
+}
+
+valid_gateway_origin() {
+  local origin="$1" authority port
+  # Keep the render substitution inert: one HTTPS DNS/IPv4 authority, with an
+  # optional numeric port, and no credentials, path, query, fragment, control
+  # characters, or sed delimiter. Caddy validates the hostname itself later.
+  [[ "$origin" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] \
+    || return 1
+  authority=${origin#https://}
+  if [[ "$authority" == *:* ]]; then
+    port=${authority##*:}
+    (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+  fi
 }
 
 # The bundled Caddyfile is the single routing source of truth for BOTH
@@ -343,10 +373,10 @@ install_edge_fragment() {
   case "$DOMAIN" in
     *[!A-Za-z0-9.-]*|"") fail "DOMAIN '$DOMAIN' is not a bare hostname; refusing to render the edge fragment"; exit 1 ;;
   esac
-  case "$gw" in
-    ""|https://[A-Za-z0-9]*) : ;;
-    *) fail "MOBIUS_SERVICE_GATEWAY_ORIGIN '$gw' is not an https origin; refusing to render the edge fragment"; exit 1 ;;
-  esac
+  if [ -n "$gw" ] && ! valid_gateway_origin "$gw"; then
+    fail "MOBIUS_SERVICE_GATEWAY_ORIGIN '$gw' is not a bare https origin; refusing to render the edge fragment"
+    exit 1
+  fi
   local rendered
   rendered=$(mktemp)
   if [ -n "$gw" ]; then
@@ -380,10 +410,18 @@ install_edge_fragment() {
     rm -f "$rendered"
     exit 1
   fi
-  if [ "${EDGE_CSP_MODE:-enforce}" = "report-only" ]; then
-    sed -i 's|>Content-Security-Policy |>Content-Security-Policy-Report-Only |g' "$rendered"
-    info "edge fragment CSP rendered as Report-Only (EDGE_CSP_MODE=report-only)"
-  fi
+  case "${EDGE_CSP_MODE:-enforce}" in
+    enforce) ;;
+    report-only)
+      sed -i 's|>Content-Security-Policy |>Content-Security-Policy-Report-Only |g' "$rendered"
+      info "edge fragment CSP rendered as Report-Only (EDGE_CSP_MODE=report-only)"
+      ;;
+    *)
+      rm -f "$rendered"
+      fail "EDGE_CSP_MODE must be 'enforce' or 'report-only'."
+      exit 1
+      ;;
+  esac
   # edgectl is transactional: a bad render never replaces the installed
   # fragment, a failed reload restores it, and the previously SERVED fragment
   # stays available as `edgectl rollback mobius`.
