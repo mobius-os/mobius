@@ -62,6 +62,7 @@ import {
   isImmutableAppAsset,
   isPackagedAppAsset,
   packagedAppAssetCacheKey,
+  hasOpaqueEmbedSandbox,
   isCacheableOpaqueEmbedDocument,
   isRangeRequest,
   isStaleRuntimeCache,
@@ -306,10 +307,16 @@ const appAssetsTrimPlugin = {
 }
 
 const packagedAssetCacheKeyPlugin = {
-  cacheKeyWillBeUsed: async ({ request }) => packagedAppAssetCacheKey(
-    request.url,
-    request.mode === 'navigate' || request.destination === 'document',
-  ),
+  cacheKeyWillBeUsed: async ({ request }) => {
+    const isDocument = request.mode === 'navigate'
+      || request.destination === 'document'
+    return packagedAppAssetCacheKey(request.url, {
+      isDocument,
+      // fetch()/XHR has an empty destination. Preserve its namespace rather
+      // than letting a response-sandboxed entry alias onto /app-assets.
+      isSubresource: !isDocument && !!request.destination,
+    })
+  },
 }
 
 const packagedAssetUpdateGuard = {
@@ -317,8 +324,13 @@ const packagedAssetUpdateGuard = {
     const url = new URL(request.url)
     const documentRequest = request.mode === 'navigate'
       || request.destination === 'document'
-    if (documentRequest && url.pathname.startsWith('/app-embeds/')) {
-      return isCacheableOpaqueEmbedDocument(response) ? response : null
+    if (url.pathname.startsWith('/app-embeds/')) {
+      // Namespace-wide invariant: a fetch/XHR must not put an unsandboxed
+      // response into the same cache identity a later navigation can read.
+      if (!hasOpaqueEmbedSandbox(response)) return null
+      if (documentRequest) {
+        return isCacheableOpaqueEmbedDocument(response) ? response : null
+      }
     }
     return response?.status === 200 ? response : null
   },

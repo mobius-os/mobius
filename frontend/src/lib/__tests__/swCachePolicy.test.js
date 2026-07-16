@@ -12,6 +12,7 @@ import {
   entriesToTrim,
   isAppCodeRoute,
   isCacheableAppAssetResponse,
+  hasOpaqueEmbedSandbox,
   isCacheableOpaqueEmbedDocument,
   isImmutableAppAsset,
   isPackagedAppAsset,
@@ -64,14 +65,16 @@ test('hashed packaged-app asset names are immutable', () => {
   )
 })
 
-test('opaque packaged subresources reuse ordinary by-id cache keys', () => {
+test('only controlled packaged subresources reuse ordinary by-id cache keys', () => {
   const embed = 'https://mobius.test/app-embeds/by-id/60/static/js/main.deadbeef.js'
   const ordinary = 'https://mobius.test/app-assets/by-id/60/static/js/main.deadbeef.js'
+  const entry = 'https://mobius.test/app-embeds/by-id/60/index.html'
   assert.equal(isPackagedAppAsset(new URL(embed).pathname), true)
-  assert.equal(packagedAppAssetCacheKey(embed, false), ordinary)
-  // The entry document must retain the response-sandboxed alias identity.
-  assert.equal(packagedAppAssetCacheKey(embed, true), embed)
-  assert.equal(packagedAppAssetCacheKey(ordinary, false), ordinary)
+  assert.equal(packagedAppAssetCacheKey(embed, { isSubresource: true }), ordinary)
+  // Documents and fetch()/XHR keep the response-sandboxed alias identity.
+  assert.equal(packagedAppAssetCacheKey(entry, { isDocument: true }), entry)
+  assert.equal(packagedAppAssetCacheKey(entry), entry)
+  assert.equal(packagedAppAssetCacheKey(ordinary, { isSubresource: true }), ordinary)
 })
 
 test('un-hashed or non-app-asset paths are not immutable', () => {
@@ -123,6 +126,12 @@ test('opaque embed documents cache only with the response sandbox intact', () =>
   )), false)
   assert.equal(isCacheableOpaqueEmbedDocument(documentRes(
     404, 'text/html', 'sandbox allow-scripts',
+  )), false)
+  assert.equal(hasOpaqueEmbedSandbox(documentRes(
+    200, 'application/javascript', 'sandbox allow-scripts',
+  )), true)
+  assert.equal(hasOpaqueEmbedSandbox(documentRes(
+    200, 'application/javascript', "default-src 'self'",
   )), false)
 })
 

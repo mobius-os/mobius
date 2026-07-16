@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
 const isCI = !!process.env.CI
+const localInternalTls = process.env.MOBIUS_LOCAL_E2E_INTERNAL_TLS === '1'
 
 if (!isCI && process.env.MOBIUS_LOCAL_E2E !== '1') {
   throw new Error(
@@ -91,7 +92,10 @@ export default defineConfig({
       : localChrome
         ? {
             browserName: 'chromium',
-            launchOptions: { executablePath: localChrome },
+            launchOptions: {
+              executablePath: localChrome,
+              ...(localInternalTls ? { args: ['--ignore-certificate-errors'] } : {}),
+            },
           }
         : { channel: 'chrome' }),
     // Capture diagnostics for failure analysis on CI.

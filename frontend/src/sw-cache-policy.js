@@ -114,13 +114,19 @@ export function isPackagedAppAsset(pathname) {
   return pathname.startsWith('/app-assets/') || pathname.startsWith('/app-embeds/')
 }
 
-// Entry documents keep their /app-embeds identity so their cached response
-// retains CSP sandbox. Equivalent JS/CSS/media subresources share the ordinary
-// /app-assets/by-id cache key, avoiding a second ~19MB CubeRun cache tree.
-export function packagedAppAssetCacheKey(rawUrl, isDocument = false) {
+// Entry documents and script-level fetches keep their /app-embeds identity so
+// a response-sandboxed document can never be stored on the ordinary protected
+// lane. Only actual, SW-controlled browser subresource requests share the
+// /app-assets/by-id cache key. (A response-sandboxed opaque child is not itself
+// controlled by the shell worker, so its own relative requests use the browser
+// HTTP cache rather than this normalization.)
+export function packagedAppAssetCacheKey(
+  rawUrl,
+  { isDocument = false, isSubresource = false } = {},
+) {
   let url
   try { url = new URL(rawUrl) } catch { return rawUrl }
-  if (!isDocument) {
+  if (isSubresource && !isDocument) {
     url.pathname = url.pathname.replace(
       /^\/app-embeds\/by-id\/(\d+)\//,
       '/app-assets/by-id/$1/',
@@ -166,13 +172,17 @@ export function isCacheableAppAssetResponse(response) {
   return !ct.includes('text/html')
 }
 
-export function isCacheableOpaqueEmbedDocument(response) {
+export function hasOpaqueEmbedSandbox(response) {
   if (!response || response.status !== 200) return false
-  const type = (response.headers.get('content-type') || '').toLowerCase()
   const csp = (response.headers.get('content-security-policy') || '').toLowerCase()
-  return type.includes('text/html')
-    && /(?:^|;)\s*sandbox(?:\s|;|$)/.test(csp)
+  return /(?:^|;)\s*sandbox(?:\s|;|$)/.test(csp)
     && !csp.includes('allow-same-origin')
+}
+
+export function isCacheableOpaqueEmbedDocument(response) {
+  if (!hasOpaqueEmbedSandbox(response)) return false
+  const type = (response.headers.get('content-type') || '').toLowerCase()
+  return type.includes('text/html')
 }
 
 // PURE: should appCodeHandler serve the CACHED copy first (instant) vs go

@@ -219,7 +219,7 @@ Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI pro
 | Tier | Boundary and capability | UX / standalone consequence |
 |---|---|---|
 | Ordinary mini-app | Shell-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default inside the shell. The shell owns install/offline identity; a home-screen shortcut may deep-link through the shell, but opacity alone does not create an independent PWA |
-| Packaged nested document | `/app-embeds/by-id/<id>/…`; every response carries CSP `sandbox` without `allow-same-origin`, scoped `Access-Control-Allow-Origin: null`, and no frame denial | For a game/tool build nested below an ordinary wrapper. Relative subresources work and share cache identity with `/app-assets`; readiness must be a source-bound post-commit heartbeat, never iframe `load` or a null-origin prefetch probe |
+| Packaged nested document | `/app-embeds/by-id/<id>/…`; every response carries CSP `sandbox` without `allow-same-origin`, scoped `Access-Control-Allow-Origin: null`, and no frame denial | For a game/tool build nested below an ordinary wrapper. Relative subresources work online but an opaque child is not controlled by the shell SW, so only the entry document may be SW-cached; readiness must be a source-bound post-commit heartbeat, never iframe `load` or a null-origin prefetch probe |
 | Full web service / independent PWA | Dedicated distinct origin (prefer a same-site subdomain), shell-owned direct adapter, host-only cookies, exact shell+service ancestor policy; never nested below the opaque wrapper | Required for same-origin cookies/XHR, durable origin storage, service workers, OPFS/IndexedDB and genuine independent installability. The app origin owns its manifest, SW and storage |
 
 Opacity simplifies permissions: no ambient owner JWT, shell storage bleed, DOM
@@ -865,10 +865,15 @@ Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
 
 Packaged static documents use a separate rule. `/app-embeds/` entry documents
-retain their own response-sandboxed cache key, while equivalent relative
-subresources normalize to the ordinary `/app-assets/by-id/…` identity so a
-large packaged game is not cached twice. The document catch path never returns
-shell/offline HTML for `/app-embeds/`; a controlled-page regression pins this.
+retain their own response-sandboxed cache key. A response-sandboxed opaque child
+is not controlled by the shell worker, so its relative JS/CSS/media requests use
+normal network/HTTP caching and have no packaged-static offline guarantee. Only
+an actual SW-controlled subresource request may normalize to the ordinary
+`/app-assets/by-id/…` identity; fetch/XHR and document requests retain the embed
+namespace, preventing a sandboxed entry response from aliasing onto the ordinary
+protected lane. No recursive crawler is implied: a future offline-capable package
+needs an explicit manifest/static-assets warm contract. The controlled-page
+regression pins the cached entry as packaged content rather than shell HTML.
 
 Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.7, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
