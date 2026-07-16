@@ -39,8 +39,8 @@ def test_app_routes_and_images_are_not_static():
   assert not _is_static_asset_path("vendorfoo")
 
 
-def test_public_app_modules_are_intrinsically_cors_readable():
-  """Service-worker-cached app modules must still load in Origin:null."""
+def test_opaque_frame_public_assets_are_intrinsically_cors_readable():
+  """Service-worker-cached executable assets must load in Origin:null."""
   assert _public_static_headers("vendor/react@19.2.7/react.mjs") == {
     "Access-Control-Allow-Origin": "*",
   }
@@ -50,8 +50,15 @@ def test_public_app_modules_are_intrinsically_cors_readable():
   assert _public_static_headers("mobius-runtime.js") == {
     "Access-Control-Allow-Origin": "*",
   }
+  assert _public_static_headers("assets/index-abc.js") == {
+    "Access-Control-Allow-Origin": "*",
+  }
+  assert _public_static_headers("assets/index-abc.css") == {
+    "Access-Control-Allow-Origin": "*",
+  }
   assert _public_static_headers("vendorfoo/module.mjs") == {}
-  assert _public_static_headers("assets/index.js") == {}
+  assert _public_static_headers("assetsfoo/index.js") == {}
+  assert _public_static_headers("icons/icon-192.png") == {}
 
 
 def _spa_active(client):

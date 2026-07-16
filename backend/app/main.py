@@ -1154,14 +1154,18 @@ def _public_static_headers(path: str) -> dict[str, str]:
 
   Sandboxed app frames intentionally have the effective origin ``null`` and
   import both ``/mobius-runtime.js`` and the public modules under ``/vendor``.
-  Those files are also fetched and cached by the shell service worker without
-  an Origin header.  CORS middleware can decorate a direct opaque-origin
-  request, but it cannot repair that already-cached response when the worker
-  later returns it to the frame.  Make the public app modules intrinsically
-  cross-origin readable so both the HTTP cache and service-worker cache
-  preserve the contract.
+  The nested chat embed inherits that opaque origin and loads the Vite shell
+  JavaScript and CSS under ``/assets``.  All three namespaces are also fetched
+  and cached by the shell service worker without an Origin header.  CORS
+  middleware can decorate a direct opaque-origin request, but it cannot repair
+  that already-cached response when the worker later returns it to the frame.
+  Make the public executable assets intrinsically cross-origin readable so both
+  the HTTP cache and service-worker cache preserve the contract.
   """
-  if path == "mobius-runtime.js" or path.split("/", 1)[0] == "vendor":
+  if (
+    path == "mobius-runtime.js"
+    or path.split("/", 1)[0] in {"assets", "vendor"}
+  ):
     return {"Access-Control-Allow-Origin": "*"}
   return {}
 

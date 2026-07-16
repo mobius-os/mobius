@@ -72,11 +72,14 @@ export function isCacheableAssetResponse(response) {
   return CACHEABLE_ASSET_TYPES.some(t => ct.includes(t))
 }
 
-// Public modules imported by the sandboxed app frame. Keep this exact: these
-// paths are intentionally readable across the frame's opaque Origin:null, but
-// the rest of the shell stays on the ordinary same-origin policy.
-export function isPublicAppModulePath(pathname) {
-  return pathname === '/mobius-runtime.js' || pathname.startsWith('/vendor/')
+// Public assets executed by an opaque app frame or its nested chat embed. Keep
+// this exact: the app imports the runtime + vendor modules, while the inherited
+// Origin:null chat document loads the Vite shell JS/CSS under /assets. The rest
+// of the shell stays on the ordinary same-origin policy.
+export function isOpaqueFramePublicAssetPath(pathname) {
+  return pathname === '/mobius-runtime.js'
+    || pathname.startsWith('/vendor/')
+    || pathname.startsWith('/assets/')
 }
 
 // The shell service worker precaches these modules itself (without an Origin
@@ -86,7 +89,7 @@ export function isPublicAppModulePath(pathname) {
 // Decorate both old cache hits and fresh fetches at the worker boundary; the
 // server emits the same wildcard header so direct and HTTP-cached responses
 // have an identical contract.
-export function withPublicAppModuleCors(response) {
+export function withOpaqueFramePublicAssetCors(response) {
   if (!response) return response
   if (response.headers.get('access-control-allow-origin') === '*') {
     return response
