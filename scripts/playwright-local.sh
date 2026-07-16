@@ -11,7 +11,7 @@ Möbius stack and can take several minutes. Prefer the GitHub PR checks.
 Run this on a Docker-capable host, not inside the Möbius app container:
   scripts/playwright-local.sh --allow-local-e2e <spec or --grep arguments>
 
-The runner keeps one reusable image tag to make later submissions faster.
+The runner keeps one reusable image tag per checkout to make later runs faster.
 Set MOBIUS_LOCAL_E2E_KEEP_CACHE=0 when disk retention is more important.
 EOF
   exit 2
@@ -49,15 +49,34 @@ head_sha="$(git rev-parse --verify HEAD)"
 run_id="$(date +%s)-$$"
 project="mobius-local-e2e-${run_id}"
 image_name="${project}:test"
-# Keep one bounded image reference after a run. Docker can then retain the
-# expensive dependency ancestors even though the per-run image and all
-# containers/volumes remain disposable. Set MOBIUS_LOCAL_E2E_KEEP_CACHE=0 for
-# a no-retention run, or choose a separate shared tag with
-# MOBIUS_LOCAL_E2E_CACHE_IMAGE.
-cache_image="${MOBIUS_LOCAL_E2E_CACHE_IMAGE:-mobius-local-e2e-cache:test}"
+# Keep one bounded image reference per checkout after a run. Checkout scoping
+# prevents concurrent worktrees from replacing each other's dependency cache,
+# while the stable numeric suffix keeps the default tag Docker-safe.
+checkout_id="$(printf '%s' "$ROOT" | cksum | awk '{print $1}')"
+cache_image="${MOBIUS_LOCAL_E2E_CACHE_IMAGE:-mobius-local-e2e-cache-${checkout_id}:test}"
 keep_cache="${MOBIUS_LOCAL_E2E_KEEP_CACHE:-1}"
 if [[ "$keep_cache" != "0" && "$keep_cache" != "1" ]]; then
   echo "error: MOBIUS_LOCAL_E2E_KEEP_CACHE must be 0 or 1" >&2
+  exit 2
+fi
+min_free_gb="${MOBIUS_LOCAL_E2E_MIN_FREE_GB:-8}"
+if [[ ! "$min_free_gb" =~ ^[0-9]+$ ]]; then
+  echo "error: MOBIUS_LOCAL_E2E_MIN_FREE_GB must be a non-negative integer" >&2
+  exit 2
+fi
+docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+disk_path="${docker_root:-$ROOT}"
+available_kb="$(df -Pk "$disk_path" | awk 'NR == 2 {print $4}')"
+minimum_kb="$((min_free_gb * 1024 * 1024))"
+if (( available_kb < minimum_kb )); then
+  available_gb="$((available_kb / 1024 / 1024))"
+  cat >&2 <<EOF
+error: isolated local E2E needs at least ${min_free_gb} GiB free for Docker;
+only ${available_gb} GiB is available on $disk_path.
+Review usage with 'docker system df'. Remove unused build cache or set
+MOBIUS_LOCAL_E2E_MIN_FREE_GB=0 only when this checkout already completed a
+cached build that is known to fit.
+EOF
   exit 2
 fi
 app_container="${project}-app"
@@ -86,7 +105,7 @@ compose() {
   INTERNAL_TEST_PORT="$internal_publish_port" \
   RECOVERY_TEST_PORT="$recovery_publish_port" \
   BUILD_SHA=unknown \
-  GITHUB_SHA="$head_sha" \
+    GITHUB_SHA="$head_sha" \
     docker compose -p "$project" -f "$snapshot_dir/docker-compose.test.yml" \
       --project-directory "$snapshot_dir" "$@"
 }
