@@ -237,11 +237,10 @@ test.describe('Tabs', () => {
     await expect(page.locator('.workspace__strip--focused')).toContainText(chat.title)
 
     // Opaque iframe input uses the explicit frame-focus bridge.
-    await page.locator(`iframe[data-app-id="${APP_ID}"]`).evaluate(frame => {
-      frame.contentDocument.querySelector('#probe').dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true }),
-      )
-    })
+    await page
+      .frameLocator(`iframe[data-app-id="${APP_ID}"]`)
+      .locator('#probe')
+      .dispatchEvent('pointerdown')
     await expect(page.locator('.workspace__strip--focused')).toContainText('Demo App')
 
     // The global drawer suspends kinetic interaction in every visible app pane.
