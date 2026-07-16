@@ -677,46 +677,13 @@
   30% { transform: scale(1.4); opacity: 1; }
 }
 
-/* ── Reasoning disclosure ────────────────────────── */
+/* ── Reasoning lane (reused by the activity stretch) ── */
 
-/* Collapsed-by-default "Thinking" disclosure for the agent's live
-   reasoning (StreamingMessage's `item.type === 'thinking'` branch + the
-   useStreamConnection 'thinking' handler). Quiet + dim so it reads as a
-   secondary "the agent is thinking" indication that fills a long silent
-   stretch — not a wall of raw chain-of-thought competing with the
-   answer. The partner can expand to peek; persisted thinking blocks use
-   the same measured lane so the transcript does not shift after promote. */
-.chat__reasoning {
-  box-sizing: border-box;
-  width: min(100%, 480px);
-  max-width: min(100%, 480px);
-  margin: 4px 0;
-  padding-left: 6px;
-  color: var(--text-muted, color-mix(in srgb, var(--text) 55%, transparent));
-  font-size: 13px;
-  line-height: 1.5;
-}
-.chat__reasoning-summary {
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  cursor: pointer;
-  list-style: none; /* hide the native disclosure triangle; we draw our own */
-  user-select: none;
-  padding: 2px 0;
-  color: var(--muted);
-}
-.chat__reasoning-summary::-webkit-details-marker { display: none; }
-.chat__reasoning-line {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 1px;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* The standalone "> Thought" disclosure is gone — thinking now flows into the
+   unified activity stretch (see ActivityStretch + the .chat__activity family
+   below). Two pieces of the old reasoning lane survive because the stretch
+   reuses them: the animated live-thinking ellipsis and the dim markdown body
+   that renders a thinking entry when the stretch is expanded. */
 .chat__reasoning-ellipsis {
   display: inline-flex;
   align-items: baseline;
@@ -827,11 +794,6 @@
 .chat__text + .chat__tools { margin-top: 10px; }
 .chat__tools + .chat__text { margin-top: 10px; }
 .chat__tools + .chat__tools { margin-top: 2px; }
-.chat__text + .chat__reasoning { margin-top: 10px; }
-.chat__reasoning + .chat__text { margin-top: 4px; }
-.chat__tools + .chat__reasoning,
-.chat__reasoning + .chat__tools,
-.chat__reasoning + .chat__reasoning { margin-top: 2px; }
 .chat__text--assistant + .chat__text--assistant { margin-top: 0.75rem; }
 
 .chat__tool {
@@ -851,14 +813,30 @@
   border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light)); /* CONTRACT: 1px line mixing accent with hairline */
 }
 
+/* The header is a real <button> when there's detail to disclose (keyboard
+   operable) and a static div otherwise; the button resets below keep both
+   looking identical to the old clickable div. */
 .chat__tool-header {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   min-height: 32px;
   padding: 5px 10px;
   cursor: pointer;
   user-select: none;
+  background: none;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.chat__tool-header--static { cursor: default; }
+
+.chat__tool-header:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
+  outline-offset: -2px;
 }
 
 .chat__tool-name {
@@ -1024,118 +1002,101 @@
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Tool activity group ───────────────────────────── */
+/* ── Activity stretch (thinking + tools, unified) ───── */
 
-/* Adjacent tool calls, including a lone call, collapse into one card so a build
-   turn's wall of tool blocks doesn't bury the agent's prose (see
-   ToolActivityGroup + groupBlocks.js). Collapsed by default; the header carries
-   live running/done/failed status so a step's state shows without expanding. */
-.chat__toolgroup {
-  border-radius: 10px;
-  border: 1px solid var(--border-light); /* CONTRACT: neutral hairline — the group is structure, not signal */
-  background: color-mix(in srgb, var(--accent) 3%, transparent); /* CONTRACT: faint tint on the opaque message-list fill beneath */
-  overflow: hidden;
+/* A contiguous run of thinking AND tool blocks collapses to ONE borderless dim
+   line — the calm ChatGPT/Codex activity line, not a bordered card — so a build
+   turn's pre-prose burst stops burying the answer (~136px of stacked chrome →
+   one ~32px line). Structure is neutral; the only hue is --danger for a failed
+   step and --accent for keyboard focus. Collapsed by default; the header status
+   (spinner / pulse dot / triangle + exit chip) reads WITHOUT expanding. See
+   ActivityStretch.jsx + groupBlocks.js. */
+.chat__activity {
+  margin: 2px 0;
 }
 
-.chat__toolgroup--running {
-  background: var(--surface); /* CONTRACT: same collapsed running surface as a lone tool row */
-  border-color: var(--accent, var(--border-light));
-}
-
-.chat__toolgroup--done {
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--border-light));
-}
-
-.chat__toolgroup--error {
-  border-color: color-mix(in srgb, var(--danger) 34%, var(--border-light)); /* CONTRACT: danger-tinted hairline when a step failed */
-}
-
-.chat__toolgroup-header {
+.chat__activity-header {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
   min-height: 32px;
-  padding: 5px 10px;
+  padding: 2px 2px 2px 0;
   background: none;
   border: 0;
   text-align: left;
   cursor: pointer;
   user-select: none;
-  color: inherit;
+  color: var(--muted); /* CONTRACT: low-contrast structure — the line is metadata, not signal */
   font: inherit;
 }
 
-.chat__toolgroup-header:focus-visible {
+.chat__activity-header:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
+  border-radius: 6px;
 }
 
-.chat__toolgroup-icon {
+.chat__activity-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--muted); /* CONTRACT: low-contrast completion glyph */
+  color: var(--muted); /* CONTRACT: low-contrast status glyph */
 }
 
-.chat__toolgroup--error .chat__toolgroup-icon {
-  color: var(--danger); /* CONTRACT: vivid danger — a step in the run failed */
+.chat__activity--error .chat__activity-icon {
+  color: var(--danger); /* CONTRACT: vivid danger — a step in the stretch failed */
 }
 
-.chat__toolgroup-summary {
-  font-size: 12.5px;
-  font-family: var(--mono); /* CONTRACT: monospace tool names, matching tool blocks */
-  color: var(--muted); /* CONTRACT: same quiet summary tone as tool headers */
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
+/* The live-thinking pulse dot (reuses the cursorPulse keyframe): a quiet "the
+   agent is reasoning now" beat, distinct from the tool-run spinner. Under
+   reduced motion the dot stays as a static liveness marker — present but still. */
+.chat__activity-icon--think {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat__activity-icon--think {
+    animation: cursorPulse 1.5s ease-in-out infinite;
+  }
+}
+
+.chat__activity-label {
   flex: 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.chat__toolgroup-title {
-  flex-shrink: 0;
-}
-
-.chat__toolgroup-activity {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--muted); /* CONTRACT: calm prose voice — regular UI font, NOT --mono; identifiers live in the expanded ToolBlock */
+  font-size: 13px;
 }
 
-.chat__toolgroup-activity::before {
-  content: '· ';
-  color: var(--muted);
-}
-
-.chat__toolgroup-chip {
+.chat__activity-chip {
   flex-shrink: 0;
   padding: 0 6px;
   border-radius: 8px;
+  font-family: var(--mono); /* CONTRACT: monospace exit-code chip, matches the tool block */
   font-size: 11px;
-  font-weight: 600;
-  color: var(--danger); /* CONTRACT: vivid danger text — a step failed */
-  background: color-mix(in srgb, var(--danger) 12%, transparent); /* CONTRACT: faint danger tint on the opaque fill */
+  color: var(--danger); /* CONTRACT: vivid danger text — a nonzero exit failed */
+  background: color-mix(in srgb, var(--danger) 12%, transparent); /* CONTRACT: faint danger tint on the opaque message-list fill */
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
-.chat__toolgroup-toggle {
+.chat__activity-toggle {
   flex-shrink: 0;
-  font-size: 12px;
-  color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
   display: inline-flex;
+  color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
 }
 
-/* Rotating disclosure chevron shared by the tool-activity and marker cards,
-   matching the queued-tray chevron idiom: the SVG points down when open and
-   rotates to point right when collapsed, easing the transform so the state
-   change reads as motion rather than an instant glyph swap. */
+/* Rotating disclosure chevron shared by the activity + marker cards, matching
+   the queued-tray chevron idiom: the SVG points down when open and rotates to
+   point right when collapsed, easing the transform so the state change reads as
+   motion rather than an instant glyph swap. */
 .chat__chevron {
   transition: transform 0.15s;
 }
@@ -1143,12 +1104,82 @@
   transform: rotate(-90deg);
 }
 
-/* The individual tool blocks, stacked with a small gap when expanded. */
-.chat__toolgroup-body {
+/* Expanded, a quiet vertical hairline rail holds the entries in persisted
+   (chronological) order — thinking bodies inline, ToolBlock rows for tools. The
+   rail is neutral structure, not a decorative accent stripe. */
+.chat__activity-timeline {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 0 6px 6px;
+  margin-top: 4px;
+  padding: 2px 0 2px 10px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+/* A thinking entry renders inline at the first level (the user already opted in
+   by expanding): a small dim "Thought for Ns" label + the reasoning body, which
+   reuses the .chat__reasoning-body lane. For a thinking-only stretch the label
+   is suppressed (the collapsed header already said it). */
+.chat__activity-think {
+  padding: 2px 0;
+  color: var(--muted); /* CONTRACT: low-contrast reasoning tone */
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chat__activity-think-label {
+  display: block;
+  opacity: 0.8;
+}
+
+/* Soften the ToolBlock shell inside the timeline: no card border/tint/fill — the
+   rail supplies structure, so a tool reads as a quiet row, not a nested card.
+   Scoped to the timeline so an out-of-timeline fixture keeps the base look. */
+.chat__activity-timeline .chat__tool {
+  border-radius: 0;
+}
+.chat__activity-timeline .chat__tool--running,
+.chat__activity-timeline .chat__tool--done {
+  background: none;
+  border: 0;
+}
+.chat__activity-timeline .chat__tool-header {
+  min-height: 28px;
+  padding: 3px 0;
+}
+.chat__activity-timeline .chat__tool-detail {
+  padding: 0 0 6px;
+}
+
+/* A subtle modern touch: the live label shimmers between --muted and --text while
+   the stretch is actively working (ChatGPT-style), gated on reduced-motion so it
+   is pure decoration on top of the load-bearing spinner/pulse. CSS-only — the
+   sweep repaints one short masked text line per frame (cheap at this size) but
+   never re-renders React — and the sweep floor is --muted, so contrast never
+   drops below the resting label. Scoped to --running as well as --live: in the
+   gap between one tool ending and the next event the trailing stretch is still
+   the live node but has nothing running, and a shimmering settled-looking label
+   would read as a glitch. */
+@media (prefers-reduced-motion: no-preference) {
+  .chat__activity--live.chat__activity--running .chat__activity-label {
+    background: linear-gradient(
+      100deg,
+      var(--muted) 30%,
+      var(--text) 50%,
+      var(--muted) 70%
+    );
+    background-size: 200% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    animation: activityShimmer 2.4s linear infinite;
+  }
+}
+
+@keyframes activityShimmer {
+  0% { background-position: 150% 0; }
+  100% { background-position: -50% 0; }
 }
 
 /* ── Marker card (compaction + future system markers) ── */

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  groupToolRuns,
+  groupActivityRuns,
   coalesceThinkingEntries,
   toolGroupState,
   toolGroupSummary,
@@ -12,50 +12,82 @@ const e = item => ({ item })
 const tool = (extra = {}) => ({ type: 'tool', ...extra })
 
 test('a lone tool renders as an activity group', () => {
-  const nodes = groupToolRuns([e(tool()), e({ type: 'text' })])
+  const nodes = groupActivityRuns([e(tool()), e({ type: 'text' })])
   assert.equal(nodes.length, 2)
   assert.equal(nodes[0].group.length, 1)
   assert.ok(nodes[1].single)
 })
 
+test('a lone thinking renders as an activity group', () => {
+  // Thinking is now an activity entry too, so a standalone thinking block folds
+  // into the same primitive (a 1-entry group) rather than the old standalone
+  // "> Thought" disclosure.
+  const nodes = groupActivityRuns([e({ type: 'thinking' }), e({ type: 'text' })])
+  assert.equal(nodes.length, 2)
+  assert.equal(nodes[0].group.length, 1)
+  assert.equal(nodes[0].group[0].item.type, 'thinking')
+  assert.ok(nodes[1].single)
+})
+
 test('two adjacent tools group', () => {
-  const nodes = groupToolRuns([e(tool()), e(tool())])
+  const nodes = groupActivityRuns([e(tool()), e(tool())])
   assert.equal(nodes.length, 1)
   assert.equal(nodes[0].group.length, 2)
 })
 
-test('non-tool entries break a run and pass through in order', () => {
+test('thinking and tools unify into one stretch in emit order', () => {
+  // thinking → Read → thinking → Bash is ONE activity stretch (nothing prose-like
+  // between the pieces), the single biggest real-estate win of the redesign.
   const items = [
+    e({ type: 'thinking', content: 'plan' }),
     e(tool({ tool: 'Read' })),
-    e(tool({ tool: 'Edit' })),
-    e({ type: 'text', content: 'hi' }),
-    e(tool({ tool: 'Bash' })),
+    e({ type: 'thinking', content: 'more' }),
     e(tool({ tool: 'Bash' })),
   ]
-  const nodes = groupToolRuns(items)
-  // group(Read,Edit) · single(text) · group(Bash,Bash)
-  assert.equal(nodes.length, 3)
-  assert.equal(nodes[0].group.length, 2)
-  assert.equal(nodes[1].single.item.type, 'text')
-  assert.equal(nodes[2].group.length, 2)
+  const nodes = groupActivityRuns(items)
+  assert.equal(nodes.length, 1)
+  assert.deepEqual(nodes[0].group.map(x => x.item.type), ['thinking', 'tool', 'thinking', 'tool'])
+})
+
+test('text, question, and error each break a stretch and pass through in order', () => {
+  const items = [
+    e({ type: 'thinking' }),
+    e(tool({ tool: 'Read' })),
+    e({ type: 'text', content: 'hi' }),
+    e(tool({ tool: 'Bash' })),
+    e({ type: 'question' }),
+    e(tool({ tool: 'Edit' })),
+    e({ type: 'error' }),
+  ]
+  const nodes = groupActivityRuns(items)
+  // group(think,Read) · text · group(Bash) · question · group(Edit) · error
+  assert.deepEqual(
+    nodes.map(n => (n.group ? `group:${n.group.length}` : `single:${n.single.item.type}`)),
+    ['group:2', 'single:text', 'group:1', 'single:question', 'group:1', 'single:error'],
+  )
 })
 
 test('original entry metadata is carried through untouched', () => {
   const items = [{ item: tool(), idx: 7 }, { item: tool(), idx: 8 }]
-  const nodes = groupToolRuns(items)
+  const nodes = groupActivityRuns(items)
   assert.deepEqual(nodes[0].group.map(x => x.idx), [7, 8])
 })
 
-test('a single tool between two texts keeps order as a one-tool group', () => {
-  const nodes = groupToolRuns([e({ type: 'text' }), e(tool()), e({ type: 'text' })])
-  assert.equal(nodes.length, 3)
-  assert.ok(nodes[0].single)
-  assert.equal(nodes[1].group.length, 1)
-  assert.ok(nodes[2].single)
+test('a thinking-first stretch keeps the thinking entry first for keying', () => {
+  // The stretch is keyed by its FIRST entry, so a thinking-first stretch that
+  // later gains a tool must keep the thinking entry (its idx) at position 0.
+  const items = [
+    { item: { type: 'thinking' }, idx: 2 },
+    { item: tool({ tool: 'Read', tool_use_id: 'x' }), idx: 3 },
+  ]
+  const nodes = groupActivityRuns(items)
+  assert.equal(nodes.length, 1)
+  assert.equal(nodes[0].group[0].item.type, 'thinking')
+  assert.equal(nodes[0].group[0].idx, 2)
 })
 
 test('empty input yields no nodes', () => {
-  assert.deepEqual(groupToolRuns([]), [])
+  assert.deepEqual(groupActivityRuns([]), [])
 })
 
 // A failed shell result — the ONLY failure signal a tool block carries, since
@@ -207,18 +239,21 @@ test('coalesceThinkingEntries: thinking separated by a tool stays two distinct b
   assert.deepEqual(out.map(x => x.idx), [0, 1, 2])
 })
 
-test('coalesceThinkingEntries: groupToolRuns after coalesce yields one thinking single + tool group', () => {
+test('coalesceThinkingEntries: groupActivityRuns after coalesce yields one unified stretch', () => {
+  // Adjacent thinking coalesces first (preserving the first idx), then the
+  // widened predicate folds the coalesced thinking + the two tools into ONE
+  // stretch keyed by the thinking's idx 0.
   const entries = [
     { item: think('a', 100), idx: 0 },
     { item: think('b', 100), idx: 1 },
     { item: { type: 'tool', tool: 'Read' }, idx: 2 },
     { item: { type: 'tool', tool: 'Edit' }, idx: 3 },
   ]
-  const nodes = groupToolRuns(coalesceThinkingEntries(entries))
-  assert.equal(nodes.length, 2)
-  assert.equal(nodes[0].single.item.type, 'thinking')
-  assert.equal(nodes[0].single.item.content, 'ab')
-  assert.equal(nodes[1].group.map(x => x.idx).join(','), '2,3')
+  const nodes = groupActivityRuns(coalesceThinkingEntries(entries))
+  assert.equal(nodes.length, 1)
+  assert.deepEqual(nodes[0].group.map(x => x.item.type), ['thinking', 'tool', 'tool'])
+  assert.equal(nodes[0].group[0].item.content, 'ab')
+  assert.deepEqual(nodes[0].group.map(x => x.idx), [0, 2, 3])
 })
 
 test('toolGroupState: reads output_exit_code field on a reduced block', () => {

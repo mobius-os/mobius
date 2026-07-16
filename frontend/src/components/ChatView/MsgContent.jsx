@@ -1,83 +1,16 @@
-import { memo, useEffect, useState } from 'react'
+import { memo } from 'react'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
-import ToolBlock from './ToolBlock.jsx'
-import ToolActivityGroup from './ToolActivityGroup.jsx'
-import { groupToolRuns, coalesceThinkingEntries } from './groupBlocks.js'
+import ActivityStretch from './ActivityStretch.jsx'
+import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
-import {
-  suppressedQuestionToolIndices,
-  thinkingContentForDisplay,
-  thinkingElapsedMs,
-} from './streamReducers.js'
+import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
-
-
-function thoughtSeconds(durationMs) {
-  if (!Number.isFinite(durationMs)) return null
-  return Math.max(1, Math.round(durationMs / 1000))
-}
-
-
-function thoughtLine(durationMs) {
-  const seconds = thoughtSeconds(durationMs)
-  if (!seconds) return '> Thought'
-  return `> Thought for ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
-}
-
-
-function formatSeconds(seconds) {
-  if (!Number.isFinite(seconds)) return null
-  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
-}
-
-
-function ActiveThinkingDisclosure({ block, isStreaming }) {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!isStreaming) return undefined
-    const id = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [isStreaming])
-
-  // Live items carry the runner-clock anchors used by thinkingElapsedMs.
-  // Persisted partials may only have duration_ms, so the shared renderer
-  // freezes at that durable value until live data becomes the selected source.
-  const elapsedMs = isStreaming ? thinkingElapsedMs(block, now) : block.duration_ms
-  const seconds = thoughtSeconds(elapsedMs)
-  const secondsText = formatSeconds(seconds)
-  const label = isStreaming
-    ? `> Thinking for ${secondsText || 'a moment'}`
-    : secondsText
-      ? `> Thought for ${secondsText}`
-      : '> Thought'
-
-  return (
-    <details className="chat__reasoning">
-      <summary className="chat__reasoning-summary">
-        <span className="chat__reasoning-line">
-          {label}
-          {isStreaming && (
-            <span className="chat__reasoning-ellipsis" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-          )}
-        </span>
-      </summary>
-      <div className="chat__reasoning-body">
-        <StandardMarkdown text={thinkingContentForDisplay(block.content)} />
-      </div>
-    </details>
-  )
-}
 
 
 // Answerability is purely a function of the block + its position + live hint.
@@ -153,8 +86,40 @@ function MsgContentInner({
     // also cleans up already-persisted old chats with no backend migration.
     const skipToolIdx = suppressedQuestionToolIndices(msg.blocks)
 
-    // Render a single block by type. Pulled out of the map so both the plain
-    // path and grouped tool runs (below) share one renderer.
+    // Entry idx is the POST-suppression position, not the raw msg.blocks
+    // ordinal. The two surfaces of the active answer disagree about the twin:
+    // the live reducer absorbs the AskUserQuestion tool into the question card,
+    // while the DB partial keeps both and relies on the render-time skip above.
+    // Raw ordinals therefore differ by one for every block after a mid-turn
+    // question, and an ordinal-keyed entry (thinking, a tokenless tool, the
+    // question itself) would change key across the live↔DB surface switch —
+    // remounting its stretch, collapsing what the user had expanded, and
+    // dropping nested lazy-fetch state. Numbering AFTER the skip makes both
+    // surfaces produce identical positions for identical visible content, so
+    // keys survive the switch. (Appends only ever extend the tail, so earlier
+    // positions — and their keys — are stable mid-run too.)
+    const entries = msg.blocks
+      .map((block, i) => ({ item: block, rawIdx: i }))
+      .filter(({ rawIdx }) => !skipToolIdx.has(rawIdx))
+      .map(({ item }, pos) => ({ item, idx: pos }))
+    // Repair already-persisted transcripts where a continuous reasoning pass was
+    // fragmented into many thinking blocks: coalesce runs of adjacent thinking
+    // AFTER idx assignment (each survivor keeps its first fragment's position)
+    // so a tokenless tool block's `t-<idx>` React key stays stable across
+    // renders. Fragmented thinking exists only in legacy saved chats, which are
+    // never a live surface, so coalescing after renumbering cannot reintroduce
+    // a cross-surface position mismatch. See groupBlocks.coalesceThinkingEntries.
+    const finalEntries = coalesceThinkingEntries(entries)
+    // The rendered tail's entry idx — the anchor for "is this block the tail"
+    // checks below. msg.blocks.length would be wrong here: a skipped twin means
+    // the last VISIBLE block's idx is smaller than the raw block count.
+    const lastEntryIdx = finalEntries.length
+      ? finalEntries[finalEntries.length - 1].idx
+      : -1
+
+    // Render a stretch-breaking block by type. Activity entries (tool/thinking)
+    // are folded into an ActivityStretch below; this renders only the `single`
+    // nodes — text, question, error.
     const renderBlock = (block, i) => {
       if (block.type === 'text') {
         const text = msg.role === 'user'
@@ -166,54 +131,17 @@ function MsgContentInner({
               ? (isActiveAnswer
                   ? <ProgressiveMarkdown
                       text={text}
-                      isStreaming={isStreaming && i === msg.blocks.length - 1}
+                      isStreaming={isStreaming && i === lastEntryIdx}
                     />
                   : <StandardMarkdown text={text} />)
               : text}
           </div>
         )
       }
-      if (block.type === 'tool') {
-        // Key a lone tool by its persisted `tool_use_id` (lever 2a) so the block
-        // survives the live↔DB surface switch and a catch-up commit by identity.
-        // Fall back to `t-<firstIdx>` for a legacy/tokenless block — the SAME
-        // scheme the group wrapper below uses — so a message that renders one
-        // tool and then (on a later render carrying a second adjacent tool)
-        // folds it into a group updates the slot in place instead of
-        // delete+insert. `i` is the block's index = the group's first index, and
-        // the group wrapper prefers the same tool's id, so the keys coincide.
-        return (
-          <div key={assistantBlockKey(block, i)} className="chat__tools">
-            {/* chatId + the block's tool_use_id let ToolBlock lazily fetch a
-                truncated large output on expand (GET
-                /tool-output/{tool_use_id}). */}
-            <ToolBlock t={block} chatId={chatId} />
-          </div>
-        )
-      }
-      if (block.type === 'thinking') {
-        if (isActiveAnswer) {
-          return (
-            <ActiveThinkingDisclosure
-              key={assistantBlockKey(block, i)}
-              block={block}
-              isStreaming={isStreaming && i === msg.blocks.length - 1}
-            />
-          )
-        }
-        return (
-          <details key={assistantBlockKey(block, i)} className="chat__reasoning">
-            <summary className="chat__reasoning-summary">
-              <span className="chat__reasoning-line">
-                {thoughtLine(block.duration_ms)}
-              </span>
-            </summary>
-            <div className="chat__reasoning-body">
-              <StandardMarkdown text={thinkingContentForDisplay(block.content)} />
-            </div>
-          </details>
-        )
-      }
+      // tool + thinking blocks never reach renderBlock: groupActivityRuns folds
+      // every contiguous run of them (including a lone one) into a group node,
+      // rendered by ActivityStretch below. renderBlock only sees the block types
+      // that BREAK a stretch — text (above), question, and error.
       if (block.type === 'question') {
         // Suppress if this exact question is currently live in
         // streamItems — the streaming <li> is already rendering it.
@@ -227,7 +155,7 @@ function MsgContentInner({
         // isQuestionAnswerable in ChatView). Recovery keeps a still-open
         // question at the tail; if anything later follows it, the turn has
         // moved on and the card is transcript history.
-        const isTailBlock = i === msg.blocks.length - 1
+        const isTailBlock = i === lastEntryIdx
         const answerable = !!(
           onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
         )
@@ -314,45 +242,34 @@ function MsgContentInner({
       return null
     }
 
-    // Skip the AskUserQuestion tool twin, then fold runs of adjacent tool
-    // blocks into one Activity card. Live items arrive here after conversion
-    // to the same block shape, so the transcript doesn't reshuffle on promote.
-    const entries = msg.blocks
-      .map((block, i) => ({ item: block, idx: i }))
-      .filter(({ idx }) => !skipToolIdx.has(idx))
-    // Repair already-persisted transcripts where a continuous reasoning pass was
-    // fragmented into many thinking blocks: coalesce runs of adjacent thinking
-    // AFTER idx assignment (each survivor keeps its original persisted idx) so a
-    // tokenless tool block's `t-<idx>` React key stays stable across renders.
-    // See groupBlocks.coalesceThinkingEntries.
-    const nodes = groupToolRuns(coalesceThinkingEntries(entries))
+    // Fold contiguous runs of thinking AND tool blocks into one activity
+    // stretch. Live items arrive here after conversion to the same block shape,
+    // so the transcript doesn't reshuffle on promote.
+    const nodes = groupActivityRuns(finalEntries)
 
     return (
       <>
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
-        {nodes.map(node => {
+        {nodes.map((node, nodeIdx) => {
           if (node.group) {
-            const tools = node.group.map(e => e.item)
-            // Prefer the first tool's `tool_use_id` (lever 2a); fall back to
-            // `t-<firstIdx>` — the SAME key a lone tool at that index uses (see
-            // renderBlock), so a single→group transition updates this slot in
-            // place rather than swapping keys and forcing a delete+insert. Each
-            // grouped ToolBlock is keyed by its own id so a catch-up commit
-            // reconciles each block by identity within the group.
+            // A stretch is LIVE only when it's the trailing node of the active
+            // answer's stream — the agent is working in it right now (spinner /
+            // thinking ticker). A settled stretch above the stream is not live and
+            // never re-renders on its own.
+            const live = isActiveAnswer && isStreaming && nodeIdx === nodes.length - 1
+            // Key the stretch by its FIRST entry (assistantBlockKey): a
+            // thinking-first stretch keeps its thinking idx, a tool-first stretch
+            // its `tool_use_id`/`t-<idx>`, so a single→group / live↔DB /
+            // mid-run-growth transition updates this slot in place rather than
+            // swapping keys and forcing a delete+insert. Each entry inside the
+            // stretch keeps its own key so a catch-up commit reconciles by
+            // identity.
             return (
               <div
                 key={assistantBlockKey(node.group[0].item, node.group[0].idx)}
                 className="chat__tools"
               >
-                <ToolActivityGroup tools={tools}>
-                  {node.group.map(e => (
-                    <ToolBlock
-                      key={assistantBlockKey(e.item, e.idx)}
-                      t={e.item}
-                      chatId={chatId}
-                    />
-                  ))}
-                </ToolActivityGroup>
+                <ActivityStretch entries={node.group} chatId={chatId} live={live} />
               </div>
             )
           }
