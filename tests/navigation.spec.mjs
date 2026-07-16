@@ -742,7 +742,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(contract).toEqual({
       overlayTouchAction: 'none',
       overlayOverscroll: 'none',
-      drawerTouchAction: 'pan-y',
+      drawerTouchAction: 'pan-y pinch-zoom',
       drawerOverscroll: 'contain',
       contentPointerEvents: 'none',
       contentTouchAction: 'none',
