@@ -221,6 +221,36 @@ export function cushionPresent(snap, { min = PIN_BOTTOM_ROOM, pinOffset = PIN_OF
   return { ok: cushion >= min, id, measured: cushion, expected }
 }
 
+/** C7 anchor-held-through-toggle: collapsing/expanding a disclosure (a thinking
+ *  block, tool card, or activity stretch) must not move the reader. The anchor's
+ *  viewport-top stays put across the toggle (±tolerance), AND the dynamic spacer
+ *  must not accumulate reservation across repeated toggles: after a collapse it
+ *  may grow by at most the one removed body's height, never a stacked multiple
+ *  (the "spacer over-reserves across rapid toggles" regression). This is the
+ *  disclosure seam where preserveTogglePosition and useScrollMode share the
+ *  spacer — the interaction that regressed repeatedly. `bodyH` is the collapsed
+ *  body's outer height; pass 0 for an expand (spacer must not exceed baseline). */
+export function anchorHeldThroughToggle(
+  before, after, { tolerance = 2, bodyH = 0, spacerBaseline = null } = {}) {
+  const id = 'anchor-held-through-toggle'
+  const expected = `anchor top drift <= ${tolerance}; spacer <= baseline + bodyH`
+  if (!before || !after || before.anchorTop == null || after.anchorTop == null) {
+    return indeterminate(id, expected,
+      'no anchorTop in before/after (missing disclosure anchor)')
+  }
+  const drift = after.anchorTop - before.anchorTop
+  const baseline = spacerBaseline ?? before.spacerH
+  // Spacer accumulation check only when both sides expose a spacer height.
+  const spacerOk = after.spacerH == null || baseline == null
+    ? true
+    : after.spacerH <= baseline + Math.max(0, bodyH) + tolerance
+  return {
+    ok: Math.abs(drift) <= tolerance && spacerOk,
+    id, expected,
+    measured: { drift, spacerBefore: baseline, spacerAfter: after.spacerH },
+  }
+}
+
 /** Single visible assistant surface. Count is supplied by the caller (a DOM
  *  selector count) — this module never touches the DOM. */
 export function singleAssistantSurface(count, { expected = 1 } = {}) {
