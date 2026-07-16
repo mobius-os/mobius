@@ -536,17 +536,21 @@ export function gestureLayoutRetryDelay(gestureWindowUntil, now) {
 
 /** Only input whose default action can move the chat begins reader ownership.
  * Text entry and activating controls inside a message must not freeze layout
- * until the no-scroll dead-man expires. A disclosure tap is especially
+ * until the no-scroll dead-man expires. A disclosure activation is especially
  * important here: collapsing its body can clamp scrollTop and emit a synthetic
  * scroll event. Treating that clamp as the start of a swipe holds the smaller
  * spacer for the 250ms momentum window, so the viewport moves once on collapse
- * and again when layout ownership returns. A real drag that starts on a
- * disclosure still produces touchmove, which claims reader ownership below. */
+ * and again when layout ownership returns. Pointer, touch, Enter, and Space can
+ * all activate the button. A real drag still produces touchmove, which claims
+ * reader ownership below. */
 export function readerInputMayScroll(type, key = '', target = null) {
-  if ((type === 'pointerdown' || type === 'touchstart')
-      && target?.closest?.(
-        '.chat__activity-header, .chat__tool-header, .chat__marker-header',
-      )) {
+  const disclosure = target?.closest?.(
+    '.chat__activity-header, .chat__tool-header, .chat__marker-header',
+  )
+  const activatesDisclosure = type === 'pointerdown'
+    || type === 'touchstart'
+    || (type === 'keydown' && ['Enter', ' ', 'Spacebar'].includes(key))
+  if (disclosure && activatesDisclosure) {
     return false
   }
   if (type !== 'keydown') return true

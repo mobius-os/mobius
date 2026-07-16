@@ -177,7 +177,7 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('touchmove'), true)
 })
 
-test('a disclosure tap does not mistake its collapse clamp for a reader swipe', () => {
+test('disclosure activation does not mistake its collapse clamp for a reader swipe', () => {
   const disclosureTarget = {
     closest(selector) {
       assert.match(selector, /chat__activity-header/)
@@ -190,6 +190,12 @@ test('a disclosure tap does not mistake its collapse clamp for a reader swipe', 
   assert.equal(readerInputMayScroll('touchstart', '', disclosureTarget), false)
   assert.equal(readerInputMayScroll('touchmove', '', disclosureTarget), true,
     'a real drag starting on the disclosure still claims reader ownership')
+  assert.equal(readerInputMayScroll('keydown', ' ', disclosureTarget), false,
+    'Space activates the button and must not claim scroll ownership')
+  assert.equal(readerInputMayScroll('keydown', 'Spacebar', disclosureTarget), false)
+  assert.equal(readerInputMayScroll('keydown', 'Enter', disclosureTarget), false)
+  assert.equal(readerInputMayScroll('keydown', 'PageDown', disclosureTarget), true,
+    'scrolling keys still claim ownership while a disclosure has focus')
   assert.equal(readerInputMayScroll('pointerdown', '', ordinaryTarget), true)
 })
 
