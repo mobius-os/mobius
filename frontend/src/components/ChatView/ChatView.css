@@ -1151,37 +1151,6 @@
   padding: 0 0 6px;
 }
 
-/* A subtle modern touch: the live label shimmers between --muted and --text while
-   the stretch is actively working (ChatGPT-style), gated on reduced-motion so it
-   is pure decoration on top of the load-bearing spinner/pulse. CSS-only — the
-   sweep repaints one short masked text line per frame (cheap at this size) but
-   never re-renders React — and the sweep floor is --muted, so contrast never
-   drops below the resting label. Scoped to --running as well as --live: in the
-   gap between one tool ending and the next event the trailing stretch is still
-   the live node but has nothing running, and a shimmering settled-looking label
-   would read as a glitch. */
-@media (prefers-reduced-motion: no-preference) {
-  .chat__activity--live.chat__activity--running .chat__activity-label {
-    background: linear-gradient(
-      100deg,
-      var(--muted) 30%,
-      var(--text) 50%,
-      var(--muted) 70%
-    );
-    background-size: 200% 100%;
-    background-clip: text;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-    animation: activityShimmer 2.4s linear infinite;
-  }
-}
-
-@keyframes activityShimmer {
-  0% { background-position: 150% 0; }
-  100% { background-position: -50% 0; }
-}
-
 /* ── Marker card (compaction + future system markers) ── */
 
 /* A marker is a product/system moment ("the chat was summarized", "the turn

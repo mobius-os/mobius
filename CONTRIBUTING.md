@@ -92,7 +92,7 @@ scripts/playwright-local.sh --allow-local-e2e tests/navigation.spec.mjs
 
 The wrapper clones that committed revision into temporary storage, builds a
 separate backend/database/credential set on random ports, uses one browser
-worker, and tears the stack down. It intentionally refuses tracked uncommitted
+worker, and tears the stack down. It intentionally refuses uncommitted source
 changes so the browser tests and served runtime cannot drift apart.
 
 ## Dev loop: live app rebuild

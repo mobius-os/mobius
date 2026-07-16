@@ -21,7 +21,7 @@ shift
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command_name in git docker curl python3; do
+for command_name in git docker curl flock python3 sha256sum; do
   command -v "$command_name" >/dev/null || {
     echo "error: $command_name is required for isolated local E2E" >&2
     exit 2
@@ -33,19 +33,28 @@ if [[ ! -x "$ROOT/node_modules/.bin/playwright" ]]; then
   exit 2
 fi
 
-# The disposable runtime intentionally serves a committed tree. Refuse tracked
+# The disposable runtime intentionally serves a committed tree. Refuse source
 # edits rather than running working-tree tests against an older backend/frontend
-# from HEAD and reporting a false result. Ignored/untracked build artifacts do
-# not affect the snapshot.
-if ! git diff --quiet || ! git diff --cached --quiet; then
+# from HEAD and reporting a false result. Ignored build artifacts do not affect
+# the snapshot; non-ignored untracked source does.
+if ! git diff --quiet \
+    || ! git diff --cached --quiet \
+    || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
   cat >&2 <<'EOF'
 error: local E2E requires a committed revision.
-Commit or stash tracked changes first so the tests and runtime use identical code.
+Commit or stash source changes first so the tests and runtime use identical code.
 EOF
   exit 2
 fi
 
 head_sha="$(git rev-parse --verify HEAD)"
+root_id="$(printf '%s' "$ROOT" | sha256sum | cut -c1-12)"
+lock_path="${TMPDIR:-/tmp}/mobius-local-e2e-${root_id}.lock"
+exec 9>"$lock_path"
+if ! flock -n 9; then
+  echo "error: another isolated local E2E run is active for $ROOT" >&2
+  exit 2
+fi
 run_id="$(date +%s)-$$"
 project="mobius-local-e2e-${run_id}"
 image_name="${project}:test"
@@ -172,6 +181,8 @@ for _ in $(seq 1 60); do
     break
   fi
   if [[ "$health" == "unhealthy" ]]; then
+    docker inspect --format='{{range .State.Health.Log}}{{println .Output}}{{end}}' \
+      "$app_container" >&2 || true
     compose logs --tail 200 app
     echo "error: isolated test backend is unhealthy" >&2
     exit 1

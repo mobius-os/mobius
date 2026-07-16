@@ -663,6 +663,37 @@ test('an unresolvable saved location falls back to a settled bottom anchor', () 
   assert.notEqual(mode.kind, 'FOLLOW_BOTTOM')
 })
 
+test('attention nudge anchors the physical tail without enabling follow', () => {
+  const last = {
+    offsetTop: 1500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-attention-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 2100,
+    scrollTop: 700,
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-attention-tail"]' ? last : null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const mode = physicalBottomAnchorModeFromScroll(scrollEl)
+  assert.deepEqual(mode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-attention-tail',
+    offset: 100,
+  })
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1400,
+    'the move includes all composer clearance after the attention card')
+  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
+    'revealing an action must not create live-follow intent')
+})
+
 test('chat exit freezes the visible anchor even at the physical tail', () => {
   const item = {
     offsetTop: 1200,

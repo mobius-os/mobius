@@ -30,10 +30,11 @@ test('chat context actions follow model selection and continuation policy', () =
 })
 
 
-test('agent context inspector presents only the two owner-facing layers', () => {
+test('agent context inspector keeps continuity and active turn context visible', () => {
   assert.match(inspectorSource, /title: 'System prompt'/)
   assert.match(inspectorSource, /title: 'Recent chat summaries'/)
   assert.doesNotMatch(inspectorSource, /title: 'Memory/)
-  assert.doesNotMatch(inspectorSource, /title: 'Compaction/)
-  assert.doesNotMatch(inspectorSource, /title: 'App context/)
+  assert.match(inspectorSource, /title: 'Current app context'/)
+  assert.match(inspectorSource, /title: 'App report'/)
+  assert.match(inspectorSource, /title: 'Compaction handoff'/)
 })

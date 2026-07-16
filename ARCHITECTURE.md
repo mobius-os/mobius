@@ -195,7 +195,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `uploads.py` | Per-chat file upload management |
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
-| `local_services.py` | Guarded loopback proxy plus the shared gateway-origin adapter for owner-trusted backend web apps. One gateway hostname is reserved to explicitly enabled `/services/<slug>` prefixes, strips upstream frame blockers only there, keeps cookies host-only, and fails closed without an origin or registry opt-in |
+| `local_services.py` | Guarded loopback proxy plus the shared gateway-origin adapter for owner-trusted backend web apps. Each service requires explicit `upstream_auth` and gateway opt-in; Möbius authority headers are stripped, cookies and redirects stay confined to `/services/<slug>`, the gateway hostname is reserved to enabled prefixes, frame blockers are relaxed only there, and invalid configuration fails closed |
 | `standalone.py` | Top-level install/manifest shell for mini-app PWAs. **Known boundary gap:** its current loader executes the app component in the top-level shell origin; it is not yet equivalent to the opaque in-shell app frame |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
@@ -580,6 +580,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   text block in event order, without hiding, duplicating, or reordering them. Only a
   recovered answer whose POST returns `started` creates a new hidden continuation.
   Switching sources preserves the active row's anchor identity and writes no scroll.
+- **R4a — Attention nudges reveal the usable tail.** Tapping an offscreen question or
+  paused-turn nudge lands at the physical tail, including composer-clearance padding,
+  so the real Submit or Resume action is visible above the overlaid composer. This is
+  a settled `ANCHOR_AT` hold, not `FOLLOW_BOTTOM`; one-shot navigation must not create
+  live-follow intent for later content. It routes through the scroll owner rather than
+  `scrollIntoView`, whose viewport intersection cannot detect composer coverage.
 
 The transition table is intentionally exhaustive; adding a new send or lifecycle
 path means routing it through the same entries rather than inventing another rule:

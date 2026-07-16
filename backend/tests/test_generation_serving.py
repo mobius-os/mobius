@@ -219,12 +219,9 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_NEXT_DIST_DIR", dirs["next"])
   monkeypatch.setattr(fw, "_OLD_DIST_DIR", dirs["old"])
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
-  monkeypatch.setattr(
-    fw,
-    "_BUILT_GLOBAL_CHECK",
-    Path(__file__).resolve().parents[2]
-    / "frontend" / "scripts" / "check-built-globals.mjs",
-  )
+  # Global validation has focused publisher coverage; these fixtures exercise
+  # only generation rotation and contain deliberately tiny placeholder JS.
+  monkeypatch.setattr(fw, "_validate_built_globals", lambda _built: None)
   return dirs
 
 

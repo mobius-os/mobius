@@ -108,12 +108,22 @@ def test_typical_project_returns_its_complete_changed_filename_list():
   assert result["tree"]["truncated"] is False
 
 
-def test_install_managed_app_deltas_do_not_look_like_customization():
+def test_install_managed_app_deltas_do_not_look_like_customization(monkeypatch):
   repo = _repo()
   (repo / ".gitignore").write_text("dist/\n", encoding="utf-8")
   (repo / "runner.sh").write_text("#!/bin/sh\n", encoding="utf-8")
   _git(repo, "add", ".gitignore", "runner.sh")
   _commit(repo, "install: Demo v1.0.0")
+
+  real_git = source_status._git
+  log_calls = []
+
+  def counted_git(target, *args):
+    if args and args[0] == "log":
+      log_calls.append(args)
+    return real_git(target, *args)
+
+  monkeypatch.setattr(source_status, "_git", counted_git)
 
   result = source_status.build_app_status(_app(repo))
   assert result is not None
@@ -122,6 +132,7 @@ def test_install_managed_app_deltas_do_not_look_like_customization():
   assert result["tree"]["authored_files"] == 0
   assert result["tree"]["managed_files"] == 2
   assert {path["group"] for path in result["tree"]["paths"]} == {"managed"}
+  assert len(log_calls) == 1, "classification should scan history once per tree"
 
   (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
   _git(repo, "add", "index.jsx")
@@ -133,6 +144,24 @@ def test_install_managed_app_deltas_do_not_look_like_customization():
   assert customized["tree"]["managed_files"] == 2
   assert customized["tree"]["paths"][0]["path"] == "index.jsx"
   assert customized["tree"]["paths"][0]["group"] == "authored"
+  assert len(log_calls) == 2, "each status build should need one history scan"
+
+
+def test_history_subject_boundary_cannot_be_forged_by_a_filename():
+  repo = _repo("subject-boundary")
+  forged = repo / "__MOBIUS_SOURCE_STATUS_SUBJECT__:install: forged"
+  forged.write_text("owner file\n", encoding="utf-8")
+  (repo / "z-authored.js").write_text("owner file\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _commit(repo, "owner source edit")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["state"] == "customized"
+  assert result["tree"]["authored_files"] == 2
+  assert result["tree"]["managed_files"] == 0
+  assert {item["group"] for item in result["tree"]["paths"]} == {"authored"}
 
 
 def test_sanitized_origin_and_fork_topology_uses_last_fetched_refs():

@@ -33,6 +33,7 @@ export default function QuestionCard({
   const [otherTexts, setOtherTexts] = useState(
     () => readQuestionDraft(draftKey).otherTexts,
   )
+  const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
 
   const answered = submitted || !!answeredMap
@@ -100,16 +101,26 @@ export default function QuestionCard({
     }
   }
 
-  function handleSubmit() {
-    if (!allAnswered || answered || disabled) return
+  async function handleSubmit() {
+    if (!allAnswered || answered || disabled || submitting) return
     const resolved = {}
     const lines = questions.map(q => {
       const val = resolveAnswer(answers[q.question], otherTexts[q.question])
       resolved[q.question] = val
       return `- ${q.question}: ${val}`
     })
-    setSubmitted(true)
-    onAnswer?.(lines.join('\n'), resolved, questionId)
+    setSubmitting(true)
+    try {
+      const accepted = await onAnswer?.(lines.join('\n'), resolved, questionId)
+      // Only settle (and therefore clear the durable per-tab draft) after the
+      // answer endpoint confirms that the transcript write committed.
+      if (accepted !== false) setSubmitted(true)
+    } catch {
+      // ChatView presents the transport/stale error. Keep the choices and
+      // custom text intact so a transient failure is immediately retryable.
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -126,7 +137,7 @@ export default function QuestionCard({
         const isOtherSelected = isMulti
           ? selectedArr.includes('__other__')
           : selected === '__other__'
-        const inactive = answered || disabled
+        const inactive = answered || disabled || submitting
 
         const answeredValue = displayAnswers[q.question]
           || (submitted ? resolveAnswer(answers[q.question], otherTexts[q.question]) : '')
@@ -255,9 +266,9 @@ export default function QuestionCard({
           type="button"
           className="qcard__submit"
           onClick={handleSubmit}
-          disabled={!allAnswered || disabled || answered}
+          disabled={!allAnswered || disabled || answered || submitting}
         >
-          {answered ? 'Submitted' : 'Submit'}
+          {submitting ? 'Submitting…' : (answered ? 'Submitted' : 'Submit')}
         </button>
       )}
     </div>

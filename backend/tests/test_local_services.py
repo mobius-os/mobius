@@ -21,7 +21,11 @@ def clean_local_services_config():
 
 
 def write_config(path: Path, services: dict):
-  path.write_text(json.dumps({"version": 1, "services": services}))
+  declared = {
+    slug: {**entry, "access": "upstream_auth"}
+    for slug, entry in services.items()
+  }
+  path.write_text(json.dumps({"version": 1, "services": declared}))
 
 
 def test_stock_instance_exposes_no_local_service(client):
@@ -105,6 +109,22 @@ def test_malformed_configuration_does_not_affect_platform_health(
   assert health.status_code == 200
 
 
+def test_service_must_explicitly_delegate_access_to_upstream_auth(
+  client, clean_local_services_config,
+):
+  clean_local_services_config.write_text(json.dumps({
+    "version": 1,
+    "services": {
+      "recipes": {"upstream": "http://127.0.0.1:8123"},
+    },
+  }))
+
+  response = client.get("/services/recipes/")
+
+  assert response.status_code == 503
+  assert "configuration is invalid" in response.json()["detail"]
+
+
 def test_proxy_preserves_path_query_headers_body_and_repeated_cookies(
   client, clean_local_services_config, monkeypatch,
 ):
@@ -128,8 +148,9 @@ def test_proxy_preserves_path_query_headers_body_and_repeated_cookies(
         201,
         headers=[
           ("content-type", "text/plain"),
-          ("set-cookie", "sessionid=abc; Path=/services/recipes; HttpOnly"),
-          ("set-cookie", "csrftoken=xyz; Path=/services/recipes"),
+          ("location", "http://127.0.0.1:8123/services/recipes/welcome/"),
+          ("set-cookie", "sessionid=abc; Path=/; Domain=127.0.0.1; HttpOnly"),
+          ("set-cookie", "csrftoken=xyz"),
           ("connection", "close"),
           ("content-length", "999"),
         ],
@@ -146,7 +167,13 @@ def test_proxy_preserves_path_query_headers_body_and_repeated_cookies(
   response = client.post(
     "/services/recipes/accounts/login/?next=%2Fservices%2Frecipes%2F",
     content=b"username=owner",
-    headers={"host": "mobius.test", "content-type": "application/x-www-form-urlencoded"},
+    headers={
+      "host": "attacker.invalid",
+      "authorization": "Bearer must-not-reach-upstream",
+      "forwarded": "for=198.51.100.7;host=attacker.invalid;proto=http",
+      "x-forwarded-host": "attacker.invalid",
+      "content-type": "application/x-www-form-urlencoded",
+    },
   )
 
   request = seen["request"]
@@ -155,17 +182,24 @@ def test_proxy_preserves_path_query_headers_body_and_repeated_cookies(
     "?next=%2Fservices%2Frecipes%2F"
   )
   assert request.content == b"username=owner"
-  assert request.headers["host"] == "mobius.test"
-  assert request.headers["x-forwarded-host"] == "mobius.test"
+  public = urlsplit(get_settings().frontend_origin)
+  assert request.headers["host"] == public.netloc
+  assert request.headers["x-forwarded-host"] == public.netloc
   assert request.headers["x-forwarded-proto"] == urlsplit(
     get_settings().frontend_origin
   ).scheme
   assert request.headers["x-script-name"] == "/services/recipes"
+  assert request.headers["x-forwarded-prefix"] == "/services/recipes"
+  assert "authorization" not in request.headers
+  assert "forwarded" not in request.headers
   assert response.status_code == 201
   assert response.content == b"proxied"
+  assert response.headers["location"] == (
+    f"{public.scheme}://{public.netloc}/services/recipes/welcome/"
+  )
   assert response.headers.get_list("set-cookie") == [
-    "sessionid=abc; Path=/services/recipes; HttpOnly",
-    "csrftoken=xyz; Path=/services/recipes",
+    "sessionid=abc; Path=/services/recipes/; HttpOnly",
+    "csrftoken=xyz; Path=/services/recipes/",
   ]
   assert "connection" not in response.headers
   assert "content-length" not in response.headers
@@ -344,7 +378,8 @@ def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
   assert all(policy != "frame-ancestors 'self'" for policy in policies)
   assert "domain=" not in public.headers["set-cookie"].lower()
   assert ordinary.headers["x-frame-options"] == "SAMEORIGIN"
-  assert "domain=.localhost" in ordinary.headers["set-cookie"].lower()
+  assert "domain=" not in ordinary.headers["set-cookie"].lower()
+  assert "path=/services/tandoor" in ordinary.headers["set-cookie"].lower()
 
 
 def test_multiple_owner_trusted_services_share_one_gateway_but_private_service_does_not(

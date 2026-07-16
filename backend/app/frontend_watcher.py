@@ -142,7 +142,7 @@ def _validate_built_globals(d: Path) -> None:
   supply globals at runtime. That also means a half-finished refactor such as
   ``clearTimeout(ioBounceTimer)`` compiles successfully, publishes, and crashes
   only when the affected callback runs. The companion Node script parses every
-  emitted JS module with Babel's scope analysis and allows only the explicit
+  emitted JS module with scope analysis and allows only the explicit
   browser/worker/toolchain globals the shell actually relies on.
 
   Run this after copying to ``.dist-next`` and before the atomic swap so a
@@ -372,14 +372,6 @@ def _prepare_next_from(source_dir: Path) -> None:
       "vite build did not produce index.html, assets/, sw.js, and "
       "manifest.webmanifest"
     )
-  try:
-    _validate_built_globals(_NEXT_DIST_DIR)
-  except Exception:
-    # Match every other preparation failure: a rejected candidate must not
-    # linger as a complete-looking `.dist-next` that a later publisher could
-    # mistake for its own output.
-    shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
-    raise
 
 
 def _content_identical(a: Path, b: Path) -> bool:
@@ -436,6 +428,13 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
             "served dist", reason,
           )
           return False
+        try:
+          _validate_built_globals(_NEXT_DIST_DIR)
+        except Exception:
+          # A rejected candidate must not linger as a complete-looking next
+          # generation that a later publisher could mistake for its output.
+          shutil.rmtree(_NEXT_DIST_DIR, ignore_errors=True)
+          raise
         _replace_dist()
         return True
       finally:

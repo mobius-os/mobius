@@ -37,10 +37,10 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
-    # The full backend suite is now large enough that cold hosted runners can
-    # reach 5 minutes while tests are still passing. Keep the cap bounded, but
-    # leave headroom so the job fails on assertions instead of a hard cancel.
-    timeout-minutes: 10
+    # The full backend suite now reaches roughly 10 minutes on a cold hosted
+    # runner, plus dependency/setup time. Keep the cap bounded, but leave enough
+    # headroom for pytest to report assertions instead of being killed near 90%.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -48,24 +48,27 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
           cache-dependency-path: backend/requirements.txt
-      - uses: actions/setup-node@v5
+      - name: Set up Node with npm cache
+        uses: actions/setup-node@v5
         with:
           node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
       - name: Install esbuild
         # compile_jsx shells out to esbuild; /api/apps/ tests need it.
         # Keep aligned with the Dockerfile pin (the source of truth) — drift
         # here means a 0.25-only compile regression passes green CI but
         # breaks the prod image build.
         run: npm install -g esbuild@0.25.12
+      - name: Install frontend runtime deps
+        # frontend_watcher's publish validation executes the locked Acorn /
+        # eslint-scope checker. The production image installs this same
+        # lockfile, so backend integration tests need the matching runtime.
+        working-directory: frontend
+        run: npm ci --ignore-scripts
       - name: Install backend deps
         working-directory: backend
         run: pip install -r requirements.txt
-      - name: Install built-shell checker deps
-        # Backend publication tests execute the same Babel-based checker used
-        # by the runtime publisher. Keep this real boundary covered instead of
-        # mocking the subprocess in pytest.
-        working-directory: frontend
-        run: npm ci --ignore-scripts
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site

@@ -89,8 +89,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 24px;
-  padding: 0 8px;
+  min-height: 44px;
+  padding: 0 12px;
   border-radius: 999px;
   border: 1px solid var(--border-light);
   background: color-mix(in srgb, var(--bg) 88%, var(--text) 6%);
@@ -188,7 +188,7 @@
   border-radius: 10px;
   border: 1px solid var(--border-light);
   background: var(--bg);
-  box-shadow: 0 8px 28px color-mix(in srgb, #000 28%, transparent);
+  box-shadow: 0 4px 8px color-mix(in srgb, #000 28%, transparent);
   /* No persistent scrollbar track on coarse pointers, matching the shell. */
   scrollbar-width: none;
 }

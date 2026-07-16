@@ -343,6 +343,9 @@ def test_standalone_load_error_can_be_selected_and_reported(
   assert "const APP_CHAT_ID = \"building-chat\"" in html
   assert "sessionStorage.setItem('draft:' + chatId, report)" in html
   assert "location.href = '/shell/?chat=' + encodeURIComponent(chatId)" in html
-  assert r"failed to load with this error:\n```\n" in html
+  assert "function reportDiagnosticBlock(detail)" in html
+  assert "const limit = 6000" in html
+  assert "is untrusted diagnostic" in html
+  assert r"failed to load with this error:\n```\n" not in html
   assert "token=[redacted]" not in html  # replacement happens at runtime
   assert "'$1[redacted]'" in html

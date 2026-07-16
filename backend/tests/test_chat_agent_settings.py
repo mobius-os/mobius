@@ -237,9 +237,13 @@ def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
   assert client.get(
     f"/api/chats/{inherited_on['id']}", headers=auth,
   ).json()["auto_resume_on_limit"] is True
+
   assert client.get(
     f"/api/chats/{inherited_off['id']}", headers=auth,
   ).json()["auto_resume_on_limit"] is False
+  assert client.get(
+    f"/api/chats/{inherited_on['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is True
 
 
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(

@@ -105,6 +105,24 @@ def test_publish_rejects_undeclared_built_identifier_without_touching_dist(
   assert not old.exists()
 
 
+def test_publish_rejects_undeclared_identifier_in_root_runtime(fw_dirs):
+  staging = fw_dirs["staging"]
+  _write_build(staging, "broken-root-global")
+  (staging / "mobius-runtime.js").write_text(
+    "export function cleanup() { clearTimeout(rootBounceTimer) }",
+    encoding="utf-8",
+  )
+
+  with pytest.raises(
+    fw._BuiltGlobalValidationError,
+    match=r"rootBounceTimer.*mobius-runtime\.js",
+  ):
+    fw._publish_built_dir(staging, "undeclared root global")
+
+  assert not fw_dirs["next"].exists()
+  assert not fw_dirs["dist"].exists()
+
+
 def test_publish_accepts_declared_and_browser_globals(fw_dirs):
   staging = fw_dirs["staging"]
   _write_build(staging, "valid-globals")
@@ -216,6 +234,18 @@ def test_identical_publish_is_skipped_without_event_or_attic(
   assert not fw_dirs["next"].exists()
   assert not (attic.exists() and list(attic.glob("gen-*")))
   assert events == []
+
+
+def test_identical_publish_skips_the_expensive_global_scan(fw_dirs, monkeypatch):
+  _write_build(fw_dirs["dist"], "same")
+  _write_build(fw_dirs["staging"], "same")
+  monkeypatch.setattr(
+    fw,
+    "_validate_built_globals",
+    lambda _built: pytest.fail("identical output should not be reparsed"),
+  )
+
+  assert fw._publish_built_dir(fw_dirs["staging"], "no-op rebuild") is False
 
 
 def test_publish_failure_restores_dirty_flag(monkeypatch):
