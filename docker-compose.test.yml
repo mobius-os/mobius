@@ -1,4 +1,22 @@
 services:
+  # Exercise the same response-header and dedicated-service-origin boundary as
+  # production.  The app remains separately published on INTERNAL_TEST_PORT
+  # for cleanup that must not traverse the public proxy.
+  caddy:
+    image: caddy:2.9-alpine
+    container_name: ${MOBIUS_CADDY_CONTAINER:-mobius-test-caddy}
+    restart: unless-stopped
+    environment:
+      - DOMAIN=http://localhost:${TEST_PORT:-8001}
+      - FRONTEND_ORIGIN=http://localhost:${TEST_PORT:-8001}
+      - MOBIUS_SERVICE_TANDOOR_ORIGIN=http://tandoor.localhost:${TEST_PORT:-8001}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports: !override ["${TEST_PORT:-8001}:${TEST_PORT:-8001}"]
+    depends_on:
+      app:
+        condition: service_healthy
+
   app:
     # container_name and image are GLOBAL (not Compose-project-scoped), so two
     # runs with the same defaults collide even when -p differs. For full
@@ -36,7 +54,7 @@ services:
       # other than mobius-test.
       - SECRET_KEY=test-secret-not-for-prod-do-not-use-anywhere-else
       - DOMAIN=localhost
-      - FRONTEND_ORIGIN=http://localhost:8001
+      - FRONTEND_ORIGIN=http://localhost:${TEST_PORT:-8001}
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
       - AGENT_BROWSER_STREAM_PORT=9225
@@ -51,11 +69,9 @@ services:
     volumes:
       - test_data:/data
       - ./:/workspace:ro
-    # Port is TEST_PORT (default 8001). Uses the !override tag so a custom
-    # TEST_PORT REPLACES the default rather than merge-appending it (a plain
-    # second `ports:` entry would keep 8001:8000 AND add the new one, colliding
-    # with a concurrent default run).
-    ports: !override ["${TEST_PORT:-8001}:8000"]
+    # The public browser surface is Caddy on TEST_PORT. Publish the app on a
+    # separate host port only for exact, proxy-independent cleanup/probes.
+    ports: !override ["${INTERNAL_TEST_PORT:-8012}:8000"]
     healthcheck:
       # Includes ordinary API health plus a fail-closed checkout identity test.
       # A healthy container therefore proves Playwright will exercise this
