@@ -863,6 +863,40 @@ def test_review_status_catches_noncanonical_stored_diff(
   assert response.json()["records"][0]["code"] == "diff_mismatch"
 
 
+def test_review_status_rejects_a_fingerprinted_nonancestor_base(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  repo, record, _diff = _prepared_real_review(app_id, "review-ancestry")
+  original_base = record["plan"]["base_sha"]
+  head = record["plan"]["head_sha"]
+  tree = subprocess.check_output(
+    ["git", "rev-parse", f"{original_base}^{{tree}}"], cwd=repo, text=True,
+  ).strip()
+  sibling = subprocess.check_output([
+    "git", "commit-tree", tree, "-p", original_base, "-m", "sibling base",
+  ], cwd=repo, text=True).strip()
+  reviewed = subprocess.check_output([
+    "git", "-c", "core.quotePath=false", "diff", "--no-ext-diff",
+    "--no-color", "--binary", "--full-index", "--src-prefix=a/",
+    "--dst-prefix=b/", f"{sibling}..{head}",
+  ], cwd=repo, text=True)
+  record["plan"]["base_sha"] = sibling
+  record["plan"]["diff_sha256"] = hashlib.sha256(reviewed.encode()).hexdigest()
+  _write_contribution(app_id, "review-ancestry", record, reviewed)
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["records"][0]["code"] == "invalid_ancestry"
+
+
 def test_review_status_requires_refresh_after_stack_parent_merges(
   client, owner_token,
 ):
@@ -940,6 +974,208 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
   if args[:1] == ("merge-tree",):
     return _cp(returncode=1 if merge_conflict else 0)
   return None
+
+
+def test_push_topic_branch_does_not_retry_deterministic_rejections(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _push_topic_branch
+
+  calls = []
+  sleeps = []
+  monkeypatch.setattr(
+    "app.routes.github._git",
+    lambda _repo, *args, **kwargs: calls.append(args) or _cp(
+      stderr="remote: error: GH006: Protected branch update failed",
+      returncode=1,
+    ),
+  )
+  monkeypatch.setattr("app.routes.github.time.sleep", sleeps.append)
+
+  error = _push_topic_branch(tmp_path, "fix/demo")
+
+  assert "Protected branch" in error
+  assert len(calls) == 1
+  assert sleeps == []
+
+
+def test_push_topic_branch_briefly_retries_transient_transport_errors(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _push_topic_branch
+
+  outcomes = iter((
+    _cp(stderr="fatal: unable to access: HTTP 503", returncode=1),
+    _cp(stderr="fatal: connection reset by peer", returncode=1),
+    _cp(),
+  ))
+  sleeps = []
+  monkeypatch.setattr(
+    "app.routes.github._git",
+    lambda _repo, *args, **kwargs: next(outcomes),
+  )
+  monkeypatch.setattr("app.routes.github.time.sleep", sleeps.append)
+
+  assert _push_topic_branch(tmp_path, "fix/demo") is None
+  assert sleeps == [0.5, 1.0]
+
+
+def test_workflow_scope_push_errors_are_classified_for_stale_fork_fallback():
+  from app.routes.github import _is_workflow_scope_push_error
+
+  assert _is_workflow_scope_push_error(
+    "refusing to allow an OAuth App to create or update workflow "
+    "`.github/workflows/test.yml` without `workflow` scope"
+  )
+  assert not _is_workflow_scope_push_error(
+    "remote rejected: non-fast-forward"
+  )
+
+
+def test_push_reviewed_topic_adapts_only_after_workflow_scope_rejection(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _push_reviewed_topic
+
+  pushes = []
+  inspections = []
+  built_sha = "e" * 40
+
+  def fake_push(_repo, branch, source="HEAD"):
+    pushes.append((branch, source))
+    if len(pushes) == 1:
+      return (
+        "refusing to allow an OAuth App to create or update workflow "
+        "`.github/workflows/test.yml` without `workflow` scope"
+      )
+    return None
+
+  monkeypatch.setattr("app.routes.github._push_topic_branch", fake_push)
+  monkeypatch.setattr(
+    "app.routes.github._inspect_owner_fork_default_branch",
+    lambda _repo, fork, **kwargs: inspections.append((fork, kwargs)) or {
+      "last_submit_fork_sync": "strictly-behind",
+      "last_submit_fork_sha": "c" * 40,
+    },
+  )
+  monkeypatch.setattr(
+    "app.routes.github._build_fork_compatible_topic_commit",
+    lambda *_args, **_kwargs: built_sha,
+  )
+
+  source, patch = _push_reviewed_topic(
+    tmp_path,
+    branch="fix/demo",
+    fork_slug="octocat/demo",
+    merge_patch={
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": "d" * 40,
+    },
+    record_patch={"head_repository": "octocat/demo"},
+    diff_path=tmp_path / "reviewed.diff",
+    expected_diff="f" * 64,
+    author_name="octocat",
+    author_email="42+octocat@users.noreply.github.com",
+  )
+
+  assert source == built_sha
+  assert pushes == [("fix/demo", "HEAD"), ("fix/demo", built_sha)]
+  assert len(inspections) == 1
+  assert patch["last_submit_fork_sync"] == "stale-base-compatible"
+  assert patch["last_submit_push_sha"] == built_sha
+
+
+def test_push_reviewed_topic_uses_granted_workflow_scope_only_as_fallback(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError, _push_reviewed_topic
+
+  pushes = []
+  syncs = []
+
+  def fake_push(_repo, branch, source="HEAD"):
+    pushes.append((branch, source))
+    if len(pushes) == 1:
+      return (
+        "refusing to allow an OAuth App to create or update workflow "
+        "`.github/workflows/test.yml` without `workflow` scope"
+      )
+    return None
+
+  monkeypatch.setattr("app.routes.github._push_topic_branch", fake_push)
+  monkeypatch.setattr(
+    "app.routes.github._inspect_owner_fork_default_branch",
+    lambda *_args, **_kwargs: {
+      "last_submit_fork_sync": "strictly-behind",
+      "last_submit_fork_sha": "c" * 40,
+    },
+  )
+  monkeypatch.setattr(
+    "app.routes.github._build_fork_compatible_topic_commit",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      ContributionSubmitError("workflow files cannot be re-parented")
+    ),
+  )
+  monkeypatch.setattr(
+    "app.routes.github._sync_owner_fork_with_workflow_scope",
+    lambda _repo, fork, **kwargs: syncs.append((fork, kwargs)) or {
+      "last_submit_fork_sync": "fast-forwarded",
+    },
+  )
+
+  source, patch = _push_reviewed_topic(
+    tmp_path,
+    branch="fix/workflow",
+    fork_slug="octocat/demo",
+    merge_patch={
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": "d" * 40,
+    },
+    record_patch={"head_repository": "octocat/demo"},
+    diff_path=tmp_path / "reviewed.diff",
+    expected_diff="f" * 64,
+    author_name="octocat",
+    author_email="42+octocat@users.noreply.github.com",
+    workflow_scope=True,
+  )
+
+  assert source == "HEAD"
+  assert pushes == [("fix/workflow", "HEAD"), ("fix/workflow", "HEAD")]
+  assert len(syncs) == 1
+  assert patch["last_submit_fork_sync"] == "fast-forwarded"
+
+
+def test_push_reviewed_topic_skips_fork_inspection_on_happy_path(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _push_reviewed_topic
+
+  monkeypatch.setattr(
+    "app.routes.github._push_topic_branch",
+    lambda _repo, _branch, _source="HEAD": None,
+  )
+  monkeypatch.setattr(
+    "app.routes.github._inspect_owner_fork_default_branch",
+    lambda *_args, **_kwargs: pytest.fail("fork inspection is not needed"),
+  )
+
+  source, patch = _push_reviewed_topic(
+    tmp_path,
+    branch="fix/demo",
+    fork_slug="octocat/demo",
+    merge_patch={
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": "d" * 40,
+    },
+    record_patch={"head_repository": "octocat/demo"},
+    diff_path=tmp_path / "reviewed.diff",
+    expected_diff="f" * 64,
+    author_name="octocat",
+    author_email="42+octocat@users.noreply.github.com",
+  )
+
+  assert source == "HEAD"
+  assert patch == {"head_repository": "octocat/demo"}
 
 
 def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
@@ -1532,6 +1768,8 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   assert "--draft" not in create_call
   assert "octocat:fix/demo-polish" in create_call
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
+  assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
+  assert not any(call[:2] == ("pr", "list") for call in gh_calls)
   assert ("checkout", "-q", "develop") in git_calls
 
   stored = json.loads(

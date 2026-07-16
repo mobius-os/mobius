@@ -100,6 +100,7 @@ _COAUTHOR_TRAILER = (
 )
 _SUBMIT_TIMEOUT = 90
 _PUSH_RETRIES = 3
+_PUSH_RETRY_BASE_SECONDS = 0.5
 
 # The classic-token creation URL with the required scope + description
 # pre-filled. Fine-grained tokens (github_pat_…) can't push to or open PRs
@@ -682,6 +683,20 @@ def _assert_fresh(
   expected_head = _resolve_reviewed_commit(
     repo, plan.get("head_sha") or record.get("head_sha"), "head sha"
   )
+  ancestry = _git(
+    repo,
+    "merge-base",
+    "--is-ancestor",
+    expected_base,
+    expected_head,
+    check=False,
+  )
+  if ancestry.returncode != 0:
+    raise ContributionSubmitError(
+      "The reviewed branch is no longer based on its recorded parent. Ask "
+      "your agent to prepare this contribution again.",
+      code="invalid_ancestry",
+    )
   actual_head = _git(repo, "rev-parse", branch).stdout.strip()
   if actual_head != expected_head:
     raise ContributionSubmitError(
@@ -1045,6 +1060,70 @@ def _find_existing_pr(
   return None
 
 
+def _is_workflow_scope_push_error(message: str) -> bool:
+  """Recognize GitHub's stable OAuth workflow-scope rejection."""
+  detail = str(message or "").lower()
+  return (
+    "workflow" in detail
+    and (
+      "refusing to allow" in detail
+      or ".github/workflows" in detail
+      or "oauth app" in detail
+    )
+  )
+
+
+def _is_transient_push_error(message: str) -> bool:
+  """Retry transport/server failures, never deterministic push rejections."""
+  detail = str(message or "").lower()
+  transient_markers = (
+    "could not resolve host",
+    "failed to connect",
+    "connection reset",
+    "connection timed out",
+    "operation timed out",
+    "remote end hung up unexpectedly",
+    "remote hung up unexpectedly",
+    "temporarily unavailable",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "the requested url returned error: 500",
+    "the requested url returned error: 502",
+    "the requested url returned error: 503",
+    "the requested url returned error: 504",
+  )
+  return any(marker in detail for marker in transient_markers)
+
+
+def _push_branch(
+  repo: Path,
+  remote: str,
+  branch: str,
+  source: str = "HEAD",
+) -> str | None:
+  """Push once on deterministic failures; briefly retry transient failures."""
+  last_error = ""
+  for attempt in range(_PUSH_RETRIES):
+    proc = _git(
+      repo, "push", remote, f"{source}:refs/heads/{branch}", check=False,
+    )
+    if proc.returncode == 0:
+      return None
+    last_error = (proc.stderr or proc.stdout or "").strip()
+    if not _is_transient_push_error(last_error):
+      break
+    if attempt + 1 < _PUSH_RETRIES:
+      time.sleep(_PUSH_RETRY_BASE_SECONDS * (2 ** attempt))
+  return last_error or "Git push failed."
+
+
+def _push_topic_branch(repo: Path, branch: str, source: str = "HEAD") -> str | None:
+  """Push a reviewed topic to the owner's configured fork remote."""
+  return _push_branch(repo, "fork", branch, source)
+
+
 def _github_remote_slug(remote_url: str) -> str | None:
   """Return owner/repo for GitHub remotes we can verify."""
   raw = str(remote_url or "").strip()
@@ -1368,6 +1447,98 @@ def _sync_owner_fork_with_workflow_scope(
   return {**verified, "last_submit_fork_sync": "fast-forwarded"}
 
 
+def _push_reviewed_topic(
+  repo: Path,
+  *,
+  branch: str,
+  fork_slug: str,
+  merge_patch: dict,
+  record_patch: dict,
+  diff_path: Path,
+  expected_diff: str,
+  author_name: str,
+  author_email: str,
+  workflow_scope: bool = False,
+) -> tuple[str, dict]:
+  """Push the reviewed topic, inspecting a stale fork only when required."""
+  push_source = "HEAD"
+  last_push_error = _push_topic_branch(repo, branch, push_source)
+  if not last_push_error:
+    return push_source, record_patch
+  if not _is_workflow_scope_push_error(last_push_error):
+    raise ContributionSubmitError(
+      last_push_error[:600] or "Git push failed.",
+      record_patch=record_patch,
+    )
+
+  # Most topic branches can be pushed without consulting the fork's default
+  # branch. GitHub only makes that state relevant when a public_repo-only
+  # OAuth token would introduce a workflow that landed upstream after the
+  # fork fell behind. Inspect and adapt only on that specific rejection.
+  try:
+    fork_sync_patch = _inspect_owner_fork_default_branch(
+      repo,
+      fork_slug,
+      upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+      upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+    )
+    record_patch = _record_patch_with(record_patch, fork_sync_patch)
+  except ContributionSubmitError as exc:
+    raise _merge_error_patch(exc, record_patch) from exc
+  if fork_sync_patch.get("last_submit_fork_sync") != "strictly-behind":
+    raise ContributionSubmitError(
+      "GitHub refused this branch because the connection does not grant "
+      "workflow access. Reconnect GitHub with a classic token granting "
+      "public_repo and workflow, then try Send again.",
+      record_patch=record_patch,
+    )
+  try:
+    push_source = _build_fork_compatible_topic_commit(
+      repo,
+      branch=branch,
+      fork_sha=str(fork_sync_patch["last_submit_fork_sha"]),
+      upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+      diff_path=diff_path,
+      expected_diff=expected_diff,
+      author_name=author_name,
+      author_email=author_email,
+    )
+    record_patch = _record_patch_with(record_patch, {
+      "last_submit_fork_sync": "stale-base-compatible",
+      "last_submit_push_sha": push_source,
+    })
+  except ContributionSubmitError as exc:
+    if not workflow_scope:
+      raise ContributionSubmitError(
+        "This reviewed change depends on newer code in a stale PR fork. "
+        "In Contribute, enable optional workflow access, then try Send "
+        "again; Contribute will fast-forward only that fork's default "
+        "branch before pushing the reviewed topic branch.",
+        record_patch=_record_patch_with(record_patch, {
+          "last_submit_requires_workflow_scope": True,
+          "last_submit_compatible_error": exc.message,
+        }),
+      ) from exc
+    try:
+      synced_patch = _sync_owner_fork_with_workflow_scope(
+        repo,
+        fork_slug,
+        upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
+        upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
+      )
+      record_patch = _record_patch_with(record_patch, synced_patch)
+      push_source = "HEAD"
+    except ContributionSubmitError as sync_exc:
+      raise _merge_error_patch(sync_exc, record_patch) from sync_exc
+  last_push_error = _push_topic_branch(repo, branch, push_source)
+  if last_push_error:
+    raise ContributionSubmitError(
+      last_push_error[:600] or "Git push failed.",
+      record_patch=record_patch,
+    )
+  return push_source, record_patch
+
+
 def _submit_prepared_pr(
   record: dict,
   diff_path: Path,
@@ -1457,83 +1628,33 @@ def _submit_prepared_pr(
         "last_submit_mode": "stack",
         "last_submit_push_sha": _git(repo, "rev-parse", "HEAD").stdout.strip(),
       })
+      last_push_error = _push_branch(
+        repo, push_remote, branch, push_source,
+      )
+      if last_push_error:
+        raise ContributionSubmitError(
+          last_push_error[:600] or "Git push failed.",
+          record_patch=record_patch,
+        )
     else:
       try:
         fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
       except ContributionSubmitError as exc:
         raise _merge_error_patch(exc, record_patch) from exc
       record_patch = _record_patch_with(record_patch, {"head_repository": fork_slug})
-
-      try:
-        fork_sync_patch = _inspect_owner_fork_default_branch(
-          repo,
-          fork_slug,
-          upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
-          upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-        )
-      except ContributionSubmitError as exc:
-        raise _merge_error_patch(exc, record_patch) from exc
-      record_patch = _record_patch_with(record_patch, fork_sync_patch)
-
-      if fork_sync_patch.get("last_submit_fork_sync") == "strictly-behind":
-        try:
-          push_source = _build_fork_compatible_topic_commit(
-            repo,
-            branch=branch,
-            fork_sha=str(fork_sync_patch["last_submit_fork_sha"]),
-            upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-            diff_path=diff_path,
-            expected_diff=expected_diff,
-            author_name=author_name,
-            author_email=author_email,
-          )
-          record_patch = _record_patch_with(record_patch, {
-            "last_submit_fork_sync": "stale-base-compatible",
-            "last_submit_push_sha": push_source,
-          })
-        except ContributionSubmitError as exc:
-          granted_scopes = set(state.get("scopes") or [])
-          if "workflow" not in granted_scopes:
-            raise ContributionSubmitError(
-              "This reviewed change depends on newer code in a stale PR fork. "
-              "In Contribute, enable optional workflow access, then try Send "
-              "again; Contribute will fast-forward only that fork's default "
-              "branch before pushing the reviewed topic branch.",
-              record_patch=_record_patch_with(record_patch, {
-                "last_submit_requires_workflow_scope": True,
-                "last_submit_compatible_error": exc.message,
-              }),
-            ) from exc
-          try:
-            synced_patch = _sync_owner_fork_with_workflow_scope(
-              repo,
-              fork_slug,
-              upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
-              upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-            )
-            record_patch = _record_patch_with(record_patch, synced_patch)
-            push_source = "HEAD"
-          except ContributionSubmitError as sync_exc:
-            raise _merge_error_patch(sync_exc, record_patch) from sync_exc
-      push_remote = "fork"
-      published_repo = fork_slug
-
-    last_push_error = None
-    for _ in range(_PUSH_RETRIES):
-      proc = _git(
-        repo, "push", push_remote, f"{push_source}:refs/heads/{branch}",
-        check=False,
-      )
-      if proc.returncode == 0:
-        last_push_error = None
-        break
-      last_push_error = (proc.stderr or proc.stdout or "").strip()
-      time.sleep(2)
-    if last_push_error:
-      raise ContributionSubmitError(
-        last_push_error[:600] or "Git push failed.",
+      push_source, record_patch = _push_reviewed_topic(
+        repo,
+        branch=branch,
+        fork_slug=fork_slug,
+        merge_patch=merge_patch,
         record_patch=record_patch,
+        diff_path=diff_path,
+        expected_diff=expected_diff,
+        author_name=author_name,
+        author_email=author_email,
+        workflow_scope="workflow" in set(state.get("scopes") or []),
       )
+      published_repo = fork_slug
     pushed_branch_url = (
       f"https://github.com/{published_repo}/tree/{quote(branch, safe='/')}"
     )
@@ -1545,17 +1666,6 @@ def _submit_prepared_pr(
       ),
       "last_pushed_branch_url": pushed_branch_url,
     }
-
-    existing = _find_existing_pr(
-      repo,
-      upstream_repo,
-      login,
-      branch,
-      base_branch=direct_base,
-      same_repo=bool(direct_base),
-    )
-    if existing:
-      return existing, _parse_pr_number(existing), pushed_patch
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -1571,10 +1681,22 @@ def _submit_prepared_pr(
         ]
         if direct_base:
           create_args.extend(("--base", direct_base))
-        pr = _gh(
-          repo,
-          *create_args,
-        )
+        pr = _gh(repo, *create_args, check=False)
+        if pr.returncode != 0:
+          # Retried sends commonly arrive after GitHub already created the PR.
+          # Pay for the list lookup only on this uncommon recovery path.
+          existing = _find_existing_pr(
+            repo,
+            upstream_repo,
+            login,
+            branch,
+            base_branch=direct_base,
+            same_repo=bool(direct_base),
+          )
+          if existing:
+            return existing, _parse_pr_number(existing), pushed_patch
+          detail = (pr.stderr or pr.stdout or "GitHub command failed.").strip()
+          raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
       except ContributionSubmitError as exc:
         raise ContributionSubmitError(
           f"{exc.message} The branch was pushed to {pushed_branch_url}.",
@@ -2012,6 +2134,9 @@ _REVIEW_STATUS_MESSAGES = {
   "review_changed": "The stored review changed after it was prepared.",
   "diff_mismatch": (
     "The reviewed source does not exactly match the staged branch."
+  ),
+  "invalid_ancestry": (
+    "The staged branch is no longer descended from its reviewed base."
   ),
   "missing_coauthor": (
     "The staged commit is missing its Möbius Agent co-author marker."
