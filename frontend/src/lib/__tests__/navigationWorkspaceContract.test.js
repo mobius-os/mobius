@@ -61,3 +61,19 @@ test('an explicit deep link replaces an unpinned implicit home tab', () => {
     /dispatchWorkspace\(replaceImplicitBootTab[\s\S]*type: 'RESET_FLAT', tabs: \[tab\][\s\S]*type: 'OPEN_TAB'/,
   )
 })
+
+test('the legacy active destination wins every blob-invalid flat-tab boot', () => {
+  assert.match(
+    navigation,
+    /else if \(!blobValid && initialNav\.view === 'canvas'[\s\S]*openBootTab\(tabModel\.makeTab\('app'/,
+  )
+  assert.match(
+    navigation,
+    /else if \(!blobValid && initialNav\.chatId != null\)[\s\S]*openBootTab\(tabModel\.makeTab\('chat'/,
+  )
+  assert.doesNotMatch(
+    navigation,
+    /!blobValid && bootPaneEmpty/,
+    'a legacy flat-tab seed must not suppress the active destination',
+  )
+})
