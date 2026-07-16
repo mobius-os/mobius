@@ -59,7 +59,9 @@ async function newChat(page) {
   // The versioned workspace is authoritative over the legacy active-chat
   // compatibility mirror. Use the supported explicit deep link so this helper
   // really navigates to the chat even after a previous test engaged a workspace.
-  await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 

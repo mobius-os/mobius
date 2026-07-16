@@ -66,6 +66,20 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
+test('a retained chat crosses the old unmount lifecycle while hidden', () => {
+  const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  assert.match(
+    chatView,
+    /useLayoutEffect\(\(\) => \{\s*if \(hidden\) freezeChatExit\(\)/,
+    'hiding a retained chat must freeze its reader position before Settings paints',
+  )
+  assert.match(
+    chatView,
+    /if \(hidden\) return[\s\S]*?\}, \[chatId, loadNonce, hidden\]\)/,
+    'hidden chats must disconnect and refresh history when they become visible again',
+  )
+})
+
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {
   const s = snapshotChatUX(pinnedEnv)
   assert.equal(s.scrollTop, 996)

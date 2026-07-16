@@ -83,7 +83,9 @@ async function visitChat(page, chatId) {
   // The active-chat localStorage key is a compatibility projection. A valid
   // versioned workspace intentionally wins on reload, while an explicit shell
   // deep link is the supported per-load navigation override.
-  await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chatId)}`, {
+    waitUntil: 'domcontentloaded',
+  })
 }
 
 // ---------------------------------------------------------------------------

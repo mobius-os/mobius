@@ -50,7 +50,11 @@ async function newChat(page) {
   // chat at the end of the spec. See tests/_chatTracker.mjs.
   const chat = await createTaggedChat(page)
   if (chat?.id) {
-    await page.goto(`${BASE}/shell/chat/${chat.id}`, { waitUntil: 'domcontentloaded' })
+    // A valid persisted workspace wins over the legacy active-chat mirror.
+    // Navigate through the supported in-scope cold deep-link contract.
+    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+      waitUntil: 'domcontentloaded',
+    })
   } else {
     await page.evaluate(() => {
       document.querySelector('.drawer__item--new')?.click()
