@@ -664,7 +664,6 @@ export default function useNavigation({
       // "focused pane empty" is NOT a proxy for that — a flat-tab fallback yields
       // a non-empty pane with no blob — so gate on `blobValid` directly. A seeded
       // chat is validated against the live list by Shell's chat-restore effect.
-      const bootPaneEmpty = !workspaceStateRef.current.ws.panes[bootPaneId]?.activeTabKey
       const openBootTab = (tab) => {
         dispatchWorkspace(replaceImplicitBootTab
           ? { type: 'RESET_FLAT', tabs: [tab] }
@@ -675,16 +674,16 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('app', deepLink.appId))
       } else if (deepLink?.view === 'chat' && deepLink.chatId) {
         openBootTab(tabModel.makeTab('chat', deepLink.chatId))
-      } else if (!blobValid && bootPaneEmpty && initialNav.view === 'canvas' && initialNav.appId != null) {
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: bootPaneId,
-          tab: tabModel.makeTab('app', initialNav.appId), activate: true,
-        })
-      } else if (!blobValid && bootPaneEmpty && initialNav.chatId != null) {
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: bootPaneId,
-          tab: tabModel.makeTab('chat', initialNav.chatId), activate: true,
-        })
+      } else if (!blobValid && initialNav.view === 'canvas' && initialNav.appId != null) {
+        // No valid blob: the flat-tab seed is only the tab STRIP; the legacy
+        // triple (moebius_active_view/_app/_chat) names the ACTIVE tab and must
+        // win as active — NOT gated on `bootPaneEmpty`, because a prior session's
+        // persisted mobius-open-tabs makes the seeded pane non-empty and would
+        // otherwise strand the restore on the wrong (stale) tab. openBootTab dedups
+        // an already-open tab and replaces a lone implicit-home tab.
+        openBootTab(tabModel.makeTab('app', initialNav.appId))
+      } else if (!blobValid && initialNav.chatId != null) {
+        openBootTab(tabModel.makeTab('chat', initialNav.chatId))
       }
 
       // Reset URL to /shell/ once on mount (must match the manifest scope). The
