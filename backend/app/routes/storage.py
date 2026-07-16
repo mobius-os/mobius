@@ -39,6 +39,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -75,6 +76,8 @@ router = APIRouter(prefix="/api/storage", tags=["storage"])
 
 _log = logging.getLogger(__name__)
 _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
+_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_GIT_BLOB_READ_MAX = 8 * 1024 * 1024
 
 
 _LEVELS = {"none": 0, "read": 1, "write": 2}
@@ -471,6 +474,31 @@ def _serve_file(file_path: Path, stored_mime: str | None = None):
   return PlainTextResponse(text, media_type=(mime or "text/plain"))
 
 
+def _git_read_env() -> dict[str, str]:
+  """Minimal deterministic environment for read-only Git object commands."""
+  return {
+    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_NO_REPLACE_OBJECTS": "1",
+    "HOME": "/nonexistent",
+  }
+
+
+def _git_read(
+  repo: Path, *args: str, timeout: int = 10,
+) -> subprocess.CompletedProcess:
+  return subprocess.run(
+    [
+      "git", "--no-pager", f"--git-dir={repo / '.git'}",
+      f"--work-tree={repo}", *args,
+    ],
+    env=_git_read_env(), capture_output=True, timeout=timeout,
+  )
+
+
 def _is_envelope(body) -> bool:
   """True iff body is the legacy `{"content": "<string>"}` shape."""
   return (
@@ -843,6 +871,95 @@ async def delete_app_file(
       size_delta=-deleted_size,
     )
   return Response(status_code=204)
+
+
+@router.get("/shared-git/{repo:path}")
+def read_shared_git_file(
+  repo: str,
+  revision: str,
+  file: str,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Read one regular file from a pinned commit in a shared-data Git repo.
+
+  This is a generic immutable-read surface, not a Memory-specific router. The
+  Memory namespace keeps its ordinary live capability gate. The repository and
+  file are confined below ``/data/shared``; revisions must be full commit SHAs
+  reachable from ``refs/heads/main``; symlinks, submodules, replacement refs,
+  hooks and external Git configuration are never consulted.
+  """
+  _require_shared_memory_read(f"{repo}/{file}", principal, db)
+  if not _GIT_COMMIT_RE.fullmatch(revision):
+    raise HTTPException(status_code=400, detail="Invalid Git revision.")
+  if (
+    not file
+    or not _SAFE_RE.fullmatch(file)
+    or ".." in Path(file).parts
+    or any(part.startswith(".") for part in Path(file).parts)
+  ):
+    raise HTTPException(status_code=400, detail="Invalid Git file path.")
+  base = Path(get_settings().data_dir) / "shared"
+  repo_path = _resolve(base, repo)
+  git_dir = repo_path / ".git"
+  if (
+    repo_path.is_symlink()
+    or not repo_path.is_dir()
+    or git_dir.is_symlink()
+    or not git_dir.is_dir()
+  ):
+    raise HTTPException(status_code=404, detail="Git repository not found.")
+  try:
+    reachable = _git_read(
+      repo_path, "merge-base", "--is-ancestor", revision, "refs/heads/main",
+    )
+    if reachable.returncode != 0:
+      raise HTTPException(status_code=404, detail="Git revision not found.")
+    entry = _git_read(
+      repo_path, "ls-tree", "-z", "--full-tree", revision, "--", file,
+    )
+  except (OSError, subprocess.TimeoutExpired):
+    raise HTTPException(status_code=503, detail="Git storage unavailable.")
+  if entry.returncode != 0 or not entry.stdout.endswith(b"\0"):
+    raise HTTPException(status_code=404, detail="Git file not found.")
+  record = entry.stdout[:-1]
+  try:
+    metadata, raw_path = record.split(b"\t", 1)
+    mode, object_type, object_sha = metadata.decode("ascii").split(" ")
+    listed_path = raw_path.decode("utf-8")
+  except (ValueError, UnicodeError):
+    raise HTTPException(status_code=404, detail="Git file not found.")
+  if (
+    listed_path != file
+    or mode not in ("100644", "100755")
+    or object_type != "blob"
+    or not _GIT_COMMIT_RE.fullmatch(object_sha)
+  ):
+    raise HTTPException(status_code=404, detail="Git file not found.")
+  try:
+    sized = _git_read(repo_path, "cat-file", "-s", object_sha)
+    size = int(sized.stdout.strip()) if sized.returncode == 0 else -1
+  except (OSError, ValueError, subprocess.TimeoutExpired):
+    raise HTTPException(status_code=503, detail="Git storage unavailable.")
+  if size < 0:
+    raise HTTPException(status_code=404, detail="Git file not found.")
+  # Unlike an ordinary storage read, ``git cat-file`` is captured from a
+  # subprocess rather than streamed by FileResponse. Keep that allocation
+  # comfortably below the general 50 MiB write limit; Memory graphs and notes
+  # are already bounded far below this ceiling.
+  if size > _GIT_BLOB_READ_MAX:
+    raise HTTPException(status_code=413, detail="Stored Git object too large.")
+  try:
+    blob = _git_read(repo_path, "cat-file", "blob", object_sha)
+  except (OSError, subprocess.TimeoutExpired):
+    raise HTTPException(status_code=503, detail="Git storage unavailable.")
+  if blob.returncode != 0 or len(blob.stdout) != size:
+    raise HTTPException(status_code=503, detail="Git storage unavailable.")
+  media_type = mimetypes.guess_type(file)[0] or "text/plain"
+  response = Response(content=blob.stdout, media_type=media_type)
+  response.headers["ETag"] = f'"{revision}-{object_sha}"'
+  response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+  return response
 
 
 @router.get("/shared/{path:path}")

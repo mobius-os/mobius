@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -187,6 +188,112 @@ def test_shared_memory_reads_require_live_declared_contract(
   assert client.get(
     "/api/storage/shared-list/memory", headers=app_auth,
   ).status_code == 200
+
+
+def _memory_git_repo() -> tuple[Path, str]:
+  repo = Path(get_settings().data_dir) / "shared" / "memory" / "repository"
+  repo.mkdir(parents=True)
+  subprocess.run(
+    ["git", "init", "-b", "main", str(repo)], check=True, capture_output=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.name", "Memory"], check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.email", "memory@mobius.local"],
+    check=True,
+  )
+  (repo / "graph.json").write_text('{"version":1}\n', encoding="utf-8")
+  (repo / "notes").mkdir()
+  (repo / "notes" / "fact.md").write_text("old fact\n", encoding="utf-8")
+  subprocess.run(
+    ["git", "-C", str(repo), "add", "graph.json", "notes"], check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "commit", "-m", "initial"],
+    check=True, capture_output=True,
+  )
+  revision = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+    capture_output=True, text=True,
+  ).stdout.strip()
+  return repo, revision
+
+
+def test_shared_git_read_is_commit_pinned_and_rejects_symlinks(client, auth):
+  repo, first = _memory_git_repo()
+  # A dirty working tree cannot affect a commit-addressed read.
+  (repo / "notes" / "fact.md").write_text(
+    "unpublished fact\n", encoding="utf-8",
+  )
+  response = client.get(
+    "/api/storage/shared-git/memory/repository",
+    params={"revision": first, "file": "notes/fact.md"},
+    headers=auth,
+  )
+  assert response.status_code == 200, response.text
+  assert response.text == "old fact\n"
+  assert response.headers["cache-control"].endswith("immutable")
+
+  (repo / "notes" / "link.md").symlink_to("fact.md")
+  subprocess.run(["git", "-C", str(repo), "add", "notes"], check=True)
+  subprocess.run(
+    ["git", "-C", str(repo), "commit", "-m", "link"],
+    check=True, capture_output=True,
+  )
+  second = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+    capture_output=True, text=True,
+  ).stdout.strip()
+  blocked = client.get(
+    "/api/storage/shared-git/memory/repository",
+    params={"revision": second, "file": "notes/link.md"},
+    headers=auth,
+  )
+  assert blocked.status_code == 404
+  traversal = client.get(
+    "/api/storage/shared-git/memory/repository",
+    params={"revision": second, "file": "../.git/config"},
+    headers=auth,
+  )
+  assert traversal.status_code == 400
+
+
+def test_shared_git_memory_read_requires_live_declared_contract(
+  client, owner_token, db,
+):
+  _repo, revision = _memory_git_repo()
+  app_id = _make_app(client, owner_token)
+  token = client.post(
+    "/api/auth/app-token",
+    json={"app_id": app_id},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+  url = "/api/storage/shared-git/memory/repository"
+  params = {"revision": revision, "file": "graph.json"}
+
+  assert client.get(url, params=params, headers=app_auth).status_code == 403
+  app = db.query(models.App).filter(models.App.id == app_id).one()
+  app.capability_contract = {"data": {"shared_memory": "read"}}
+  db.commit()
+
+  allowed = client.get(url, params=params, headers=app_auth)
+  assert allowed.status_code == 200
+  assert allowed.json() == {"version": 1}
+
+
+def test_shared_git_read_caps_buffered_blob(client, auth, monkeypatch):
+  repo, revision = _memory_git_repo()
+  monkeypatch.setattr(storage_routes, "_GIT_BLOB_READ_MAX", 4)
+
+  response = client.get(
+    "/api/storage/shared-git/memory/repository",
+    params={"revision": revision, "file": "graph.json"},
+    headers=auth,
+  )
+
+  assert response.status_code == 413
 
 
 def test_put_text_accepts_non_json_content_type(client, auth, owner_token):

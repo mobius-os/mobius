@@ -189,7 +189,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `chats.py` | Chat CRUD + reversible soft-delete with recovery; the chat-load serializer drops tool outputs >4KB to an `output_truncated`/`output_full_len` marker (read-side only — the stored message keeps the full text; blocks ≤4KB or without a message `ts` stay inline), lazy-fetched by `ToolBlock` on expand via `GET /{id}/tool-output?ts=&i=`; also `GET /{id}/agent-context` — read-only inspection of the assembled prompt (system prompt + injected memory / app-context / compaction blocks) |
 | `chats_stream.py` | `POST /messages` (starts a turn, returns 202) + `GET /stream` (SSE) |
 | `chat_logs.py` | Gated, redacted chat-log read API for mini-apps |
-| `storage.py` | Per-app and shared file storage |
+| `storage.py` | Per-app and shared file storage, plus confined immutable blob reads from full commits reachable on a shared repository's `main` branch (`GET /api/storage/shared-git/{repo}?revision=&file=`). The Git route applies the same Memory capability gate, rejects traversal/symlinks/submodules, and never reads the mutable worktree. |
 | `secrets.py` | Bounded encrypted secret storage scoped to an app; an app can write/delete/check its own values, while only the owner or owner-scoped agent can decrypt them; no cross-app access or listing surface |
 | `fs.py` | Owner-facing filesystem + git oversight API |
 | `uploads.py` | Per-chat file upload management |
