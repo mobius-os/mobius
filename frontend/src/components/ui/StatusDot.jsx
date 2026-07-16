@@ -5,9 +5,9 @@
  *
  * Why a shared component:
  *   - The pattern was duplicated as `::before` rules in two CSS
- *     files (SettingsView's "Configured" badge for the Gemini API
- *     key + ProviderAuth's "Connected" / "Not connected" status
- *     for each provider row). The two `::before` blocks were
+ *     files (SettingsView's status badges + ProviderAuth's
+ *     "Connected" / "Not connected" status for each provider row).
+ *     The two `::before` blocks were
  *     literally near-identical — easy to drift apart when one is
  *     tweaked without the other.
  *   - The pattern likely keeps showing up (new provider, new

@@ -80,13 +80,15 @@ class Principal:
   """The authenticated caller, with the token's app scope if any.
 
   `owner` is always set. `app_id` is the `app_id` claim from an
-  app-scoped JWT, or None for full owner tokens. Routes that gate on
-  cross-app access (storage, app-attributed chats) read `app_id` to decide whether
-  the caller is the app itself, a different app, or the owner.
+  app-scoped JWT, or None for non-app tokens. `scope` preserves the JWT scope
+  so a narrow media token cannot be mistaken for a full owner token. Routes
+  that gate on cross-app access (storage, app-attributed chats) read `app_id`
+  to decide whether the caller is the app itself, a different app, or the owner.
   """
   owner: models.Owner
   app_id: int | None
   app_instance_id: str | None = None
+  scope: str | None = None
 
 
 def _resolve_owner(
@@ -130,7 +132,7 @@ def resolve_owner_only(token: str, db: Session) -> models.Owner:
   The owner-only counterpart to `_resolve_owner`, exposed for the two
   routes that take the token on a `?token=` query param instead of the
   Authorization header (img/iframe fetches can't set headers):
-  uploads.serve_upload and generate.serve_generated_image. They used to
+  uploads.serve_upload and media.serve_chat_media. They used to
   hand-roll decode + scope-reject + lookup, which silently skipped the
   revocation check — routing them through here keeps "sign out
   everywhere" effective on those surfaces too. `get_current_owner` is
@@ -150,7 +152,7 @@ def resolve_media_or_header_owner(
 ) -> models.Owner:
   """Resolves an owner for media-serving routes.
 
-  The serve routes (uploads, generated images) accept the token from two
+  The serve routes (uploads and chat media) accept the token from two
   sources: the Authorization header (Bearer) OR a `?token=` query param.
   The security fix is the asymmetry:
 
@@ -313,6 +315,7 @@ def get_principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+    scope=payload.get("scope"),
   )
 
 

@@ -1,4 +1,4 @@
-"""Path-traversal validation shared across upload/generate/storage routes.
+"""Path-traversal validation shared across upload/media/storage routes.
 
 The three caller routes used to each implement this check with subtly
 different techniques (`str().startswith()`, string concatenation,

@@ -23,7 +23,6 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app import models, providers
-from app.auth import encrypt_api_key
 from app.config import get_settings as get_app_settings
 from app.database import get_db
 from app.deps import (
@@ -213,7 +212,7 @@ def _agent_settings_payload(agent_settings) -> dict:
 # real surfaces live on the three child surfaces below.
 router = APIRouter()
 
-# Owner-level settings (Gemini key, provider preference).
+# Owner-level settings.
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
@@ -270,7 +269,6 @@ def get_settings_view(
       "model": providers.DEFAULT_MODELS.get(provider),
     }
   return {
-    "gemini_configured": owner.gemini_api_key_enc is not None,
     "codex_authenticated": codex_creds.exists(),
     "provider": provider,
     "agent_settings": agent_settings,
@@ -289,12 +287,7 @@ def update_settings(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ) -> dict:
-  """Saves updated settings. Pass empty string to clear a key."""
-  if body.gemini_api_key is not None:
-    if body.gemini_api_key == "":
-      owner.gemini_api_key_enc = None
-    else:
-      owner.gemini_api_key_enc = encrypt_api_key(body.gemini_api_key)
+  """Saves updated settings."""
   if body.provider is not None:
     owner.provider = body.provider
   # `skills_enabled` lives in the shared agent-settings.json (the

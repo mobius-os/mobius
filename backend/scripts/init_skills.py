@@ -9,14 +9,13 @@ own skill edits.
 
 Propagation policy, precisely (the code below is the contract): on first boot
 the whole seed tree is copied and `.seed-version` is stamped. On every later
-boot we ONLY add seed skills the instance is missing — an already-present skill
-is NEVER overwritten, so the agent's edits survive. There is deliberately no
-automatic content migration of existing skills: an updated baked seed (e.g. a
-fix to reflection.md) does NOT reach an instance that already has that file. Such
-an update must be propagated explicitly (copy the new seed over the live
-/data/shared/skills/<name>.md), because a blind overwrite can't tell an owner
-improvement from an agent edit. App-owned skills are not part of this seed
-tree; they arrive through manifests and their generic ownership sidecar.
+boot we add missing seed skills and apply only explicit, hash-gated migrations:
+an existing file is replaced when it is byte-for-byte a known baked predecessor,
+while every owner/agent-edited copy is preserved. A normal baked-seed edit does
+not propagate until its predecessor hash is deliberately registered below; this
+keeps urgent fix-forward migrations possible without blind overwrites. App-owned
+skills are not part of this seed tree; they arrive through manifests and their
+generic ownership sidecar.
 `.seed-version`/`SEED_VERSION` are kept as a
 record of the baked seed generation for that future, merge-aware migration; the
 sentinel is written but not yet read.
@@ -35,13 +34,27 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "12"  # v12: app-owned skills are absent from platform seeds
-# These three base skills used to contain unconditional graph behavior. Update
-# only byte-for-byte baked copies; an owner/agent-edited file is never touched.
+SEED_VERSION = "13"  # v13: remove the retired built-in image provider
+# Update only byte-for-byte baked copies; an owner/agent-edited file is never
+# touched. A set preserves every known unmodified predecessor when one skill
+# needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
-  "reflection.md": "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
-  "cron.md": "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
-  "recovery.md": "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
+  "reflection.md": {
+    "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
+  },
+  "cron.md": {
+    "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
+  },
+  "recovery.md": {
+    "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
+    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
+  },
+  "images.md": {
+    "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
+  },
+  "building-apps.md": {
+    "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
+  },
 }
 
 _SEED_CANDIDATES = [
@@ -89,13 +102,13 @@ def init() -> None:
   migrated = 0
   for src in seed.glob("*.md"):
     dst = SKILLS / src.name
-    old_digest = _UNMODIFIED_MIGRATIONS.get(src.name)
-    if dst.is_file() and old_digest:
+    old_digests = _UNMODIFIED_MIGRATIONS.get(src.name)
+    if dst.is_file() and old_digests:
       try:
         digest = hashlib.sha256(dst.read_bytes()).hexdigest()
       except OSError:
         digest = ""
-      if digest == old_digest:
+      if digest in old_digests:
         shutil.copy2(src, dst)
         migrated += 1
         continue

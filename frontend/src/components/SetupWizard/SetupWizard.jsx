@@ -15,7 +15,6 @@ import './SetupWizard.css'
 const SETUP_STEPS = [
   { id: 'account', label: 'Account' },
   { id: 'provider', label: 'AI' },
-  { id: 'gemini', label: 'Images' },
 ]
 const PROVIDERS = [
   { id: 'codex', label: 'OpenAI Codex' },
@@ -58,11 +57,6 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // Gemini step state.
-  const [geminiKey, setGeminiKey] = useState('')
-  const [geminiError, setGeminiError] = useState('')
-  const [geminiSaving, setGeminiSaving] = useState(false)
-
   // Clear the 401-bypass flag on any unmount — completion, nav-away,
   // tab close. The onDone path also clears it; idempotent. Without
   // this, closing the browser between account-create and onDone
@@ -99,89 +93,13 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
     }
   }
 
-  async function handleGeminiSave() {
-    setGeminiError('')
-    if (!geminiKey.trim()) {
-      onDone()
-      return
-    }
-    setGeminiSaving(true)
-    try {
-      const res = await api.settings.save({ gemini_api_key: geminiKey.trim() })
-      if (!res.ok) {
-        const data = await res.json()
-        setGeminiError(data.detail || 'Failed to save key.')
-        return
-      }
-      onDone()
-    } catch {
-      setGeminiError('Network error.')
-    } finally {
-      setGeminiSaving(false)
-    }
-  }
-
   if (step === 'provider') {
     return (
       <ProviderStep
-        onSkip={() => goToStep('gemini')}
-        onContinue={() => goToStep('gemini')}
+        onSkip={onDone}
+        onContinue={onDone}
         claudeAuthenticated={claudeAuthenticated}
       />
-    )
-  }
-
-  if (step === 'gemini') {
-    return (
-      <div className="setup">
-        <div className="setup__card">
-          <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
-          <SetupProgress step="gemini" />
-          <h1 className="setup__title">Image generation (optional)</h1>
-          <p className="setup__subtitle">
-            Add a Gemini API key only if you want image generation in chat. Get
-            one at{' '}
-            <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">
-              aistudio.google.com
-            </a>
-            .
-          </p>
-          <form
-            className="setup__form"
-            onSubmit={(e) => { e.preventDefault(); handleGeminiSave() }}
-          >
-            <label className="setup__label">
-              Gemini API key
-              <input
-                className="setup__input"
-                type="password"
-                placeholder="AIza..."
-                value={geminiKey}
-                onChange={(e) => { setGeminiKey(e.target.value); setGeminiError('') }}
-                autoComplete="off"
-              />
-            </label>
-            <p className="setup__hint">
-              Your key is encrypted at rest and never leaves the server.
-            </p>
-            {geminiError && <p className="setup__error">{geminiError}</p>}
-            <button
-              type="submit"
-              className="setup__btn"
-              disabled={geminiSaving}
-            >
-              {geminiSaving ? 'Saving…' : 'Save & continue'}
-            </button>
-            <button
-              type="button"
-              className="setup__skip"
-              onClick={onDone}
-            >
-              Skip for now
-            </button>
-          </form>
-        </div>
-      </div>
     )
   }
 

@@ -171,6 +171,7 @@ Agent-editable general-purpose modules — several sit on live chat paths, so de
 |------|------|
 | `bootstrap.py` | First-boot bootstrap (`ensure_store_installed`) that auto-installs the curated app-store mini-app; called idempotently from the FastAPI lifespan |
 | `chat_log_redaction.py` | Server-side structural redaction for the gated chat-log read API |
+| `chat_media.py` | One-way startup migration that moves old chat images and stored URLs onto the canonical `/media/` path |
 | `http_caching.py` | Range/206 hardening for revalidating `FileResponse`s |
 | `timeutil.py` | `now_naive_utc()` + `SOFT_DELETE_TTL`; SQLite stores naive datetimes (mixing aware/naive `TypeError`s on compare) |
 | `presence.py` | Chat-broadcast presence (`has_watchers(chat_id)`) — `push.notify_owner` uses it to skip a push when a live SSE subscriber is already watching |
@@ -189,9 +190,10 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `chats_stream.py` | `POST /messages` (starts a turn, returns 202) + `GET /stream` (SSE) |
 | `chat_logs.py` | Gated, redacted chat-log read API for mini-apps |
 | `storage.py` | Per-app and shared file storage |
+| `secrets.py` | Bounded encrypted secret storage scoped to an app; an app can write/delete/check its own values, while only the owner or owner-scoped agent can decrypt them; no cross-app access or listing surface |
 | `fs.py` | Owner-facing filesystem + git oversight API |
 | `uploads.py` | Per-chat file upload management |
-| `generate.py` | Gemini image-generation endpoint (image-only; not a chat provider) |
+| `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
 | `standalone.py` | Top-level routes that make a mini-app installable as its own PWA (own importmap) |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
@@ -324,6 +326,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 ├── compiled/app-*.js       esbuild output (one per app, keyed by numeric id)
 ├── apps/<slug>/index.jsx   agent-editable JSX source (keyed by app slug)
 ├── apps/<slug>/...          per-app runtime data + per-app git repo
+├── app-secrets/<id>/       encrypted app-scoped credentials (outside app repos)
 ├── shared/                 cross-app shared files (theme.css, skills/, memory/)
 ├── shell/                  agent's editable shell copy (src/ + dist/)
 ├── cli-auth/claude/        CLI credentials
@@ -339,7 +342,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 **Layers + where they live:** core platform = `/data/platform`, a git repo whose
 backend is served from `backend/` and frontend from `frontend/dist`; mini-apps
 (`/data/apps/<slug>`, each a git repo); recovery (the frozen island, below).
-Runtime trees are gitignored (db, compiled, cli-auth).
+Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update

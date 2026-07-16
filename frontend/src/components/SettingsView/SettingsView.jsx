@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
@@ -279,16 +278,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const versionQuery = versionQueries.current.useQuery()
-  const [geminiKey, setGeminiKey] = useState('')
-  const [geminiExpanded, setGeminiExpanded] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [status, setStatus] = useState(null)
-  const [errorMsg, setErrorMsg] = useState('')
-  // Mirrors ProviderAuth.jsx's `justConnected` pattern: bake the
-  // success signal into the Save button label for 2s instead of a
-  // separate <Alert> row that auto-dismisses. Cleaner one-place
-  // feedback; the form already owns the button.
-  const [justSaved, setJustSaved] = useState(false)
   const [lightMode, setLightMode] = useState(false)
   const [themeSwitching, setThemeSwitching] = useState(false)
   // Which provider has its inline auth panel expanded. null = none.
@@ -334,7 +323,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     setLightMode(themeModeQuery.data === 'light')
   }, [themeModeQuery.data])
 
-  const configured = !!settingsQuery.data?.gemini_configured
   const codexAuthenticated = !!settingsQuery.data?.codex_authenticated
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
@@ -730,34 +718,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       onThemeChange?.()  // reload original theme on error
     } finally {
       setThemeSwitching(false)
-    }
-  }
-
-  async function handleSave(e) {
-    e.preventDefault()
-    if (!geminiKey.trim()) return
-    setSaving(true)
-    setStatus(null)
-    setErrorMsg('')
-    try {
-      const res = await api.settings.save({ gemini_api_key: geminiKey.trim() })
-      if (!res.ok) {
-        const data = await res.json()
-        setErrorMsg(data.detail || 'Failed to save key.')
-        setStatus('error')
-        return
-      }
-      settingsQueries.owner.invalidate(queryClient)
-      setGeminiKey('')
-      setStatus('success')
-      setJustSaved(true)
-      setGeminiExpanded(false)
-      setTimeout(() => setJustSaved(false), 2000)
-    } catch {
-      setErrorMsg('Network error.')
-      setStatus('error')
-    } finally {
-      setSaving(false)
     }
   }
 
@@ -1301,69 +1261,6 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               Loading providers…
             </div>
           )}
-        </section>
-
-        <section
-          className={`settings__section${attentionSection === 'image-generation' ? ' settings-setup-target' : ''}`}
-          id="settings-image-generation"
-          ref={(node) => setSetupFocusRef('image-generation', node)}
-          tabIndex={-1}
-        >
-          <h2 className="settings__section-title">Image generation</h2>
-          {/* Same unified row as the providers + chat model above: tap the
-              action to reveal the key form (matching "Connect" on a provider).
-              statusNode carries "Configured" instead of "Connected". */}
-          <div className="settings__providers">
-            <ProviderRow
-              id="gemini"
-              name="Gemini API key"
-              showRadio={false}
-              connected={configured}
-              subtitle="Used for image generation."
-              statusNode={
-                <StatusDot color={configured ? '--green' : '--muted'}>
-                  {configured ? 'Configured' : 'Not configured'}
-                </StatusDot>
-              }
-              actionLabel={configured ? 'Reconfigure' : 'Add key'}
-              expanded={geminiExpanded}
-              onToggleExpand={() => setGeminiExpanded(prev => !prev)}
-            >
-              <form className="settings__form" onSubmit={handleSave}>
-                <p className="settings__subtext settings__subtext--tight">
-                  Get a key at{' '}
-                  <TextLink href="https://aistudio.google.com/apikey" forceExternal>
-                    AI Studio
-                  </TextLink>.
-                </p>
-                {/* The key is always pasted, never typed, so there's no reveal
-                    toggle — keep the field a plain masked paste target. */}
-                <input
-                  className="settings__input"
-                  type="password"
-                  value={geminiKey}
-                  onChange={(e) => { setGeminiKey(e.target.value); setStatus(null) }}
-                  placeholder={configured ? '••••••••' : 'AIza...'}
-                  autoComplete="off"
-                  aria-label="Gemini API key"
-                />
-                {status === 'error' && (
-                  <Alert
-                    color="danger"
-                    variant="soft"
-                    description={errorMsg}
-                  />
-                )}
-                <button
-                  className="settings__btn"
-                  type="submit"
-                  disabled={saving || !geminiKey.trim()}
-                >
-                  {saving ? 'Saving…' : justSaved ? 'Saved' : 'Save'}
-                </button>
-              </form>
-            </ProviderRow>
-          </div>
         </section>
 
         <section className="settings__section settings__section--compact">

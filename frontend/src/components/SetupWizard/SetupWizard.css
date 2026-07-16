@@ -126,13 +126,6 @@
   font-size: 13px;
 }
 
-.setup__hint {
-  font-size: 13px;
-  color: var(--muted, #52525b);
-  line-height: 1.45;
-  margin: -6px 0 2px;
-}
-
 .setup__btn {
   background: var(--accent, #a78bfa);
   color: #fff;

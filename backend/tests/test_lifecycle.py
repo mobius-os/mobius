@@ -148,18 +148,3 @@ def test_notifications_older_than_90_days_purged(client, db, auth):
 def test_chat_has_uploads_column(db, chat):
   """Chat.uploads must default to an empty list."""
   assert chat.uploads == []
-
-
-def test_chat_has_generated_images_column(db, chat):
-  """Chat.generated_images must default to an empty list."""
-  assert chat.generated_images == []
-
-
-def test_owner_has_gemini_key_column(db, owner_token):
-  """Owner.gemini_api_key_enc must default to None."""
-  owner = db.query(models.Owner).filter(
-    models.Owner.username == "test"
-  ).first()
-  assert owner is not None
-  assert hasattr(owner, "gemini_api_key_enc")
-  assert owner.gemini_api_key_enc is None

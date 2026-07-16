@@ -191,8 +191,8 @@ def sign_out_everywhere(
   whose stamped epoch is now behind — so this single bump strands the
   whole fleet, including the caller's own token and the on-disk
   90-day service token. This is the answer to an exfiltrated token: no
-  SECRET_KEY rotation (which would also break Fernet-encrypted API keys
-  and the CLI credential derivation), just one integer.
+  SECRET_KEY rotation (which would also break encrypted app secrets and the
+  CLI credential derivation), just one integer.
 
   Owner-only via get_current_owner (app tokens are 403'd) so a
   compromised mini-app can't sign the owner out. After this returns,

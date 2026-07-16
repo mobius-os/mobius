@@ -7,9 +7,10 @@ broken the server can't boot and /recover/chat is unreachable.
 To add a column to an existing table: edit me on the host repo and
 rebuild. For per-chat fields you can usually skip a migration by
 adding to `Chat.agent_settings_json` (a JSON column intentionally
-included as the no-migration escape hatch). For app-scoped data
+included as the no-migration escape hatch). For non-secret app-scoped data
 you'd otherwise add a column for, use per-app storage at
-`/data/apps/<app_id>/...` via the storage API.
+`/data/apps/<app_id>/...` via the storage API. Credentials belong in the
+separate encrypted app-secrets API.
 """
 
 import secrets
@@ -31,7 +32,6 @@ class Owner(Base):
   id = Column(Integer, primary_key=True)
   username = Column(String(64), nullable=False, unique=True)
   hashed_password = Column(String(255), nullable=False)
-  gemini_api_key_enc = Column(Text, nullable=True, default=None)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
   # Per-owner model-picker preferences. Shape:
@@ -57,8 +57,8 @@ class Owner(Base):
   # mint time; the owner-resolving dependency in deps.py rejects any
   # token whose stamped epoch is behind this value. Incrementing it is
   # "sign out everywhere" — it invalidates every outstanding token at
-  # once without rotating SECRET_KEY (which would also break the
-  # Fernet-encrypted API keys and the CLI credential derivation). A
+  # once without rotating SECRET_KEY (which would also break encrypted app
+  # secrets and the CLI credential derivation). A
   # token minted before this column existed carries no epoch claim and
   # reads as epoch 0, which equals a freshly-migrated owner's epoch, so
   # legacy tokens stay valid until the first bump.
@@ -81,7 +81,6 @@ class Chat(Base):
   messages = Column(JSON, nullable=False, default=list)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
-  generated_images = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
   session_id = Column(String(128), nullable=True, default=None)
   # Must stay in sync with providers.PROVIDER_NAMES.

@@ -20,7 +20,7 @@ What gets stripped, and why each matters (design §2 "Redaction"):
   - `thinking` blocks — model chain-of-thought, may quote secrets.
   - `question` / `error` blocks — AskUserQuestion option text + raw
     error strings (often include paths/tokens).
-  - attachment metadata + generated images — filenames, paths, mime.
+  - attachment and media metadata — filenames, paths, mime.
   - hidden + pending messages — internal answer-delivery + not-yet-run
     queue; never part of the visible conversation.
   - the upload-metadata / absolute-fs-path augmentation appended to

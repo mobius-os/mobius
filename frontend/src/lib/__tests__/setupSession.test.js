@@ -63,17 +63,13 @@ test('getResumeStep returns saved provider step', () => {
   assert.equal(setupSession.getResumeStep(), 'provider')
 })
 
-test('getResumeStep returns saved gemini step', () => {
-  localStorageStub.setItem('setup-step', 'gemini')
-  assert.equal(setupSession.getResumeStep(), 'gemini')
-})
-
-test('getResumeStep ignores unknown step values', () => {
+test('getResumeStep clears retired or unknown step values', () => {
   // Defensive: a future SetupWizard edit could try to save a step
   // name the resumer doesn't recognise. Returning null forces a
   // clean start instead of crashing AppRoot's initial render.
   localStorageStub.setItem('setup-step', 'something-else')
   assert.equal(setupSession.getResumeStep(), null)
+  assert.equal(localStorageStub.getItem('setup-step'), null)
 })
 
 test('saveStep writes provider step', () => {
@@ -89,7 +85,7 @@ test('saveStep is a no-op for "account"', () => {
 })
 
 test('clearResumeStep removes the saved step', () => {
-  setupSession.saveStep('gemini')
+  setupSession.saveStep('provider')
   setupSession.clearResumeStep()
   assert.equal(localStorageStub.getItem('setup-step'), null)
 })

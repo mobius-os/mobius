@@ -307,6 +307,36 @@ await window.mobius.storage.pendingCount()  // unsynced writes — for sync logi
 
 Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
 
+### Secrets — use the app-scoped encrypted store
+
+Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs. The platform has a deliberately small encrypted secret surface: at most 16 named values per app and no listing endpoint. An app can store, replace, delete, or check its own values, but only the owner or owner-scoped chat agent can decrypt them.
+
+```jsx
+await fetch(`/api/apps/${appId}/secrets/provider-key`, {
+  method: 'PUT',
+  headers: {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ value: key }),
+})
+
+const configured = (await fetch(`/api/apps/${appId}/secrets/provider-key`, {
+  method: 'HEAD',
+  headers: { Authorization: `Bearer ${token}` },
+})).ok
+```
+
+`DELETE` the same path to clear it. An app-token `GET` is deliberately forbidden: a later UI compromise must not recover a credential the user entered months earlier. An app that teaches the agent a workflow can ship a manifest-declared skill and a helper script. The helper runs inside the owner-scoped chat turn, fetches the value with `$AGENT_TOKEN`, calls the provider, saves output under `/data/chats/$CHAT_ID/media/`, and prints only the resulting media path—not the secret:
+
+```bash
+KEY=$(curl -fsS \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  "$API_BASE_URL/api/apps/<app-id>/secrets/provider-key")
+```
+
+Keep that variable inside the helper process. Never echo it, pass it on a command line, or persist it in browser storage, React Query, a file, or a log.
+
 ### Concurrent writers — compare-and-swap, not last-write-wins
 
 `set()` is last-write-wins: the last PUT clips whatever landed between your read and your write. That silently drops edits on any file **several writers touch** — the agent (a chat turn) + cron + the open UI all appending to one `topics.txt`, `index.json`, or a per-day log. When more than one writer shares a mutable file, compare-and-swap instead:

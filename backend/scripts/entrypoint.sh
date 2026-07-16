@@ -10,7 +10,7 @@ trap cleanup TERM INT
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
-mkdir -p /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
+mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
 # Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
 # discovered managed schedule has been converged through the common runner.
 rm -f /data/run/app-cron-supervision-ready
@@ -121,6 +121,18 @@ if ! chown -R mobius:mobius /data 2>/dev/null; then
   chmod 1777 /data 2>/dev/null || true
   chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/run 2>/dev/null || true
 fi
+
+# App credentials live outside ordinary app storage and the outer /data git
+# repo. Prefer a mobius-owned 0700 root. On managed volumes that reject chown,
+# use a root-owned write+traverse-only directory: mobius can create its own
+# 0700 app directories, but cannot list the secret root. Payloads remain 0600.
+if chown mobius:mobius /data/app-secrets 2>/dev/null; then
+  chmod 700 /data/app-secrets 2>/dev/null || true
+else
+  chmod 733 /data/app-secrets 2>/dev/null || true
+fi
+find /data/app-secrets -mindepth 1 -type d -exec chmod 700 {} + 2>/dev/null || true
+find /data/app-secrets -type f -exec chmod 600 {} + 2>/dev/null || true
 
 # The /app/platform-baked/ clone stays root-owned + chmod a-w as the baked
 # floor. /data/platform is handed to mobius so the agent can edit it and Python
@@ -941,6 +953,7 @@ python3 /app/scripts/init_skills.py
 # the ignore list) get the updated rules before the next add/commit cycle.
 cat > /data/.gitignore <<'EOF'
 cli-auth/
+app-secrets/
 push/*.pem
 push/*.json
 push/*.txt

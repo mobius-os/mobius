@@ -75,7 +75,7 @@ class Base(DeclarativeBase):
 
 
 def run_migrations(eng) -> None:
-  """Run additive schema migrations on startup.
+  """Run schema migrations on startup.
 
   Uses SQLAlchemy's database-agnostic inspector so this works for both
   SQLite and PostgreSQL.  Safe to call on every boot — no-ops if already
@@ -87,6 +87,25 @@ def run_migrations(eng) -> None:
   tables = inspector.get_table_names()
   if "apps" not in tables:
     return  # fresh install — create_all handles it
+  # Removed built-in image generation left two provider-specific columns on
+  # existing installs. Drop them instead of carrying dead schema forever;
+  # fresh installs never create them because the ORM no longer declares them.
+  if "owner" in tables:
+    owner_cols = {c["name"] for c in inspector.get_columns("owner")}
+    if "gemini_api_key_enc" in owner_cols:
+      with eng.connect() as conn:
+        conn.execute(text(
+          "ALTER TABLE owner DROP COLUMN gemini_api_key_enc"
+        ))
+        conn.commit()
+  if "chats" in tables:
+    chats_cols = {c["name"] for c in inspector.get_columns("chats")}
+    if "generated_images" in chats_cols:
+      with eng.connect() as conn:
+        conn.execute(text(
+          "ALTER TABLE chats DROP COLUMN generated_images"
+        ))
+        conn.commit()
   apps_cols = {c["name"] for c in inspector.get_columns("apps")}
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
@@ -383,8 +402,6 @@ def run_migrations(eng) -> None:
       _add.append(
         "ALTER TABLE chats ADD COLUMN pending_messages JSON NOT NULL DEFAULT '[]'"
       )
-    if "generated_images" not in chats_cols:
-      _add.append("ALTER TABLE chats ADD COLUMN generated_images JSON NOT NULL DEFAULT '[]'")
     if "deleted_at" not in chats_cols:
       _add.append("ALTER TABLE chats ADD COLUMN deleted_at DATETIME")
     if "session_id" not in chats_cols:

@@ -7,11 +7,11 @@
  * 30-day owner JWT into the image URL.
  *
  * Key invariants:
- *   1. Root-relative paths (/api/chats/<id>/generated/<file>) match the regex.
- *   2. Absolute paths (https://host/api/chats/<id>/generated/<file>) also match.
+ *   1. Root-relative paths (/api/chats/<id>/media/<file>) match the regex.
+ *   2. Absolute paths (https://host/api/chats/<id>/media/<file>) also match.
  *   3. External URLs (https://example.com/img.png) do NOT match — they render
  *      as direct <img> sources without any token.
- *   4. /uploads/ paths match, not just /generated/.
+ *   4. /uploads/ paths match alongside /media/.
  *   5. Chat IDs with hyphens (UUID4 format) are extracted correctly.
  *   6. When a media path is detected, the media token is fetched and appended
  *      as ?token=<media>. The owner JWT is never put on the URL.
@@ -37,7 +37,7 @@ import { parseImageDims, imageVarsFromDims } from '../markdown/imageDims.js'
 // Copy of MEDIA_PATH_RE as declared in InlineContent.jsx.
 // Any change to the source must be reflected here (the test documents the
 // contract, not the implementation — we verify the shape is correct).
-const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media|generated)\//
+const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media)\//
 
 function getMediaChatId(src) {
   const m = src.match(MEDIA_PATH_RE)
@@ -104,11 +104,6 @@ async function resolveExpandableImageSrc(href, mockMediaToken, ownerToken = 'OWN
 // ---------------------------------------------------------------------------
 
 describe('MEDIA_PATH_RE regex', () => {
-  test('matches a root-relative /api/chats/<id>/generated/ path', () => {
-    const src = '/api/chats/abc-123/generated/img.png'
-    assert.ok(MEDIA_PATH_RE.test(src), 'root-relative generated path must match')
-  })
-
   test('matches a root-relative /api/chats/<id>/uploads/ path', () => {
     const src = '/api/chats/abc-123/uploads/file.jpg'
     assert.ok(MEDIA_PATH_RE.test(src), 'root-relative uploads path must match')
@@ -119,9 +114,9 @@ describe('MEDIA_PATH_RE regex', () => {
     assert.ok(MEDIA_PATH_RE.test(src), 'root-relative media path must match')
   })
 
-  test('matches an absolute https://host/api/chats/<id>/generated/ path', () => {
-    const src = 'https://mobius.example.com/api/chats/abc-123/generated/img.png'
-    assert.ok(MEDIA_PATH_RE.test(src), 'absolute generated path must match')
+  test('matches an absolute https://host/api/chats/<id>/media/ path', () => {
+    const src = 'https://mobius.example.com/api/chats/abc-123/media/img.png'
+    assert.ok(MEDIA_PATH_RE.test(src), 'absolute media path must match')
   })
 
   test('matches an absolute https://host/api/chats/<id>/uploads/ path', () => {
@@ -151,13 +146,13 @@ describe('MEDIA_PATH_RE regex', () => {
 
 describe('getMediaChatId', () => {
   test('extracts a plain chat ID from a root-relative path', () => {
-    const id = getMediaChatId('/api/chats/mychat/generated/img.png')
+    const id = getMediaChatId('/api/chats/mychat/media/img.png')
     assert.equal(id, 'mychat')
   })
 
   test('extracts a UUID4 chat ID (with hyphens) from a root-relative path', () => {
     const uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
-    const id = getMediaChatId(`/api/chats/${uuid}/generated/shot.png`)
+    const id = getMediaChatId(`/api/chats/${uuid}/media/shot.png`)
     assert.equal(id, uuid, 'UUID with hyphens must be extracted intact')
   })
 
@@ -177,7 +172,7 @@ describe('getMediaChatId', () => {
 
   test('extracts the correct chat ID even when filename contains hyphens', () => {
     const uuid = 'aaaabbbb-cccc-4ddd-8eee-ffffffffffff'
-    const id = getMediaChatId(`/api/chats/${uuid}/generated/mind-after-fix-v2.png`)
+    const id = getMediaChatId(`/api/chats/${uuid}/media/mind-after-fix-v2.png`)
     assert.equal(id, uuid, 'filename hyphens must not bleed into chat ID')
   })
 })
@@ -187,8 +182,8 @@ describe('getMediaChatId', () => {
 // ---------------------------------------------------------------------------
 
 describe('ExpandableImage resolution for media paths', () => {
-  test('fetches a media token and builds a token-bearing URL for a root-relative generated path', async () => {
-    const href = '/api/chats/f47ac10b-58cc-4372-a567-0e02b2c3d479/generated/shot.png'
+  test('fetches a media token and builds a token-bearing URL for a root-relative media path', async () => {
+    const href = '/api/chats/f47ac10b-58cc-4372-a567-0e02b2c3d479/media/shot.png'
     let capturedChatId = null
 
     const mockMediaToken = async (chatId) => {
@@ -234,21 +229,21 @@ describe('ExpandableImage resolution for media paths', () => {
 
   test('produces a URL with the correct pathname (no hash/query leakage from href)', async () => {
     const chatId = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
-    const href = `/api/chats/${chatId}/generated/shot.png`
+    const href = `/api/chats/${chatId}/media/shot.png`
 
     const mockMediaToken = async () => '?token=TOK'
     const src = await resolveExpandableImageSrc(href, mockMediaToken)
 
-    // Pathname must be exactly /api/chats/{id}/generated/shot.png
+    // Pathname must be exactly /api/chats/{id}/media/shot.png
     assert.equal(
       src,
-      `/api/chats/${chatId}/generated/shot.png?token=TOK`,
+      `/api/chats/${chatId}/media/shot.png?token=TOK`,
       'resolved src must be pathname + ?token= (no extra fragments or query leakage)',
     )
   })
 
   test('handles token-fetch failure gracefully: returns path with empty param', async () => {
-    const href = '/api/chats/abc-123/generated/shot.png'
+    const href = '/api/chats/abc-123/media/shot.png'
     // Simulate mediaTokenParam returning '' on failure
     const mockMediaToken = async () => ''
 
@@ -257,7 +252,7 @@ describe('ExpandableImage resolution for media paths', () => {
     // The src is produced (non-null); the <img> will 401 server-side but
     // the page won't crash. This matches the mediaTokenParam contract:
     // "Returns '' if token fetch fails — image just won't render".
-    assert.equal(src, '/api/chats/abc-123/generated/shot.png',
+    assert.equal(src, '/api/chats/abc-123/media/shot.png',
       'on token-fetch failure, src is produced without token (server returns 401, no crash)')
   })
 })
@@ -313,7 +308,7 @@ describe('ExpandableImage resolution for external URLs', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveStaticImageSrc for non-media /api/ paths', () => {
-  // A hypothetical /api/ image path that is NOT uploads/generated — rare
+  // A hypothetical /api/ image path that is NOT uploads/media — rare
   // but the code falls through to the static resolution branch, appending
   // the owner JWT. This confirms the asymmetry: media routes use media tokens,
   // everything else uses the owner token via the HEADER path in practice
@@ -337,10 +332,8 @@ describe('resolveStaticImageSrc for non-media /api/ paths', () => {
 
 describe('regex and extraction consistency', () => {
   const CASES = [
-    ['/api/chats/abc/generated/img.png', 'abc'],
     ['/api/chats/abc/uploads/file.pdf', 'abc'],
     ['/api/chats/abc/media/shot.png', 'abc'],
-    ['https://h.example.com/api/chats/uuid-here/generated/x.png', 'uuid-here'],
     ['https://h.example.com/api/chats/uuid-here/media/x.png', 'uuid-here'],
     ['https://h.example.com/api/chats/uuid-here/uploads/x.png', 'uuid-here'],
   ]
