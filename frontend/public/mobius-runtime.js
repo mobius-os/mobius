@@ -1721,7 +1721,20 @@ export function createUseDocument(storage, reactProvider = null) {
       throw new Error('useDocument needs React — bind it via window.mobius.createUseDocument(React)')
     }
     const initialOpt = Object.prototype.hasOwnProperty.call(opts, 'initial') ? opts.initial : null
-    const initialValue = typeof initialOpt === 'function' ? initialOpt() : initialOpt
+    // Resolve a lazy initial value once per document path. Calling an initializer
+    // such as `() => []` on every render creates a new reference, which changes
+    // refresh's dependencies; the refresh effect then fetches, sets state,
+    // renders, and fetches again forever. A path change is the only event that
+    // should establish a new document baseline.
+    const initialRef = React.useRef({ path: undefined, initialized: false, value: null })
+    if (!initialRef.current.initialized || initialRef.current.path !== path) {
+      initialRef.current = {
+        path,
+        initialized: true,
+        value: typeof initialOpt === 'function' ? initialOpt() : initialOpt,
+      }
+    }
+    const initialValue = initialRef.current.value
     const identity = opts.identity || defaultIdentity
     const merge = opts.merge || ((base, mine, theirs) => defaultDocumentMerge(base, mine, theirs, identity))
     const mode = opts.mode || 'cas'
