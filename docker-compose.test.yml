@@ -175,6 +175,10 @@ services:
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
       - MOBIUS_BUILD_INFO_PATH=/workspace/.test-build-info-does-not-exist.json
+      # Execute the current checkout's checker source with the dependency tree
+      # baked into the verified test image; the /workspace bind intentionally
+      # contains no host node_modules directory.
+      - MOBIUS_FRONTEND_NODE_MODULES=/app/shell-src/node_modules
       # Worktrees can retain __pycache__ files first compiled at the old /app
       # mount.  Their embedded filenames and, in timestamp/size collisions,
       # bytecode can then come from a different checkout.  Use a fresh cache

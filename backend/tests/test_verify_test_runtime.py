@@ -190,10 +190,39 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert 'error: timed out waiting for isolated browser proxy' in runner
 
 
+def _git_env(home: Path) -> dict[str, str]:
+  """Minimal Git environment for nested-repository harnesses.
+
+  These tests run near the end of the full suite and must not inherit any
+  repository-discovery or temporary config variables exercised by earlier Git
+  tests. A fresh HOME also prevents host/image user config from changing init
+  or clone behavior.
+  """
+  home.mkdir(parents=True, exist_ok=True)
+  empty_config = home / ".gitconfig-empty"
+  empty_config.write_text("", encoding="utf-8")
+  return {
+    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    "HOME": str(home),
+    "XDG_CONFIG_HOME": str(home / ".config"),
+    "TMPDIR": str(home),
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": str(empty_config),
+  }
+
+
 def _git(repo: Path, *args: str):
-  return subprocess.run(
-    ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+  result = subprocess.run(
+    ["git", "-C", str(repo), *args], check=False, capture_output=True,
+    text=True, env=_git_env(repo.parent),
   )
+  if result.returncode != 0:
+    raise AssertionError(
+      f"git {' '.join(args)} failed ({result.returncode}): {result.stderr}"
+    )
+  return result
 
 
 def _init_repo(repo: Path):
@@ -228,7 +257,10 @@ def test_local_runner_refuses_tracked_edits_before_docker(tmp_path):
     cwd=repo,
     capture_output=True,
     text=True,
-    env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    env={
+      **_git_env(tmp_path),
+      "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    },
   )
   assert result.returncode == 2
   assert "requires a committed revision" in result.stderr
@@ -246,7 +278,7 @@ def test_no_local_clone_from_linked_worktree_has_standalone_git_dir(tmp_path):
 
   subprocess.run(
     ["git", "clone", "--quiet", "--no-local", str(linked), str(snapshot)],
-    check=True,
+    check=True, env=_git_env(tmp_path),
   )
   assert (linked / ".git").is_file()
   assert (snapshot / ".git").is_dir()
