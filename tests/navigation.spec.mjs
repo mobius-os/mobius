@@ -949,8 +949,11 @@ async function bootTwoAppPanes(page) {
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
-function appFrameFor(page, appId) {
-  return page.frames().find(f => new RegExp(`/api/apps/${appId}/frame`).test(f.url()))
+async function appFrameFor(page, appId) {
+  const iframe = page.locator(`iframe[data-app-id="${appId}"]`)
+  await expect(iframe).toHaveCount(1, { timeout: 5000 })
+  const handle = await iframe.elementHandle()
+  return handle?.contentFrame() ?? null
 }
 
 /** Arm a frame's nav-back counter. */
@@ -966,9 +969,10 @@ async function armBackCounter(frame) {
 test.describe('Split-pane navigation (PR2 gate)', () => {
   test('25. two visible app panes: Back routes nav-back to the topmost tagged pane', async ({ page }) => {
     await bootTwoAppPanes(page)
-    const frameA = appFrameFor(page, PANE_APP_A)
-    const frameB = appFrameFor(page, PANE_APP_B)
-    if (!frameA || !frameB) test.skip(true, 'both app frames did not load in the mocked harness')
+    const frameA = await appFrameFor(page, PANE_APP_A)
+    const frameB = await appFrameFor(page, PANE_APP_B)
+    expect(frameA, 'app A frame mounted').not.toBeNull()
+    expect(frameB, 'app B frame mounted').not.toBeNull()
 
     await armBackCounter(frameA)
     await armBackCounter(frameB)
@@ -1001,9 +1005,10 @@ test.describe('Split-pane navigation (PR2 gate)', () => {
 
   test('26. closing a pane retires its app history without disturbing the sibling', async ({ page }) => {
     await bootTwoAppPanes(page)
-    const frameA = appFrameFor(page, PANE_APP_A)
-    const frameB = appFrameFor(page, PANE_APP_B)
-    if (!frameA || !frameB) test.skip(true, 'both app frames did not load in the mocked harness')
+    const frameA = await appFrameFor(page, PANE_APP_A)
+    const frameB = await appFrameFor(page, PANE_APP_B)
+    expect(frameA, 'app A frame mounted').not.toBeNull()
+    expect(frameB, 'app B frame mounted').not.toBeNull()
 
     await armBackCounter(frameB)
 

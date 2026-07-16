@@ -166,11 +166,9 @@ async function rememberChatRoot(page, chatId) {
 async function rememberedChatRootIsCurrent(page) {
   return page.evaluate(() => {
     const root = window.__workspacePaneChatRoot
-    const wrapper = root?.closest('.shell__view')
-    // A collapsed single-pane wrapper deliberately drops data-tab-key, so
-    // querying by chat id after the move would report a false remount. The
-    // remembered DOM object's connectivity + active wrapper is the invariant.
-    return !!root?.isConnected && !!wrapper?.classList.contains('shell__view--active')
+    // The same wrapper is --paned before collapse and --active afterward. Its
+    // retained root object's connectivity is the cross-mode identity invariant.
+    return !!root?.isConnected
   })
 }
 
@@ -318,8 +316,11 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.goto(`${BASE}/shell/?app=${APP_ID}`, { waitUntil: 'domcontentloaded' })
     await waitTiled(page)
 
-    const appFrame = page.frames().find(f => new RegExp(`/api/apps/${APP_ID}/frame`).test(f.url()))
-    if (!appFrame) test.skip(true, 'app frame did not load in the mocked harness')
+    const iframe = page.locator(`iframe[data-app-id="${APP_ID}"]`)
+    await expect(iframe).toHaveCount(1, { timeout: 5000 })
+    const iframeHandle = await iframe.elementHandle()
+    const appFrame = await iframeHandle?.contentFrame()
+    expect(appFrame, 'the mocked app frame is mounted').not.toBeNull()
     await appFrame.waitForFunction(() => typeof window.__fi === 'number', { timeout: 4000 })
     // Let the parent's onLoad + token frame-init posts settle.
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
