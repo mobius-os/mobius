@@ -21,8 +21,6 @@
   <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
-![Editor showing the files and source behind a Möbius app](assets/product/editor-desktop.png)
-
 ## Build apps around the way you work
 
 Möbius is a self-hosted workspace where a coding agent builds apps beside the conversation. Describe what you need, inspect the result, and keep the app in the same place where you use it.
@@ -31,25 +29,22 @@ Apps are ordinary repositories with readable source and a small manifest. Start 
 
 <table>
   <tr>
-    <td width="52%"><img src="assets/product/tandem-reader.png" alt="Tandem showing a bilingual story"></td>
-    <td width="48%"><img src="assets/product/beat-machine-iphone.png" alt="Beat Machine showing a step sequencer on an iPhone"></td>
+    <td width="34%"><img src="assets/product/tandem-iphone.png" alt="Tandem showing a bilingual story with a selected word translated on an iPhone"></td>
+    <td width="66%"><img src="assets/product/atlas-desktop.png" alt="Atlas showing visited and saved countries on an interactive globe"></td>
   </tr>
   <tr>
     <td><strong>Tandem:</strong> read generated stories in two languages at your chosen level.</td>
-    <td><strong>Beat Machine:</strong> sketch a beat, shape the sound, and add your own recordings.</td>
+    <td><strong>Atlas:</strong> collect the places you have visited and save where you want to go next.</td>
   </tr>
 </table>
+
+Other apps can be as personal as the trip they support. Brazil 2026 keeps an itinerary, local phrases, weather, packing, and a journal together. News prepares a daily digest around the topics you care about.
 
 ## Use the same workspace on phone and web
 
 Möbius runs as a progressive web app (PWA). Your apps, files, chat, memory, and settings stay together across a computer and phone.
 
-<table>
-  <tr>
-    <td width="67%"><img src="assets/product/editor-desktop.png" alt="Editor showing app files and source on a computer"></td>
-    <td width="33%"><img src="assets/product/editor-iphone.png" alt="Editor showing the same app files on an iPhone"></td>
-  </tr>
-</table>
+![Editor showing the same app project across web and iPhone](assets/product/editor-continuity.png)
 
 ## Personalize the whole platform
 
