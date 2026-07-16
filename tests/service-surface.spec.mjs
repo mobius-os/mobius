@@ -201,7 +201,13 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
     expect(cspSources(shellResponse.headers()['content-security-policy'], 'frame-src'))
       .toEqual(["'self'", SERVICE_ORIGIN])
     const appFrame = page.locator(`iframe[src*="/api/apps/${app.id}/frame"]`)
-    await expect(appFrame).toHaveCount(1, { timeout: 5_000 })
+    // This is a cold deep-link immediately after creating the app. On a clean
+    // browser the shell may also complete its first service-worker handoff
+    // before the catalog hydrates; five seconds proved too tight under a busy
+    // CI runner even though the frame appeared and the same contract passed on
+    // the PR head. Keep this bounded, but align it with the shell's normal
+    // cold-start budget rather than treating scheduler latency as a failure.
+    await expect(appFrame).toHaveCount(1, { timeout: 15_000 })
     const appSandbox = (await appFrame.getAttribute('sandbox') || '').split(/\s+/)
     expect(appSandbox).not.toContain('allow-same-origin')
     // load fires even for the deliberately blocked document. While the shell
