@@ -55,6 +55,12 @@
      read as part of the same design system. --cubic-move is the
      ease curve the SDK uses for sliding panels. */
   transition: transform var(--transition-duration-basic, 250ms) var(--cubic-move, cubic-bezier(0.4, 0, 0.2, 1));
+  /* Vertical gestures belong to the two drawer lists; horizontal gestures are
+     reserved for Drawer.jsx's swipe-to-close interaction. Keeping this modal
+     boundary explicit also stops a pan begun on non-scrollable drawer chrome
+     (a section label or gutter) from chaining into the app iframe beneath it. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
 }
 
 /* Give longer chat and app names more room on larger screens without

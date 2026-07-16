@@ -726,15 +726,72 @@ test.describe('Drawer close paths converge through handleBack', () => {
   test('22b. Drawer scrim owns touch pans instead of the background', async ({ page }) => {
     await setup(page)
     await openDrawer(page)
-    const contract = await page.locator('.drawer-overlay').evaluate((overlay) => ({
-      touchAction: getComputedStyle(overlay).touchAction,
-      overscrollBehavior: getComputedStyle(overlay).overscrollBehavior,
-    }))
-    expect(contract.touchAction).toBe('none')
-    expect(contract.overscrollBehavior).toBe('none')
+    const contract = await page.evaluate(() => {
+      const overlay = getComputedStyle(document.querySelector('.drawer-overlay'))
+      const drawer = getComputedStyle(document.querySelector('.drawer'))
+      const content = getComputedStyle(document.querySelector('.shell__content'))
+      return {
+        overlayTouchAction: overlay.touchAction,
+        overlayOverscroll: overlay.overscrollBehavior,
+        drawerTouchAction: drawer.touchAction,
+        drawerOverscroll: drawer.overscrollBehavior,
+        contentPointerEvents: content.pointerEvents,
+        contentTouchAction: content.touchAction,
+      }
+    })
+    expect(contract).toEqual({
+      overlayTouchAction: 'none',
+      overlayOverscroll: 'none',
+      drawerTouchAction: 'pan-y',
+      drawerOverscroll: 'contain',
+      contentPointerEvents: 'none',
+      contentTouchAction: 'none',
+    })
   })
 
-  test('22c. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
+  test('22c. Vertical drawer scroll does not swallow the next destination tap', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    // Reproduce the phone sequence without waiting out the old suppressor's
+    // 400ms fallback: scroll vertically, lift, then immediately tap Settings.
+    // A vertical pan is native scrolling, not the custom horizontal
+    // swipe-to-close gesture, so the destination click must pass through.
+    await page.locator('.drawer').evaluate((drawer) => {
+      const point = (y) => new Touch({
+        identifier: 37,
+        target: drawer,
+        clientX: 180,
+        clientY: y,
+      })
+      drawer.dispatchEvent(new TouchEvent('touchstart', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(520)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchmove', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(390)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchend', {
+        bubbles: true,
+        cancelable: true,
+        touches: [],
+        changedTouches: [point(390)],
+      }))
+
+      const settings = [...drawer.querySelectorAll('button')]
+        .find(button => button.textContent.trim() === 'Settings')
+      settings?.click()
+    })
+
+    await expect(page.locator('.settings')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('22d. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
 
@@ -776,7 +833,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
     )).toBeLessThanOrEqual(-359)
   })
 
-  test('22d. Closing scrim blocks the app until the panel is offscreen', async ({ page }) => {
+  test('22e. Closing scrim blocks the app until the panel is offscreen', async ({ page }) => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
     await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
