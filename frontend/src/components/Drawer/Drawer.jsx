@@ -273,7 +273,11 @@ export default function Drawer({
   // without easing.
   const drawerRef = useRef(null)
   const dragStart = useRef(null) // { x, y } or null
-  // True once a touch gesture has moved past the tap/swipe threshold.
+  // True once a touch gesture has become a HORIZONTAL swipe. Vertical movement
+  // belongs to the drawer's scroll containers and must never arm click
+  // suppression: some mobile browsers do not emit a synthetic click after a
+  // scroll, so the old "any movement" rule left the suppressor waiting and ate
+  // the user's next real tap on a chat/app row.
   // React's onTouch* handlers are passive, so preventDefault() in
   // onTouchMove is a no-op and a horizontal drag still emits a synthetic
   // click that lands on whatever row the finger lifted over — selecting
@@ -331,13 +335,15 @@ export default function Drawer({
     if (!dragStart.current || e.touches.length !== 1) return
     const dx = e.touches[0].clientX - dragStart.current.x
     const dy = e.touches[0].clientY - dragStart.current.y
-    // Any movement past the threshold (in either axis) means this is a
-    // drag, not a tap — mark it so touchend can suppress the trailing
-    // click even on a scroll/vertical pan that lifted over a row.
-    if (Math.abs(dx) > SWIPE_THRESHOLD || Math.abs(dy) > SWIPE_THRESHOLD) {
+    const isHorizontalSwipe = Math.abs(dx) > SWIPE_THRESHOLD
+      && Math.abs(dx) > Math.abs(dy) * 1.15
+    // Only custom horizontal gestures need the one-shot click suppressor.
+    // Native vertical scrolling already owns its tap/click cancellation; arming
+    // our suppressor for it made a quick post-scroll destination tap look dead.
+    if (isHorizontalSwipe) {
       swipingRef.current = true
     }
-    if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.15) {
+    if (dx < 0 && isHorizontalSwipe) {
       const el = drawerRef.current
       if (!el) return
       el.classList.add('drawer--dragging')

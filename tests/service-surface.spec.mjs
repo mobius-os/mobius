@@ -121,6 +121,30 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
   })
   await page.addInitScript(() => {
     window.__mobiusServiceReadyEvents = []
+    window.__mobiusAppFrameSandboxes = []
+    const recordAppFrames = root => {
+      const frames = root instanceof HTMLIFrameElement
+        ? [root]
+        : [...(root.querySelectorAll?.('iframe') || [])]
+      for (const frame of frames) {
+        if (!frame.getAttribute('src')?.includes('/api/apps/')) continue
+        window.__mobiusAppFrameSandboxes.push({
+          src: frame.getAttribute('src'),
+          sandbox: frame.getAttribute('sandbox') || '',
+        })
+      }
+    }
+    const observeAppFrames = () => {
+      if (!document.documentElement) return
+      const observer = new MutationObserver(records => {
+        for (const record of records) {
+          for (const node of record.addedNodes) recordAppFrames(node)
+        }
+      })
+      observer.observe(document.documentElement, { childList: true, subtree: true })
+    }
+    if (document.documentElement) observeAppFrames()
+    else document.addEventListener('DOMContentLoaded', observeAppFrames, { once: true })
     window.addEventListener('message', event => {
       if (event.data?.type !== 'moebius:service-ready') return
       const frame = [...document.querySelectorAll('iframe[src*="/_mobius/surface"]')]
@@ -200,9 +224,24 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
     // mistaken for a route/interception failure again.
     expect(cspSources(shellResponse.headers()['content-security-policy'], 'frame-src'))
       .toEqual(["'self'", SERVICE_ORIGIN])
-    const appFrame = page.locator(`iframe[src*="/api/apps/${app.id}/frame"]`)
-    await expect(appFrame).toHaveCount(1, { timeout: 5_000 })
-    const appSandbox = (await appFrame.getAttribute('sandbox') || '').split(/\s+/)
+    // The launcher posts moebius:open-service from its first React effect, so
+    // its ordinary app iframe can be replaced by the service iframe before a
+    // locator's next polling interval. Observe insertion instead of requiring
+    // that deliberately transient launcher to remain mounted.
+    await expect.poll(
+      () => page.evaluate(appId => (
+        window.__mobiusAppFrameSandboxes.some(entry =>
+          entry.src.includes(`/api/apps/${appId}/frame`)
+        )
+      ), app.id),
+      { timeout: 15_000 },
+    ).toBe(true)
+    const mountedAppFrame = await page.evaluate(appId => (
+      window.__mobiusAppFrameSandboxes.find(entry =>
+        entry.src.includes(`/api/apps/${appId}/frame`)
+      )
+    ), app.id)
+    const appSandbox = (mountedAppFrame.sandbox || '').split(/\s+/)
     expect(appSandbox).not.toContain('allow-same-origin')
     // load fires even for the deliberately blocked document. While the shell
     // waits for the absent heartbeat, the frame must remain fully covered.

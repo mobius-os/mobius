@@ -272,7 +272,15 @@
               && navigator.serviceWorker.controller
               && !sessionStorage.getItem('sw-auto-reloaded')) {
             sessionStorage.setItem('sw-auto-reloaded', '1')
-            rememberShellStateForAutoReload()
+            // Shell.performShellReload captures its live ref-backed route
+            // before requesting the worker handoff. Keep that authoritative
+            // snapshot: localStorage mirrors React state in effects and can
+            // still describe the previous view during a just-mounted cold
+            // deep-link. The early boot handler is only a fallback for a
+            // controller change that has no Shell-owned snapshot.
+            if (!sessionStorage.getItem('shell-reload')) {
+              rememberShellStateForAutoReload()
+            }
             window.location.reload()
           }
         }
