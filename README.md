@@ -63,7 +63,7 @@ The workspace can change with you. Themes reshape the shell, Memory keeps durabl
 
 ## Build toward AGI in public
 
-Möbius is a community-built artificial general intelligence (AGI) project grounded in useful apps. It does not claim that general intelligence has already been solved. The project asks what becomes possible when a capable agent can build tools, modify its platform, remember useful context, and learn from real friction.
+Möbius is a community-built artificial general intelligence (AGI) project that grows with the needs of its users. It does not claim that general intelligence has already been solved. The project asks what becomes possible when a capable agent can build productive tools, personalize its platform, remember useful context, and learn from real friction.
 
 Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and `/recover` keep those changes reversible.
 
