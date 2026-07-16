@@ -55,6 +55,30 @@ test('isEmbedMessage rejects a cross-origin message even with the right source',
   )
 })
 
+test('isEmbedMessage accepts an opaque parent only when explicitly allowed and source matches', () => {
+  const opaque = evt({ origin: 'null', type: INIT, instanceId: 'i' })
+  assert.equal(
+    isEmbedMessage(opaque, {
+      origin: ORIGIN,
+      expectedSource: SRC,
+      allowOpaqueOrigin: true,
+    }),
+    true,
+  )
+  assert.equal(
+    isEmbedMessage(opaque, { origin: ORIGIN, expectedSource: SRC }),
+    false,
+  )
+  assert.equal(
+    isEmbedMessage(opaque, {
+      origin: ORIGIN,
+      expectedSource: { name: 'sibling' },
+      allowOpaqueOrigin: true,
+    }),
+    false,
+  )
+})
+
 test('isEmbedMessage rejects a sibling same-origin frame (wrong source)', () => {
   // The whole point of §1.4: another frame shares the origin. A message
   // from a DIFFERENT window must be ignored even though origin matches.

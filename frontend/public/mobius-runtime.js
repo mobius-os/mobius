@@ -2431,25 +2431,41 @@ function makeChat({ appId, getToken, storage }) {
       renderChatOptions([])
     }
 
-    function sendInit() {
+    async function sendInit() {
       const w = iframe.contentWindow
       if (!w) return
       const msg = { type: EMBED_INIT, instanceId, chatId: chatId || undefined, picker: pickerOn }
       if (quickActions && quickActions.length > 0) msg.quickActions = quickActions
-      w.postMessage(msg, window.location.origin)
+      // The chat iframe is nested under the app's opaque-origin sandbox. Pass
+      // only this app's scoped token, in memory, after the document load; the
+      // child cannot read the owner's localStorage and must never receive the
+      // owner JWT. scopedToken() also verifies app id + instance nonce.
+      let token = null
+      try { token = await getToken() } catch (e) {}
+      if (token) msg.token = token
+      w.postMessage(msg, '*')
     }
 
     function onMessage(e) {
       // §1.4 hardening: three same-origin frames share this origin, so
       // origin alone is insufficient — also require the message to come
       // from THIS embed's contentWindow and carry OUR instanceId.
-      if (e.origin !== window.location.origin) return
+      if (e.origin !== window.location.origin && e.origin !== 'null') return
       if (e.source !== iframe.contentWindow) return
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       if (typeof msg.type !== 'string' || !msg.type.startsWith(EMBED_NS)) return
       if (msg.instanceId && msg.instanceId !== instanceId) return
       if (msg.type === EMBED_READY) {
+        // The child's mount-time READY is intentionally uncorrelated. INIT sent
+        // from the iframe load handler can race ahead of React's message
+        // listener, so use this first READY as the one retry. The child replies
+        // to that INIT with our instanceId; correlated READY messages below do
+        // not re-send INIT and cannot form a handshake loop.
+        if (!msg.instanceId) {
+          sendInit().catch(() => {})
+          return
+        }
         // The embed resolved its chatId (e.g. it was opened without one
         // and INIT carried it, or a future lazy path). Adopt it, and
         // re-persist if it differs from what we saved.
@@ -2475,14 +2491,14 @@ function makeChat({ appId, getToken, storage }) {
           if (!w) return
           w.postMessage(
             { type: EMBED_CONTEXT_RESPONSE, instanceId, nonce, context: ctx || null },
-            window.location.origin,
+            '*',
           )
         }).catch(() => {
           const w = iframe.contentWindow
           if (!w) return
           w.postMessage(
             { type: EMBED_CONTEXT_RESPONSE, instanceId, nonce, context: null },
-            window.location.origin,
+            '*',
           )
         })
       }

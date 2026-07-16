@@ -12,7 +12,13 @@ export function streamSnapshotKey(chatId) {
 }
 
 function defaultStorage() {
-  return typeof sessionStorage === 'undefined' ? null : sessionStorage
+  try {
+    return typeof sessionStorage === 'undefined' ? null : sessionStorage
+  } catch {
+    // Opaque app-chat sandboxes expose the property but deny access to it.
+    // The cache is optional; the durable chat row and SSE catch-up are enough.
+    return null
+  }
 }
 
 export function readStoredStreamSnapshot(chatId, storage = defaultStorage()) {

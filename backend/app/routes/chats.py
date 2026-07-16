@@ -668,7 +668,7 @@ def get_chat(
   chat_id: str,
   limit: int = 20,
   before: int | None = None,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Returns a chat with paginated messages and running status.
@@ -682,7 +682,7 @@ def get_chat(
   messages have higher indices. The response includes `offset` (the index
   of the first message in this page) and `total` (total message count).
   """
-  chat = get_active_chat_or_404(db, chat_id)
+  chat = get_active_chat_for_principal(db, chat_id, principal)
   from app.chat_transcript import materialized_messages
   all_msgs = materialized_messages(chat)
   total = len(all_msgs)

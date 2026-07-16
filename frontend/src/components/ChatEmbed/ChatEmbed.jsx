@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import useTheme from '../../hooks/useTheme.js'
+import { getToken, setEmbeddedToken } from '../../api/client.js'
 import {
   INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR,
   CONTEXT_REQUEST, CONTEXT_RESPONSE,
@@ -17,18 +18,13 @@ import './ChatEmbed.css'
 //
 // This is the RENDERER in the embed-as-renderer design: a SEPARATE
 // entry (NOT conditionals threaded through Shell) that mounts the real
-// ChatView scoped to one chatId, in the shell's own React-19 +
-// QueryClient context. App.jsx wraps both this and the full Shell in the
-// same PersistQueryClientProvider, so ChatView's useQueryClient resolves
-// and its cache (messages, theme) is shared.
+// ChatView scoped to one chatId in a lightweight QueryClient context.
 //
-// It is NOT the trust boundary (design §0b): a same-origin app already
-// holds the owner JWT, so the embed adds no confidentiality control —
-// the real authority is the app-attributed backend chat contract. Do not
-// add auth gating here.
+// It is NOT the trust boundary: the parent supplies its short-lived app JWT,
+// and the app-attributed backend chat contract enforces the real authority.
 //
-// Frame layering is shell → app frame → embed frame, all same-origin, so
-// every postMessage is validated by source + origin + instanceId
+// Frame layering is shell → opaque app frame → embed frame, so every
+// postMessage is validated by source + origin + instanceId
 // (lib/chatEmbed.js). The runtime helper (mobius-runtime.js) is the
 // parent: it resolves a chatId (lazy-creating one via the backend
 // contract when the app didn't pass one), opens this iframe at
@@ -86,6 +82,12 @@ export default function ChatEmbed() {
   // resolved, so keep it in state.
   const [chatId, setChatId] = useState(() => readChatIdFromUrl())
   const [picker, setPicker] = useState(() => readPickerFromUrl())
+  // Top-level opens use the owner's localStorage token. Inside an app frame the
+  // inherited opaque sandbox has no storage access, so wait for INIT to carry
+  // the narrower app token before mounting ChatView and firing API requests.
+  const [tokenReady, setTokenReady] = useState(() => (
+    window.parent === window || !!getToken()
+  ))
   // quickActions: array of {label, prompt} from the INIT payload. Max 4.
   // Passed to ChatView which renders them as chips on the embedded empty state.
   const [quickActions, setQuickActions] = useState(null)
@@ -153,7 +155,7 @@ export default function ChatEmbed() {
       })
       target.postMessage(
         { type: CONTEXT_REQUEST, instanceId: instanceIdRef.current, nonce },
-        window.location.origin,
+        '*',
       )
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -164,7 +166,7 @@ export default function ChatEmbed() {
     if (!target || target === window) return // opened standalone, no parent
     target.postMessage(
       { type, instanceId: instanceIdRef.current, chatId: chatIdRef.current, ...extra },
-      window.location.origin,
+      '*',
     )
   }
 
@@ -183,6 +185,10 @@ export default function ChatEmbed() {
       if (!isEmbedMessage(event, {
         origin: window.location.origin,
         expectedSource: parentRef.current,
+        // A nested app chat inherits the app frame's opaque origin. Exact
+        // source-window validation remains mandatory, so accepting the
+        // browser's serialized "null" origin does not admit sibling frames.
+        allowOpaqueOrigin: parentRef.current !== window,
       })) return
       const msg = event.data
       if (msg.type === CONTEXT_RESPONSE) {
@@ -196,6 +202,9 @@ export default function ChatEmbed() {
       }
       if (msg.type !== INIT) return
       if (typeof msg.instanceId === 'string') instanceIdRef.current = msg.instanceId
+      if (typeof msg.token === 'string' && msg.token) {
+        setTokenReady(setEmbeddedToken(msg.token))
+      }
       // The helper may pass an authoritative chatId in INIT (it
       // lazy-created one after opening us without a query param). Adopt
       // it when we don't already have one so ChatView mounts the real
@@ -216,14 +225,17 @@ export default function ChatEmbed() {
     // uncorrelated READY now too; the parent keys off origin + source and
     // picks up the instanceId from its own INIT round-trip. Idempotent.
     postToParent(READY)
-    return () => window.removeEventListener('message', onMessage)
+    return () => {
+      window.removeEventListener('message', onMessage)
+      setEmbeddedToken(null)
+    }
     // Mount-only: refs hold the mutable bits and the listener reads the
     // latest chatId via chatIdRef. Re-subscribing on chatId change would
     // drop in-flight INIT handling.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  if (!chatId) {
+  if (!chatId || !tokenReady) {
     return (
       <div className="chat-embed chat-embed--empty">
         <p className="chat-embed__notice">

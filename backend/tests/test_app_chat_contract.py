@@ -51,6 +51,15 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   assert owner_view.status_code == 200
   assert owner_view.json()["created_by_app_id"] == app_id
 
+  # The embedded renderer loads the same durable transcript with its scoped
+  # app token; the principal gate limits it to this app's own chat.
+  app_view = client.get(
+    f"/api/chats/{chat_id}",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert app_view.status_code == 200, app_view.text
+  assert app_view.json()["id"] == chat_id
+
   # The app can send to its own chat (202 — accepted + runner spawned).
   r = client.post(
     f"/api/chats/{chat_id}/messages", json={"content": "hello agent"},
@@ -364,6 +373,14 @@ def test_app_cannot_touch_foreign_chat(client, owner_token, db):
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert r.status_code == 403, r.text
+
+  # Loading either foreign transcript is forbidden by the same principal gate.
+  for chat_id in ("owner-chat", "other-app-chat"):
+    r = client.get(
+      f"/api/chats/{chat_id}",
+      headers={"Authorization": f"Bearer {app_token}"},
+    )
+    assert r.status_code == 403, r.text
 
 
 def test_owner_token_rejected_from_app_chats_create(client, owner_token):
