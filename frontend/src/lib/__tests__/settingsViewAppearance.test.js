@@ -39,7 +39,7 @@ test('background agents are always draggable without reorder chrome or a trailin
   assert.match(view, /reorderMode\s*\n/)
   assert.match(view, /<GripVertical size=\{18\}/)
   assert.doesNotMatch(view, /settings-agent-group__reorder|>Reorder<|model-trigger__caret/)
-  assert.match(view, /Background models/)
+  assert.match(view, /Background agents/)
   assert.match(view, /Used for memory, reflection, and other automatic tasks\. Tried in order\./)
   assert.match(css, /\.settings-bg-row\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s)
   assert.match(css, /\.settings-bg-row__effort-visual\s*\{[^}]*min-width:\s*68px;/s)
