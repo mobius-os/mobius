@@ -87,6 +87,13 @@ export default function Shell() {
     )),
   )
   const workspace = workspaceState.ws
+  // Whether a VALID persisted workspace blob booted this session (not a flat-tab
+  // fallback). The nav adapter uses it to make the blob authoritative over the
+  // legacy shell-reload triple, seeding from that triple only when absent/invalid
+  // (contract §5.3.10). Read once — sessionStorage is fixed for the mount.
+  const [blobValid] = useState(
+    () => paneModel.isValidWorkspaceBlob(paneModel.readWorkspaceRaw(sessionStorage)),
+  )
   // Ref-side reducer preview: this wrapper advances a ref copy of the reducer
   // state SYNCHRONOUSLY before the raw React dispatch, so two navigation/
   // placement events in one React 18 batch observe each other (design §1). Every
@@ -156,12 +163,13 @@ export default function Shell() {
     navTo, backFiredRef, drawerPushedRef, navStackRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
-    appNavPush, appNavPop, appNavReset, retireAppHistory,
+    appNavPush, appNavPop, appNavReset, retireAppHistory, tombstoneRoute,
   } = useNavigation({
     workspace,
     workspaceStateRef,
     dispatchWorkspace,
     visiblePaneIds,
+    blobValid,
   })
 
   // Settings is a full-workspace overlay (§9) — while it is up we suppress the
@@ -174,16 +182,21 @@ export default function Shell() {
   const navToRef = useRef(navTo)
   navToRef.current = navTo
   // Wire the pane-close route retargeting (design §5.1.3). navStackRef is stable,
-  // so recreating this closure each render is behaviourally identical; the
-  // reducer moves focus to the surviving sibling on a pane removal, so retargeting
-  // dead-pane routes to nextWs.focusedPaneId lands them on a live pane. Physical
-  // history hints that can't be rewritten degrade via restoreRoute's dead-hint
-  // fallback.
+  // so recreating this closure each render is behaviourally identical. Each dead
+  // pane's routes retarget to the STRUCTURAL sibling the collapse chose (the
+  // nearest surviving leaf in the pre-transition order), NOT global focus — a
+  // background split can be removed while focus is elsewhere, and focus is not a
+  // sibling-selection algorithm. Physical history hints that can't be rewritten
+  // degrade via restoreRoute's dead-hint fallback.
   onPaneClosedRef.current = (prevWs, nextWs) => {
-    const survivor = nextWs.focusedPaneId
-    const dead = new Set(Object.keys(prevWs.panes).filter(id => !nextWs.panes[id]))
+    const dead = Object.keys(prevWs.panes).filter(id => !nextWs.panes[id])
+    if (dead.length === 0) return
+    const siblingFor = new Map()
+    for (const d of dead) {
+      siblingFor.set(d, paneModel.survivingSiblingOf(prevWs, nextWs, d) || nextWs.focusedPaneId)
+    }
     navStackRef.current = navStackRef.current.map(r =>
-      (r && dead.has(r.paneId) ? { ...r, paneId: survivor } : r))
+      (r && siblingFor.has(r.paneId) ? { ...r, paneId: siblingFor.get(r.paneId) } : r))
   }
 
   const { loadTheme } = useTheme()
@@ -277,11 +290,16 @@ export default function Shell() {
   }, [])
 
   function shellReloadState() {
+    // Derive the compatibility triple from the freshest workspace at WRITE time,
+    // not the render-lagging active*Refs (§5.3.10): a workspace action previewed
+    // in the same React batch must not persist a fresh blob beside a stale triple.
+    // Settings is a global overlay tracked separately from pane content.
+    const content = paneModel.focusedContentRoute(workspaceStateRef.current.ws)
     return {
-      activeView: activeViewRef.current,
-      activeAppId: activeAppIdRef.current,
+      activeView: activeViewRef.current === 'settings' ? 'settings' : content.view,
+      activeAppId: content.appId,
+      activeChatId: content.chatId,
       drawerOpen: drawerOpenRef.current,
-      activeChatId: activeChatIdRef.current,
     }
   }
 
@@ -630,11 +648,23 @@ export default function Shell() {
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
   }, [projection, workspace])
 
+  // The rendered set as of the last derivation — the baseline the next derivation
+  // diffs against to identify eviction victims.
+  const prevRenderedRef = useRef(new Set())
+
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
   // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
   // from the projection REGARDLESS of LRU membership and are never evicted, so a
   // MOVE_TAB that makes a never-visited app visible materializes its wrapper in
-  // the SAME commit — no post-commit effect, no blank pane (finding B).
+  // the SAME commit — no post-commit effect, no blank pane (finding B). The set is
+  // bounded by APP_CACHE_MAX so it never renders five frames to preserve history
+  // (§4.1.4). Eviction victims are RETIRED here, synchronously in the derivation,
+  // BEFORE this render commits and unmounts their iframes (contract §4.1.2): any
+  // app that was rendered, is not in the new set, and is not still visible is
+  // losing its frame this commit, so its physical entries are marked consumed
+  // before the unmount — the orphan-Back hazard is closed without waiting for the
+  // AppCanvas cleanup backstop. retireAppHistory is idempotent, so the StrictMode
+  // double-render and the onNavReset unmount backstop are both no-ops.
   const renderedAppIds = useMemo(() => {
     const result = new Set()
     for (const id of visibleAppIds) result.add(String(id))
@@ -642,39 +672,31 @@ export default function Shell() {
       if (result.size >= APP_CACHE_MAX) break
       result.add(String(id))
     }
+    for (const id of prevRenderedRef.current) {
+      if (!result.has(id) && !visibleAppIds.has(id)) retireAppHistory(id, 'evict')
+    }
+    prevRenderedRef.current = result
     return [...result].sort((a, b) => Number(a) - Number(b))
-    // warmVersion re-derives the set when the warm LRU changes.
+    // warmVersion re-derives the set when the warm LRU changes; retireAppHistory
+    // is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleAppIds, warmVersion])
-  // The rendered set as of the last maintenance pass — the baseline the next
-  // pass diffs against to identify eviction victims (never the current set,
-  // which already dropped them).
-  const prevRenderedRef = useRef(new Set())
 
   // Maintain the warm LRU as the visible set changes: currently-visible apps are
-  // the most-recent entries, and a just-hidden app slides into the warm
-  // remainder (capped, so the rendered set is never > APP_CACHE_MAX — never five
-  // frames to preserve history, §4.1.4). Any app that leaves the rendered set is
-  // RETIRED (contract §4): its physical entries are marked consumed so a later
-  // Back discards them atomically. AppCanvas's onNavReset cleanup fires inside
-  // the same unmount commit — before any Back event can process — so the orphan-
-  // Back hazard is closed regardless; this explicit retire is the idempotent
-  // primary path, never a visible app.
+  // the most-recent entries, and a just-hidden app slides into the warm remainder
+  // (capped). Retirement is NOT done here — it happens synchronously in the
+  // derivation above, before the unmount (§4.1.2). This effect only rotates the
+  // bounded warm list and bumps the version so the memo re-derives.
   useEffect(() => {
     const visible = [...visibleAppIds].map(String)
     const prevWarm = warmLruRef.current
     const merged = [...visible, ...prevWarm.filter(id => !visible.includes(id))].slice(0, APP_CACHE_MAX)
-    const nextRendered = new Set(merged)   // visible ⊆ merged; = the memo's set
-    for (const id of prevRenderedRef.current) {
-      if (!nextRendered.has(id) && !visibleAppIds.has(id)) retireAppHistory(id)
-    }
-    prevRenderedRef.current = nextRendered
     const changed = merged.length !== prevWarm.length || merged.some((id, i) => id !== prevWarm[i])
     if (changed) {
       warmLruRef.current = merged
       setWarmVersion(v => v + 1)
     }
-  }, [visibleAppIds, retireAppHistory])
+  }, [visibleAppIds])
 
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'chat') return chats.find(c => String(c.id) === tab.id)?.title || 'Chat'
@@ -1001,7 +1023,8 @@ export default function Shell() {
       e => !(e.view === 'canvas' && staleSet.has(String(e.appId)))
     )
     for (const sid of stale) {
-      retireAppHistory(sid)
+      retireAppHistory(sid, 'uninstalled')
+      tombstoneRoute('app', sid)
       dispatchWorkspace({
         type: 'CLOSE_TAB',
         tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
@@ -1060,7 +1083,8 @@ export default function Shell() {
     // tab was seeded for it (fallback boot), close it in its pane; if the
     // authoritative workspace never contained it, this is a no-op (contract
     // §1.4.6).
-    retireAppHistory(coldRestoredCanvasAppId)
+    retireAppHistory(coldRestoredCanvasAppId, 'cold-restore-gone')
+    tombstoneRoute('app', coldRestoredCanvasAppId)
     dispatchWorkspace({
       type: 'CLOSE_TAB',
       tabKey: tabModel.tabKey(tabModel.makeTab('app', coldRestoredCanvasAppId)),
@@ -1829,6 +1853,10 @@ export default function Shell() {
     // they re-enter the chat list normally and rebuild navStack via
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
+    // Tombstone the route so a Back/Forward landing on a surviving PHYSICAL
+    // history entry for this chat cannot recreate the tab via the branch-(5)
+    // route fallback (§5.1.1) — the in-memory scrub above only covers navStackRef.
+    tombstoneRoute('chat', id)
     // Drop the tab pinned to this chat (local delete only — see deleteApp).
     // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
     // tombstoned chat outside the backend recovery path. CLOSE_TAB already
@@ -1893,10 +1921,12 @@ export default function Shell() {
       // cleanup so the app doesn't linger as a phantom in the UI.
     }
     // Retire this app's physical history + evict any warm frame before unmount
-    // (contract §4.1.5), then scrub the nav-stack, then close its tab. The
+    // (contract §4.1.5), tombstone its route so Back can't recreate the tab
+    // (§5.1.1), then scrub the nav-stack, then close its tab. The
     // CLOSE_TAB(reason:'deleted') owns the view transition — the derived triple
     // follows the workspace to the pane's neighbour/collapse; no global demote.
-    retireAppHistory(id)
+    retireAppHistory(id, 'deleted')
+    tombstoneRoute('app', id)
     const sid = String(id)
     if (warmLruRef.current.some(cid => String(cid) === sid)) {
       warmLruRef.current = warmLruRef.current.filter(cid => String(cid) !== sid)
@@ -1957,7 +1987,7 @@ export default function Shell() {
     // lock. The remount rides versionForApp's bump (refreshApps below); we just
     // retire the old frame's physical history — its replacement starts with an
     // empty internal nav stack (contract §4.1.5) — and drop any warm-only frame.
-    retireAppHistory(id)
+    retireAppHistory(id, 'data-reset')
     const sid = String(id)
     if (warmLruRef.current.some(cid => String(cid) === sid)) {
       warmLruRef.current = warmLruRef.current.filter(cid => String(cid) !== sid)
@@ -2229,6 +2259,7 @@ export default function Shell() {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
+                visible={!settingsActive}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
                 composerFocusRequest={composerFocusRequest}

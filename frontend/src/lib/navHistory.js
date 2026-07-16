@@ -95,6 +95,27 @@ export function isTopmostAppEntry({ state, head, inFlight, drawerOpen, registry,
   return true
 }
 
+// Pure selection of the entry a fresh nav-pop should target: the newest still-
+// live physical entry for an app whose id is NOT already claimed by a queued or
+// in-flight request (contract §3.3.1, H1). Without the exclusion, a double-tap
+// before the first popstate lands enqueues the SAME newest entry twice — the
+// second request can never reach topmost (its target consumes on the first) and
+// wedges the FIFO head. `entries` is the registry in insertion order
+// ([entryId, {appId, paneId, status}]); returns {entryId, paneId, appId} or null.
+export function selectNavPopTarget(entries, appId, targetedEntryIds) {
+  const target = String(appId)
+  const claimed = targetedEntryIds instanceof Set
+    ? targetedEntryIds
+    : new Set(targetedEntryIds || [])
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const [entryId, rec] = entries[i]
+    if (rec.appId === target && rec.status === 'live' && !claimed.has(entryId)) {
+      return { entryId, paneId: rec.paneId, appId: rec.appId }
+    }
+  }
+  return null
+}
+
 function mirrorCurrentEntry(state) {
   if (typeof navigation !== 'undefined' && navigation.updateCurrentEntry) {
     navigation.updateCurrentEntry({ state })

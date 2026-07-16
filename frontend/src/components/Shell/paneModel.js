@@ -411,6 +411,32 @@ export function visibleAppIds(ws, visibleLeaves) {
   return set
 }
 
+// The surviving sibling a pane-removal collapse chose for a now-dead pane: the
+// nearest leaf in the PRE-transition in-order sequence that still exists after
+// the collapse (contract §5.1.3). This is the neighbour that inherited the
+// removed pane's space, computed the same way the reducer picks a focus target —
+// so dead-pane route hints retarget to the structural sibling, not global focus.
+export function survivingSiblingOf(prevWs, nextWs, deadPaneId) {
+  const ordered = leafIds(prevWs.layout)
+  const survivors = new Set(Object.keys(nextWs.panes))
+  return nearestSurviving(ordered, survivors, deadPaneId)
+}
+
+// True iff `raw` is a well-formed, current-version, invariant-satisfying workspace
+// blob — the exact success condition of parseWorkspace, WITHOUT the flat-seed
+// fallback. Lets boot distinguish "a valid persisted workspace is authoritative"
+// from "no/again-invalid blob, fall back to the legacy triple" (contract §5.3.10).
+export function isValidWorkspaceBlob(raw) {
+  try {
+    if (typeof raw !== 'string' || raw.length === 0) return false
+    const parsed = JSON.parse(raw)
+    if (!parsed || parsed.v !== 1) return false
+    return isValidWorkspace(normalize(parsed))
+  } catch {
+    return false
+  }
+}
+
 // Open a tab and report whether the open forced an eviction (the reducer needs
 // that to decide undoability — an evicting open is undoable, a plain one is not).
 function doOpenTab(ws, tab, { paneId, activate = true } = {}) {

@@ -275,6 +275,11 @@ export default function ChatView({
   // controller's paneResized() below. Null for a single-pane chat (today's
   // behavior — the controller's own ResizeObserver owns resize there).
   paneContentHeight = null,
+  // True when this mounted chat is hidden behind the full-workspace Settings
+  // overlay (design §2). Before path-unification the single ChatView UNMOUNTED on
+  // Settings, which aborted the mic; now it stays mounted, so we must stop voice
+  // capture explicitly or the microphone would keep listening off-screen.
+  hidden = false,
 }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
@@ -1457,6 +1462,12 @@ export default function ChatView({
   // doSend's identity.
   const stopVoiceRef = useRef(stopVoice)
   stopVoiceRef.current = stopVoice
+
+  // Abort voice capture the moment this chat is hidden behind Settings, matching
+  // the pre-unification unmount behavior — the mic must never stay hot off-screen.
+  useEffect(() => {
+    if (hidden && listeningRef.current) stopVoiceRef.current?.()
+  }, [hidden, listeningRef])
 
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.

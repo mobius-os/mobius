@@ -24,6 +24,7 @@ function PaneChatView({
   chatId,
   paneId,
   apps,
+  visible = true,
   paneContentHeight,
   chatRunSignals,
   composerFocusRequest,
@@ -79,6 +80,7 @@ function PaneChatView({
       <ChatView
         key={chatId}
         chatId={chatId}
+        hidden={!visible}
         paneContentHeight={paneContentHeight}
         externalRunSignal={chatRunSignal(chatRunSignals, chatId)}
         onStreamEnd={handleStreamEnd}

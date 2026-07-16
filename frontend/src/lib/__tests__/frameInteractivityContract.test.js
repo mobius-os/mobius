@@ -11,8 +11,15 @@ const canvas = readFileSync(resolve(src, 'components/AppCanvas/AppCanvas.jsx'), 
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
 
 test('drawer suspension reaches the live app frame before paint', () => {
-  assert.match(shell, /interactive=\{activeView === 'canvas'[\s\S]*&& !drawerOpen\}/)
-  assert.match(canvas, /useLayoutEffect\(\(\) => \{[\s\S]*sendInteractivity\(swap\.liveVersion, interactive, active\)/)
+  // The interactive gate is the FOCUSED canvas minus drawer-open. Post the
+  // workspace-reducer refactor (PR2) that is expressed in workspace terms
+  // (tabKey === focusedActiveKey) rather than the legacy activeView/activeAppId
+  // scalars; the behavior (cancel momentum when the drawer opens) is unchanged.
+  assert.match(shell, /interactive=\{tabKey === focusedActiveKey && !drawerOpen\}/)
+  // The layout effect's "painted" argument tracks `visible` after the
+  // active->visible split (a frame is painted iff it is the active tab of a
+  // visible pane); `interactive` stays the focused-pane, drawer-aware gate.
+  assert.match(canvas, /useLayoutEffect\(\(\) => \{[\s\S]*sendInteractivity\(swap\.liveVersion, interactive, visible\)/)
   assert.match(canvas, /suspendScrolling:\s*visible\s*&&\s*!enabled/)
   assert.match(canvas, /moebius:frame-interactivity/)
 })

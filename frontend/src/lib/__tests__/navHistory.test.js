@@ -11,6 +11,7 @@ import {
   ownerKeyOf,
   pushNavEntry,
   replaceNavEntry,
+  selectNavPopTarget,
   updateCurrentNavEntry,
 } from '../navHistory.js'
 
@@ -63,6 +64,29 @@ test('ownerKeyOf is a stable, unambiguous (paneId, appId) key', () => {
   assert.equal(ownerKeyOf('p0', 7), ownerKeyOf('p0', '7'))
   assert.notEqual(ownerKeyOf('p0', 7), ownerKeyOf('p1', 7))
   assert.notEqual(ownerKeyOf('p:0', '1'), ownerKeyOf('p', '0:1'))
+})
+
+test('selectNavPopTarget picks the newest live entry NOT already targeted (H1)', () => {
+  // Registry in insertion order: two live entries for app 7, one consumed.
+  const entries = [
+    ['e1', { appId: '7', paneId: 'p0', status: 'live' }],
+    ['e2', { appId: '9', paneId: 'p0', status: 'live' }],
+    ['e3', { appId: '7', paneId: 'p0', status: 'live' }],
+    ['e4', { appId: '7', paneId: 'p0', status: 'consumed' }],
+  ]
+  // Nothing targeted yet → newest live for app 7 is e3.
+  assert.deepEqual(selectNavPopTarget(entries, 7, new Set()),
+    { entryId: 'e3', paneId: 'p0', appId: '7' })
+  assert.deepEqual(selectNavPopTarget(entries, '7', []),
+    { entryId: 'e3', paneId: 'p0', appId: '7' })
+  // e3 already claimed by an in-flight/queued request → fall back to the next
+  // live, not-yet-targeted entry (e1) — a double-tap can't target e3 twice.
+  assert.deepEqual(selectNavPopTarget(entries, 7, new Set(['e3'])),
+    { entryId: 'e1', paneId: 'p0', appId: '7' })
+  // Both live entries claimed → no-op (never re-targets a consumed entry).
+  assert.equal(selectNavPopTarget(entries, 7, new Set(['e1', 'e3'])), null)
+  // A never-seen app → null.
+  assert.equal(selectNavPopTarget(entries, 42, new Set()), null)
 })
 
 test('isTopmostAppEntry enforces all seven queue-until-topmost conditions', () => {
