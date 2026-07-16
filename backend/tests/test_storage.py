@@ -296,6 +296,60 @@ def test_shared_git_read_caps_buffered_blob(client, auth, monkeypatch):
   assert response.status_code == 413
 
 
+def test_shared_git_read_requires_full_reachable_commit_and_regular_blob(
+  client, auth,
+):
+  repo, revision = _memory_git_repo()
+  url = "/api/storage/shared-git/memory/repository"
+
+  abbreviated = client.get(
+    url,
+    params={"revision": revision[:12], "file": "graph.json"},
+    headers=auth,
+  )
+  assert abbreviated.status_code == 400
+
+  tree = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", f"{revision}^{{tree}}"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  unreachable = subprocess.run(
+    ["git", "-C", str(repo), "commit-tree", tree, "-m", "unreachable"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  hidden = client.get(
+    url,
+    params={"revision": unreachable, "file": "graph.json"},
+    headers=auth,
+  )
+  assert hidden.status_code == 404
+
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+      f"160000,{revision},notes/nested-repository",
+    ],
+    check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "commit", "-m", "gitlink"],
+    check=True, capture_output=True,
+  )
+  gitlink_revision = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  gitlink = client.get(
+    url,
+    params={
+      "revision": gitlink_revision,
+      "file": "notes/nested-repository",
+    },
+    headers=auth,
+  )
+  assert gitlink.status_code == 404
+
+
 def test_put_text_accepts_non_json_content_type(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
 
