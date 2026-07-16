@@ -198,6 +198,44 @@ async function renderUseDocument(storage, path, opts) {
   return { handle, state: () => stateSlots[0], cleanup: () => cleanups.forEach((fn) => fn()) }
 }
 
+function createRerenderReact() {
+  const stateSlots = []
+  const refSlots = []
+  const callbackSlots = []
+  let stateIndex = 0
+  let refIndex = 0
+  let callbackIndex = 0
+  const sameDeps = (a, b) => (
+    Array.isArray(a) && Array.isArray(b) &&
+    a.length === b.length && a.every((value, index) => Object.is(value, b[index]))
+  )
+  return {
+    beginRender() {
+      stateIndex = 0
+      refIndex = 0
+      callbackIndex = 0
+    },
+    useState(init) {
+      const i = stateIndex++
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init
+      return [stateSlots[i], () => {}]
+    },
+    useRef(init) {
+      const i = refIndex++
+      if (!(i in refSlots)) refSlots[i] = { current: init }
+      return refSlots[i]
+    },
+    useCallback(fn, deps) {
+      const i = callbackIndex++
+      const previous = callbackSlots[i]
+      if (previous && sameDeps(previous.deps, deps)) return previous.fn
+      callbackSlots[i] = { fn, deps }
+      return fn
+    },
+    useEffect() {},
+  }
+}
+
 // ── Read-through cache: write/read online, read offline ────────────────────
 
 test('a value written online is readable offline (write-through mirror)', async () => {
@@ -997,6 +1035,32 @@ test('useDocument factory requires an explicit React (window.mobius.createUseDoc
   // silently lean on an absent global — the bug the exposure fix closed.
   const useDocNoReact = createUseDocument(s)
   assert.throws(() => useDocNoReact('x.json', {}), /createUseDocument\(React\)/)
+})
+
+test('useDocument resolves a lazy initial value once so rerenders do not restart refresh', async () => {
+  freshEnv()
+  const { createUseDocument } = await runtimeExports()
+  const React = createRerenderReact()
+  const storage = {
+    getWithVersion: async () => ({ value: null, version: null }),
+    subscribe: () => () => {},
+  }
+  const useDocument = createUseDocument(storage, React)
+  let initialCalls = 0
+  const opts = {
+    initial: () => {
+      initialCalls += 1
+      return []
+    },
+  }
+
+  React.beginRender()
+  const first = useDocument('entries.json', opts)
+  React.beginRender()
+  const second = useDocument('entries.json', opts)
+
+  assert.equal(initialCalls, 1)
+  assert.equal(second.refresh, first.refresh)
 })
 
 test('useDocument serializes updates and reconciles item ids by content identity', async () => {
