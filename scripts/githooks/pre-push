@@ -107,6 +107,18 @@ CHANGED="$(git diff --name-only --diff-filter=d "$BASE"..HEAD 2>/dev/null || tru
 changed_match() { echo "$CHANGED" | grep -qE "$1"; }
 changed_list()  { echo "$CHANGED" | grep -E "$1" || true; }
 
+# Seed-skill Markdown is shipped content, not executable backend code. Treating
+# it as a backend change made a direct main push run seven minutes of pytest
+# before GitHub ran the same suite again. Keep every other backend path on the
+# conservative full-suite gate.
+BACKEND_PYTEST_CHANGES="$(
+  printf '%s\n' "$CHANGED" \
+    | grep -E '^backend/' \
+    | grep -Ev '^backend/scripts/seed-skills/.*\.md$' \
+    || true
+)"
+backend_needs_pytest() { [ -n "$BACKEND_PYTEST_CHANGES" ]; }
+
 # 1. Conflict markers — the prod-outage preventer. Matches the real git
 #    marker shape (`<<<<<<< ` / `>>>>>>> `), not bare `=======` which is a
 #    common doc separator. Scans the tip being pushed.
@@ -240,11 +252,11 @@ fi
 
 # 5. Backend pytest — required before main updates, optional on topic/backup
 #    pushes, and only possible when the shared local venv exists.
-if changed_match '^backend/' && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
+if backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
   warn "backend changed, but this push does not update main —"
   warn "  skipping full pytest (required PR CI runs it)."
   warn "  enable locally: MOBIUS_PREPUSH_FULL=1 git push …"
-elif changed_match '^backend/'; then
+elif backend_needs_pytest; then
   VENV="$MAIN/backend/.venv/bin/python"
   if [ -x "$VENV" ]; then
     warn "running backend pytest (full suite currently ~7m)…"
@@ -286,6 +298,8 @@ elif changed_match '^backend/'; then
     warn "  enable: python3 -m venv \"$MAIN/backend/.venv\" \\"
     warn "    && \"$MAIN/backend/.venv/bin/pip\" install -r \"$MAIN/backend/requirements.txt\""
   fi
+elif changed_match '^backend/scripts/seed-skills/.*\.md$'; then
+  ok "backend seed-skill docs changed — full pytest not required"
 fi
 
 if [ "$FAIL" -ne 0 ]; then

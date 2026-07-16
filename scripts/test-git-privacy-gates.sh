@@ -70,6 +70,26 @@ git -C "$repo" add public.txt public.md
 (cd "$repo" && scripts/pre-commit.sh >/dev/null) || fail "pre-commit rejected a public path"
 git -C "$repo" commit -qm public
 
+# A seed-skill prose-only change must not pay for the seven-minute backend
+# suite on a direct main push. The hook still runs its privacy and syntax gates;
+# assert only that it does not classify this shipped Markdown as backend code.
+mkdir -p "$repo/backend/scripts/seed-skills"
+printf '# Building apps\n' >"$repo/backend/scripts/seed-skills/building-apps.md"
+git -C "$repo" add backend/scripts/seed-skills/building-apps.md
+git -C "$repo" commit -qm seed-skill-doc
+doc_sha="$(git -C "$repo" rev-parse HEAD)"
+doc_base="$(git -C "$repo" rev-parse HEAD^)"
+doc_push_output="$({
+  printf 'refs/heads/master %s refs/heads/main %s\n' "$doc_sha" "$doc_base"
+} | (cd "$repo" && scripts/githooks/pre-push) 2>&1)" \
+  || fail "pre-push rejected a seed-skill documentation change"
+if printf '%s\n' "$doc_push_output" | grep -qE 'running backend pytest|backend changed,'; then
+  fail "pre-push classified seed-skill Markdown as executable backend code"
+fi
+printf '%s\n' "$doc_push_output" \
+  | grep -q 'backend seed-skill docs changed' \
+  || fail "pre-push did not report its seed-skill documentation fast path"
+
 # A committed private path must be rejected by the reusable CI check, the
 # pre-push hook, and land.sh before land.sh attempts any remote backup push.
 git -C "$repo" switch -qc private-fixture
