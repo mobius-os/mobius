@@ -1,186 +1,152 @@
 <p align="center">
-  <img src="assets/moebius.png" width="120" alt="Möbius" />
+  <img src="assets/moebius.png" width="104" alt="Möbius">
 </p>
 
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  A self-hosted AI agent that builds the apps you need, edits its own interface, and improves itself overnight. Your data stays on your server.
+  A community-built AGI app platform. Build the apps you need, shape the workspace around your life, and improve the system through use.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://hub.docker.com"><img src="https://img.shields.io/badge/Docker-single--container-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
-  <a href="#get-started"><img src="https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white" alt="PWA"></a>
+  <a href="#launch-your-möbius"><img src="https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white" alt="Installable PWA"></a>
 </p>
 
 <p align="center">
-  <a href="#what-is-möbius">What is it?</a> &middot;
-  <a href="#batteries-included">Batteries included</a> &middot;
-  <a href="#you-grow-it">You grow it</a> &middot;
-  <a href="#apps-that-work-together">Apps that work together</a> &middot;
-  <a href="#build-an-app">Build an app</a> &middot;
-  <a href="#it-improves-itself-for-you">It improves itself for you</a> &middot;
-  <a href="#how-the-agent-itself-gets-better">How the agent gets better</a> &middot;
-  <a href="#get-started">Get started</a>
+  <a href="https://mobius.you/"><strong>Launch Möbius</strong></a> ·
+  <a href="https://mobius-os.github.io/apps/">Browse apps</a> ·
+  <a href="#build-a-möbius-app">Build an app</a> ·
+  <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
----
+![Editor showing the files and source behind a Möbius app](assets/product/editor-desktop.png)
 
-## What is Möbius?
+## Build apps around the way you work
 
-A Möbius strip is a surface with no inside or outside and no beginning or end. That is the idea behind Möbius, a self-improving personal AI agent you self-host where the agent, the server it runs on, and the apps it builds loop back into one system that works to be as useful to you as it can.
+Möbius is a self-hosted workspace where a coding agent builds apps beside the conversation. Describe what you need, inspect the result, and keep the app in the same place where you use it.
 
-Chat sits on one side, a full-screen canvas on the other. Describe what you want and the coding agent builds it — a small app that runs in your browser and persists next to the chat. The agent is not limited to apps: it can also edit the interface it runs inside, the theme, the layout, the features in the shell, by editing the source and rebuilding live.
+Apps are ordinary repositories with readable source and a small manifest. Start with a community app, change it for your workflow, or build the missing piece with your agent.
 
-The unusual design decisions worth knowing upfront:
+<table>
+  <tr>
+    <td width="52%"><img src="assets/product/tandem-reader.png" alt="Tandem showing a bilingual story"></td>
+    <td width="48%"><img src="assets/product/beat-machine-iphone.png" alt="Beat Machine showing a step sequencer on an iPhone"></td>
+  </tr>
+  <tr>
+    <td><strong>Tandem:</strong> read generated stories in two languages at your chosen level.</td>
+    <td><strong>Beat Machine:</strong> sketch a beat, shape the sound, and add your own recordings.</td>
+  </tr>
+</table>
 
-- **The agent can modify its own platform.** It has write access to the entire backend and frontend under `/data/platform`, with full git history. Every change is reversible. If the shell breaks, `/recover` resets it without touching your chats, apps, or data.
-- **Crash-loop safety.** A broken shell or backend auto-falls back to the pristine copy baked into the container image, so the agent can make bold changes without taking the instance down.
-- **Offline-first.** Mini-apps cache to your phone and keep working with no network. Writes queue locally and sync when you reconnect.
-- **No API key.** It runs on Codex (free or paid ChatGPT plan) or Claude Code (any paid plan) via OAuth.
-- **Single-owner, self-hosted.** This is not a SaaS product. It runs in one Docker container on a server you control. Your data never leaves it.
+## Use the same workspace on phone and web
 
-[Get Started](#get-started) has one-command setup.
+Möbius runs as a progressive web app (PWA). Your apps, files, chat, memory, and settings stay together across a computer and phone.
 
----
+<table>
+  <tr>
+    <td width="67%"><img src="assets/product/editor-desktop.png" alt="Editor showing app files and source on a computer"></td>
+    <td width="33%"><img src="assets/product/editor-iphone.png" alt="Editor showing the same app files on an iPhone"></td>
+  </tr>
+</table>
 
-## Batteries included
+## Personalize the whole platform
 
-Möbius ships with a curated app store. Tap to install; each app is yours to use, edit, or rebuild.
+The workspace can change with you. Themes reshape the shell, Memory keeps durable context available, and Reflection reviews completed work for improvements worth carrying forward.
 
-<p align="center">
-  <img src="assets/screenshots/batteries-included.png" width="720" alt="The Möbius App Store Browse tab showing Skills, Tasks, Contribute, Notes, News, Memory, Reflection, and Editor in the starter catalog." />
-</p>
+<table>
+  <tr>
+    <td width="36%"><img src="assets/product/memory-graph-iphone.png" alt="Memory showing connected notes on an iPhone"></td>
+    <td width="64%"><img src="assets/product/themes.png" alt="Möbius in its default theme and a custom expressive theme"></td>
+  </tr>
+  <tr>
+    <td><strong>Memory:</strong> connect facts, decisions, preferences, and projects.</td>
+    <td><strong>Themes:</strong> change the full workspace, not one isolated app.</td>
+  </tr>
+</table>
 
-<sub>The starter catalog opens with apps that help Möbius improve itself: <strong>Skills</strong> for agent playbooks, <strong>Tasks</strong> for scheduled check-ins, and <strong>Contribute</strong> for GitHub-backed changes. Everyday apps follow: <strong>Notes</strong>, <strong>News</strong>, <strong>Memory</strong>, <strong>Reflection</strong>, <strong>Editor</strong>, <strong>Web Studio</strong>, <strong>Workout</strong>, and more.</sub>
+## Build toward AGI in public
 
-Every app is a public repo with a `mobius.json` and an `index.jsx`, open under [github.com/mobius-os](https://github.com/mobius-os). Installing means pasting a URL. Updating means pasting the same URL again — it patches the code and keeps your data. There is no submission queue.
+Möbius is a community-built artificial general intelligence (AGI) project grounded in useful apps. It does not claim that general intelligence has already been solved. The project asks what becomes possible when a capable agent can build tools, modify its platform, remember useful context, and learn from real friction.
 
----
+Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and `/recover` keep those changes reversible.
 
-## You grow it
+The improvement loop stays concrete:
 
-Möbius starts small: a chat and a canvas. You grow it from there. Ask for a feature and the agent writes it, end to end, in the same conversation. I asked for file upload in one prompt — _"I'd like to send files and images along with my messages"_ — and got the endpoint, the schema, the drag-and-drop overlay, the paste handler, and the thumbnails, all in one chat.
+1. Build an app for a real need
+2. Notice repeated friction through use, Memory, and Reflection
+3. Turn a useful pattern into a skill, app change, or platform capability
+4. Review and share the parts that should help the wider community
 
-<p align="center">
-  <img src="assets/screenshots/upload-flow.gif" width="280" alt="The file-upload build animated in three steps: ask the agent, answer a few clarifying questions, then attach an image inline in the chat." />
-</p>
+No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
 
-<sub>One chat, from empty composer to working feature.</sub>
+## Start with the community catalog
 
-The same loop builds whole apps. Some of what it has built me:
+The App Store includes tools for notes, tasks, skills, memory, reflection, development, news, health, and learning. Each app is a public repository under the [Möbius OS GitHub organization](https://github.com/mobius-os).
 
-- **News aggregator** that runs on a schedule, searches the web, and filters stories around preferences that evolve over time
-- **Stock dashboard** for a local exchange with no public API, which the agent figured out how to scrape
-- **Finance tool** to upload statements, categorize spending, and compute taxes from your phone
-- **Learning companion** that builds a curriculum around any topic with spaced repetition that adjusts as you improve
-- **Period tracker**, a habit log, a drum machine that turns voice samples into beats
+![The Möbius App Store](assets/product/app-store.png)
 
-<p align="center">
-  <img src="assets/screenshots/apps-cycle.gif" width="280" alt="A few of the apps Möbius has built, ISS tracker, habit log, HN dashboard, earthquake map, flashcards deck" />
-</p>
+Installing an app means adding its repository URL. Updating the same URL patches the code while keeping the app's data.
 
-<sub>Each was a single prompt. The agent wrote the JSX, compiled it, mounted it, and the app lives in the same shell the chat does.</sub>
+## Bring agent access
 
-You can reshape the platform the same way. "Make it warmer." "Restyle the whole shell as a 1970s synth panel." The agent edits the CSS and the new look is live in seconds.
+Möbius uses an agent account you already control. Connect one of these providers during setup:
 
-<p align="center">
-  <img src="assets/screenshots/theme-switch.gif" width="240" alt="The same Möbius new-chat screen cycling through several themes the agent built, ending on a meme theme" />
-</p>
+- **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan. See [Using Codex with your ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
+- **Claude Code**: sign in with a supported Claude Code plan
 
-<sub>The same new-chat screen across a range of looks, from a medieval manuscript to a deep-blue ambient theme to fully meme-worthy. Themes and layout changes go live immediately, no rebuild.</sub>
+Möbius uses provider sign-in, so the default setup does not require a separate API key.
 
----
+## Launch your Möbius
 
-## Apps that work together
+[Möbius Launch](https://mobius.you/) creates a private deployment in a Railway account you control:
 
-Möbius apps share a storage layer and a permission model. With your say-so, one app can read another's data. Ask for a dashboard that pulls your **Workout** log and your habit tracker into one view and the agent can build it. The cross-app compose flow is designed but not fully wired yet; tweaking individual apps and reading across two is what works today.
+1. Sign in to Möbius Launch
+2. Connect your Railway workspace
+3. Review the deployment and open your Möbius instance
 
----
+Your chats, files, apps, credentials, and agent activity stay inside that deployment. Möbius Launch stores only the account and infrastructure data needed to create and manage it.
 
-## Build an app
+### Deploy on your own server
 
-The usual path is to ask for one: describe it in chat and the agent writes the JSX, compiles it, and mounts it next to the conversation. The contract is open, so you can also write one by hand or fork an existing one.
-
-An app is a `mobius.json` manifest and an `index.jsx`. The component receives `{ appId, token }` and persists through `/api/storage/apps/{appId}/...`. Apps that need user-supplied credentials store them separately through the encrypted, app-scoped `/api/apps/{appId}/secrets/{name}` API. The full contract is in the seed skills the agent itself reads: [`backend/scripts/seed-skills/building-apps.md`](backend/scripts/seed-skills/building-apps.md) and [`backend/scripts/seed-skills/app-component-shapes.md`](backend/scripts/seed-skills/app-component-shapes.md). Every `mobius.json` field is documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) (the *Mini-app manifest (mobius.json)* section).
-
-The whole starter catalog under [github.com/mobius-os](https://github.com/mobius-os) is working code to read or fork. Each `app-*` repo is one installable app. Install by pasting its repo URL; update by pasting the same URL again.
-
----
-
-## It improves itself for you
-
-Every chat maintains its own name, one-paragraph Digest, and complete cumulative Summary. New chats receive only the recent Digests. The optional **Memory** system app adds an Obsidian-style graph of durable facts: when prior context matters, the chat agent sends a focused question to a read-only recall agent and gets back relevant text with file pointers. The graph is never loaded wholesale, and uninstalling Memory removes its instructions while leaving ordinary chat continuity intact.
-
-When Memory is installed, its own scheduled agent merges duplicate graph notes, drops stale ones, repairs links, and preserves provenance. Separately, the **Reflection** agent audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast — and looks for things worth suggesting in the morning. Both commit their changes to the same git history, so a bad reorganization is recoverable.
-
-The nightly loop is the same reflect-and-refactor cycle the developers run by hand when improving the agent. Reflection is that loop, scheduled, on your instance.
-
----
-
-## How the agent itself gets better
-
-Fully recursive self-improvement — a system that rewrites itself unattended and just gets better — is not here yet; a person stays in the loop at every turn. What works today is the half in front of it: an agent and a human improving that agent together, faster and more durably than either manages alone.
-
-Möbius improves through a self-improvement harness run during development. An outer agent watches the inner one build, asks it _why_ it made each decision (with the transcript still in context), and rewrites its instructions between sessions. A few things that surprised us running that loop:
-
-1. Reading transcripts and patching the prompt stalls after a few rounds, because every rule added tends to surface a regression somewhere else. Asking the inner agent why it acted, with the transcript in front of it, produced more durable fixes than reasoning from outside did. An agent reflecting on its own session beats a bigger agent theorizing about it.
-2. Confrontational prompts get binary compliance or defiance. Warm, curious framings get the model to push back on wrong premises and cooperate on correct ones.
-3. Once the loop works, the bottleneck is no longer the model. It becomes the meta-goals you optimize for, which come from real users hitting real friction.
-
----
-
-## It's yours
-
-Möbius runs in a single Docker container you control. Your chats, apps, data, theme, and the agent's memory live on your server. The whole platform is tracked in git, so any bad change can be read back and undone.
-
-If the UI ever breaks, `/recover` resets the shell without touching your chats, apps, or data. It renders from a server-side path the agent cannot edit, so it survives even a shell rewrite that hides everything else. Installs are atomic: a failed one restores the previous working version.
-
-The trust model is explicit: this is single-owner software. The agent has full write access to the platform because it is your agent, on your server, and the undo chain is the safety net.
-
----
-
-## Get started
-
-### <a href="https://mobius.you"><img src="https://img.shields.io/badge/Launch_M%C3%B6bius-mobius.you-5A0FC8?style=for-the-badge&logo=railway&logoColor=white" alt="Launch Möbius on mobius.you" height="40"></a>
-
-Click **Launch Möbius** and [mobius.you](https://mobius.you) takes it from there. It walks you through the three steps — create a Railway account (free for the first month, then around $5/month), connect it, and deploy — and hands you a public URL with a live usage dashboard when the build finishes. There's no manual domain setup. Open your URL and the wizard helps you create your account and connect Codex or Claude.
-
-Bookmark your instance's `/recover` page. On your phone, save it to the home screen for the best experience.
-
-To update, open **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys, and your chats, apps, credentials, and memory all survive.
-
-### Deploy self-hosted
-
-**Requirements:** a Linux server with Docker, a domain name, and a coding provider (Codex free or paid, or Claude Code paid).
+Use a Linux server with Docker, a domain name, and Codex or Claude Code access:
 
 ```bash
 git clone https://github.com/mobius-os/mobius.git
 cd mobius
 cp .env.example .env
-sed -i 's/^DOMAIN=.*/DOMAIN=your-domain.com/' .env
+sed -i 's/^DOMAIN=.*/DOMAIN=mobius.example.com/' .env
 docker compose up -d
 ```
 
-Caddy handles HTTPS automatically. Visit `https://your-domain.com` and the setup wizard takes it from there. On a headless server, copy the auth URL to a local browser to complete sign-in.
+Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard. Bookmark `/recover` before asking the agent to change the platform.
 
-Bookmark `https://your-domain.com/recover`.
+Update a self-hosted instance with:
 
-To update: `git pull && docker compose up -d --build`. Everything in `/data` survives rebuilds. On boot the container serves the editable whole-repo clone at `/data/platform`; backend code comes from `backend/`, and the frontend is served from `/data/platform/frontend/dist` with `/app/static` as the baked fallback. `GET /api/version` reports both the image build sha and the served platform/frontend identity for verifying an update landed.
+```bash
+git pull
+docker compose up -d --build
+```
 
----
+Data under `/data` survives rebuilds.
 
-## Contributing
+## Build a Möbius app
 
-Möbius is built to be extended — by its own in-product agent and by people. To work on the platform itself:
+A Möbius app needs a `mobius.json` manifest and an `index.jsx` component. The component receives `{ appId, token }` and stores data through the app storage API.
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** maps the system: the single-container layout, what each backend module and frontend component does, and where to make a given change.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** covers the dev loop: running it locally, the backend and frontend test suites, and the live-rebuild model.
+Start with these references:
 
-To build a **mini-app** rather than work on the platform, just ask the in-product agent in a chat — it writes and installs the app for you. The authoring contract, if you'd rather write one by hand, lives in `backend/scripts/seed-skills/building-apps.md`.
+- [Building apps](backend/scripts/seed-skills/building-apps.md): app structure, storage, permissions, themes, and publishing
+- [App component shapes](backend/scripts/seed-skills/app-component-shapes.md): supported React component contracts
+- [Architecture](ARCHITECTURE.md): platform boundaries and the complete manifest reference
+- [Community app catalog](https://github.com/mobius-os): working apps to inspect and fork
 
----
+## Contribute to the platform
+
+Möbius grows through apps, platform changes, testing, and discussion. A local improvement can stay private or become a reviewed contribution through the Contribute app and GitHub.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development loop and [ARCHITECTURE.md](ARCHITECTURE.md) for the system map.
 
 ## License
 
