@@ -606,15 +606,10 @@ export default function AppCanvas({
 
   useEffect(() => {
     // A response from the previously mounted app must never replace the new
-    // app's canvas with a service surface. Deliberately key this only to appId:
-    // a newly-created app may finish compiling after it has already requested
-    // its service, and clearing on that ordinary version bump strands the user
-    // back in the wrapper before the heartbeat timeout can offer Retry/Close.
-    // The service is an explicit view owned by this app, so rebuilds preserve it
-    // just like any other in-app view; switching apps still cancels the request.
+    // app's canvas with a service surface.
     serviceRequestRef.current += 1
     setServiceSurface(null)
-  }, [appId])
+  }, [appId, version])
 
   useEffect(() => {
     if (serviceSurface?.phase !== 'loading') return
