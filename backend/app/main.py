@@ -41,9 +41,9 @@ from app import models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_logs_router, chat_router, chats_router, chats_stream_router,
-  debug_router, fs_router, generate_router, github_router,
+  debug_router, fs_router, github_router, media_router,
   notifications_router, notify_router, proxy_router, push_router,
-  self_reminders_router, settings_router,
+  secrets_router, self_reminders_router, settings_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
@@ -110,6 +110,20 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  # Fix old chat-image storage forward to the canonical media/ path before
+  # serving requests. The migration is idempotent and removes the need for a
+  # permanent compatibility route in the live API.
+  app.state.media_migration_failed = False
+  try:
+    from app.chat_media import fix_forward_chat_media
+    _media_db = SessionLocal()
+    try:
+      fix_forward_chat_media(_media_db, get_settings().data_dir)
+    finally:
+      _media_db.close()
+  except Exception as exc:
+    _log.error("chat media fix-forward failed: %s", exc, exc_info=True)
+    app.state.media_migration_failed = True
   # Crash recovery: a process death (OOM / SIGKILL — a recurring
   # failure mode on this host) mid-turn leaves the chat's durable
   # run marker set but the in-memory registry empty. Reconcile those
@@ -636,7 +650,8 @@ app.include_router(client_signal_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)
-app.include_router(generate_router)
+app.include_router(media_router)
+app.include_router(secrets_router)
 app.include_router(github_router)
 app.include_router(push_router)
 app.include_router(notifications_router)

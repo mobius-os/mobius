@@ -493,7 +493,6 @@ class SettingsUpdate(BaseModel):
   # clients (and typos) instead of returning {ok: true} for an ignored field.
   model_config = ConfigDict(extra="forbid")
 
-  gemini_api_key: str | None = None
   provider: str | None = None
   # Legacy owner-level agent settings. Live chat surfaces should write
   # per-chat choices through ChatPatch.agent_settings_json.

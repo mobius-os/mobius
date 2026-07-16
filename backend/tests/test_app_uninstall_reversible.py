@@ -148,6 +148,10 @@ def test_reinstall_reattaches_same_id_and_data(
 ):
   app = _install(client, auth)
   app_id = app["id"]
+  old_token = client.post(
+    "/api/auth/app-token", headers=auth, json={"app_id": app_id},
+  ).json()["token"]
+  old_nonce = db.query(models.App).filter(models.App.id == app_id).one().token_nonce
   data_file = _seed_data(app_id, body="kept")
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
@@ -159,7 +163,12 @@ def test_reinstall_reattaches_same_id_and_data(
 
   row = db.query(models.App).filter(models.App.id == app_id).first()
   assert row.deleted_at is None
+  assert row.token_nonce != old_nonce
   assert data_file.exists() and data_file.read_text() == "kept"
+  assert client.get(
+    f"/api/storage/apps/{app_id}/entries.json",
+    headers={"Authorization": f"Bearer {old_token}"},
+  ).status_code == 401
   assert app_id in [a["id"] for a in client.get("/api/apps/", headers=auth).json()]
 
 
@@ -178,6 +187,38 @@ def test_recover_endpoint_restores_app(client, auth, db, bypass_url_validation):
   assert row.deleted_at is None
   assert data_file.read_text() == "recover-me"
   assert app_id in [a["id"] for a in client.get("/api/apps/", headers=auth).json()]
+
+
+def test_recover_never_reactivates_pre_uninstall_app_token(
+  client, auth, bypass_url_validation,
+):
+  app = _install(client, auth)
+  app_id = app["id"]
+  token = client.post(
+    "/api/auth/app-token", headers=auth, json={"app_id": app_id},
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+
+  assert client.put(
+    f"/api/apps/{app_id}/secrets/key",
+    headers=auth,
+    json={"value": "preserved"},
+  ).status_code == 204
+  assert client.head(
+    f"/api/apps/{app_id}/secrets/key", headers=app_auth,
+  ).status_code == 204
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  assert client.post(
+    f"/api/apps/{app_id}/recover", headers=auth,
+  ).status_code == 200
+
+  assert client.head(
+    f"/api/apps/{app_id}/secrets/key", headers=app_auth,
+  ).status_code == 401
+  owner_read = client.get(f"/api/apps/{app_id}/secrets/key", headers=auth)
+  assert owner_read.status_code == 200
+  assert owner_read.text == "preserved"
 
 
 def test_recover_expired_returns_410(client, auth, db, bypass_url_validation):
@@ -201,6 +242,12 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   app = _install(client, auth)
   app_id = app["id"]
   data_file = _seed_data(app_id)
+  assert client.put(
+    f"/api/apps/{app_id}/secrets/key",
+    headers=auth,
+    json={"value": "purge-me"},
+  ).status_code == 204
+  secret_dir = Path(get_settings().data_dir) / "app-secrets" / str(app_id)
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
   # Age the tombstone past the TTL, then a list call sweeps it.
@@ -213,6 +260,7 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   db.expire_all()
   assert db.query(models.App).filter(models.App.id == app_id).first() is None
   assert not data_file.exists()
+  assert not secret_dir.exists()
 
 
 def test_tombstoned_app_module_and_frame_404(
@@ -290,6 +338,12 @@ def test_delete_app_data_wipes_storage_and_keeps_app(
   old_nonce = db.query(models.App).filter(models.App.id == app_id).one().token_nonce
   data_file = _seed_data(app_id, body="wipe-me")
   storage_dir = Path(get_settings().data_dir) / "apps" / str(app_id)
+  assert client.put(
+    f"/api/apps/{app_id}/secrets/key",
+    headers=auth,
+    json={"value": "wipe-me"},
+  ).status_code == 204
+  secret_dir = Path(get_settings().data_dir) / "app-secrets" / str(app_id)
   assert data_file.exists()
 
   r = client.delete(f"/api/apps/{app_id}/data", headers=auth)
@@ -298,6 +352,7 @@ def test_delete_app_data_wipes_storage_and_keeps_app(
   # Storage tree gone.
   assert not data_file.exists()
   assert not storage_dir.exists()
+  assert not secret_dir.exists()
 
   # App row still LIVE — not tombstoned, not hard-deleted.
   db.expire_all()

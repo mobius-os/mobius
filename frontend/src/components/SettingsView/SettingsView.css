@@ -101,42 +101,6 @@
   text-decoration: underline;
 }
 
-.settings__form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 8px;
-}
-
-.settings__input {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  padding: 11px 14px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.15s, box-shadow 0.15s;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.settings__input:focus,
-.settings__input:focus-visible {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-.settings__success {
-  font-size: 13px;
-  color: var(--accent);
-}
-
-.settings__error {
-  font-size: 13px;
-  color: var(--danger, #ef4444);
-}
-
 .settings__btn {
   align-self: flex-start;
   background: var(--accent);

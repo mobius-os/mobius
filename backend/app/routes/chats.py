@@ -60,7 +60,7 @@ def _purge_chat_dir(chat_id: str) -> None:
   """Removes per-chat dirs left on disk after a chat is gone.
 
   Three locations get cleaned: the chat's data dir
-  (`/data/chats/{chat_id}/` — uploads, generated images, scratch),
+  (`/data/chats/{chat_id}/` — uploads, media, scratch),
   its agent-browser Chromium profile
   (`/data/agent-browser-profiles/chat-{chat_id}/` — IndexedDB,
   cache, cookies; typically 50-200 MB per profile that's seen any
@@ -170,14 +170,14 @@ def issue_media_token(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Issues a short-lived media token scoped to one chat's uploads/generated images.
+  """Issues a short-lived media token scoped to one chat's uploads and media.
 
   <img> tags and direct image fetches can't set Authorization headers, so they
   must use ?token= query params. Passing the full 30-day owner JWT as a query
   param leaks it into access logs, browser history, and Referer headers.
 
   This endpoint mints a 15-minute token with scope='media' and media_chat=chat_id.
-  The serve routes (uploads, generated images) accept ONLY these tokens on ?token=;
+  The serve routes (uploads and media) accept ONLY these tokens on ?token=;
   they explicitly reject owner JWTs arriving via query params.
 
   Cache the returned token client-side (~10 min) and refresh on 401. The token is

@@ -343,6 +343,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   storage_dir = apps_root / str(deleted_app_id)
   if storage_dir.is_dir():
     await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
+  secrets_dir = Path(settings.data_dir) / "app-secrets" / str(deleted_app_id)
+  if secrets_dir.is_dir():
+    await asyncio.to_thread(shutil.rmtree, secrets_dir, ignore_errors=True)
 
 
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
@@ -1940,6 +1943,10 @@ async def delete_app(
     # list_apps / recover_app (same contract chats.py documents). Avoids a
     # platform-dependent aware/naive round-trip mismatch.
     app.deleted_at = now_naive_utc()
+    # Tombstoning is a permanent credential boundary, even if the same row is
+    # later recovered. Without this rotation, an app token rejected while the
+    # row is deleted becomes valid again as soon as recovery clears deleted_at.
+    app.token_nonce = secrets.token_hex(16)
     app_name = app.name
     app_slug = app.slug
     app_source_dir = app.source_dir
@@ -2025,6 +2032,8 @@ async def delete_app_data(
     # whole `<meta>/apps/<id>` sidecar tree (an empty component is dropped in
     # the path join), the sidecar analogue of removing the storage root.
     await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
+    secrets_dir = Path(data_dir) / "app-secrets" / str(app.id)
+    await asyncio.to_thread(shutil.rmtree, secrets_dir, ignore_errors=True)
     delete_content_type_tree(data_dir, Path("apps") / str(app.id), "")
     # Rotate the storage generation and commit it before releasing the SAME lock
     # every writer re-checks. An old-token write that was already waiting cannot

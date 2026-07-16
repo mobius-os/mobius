@@ -301,7 +301,7 @@ def test_patch_chat_provider_rejects_unknown_value(client, auth, chat, db):
   r = client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
-    json={"provider": "gemini-pro"},
+    json={"provider": "unsupported-provider"},
   )
   assert r.status_code == 422
   db.expire_all()

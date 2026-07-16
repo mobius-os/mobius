@@ -194,67 +194,67 @@ def test_serve_upload_rejects_expired_media_token(client, auth, chat):
 
 
 # ---------------------------------------------------------------------------
-# Generated image serve route: media token on ?token=
+# Chat media serve route: media token on ?token=
 # ---------------------------------------------------------------------------
 
-def _setup_generated_image(client, auth, chat):
-  """Writes a fake generated image directly to disk, bypassing Gemini."""
+def _setup_media_image(client, auth, chat):
+  """Writes a fake image directly to the chat media directory."""
   import pathlib
   from app.config import get_settings
-  gen_dir = pathlib.Path(get_settings().data_dir) / "chats" / chat.id / "generated"
-  gen_dir.mkdir(parents=True, exist_ok=True)
-  fname = "test-generated.png"
-  (gen_dir / fname).write_bytes(b"\x89PNG\r\n")
+  media_dir = pathlib.Path(get_settings().data_dir) / "chats" / chat.id / "media"
+  media_dir.mkdir(parents=True, exist_ok=True)
+  fname = "test-media.png"
+  (media_dir / fname).write_bytes(b"\x89PNG\r\n")
   return fname
 
 
-def test_serve_generated_with_media_token(client, auth, chat):
-  """GET /generated/{file}?token=<media-token> returns 200."""
-  fname = _setup_generated_image(client, auth, chat)
+def test_serve_media_with_media_token(client, auth, chat):
+  """GET /media/{file}?token=<media-token> returns 200."""
+  fname = _setup_media_image(client, auth, chat)
   token_r = client.post(f"/api/chats/{chat.id}/media-token", headers=auth)
   media_token = token_r.json()["token"]
   r = client.get(
-    f"/api/chats/{chat.id}/generated/{fname}",
+    f"/api/chats/{chat.id}/media/{fname}",
     params={"token": media_token},
   )
   assert r.status_code == 200
 
 
-def test_serve_generated_rejects_owner_jwt_on_query_param(client, auth, chat):
-  """GET /generated/{file}?token=<owner-jwt> must return 403."""
+def test_serve_media_rejects_owner_jwt_on_query_param(client, auth, chat):
+  """GET /media/{file}?token=<owner-jwt> must return 403."""
   from app.auth import create_access_token
-  fname = _setup_generated_image(client, auth, chat)
+  fname = _setup_media_image(client, auth, chat)
   owner_jwt = create_access_token({"sub": "test"})
   r = client.get(
-    f"/api/chats/{chat.id}/generated/{fname}",
+    f"/api/chats/{chat.id}/media/{fname}",
     params={"token": owner_jwt},
   )
   assert r.status_code == 403
 
 
-def test_serve_generated_accepts_owner_jwt_on_header(client, auth, chat):
-  """GET /generated/{file} with Authorization: Bearer returns 200."""
-  fname = _setup_generated_image(client, auth, chat)
+def test_serve_media_accepts_owner_jwt_on_header(client, auth, chat):
+  """GET /media/{file} with Authorization: Bearer returns 200."""
+  fname = _setup_media_image(client, auth, chat)
   r = client.get(
-    f"/api/chats/{chat.id}/generated/{fname}",
+    f"/api/chats/{chat.id}/media/{fname}",
     headers=auth,
   )
   assert r.status_code == 200
 
 
-def test_serve_generated_rejects_media_token_for_wrong_chat(client, auth, chat, db):
-  """Media token for the wrong chat is rejected on generated images."""
+def test_serve_media_rejects_media_token_for_wrong_chat(client, auth, chat, db):
+  """A media token for the wrong chat is rejected."""
   import uuid
   from app import models
   chat_b = models.Chat(id=str(uuid.uuid4()), title="Chat B", messages=[])
   db.add(chat_b)
   db.commit()
 
-  fname = _setup_generated_image(client, auth, chat)
+  fname = _setup_media_image(client, auth, chat)
   token_r = client.post(f"/api/chats/{chat_b.id}/media-token", headers=auth)
   media_token = token_r.json()["token"]
   r = client.get(
-    f"/api/chats/{chat.id}/generated/{fname}",
+    f"/api/chats/{chat.id}/media/{fname}",
     params={"token": media_token},
   )
   assert r.status_code == 403

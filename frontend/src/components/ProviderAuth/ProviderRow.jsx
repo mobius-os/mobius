@@ -29,8 +29,8 @@ import './ProviderAuth.css'
  *                     next to the name when the provider is connected.
  *
  *   The next three make this the ONE row used for every Settings
- *   line — the two providers, "Chat model", and "Gemini API key" —
- *   so they read as one family. All optional; the provider callers
+ *   line — the two providers and "Chat model" — so they read as one
+ *   family. All optional; the provider callers
  *   pass none and keep the connected/version behavior above.
  *   subtitle        — optional one-line muted description under the name.
  *   statusNode      — optional node replacing the default Connected/Not

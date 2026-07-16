@@ -41,7 +41,9 @@ let _inProgress = (() => {
 export function getResumeStep() {
   try {
     const v = localStorage.getItem(SETUP_STEP_KEY)
-    return (v === 'provider' || v === 'gemini') ? v : null
+    if (v === 'provider') return v
+    if (v !== null) localStorage.removeItem(SETUP_STEP_KEY)
+    return null
   } catch { return null }
 }
 

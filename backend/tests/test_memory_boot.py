@@ -89,7 +89,7 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
   monkeypatch.setattr(module, "VERSION_FILE", skills / ".seed-version")
   monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
   monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {
-    "reflection.md": hashlib.sha256(old.encode()).hexdigest(),
+    "reflection.md": {hashlib.sha256(old.encode()).hexdigest()},
   })
 
   module.init()
@@ -98,6 +98,22 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
   live.write_text("owner edit", encoding="utf-8")
   module.init()
   assert live.read_text(encoding="utf-8") == "owner edit"
+
+
+def test_retired_image_provider_skills_have_fix_forward_migrations():
+  module = _load("init_skills")
+
+  assert module.SEED_VERSION == "13"
+  assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
+    "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
+    "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
+  }
+  assert (
+    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87"
+    in module._UNMODIFIED_MIGRATIONS["recovery.md"]
+  )
 
 
 def test_cron_starts_only_after_per_boot_supervision_proof():

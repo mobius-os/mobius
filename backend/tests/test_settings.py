@@ -6,31 +6,7 @@ from types import SimpleNamespace
 
 from pydantic import ValidationError
 
-from app.auth import encrypt_api_key, decrypt_api_key
 from app.schemas import SettingsUpdate
-
-
-def test_encrypt_decrypt_roundtrip():
-  """encrypt_api_key then decrypt_api_key must return the original string."""
-  original = "AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
-  encrypted = encrypt_api_key(original)
-  assert encrypted != original, "Encrypted value must differ from plaintext"
-  assert isinstance(encrypted, str), "Encrypted value must be a string"
-  decrypted = decrypt_api_key(encrypted)
-  assert decrypted == original
-
-
-def test_encrypt_produces_different_ciphertext_each_time():
-  """Fernet uses a random IV so two encryptions of the same value differ."""
-  key = "AIzaSyTest"
-  assert encrypt_api_key(key) != encrypt_api_key(key)
-
-
-def test_get_settings_unconfigured(client, auth):
-  """GET /api/settings returns gemini_configured: false when no key set."""
-  res = client.get("/api/settings", headers=auth)
-  assert res.status_code == 200
-  assert res.json()["gemini_configured"] is False
 
 
 def test_global_settings_do_not_expose_chat_auto_resume(client, auth):
@@ -73,44 +49,6 @@ def test_boot_removes_stale_global_auto_resume_setting():
     pass
 
   assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
-
-
-def test_save_and_check_gemini_key(client, db, auth):
-  """POST /api/settings saves the key encrypted; GET reflects configured."""
-  res = client.post(
-    "/api/settings",
-    json={"gemini_api_key": "AIzaSyTestKey123"},
-    headers=auth,
-  )
-  assert res.status_code == 200
-  assert res.json()["ok"] is True
-
-  # Key must be stored encrypted, not plaintext.
-  from app import models
-  owner = db.query(models.Owner).first()
-  assert owner.gemini_api_key_enc is not None
-  assert owner.gemini_api_key_enc != "AIzaSyTestKey123"
-
-  # GET must now report configured.
-  res2 = client.get("/api/settings", headers=auth)
-  assert res2.json()["gemini_configured"] is True
-
-
-def test_clear_gemini_key(client, db, auth):
-  """POST /api/settings with empty string clears the key."""
-  client.post(
-    "/api/settings",
-    json={"gemini_api_key": "AIzaSyKey"},
-    headers=auth,
-  )
-  client.post(
-    "/api/settings",
-    json={"gemini_api_key": ""},
-    headers=auth,
-  )
-  from app import models
-  owner = db.query(models.Owner).first()
-  assert owner.gemini_api_key_enc is None
 
 
 def test_set_provider(client, auth):
@@ -1070,19 +1008,19 @@ def test_model_prefs_patch_rejects_cross_site_request(client, auth):
 
 
 def test_settings_post_rejects_cross_site_request(client, auth):
-  """POST /api/settings writes gemini_api_key + provider — both owner-
-  state mutations — and shares the reject_cross_site defense applied
+  """POST /api/settings writes owner state and shares the
+  reject_cross_site defense applied
   to walkthrough/complete and model-prefs PATCH. Catches the case
   where a future refactor accidentally drops the dep."""
   cross = client.post(
     "/api/settings",
-    json={"gemini_api_key": "AIzaSyTestCrossSite"},
+    json={"provider": "codex"},
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
   same_origin = client.post(
     "/api/settings",
-    json={"gemini_api_key": ""},
+    json={"provider": "claude"},
     headers={**auth, "Sec-Fetch-Site": "same-origin"},
   )
   assert same_origin.status_code == 200

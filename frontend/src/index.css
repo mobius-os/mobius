@@ -372,7 +372,7 @@ input, textarea {
 }
 
 /* Accessibility: keyboard-only focus ring on text inputs. Forms across
-   the app (Setup, Login, Settings, Gemini key) remove the native
+   the app (Setup, Login, Settings) remove the native
    outline and only swap border-color — fine for mouse/touch focus,
    but invisible to keyboard users on themes where the border color
    is close to the background. :focus-visible only fires for keyboard

@@ -67,7 +67,7 @@ function AppRoot() {
   // sees the hydrated cache (no flash on cold reload).
   const isRestoring = useIsRestoring()
   // If a previous tab created an account but the user closed before
-  // finishing provider/Gemini steps, resume the wizard at that step
+  // finishing the provider step, resume the wizard there
   // instead of dropping them into a Shell with no AI configured.
   // Read BEFORE the token fast path so we don't briefly mount Shell.
   const hasToken = !!getToken()

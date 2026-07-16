@@ -1236,7 +1236,6 @@ export default function Shell() {
     const settingsSections = new Set([
       'ai-providers',
       'background-agents',
-      'image-generation',
       'models',
     ])
     const findAppForOpenTarget = (list, target) => {

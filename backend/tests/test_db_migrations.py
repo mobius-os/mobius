@@ -4,6 +4,29 @@ from app import models
 from app.database import run_migrations
 
 
+def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
+  db_path = tmp_path / "legacy-image-generation.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(eng)
+  with eng.connect() as conn:
+    conn.execute(text(
+      "ALTER TABLE owner ADD COLUMN gemini_api_key_enc TEXT"
+    ))
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN generated_images JSON "
+      "NOT NULL DEFAULT '[]'"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+
+  inspector = inspect(eng)
+  owner_columns = {column["name"] for column in inspector.get_columns("owner")}
+  chat_columns = {column["name"] for column in inspector.get_columns("chats")}
+  assert "gemini_api_key_enc" not in owner_columns
+  assert "generated_images" not in chat_columns
+
+
 def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   db_path = tmp_path / "legacy.db"
   eng = create_engine(f"sqlite:///{db_path}")

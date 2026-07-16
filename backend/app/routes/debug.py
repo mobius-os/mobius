@@ -52,6 +52,9 @@ def debug_status(
   chats may still show as "running" in the UI after a crash — the
   operator should investigate and restart. The field is absent (or
   False) when reconciliation succeeded.
+
+  `media_migration_failed` follows the same absent-when-healthy contract. When
+  present, old chat image paths may require recovery before they render.
   """
   now_monotonic = time.monotonic()
   now_wall = datetime.now(UTC).replace(tzinfo=None)
@@ -94,6 +97,9 @@ def debug_status(
   # startup reconciliation throws. Absent (getattr default False)
   # when reconciliation succeeded so the field is stable to check.
   reconciliation_failed = getattr(request.app.state, "reconciliation_failed", False)
+  media_migration_failed = getattr(
+    request.app.state, "media_migration_failed", False,
+  )
 
   # Provider-limit parks (design §2.4). A parked chat has NO live handle and
   # NO broadcast — its turn ended — so it appears in none of the lists above;
@@ -132,6 +138,8 @@ def debug_status(
   }
   if reconciliation_failed:
     result["reconciliation_failed"] = True
+  if media_migration_failed:
+    result["media_migration_failed"] = True
 
   # Surface the SECRET_KEY drift flag written by entrypoint.sh.
   # Present (with the detection timestamp as a string) when the key changed

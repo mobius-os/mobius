@@ -243,6 +243,6 @@ Detailed how-to lives in skill files under `/data/shared/skills/`. They're yours
 | `theming.md` | Changing the shell's look: `theme.css` (hot-reload, no rebuild), light/dark CSS variables, structural shell edits (JSX rebuild), lucide icons, describe-tree, protecting the shell. |
 | `cron.md` | Scheduling recurring jobs: `init-cron-scaffold.sh`, why every cron task needs an `init-cron.sh` (survives rebuild), the service token, scheduled-app UI rules, dry-run testing. |
 | `notifications.md` | Sending push notifications: when to notify, firing the push yourself on an open question, the curl forms, and never executing an outbound-channel script live. |
-| `images.md` | Generating images: Codex `$imagegen` vs Claude/Gemini, copying into the chat's media dir, embedding. |
+| `images.md` | Generating images with Codex `$imagegen`, copying them into the chat's media directory, and embedding them. |
 | `recovery.md` | Backend fixes, the restart loop, `/data`-as-git (`pm-commit`), SQLite manual ALTER, file locations, chat recovery, the recovery surface. |
 | `reflection.md` | The nightly unattended run: triage chats by their summaries, interview agents whose work shows difficulties or learnings, improve skills, fix + harden used apps, research the partner's interests, then write the morning brief. Read it when running as the Reflection agent or wiring its cron. |

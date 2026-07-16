@@ -1,8 +1,8 @@
 /**
- * Short-lived media tokens for serving uploads, media, and generated images.
+ * Short-lived media tokens for serving uploads and chat media.
  *
- * The serve routes (/api/chats/{id}/{uploads,media,generated}/{file} — `media` is
- * where agent screenshots + image-gen land; `generated` is the legacy alias)
+ * The serve routes (/api/chats/{id}/{uploads,media}/{file}; `media` is where
+ * agent screenshots and agent-created images land)
  * accept the auth token from a ?token= query param because <img> tags can't set
  * Authorization headers. Passing the full 30-day owner JWT as a query param leaks it
  * into server access logs, browser history, and Referer headers.
@@ -52,7 +52,7 @@ export async function mediaTokenParam(chatId) {
 }
 
 /**
- * Builds a full media URL for a chat resource (upload or generated image).
+ * Builds a full media URL for a chat resource (upload or media file).
  * Appends the cached/fetched media token as a query param.
  *
  * @param {string} path  e.g. "/api/chats/{id}/uploads/{file}"

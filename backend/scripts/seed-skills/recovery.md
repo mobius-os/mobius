@@ -122,7 +122,8 @@ their mind.
 ## File locations
 
 - **Uploaded files:** `/data/chats/{chat_id}/uploads/`
-- **Chat media (screenshots + generated):** `/data/chats/{chat_id}/media/` — the old `generated/` path is still served for embeds in pre-`media/` messages.
+- **Chat media (screenshots + generated):** `/data/chats/{chat_id}/media/`. Startup moves files and stored URLs off the retired `generated/` path; the live API serves only `media/`.
+- **Encrypted app credentials:** `/data/app-secrets/{app_id}/` — manage them through `/api/apps/{app_id}/secrets/{name}`, never by editing the encrypted files.
 - **Per-app storage (numeric id):** `/data/apps/{app_id}/<path>` — what `PUT /api/storage/apps/{app_id}/...` writes to, keyed by the numeric DB id.
 - **Per-app source (slug):** `/data/apps/{slug}/` — where app source lives, keyed by slug. `index.jsx` is the entrypoint and can import sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules. NOT the same dir as storage; the slug tree and the numeric-id tree are separate.
 - **Shared storage (cross-app):** `/data/shared/<path>` — what `PUT /api/storage/shared/...` writes to; used for theme.css, agent-settings.json, chat summaries, and app-owned shared data.
