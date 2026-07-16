@@ -101,6 +101,8 @@ def test_explicit_gateway_wins_over_canonical_checkout(linked_worktree):
   "https://mobius.example.com",
   "https://services.mobius.example.com/path",
   "https://services.mobius.example.com|bad",
+  "https://services.mobius.example.com:0",
+  "https://services.mobius.example.com:65536",
 ])
 def test_invalid_or_shell_gateway_is_rejected(tmp_path, gateway):
   result = _run_resolution(tmp_path, gateway=gateway)

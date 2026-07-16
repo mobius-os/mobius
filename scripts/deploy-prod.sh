@@ -340,6 +340,7 @@ if (
   or parsed.fragment
   or parsed.path not in ("", "/")
   or host == shell_host.rstrip(".").lower()
+  or port is not None and not 1 <= port <= 65535
 ):
   raise SystemExit(1)
 authority = host if port in (None, 443) else f"{host}:{port}"
