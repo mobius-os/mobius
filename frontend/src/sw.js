@@ -58,7 +58,8 @@ import {
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
-  withPublicVendorCors,
+  isPublicAppModulePath,
+  withPublicAppModuleCors,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
   isPackagedAppAsset,
@@ -75,24 +76,26 @@ import {
   entriesToTrim,
 } from './sw-cache-policy.js'
 
-const isVendorRequest = request => {
+const isPublicAppModuleRequest = request => {
   try {
-    return new URL(request.url).pathname.startsWith('/vendor/')
+    return isPublicAppModulePath(new URL(request.url).pathname)
   } catch {
     return false
   }
 }
 
-// Repair vendor responses at the service-worker boundary, including entries
-// written by an older release before the server made /vendor intrinsically
+// Repair public app-module responses at the service-worker boundary, including
+// entries written by an older release before the server made them intrinsically
 // CORS-readable. This hook runs on precache hits as well as fresh installs.
-const vendorCorsPlugin = {
+const publicAppModuleCorsPlugin = {
   cachedResponseWillBeUsed: async ({ request, cachedResponse }) =>
-    isVendorRequest(request)
-      ? withPublicVendorCors(cachedResponse)
+    isPublicAppModuleRequest(request)
+      ? withPublicAppModuleCors(cachedResponse)
       : cachedResponse,
   fetchDidSucceed: async ({ request, response }) =>
-    isVendorRequest(request) ? withPublicVendorCors(response) : response,
+    isPublicAppModuleRequest(request)
+      ? withPublicAppModuleCors(response)
+      : response,
 }
 
 // SW UPDATE LEASH (design §1.3 — "the streaming view is sacred").
@@ -223,7 +226,7 @@ const VENDORED_MEMORY_GRAPH = [
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
-addPlugins([vendorCorsPlugin])
+addPlugins([publicAppModuleCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
   ...VENDORED_REACT,
@@ -272,7 +275,7 @@ registerRoute(
     url.origin === self.location.origin && url.pathname.startsWith('/vendor/'),
   new CacheFirst({
     cacheName: VENDOR_CACHE,
-    plugins: [assetCacheGuard, vendorCorsPlugin],
+    plugins: [assetCacheGuard, publicAppModuleCorsPlugin],
   }),
 )
 

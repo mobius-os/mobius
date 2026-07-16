@@ -39,12 +39,15 @@ def test_app_routes_and_images_are_not_static():
   assert not _is_static_asset_path("vendorfoo")
 
 
-def test_vendor_responses_are_intrinsically_cors_readable():
-  """A service-worker-cached vendor module must still load in Origin:null."""
+def test_public_app_modules_are_intrinsically_cors_readable():
+  """Service-worker-cached app modules must still load in Origin:null."""
   assert _public_static_headers("vendor/react@19.2.7/react.mjs") == {
     "Access-Control-Allow-Origin": "*",
   }
   assert _public_static_headers("vendor") == {
+    "Access-Control-Allow-Origin": "*",
+  }
+  assert _public_static_headers("mobius-runtime.js") == {
     "Access-Control-Allow-Origin": "*",
   }
   assert _public_static_headers("vendorfoo/module.mjs") == {}

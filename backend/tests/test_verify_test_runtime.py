@@ -190,6 +190,9 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert "Local E2E artifacts retained at:" in runner
   assert 'compose logs --no-color app caddy recoveryd fake-tandoor' in runner
   assert 'MOBIUS_LOCAL_E2E_KEEP_CACHE' in runner
+  assert 'mobius-local-e2e-cache-${checkout_id}:test' in runner
+  assert 'MOBIUS_LOCAL_E2E_MIN_FREE_GB' in runner
+  assert "docker system df" in runner
   assert 'docker image tag "$image_name" "$cache_image"' in runner
   assert 'docker image rm "$image_name"' in runner
   assert 'error: timed out waiting for the isolated test backend' in runner
@@ -331,3 +334,5 @@ def test_hosted_e2e_runs_for_prs_and_long_lived_branches_only():
   assert "github.event_name == 'pull_request'" in e2e
   assert "github.ref == 'refs/heads/main'" in e2e
   assert "refs/heads/integration/" in e2e
+  assert "needs: privacy" in e2e
+  assert "needs: backend" not in e2e
