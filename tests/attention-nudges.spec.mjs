@@ -6,7 +6,7 @@
  * intersected the scroll viewport, even though the composer still covered the
  * card's Submit or Resume action.
  *
- * Run: npx playwright test tests/attention-nudges.spec.mjs
+ * Run: scripts/playwright-local.sh --allow-local-e2e tests/attention-nudges.spec.mjs
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
