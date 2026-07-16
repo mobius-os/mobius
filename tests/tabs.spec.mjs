@@ -245,9 +245,10 @@ test.describe('Tabs', () => {
 
     // The global drawer suspends kinetic interaction in every visible app pane.
     await page.locator('.shell__brand').click()
-    await expect.poll(() => page.locator(`iframe[data-app-id="${APP_ID}"]`).evaluate(
-      frame => frame.contentDocument.body.dataset.interactive,
-    )).toBe('false')
+    await expect(page
+      .frameLocator(`iframe[data-app-id="${APP_ID}"]`)
+      .locator('body'))
+      .toHaveAttribute('data-interactive', 'false')
     await page.evaluate(() => history.back())
     await expect(page.locator('.drawer')).not.toHaveClass(/drawer--open/)
 
