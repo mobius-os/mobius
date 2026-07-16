@@ -177,6 +177,22 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('touchmove'), true)
 })
 
+test('a disclosure tap does not mistake its collapse clamp for a reader swipe', () => {
+  const disclosureTarget = {
+    closest(selector) {
+      assert.match(selector, /chat__activity-header/)
+      return { className: 'chat__activity-header' }
+    },
+  }
+  const ordinaryTarget = { closest: () => null }
+
+  assert.equal(readerInputMayScroll('pointerdown', '', disclosureTarget), false)
+  assert.equal(readerInputMayScroll('touchstart', '', disclosureTarget), false)
+  assert.equal(readerInputMayScroll('touchmove', '', disclosureTarget), true,
+    'a real drag starting on the disclosure still claims reader ownership')
+  assert.equal(readerInputMayScroll('pointerdown', '', ordinaryTarget), true)
+})
+
 test('inputs without an end event get a next-frame no-scroll release', () => {
   assert.equal(readerInputNeedsFrameRelease('wheel'), true)
   assert.equal(readerInputNeedsFrameRelease('keydown'), true)

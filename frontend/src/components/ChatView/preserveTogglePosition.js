@@ -2,6 +2,31 @@ export function preserveTogglePosition(anchorEl) {
   if (!anchorEl || typeof requestAnimationFrame !== 'function') return
   const scroller = anchorEl.closest?.('.chat__scroll')
   if (!scroller) return
+
+  // Closing a disclosure at the physical tail removes height before the chat's
+  // ResizeObserver can grow its dynamic bottom reservation. The browser clamps
+  // scrollTop in that gap, paints the header lower for one frame, then the
+  // observer restores it — the visible down/up twitch. Reserve the body's exact
+  // outer height synchronously so total scroll height stays constant across the
+  // React commit; the observer replaces this provisional value with its normal
+  // spacer calculation on the next layout pass.
+  if (anchorEl.getAttribute?.('aria-expanded') === 'true') {
+    const spacer = scroller.querySelector?.('.spacer-dynamic')
+    const body = anchorEl.nextElementSibling
+    if (spacer && body) {
+      const rectHeight = body.getBoundingClientRect?.().height || 0
+      const styles = typeof getComputedStyle === 'function'
+        ? getComputedStyle(body)
+        : null
+      const marginTop = Number.parseFloat(styles?.marginTop) || 0
+      const marginBottom = Number.parseFloat(styles?.marginBottom) || 0
+      const removedHeight = rectHeight + marginTop + marginBottom
+      if (removedHeight > 0) {
+        spacer.style.height = `${(spacer.offsetHeight || 0) + removedHeight}px`
+      }
+    }
+  }
+
   const before = anchorEl.getBoundingClientRect().top
 
   // A disclosure inserts/removes its body during React's click commit. Observe

@@ -79,3 +79,65 @@ test('rAF remains a fallback when MutationObserver is unavailable', () => {
     globalThis.requestAnimationFrame = originalRaf
   }
 })
+
+test('closing a disclosure primes the bottom spacer before React removes its body', () => {
+  const originalMutationObserver = globalThis.MutationObserver
+  const originalRaf = globalThis.requestAnimationFrame
+  const originalGetComputedStyle = globalThis.getComputedStyle
+  globalThis.MutationObserver = undefined
+  globalThis.requestAnimationFrame = () => 1
+  globalThis.getComputedStyle = () => ({ marginTop: '4px', marginBottom: '2px' })
+
+  try {
+    const spacer = { offsetHeight: 100, style: {} }
+    const scroller = {
+      scrollTop: 50,
+      querySelector: selector => selector === '.spacer-dynamic' ? spacer : null,
+    }
+    const body = { getBoundingClientRect: () => ({ height: 60 }) }
+    const anchor = {
+      parentElement: {},
+      nextElementSibling: body,
+      closest: () => scroller,
+      getAttribute: name => name === 'aria-expanded' ? 'true' : null,
+      getBoundingClientRect: () => ({ top: 120 }),
+    }
+
+    preserveTogglePosition(anchor)
+    assert.equal(spacer.style.height, '166px')
+  }
+  finally {
+    globalThis.MutationObserver = originalMutationObserver
+    globalThis.requestAnimationFrame = originalRaf
+    globalThis.getComputedStyle = originalGetComputedStyle
+  }
+})
+
+test('opening a disclosure leaves normal spacer sizing alone', () => {
+  const originalMutationObserver = globalThis.MutationObserver
+  const originalRaf = globalThis.requestAnimationFrame
+  globalThis.MutationObserver = undefined
+  globalThis.requestAnimationFrame = () => 1
+
+  try {
+    const spacer = { offsetHeight: 100, style: {} }
+    const scroller = {
+      scrollTop: 50,
+      querySelector: () => spacer,
+    }
+    const anchor = {
+      parentElement: {},
+      nextElementSibling: null,
+      closest: () => scroller,
+      getAttribute: () => 'false',
+      getBoundingClientRect: () => ({ top: 120 }),
+    }
+
+    preserveTogglePosition(anchor)
+    assert.equal(spacer.style.height, undefined)
+  }
+  finally {
+    globalThis.MutationObserver = originalMutationObserver
+    globalThis.requestAnimationFrame = originalRaf
+  }
+})
