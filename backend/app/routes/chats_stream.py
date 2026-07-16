@@ -521,6 +521,15 @@ async def send_message(
   # practice; after that, the durable-transcript fallback below decides
   # whether this is recoverable or genuinely stale.
   if body.answers:
+    # Snapshot the Stop tombstone BEFORE waiting on the queue lock. A Stop
+    # that lands after this request began must still win the race (410); a
+    # Stop that had already completed is different: pressing Submit afterward
+    # is a fresh, explicit request to continue from the durable tail question.
+    # The old unconditional tombstone check made that later Submit impossible
+    # until the whole server restarted and forgot the in-memory tombstone.
+    cancelled_when_submitted = questions.was_cancelled(
+      chat_id, body.question_id,
+    )
     async with chat_queue.get_lock(chat_id):
       _GRACE_ATTEMPTS = 10
       _GRACE_INTERVAL = 0.05  # seconds — total ~500ms
@@ -610,7 +619,10 @@ async def send_message(
           status_code=410,
           detail="The question is no longer accepting answers.",
         )
-      if questions.was_cancelled(chat_id, body.question_id):
+      if (
+        questions.was_cancelled(chat_id, body.question_id)
+        and not cancelled_when_submitted
+      ):
         raise HTTPException(
           status_code=410,
           detail="The question is no longer accepting answers.",
@@ -822,6 +834,13 @@ async def _send_message_locked(
         # runner already does and queue the message instead.
         steered = False
       if steered:
+        # A question tool is a synchronous human pause. Once the owner
+        # explicitly fast-forwards (or a steer-enabled chat auto-steers), the
+        # new message supersedes that pause; leaving its future registered
+        # would strand Codex waiting on a card that the transcript has already
+        # moved past. Retire it only AFTER the provider accepts the steer so a
+        # failed steer still leaves the original question answerable.
+        questions.cancel(chat_id)
         # Persist the steer so a reload renders Q1, A1, Q2, A2: seal the
         # pre-interrupt assistant text (A1) as its own message, append this
         # steered user row at the END, and reset the live sink so the

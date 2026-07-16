@@ -12,10 +12,24 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not receive a stale visual class')
   assert.doesNotMatch(component, /This question is no longer active/,
     'unanswered cards should not tell the user the question expired')
-  assert.match(component, /\{!answered && !disabled && \(\s*<button[\s\S]*className="qcard__submit"/,
-    'submit button should render only while the card can still be answered')
-  assert.match(component, /\{!answered && !disabled && \(\s*<div className="qcard__hint"/,
-    'selection hints should render only when the card is answerable')
+  assert.match(component, /\{\(answered \|\| !disabled\) && \(\s*<button[\s\S]*className="qcard__submit"/,
+    'submit button should remain in place after an answer is submitted')
+  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : 'Submit'\)/,
+    'the retained submit button should explain pending and answered states')
+  assert.match(component, /\{\(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
+    'selection hints should stay in place after the answer is submitted')
+  assert.doesNotMatch(component, /\{!answered && \(\s*<button[\s\S]*?qcard__opt--other/,
+    'the Other option should not disappear after submission')
+  assert.match(component, /\{\(isOtherSelected \|\| answeredWithOther\) && \(\s*<input/,
+    'a submitted custom answer should keep its input row in place')
+  assert.match(component, /writeQuestionDraft\(draftKey, answers, otherTexts\)/,
+    'unsubmitted selections and custom text should be cached')
+  assert.match(component, /if \(answered \|\| disabled\) \{\s*clearQuestionDraft\(draftKey\)/,
+    'submitted or superseded questions should clear their cached draft')
+  assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted !== false\) setSubmitted\(true\)/,
+    'a card should settle only after the answer request is accepted')
+  assert.match(component, /catch \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
+    'a failed answer should retain its retryable draft')
 })
 
 test('question card css has no stale styling hook', () => {
@@ -23,4 +37,6 @@ test('question card css has no stale styling hook', () => {
     'stale question styling should not come back')
   assert.doesNotMatch(css, /\.qcard__status\s*\{[\s\S]*?\}/,
     'expiration status styling should not come back')
+  assert.match(css, /\.qcard__input:disabled\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
+    'a submitted custom answer should visibly gray out in every browser')
 })

@@ -330,8 +330,10 @@ test.describe('Message rendering', () => {
     // contract is that submitting an answer starts the hidden continuation.
     await expect.poll(() => followupStreamServed).toBe(true)
 
-    // Verify the question card is in answered state (no submit button).
-    await expect(page.locator('.qcard__submit')).toHaveCount(0)
+    // Verify the question card is in its stable answered state. The retained
+    // disabled button keeps the card geometry fixed while making settlement
+    // explicit instead of collapsing the final row.
+    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
   })
 
   test('6c. Question card answer sends hidden message', async ({ page }) => {

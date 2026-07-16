@@ -1883,6 +1883,7 @@ export default function Shell() {
               // round-trip wait for the first SSE event).
               markStreamingStart(activeChatId)
             }}
+            onQuestionAnswered={refreshChats}
             onVoiceListeningChange={markVoiceListening}
             composerFocusRequest={composerFocusRequest}
             onComposerFocusHandled={handleComposerFocusHandled}

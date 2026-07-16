@@ -234,6 +234,7 @@ function MsgContentInner({
         return (
           <div key={assistantBlockKey(block, i)}>
             <QuestionCard
+              chatId={chatId}
               questions={block.questions || []}
               questionId={block.question_id}
               answeredMap={answers}

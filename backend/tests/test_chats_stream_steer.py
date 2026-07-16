@@ -23,11 +23,13 @@ covered by `test_codex_sdk_runner.py`; here we only exercise the wiring.
 """
 
 import asyncio
+from concurrent.futures import Future
 
-from app import models
+from app import models, questions
 from app.broadcast import create_broadcast, get_broadcast
 from app.chat_writer import cid_of
 from app.database import SessionLocal
+from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
 
 
@@ -177,6 +179,65 @@ def test_steers_into_live_codex_turn_when_flag_on(
       "content": "actually use blue",
     }
   ]
+
+
+def test_accepted_steer_retires_open_question(client, auth, monkeypatch):
+  """Steering supersedes a synchronous question instead of leaving its hidden
+  future parked after the transcript has already moved on."""
+  chat_id = "questionsteer"
+  question_id = "q-open"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.messages[-1]["blocks"] = [{
+      "type": "question",
+      "question_id": question_id,
+      "questions": [{"question": "Keep going?", "options": [{"label": "Yes"}]}],
+    }]
+    chat.pending_messages = [{
+      "role": "user",
+      "content": "Skip that and use the default",
+      "ts": 10,
+      "cid": "question-steer-cid",
+    }]
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(chat, "messages")
+    db.commit()
+  finally:
+    db.close()
+
+  waiting = Future()
+  questions.register(chat_id, PendingQuestion(
+    question_id=question_id,
+    questions=[],
+    future=waiting,
+  ))
+  registry.register(_make_active_codex_turn(chat_id))
+
+  async def _fake_steer(cid, message):
+    return True
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "Skip that and use the default",
+      "force_steer": True,
+      "consume_pending_cids": ["question-steer-cid"],
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  assert waiting.cancelled()
+  assert questions.get(chat_id) is None
+  assert questions.was_cancelled(chat_id, question_id)
+  assert _read_chat(chat_id).messages[-1]["content"] == "Skip that and use the default"
 
 
 def _register_sink_with_partial(chat_id: str, run_token: str, text: str):
