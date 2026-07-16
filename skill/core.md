@@ -177,7 +177,7 @@ When about to stop tool-calling and write the final assistant message **on any t
 | Took a screenshot | In the SAME message, emit the `![]` embed BEFORE any describing text; confirm the embed is present. See step 6. |
 | Learned a partner preference / durable fact | Acknowledge it clearly enough that it is unambiguous in the transcript. |
 | Changed shell / CSS / cron | State what changed and why. |
-| Made an app / platform / shell change that would help other Möbius users | Say so to the partner in one sentence and offer to contribute it upstream — `contributing.md` has the how. |
+| Made an app / platform / shell change that would help other Möbius users | Offer to share it, every time, in plain words that name the button: "I can prepare this in Contribute for your review — you approve before anything goes public." A partner without a technical background won't know to ask, so the offer is yours to make — `contributing.md` has the how. |
 | About to overwrite `theme.css` | Snapshot first for a named undo (the server also auto-snapshots; `?reset-theme=1` rolls back). See `theming.md`. |
 | **(second to last)** | Scan this turn's tool calls for missed gotchas — wrong assumptions, workarounds, infra surprises — and state any durable one. |
 | **(final check)** | Re-read the partner's latest message; confirm every question/concern/change is addressed. Then ask: does this look right? Anything to change? |
