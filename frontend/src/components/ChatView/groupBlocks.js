@@ -195,6 +195,44 @@ export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
   return toolGroupState(tools)
 }
 
+// The SINGLE presentation authority for the collapsed line's icon, danger
+// chip, and state class, applied on top of an already-derived stream state
+// (so the caller's memo keeps owning the parse-heavy failure scan). A live
+// trailing stretch is in-progress for its WHOLE life — including the gap
+// between one tool ending and the next event, where no tool is 'running' —
+// so tense (activityCollapsedLabel's live||running branch), the spinner, and
+// the shimmer all stay in agreement instead of a settled type glyph or the
+// failure triangle flashing in mid-turn beside present-tense copy (review
+// round 2, both reviewers). Failure surfaces when the stretch actually
+// settles (live=false), consistent with running-wins.
+export function activityDisplayState(state, { live = false } = {}) {
+  if (live && state !== 'running') return 'running'
+  return state
+}
+
+// The memo signature ActivityStretch keys its parse-heavy derivations on.
+// Pure and exported so the staleness contract is unit-testable. Per tool:
+// name + status + output length + the output's HEAD and TAIL slices + the
+// explicit exit-code field. The two slices cover both places a failure marker
+// can live in replace-semantics output — Claude's plain-text "Exit code N"
+// head is START-anchored and a JSON envelope may serialize exit_code first or
+// last — so an equal-length replacement that flips the exit code cannot leave
+// a stale success line (review round 2). Thinking entries contribute a
+// constant: their content length must NOT bust the memo on typewriter frames.
+export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
+  return entries
+    .map(e => {
+      const it = e?.item
+      if (it?.type === 'tool') {
+        return `t:${it.tool || ''}:${it.status || ''}:${it.output?.length || 0}`
+          + `:${it.output?.slice(0, 16) || ''}:${it.output?.slice(-14) || ''}`
+          + `:${it.output_exit_code ?? ''}`
+      }
+      return 'k'
+    })
+    .join('|') + `|${entries.length}|${liveThinkingTail ? 'T' : ''}`
+}
+
 // The single localization surface for the collapsed line's primary text. One
 // rule for the whole stretch, computed from its entries + the live hint:
 //   - live thinking tail (no tool running) → "Thinking for Ns" + animated dots
