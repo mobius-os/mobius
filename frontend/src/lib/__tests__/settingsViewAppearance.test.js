@@ -11,14 +11,14 @@ const css = readFileSync(
   'utf8',
 )
 
-test('appearance is one full-row icon switch', () => {
+test('appearance keeps one icon switch without making the section clickable', () => {
   assert.match(view, /settings__section--appearance/)
-  assert.match(view, /role="switch"/)
-  assert.match(view, /onClick=\{toggleTheme\}/)
+  assert.match(view, /className="settings__appearance-toggle"[\s\S]*role="switch"[\s\S]*onClick=\{toggleTheme\}/)
+  assert.match(view, /settings__appearance-thumb/)
   assert.match(view, /<Sun[\s\S]*<Moon/)
   assert.doesNotMatch(view, /<span>Light<\/span>|<span>Dark<\/span>|type="radio"/)
-  assert.match(css, /\.settings__section--appearance\s*\{[^}]*padding:\s*0;/s)
-  assert.match(css, /\.settings__appearance\s*\{[^}]*width:\s*100%;/s)
+  assert.doesNotMatch(view, /<section[^>]*onClick=\{toggleTheme\}/)
+  assert.match(css, /\.settings__appearance-toggle\s*\{[^}]*grid-template-columns:\s*repeat\(2, 34px\);/s)
 })
 
 test('model and synced commit use the same normal-weight standard highlight', () => {
@@ -31,13 +31,14 @@ test('model and synced commit use the same normal-weight standard highlight', ()
 })
 
 test('background agents are always draggable without reorder chrome or a trailing caret', () => {
-  assert.match(view, /className="settings-bg-row__effort">\{effortLabel\} effort/)
+  assert.match(view, /settings-bg-row__effort-picker[\s\S]*<EffortStepper/)
+  assert.doesNotMatch(view, /\{effortLabel\} effort<\/span>/)
   assert.match(view, /reorderMode\s*\n/)
   assert.match(view, /<GripVertical size=\{18\}/)
   assert.doesNotMatch(view, /settings-agent-group__reorder|>Reorder<|model-trigger__caret/)
   assert.match(view, /Tried in order when quota or authentication fails\./)
   assert.match(css, /\.settings-bg-row\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s)
-  assert.match(css, /\.settings-bg-row__effort\s*\{[^}]*font-weight:\s*400;/s)
+  assert.match(css, /\.settings-bg-row__effort-picker\s*\{[^}]*padding:\s*0 10px 3px 46px;/s)
   assert.doesNotMatch(view, /dropPosition|settings-bg-row--drop-before|settings-bg-row--drop-after/)
   assert.doesNotMatch(css, /settings-bg-row--drop-before|settings-bg-row--drop-after/)
 })

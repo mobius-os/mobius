@@ -264,6 +264,26 @@ test('applyThemeToDom can opt out of View Transitions for back-stack-sensitive t
   assert.equal(dom.document.body.style.background, '#f0eeeb')
 })
 
+test('applyThemeToDom can make a post-boot theme change atomically', () => {
+  themeService.applyThemeToDom(':root { --bg: #111111; }', '#111111')
+  let called = false
+  dom.document.startViewTransition = () => {
+    called = true
+    throw new Error('an atomic theme change must not start a View Transition')
+  }
+
+  themeService.applyThemeToDom(
+    ':root { --bg: #f0eeeb; }',
+    '#f0eeeb',
+    'light',
+    { animate: false },
+  )
+
+  assert.equal(called, false)
+  assert.equal(dom.documentElement.classList.contains('theme-transitioning'), false)
+  assert.equal(dom.document.body.style.background, '#f0eeeb')
+})
+
 test('persistTheme writes CSS + mode + sends notify in parallel', async () => {
   const calls = []
   const api = {
