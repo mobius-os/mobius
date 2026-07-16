@@ -72,16 +72,24 @@ export function isCacheableAssetResponse(response) {
   return CACHEABLE_ASSET_TYPES.some(t => ct.includes(t))
 }
 
-// A sandboxed app frame has the opaque Origin:null and statically imports
-// /mobius-runtime.js plus public modules under /vendor. The shell service
-// worker precaches those files itself (without an Origin request header), so
-// an older cache may contain a perfectly valid module response without
+// Public assets executed by an opaque app frame or its nested chat embed. Keep
+// this exact: the app imports the runtime + vendor modules, while the inherited
+// Origin:null chat document loads the Vite shell JS/CSS under /assets. The rest
+// of the shell stays on the ordinary same-origin policy.
+export function isOpaqueFramePublicAssetPath(pathname) {
+  return pathname === '/mobius-runtime.js'
+    || pathname.startsWith('/vendor/')
+    || pathname.startsWith('/assets/')
+}
+
+// The shell service worker precaches these modules itself (without an Origin
+// request header), so an older cache may contain a valid response without
 // Access-Control-Allow-Origin. When that cached response is handed to the
 // opaque frame Chromium applies CORS and rejects it before the app can mount.
 // Decorate both old cache hits and fresh fetches at the worker boundary; the
 // server emits the same wildcard header so direct and HTTP-cached responses
 // have an identical contract.
-export function withPublicAppImportCors(response) {
+export function withOpaqueFramePublicAssetCors(response) {
   if (!response) return response
   if (response.headers.get('access-control-allow-origin') === '*') {
     return response

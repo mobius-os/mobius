@@ -58,7 +58,8 @@ import {
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
-  withPublicAppImportCors,
+  isOpaqueFramePublicAssetPath,
+  withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
   isPackagedAppAsset,
@@ -75,26 +76,25 @@ import {
   entriesToTrim,
 } from './sw-cache-policy.js'
 
-const isPublicAppImportRequest = request => {
+const isOpaqueFramePublicAssetRequest = request => {
   try {
-    const path = new URL(request.url).pathname
-    return path === '/mobius-runtime.js' || path.startsWith('/vendor/')
+    return isOpaqueFramePublicAssetPath(new URL(request.url).pathname)
   } catch {
     return false
   }
 }
 
-// Repair public app imports at the service-worker boundary, including entries
-// written by an older release before the server made them intrinsically
+// Repair opaque-frame public assets at the service-worker boundary, including
+// entries written by an older release before the server made them intrinsically
 // CORS-readable. This hook runs on precache hits as well as fresh installs.
-const publicAppImportCorsPlugin = {
+const opaqueFramePublicAssetCorsPlugin = {
   cachedResponseWillBeUsed: async ({ request, cachedResponse }) =>
-    isPublicAppImportRequest(request)
-      ? withPublicAppImportCors(cachedResponse)
+    isOpaqueFramePublicAssetRequest(request)
+      ? withOpaqueFramePublicAssetCors(cachedResponse)
       : cachedResponse,
   fetchDidSucceed: async ({ request, response }) =>
-    isPublicAppImportRequest(request)
-      ? withPublicAppImportCors(response)
+    isOpaqueFramePublicAssetRequest(request)
+      ? withOpaqueFramePublicAssetCors(response)
       : response,
 }
 
@@ -226,7 +226,7 @@ const VENDORED_MEMORY_GRAPH = [
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
-addPlugins([publicAppImportCorsPlugin])
+addPlugins([opaqueFramePublicAssetCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
   ...VENDORED_REACT,
@@ -275,7 +275,7 @@ registerRoute(
     url.origin === self.location.origin && url.pathname.startsWith('/vendor/'),
   new CacheFirst({
     cacheName: VENDOR_CACHE,
-    plugins: [assetCacheGuard, publicAppImportCorsPlugin],
+    plugins: [assetCacheGuard, opaqueFramePublicAssetCorsPlugin],
   }),
 )
 

@@ -60,11 +60,12 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: pip install -r requirements.txt
-      - name: Install frontend validator deps
-        # Backend publication tests execute the checked-in built-global
-        # validator, whose parser/traversal dependencies live in this lockfile.
+      - name: Install built-shell checker deps
+        # Backend publication tests execute the same Babel-based checker used
+        # by the runtime publisher. Keep this real boundary covered instead of
+        # mocking the subprocess in pytest.
         working-directory: frontend
-        run: npm ci
+        run: npm ci --ignore-scripts
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site
@@ -164,7 +165,11 @@ jobs:
     # runners. Keep the job cap comfortably above the inner Playwright timeout
     # so failures still reach the diagnostic log/report upload steps.
     timeout-minutes: 25
-    needs: backend
+    # The backend and browser suites are independent and each takes roughly
+    # seven minutes. Serializing them doubled every review cycle without adding
+    # coverage. Keep the short privacy job fail-closed, then run both expensive
+    # gates in parallel so a submission completes in one suite-length.
+    needs: privacy
 
     steps:
       - uses: actions/checkout@v5
