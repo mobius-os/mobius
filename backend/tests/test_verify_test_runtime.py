@@ -342,13 +342,17 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_hosted_e2e_runs_for_prs_and_long_lived_branches_only():
+def test_hosted_expensive_suites_run_for_prs_and_long_lived_branches_only():
   workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
+  backend = workflow.split("\n  backend:\n", 1)[1].split(
+    "\n  frontend-unit:\n", 1,
+  )[0]
   e2e = workflow.split("\n  e2e:\n", 1)[1]
-  assert "github.event_name == 'pull_request'" in e2e
-  assert "github.ref == 'refs/heads/main'" in e2e
-  assert "refs/heads/integration/" in e2e
+  for job in (backend, e2e):
+    assert "github.event_name == 'pull_request'" in job
+    assert "github.ref == 'refs/heads/main'" in job
+    assert "refs/heads/integration/" in job
   assert "needs: privacy" in e2e
   assert "needs: backend" not in e2e
