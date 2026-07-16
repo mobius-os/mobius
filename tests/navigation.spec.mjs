@@ -946,7 +946,7 @@ function appFrameFor(page, appId) {
   return page.frames().find(f => new RegExp(`/api/apps/${appId}/frame`).test(f.url()))
 }
 
-/** Arm a frame's nav-back counter and return a getter. */
+/** Arm a frame's nav-back counter. */
 async function armBackCounter(frame) {
   await frame.evaluate(() => {
     window.__navBack = 0
@@ -969,24 +969,30 @@ test.describe('Split-pane navigation (PR2 gate)', () => {
     // App A pushes a nested level, then app B pushes its own — two live
     // sentinels keyed by (paneId, appId), interleaved across the visible pair.
     await frameA.evaluate(id => window.parent.postMessage({ type: 'moebius:nav-push', appId: id }, '*'), PANE_APP_A)
-    await page.waitForFunction(() => history.state?.kind === 'app')
+    await page.waitForFunction(id => (
+      history.state?.kind === 'app' && history.state?.route?.appId === id
+    ), PANE_APP_A)
     await frameB.evaluate(id => window.parent.postMessage({ type: 'moebius:nav-push', appId: id }, '*'), PANE_APP_B)
-    await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
+    await page.waitForFunction(id => (
+      history.state?.kind === 'app' && history.state?.route?.appId === id
+    ), PANE_APP_B)
 
     // Back pops the TOPMOST tagged entry first — app B (last pushed), not A.
     await page.evaluate(() => history.back())
-    await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
-    expect(await frameB.evaluate(() => window.__navBack)).toBe(1)
+    await expect.poll(() => frameB.evaluate(() => window.__navBack), {
+      timeout: 3000,
+    }).toBe(1)
     expect(await frameA.evaluate(() => window.__navBack)).toBe(0)
 
     // The next Back routes to app A's level.
     await page.evaluate(() => history.back())
-    await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
-    expect(await frameA.evaluate(() => window.__navBack)).toBe(1)
+    await expect.poll(() => frameA.evaluate(() => window.__navBack), {
+      timeout: 3000,
+    }).toBe(1)
     expect(await frameB.evaluate(() => window.__navBack)).toBe(1)
   })
 
-  test('26. closing a pane retargets its app history to the surviving sibling', async ({ page }) => {
+  test('26. closing a pane retires its app history without disturbing the sibling', async ({ page }) => {
     await bootTwoAppPanes(page)
     const frameA = appFrameFor(page, PANE_APP_A)
     const frameB = appFrameFor(page, PANE_APP_B)
@@ -997,7 +1003,9 @@ test.describe('Split-pane navigation (PR2 gate)', () => {
     // App A (p0) pushes a nested level, so it owns a live sentinel + a physical
     // history entry.
     await frameA.evaluate(id => window.parent.postMessage({ type: 'moebius:nav-push', appId: id }, '*'), PANE_APP_A)
-    await page.waitForFunction(() => history.state?.kind === 'app')
+    await page.waitForFunction(id => (
+      history.state?.kind === 'app' && history.state?.route?.appId === id
+    ), PANE_APP_A)
 
     // Close app A's pane (its strip ✕). p0 collapses; app B becomes the sole
     // pane. Eviction retires app A's tagged history so the physical entry can no
@@ -1014,7 +1022,7 @@ test.describe('Split-pane navigation (PR2 gate)', () => {
     await page.evaluate(() => history.back())
     await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
     expect(await frameB.evaluate(() => window.__navBack)).toBe(0)
-    expect(page.frames().includes(frameB), 'sibling app B survived the retarget').toBe(true)
+    expect(page.frames().includes(frameB), 'sibling app B survived the retirement').toBe(true)
     await expect(page.locator('.shell__view--active')).toBeVisible()
   })
 })
