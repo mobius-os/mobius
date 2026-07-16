@@ -14,6 +14,7 @@ import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
 import ModelSheet from '../ui/ModelSheet.jsx'
+import EffortStepper from '../ui/EffortStepper.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
@@ -201,10 +202,17 @@ function BackgroundProviderRow({
               <span className="model-trigger__id">{selectedModel}</span>
             )}
           </span>
-          {effortLabel && (
-            <span className="settings-bg-row__effort">{effortLabel} effort</span>
-          )}
         </button>
+        {enabled && effortLabel && (
+          <div className="settings-bg-row__effort-picker">
+            <EffortStepper
+              efforts={selectedEfforts}
+              value={row.effort}
+              onChange={onEffortChange}
+              ariaLabel={`${info?.label || row.provider} reasoning effort`}
+            />
+          </div>
+        )}
       </div>
       <ModelSheet
         open={sheetOpen}
@@ -213,9 +221,6 @@ function BackgroundProviderRow({
         groups={groups}
         provider={enabled ? row.provider : ''}
         model={selectedModel}
-        efforts={efforts}
-        effort={row.effort}
-        onEffortChange={onEffortChange}
         onPick={(pid, id, pickedModel) => {
           const nextEfforts = modelEfforts(efforts, pickedModel)
           onModelChange(id, validEffort(nextEfforts, row.effort))
@@ -1249,17 +1254,22 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         </section>
 
         <section className="settings__section settings__section--compact settings__section--appearance">
-          <button
-            type="button"
-            className={`settings__appearance${themeSwitching ? ' settings__appearance--switching' : ''}`}
-            role="switch"
-            aria-checked={themeMode === 'dark'}
-            aria-busy={themeSwitching}
-            disabled={themeSwitching}
-            onClick={toggleTheme}
-          >
+          <div className="settings__appearance">
             <span className="settings__label">Appearance</span>
-            <span className="settings__appearance-icons" aria-hidden="true">
+            <button
+              type="button"
+              className="settings__appearance-toggle"
+              role="switch"
+              aria-label="Dark mode"
+              aria-checked={themeMode === 'dark'}
+              aria-busy={themeSwitching}
+              disabled={themeSwitching}
+              onClick={toggleTheme}
+            >
+              <span
+                className={`settings__appearance-thumb${themeMode === 'dark' ? ' settings__appearance-thumb--dark' : ''}`}
+                aria-hidden="true"
+              />
               <Sun
                 size={16}
                 strokeWidth={2}
@@ -1270,8 +1280,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 strokeWidth={2}
                 className={themeMode === 'dark' ? 'settings__appearance-icon--active' : ''}
               />
-            </span>
-          </button>
+            </button>
+          </div>
           {themeError && (
             <Alert
               color="danger"
