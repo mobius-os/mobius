@@ -336,6 +336,15 @@
     .error-btn--report:hover { background: var(--accent-hover); }
     .error-btn--reported { background: var(--surface2); color: var(--green); pointer-events: none; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    /* Touch devices: customizing a scrollbar makes Chromium Android swap
+       the auto-hiding overlay for a persistent classic track, so apps that
+       style scrollbars to look polished get a visible gutter on phones.
+       Zero-specificity baseline: an app that deliberately styles a class's
+       scrollbar still wins. Scrolling itself is unaffected. */
+    @media (pointer: coarse) {
+      * { scrollbar-width: none; }
+      ::-webkit-scrollbar { display: none; }
+    }
   </style>
 </head>
 <body>
