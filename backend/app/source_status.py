@@ -103,22 +103,33 @@ def _install_managed_paths(
   managed = {path for path in wanted if path == ".gitignore"}
   if not wanted:
     return managed
-  marker = "__MOBIUS_SOURCE_STATUS_SUBJECT__:"
   proc = _git(
-    repo, "log", "-z", f"--format={marker}%s", "--name-only", "--no-renames",
+    # Prefix each commit header with an extra NUL. Empty path names are not
+    # valid in Git, so that boundary cannot collide with an owner-controlled
+    # filename (unlike a printable subject marker).
+    repo, "log", "-z", "--format=%x00%s", "--name-only", "--no-renames",
     f"{left}..{right}", "--",
   )
   if proc.returncode != 0:
     return managed
   subject = ""
   seen: set[str] = set()
+  expect_subject = False
+  first_path = False
   for token in proc.stdout.split("\0"):
-    if token.startswith(marker):
-      subject = token.removeprefix(marker).casefold()
+    if expect_subject:
+      subject = token.casefold()
+      expect_subject = False
+      first_path = True
       continue
-    # Git separates the pretty header from the first --name-only path with a
-    # newline even in -z mode; later paths are already clean NUL tokens.
-    path = token.removeprefix("\n")
+    if not token:
+      expect_subject = True
+      continue
+    # Git separates the pretty header from the first --name-only path with
+    # one newline even in -z mode. Remove exactly that separator so a real
+    # filename beginning with a newline remains intact.
+    path = token.removeprefix("\n") if first_path else token
+    first_path = False
     if not path or path not in wanted or path in seen:
       continue
     seen.add(path)

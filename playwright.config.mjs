@@ -51,14 +51,6 @@ function localChromeExecutable() {
 
 const localChrome = isCI ? null : localChromeExecutable()
 
-if (!isCI && process.env.MOBIUS_LOCAL_E2E !== '1') {
-  throw new Error(
-    'Local Playwright E2E is opt-in because it builds a disposable Möbius ' +
-    'backend and database. Prefer the GitHub PR checks. For a focused local ' +
-    'run, use scripts/playwright-local.sh --allow-local-e2e <spec or --grep>.'
-  )
-}
-
 export default defineConfig({
   testDir: './tests',
   timeout: 60000,

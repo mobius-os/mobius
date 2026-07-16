@@ -332,25 +332,6 @@ RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
          /app/static/vendor/dompurify@3.4.11 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
 
-# Application-owned source comes after dependency and self-hosted vendor
-# layers. This keeps ordinary backend/frontend edits on the cheap trailing
-# build path while preserving exactly the same runtime filesystem layout.
-COPY backend/app ./app/
-COPY backend/scripts ./scripts/
-COPY skill/ ./skill/
-COPY core-apps/ ./core-apps/
-COPY protected-files.txt ./protected-files.txt
-
-# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
-# in its OWN container (same image, command `python3 -P /app/recovery/
-# recoveryd.py`). It imports ZERO app.* code and survives a fully-broken
-# platform. Baked root-owned + chmod a-w so even root can't modify it in
-# place and the agent (mobius) cannot touch it; recoveryd self-checks this
-# at startup and refuses to run if any file is writable. This is the floor
-# of the recovery story, distinct from the platform-baked backend floor.
-COPY backend/recovery ./recovery/
-RUN chmod -R a-w /app/recovery
-
 # Frontend static files + app-frame served by FastAPI, plus the full source
 # tree retained for /data/platform/frontend/node_modules to link at runtime.
 COPY --from=frontend /build/dist ./static/

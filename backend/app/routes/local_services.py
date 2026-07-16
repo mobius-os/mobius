@@ -86,6 +86,7 @@ _HOP_BY_HOP = {
 }
 _PRIVATE_REQUEST_HEADERS = {
   "authorization",
+  "forwarded",
   "host",
   "proxy-authorization",
   "x-forwarded-for",

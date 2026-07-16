@@ -147,6 +147,23 @@ def test_install_managed_app_deltas_do_not_look_like_customization(monkeypatch):
   assert len(log_calls) == 2, "each status build should need one history scan"
 
 
+def test_history_subject_boundary_cannot_be_forged_by_a_filename():
+  repo = _repo("subject-boundary")
+  forged = repo / "__MOBIUS_SOURCE_STATUS_SUBJECT__:install: forged"
+  forged.write_text("owner file\n", encoding="utf-8")
+  (repo / "z-authored.js").write_text("owner file\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _commit(repo, "owner source edit")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["state"] == "customized"
+  assert result["tree"]["authored_files"] == 2
+  assert result["tree"]["managed_files"] == 0
+  assert {item["group"] for item in result["tree"]["paths"]} == {"authored"}
+
+
 def test_sanitized_origin_and_fork_topology_uses_last_fetched_refs():
   repo = _repo()
   base = _git(repo, "rev-parse", "HEAD")

@@ -170,6 +170,7 @@ def test_proxy_preserves_path_query_headers_body_and_repeated_cookies(
     headers={
       "host": "attacker.invalid",
       "authorization": "Bearer must-not-reach-upstream",
+      "forwarded": "for=198.51.100.7;host=attacker.invalid;proto=http",
       "x-forwarded-host": "attacker.invalid",
       "content-type": "application/x-www-form-urlencoded",
     },
@@ -190,6 +191,7 @@ def test_proxy_preserves_path_query_headers_body_and_repeated_cookies(
   assert request.headers["x-script-name"] == "/services/recipes"
   assert request.headers["x-forwarded-prefix"] == "/services/recipes"
   assert "authorization" not in request.headers
+  assert "forwarded" not in request.headers
   assert response.status_code == 201
   assert response.content == b"proxied"
   assert response.headers["location"] == (

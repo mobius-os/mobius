@@ -69,12 +69,6 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: pip install -r requirements.txt
-      - name: Install built-shell checker deps
-        # Backend publication tests execute the same Babel-based checker used
-        # by the runtime publisher. Keep this real boundary covered instead of
-        # mocking the subprocess in pytest.
-        working-directory: frontend
-        run: npm ci --ignore-scripts
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site

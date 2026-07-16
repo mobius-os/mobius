@@ -114,9 +114,14 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   shell_deps = "RUN cd ./shell-src && npm ci --ignore-scripts"
   last_vendor = "RUN mkdir -p /tmp/dompurify-install"
   backend_source = "COPY backend/app ./app/"
+  backend_scripts = "COPY backend/scripts ./scripts/"
+  platform_seed = 'git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked'
   frontend_source = "COPY frontend/ ./shell-src/"
+  assert dockerfile.count(backend_source) == 1
+  assert dockerfile.count(backend_scripts) == 1
   assert dockerfile.index(shell_deps) < dockerfile.index(last_vendor)
-  assert dockerfile.index(last_vendor) < dockerfile.index(backend_source)
+  assert dockerfile.index(last_vendor) < dockerfile.index(platform_seed)
+  assert dockerfile.index(platform_seed) < dockerfile.index(backend_source)
   assert dockerfile.index(last_vendor) < dockerfile.index(frontend_source)
 
 
