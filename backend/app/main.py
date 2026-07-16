@@ -1149,6 +1149,22 @@ _RESERVED_TOP_LEVEL_APP_ALIASES = {
 }
 
 
+def _public_static_headers(path: str) -> dict[str, str]:
+  """Headers required when public shell assets cross an opaque app origin.
+
+  Sandboxed app frames intentionally have the effective origin ``null`` and
+  import the public modules under ``/vendor``.  Those files are also fetched
+  and cached by the shell service worker without an Origin header.  CORS
+  middleware can decorate a direct opaque-origin request, but it cannot repair
+  that already-cached response when the worker later returns it to the frame.
+  Make the public vendor response intrinsically cross-origin readable so both
+  the HTTP cache and the service-worker cache preserve the contract.
+  """
+  if path.split("/", 1)[0] == "vendor":
+    return {"Access-Control-Allow-Origin": "*"}
+  return {}
+
+
 def _top_level_app_slug_alias(path: str) -> str | None:
   """Return an app slug for legacy top-level app URLs like `/cuberun`.
 
@@ -1479,11 +1495,9 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       # cache the response body but forces revalidation via
       # If-None-Match on every request, so a 304 keeps the
       # download cheap when nothing changed.
-      headers = (
-        {"Cache-Control": "no-cache, must-revalidate"}
-        if path == "sw.js"
-        else None
-      )
+      headers = _public_static_headers(path)
+      if path == "sw.js":
+        headers["Cache-Control"] = "no-cache, must-revalidate"
       if path == "sw.js":
         # sw.js is a REVALIDATING response (no-cache + the mtime ETag
         # FileResponse sets), so it must never answer a 206. A
@@ -1492,7 +1506,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
         # one-byte service worker. Stripping Range keeps the full-body 200
         # (same class as the /app-assets + /module fix; see http_caching).
         strip_range(request)
-      return FileResponse(str(file), headers=headers)
+      return FileResponse(str(file), headers=headers or None)
     # When the live build is being served, a file that lives ONLY in the baked
     # build (/app/static) would otherwise fall through to the HTML response.
     # /vendor/three/* is the canonical example: the npm-install vendor copy
@@ -1503,7 +1517,9 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     if static_dir != _baked_dir and path != "index.html":
       baked = _baked_dir / path
       if baked.is_file():
-        return FileResponse(str(baked))
+        return FileResponse(
+          str(baked), headers=_public_static_headers(path) or None
+        )
     # Static asset namespaces 404 on a miss — they must never receive the
     # SPA HTML below (a module URL served as text/html is MIME-rejected by
     # the browser and poisons the cache-first service worker). Only app
