@@ -3,6 +3,8 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import {
   activityStreamState,
+  activityDisplayState,
+  activityMemoSig,
   activityCollapsedLabel,
   thoughtDurationLabel,
 } from './groupBlocks.js'
@@ -121,32 +123,18 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
   // thinkingElapsedMs (inside activityCollapsedLabel) so it stays replay-invariant
   // across a reconnect burst.
   const [now, setNow] = useState(() => Date.now())
+  const tickerActive = liveThinkingTail && !toolRunning
   useEffect(() => {
-    if (!liveThinkingTail) return undefined
+    if (!tickerActive) return undefined
     const id = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(id)
-  }, [liveThinkingTail])
+  }, [tickerActive])
 
-  // Deriving the state parses each tool's output for its exit code, so memoize on
-  // a cheap signature: tool name + status + output length + the output's TAIL
-  // slice + explicit exit code + entry count + the live-thinking flag — NOT
-  // thinking content length, so a typewriter thinking delta never busts the memo
-  // while a co-rendering prose answer re-renders this component every frame. The
-  // tail slice covers replace-semantics output (streamReducers sets it whole):
-  // an equal-length replacement that flips the terminal envelope's exit code
-  // changes the tail (`"exit_code":N}` lives there), so length alone can't leave
-  // a stale success line. The name is in the sig because the label rollup below
-  // reads it.
-  const sig = entries
-    .map(e => {
-      const it = e?.item
-      if (it?.type === 'tool') {
-        return `t:${it.tool || ''}:${it.status || ''}:${it.output?.length || 0}`
-          + `:${it.output?.slice(-14) || ''}:${it.output_exit_code ?? ''}`
-      }
-      return 'k'
-    })
-    .join('|') + `|${entries.length}|${liveThinkingTail ? 'T' : ''}`
+  // Deriving the state parses each tool's output for its exit code, so memoize
+  // on a cheap signature (see activityMemoSig for the exact staleness contract:
+  // head+tail output slices catch an equal-length exit-code flip; thinking
+  // content never busts the memo on typewriter frames).
+  const sig = activityMemoSig(entries, { liveThinkingTail })
 
   const meta = useMemo(() => {
     const tools = entries
@@ -167,6 +155,11 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
   }, [sig]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { state, exitCode, toolCount, thinkingOnly } = meta
+  // The one presentation authority for icon, chip, and state class: a live
+  // stretch reads in-progress for its whole life — the tool→tool gap included —
+  // so icon and tense can never contradict (see activityDisplayState). Applied
+  // OUTSIDE the memo because `live` is not part of the signature.
+  const displayState = activityDisplayState(state, { live })
   // The label is memoized on the same signature so a prose typewriter frame
   // never rebuilds the dedup'd activity rollup for every stretch above it. The
   // 1Hz `now` tick re-derives it only while the live thinking clock is the
@@ -186,13 +179,13 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
   const stepNote = toolCount > 0
     ? ` (${toolCount} ${toolCount === 1 ? 'step' : 'steps'})`
     : ''
-  const stateNote = state === 'error'
+  const stateNote = displayState === 'error'
     ? `, a step failed${exitCode != null ? ` with exit ${exitCode}` : ''}`
     : ''
 
   return (
     <div className={
-      `chat__activity chat__activity--${state}`
+      `chat__activity chat__activity--${displayState}`
       + (live ? ' chat__activity--live' : '')
       + (open ? ' chat__activity--open' : '')
     }>
@@ -213,9 +206,9 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         {liveThinkingTail && !toolRunning ? (
           // The agent is reasoning now — a quiet pulse, distinct from the spinner.
           <span className="chat__activity-icon chat__activity-icon--think" aria-hidden="true" />
-        ) : state === 'running' ? (
+        ) : displayState === 'running' ? (
           <span className="chat__tool-spin" />
-        ) : state === 'error' ? (
+        ) : displayState === 'error' ? (
           <span className="chat__activity-icon" aria-hidden="true">
             {/* triangle — a step failed */}
             <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
@@ -225,9 +218,11 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
             </svg>
           </span>
         ) : toolCount > 0 ? (
-          // Settled tool stretch: a muted TYPE glyph for the line's first
-          // activity (terminal, magnifier, …) — informative structure in the
-          // Codex idiom, not a success mark; a thinking-only line stays bare.
+          // A genuinely SETTLED tool stretch (displayState keeps a live one on
+          // the spinner through inter-tool gaps): a muted TYPE glyph for the
+          // line's first activity (terminal, magnifier, …) — informative
+          // structure in the Codex idiom, not a success mark; a thinking-only
+          // line stays bare.
           <span
             className="chat__activity-icon"
             data-activity-kind={firstToolIcon}
@@ -248,7 +243,7 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
             <span />
           </span>
         )}
-        {state === 'error' && exitCode != null && (
+        {displayState === 'error' && exitCode != null && (
           <span className="chat__activity-chip">exit {exitCode}</span>
         )}
         {/* No chevron: the line IS the affordance (owner call, 2026-07-16).

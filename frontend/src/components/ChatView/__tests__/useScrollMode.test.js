@@ -180,7 +180,12 @@ test('only scrolling keys claim reader ownership', () => {
 test('disclosure activation does not mistake its collapse clamp for a reader swipe', () => {
   const disclosureTarget = {
     closest(selector) {
+      // Pin ALL THREE guarded disclosure surfaces: dropping any one of them
+      // from the selector silently re-opens the tap-vs-swipe ambiguity for
+      // that surface (activity line, nested tool row, marker card).
       assert.match(selector, /chat__activity-header/)
+      assert.match(selector, /chat__tool-header/)
+      assert.match(selector, /chat__marker-header/)
       return { className: 'chat__activity-header' }
     },
   }

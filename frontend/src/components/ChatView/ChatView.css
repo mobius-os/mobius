@@ -1039,6 +1039,15 @@
   border-radius: 6px;
 }
 
+/* With the chevron gone the resting line is deliberately bare, so pointer and
+   touch users get their disclosure cue on interaction instead: the label lifts
+   to full text color on hover and press (review round 2 — discoverability
+   without resting chrome). Keyboard users already have the focus ring. */
+.chat__activity-header:hover .chat__activity-label,
+.chat__activity-header:active .chat__activity-label {
+  color: var(--text); /* CONTRACT: high-contrast lift marks the tappable line */
+}
+
 .chat__activity-icon {
   display: inline-flex;
   align-items: center;
@@ -1069,10 +1078,10 @@
 }
 
 .chat__activity-label {
-  /* No stretch: the chevron hugs the label text (the ChatGPT idiom) instead of
-     floating at the row's far right edge, so the line reads as one compact
-     unit. The header button is still full-width — only the visual grouping is
-     left-aligned. Long labels still truncate before the chip/chevron clip. */
+  /* No stretch: the label and its trailing chip group left as one compact
+     unit (the ChatGPT idiom) rather than spreading across the row. The header
+     button is still full-width — only the visual grouping is left-aligned.
+     Long labels truncate before the danger chip clips. */
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1093,10 +1102,11 @@
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
-/* Rotating disclosure chevron shared by the activity + marker cards, matching
-   the queued-tray chevron idiom: the SVG points down when open and rotates to
-   point right when collapsed, easing the transform so the state change reads as
-   motion rather than an instant glyph swap. */
+/* Rotating disclosure chevron for the MARKER card (the activity line dropped
+   its chevron — the quiet line itself is the affordance), matching the
+   queued-tray idiom: the SVG points down when open and rotates to point right
+   when collapsed, easing the transform so the state change reads as motion
+   rather than an instant glyph swap. */
 .chat__chevron {
   transition: transform 0.15s;
 }
