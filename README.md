@@ -111,7 +111,7 @@ Möbius uses provider sign-in, so the default setup does not require a separate 
 2. Connect your Railway workspace
 3. Review the deployment and open your Möbius instance
 
-![Möbius Launch showing a running deployment with spend, CPU, memory, and storage usage](assets/product/mobius-launch-deployment.png)
+![Möbius Launch showing workspace health, included Railway credit, and live resource usage](assets/product/mobius-launch-deployment.png)
 
 Your chats, files, apps, credentials, and agent activity stay inside that deployment. Möbius Launch stores only the account and infrastructure data needed to create and manage it.
 
