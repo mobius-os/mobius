@@ -228,7 +228,11 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           // Settled tool stretch: a muted TYPE glyph for the line's first
           // activity (terminal, magnifier, …) — informative structure in the
           // Codex idiom, not a success mark; a thinking-only line stays bare.
-          <span className="chat__activity-icon" aria-hidden="true">
+          <span
+            className="chat__activity-icon"
+            data-activity-kind={firstToolIcon}
+            aria-hidden="true"
+          >
             <ActivityTypeIcon kind={firstToolIcon} />
           </span>
         ) : (

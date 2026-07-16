@@ -6,6 +6,7 @@ import {
   thoughtDurationLabel,
   toolGroupPastSummary,
 } from '../groupBlocks.js'
+import { toolActivityIcon, toolActivityPastLabel } from '../toolActivityLabel.js'
 
 // The label helpers are the single localization surface for the collapsed
 // activity line — ActivityStretch owns only presentation and the 1Hz clock, so
@@ -110,6 +111,25 @@ test('collapsed label — LIVE mixed stretch keeps the progressive running-first
   ]
   const label = activityCollapsedLabel(entries, { live: true })
   assert.equal(label.text, 'Running commands · Reading files')
+})
+
+test('a running tool keeps progressive copy outside the trailing live stretch', () => {
+  const entries = [
+    e(tool({ tool: 'Read', status: 'done' })),
+    e(tool({ tool: 'Bash', status: 'running' })),
+  ]
+  const label = activityCollapsedLabel(entries, { live: false })
+  assert.equal(label.text, 'Running commands · Reading files')
+  assert.equal(activityStreamState(entries.map(entry => entry.item)), 'running')
+})
+
+test('settled activity labels and icons have neutral unknown-tool fallbacks', () => {
+  assert.equal(toolActivityPastLabel('Bash'), 'Ran commands')
+  assert.equal(toolActivityPastLabel('CronCreate'), null)
+  assert.equal(toolActivityIcon('Bash'), 'terminal')
+  assert.equal(toolActivityIcon('Grep'), 'search')
+  assert.equal(toolActivityIcon('CronCreate'), 'dot')
+  assert.equal(toolActivityIcon(undefined), 'dot')
 })
 
 test('collapsed label — a live thinking tail after a failed tool still reads "Thinking"', () => {

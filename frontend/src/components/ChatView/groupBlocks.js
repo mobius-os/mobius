@@ -198,10 +198,12 @@ export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
 // The single localization surface for the collapsed line's primary text. One
 // rule for the whole stretch, computed from its entries + the live hint:
 //   - live thinking tail (no tool running) → "Thinking for Ns" + animated dots
-//   - any tools present → the running-first activity rollup (toolGroupSummary),
-//     the same label live (with the spinner) and settled — activities say WHAT
-//     happened, never "N tool calls" (implementation vocabulary the product
-//     avoids); the step count lives in the header's aria-label instead
+//   - a live stretch or any running tool → the progressive, running-first
+//     activity rollup (toolGroupSummary)
+//   - settled tools → the first-seen past-tense rollup (toolGroupPastSummary)
+//     Activities say WHAT happened, never "N tool calls" (implementation
+//     vocabulary the product avoids); the step count lives in the header's
+//     aria-label instead
 //   - thinking-only → "Thought for Ns" (the reasoning duration IS the content)
 // Cheap on every call (Map lookups + a duration sum), so it runs each render
 // without a memo; the parse-heavy failure state lives in activityStreamState.
@@ -219,11 +221,11 @@ export function activityCollapsedLabel(entries, { live = false, now = Date.now()
   }
 
   if (tools.length > 0) {
-    // Live keeps the progressive running-first rollup; settled flips to the
-    // past-tense sentence ("Ran commands"), so the line always agrees with
-    // time — a persisted partial (live=false) reads as history too.
+    // A real running status keeps progressive copy even outside the trailing
+    // live stretch; otherwise the row could show a spinner beside "Ran
+    // commands". Only fully settled tools flip to the past-tense sentence.
     return {
-      text: live ? toolGroupSummary(tools) : toolGroupPastSummary(tools),
+      text: live || toolRunning ? toolGroupSummary(tools) : toolGroupPastSummary(tools),
       showEllipsis: false,
     }
   }

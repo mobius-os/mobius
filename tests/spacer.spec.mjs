@@ -596,6 +596,14 @@ test.describe('SSE streaming (real React path)', () => {
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
     assertSpacerReasonable(m)
+
+    // Once the tool settles, the compact line switches from progressive copy
+    // to the reviewed past-tense label and exposes the first activity's muted
+    // type glyph. The spinner belongs only to a live tool.
+    const activity = page.locator('.chat__activity').first()
+    await expect(activity.locator('.chat__activity-label')).toHaveText('Read files')
+    await expect(activity.locator('[data-activity-kind="files"]')).toHaveCount(1)
+    await expect(activity.locator('.chat__tool-spin')).toHaveCount(0)
   })
 
   test('17. Long SSE response fills the reservation and follows the tail', async ({ page }) => {
