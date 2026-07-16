@@ -42,7 +42,7 @@
 
 import {
   precacheAndRoute, cleanupOutdatedCaches, matchPrecache,
-  createHandlerBoundToURL,
+  createHandlerBoundToURL, addPlugins,
 } from 'workbox-precaching'
 import {
   registerRoute, setCatchHandler, NavigationRoute,
@@ -58,6 +58,7 @@ import {
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
+  withPublicVendorCors,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
   isPackagedAppAsset,
@@ -73,6 +74,26 @@ import {
   supersededVersionKeys,
   entriesToTrim,
 } from './sw-cache-policy.js'
+
+const isVendorRequest = request => {
+  try {
+    return new URL(request.url).pathname.startsWith('/vendor/')
+  } catch {
+    return false
+  }
+}
+
+// Repair vendor responses at the service-worker boundary, including entries
+// written by an older release before the server made /vendor intrinsically
+// CORS-readable. This hook runs on precache hits as well as fresh installs.
+const vendorCorsPlugin = {
+  cachedResponseWillBeUsed: async ({ request, cachedResponse }) =>
+    isVendorRequest(request)
+      ? withPublicVendorCors(cachedResponse)
+      : cachedResponse,
+  fetchDidSucceed: async ({ request, response }) =>
+    isVendorRequest(request) ? withPublicVendorCors(response) : response,
+}
 
 // SW UPDATE LEASH (design §1.3 — "the streaming view is sacred").
 //
@@ -202,6 +223,7 @@ const VENDORED_MEMORY_GRAPH = [
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
+addPlugins([vendorCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
   ...VENDORED_REACT,
@@ -248,7 +270,10 @@ const assetCacheGuard = {
 registerRoute(
   ({ url }) =>
     url.origin === self.location.origin && url.pathname.startsWith('/vendor/'),
-  new CacheFirst({ cacheName: VENDOR_CACHE, plugins: [assetCacheGuard] }),
+  new CacheFirst({
+    cacheName: VENDOR_CACHE,
+    plugins: [assetCacheGuard, vendorCorsPlugin],
+  }),
 )
 
 // esm.sh/* — third-party module CDN. Their URLs encode the version

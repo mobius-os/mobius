@@ -9,7 +9,7 @@ cache-first service worker — the failure mode behind the missing
 
 import pytest
 
-from app.main import _is_static_asset_path
+from app.main import _is_static_asset_path, _public_static_headers
 
 
 def test_classifies_module_and_asset_paths_as_static():
@@ -37,6 +37,18 @@ def test_app_routes_and_images_are_not_static():
   assert not _is_static_asset_path("icons/logo.png")
   # A route that merely starts with "vendor" must not be over-matched.
   assert not _is_static_asset_path("vendorfoo")
+
+
+def test_vendor_responses_are_intrinsically_cors_readable():
+  """A service-worker-cached vendor module must still load in Origin:null."""
+  assert _public_static_headers("vendor/react@19.2.7/react.mjs") == {
+    "Access-Control-Allow-Origin": "*",
+  }
+  assert _public_static_headers("vendor") == {
+    "Access-Control-Allow-Origin": "*",
+  }
+  assert _public_static_headers("vendorfoo/module.mjs") == {}
+  assert _public_static_headers("assets/index.js") == {}
 
 
 def _spa_active(client):
