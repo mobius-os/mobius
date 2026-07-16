@@ -614,7 +614,9 @@ class _BodySizeLimitMiddleware:
 # Content-Security-Policy here yet: mini-apps intentionally support user-chosen
 # external resources and a strict shell-wide policy would break that contract.
 # App isolation instead comes from opaque-origin sandboxed frames plus scoped
-# tokens. Clickjacking is covered by X-Frame-Options without a CSP.
+# tokens. Clickjacking is covered by X-Frame-Options without a CSP, except for
+# the dedicated embedded-chat document: it is intentionally nested inside an
+# opaque-origin app frame, so SAMEORIGIN would reject its legitimate ancestor.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
@@ -624,13 +626,17 @@ _SECURITY_HEADERS = [
    b"max-age=31536000; includeSubDomains; preload"),
 ]
 _SECURITY_HEADER_NAMES = frozenset(name for name, _ in _SECURITY_HEADERS)
+_X_FRAME_OPTIONS = b"x-frame-options"
+_OPAQUE_ANCESTOR_FRAME_PATHS = frozenset({"/shell/embed/chat"})
 
 
 class _SecurityHeadersMiddleware:
   """Authoritatively sets the platform security headers on every response. Pure
   ASGI so it never buffers a streaming body. It strips any same-named header a
   route may have set first and replaces it with the platform value, so no route
-  can weaken the CSP/HSTS/etc. (the headers must be uniform to be a wall)."""
+  can weaken the HSTS/MIME/etc. wall. The one frame-policy exception is the
+  embedded-chat document, which must load below an opaque-origin app iframe;
+  all other routes retain SAMEORIGIN clickjacking protection."""
 
   def __init__(self, app):
     self.app = app
@@ -639,13 +645,20 @@ class _SecurityHeadersMiddleware:
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
 
+    response_headers = _SECURITY_HEADERS
+    if scope.get("path") in _OPAQUE_ANCESTOR_FRAME_PATHS:
+      response_headers = [
+        (name, value) for name, value in _SECURITY_HEADERS
+        if name != _X_FRAME_OPTIONS
+      ]
+
     async def _send(message):
       if message["type"] == "http.response.start":
         headers = [
           (k, v) for k, v in message.get("headers", [])
           if k.lower() not in _SECURITY_HEADER_NAMES
         ]
-        headers.extend(_SECURITY_HEADERS)
+        headers.extend(response_headers)
         message["headers"] = headers
       await send(message)
 
@@ -678,7 +691,21 @@ app.add_middleware(
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allow_headers=["Authorization", "Content-Type"],
+  # The app runtime uses X-Mobius-Version to opt into ETag reads, then
+  # If-Match / If-None-Match for conflict-safe writes. Sandboxed app frames
+  # have the opaque `null` origin, so Chromium preflights these non-simple
+  # headers; omitting them here makes the runtime's versioned request fail
+  # before it ever reaches the authenticated storage route.
+  allow_headers=[
+    "Authorization",
+    "Content-Type",
+    "X-Mobius-Version",
+    "If-Match",
+    "If-None-Match",
+  ],
+  # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
+  # return the version token that the storage route intentionally emits.
+  expose_headers=["ETag"],
 )
 
 # Security remains outside CORS and request-size enforcement so its headers

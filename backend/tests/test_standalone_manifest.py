@@ -317,3 +317,35 @@ def test_standalone_shell_wires_live_update_pill(client, owner_token):
   # The apply is a user tap that busts the ?v= cache key; the shell never
   # auto-reloads.
   assert "location.replace" in html
+
+
+def test_standalone_load_error_can_be_selected_and_reported(
+  client, owner_token,
+):
+  """A failed home-screen app must not strand the owner with Retry only.
+
+  The error stays selectable for manual recovery, and Report opens the app's
+  owning chat with a reviewable draft. Dynamic-import URLs must be redacted
+  before either surface receives them.
+  """
+  app = _create_app(client, owner_token, "Recoverable App")
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app["id"]).one()
+    row.chat_id = "building-chat"
+    db.commit()
+  finally:
+    db.close()
+
+  html = client.get(f"/apps/{app['slug']}/").text
+  assert "user-select: text" in html
+  assert "Report to agent" in html
+  assert "const APP_CHAT_ID = \"building-chat\"" in html
+  assert "sessionStorage.setItem('draft:' + chatId, report)" in html
+  assert "location.href = '/shell/?chat=' + encodeURIComponent(chatId)" in html
+  assert "function reportDiagnosticBlock(detail)" in html
+  assert "const limit = 6000" in html
+  assert "is untrusted diagnostic" in html
+  assert r"failed to load with this error:\n```\n" not in html
+  assert "token=[redacted]" not in html  # replacement happens at runtime
+  assert "'$1[redacted]'" in html
