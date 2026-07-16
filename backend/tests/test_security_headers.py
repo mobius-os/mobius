@@ -1,8 +1,8 @@
 """The security-header middleware stamps the standard headers on every response.
 
-These are resource-load-agnostic (clickjacking / MIME-sniff / TLS / referrer); there
-is deliberately no CSP so apps can still load web images + external embeds — see
-.pm/172 for why a CSP wouldn't close the owner-token exfil anyway.
+These are resource-load-agnostic (clickjacking / MIME-sniff / TLS / referrer).
+The backend deliberately has no global resource CSP; exact opaque/static/service
+documents supply their own policies while the bundled proxy owns shell CSP.
 """
 
 from pathlib import Path
@@ -26,9 +26,8 @@ def test_standard_security_headers_present():
 
 
 def test_no_csp_so_apps_keep_loading_web_resources():
-  # Deliberately no Content-Security-Policy — web images / external embeds must
-  # not be restricted by a header. See .pm/172 (the owner-token exfil is the
-  # documented same-origin trade-off; a CSP can't close it).
+  # Deliberately no global Content-Security-Policy — ordinary app resource
+  # freedom is separate from the exact document policies tested below.
   assert "content-security-policy" not in _headers()
 
 
@@ -52,24 +51,45 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
   lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
   assert "@chatEmbed path /shell/embed/chat" in lines
-  assert "@notChatEmbed not path /shell/embed/chat" in lines
-  assert 'header @notChatEmbed >X-Frame-Options "SAMEORIGIN"' in lines
+  assert "@staticEmbed path /app-embeds/by-id/*" in lines
+  assert "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/*" in lines
+  assert 'header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"' in lines
   assert not any(
     line.startswith("X-Frame-Options ") for line in lines
   ), "X-Frame-Options must remain on the exact non-embed matcher"
   ordinary_csp = next(
     line for line in lines
-    if line.startswith("header @notChatEmbed >Content-Security-Policy ")
+    if line.startswith("header @notFrameableEmbed >Content-Security-Policy ")
   )
   embed_csp = next(
     line for line in lines
     if line.startswith("header @chatEmbed >Content-Security-Policy ")
   )
   assert "frame-ancestors 'self'" in ordinary_csp
+  assert "frame-src 'self' {$MOBIUS_SERVICE_TANDOOR_ORIGIN}" in ordinary_csp
+  assert "frame-src *" not in ordinary_csp
   assert "frame-ancestors" not in embed_csp
   assert "frame-src 'self'" in embed_csp
+  assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in embed_csp
   assert "https://cdn.openai.com" in ordinary_csp
   assert "https://cdn.openai.com" in embed_csp
+  static_csp = next(
+    line for line in lines
+    if line.startswith("header @staticEmbed >Content-Security-Policy ")
+  )
+  assert "sandbox allow-scripts" in static_csp
+  assert "allow-same-origin" not in static_csp
+  assert "frame-ancestors" not in static_csp
+  assert "MOBIUS_SERVICE_TANDOOR_ORIGIN" not in static_csp
+  service_csp = next(
+    line for line in lines
+    if line.startswith("?Content-Security-Policy ")
+  )
+  assert "frame-ancestors 'self' {$FRONTEND_ORIGIN}" in service_csp
+  assert "{$MOBIUS_SERVICE_TANDOOR_ORIGIN} {" in lines
+  assert "@tandoorSurface path /services/tandoor /services/tandoor/*" in lines
+  assert "respond \"Not found\" 404" in lines
+  assert "-X-Frame-Options" in lines
   for name in (
     "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy",
     "Strict-Transport-Security",
@@ -77,6 +97,21 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     assert any(line.startswith(f">{name} ") for line in lines), (
       f"{name} must replace, not duplicate, the backend value after proxying"
     )
+
+
+def test_compose_keeps_optional_service_origin_inert_by_default():
+  compose = (
+    Path(__file__).resolve().parents[2] / "docker-compose.yml"
+  ).read_text(encoding="utf-8")
+  assert (
+    "MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-}"
+    in compose
+  )
+  assert (
+    "MOBIUS_SERVICE_TANDOOR_ORIGIN=${MOBIUS_SERVICE_TANDOOR_ORIGIN:-http://tandoor.invalid}"
+    in compose
+  )
+  assert "https://tandoor.${DOMAIN}" not in compose
 
 
 def test_opaque_embed_preflight_allows_scoped_instance_header():

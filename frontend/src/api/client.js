@@ -237,6 +237,25 @@ export async function apiFetch(path, options = {}) {
   return res
 }
 
+/**
+ * Decode a JSON API response at the client boundary. Endpoints that expose a
+ * data-object contract (rather than the raw Fetch Response contract used by
+ * most existing query hooks) should use this helper so callers cannot confuse
+ * Response fields such as `url` with fields from the response body.
+ */
+export async function jsonOrThrow(response, label = 'Request failed') {
+  let body = null
+  try {
+    body = await response.json()
+  } catch {
+    if (response.ok) throw new Error(`${label}: invalid JSON response`)
+  }
+  if (!response.ok) {
+    throw new Error(body?.detail || `${label} (${response.status})`)
+  }
+  return body
+}
+
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
   // and frontend bundle identity.
@@ -310,6 +329,12 @@ export const api = {
     // app edits naturally become cache misses. The backend still sends ETags
     // for browser-cache revalidation on non-SW/cold paths.
     frameUrl: (appId) => `${BASE}/api/apps/${appId}/frame`,
+  },
+  services: {
+    surface: async (slug) => jsonOrThrow(
+      await apiFetch(`/local-services/${encodeURIComponent(slug)}/surface`),
+      'Service surface request failed',
+    ),
   },
   settings: {
     get: () => apiFetch('/settings'),

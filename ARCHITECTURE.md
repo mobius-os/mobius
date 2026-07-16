@@ -195,8 +195,8 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `uploads.py` | Per-chat file upload management |
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
-| `local_services.py` | Guarded same-origin mount for real local backend web apps at `/services/<slug>/`; reads the private `/data/local-services.json` map per request, accepts literal loopback HTTP origins only, preserves the public prefix upstream, and fails closed without affecting shell startup |
-| `standalone.py` | Top-level routes that make a mini-app installable as its own PWA (own importmap) |
+| `local_services.py` | Guarded loopback proxy plus the dedicated-origin adapter for full backend web apps. A configured service hostname is reserved to its exact `/services/<slug>` prefix, strips upstream frame blockers only on that surface, keeps cookies host-only, and fails closed without an explicit origin |
+| `standalone.py` | Top-level install/manifest shell for mini-app PWAs. **Known boundary gap:** its current loader executes the app component in the top-level shell origin; it is not yet equivalent to the opaque in-shell app frame |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
 | `notify.py` | System-event notifications to active broadcasts |
@@ -213,6 +213,30 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `recover_html.py` | HTML templates for the recovery page (no `router`; used by `recover.py`) |
 
 Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI proxy lived there and was removed; mini-apps reach the agent via `window.mobius.chat`, `POST /api/apps/{id}/run-job`, or cron — not a synchronous AI endpoint.
+
+## App execution tiers
+
+| Tier | Boundary and capability | UX / standalone consequence |
+|---|---|---|
+| Ordinary mini-app | Shell-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default inside the shell. The shell owns install/offline identity; a home-screen shortcut may deep-link through the shell, but opacity alone does not create an independent PWA |
+| Packaged nested document | `/app-embeds/by-id/<id>/…`; every response carries CSP `sandbox` without `allow-same-origin`, scoped `Access-Control-Allow-Origin: null`, and no frame denial | For a game/tool build nested below an ordinary wrapper. Relative subresources work and share cache identity with `/app-assets`; readiness must be a source-bound post-commit heartbeat, never iframe `load` or a null-origin prefetch probe |
+| Full web service / independent PWA | Dedicated distinct origin (prefer a same-site subdomain), shell-owned direct adapter, host-only cookies, exact shell+service ancestor policy; never nested below the opaque wrapper | Required for same-origin cookies/XHR, durable origin storage, service workers, OPFS/IndexedDB and genuine independent installability. The app origin owns its manifest, SW and storage |
+
+Opacity simplifies permissions: no ambient owner JWT, shell storage bleed, DOM
+reach or cross-app authority. It does **not** by itself improve installability,
+offline outboxes, cookies, media APIs or other origin-bound capabilities.
+
+**Standalone gap (not resolved by the table above).** `/apps/<slug>/` currently
+boots the mini-app component directly in a trusted top-level Möbius document and
+reads the owner JWT there. The component can therefore read shell localStorage
+even though its in-shell version cannot. The bounded follow-up is to turn that
+route into a trusted installable outer shell which owns auth/manifest/SW/error
+chrome and hosts the existing `app-frame.html` protocol in an opaque iframe.
+Until that lands, do not describe ordinary mini-app isolation as applying to
+standalone launches or use `/apps/<slug>/` as the security boundary for
+untrusted/high-capability code. CubeRun's nested game document remains opaque,
+but its current standalone wrapper does not; Tandoor's service surface opens
+only through the authenticated shell adapter and is not a standalone mini-app.
 
 ## Frontend (`frontend/src/`)
 
@@ -286,7 +310,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 | File | Role |
 |------|------|
-| `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps; same code for the in-shell iframe (`app-frame.html`) and the standalone PWA (`routes/standalone.py`). Offline outbox + read-through cache live here |
+| `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps; used by the opaque in-shell iframe and the current (not yet opaque) standalone loader. Offline outbox + read-through cache live here |
 | `frontend/public/app-frame.html` | The mini-app frame: importmap (React/recharts/date-fns/three from `/vendor/...`), error UI, postMessage init |
 | `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
@@ -836,9 +860,15 @@ The drawer is modeled as a *virtual route*: opening it pushes one history entry 
 
 ## Service worker + offline
 
-Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/apps.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
+Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/apps.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
 
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
+
+Packaged static documents use a separate rule. `/app-embeds/` entry documents
+retain their own response-sandboxed cache key, while equivalent relative
+subresources normalize to the ordinary `/app-assets/by-id/…` identity so a
+large packaged game is not cached twice. The document catch path never returns
+shell/offline HTML for `/app-embeds/`; a controlled-page regression pins this.
 
 Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.7, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 

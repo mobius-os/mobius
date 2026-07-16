@@ -16,7 +16,9 @@ const PASS = process.env.MOBIUS_PASS || 'admin'
 const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
 
 // First guard: only local-family hosts on a non-production port.
-const allowedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '172.17.0.1']
+const allowedHosts = [
+  'localhost', 'mobius.localhost', '127.0.0.1', '0.0.0.0', '172.17.0.1',
+]
 const baseUrl = new URL(BASE)
 if (!allowedHosts.includes(baseUrl.hostname) || baseUrl.port === '8000') {
   throw new Error(

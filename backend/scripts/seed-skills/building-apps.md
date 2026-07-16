@@ -4,6 +4,23 @@ The full mini-app contract: component shape, `window.mobius.storage` and its tra
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-scoped `token`, and persists through `window.mobius.storage`. Shell-mounted app frames intentionally omit `allow-same-origin`: their effective origin is opaque (`null`), they cannot read the shell's localStorage/owner JWT, and origin-bound browser stores such as IndexedDB/OPFS are unavailable. Root-relative API fetches still work when they present the scoped bearer; `window.mobius.storage` owns that transport and its offline fallbacks.
 
+**Current standalone limitation:** `/apps/<slug>/` still uses a separate top-level loader which executes the component on the Möbius origin. Do not claim that standalone launch has the opaque shell-frame boundary, and do not use it as the security boundary for untrusted/high-capability code. The platform follow-up is a trusted installable outer PWA shell hosting the existing opaque `app-frame` protocol. A genuinely independent PWA or cookie-backed service belongs on its own dedicated origin, not in an ordinary mini-app.
+
+## Choose the execution tier before wrapping
+
+| Need | Use | Do not do |
+|---|---|---|
+| Normal JSX app using scoped storage/chat/fetch | Ordinary shell-mounted mini-app (opaque frame) | Add `allow-same-origin` or read owner storage |
+| Existing packaged static game/tool nested by a wrapper | `/app-embeds/by-id/<appId>/…` entry document, response-sandboxed and heartbeat-gated | Frame `/app-assets/`, reveal on iframe `load`, or grant null-origin credentials |
+| Cookie-backed backend, durable origin storage, its own SW/manifest, independent PWA | Dedicated distinct origin plus a shell-owned direct adapter; ask for a platform integration | Nest `/services/<slug>` below the ordinary opaque app or fall back to the shell origin |
+
+A same-site subdomain is preferred for a full service because cookies/XHR can
+work coherently while the origin stays distinct. Its cookies must remain
+host-only, the hostname must expose only its exact service prefix, and DNS/TLS
+plus the upstream application's host/CSRF settings are deployment prerequisites.
+Opacity is a permission boundary, not a substitute for independent PWA
+installability or origin-bound browser features.
+
 ---
 
 ## Which path: local-first or installable
@@ -103,7 +120,7 @@ curl -s -X POST "$API_BASE_URL/api/apps/install" \
 
 Runtime smoke checks for this class of app:
 
-- `/app-assets/by-id/<app-id>/index.html` returns the actual static app HTML.
+- `/app-embeds/by-id/<app-id>/index.html` returns the nested entry document with response CSP `sandbox` and no `allow-same-origin`.
 - `/app-assets/by-id/<app-id>/static/...` and fonts/media return 200.
 - Old ad-hoc routes such as `/cuberun/index.html` return 404, not the shell HTML.
 - Opening `/shell/?app=<app-id>` shows the game/tool inside the nested iframe, not a copy of Möbius.
@@ -130,21 +147,23 @@ If a package update leaves `.mobius-bak` files or a dirty `/data/apps/<slug>` gi
 
 The wrapper is a thin Möbius app around someone else's build. The gotchas, learned the hard way adapting one:
 
-1. **Shape: a thin `index.jsx` wrapper around an iframe.** The wrapper mounts the build's entry HTML in an `<iframe>` and stays small — chrome (loader, error state) plus the iframe, nothing more. The build's own files are declared in `mobius.json` `static_assets` as a map of *logical path → build file* so Möbius serves them under the app's asset route. Set `offline_capable: false` unless EVERY asset the build pulls is precached (an offline-capable wrapper that fetches one uncached chunk renders broken).
+1. **Shape: a thin `index.jsx` wrapper around an iframe.** The wrapper mounts the build's entry HTML from `/app-embeds/by-id/${appId}/index.html` and stays small — branded loader/error state plus the iframe, nothing more. Never navigate a document through ordinary `/app-assets`: that lane remains clickjacking-protected and is not the nested-document boundary. The build's own files are declared in `mobius.json` `static_assets` as a map of *logical path → build file*. Set `offline_capable: false` unless EVERY asset the build pulls is warm/offline-safe.
 
-2. **Relative asset paths are mandatory.** Build with a relative public base — CRA `homepage: "."` (`PUBLIC_URL=.`), Vite `base: './'`. Absolute references like `/static/js/main.js` 404 under the app serve path (the app lives at `/app-assets/by-id/<id>/`, not site root), so the build loads blank. Rebuild with the relative base and re-check the emitted HTML/CSS reference assets relatively.
+2. **Relative asset paths are mandatory.** Build with a relative public base — CRA `homepage: "."` (`PUBLIC_URL=.`), Vite `base: './'`. Absolute references like `/static/js/main.js` 404 under the nested serve path (browser requests remain under `/app-embeds/by-id/<id>/`, not site root), so the build loads blank. The service worker may normalize equivalent subresource cache keys to `/app-assets`, but the document never navigates that protected lane. Rebuild with the relative base and re-check emitted HTML/CSS references.
 
-3. **No external CDNs — prod CSP is `default-src 'self'`.** The only off-origin source allowed is `esm.sh` for importmap scripts; everything else (a webfont from Google Fonts, a wasm/decoder fetched from a CDN, analytics, an external `<img>`) is silently blocked, so the build half-works with no console clue in some cases. **Grep the build for `https://`** before mounting; for each hit, vendor the asset same-origin (add it to `static_assets`) or route it through `/api/proxy`. If a library defaults to fetching something from a CDN, disable that default when the asset isn't actually needed.
+3. **No external CDNs.** `/app-embeds` is stricter than the ordinary mini-app importmap: its script/style/font/connect/img/media/worker policy names only the enumerated self/data/blob sources and does **not** allow `esm.sh`. Package every runtime dependency, font, wasm/decoder, model and media file in `static_assets`. **Grep the build for `https://`** before mounting; disable unused CDN defaults rather than leaving a silent CSP failure. A packaged document cannot attach the wrapper's app bearer to `/api/proxy`, so do not treat that owner-authenticated route as a general asset fallback.
 
-4. **Probe the entry asset before mounting.** HEAD/GET the build's entry HTML (or its main JS) first; if it's missing, render a clean, actionable error (Retry / Reinstall) inside the themed wrapper rather than leaving a blank iframe. A blank frame reads as "the whole platform broke"; a labeled error tells the owner exactly what to do.
+4. **Heartbeat, never `load` or a wrapper prefetch.** Mount the nested iframe immediately behind branded coverage. Its response sandbox makes the document origin `null`; a wrapper `fetch('/app-embeds/...')` is therefore a null-origin CORS request, duplicates the download, and previously enabled cache-poisoning probes. Keep the child hidden until an exact `event.source === iframe.contentWindow`, `event.origin === 'null'`, app-specific ready heartbeat sent after the child UI's first successful commit. Chromium fires iframe `load` for XFO/CSP/error documents too. On timeout, retain branded error/Retry UI; never reveal native browser error chrome.
 
 5. **Theme the wrapper chrome.** The loader and error states use `var(--bg) / var(--surface) / var(--text) / var(--border) / var(--accent)` and `var(--font)`, and honor `prefers-reduced-motion` on any spinner — so the chrome tracks the owner's theme instead of clashing with the embedded build.
 
-6. **Keep `static_assets` consistent with the build, and validate it.** Hashed filenames (`main.4f2a.js`) change on every rebuild, so a manifest written against an old build points at files that no longer exist — a stale manifest is 404s is a broken app. Run a package validator that confirms every `static_assets` entry resolves to a real file in the build before installing, and re-generate the manifest whenever you rebuild.
+6. **Keep `static_assets` consistent, tracked, and exact.** Hashed filenames (`main.4f2a.js`) change on every rebuild, so a stale manifest is a broken app. The release packager must remove obsolete bundles, regenerate manifest paths, ensure every declared source is Git-tracked (ignored `build/static/` files do not ship merely because they exist locally), and reject undeclared build output. Prove the package from a clean clone. Legacy CRA chunk hashes may rotate across build directories because their license/source-map references contain their own emitted filename; normalize only that name when checking semantic equality rather than rewriting the bundler.
 
-7. **Fix forward, no dead references.** If a build ships a feature you don't use that pulls an external/CSP-blocked resource (e.g. a compression decoder for an asset you actually ship uncompressed), disable that feature outright rather than leaving the dead CDN reference in place "just in case." A dead reference is either a silent CSP failure or future confusion; remove it.
+7. **Null-origin subresources need scoped CORS.** The `/app-embeds/` lane intentionally returns `Access-Control-Allow-Origin: null` without credentials so fonts and JS `fetch`/XHR loaders for models, textures and audio work. Do not broaden owner APIs or add credentials; they still require a scoped bearer. Every response in the namespace—including SVG/XML/JS/CSS/media—keeps CSP `sandbox` so a browser-document-capable asset can never regain the Möbius origin when framed externally.
 
-8. **Mark invented business details as PLACEHOLDERS.** When localizing or rebranding a site (a garage, a shop, a clinic), any address, phone number, price, or testimonial you didn't get from the owner is fabricated — flag it as a placeholder the owner must replace (an inline `<!-- PLACEHOLDER: real address -->` plus a line in your handoff), don't present an invented Sarajevo address and phone as finished contact facts. Made-up contact info reads as done and ships a lie.
+8. **Fix forward, no dead references.** If a build ships a feature you don't use that pulls an external/CSP-blocked resource (e.g. a compression decoder for an asset you actually ship uncompressed), disable that feature outright rather than leaving the dead CDN reference in place "just in case." A dead reference is either a silent CSP failure or future confusion; remove it.
+
+9. **Mark invented business details as PLACEHOLDERS.** When localizing or rebranding a site (a garage, a shop, a clinic), any address, phone number, price, or testimonial you didn't get from the owner is fabricated — flag it as a placeholder the owner must replace (an inline `<!-- PLACEHOLDER: real address -->` plus a line in your handoff), don't present an invented Sarajevo address and phone as finished contact facts. Made-up contact info reads as done and ships a lie.
 
 (This is the technical packaging/wrapping pattern only. Mounting and serving the build inside this instance is the whole job — there is no public-repo publish step here.)
 

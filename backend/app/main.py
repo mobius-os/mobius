@@ -614,9 +614,9 @@ class _BodySizeLimitMiddleware:
 # Content-Security-Policy here yet: mini-apps intentionally support user-chosen
 # external resources and a strict shell-wide policy would break that contract.
 # App isolation instead comes from opaque-origin sandboxed frames plus scoped
-# tokens. Clickjacking is covered by X-Frame-Options without a CSP, except for
-# the dedicated embedded-chat document: it is intentionally nested inside an
-# opaque-origin app frame, so SAMEORIGIN would reject its legitimate ancestor.
+# tokens. Clickjacking is covered by X-Frame-Options without a CSP. Narrow
+# exceptions are the inert embedded-chat bootstrap, response-sandboxed packaged
+# documents, and an explicitly configured dedicated service surface.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
@@ -627,16 +627,30 @@ _SECURITY_HEADERS = [
 ]
 _SECURITY_HEADER_NAMES = frozenset(name for name, _ in _SECURITY_HEADERS)
 _X_FRAME_OPTIONS = b"x-frame-options"
-_OPAQUE_ANCESTOR_FRAME_PATHS = frozenset({"/shell/embed/chat"})
+_OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
+
+
+def _frame_policy_exception(scope) -> bool:
+  """Exact routes whose own isolation permits a non-SAMEORIGIN ancestor."""
+  path = scope.get("path") or ""
+  if path == "/shell/embed/chat" or path.startswith(_OPAQUE_STATIC_EMBED_PREFIX):
+    return True
+  if path.startswith("/services/"):
+    try:
+      from app.routes.local_services import is_public_service_surface_request
+      return is_public_service_surface_request(scope)
+    except Exception:
+      return False
+  return False
 
 
 class _SecurityHeadersMiddleware:
   """Authoritatively sets the platform security headers on every response. Pure
   ASGI so it never buffers a streaming body. It strips any same-named header a
   route may have set first and replaces it with the platform value, so no route
-  can weaken the HSTS/MIME/etc. wall. The one frame-policy exception is the
-  embedded-chat document, which must load below an opaque-origin app iframe;
-  all other routes retain SAMEORIGIN clickjacking protection."""
+  can weaken the HSTS/MIME/etc. wall. Frame-policy exceptions are delegated to
+  exact routes whose own response sandbox or dedicated-origin adapter provides
+  the replacement boundary; ordinary routes retain SAMEORIGIN protection."""
 
   def __init__(self, app):
     self.app = app
@@ -646,7 +660,7 @@ class _SecurityHeadersMiddleware:
       return await self.app(scope, receive, send)
 
     response_headers = _SECURITY_HEADERS
-    if scope.get("path") in _OPAQUE_ANCESTOR_FRAME_PATHS:
+    if _frame_policy_exception(scope):
       response_headers = [
         (name, value) for name, value in _SECURITY_HEADERS
         if name != _X_FRAME_OPTIONS
@@ -682,6 +696,26 @@ class _DatabaseRequestContextMiddleware:
       reset_database_request_label(token)
 
 
+class _ServiceSurfaceHostMiddleware:
+  """Prevent a dedicated service host from becoming another Möbius origin."""
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] == "http":
+      from app.routes.local_services import service_surface_host_allows_path
+      if not service_surface_host_allows_path(scope):
+        await send({
+          "type": "http.response.start",
+          "status": 404,
+          "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+        })
+        await send({"type": "http.response.body", "body": b"Not found"})
+        return
+    return await self.app(scope, receive, send)
+
+
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
@@ -712,6 +746,11 @@ app.add_middleware(
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
 # request receives one diagnostic label before middleware can touch the DB.
+# A managed deployment may expose the application directly on more than one
+# hostname without the bundled Caddyfile. Reserve each configured service host
+# before routing so it can never serve the shell, APIs, recovery, or another
+# service prefix.
+app.add_middleware(_ServiceSurfaceHostMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 
@@ -1261,6 +1300,38 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
     asset_path,
     request,
   )
+
+
+_STATIC_EMBED_CSP = (
+  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
+  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
+  "media-src 'self' blob:; worker-src 'self' blob:"
+)
+
+
+@app.api_route(
+  "/app-embeds/by-id/{app_id}/{asset_path:path}",
+  methods=["GET", "HEAD"],
+  include_in_schema=False,
+)
+async def app_owned_opaque_embed_by_id(
+  app_id: int, asset_path: str, request: Request,
+):
+  """Serve a packaged static document under a permanently opaque origin.
+
+  This namespace is intentionally frameable, including by an external site,
+  so every response carries CSP sandbox without allow-same-origin. Relative
+  assets stay below the same alias. Ordinary /app-assets remains protected by
+  SAMEORIGIN and is never the document-navigation surface.
+  """
+  response = _serve_app_static_asset(
+    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    asset_path,
+    request,
+  )
+  response.headers["Content-Security-Policy"] = _STATIC_EMBED_CSP
+  return response
 
 
 @app.api_route(

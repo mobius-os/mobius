@@ -12,7 +12,10 @@ import {
   entriesToTrim,
   isAppCodeRoute,
   isCacheableAppAssetResponse,
+  isCacheableOpaqueEmbedDocument,
   isImmutableAppAsset,
+  isPackagedAppAsset,
+  packagedAppAssetCacheKey,
   isStaleRuntimeCache,
   supersededVersionKeys,
 } from '../../sw-cache-policy.js'
@@ -55,6 +58,20 @@ test('hashed packaged-app asset names are immutable', () => {
   )
   // Exactly 8 chars with a single alpha char at the boundary still counts.
   assert.equal(isImmutableAppAsset('/app-assets/cuberun/x.1234567a.js'), true)
+  assert.equal(
+    isImmutableAppAsset('/app-embeds/by-id/60/static/js/main.8f3a2b1c.js'),
+    true,
+  )
+})
+
+test('opaque packaged subresources reuse ordinary by-id cache keys', () => {
+  const embed = 'https://mobius.test/app-embeds/by-id/60/static/js/main.deadbeef.js'
+  const ordinary = 'https://mobius.test/app-assets/by-id/60/static/js/main.deadbeef.js'
+  assert.equal(isPackagedAppAsset(new URL(embed).pathname), true)
+  assert.equal(packagedAppAssetCacheKey(embed, false), ordinary)
+  // The entry document must retain the response-sandboxed alias identity.
+  assert.equal(packagedAppAssetCacheKey(embed, true), embed)
+  assert.equal(packagedAppAssetCacheKey(ordinary, false), ordinary)
 })
 
 test('un-hashed or non-app-asset paths are not immutable', () => {
@@ -87,6 +104,26 @@ test('all-digit version segments are NOT immutable (alpha-hex required)', () => 
 const res = (status, type) => ({
   status,
   headers: { get: () => type },
+})
+
+const documentRes = (status, type, csp) => ({
+  status,
+  headers: { get: name => name === 'content-type' ? type : csp },
+})
+
+test('opaque embed documents cache only with the response sandbox intact', () => {
+  assert.equal(isCacheableOpaqueEmbedDocument(documentRes(
+    200, 'text/html; charset=utf-8', "sandbox allow-scripts; default-src 'self'",
+  )), true)
+  assert.equal(isCacheableOpaqueEmbedDocument(documentRes(
+    200, 'text/html', "sandbox allow-scripts allow-same-origin",
+  )), false)
+  assert.equal(isCacheableOpaqueEmbedDocument(documentRes(
+    200, 'text/html', "default-src 'self'",
+  )), false)
+  assert.equal(isCacheableOpaqueEmbedDocument(documentRes(
+    404, 'text/html', 'sandbox allow-scripts',
+  )), false)
 })
 
 test('app-code route matches frame and module for any app id', () => {

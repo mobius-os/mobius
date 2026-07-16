@@ -60,6 +60,9 @@ import {
   isCacheableAssetResponse,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
+  isPackagedAppAsset,
+  packagedAppAssetCacheKey,
+  isCacheableOpaqueEmbedDocument,
   isRangeRequest,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
@@ -302,10 +305,31 @@ const appAssetsTrimPlugin = {
   },
 }
 
+const packagedAssetCacheKeyPlugin = {
+  cacheKeyWillBeUsed: async ({ request }) => packagedAppAssetCacheKey(
+    request.url,
+    request.mode === 'navigate' || request.destination === 'document',
+  ),
+}
+
+const packagedAssetUpdateGuard = {
+  cacheWillUpdate: async ({ request, response }) => {
+    const url = new URL(request.url)
+    const documentRequest = request.mode === 'navigate'
+      || request.destination === 'document'
+    if (documentRequest && url.pathname.startsWith('/app-embeds/')) {
+      return isCacheableOpaqueEmbedDocument(response) ? response : null
+    }
+    return response?.status === 200 ? response : null
+  },
+}
+
 registerRoute(
   ({ url, request }) =>
     url.origin === self.location.origin &&
     isImmutableAppAsset(url.pathname) &&
+    request.mode !== 'navigate' &&
+    request.destination !== 'document' &&
     !isRangeRequest(request),
   new CacheFirst({
     cacheName: APP_ASSETS_CACHE,
@@ -314,6 +338,7 @@ registerRoute(
         cacheWillUpdate: async ({ response }) =>
           isCacheableAppAssetResponse(response) ? response : null,
       },
+      packagedAssetCacheKeyPlugin,
       appAssetsTrimPlugin,
     ],
   }),
@@ -321,12 +346,18 @@ registerRoute(
 registerRoute(
   ({ url, request }) =>
     url.origin === self.location.origin &&
-    url.pathname.startsWith('/app-assets/') &&
-    !isImmutableAppAsset(url.pathname) &&
+    isPackagedAppAsset(url.pathname) &&
+    (!isImmutableAppAsset(url.pathname)
+      || request.mode === 'navigate'
+      || request.destination === 'document') &&
     !isRangeRequest(request),
   new StaleWhileRevalidate({
     cacheName: APP_ASSETS_CACHE,
-    plugins: [appAssetsTrimPlugin],
+    plugins: [
+      packagedAssetCacheKeyPlugin,
+      packagedAssetUpdateGuard,
+      appAssetsTrimPlugin,
+    ],
   }),
 )
 
@@ -680,6 +711,7 @@ registerRoute(new NavigationRoute(
   {
     denylist: [
       /^\/app-assets\//,
+      /^\/app-embeds\//,
       /^\/apps\//,
       /^\/recover(\/|$)/,
       /^\/shell\/embed(\/|$)/,
@@ -712,7 +744,8 @@ registerRoute(
 // everything else. matchPrecache resolves the content-hashed entry.
 setCatchHandler(async ({ request, url }) => {
   if (request.destination !== 'document') return Response.error()
-  if (url.pathname.startsWith('/app-assets/')) {
+  if (url.pathname.startsWith('/app-assets/')
+      || url.pathname.startsWith('/app-embeds/')) {
     return (await matchPrecache('/offline.html')) || Response.error()
   }
   if (!url.pathname.startsWith('/apps/')) {

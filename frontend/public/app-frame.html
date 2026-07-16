@@ -167,9 +167,8 @@
     if (themeColorMeta) themeColorMeta.setAttribute('content', bg);
     var colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
     if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', mode === 'light' ? 'light dark' : 'dark light');
-    // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
-    // correct {bg,mode}. The same-origin app-frame shares this localStorage but
-    // has an EMPTY slot, so it must NOT write — else it clobbers the owner's
+    // Persist in the TOP-LEVEL SHELL ONLY for the next shell boot.
+    // Opaque app frames use a memory-only storage shim with an EMPTY slot, so it must NOT write — else it clobbers the owner's
     // real theme with the dark default and the shell re-reads it (drawer bleed).
     try {
       if (window.parent === window) {

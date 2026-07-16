@@ -22,6 +22,8 @@ test('shell app navigation does not intercept top-level app-like routes', () => 
   assert.equal(denied('/cuberun/index.html'), true)
   assert.equal(denied('/app-assets/cuberun/index.html'), true)
   assert.equal(denied('/app-assets/cuberun/static/js/main.js'), true)
+  assert.equal(denied('/app-embeds/by-id/60/index.html'), true)
+  assert.equal(denied('/app-embeds/by-id/60/static/js/main.js'), true)
   assert.equal(denied('/klix-filter'), true)
   assert.equal(denied('/cuberunner'), true)
   assert.equal(denied('/shell/'), false)

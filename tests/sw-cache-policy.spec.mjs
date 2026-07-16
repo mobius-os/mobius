@@ -16,6 +16,9 @@ import {
   APP_ASSETS_CACHE,
   isCacheableAssetResponse,
   isRangeRequest,
+  isPackagedAppAsset,
+  packagedAppAssetCacheKey,
+  isCacheableOpaqueEmbedDocument,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
@@ -66,6 +69,30 @@ test.describe('sw cache policy — app-assets poisoned-cache eviction', () => {
 
   test('keeps the current app-assets cache', () => {
     expect(isStaleRuntimeCache(APP_ASSETS_CACHE)).toBe(false)
+  })
+})
+
+test.describe('sw cache policy — opaque packaged documents', () => {
+  test('shares subresource identity but not the sandboxed document identity', () => {
+    const entry = 'https://mobius.test/app-embeds/by-id/60/index.html'
+    const script = 'https://mobius.test/app-embeds/by-id/60/static/main.deadbeef.js'
+    expect(isPackagedAppAsset(new URL(entry).pathname)).toBe(true)
+    expect(packagedAppAssetCacheKey(entry, true)).toBe(entry)
+    expect(packagedAppAssetCacheKey(script, false)).toBe(
+      'https://mobius.test/app-assets/by-id/60/static/main.deadbeef.js'
+    )
+  })
+
+  test('refuses an entry document if CSP sandbox is missing or same-origin', () => {
+    const response = csp => ({
+      status: 200,
+      headers: { get: name => name === 'content-type' ? 'text/html' : csp },
+    })
+    expect(isCacheableOpaqueEmbedDocument(response('sandbox allow-scripts'))).toBe(true)
+    expect(isCacheableOpaqueEmbedDocument(response("default-src 'self'"))).toBe(false)
+    expect(isCacheableOpaqueEmbedDocument(response(
+      'sandbox allow-scripts allow-same-origin',
+    ))).toBe(false)
   })
 })
 

@@ -20,9 +20,11 @@ being external attackers reaching the public HTTPS endpoint.
   supply a different resource CSP at their proxy.
 - **CSP is deployment policy, not the app authorization boundary:** the
   backend does not impose a shell-wide resource CSP. The bundled Caddyfile does
-  apply one, including `frame-ancestors 'self'` on every route except the exact
-  inert embedded-chat bootstrap route. Opaque frame isolation and scoped,
-  server-verified principals remain the security boundary in every deployment.
+  apply one, including `frame-ancestors 'self'` on ordinary routes. The exact
+  inert chat bootstrap, response-sandboxed `/app-embeds/` namespace, and
+  host/path-scoped service adapter have narrowly different frame policies.
+  Scoped server-verified principals and response sandboxing remain the actual
+  authorization boundaries.
 - **Mini-app isolation and tokens:** shell-mounted app frames omit
   `allow-same-origin`, giving them an opaque origin. They cannot read shell
   localStorage or the owner JWT. Each receives a refreshable app JWT bound to
@@ -39,6 +41,11 @@ These are intentional design decisions appropriate for a single-owner app:
   but script execution in the shell document itself remains equivalent to the
   owner. Moving the shell session to an HttpOnly cookie would further reduce
   that shell-XSS exposure if the threat model changes.
+- **Standalone mini-app gap:** `/apps/<slug>/` still executes the component in
+  the top-level Möbius origin and therefore does not inherit the shell-mounted
+  iframe's opaque boundary. The required follow-up is a trusted installable
+  outer PWA shell which hosts the existing opaque app-frame protocol. Until
+  then, standalone launch must not be presented as isolated from owner storage.
 - **`null` CORS origin:** Required for sandboxed mini-app iframes to call
   the API. Mitigated by scoped tokens — even if a mini-app reads the
   iframe's token, it can only access storage/proxy/AI endpoints.
@@ -98,14 +105,22 @@ An exactly stolen session bearer remains a conventional bearer limitation;
 memory-only handling, short expiry, exact scoping and server revocation bound
 its usefulness.
 
-Only the inert bootstrap route omits `X-Frame-Options: SAMEORIGIN`, because an
-opaque ancestor cannot satisfy SAMEORIGIN (and `frame-ancestors 'self'` has the
-same ancestor problem). All other routes retain the global frame denial.
+The inert bootstrap route omits `X-Frame-Options: SAMEORIGIN`, because an opaque
+ancestor cannot satisfy SAMEORIGIN (and `frame-ancestors 'self'` has the same
+ancestor problem). `/app-embeds/by-id/` is also frameable, but every response in
+that namespace carries CSP `sandbox` without `allow-same-origin`; the namespace
+exposes only public packaged assets, while protected API access from null
+origins still requires the scoped principal. Ordinary `/app-assets/` remains
+frame-denied. A configured service hostname is reserved
+to its exact `/services/<slug>` prefix and frames only through its direct,
+same-origin-readable adapter; shell/API/recovery paths return 404 there.
 
-Opaque frames remain the safe default. A separate future design may give
-reviewed high-capability apps real per-app origins for IndexedDB/OPFS, robust
-offline outboxes and APIs such as `getUserMedia`; that must not restore
-`allow-same-origin` on the shell origin.
+Opaque shell frames remain the safe default. Full services and genuinely
+independent PWAs use dedicated origins for IndexedDB/OPFS, robust offline
+outboxes, same-origin cookies/XHR and APIs such as `getUserMedia`; that must
+never restore `allow-same-origin` on the shell origin. The current standalone
+mini-app loader is the documented exception still awaiting outer-shell/frame
+unification.
 
 ## Reporting vulnerabilities
 

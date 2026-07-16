@@ -232,7 +232,7 @@ export function applyTheme(theme, { doc = globalThis.document, store = defaultSt
 
   // Persist for the next boot: the new {bg,mode} key the pre-paint IIFE +
   // resolveTheme read, and the legacy bare-hex key for one-cycle compat.
-  // Persist only from the top-level shell — the same-origin app-frame shares
+  // Persist only from the top-level shell — opaque app frames intentionally do not share
   // this store and must not clobber the shell-owned theme key.
   if (bg && HEX_RE.test(bg) && (typeof window === 'undefined' || window.parent === window)) {
     try {
@@ -344,9 +344,8 @@ export const PREPAINT_SRC = `(function () {
     if (themeColorMeta) themeColorMeta.setAttribute('content', bg);
     var colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
     if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', mode === 'light' ? 'light dark' : 'dark light');
-    // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
-    // correct {bg,mode}. The same-origin app-frame shares this localStorage but
-    // has an EMPTY slot, so it must NOT write — else it clobbers the owner's
+    // Persist in the TOP-LEVEL SHELL ONLY for the next shell boot.
+    // Opaque app frames use a memory-only storage shim with an EMPTY slot, so it must NOT write — else it clobbers the owner's
     // real theme with the dark default and the shell re-reads it (drawer bleed).
     try {
       if (window.parent === window) {

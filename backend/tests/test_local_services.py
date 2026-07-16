@@ -33,6 +33,26 @@ def test_stock_instance_exposes_no_local_service(client):
   assert response.json()["detail"] == "Local service not found."
 
 
+def test_surface_is_inert_without_explicit_origin(
+  client, auth, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.delenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", raising=False)
+  write_config(clean_local_services_config, {
+    "tandoor": {"upstream": "http://127.0.0.1:8123"},
+  })
+  disabled = client.get("/api/local-services/tandoor/surface", headers=auth)
+  assert disabled.status_code == 409
+
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  missing = client.get("/api/local-services/tandoor/surface", headers=auth)
+  assert missing.status_code == 503
+  assert "invalid" in missing.json()["detail"]
+
+
 def test_bare_configured_service_normalizes_to_trailing_slash(
   client, clean_local_services_config,
 ):
@@ -180,3 +200,124 @@ def test_unreachable_service_degrades_to_scoped_502(
   assert response.status_code == 502
   assert response.text == "The local service 'recipes' is not available right now."
   assert "127.0.0.1" not in response.text
+
+
+def test_surface_requires_distinct_origin_and_owner(
+  client, auth, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123",
+      "public_surface": True,
+    },
+  })
+  assert client.get("/api/local-services/tandoor/surface").status_code == 401
+  response = client.get("/api/local-services/tandoor/surface", headers=auth)
+  assert response.status_code == 200
+  assert response.json()["url"] == (
+    "http://tandoor.localhost/services/tandoor/_mobius/surface"
+  )
+
+  adapter = client.get(
+    "/services/tandoor/_mobius/surface",
+    headers={"host": "tandoor.localhost"},
+  )
+  assert adapter.status_code == 200
+  assert "x-frame-options" not in adapter.headers
+  assert "child.contentDocument" in adapter.text
+  assert "moebius:service-ready" in adapter.text
+  assert adapter.headers["content-security-policy"].endswith(
+    f"frame-ancestors 'self' {get_settings().frontend_origin}"
+  )
+  protected = client.get(
+    "/services/tandoor/_mobius/surface",
+    headers={"host": "localhost"},
+  )
+  assert protected.status_code == 404
+  assert protected.headers["x-frame-options"] == "SAMEORIGIN"
+
+
+@pytest.mark.parametrize("path", [
+  "/", "/shell/", "/api/health", "/recover", "/services/recipes/",
+])
+def test_dedicated_surface_host_never_serves_other_platform_paths(
+  client, clean_local_services_config, monkeypatch, path,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+  response = client.get(path, headers={"host": "tandoor.localhost"})
+  assert response.status_code == 404
+  assert "<!doctype html>" not in response.text.lower()
+
+
+def test_public_surface_drops_xfo_scopes_ancestors_and_host_only_cookies(
+  client, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "localhost")
+  monkeypatch.setenv("MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost")
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123",
+      "public_surface": True,
+    },
+  })
+
+  class FakeAsyncClient:
+    def __init__(self, *args, **kwargs): pass
+    def build_request(self, method, url, *, headers, content):
+      return httpx.Request(method, url, headers=headers, content=content)
+    async def send(self, request, *, stream):
+      return httpx.Response(
+        200,
+        headers=[
+          ("x-frame-options", "SAMEORIGIN"),
+          ("content-security-policy", "default-src 'self'; frame-ancestors 'self'"),
+          ("set-cookie", "session=abc; Domain=.localhost; Path=/services/tandoor; HttpOnly"),
+        ],
+        stream=httpx.ByteStream(b"ok"), request=request,
+      )
+    async def aclose(self): pass
+
+  monkeypatch.setattr(local_services_module.httpx, "AsyncClient", FakeAsyncClient)
+  public = client.get(
+    "/services/tandoor/", headers={"host": "tandoor.localhost"},
+  )
+  ordinary = client.get(
+    "/services/tandoor/", headers={"host": "localhost"},
+  )
+  assert "x-frame-options" not in public.headers
+  policies = public.headers.get_list("content-security-policy")
+  assert "default-src 'self'" in policies
+  assert f"frame-ancestors 'self' {get_settings().frontend_origin}" in policies
+  assert all(policy != "frame-ancestors 'self'" for policy in policies)
+  assert "domain=" not in public.headers["set-cookie"].lower()
+  assert ordinary.headers["x-frame-options"] == "SAMEORIGIN"
+  assert "domain=.localhost" in ordinary.headers["set-cookie"].lower()
+
+
+def test_production_surface_rejects_http_localhost_fallback(
+  client, auth, clean_local_services_config, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "domain", "mobius.example.com")
+  monkeypatch.setattr(
+    get_settings(), "frontend_origin", "https://mobius.example.com",
+  )
+  monkeypatch.setenv(
+    "MOBIUS_SERVICE_TANDOOR_ORIGIN", "http://tandoor.localhost",
+  )
+  write_config(clean_local_services_config, {
+    "tandoor": {
+      "upstream": "http://127.0.0.1:8123", "public_surface": True,
+    },
+  })
+
+  response = client.get("/api/local-services/tandoor/surface", headers=auth)
+  assert response.status_code == 503
+  assert "invalid" in response.json()["detail"]

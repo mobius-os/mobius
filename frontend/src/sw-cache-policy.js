@@ -107,6 +107,28 @@ export function isRangeRequest(request) {
   return !!request && !!request.headers && request.headers.has('range')
 }
 
+// Both namespaces address the same packaged files. /app-assets remains the
+// ordinary protected URL; /app-embeds is the frameable, response-sandboxed
+// document lane used below an opaque app frame.
+export function isPackagedAppAsset(pathname) {
+  return pathname.startsWith('/app-assets/') || pathname.startsWith('/app-embeds/')
+}
+
+// Entry documents keep their /app-embeds identity so their cached response
+// retains CSP sandbox. Equivalent JS/CSS/media subresources share the ordinary
+// /app-assets/by-id cache key, avoiding a second ~19MB CubeRun cache tree.
+export function packagedAppAssetCacheKey(rawUrl, isDocument = false) {
+  let url
+  try { url = new URL(rawUrl) } catch { return rawUrl }
+  if (!isDocument) {
+    url.pathname = url.pathname.replace(
+      /^\/app-embeds\/by-id\/(\d+)\//,
+      '/app-assets/by-id/$1/',
+    )
+  }
+  return url.href
+}
+
 // PURE: is a packaged-app static asset (/app-assets/{slug}/...) immutable?
 // Mirrors the server's _HASHED_ASSET_NAME (backend/app/main.py): a
 // content-hash segment in the FILENAME ([.-]<8+ hex>.<ext>) means a
@@ -127,7 +149,7 @@ export function isRangeRequest(request) {
 const HASHED_ASSET_NAME = /[.-](?=[0-9a-f]{8,}\.)[0-9a-f]*[a-f][0-9a-f]*\./i
 
 export function isImmutableAppAsset(pathname) {
-  if (!pathname.startsWith('/app-assets/')) return false
+  if (!isPackagedAppAsset(pathname)) return false
   const name = pathname.slice(pathname.lastIndexOf('/') + 1)
   return HASHED_ASSET_NAME.test(name)
 }
@@ -142,6 +164,15 @@ export function isCacheableAppAssetResponse(response) {
   if (!response || response.status !== 200) return false
   const ct = (response.headers.get('content-type') || '').toLowerCase()
   return !ct.includes('text/html')
+}
+
+export function isCacheableOpaqueEmbedDocument(response) {
+  if (!response || response.status !== 200) return false
+  const type = (response.headers.get('content-type') || '').toLowerCase()
+  const csp = (response.headers.get('content-security-policy') || '').toLowerCase()
+  return type.includes('text/html')
+    && /(?:^|;)\s*sandbox(?:\s|;|$)/.test(csp)
+    && !csp.includes('allow-same-origin')
 }
 
 // PURE: should appCodeHandler serve the CACHED copy first (instant) vs go

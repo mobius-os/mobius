@@ -277,7 +277,7 @@ test('applyTheme persists both mobius-theme and mobius-theme-bg', () => {
 })
 
 test('applyTheme does NOT persist inside an iframe (window.parent !== window) — the drawer-bleed fix', () => {
-  // The app-frame is a SAME-ORIGIN iframe sharing localStorage with the shell.
+  // The opaque app frame receives a memory-only compatibility storage facade.
   // With its empty theme slot it would resolve the dark default and clobber the
   // owner's real theme in the shared key, which the shell re-reads at boot
   // (recoloring the drawer). Only the top-level shell may persist.
