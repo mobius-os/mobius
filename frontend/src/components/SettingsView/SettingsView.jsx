@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
+import { Moon, Sun } from 'lucide-react'
 import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
@@ -204,7 +204,7 @@ function BackgroundProviderRow({
             )}
           </span>
           {effortLabel && (
-            <span className="model-trigger__effort">{effortLabel}</span>
+            <span className="settings-bg-row__effort">{effortLabel} effort</span>
           )}
           <span className="model-trigger__caret" aria-hidden="true">▾</span>
         </button>
@@ -279,7 +279,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const versionQuery = versionQueries.current.useQuery()
-  const [lightMode, setLightMode] = useState(false)
+  const [themeMode, setThemeMode] = useState(() => (
+    typeof document !== 'undefined'
+    && document.documentElement.getAttribute('data-theme') === 'light'
+      ? 'light'
+      : 'dark'
+  ))
   const [themeSwitching, setThemeSwitching] = useState(false)
   // Which provider has its inline auth panel expanded. null = none.
   const [expandedAuth, setExpandedAuth] = useState(null)
@@ -316,12 +321,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
-    // resolves to 'dark' actually flips the knob back. The earlier
-    // light-only branch left the toggle stuck on whenever data went
-    // light → dark via refetch (e.g. another tab toggled, or a
+    // resolves to 'dark' actually updates the selected option. The earlier
+    // light-only branch left the control stuck whenever data went
+    // light → dark via refetch (e.g. another tab changed it, or a
     // failed persist's rollback landed via invalidation).
     if (themeModeQuery.data === undefined) return
-    setLightMode(themeModeQuery.data === 'light')
+    setThemeMode(themeModeQuery.data === 'light' ? 'light' : 'dark')
   }, [themeModeQuery.data])
 
   const codexAuthenticated = !!settingsQuery.data?.codex_authenticated
@@ -670,11 +675,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     setExpandedAuth(null)
   }, [queryClient])
 
-  async function toggleTheme() {
+  async function selectTheme(newMode) {
     if (themeSwitching) return
 
     // Derive the direction from what the user ACTUALLY SEES, not from
-    // the optimistic `lightMode` state. `lightMode` mirrors
+    // the optimistic `themeMode` state. `themeMode` mirrors
     // themeModeQuery.data, which resolves async through the SW and
     // LAGS the painted theme; trusting it computed the toggle in the
     // wrong direction (e.g. after a dark→light toggle, a follow-up
@@ -683,38 +688,40 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     // leaving the UI stuck). getEffectiveTheme().mode reads
     // <html data-theme> — the authoritative value applyThemeToDom
     // last painted — so the direction is always relative to the
-    // visible theme. Fall back to `lightMode` only at very early boot
+    // visible theme. Fall back to `themeMode` only at very early boot
     // before any theme has been applied (mode === null).
     const eff = themeService.getEffectiveTheme()
     const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
       ? eff.mode
-      : (lightMode ? 'light' : 'dark')
-    const newMode = currentMode === 'light' ? 'dark' : 'light'
+      : themeMode
 
-    // Keep the optimistic switch UI in sync with the direction we
-    // just derived from the visible theme (so the knob reflects the
-    // target, not a flip of the stale state).
-    setLightMode(newMode === 'light')
+    // The explicit Light / Dark choices can be re-clicked. Treat the already
+    // selected option as a no-op rather than rebuilding and saving it again.
+    if (newMode === currentMode) return
+
+    // Keep the explicit choice in sync with the target we derived from the
+    // visible theme, rather than selecting relative to stale query state.
+    setThemeMode(newMode)
     setThemeSwitching(true)
     setThemeError('')
 
     // Delegate the full apply/persist/invalidate dance to
     // themeService — SettingsView keeps only the optimistic UI
-    // state (setLightMode + setThemeError) and the
+    // state (setThemeMode + setThemeError) and the
     // catch-rollback. themeService.toggleTheme invalidates both
     // theme queries; AppCanvas's useEffect picks that up and
     // postMessages `moebius:frame-theme` to live iframes.
     try {
       await themeService.toggleTheme(queryClient, currentMode, api)
     } catch {
-      setLightMode(currentMode === 'light')
+      setThemeMode(currentMode)
       setThemeError(
         'Could not save theme. Check your connection and try again.',
       )
       // Force the mode query to resync with the server. Covers the
       // write-succeeded-but-response-lost case: refetching reads
       // authoritative state, the mirror effect at line 30 picks it
-      // up, and lightMode stops disagreeing with the visible theme.
+      // up, and themeMode stops disagreeing with the visible theme.
       themeQueries.mode.invalidate(queryClient)
       onThemeChange?.()  // reload original theme on error
     } finally {
@@ -1142,13 +1149,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   connected
                   subtitle="Which models appear in chat pickers."
                   statusNode={
-                    <StatusDot color="--muted">
-                      {lastModelLabel ? (
-                        <span>
-                          Last model: <span className="settings__last-model-name">{lastModelLabel}</span>
-                        </span>
-                      ) : 'No default yet'}
-                    </StatusDot>
+                    <span className="provider-row__status-text settings__last-model">
+                      {lastModelLabel ? `Last model: ${lastModelLabel}` : 'No default yet'}
+                    </span>
                   }
                   actionLabel="Configure"
                   expanded={false}
@@ -1266,16 +1269,38 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
         <section className="settings__section settings__section--compact">
           <div
-            className="settings__row"
-            onPointerDownCapture={themeService.setThemeTransitionOriginFromEvent}
+            className={`settings__appearance${themeSwitching ? ' settings__appearance--switching' : ''}`}
+            role="radiogroup"
+            aria-labelledby="settings-appearance-label"
+            aria-busy={themeSwitching}
           >
-            <span className="settings__label">Dark mode</span>
-            <Switch
-              checked={!lightMode}
-              onCheckedChange={toggleTheme}
-              disabled={themeSwitching}
-              aria-label="Toggle dark mode"
-            />
+            <span className="settings__label" id="settings-appearance-label">Appearance</span>
+            <div className="settings__appearance-options">
+              <label className="settings__appearance-option">
+                <input
+                  type="radio"
+                  name="theme-mode"
+                  value="light"
+                  checked={themeMode === 'light'}
+                  onChange={() => selectTheme('light')}
+                  disabled={themeSwitching}
+                />
+                <Sun size={16} strokeWidth={2} aria-hidden="true" />
+                <span>Light</span>
+              </label>
+              <label className="settings__appearance-option">
+                <input
+                  type="radio"
+                  name="theme-mode"
+                  value="dark"
+                  checked={themeMode === 'dark'}
+                  onChange={() => selectTheme('dark')}
+                  disabled={themeSwitching}
+                />
+                <Moon size={16} strokeWidth={2} aria-hidden="true" />
+                <span>Dark</span>
+              </label>
+            </div>
           </div>
           {themeError && (
             <Alert

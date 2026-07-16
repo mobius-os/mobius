@@ -156,22 +156,6 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  /* Override the apps-sdk-ui Switch tokens so the dark-mode toggle
-     reads at the same scale as our earlier bespoke 48x28 switch.
-     The SDK ships smaller defaults tuned for the OpenAI design
-     system; these locals scope the bump so it doesn't bleed into
-     other future Switch usages. Accent palette wired in so the
-     ON state uses the Möbius purple. */
-  --switch-track-width: 48px;
-  --switch-track-height: 28px;
-  --switch-thumb-size: 22px;
-  --switch-thumb-offset: 3px;
-  --switch-track-color: var(--border);
-  --switch-track-color-hover: var(--surface2);
-  --switch-track-color-checked: var(--accent);
-  --switch-track-color-disabled: var(--surface);
-  --switch-track-color-checked-disabled: var(--accent-dim);
-  --color-ring: var(--accent);
 }
 
 /* Top-align a row whose label spans two lines (label + subtext), so the
@@ -181,43 +165,77 @@
   align-items: flex-start;
 }
 
-/* Tailwind v4's Preflight resets button backgrounds in the base
-   layer, which fights the SDK Switch's component-layer
-   `background: var(--switch-track-color-*)` rules and leaves the
-   track transparent. Targeting the Switch button directly from
-   our settings scope gives a higher-specificity wins-over-base
-   override. Mirrors what the SDK does, just at a layer Tailwind's
-   base can't reset. */
-.settings__row button[role="switch"] {
-  background: var(--switch-track-color);
-  /* Tailwind v4 Preflight ALSO zeros border-radius on ALL
-     buttons in an UNLAYERED rule that beats the SDK Switch's
-     layered `.Track { border-radius: var(--radius-full) }`.
-     The thumb (a <span>) is unaffected so it renders circular,
-     but the track stayed a sharp rectangle — the toggle looked
-     like a square on prod even though the thumb was round.
-     Same fix pattern as the background override above. */
-  border-radius: var(--radius-full, 9999px);
-}
-.settings__row button[role="switch"][data-state="checked"] {
-  background: var(--switch-track-color-checked);
-}
-.settings__row button[role="switch"][data-disabled] {
-  background: var(--switch-track-color-disabled);
-}
-.settings__row button[role="switch"][data-disabled][data-state="checked"] {
-  background: var(--switch-track-color-checked-disabled);
+/* Appearance is a choice between two named alternatives, not an opaque
+   on/off state. Native radios preserve arrow-key behavior while the labels
+   form one compact segmented control in the expected Light -> Dark order. */
+.settings__appearance {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
 }
 
-/* The bespoke `.settings__toggle*` rules that used to live below
-   here were deleted: SettingsView.jsx renders the SDK <Switch>
-   from `@openai/apps-sdk-ui/components/Switch`, which carries its
-   own track + knob markup, so the custom toggle classes were
-   unreachable. Removed instead of left as dead weight. */
+.settings__appearance-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(88px, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+}
 
-.settings__last-model-name {
-  color: var(--accent);
-  font-weight: 650;
+.settings__appearance-option {
+  position: relative;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+  transition:
+    background-color 150ms cubic-bezier(0.2, 0, 0, 1),
+    color 150ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.settings__appearance-option:has(input:checked) {
+  color: var(--text);
+  background: var(--surface2);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 14%);
+}
+
+.settings__appearance-option:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings__appearance-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.settings__appearance--switching .settings__appearance-option {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+/* The chat model is informational, not a live status. Keep it in the normal
+   secondary-text color and weight so the model name does not read like a
+   link, warning, or selected action. */
+.settings__last-model {
+  color: var(--muted);
+  font-weight: 400;
 }
 
 /* Provider rows + .settings__providers wrapper styles live in
@@ -331,10 +349,10 @@
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
   min-height: 54px;
-  padding: 8px;
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface) 68%, var(--bg));
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -356,15 +374,18 @@
 }
 
 .settings-bg-row--dragging {
-  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
   opacity: 0.96;
 }
 
+.settings-bg-row--dragging .model-trigger,
+.settings-bg-row--drop-target .model-trigger {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  box-shadow: 0 4px 8px rgb(0 0 0 / 18%);
+}
+
 .settings-bg-row--drop-target {
-  border-color: color-mix(in srgb, var(--accent) 66%, var(--border));
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  background: transparent;
 }
 
 .settings-bg-row--drop-before::before,
@@ -388,8 +409,7 @@
 }
 
 .settings-bg-row--off {
-  background: color-mix(in srgb, var(--surface) 50%, var(--bg));
-  border-color: color-mix(in srgb, var(--border) 64%, transparent);
+  background: transparent;
   opacity: 0.78;
 }
 
@@ -439,6 +459,17 @@
   gap: 8px;
 }
 
+/* Settings only: effort is quiet read-only metadata here. The model sheet
+   retains its pill treatment where effort is an active selection control. */
+.settings-bg-row__effort {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .settings-bg-row {
     transition: none;
@@ -446,8 +477,18 @@
 }
 
 @media (max-width: 620px) {
+  .settings__appearance {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .settings__appearance-options {
+    width: 100%;
+  }
+
   .settings-bg-row {
-    padding-inline: 6px;
+    padding-inline: 0;
   }
 
   .settings-bg-row--reordering {
