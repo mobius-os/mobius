@@ -1,5 +1,5 @@
 import { toolBlockFailed } from './toolResultFormat.js'
-import { toolActivityLabel } from './toolActivityLabel.js'
+import { toolActivityLabel, toolActivityPastLabel } from './toolActivityLabel.js'
 import { thinkingElapsedMs } from './streamReducers.js'
 
 // Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
@@ -141,6 +141,27 @@ export function toolGroupSummary(tools) {
   return extra > 0 ? `${head} +${extra}` : head
 }
 
+// The SETTLED twin of toolGroupSummary: past-tense activities in first-seen
+// order, joined as one calm sentence fragment — "Read files, ran commands"
+// (the Codex idiom) rather than "Running commands · Reading files" frozen
+// mid-run. Known phrases lowercase mid-sentence; an unmapped tool keeps its
+// raw name and casing (it is an identifier, not prose). Dedupe is on the
+// label, same as the live summary. Pure — no React, no mutation.
+export function toolGroupPastSummary(tools) {
+  const seen = []
+  for (const t of tools) {
+    const past = toolActivityPastLabel(t?.tool)
+    const label = past || t?.tool || 'Tool'
+    if (!seen.some(s => s.label === label)) seen.push({ label, known: !!past })
+  }
+  const shown = seen.slice(0, 3).map(({ label, known }, i) => (
+    i > 0 && known ? label.charAt(0).toLowerCase() + label.slice(1) : label
+  ))
+  const head = shown.join(', ')
+  const extra = seen.length - 3
+  return extra > 0 ? `${head} +${extra}` : head
+}
+
 // Round a live/persisted thinking duration (ms) to whole seconds, clamping any
 // positive sub-second span to 1s so a real reasoning pass never reads "0s".
 function thoughtSeconds(durationMs) {
@@ -198,7 +219,13 @@ export function activityCollapsedLabel(entries, { live = false, now = Date.now()
   }
 
   if (tools.length > 0) {
-    return { text: toolGroupSummary(tools), showEllipsis: false }
+    // Live keeps the progressive running-first rollup; settled flips to the
+    // past-tense sentence ("Ran commands"), so the line always agrees with
+    // time — a persisted partial (live=false) reads as history too.
+    return {
+      text: live ? toolGroupSummary(tools) : toolGroupPastSummary(tools),
+      showEllipsis: false,
+    }
   }
 
   // Sum only the FINITE thinking durations; if none carry one (a thinking block

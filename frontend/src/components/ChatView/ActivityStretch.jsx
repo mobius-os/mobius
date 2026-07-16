@@ -7,6 +7,7 @@ import {
   thoughtDurationLabel,
 } from './groupBlocks.js'
 import { toolBlockExitCode } from './toolResultFormat.js'
+import { toolActivityIcon } from './toolActivityLabel.js'
 import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
@@ -37,12 +38,77 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 // spinner / pulse dot plus the running-first activity summary already say what
 // is executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
+// Muted type glyphs for a settled line's first activity (terminal for
+// commands, magnifier for search, …). Deliberately tiny and stroke-light so
+// they read as structure, not badges; 'dot' is the safe fallback for anything
+// unmapped — a new tool degrades to a neutral mark, never a crash.
+function ActivityTypeIcon({ kind }) {
+  const common = {
+    viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.5,
+    strokeLinecap: 'round', strokeLinejoin: 'round',
+  }
+  if (kind === 'terminal') {
+    return (
+      <svg {...common}>
+        <rect x="1.5" y="3" width="13" height="10" rx="2" />
+        <path d="M4.5 6.5 7 8.5l-2.5 2" /><path d="M8.5 10.5h3" />
+      </svg>
+    )
+  }
+  if (kind === 'files') {
+    return (
+      <svg {...common}>
+        <path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" />
+      </svg>
+    )
+  }
+  if (kind === 'search') {
+    return (
+      <svg {...common}>
+        <circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" />
+      </svg>
+    )
+  }
+  if (kind === 'edit') {
+    return (
+      <svg {...common}>
+        <path d="m11.3 2.2 2.5 2.5L6 12.5l-3.2.7.7-3.2z" />
+      </svg>
+    )
+  }
+  if (kind === 'web') {
+    return (
+      <svg {...common}>
+        <circle cx="8" cy="8" r="5.5" /><path d="M2.5 8h11" />
+        <path d="M8 2.5c2 1.8 2 9.2 0 11-2-1.8-2-9.2 0-11z" />
+      </svg>
+    )
+  }
+  if (kind === 'plan') {
+    return (
+      <svg {...common}>
+        <path d="M3 4.5h10" /><path d="M3 8h10" /><path d="M3 11.5h6" />
+      </svg>
+    )
+  }
+  return (
+    <svg {...common}>
+      <circle cx="8" cy="8" r="2.2" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
 export default function ActivityStretch({ entries, chatId, live = false }) {
   const [userOpen, setUserOpen] = useState(false)
   const headerRef = useRef(null)
 
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
+  // The settled line's glyph is its FIRST activity's — the same first-seen
+  // order the past-tense summary leads with, so icon and words agree.
+  const firstTool = entries.find(e => e?.item?.type === 'tool')?.item
+  const firstToolIcon = toolActivityIcon(firstTool?.tool)
   const toolRunning = entries.some(
     e => e?.item?.type === 'tool' && e.item.status === 'running',
   )
@@ -158,9 +224,16 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
               <path d="M8 2 15 14H1z" /><path d="M8 6v4" /><path d="M8 12h.01" />
             </svg>
           </span>
+        ) : toolCount > 0 ? (
+          // Settled tool stretch: a muted TYPE glyph for the line's first
+          // activity (terminal, magnifier, …) — informative structure in the
+          // Codex idiom, not a success mark; a thinking-only line stays bare.
+          <span className="chat__activity-icon" aria-hidden="true">
+            <ActivityTypeIcon kind={firstToolIcon} />
+          </span>
         ) : (
-          // Settled success has NO leading icon — success is the default state,
-          // not a signal (ChatGPT-style: a checkmark on every done run is noise).
+          // Settled thinking-only: no icon — "Thought for Ns" says it all, and
+          // a checkmark on every done run would be noise.
           null
         )}
         <span className="chat__activity-label">{text}</span>

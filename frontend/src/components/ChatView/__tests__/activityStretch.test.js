@@ -4,6 +4,7 @@ import {
   activityStreamState,
   activityCollapsedLabel,
   thoughtDurationLabel,
+  toolGroupPastSummary,
 } from '../groupBlocks.js'
 
 // The label helpers are the single localization surface for the collapsed
@@ -66,17 +67,49 @@ test('collapsed label — settled thinking-only with no duration: bare "Thought"
   assert.equal(activityCollapsedLabel(entries, { live: false }).text, 'Thought')
 })
 
-test('collapsed label — settled mixed stretch shows tool activities only', () => {
-  // The reasoning is available on expand; the settled line stays a short scannable
-  // "what did it DO" summary rather than repeating the thinking.
+test('collapsed label — settled mixed stretch: past-tense sentence, tools only', () => {
+  // The reasoning is available on expand; the settled line stays a short
+  // scannable "what did it DO" summary in past tense — "Read files, edited
+  // code" (the Codex idiom), never a "Reading files" frozen in time.
   const entries = [
     e(think({ content: 'plan', duration_ms: 3000 })),
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Edit', status: 'done' })),
   ]
   const label = activityCollapsedLabel(entries, { live: false })
-  assert.equal(label.text, 'Reading files · Editing code')
+  assert.equal(label.text, 'Read files, edited code')
   assert.equal(label.showEllipsis, false)
+})
+
+test('toolGroupPastSummary: first-seen dedupe, lowercased continuations, raw names kept', () => {
+  assert.equal(
+    toolGroupPastSummary([
+      tool({ tool: 'Bash' }), tool({ tool: 'Read' }), tool({ tool: 'Glob' }),
+    ]),
+    'Ran commands, read files',
+  )
+  // An unmapped tool is an identifier, not prose: casing survives mid-sentence.
+  assert.equal(
+    toolGroupPastSummary([tool({ tool: 'Read' }), tool({ tool: 'CronCreate' })]),
+    'Read files, CronCreate',
+  )
+  // Overflow folds into +N, same as the live rollup.
+  assert.equal(
+    toolGroupPastSummary([
+      tool({ tool: 'Read' }), tool({ tool: 'Edit' }),
+      tool({ tool: 'Bash' }), tool({ tool: 'Grep' }),
+    ]),
+    'Read files, edited code, ran commands +1',
+  )
+})
+
+test('collapsed label — LIVE mixed stretch keeps the progressive running-first rollup', () => {
+  const entries = [
+    e(tool({ tool: 'Read', status: 'done' })),
+    e(tool({ tool: 'Bash', status: 'running' })),
+  ]
+  const label = activityCollapsedLabel(entries, { live: true })
+  assert.equal(label.text, 'Running commands · Reading files')
 })
 
 test('collapsed label — a live thinking tail after a failed tool still reads "Thinking"', () => {
