@@ -42,7 +42,7 @@ async function bootAndCreateChat(page, label, viewport = { width: 412, height: 9
 async function mockOwnedApp(page, chatId) {
   await page.route(/\/api\/apps\/(\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
-    route.fulfill({
+    return route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify([{
