@@ -10,6 +10,9 @@ Möbius stack and can take several minutes. Prefer the GitHub PR checks.
 
 Run this on a Docker-capable host, not inside the Möbius app container:
   scripts/playwright-local.sh --allow-local-e2e <spec or --grep arguments>
+
+The runner keeps one reusable image tag to make later submissions faster.
+Set MOBIUS_LOCAL_E2E_KEEP_CACHE=0 when disk retention is more important.
 EOF
   exit 2
 fi
@@ -46,6 +49,17 @@ head_sha="$(git rev-parse --verify HEAD)"
 run_id="$(date +%s)-$$"
 project="mobius-local-e2e-${run_id}"
 image_name="${project}:test"
+# Keep one bounded image reference after a run. Docker can then retain the
+# expensive dependency ancestors even though the per-run image and all
+# containers/volumes remain disposable. Set MOBIUS_LOCAL_E2E_KEEP_CACHE=0 for
+# a no-retention run, or choose a separate shared tag with
+# MOBIUS_LOCAL_E2E_CACHE_IMAGE.
+cache_image="${MOBIUS_LOCAL_E2E_CACHE_IMAGE:-mobius-local-e2e-cache:test}"
+keep_cache="${MOBIUS_LOCAL_E2E_KEEP_CACHE:-1}"
+if [[ "$keep_cache" != "0" && "$keep_cache" != "1" ]]; then
+  echo "error: MOBIUS_LOCAL_E2E_KEEP_CACHE must be 0 or 1" >&2
+  exit 2
+fi
 app_container="${project}-app"
 caddy_container="${project}-caddy"
 recovery_container="${project}-recoveryd"
@@ -106,6 +120,12 @@ ln -s "$node_modules_root" "$snapshot_dir/node_modules"
 echo "Building disposable test stack for ${head_sha:0:12} (project: $project)..."
 compose_used=1
 compose build
+if [[ "$keep_cache" == "1" ]]; then
+  docker image tag "$image_name" "$cache_image"
+  echo "Retained bounded build cache as $cache_image"
+else
+  echo "Build cache retention disabled for this run."
+fi
 if ! compose up -d; then
   compose logs --tail 200 app caddy recoveryd || true
   echo "error: isolated test stack failed to start" >&2
