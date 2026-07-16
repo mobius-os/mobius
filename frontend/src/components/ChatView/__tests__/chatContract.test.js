@@ -13,6 +13,7 @@ import {
   scrollUnmoved,
   cushionPresent,
   singleAssistantSurface,
+  anchorHeldThroughToggle,
   checkContract,
 } from '../chatContract.js'
 
@@ -374,6 +375,10 @@ test('every predicate id is registered in CHAT_CONTRACT (registry is the map)', 
     scrollUnmoved(snapshotChatUX(pinnedEnv), snapshotChatUX(pinnedEnv)),
     cushionPresent(snapshotChatUX(pinnedEnv)),
     singleAssistantSurface(1),
+    anchorHeldThroughToggle(
+      { anchorTop: 100, spacerH: 40 },
+      { anchorTop: 100, spacerH: 40 },
+    ),
   ]
   for (const r of emitted) {
     assert.ok(registered.has(r.id), `predicate id ${r.id} is in the registry`)

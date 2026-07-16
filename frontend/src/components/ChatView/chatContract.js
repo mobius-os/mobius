@@ -98,6 +98,14 @@ export const CHAT_CONTRACT = [
       + 'catches duplicates/absence only. Surface IDENTITY (the right surface '
       + 'chosen) is covered by chooseActiveAssistantSurface\'s own unit tests.',
   },
+  {
+    id: 'anchor-held-through-toggle',
+    title: 'Hold the reader through disclosure toggles',
+    summary:
+      'Collapsing or expanding thinking, tool, and activity disclosures keeps '
+      + 'the reader anchor fixed and never stacks provisional spacer '
+      + 'reservations across rapid toggles.',
+  },
 ]
 
 /**
