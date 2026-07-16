@@ -56,10 +56,10 @@ async function newChat(page) {
   // untagged second row, which makes retries stateful and defeats cleanup.
   const chat = await createTaggedChat(page)
   if (!chat?.id) throw new Error('failed to create tagged test chat')
-  await page.evaluate((chatId) => {
-    localStorage.setItem('moebius_active_chat', chatId)
-  }, chat.id)
-  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  // The versioned workspace is authoritative over the legacy active-chat
+  // compatibility mirror. Use the supported explicit deep link so this helper
+  // really navigates to the chat even after a previous test engaged a workspace.
+  await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 

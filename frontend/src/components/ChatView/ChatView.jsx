@@ -818,6 +818,7 @@ export default function ChatView({
     anchorPagination,
     armSentMessage,
     closePreSendGestureWindow,
+    freezeChatExit,
     freezeForegroundReturn,
     freezeQueuedSubmission,
     revealConversationTail,
@@ -848,6 +849,14 @@ export default function ChatView({
   useEffect(() => {
     if (paneContentHeight != null) paneResized(paneContentHeight)
   }, [paneContentHeight, paneResized])
+
+  // Settings used to unmount the active chat. Retained pane identity is useful
+  // for split/unsplit transitions, but hiding a pane must still perform the old
+  // leave/return lifecycle: freeze its reader position while geometry is live,
+  // then let the load effect below disconnect while hidden and refresh on show.
+  useLayoutEffect(() => {
+    if (hidden) freezeChatExit()
+  }, [hidden, freezeChatExit])
 
   function makeSendPinIntent(willPin) {
     return {
@@ -1664,6 +1673,11 @@ export default function ChatView({
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
+    // A hidden retained pane is not an active runtime. Returning to visibility
+    // changes this dependency and re-runs the authoritative history + stream
+    // handshake, matching the former unmount/remount behavior without losing
+    // the pane's DOM identity.
+    if (hidden) return
     let cancelled = false
     chatIdStaleRef.current = false
     setLoadError(false)
@@ -1800,7 +1814,7 @@ export default function ChatView({
       loadingOlder.current = false
       disconnect()
     }
-  }, [chatId, loadNonce])
+  }, [chatId, loadNonce, hidden])
 
 
   // Paginate older messages. Captures a pre-prepend anchor so we can

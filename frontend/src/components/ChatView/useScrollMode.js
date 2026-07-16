@@ -718,6 +718,7 @@ export function mountMediaSettled(scrollEl) {
  *   anchorPagination: (key: string, offset: number) => void,
  *   armSentMessage: (event: object) => void,
  *   closePreSendGestureWindow: () => void,
+ *   freezeChatExit: () => void,
  *   freezeForegroundReturn: () => void,
  *   freezeQueuedSubmission: () => void,
  *   revealConversationTail: () => void,
@@ -954,6 +955,15 @@ export default function useScrollMode({
       ? transitionMode(nextMode, 'lifecycle:foreground-return')
       : modeRef.current
   }, [scrollRef, transitionMode])
+
+  // A retained pane becoming hidden must cross the same scroll lifecycle
+  // boundary as the old unmounting ChatView. Freeze and persist the exact
+  // visible row before Settings (or another full-workspace overlay) can grow
+  // the transcript in the background. Keeping this as a controller event
+  // avoids exposing persistMode/modeRef mutation to ChatView.
+  const freezeChatExit = useCallback(() => {
+    persistMode({ freezeToCurrentPosition: true })
+  }, [persistMode])
 
   // A sticky attention nudge (question or paused turn) is an explicit reader
   // request, but not a scroll gesture inside `.chat__scroll`. Route it through
@@ -1713,6 +1723,7 @@ export default function useScrollMode({
     anchorPagination,
     armSentMessage,
     closePreSendGestureWindow,
+    freezeChatExit,
     freezeForegroundReturn,
     freezeQueuedSubmission,
     revealConversationTail,

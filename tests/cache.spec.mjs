@@ -79,6 +79,13 @@ async function getActiveChatId(page) {
   return page.evaluate(() => localStorage.getItem('moebius_active_chat'))
 }
 
+async function visitChat(page, chatId) {
+  // The active-chat localStorage key is a compatibility projection. A valid
+  // versioned workspace intentionally wins on reload, while an explicit shell
+  // deep link is the supported per-load navigation override.
+  await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
+}
+
 // ---------------------------------------------------------------------------
 
 // These tests mock the network via page.route and assert no service-worker
@@ -118,9 +125,8 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     const chatB = ids[1]
     expect(chatA).not.toBe(chatB)
 
-    // Visit chat A by setting localStorage + reload (deterministic).
-    await page.evaluate((id) => localStorage.setItem('moebius_active_chat', id), chatA)
-    await page.reload({ waitUntil: 'domcontentloaded' })
+    // Visit chat A through the explicit shell navigation contract.
+    await visitChat(page, chatA)
     await page.waitForFunction(
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
@@ -132,8 +138,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     await page.evaluate(() => new Promise(r => setTimeout(r, 1500)))
 
     // Navigate to chat B.
-    await page.evaluate((id) => localStorage.setItem('moebius_active_chat', id), chatB)
-    await page.reload({ waitUntil: 'domcontentloaded' })
+    await visitChat(page, chatB)
     await page.waitForFunction(
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
@@ -178,8 +183,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     // Navigate back to chat A. With persister + cache mirror,
     // ChatView's useState initializer reads cached messages
     // synchronously — `loading` is false, `messages` is populated.
-    await page.evaluate((id) => localStorage.setItem('moebius_active_chat', id), chatA)
-    await page.reload({ waitUntil: 'domcontentloaded' })
+    await visitChat(page, chatA)
     // Wait only for the chat shell to mount; do not wait for any fetch
     // (we just blocked the relevant one).
     await page.waitForFunction(
@@ -223,8 +227,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     await setup(page)
     const [chatId] = await ensureChats(page, 1)
     expect(chatId).toBeTruthy()
-    await page.evaluate((id) => localStorage.setItem('moebius_active_chat', id), chatId)
-    await page.reload({ waitUntil: 'domcontentloaded' })
+    await visitChat(page, chatId)
     await page.waitForFunction(
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
