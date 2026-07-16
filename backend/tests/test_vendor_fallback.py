@@ -39,19 +39,26 @@ def test_app_routes_and_images_are_not_static():
   assert not _is_static_asset_path("vendorfoo")
 
 
-def test_public_app_imports_are_intrinsically_cors_readable():
-  """Service-worker-cached app imports must still load in Origin:null."""
-  assert _public_static_headers("mobius-runtime.js") == {
-    "Access-Control-Allow-Origin": "*",
-  }
+def test_opaque_frame_public_assets_are_intrinsically_cors_readable():
+  """Service-worker-cached executable assets must load in Origin:null."""
   assert _public_static_headers("vendor/react@19.2.7/react.mjs") == {
     "Access-Control-Allow-Origin": "*",
   }
   assert _public_static_headers("vendor") == {
     "Access-Control-Allow-Origin": "*",
   }
+  assert _public_static_headers("mobius-runtime.js") == {
+    "Access-Control-Allow-Origin": "*",
+  }
+  assert _public_static_headers("assets/index-abc.js") == {
+    "Access-Control-Allow-Origin": "*",
+  }
+  assert _public_static_headers("assets/index-abc.css") == {
+    "Access-Control-Allow-Origin": "*",
+  }
   assert _public_static_headers("vendorfoo/module.mjs") == {}
-  assert _public_static_headers("assets/index.js") == {}
+  assert _public_static_headers("assetsfoo/index.js") == {}
+  assert _public_static_headers("icons/icon-192.png") == {}
 
 
 def _spa_active(client):
@@ -61,6 +68,20 @@ def _spa_active(client):
   return r.status_code == 200 and "text/html" in r.headers.get(
     "content-type", ""
   )
+
+
+def test_live_vite_asset_route_is_intrinsically_cors_readable(
+  client, monkeypatch, tmp_path,
+):
+  """The dedicated /assets handler must not bypass the opaque-frame policy."""
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  asset = tmp_path / "index-opaque-frame.js"
+  asset.write_text("export default 1", encoding="utf-8")
+  monkeypatch.setattr("app.main._resolve_asset_file", lambda _path: asset)
+  response = client.get("/assets/index-opaque-frame.js")
+  assert response.status_code == 200
+  assert response.headers.get("access-control-allow-origin") == "*"
 
 
 def test_vendor_miss_returns_404_not_html(client):

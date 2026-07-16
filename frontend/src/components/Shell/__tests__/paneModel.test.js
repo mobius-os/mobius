@@ -514,6 +514,228 @@ test('visibleTabs returns each pane active tab in order', () => {
   assert.deepEqual(paneModel.visibleTabs(ws).map(tabKey), ['chat:a', 'chat:b'])
 })
 
+// ── Projection: geometry (projectLayout / modeForRect / canSplit) ───────────
+
+// A depth-2, four-leaf tree: s0 row → s1 col(p1,p2) | s2 col(p3,p4).
+function fourPaneWs(focusedPaneId = 'p1') {
+  return paneModel.normalize({
+    v: 1,
+    layout: {
+      id: 's0', dir: 'row', ratio: 0.5,
+      a: { id: 's1', dir: 'col', a: 'p1', b: 'p2', ratio: 0.5 },
+      b: { id: 's2', dir: 'col', a: 'p3', b: 'p4', ratio: 0.5 },
+    },
+    panes: {
+      p1: { id: 'p1', tabs: [makeTab('chat', 'a')], activeTabKey: 'chat:a' },
+      p2: { id: 'p2', tabs: [makeTab('chat', 'b')], activeTabKey: 'chat:b' },
+      p3: { id: 'p3', tabs: [makeTab('chat', 'c')], activeTabKey: 'chat:c' },
+      p4: { id: 'p4', tabs: [makeTab('chat', 'd')], activeTabKey: 'chat:d' },
+    },
+    focusedPaneId,
+    nextId: 5,
+  })
+}
+
+// A two-pane split on the named edge, keeping a spare tab so the source pane
+// survives the move.
+function twoPaneWs(edge) {
+  return paneModel.moveTab(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b'), makeTab('chat', 'spare')]),
+    'chat:b', { paneId: 'p0', edge },
+  )
+}
+
+test('modeForRect maps usable content size to a mode (both dims must clear)', () => {
+  assert.equal(paneModel.modeForRect({ w: 1000, h: 700 }), 'wide')
+  assert.equal(paneModel.modeForRect({ w: 960, h: 600 }), 'wide', 'exact threshold is wide')
+  assert.equal(paneModel.modeForRect({ w: 959, h: 600 }), 'compact', 'a hair under width drops a tier')
+  assert.equal(paneModel.modeForRect({ w: 1000, h: 599 }), 'compact', 'height under 600 drops to compact')
+  assert.equal(paneModel.modeForRect({ w: 700, h: 520 }), 'compact', 'exact compact threshold')
+  assert.equal(paneModel.modeForRect({ w: 699, h: 520 }), 'phone', 'under compact width is phone')
+  assert.equal(paneModel.modeForRect({ w: 1000, h: 519 }), 'phone', 'height under 520 is phone')
+  assert.equal(paneModel.modeForRect({ w: 400, h: 800 }), 'phone', 'a tall narrow phone')
+  assert.equal(paneModel.modeForRect(), 'phone', 'a missing rect is the phone floor')
+})
+
+test('projectLayout never mutates the workspace', () => {
+  const ws = fourPaneWs('p3')
+  const before = JSON.stringify(ws)
+  paneModel.projectLayout(ws, 'wide', { w: 1200, h: 800 })
+  paneModel.projectLayout(ws, 'compact', { w: 800, h: 600 })
+  paneModel.projectLayout(ws, 'phone', { w: 420, h: 900 })
+  assert.equal(JSON.stringify(ws), before, 'projection is pure — ws is untouched')
+})
+
+test('projectLayout returns the single-pane sentinel for a one-leaf tree', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  for (const mode of ['wide', 'compact', 'phone']) {
+    const proj = paneModel.projectLayout(ws, mode, { w: 1200, h: 800 })
+    assert.deepEqual(proj.visibleLeaves, ['p0'], `${mode}: exactly one visible leaf`)
+    assert.deepEqual(proj.rects.p0, { x: 0, y: 0, w: 1200, h: 800 }, `${mode}: full content rect, no margin`)
+    assert.deepEqual(proj.dividers, [], `${mode}: no dividers`)
+  }
+})
+
+test('projectLayout wide: a row split fills the box with a gap and one divider', () => {
+  const ws = twoPaneWs('right')     // layout: s? row a=p0 b=pNew
+  const [left, right] = paneModel.projectLayout(ws, 'wide', { w: 1000, h: 700 }).visibleLeaves
+  const proj = paneModel.projectLayout(ws, 'wide', { w: 1000, h: 700 })
+  const L = proj.rects[left]
+  const R = proj.rects[right]
+  assert.equal(L.x, paneModel.OUTER_MARGIN, 'left starts at the outer margin')
+  assert.equal(L.y, paneModel.OUTER_MARGIN)
+  assert.equal(L.h, 700 - 2 * paneModel.OUTER_MARGIN, 'full box height')
+  assert.equal(R.h, L.h)
+  assert.equal(R.x, L.x + L.w + paneModel.PANE_GAP, 'right sits a gap past the left')
+  assert.equal(
+    L.w + paneModel.PANE_GAP + R.w, 1000 - 2 * paneModel.OUTER_MARGIN,
+    'the two panes plus the gap fill the inset box',
+  )
+  assert.equal(proj.dividers.length, 1)
+  const d = proj.dividers[0]
+  assert.equal(d.dir, 'row')
+  assert.equal(d.x, L.x + L.w, 'divider sits in the gap at the left/right seam')
+  assert.equal(d.w, paneModel.PANE_GAP)
+  assert.equal(d.origin, L.x, 'origin is the split box axis start')
+  assert.equal(d.span, L.w + R.w, 'span is the usable axis length ratio maps over')
+})
+
+test('projectLayout wide: ratio drives the split fractions', () => {
+  const base = twoPaneWs('right')
+  const wide = paneModel.setRatio(base, base.layout.id, 0.7)
+  const proj = paneModel.projectLayout(wide, 'wide', { w: 1000, h: 700 })
+  const [left, right] = proj.visibleLeaves
+  const usable = proj.rects[left].w + proj.rects[right].w
+  assert.equal(proj.rects[left].w, Math.round(usable * 0.7), 'left takes ~70%')
+  assert.ok(Math.abs(proj.dividers[0].ratio - 0.7) < 1e-9, 'divider reports the effective ratio')
+})
+
+test('projectLayout wide: a depth-2 four-pane tree yields four rects and three dividers', () => {
+  const proj = paneModel.projectLayout(fourPaneWs('p1'), 'wide', { w: 1400, h: 900 })
+  assert.deepEqual(proj.visibleLeaves.sort(), ['p1', 'p2', 'p3', 'p4'])
+  assert.equal(Object.keys(proj.rects).length, 4)
+  assert.equal(proj.dividers.length, 3, 'one divider per split (s0 outer, s1 + s2 inner)')
+  const ids = proj.dividers.map(d => d.splitId).sort()
+  assert.deepEqual(ids, ['s0', 's1', 's2'])
+  // The inner col dividers span only their own column, not the whole width.
+  const outer = proj.dividers.find(d => d.splitId === 's0')
+  const inner = proj.dividers.find(d => d.splitId === 's1')
+  assert.equal(outer.dir, 'row')
+  assert.equal(inner.dir, 'col')
+  assert.ok(inner.w <= proj.rects.p1.w + 1, 'inner col divider spans its column width')
+})
+
+test('projectLayout wide: the render-time px clamp keeps both children usable', () => {
+  const skewed = paneModel.setRatio(twoPaneWs('right'), twoPaneWs('right').layout.id, 0.95)
+  const proj = paneModel.projectLayout(skewed, 'wide', { w: 640, h: 600 })
+  const [left, right] = proj.visibleLeaves
+  assert.ok(proj.rects[left].w >= paneModel.MIN_PANE_W, 'left clamped to the 280px minimum')
+  assert.ok(proj.rects[right].w >= paneModel.MIN_PANE_W, 'right clamped to the 280px minimum')
+  assert.ok(proj.dividers[0].ratio < 0.95, 'the stored 0.95 is clamped down at render')
+})
+
+test('projectLayout wide: a box too small for two minimums degrades to an even split', () => {
+  // usable = box.w - gap; box.w = w - 2*margin. Pick w so usable can not seat
+  // two 280px panes (hi < lo in clampRatio) → 0.5.
+  const proj = paneModel.projectLayout(twoPaneWs('right'), 'wide', { w: 523, h: 600 })
+  assert.equal(proj.dividers[0].ratio, 0.5, 'degenerate split falls back to 50/50')
+})
+
+test('projectLayout compact: a two-pane split shows the pair along the parent axis', () => {
+  const proj = paneModel.projectLayout(twoPaneWs('right'), 'compact', { w: 900, h: 600 })
+  assert.equal(proj.visibleLeaves.length, 2)
+  assert.equal(proj.dividers.length, 1, 'a compact pair renders along its own axis, so it has a divider')
+  assert.equal(proj.dividers[0].dir, 'row', 'a row parent lays the pair side by side')
+})
+
+test('projectLayout compact: a nested focused leaf pairs with its immediate sibling', () => {
+  // Focus p3 (in s2, the right column). Its immediate parent is s2; the sibling
+  // rep is p4. p1/p2 (the left column) are NOT shown.
+  const proj = paneModel.projectLayout(fourPaneWs('p3'), 'compact', { w: 900, h: 600 })
+  assert.deepEqual(proj.visibleLeaves, ['p3', 'p4'], 'focused leaf + its col sibling only')
+  assert.equal(proj.dividers[0].dir, 'col', 'their shared parent s2 is a col split')
+  assert.equal(proj.dividers[0].splitId, 's2')
+})
+
+test('projectLayout phone: the pair is always stacked; a row parent maps no divider', () => {
+  // A row-split pair on a phone renders stacked (col) at a fixed 50/50 with NO
+  // divider — the row ratio does not map to a vertical drag.
+  const proj = paneModel.projectLayout(twoPaneWs('right'), 'phone', { w: 420, h: 900 })
+  const [top, bottom] = proj.visibleLeaves
+  assert.equal(proj.dividers.length, 0, 'no divider for a row-parented phone pair')
+  assert.equal(proj.rects[top].w, proj.rects[bottom].w, 'stacked panes share the full width')
+  assert.equal(proj.rects[bottom].y, proj.rects[top].y + proj.rects[top].h + paneModel.PANE_GAP)
+  assert.ok(Math.abs(proj.rects[top].h - proj.rects[bottom].h) <= 1, 'a row parent stacks 50/50')
+})
+
+test('projectLayout phone: a col parent maps its ratio and keeps a divider', () => {
+  const colPair = paneModel.setRatio(twoPaneWs('bottom'), twoPaneWs('bottom').layout.id, 0.7)
+  const proj = paneModel.projectLayout(colPair, 'phone', { w: 420, h: 900 })
+  assert.equal(proj.dividers.length, 1, 'a col-parented phone pair renders along its axis')
+  assert.equal(proj.dividers[0].dir, 'col')
+  const [top, bottom] = proj.visibleLeaves
+  assert.ok(proj.rects[top].h > proj.rects[bottom].h, 'the 0.7 ratio is honored (top taller)')
+})
+
+test('projectLayout phone: a nested focused leaf still pairs with its sibling, stacked', () => {
+  const proj = paneModel.projectLayout(fourPaneWs('p3'), 'phone', { w: 420, h: 900 })
+  assert.deepEqual(proj.visibleLeaves, ['p3', 'p4'])
+  assert.equal(proj.rects.p3.x, proj.rects.p4.x, 'stacked — same x')
+  assert.equal(proj.dividers.length, 1, 's2 is a col split, so the stacked pair maps its ratio')
+})
+
+test('canSplit: mode edge restrictions (phone allows only top/bottom)', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  const big = { w: 1000, h: 700 }
+  for (const edge of ['left', 'right', 'top', 'bottom']) {
+    assert.equal(paneModel.canSplit(ws, 'p0', edge, 'wide', big), true, `wide allows ${edge}`)
+  }
+  assert.equal(paneModel.canSplit(ws, 'p0', 'left', 'phone', { w: 420, h: 900 }), false, 'phone forbids left')
+  assert.equal(paneModel.canSplit(ws, 'p0', 'right', 'phone', { w: 420, h: 900 }), false, 'phone forbids right')
+  assert.equal(paneModel.canSplit(ws, 'p0', 'top', 'phone', { w: 420, h: 900 }), true, 'phone allows top')
+  assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 420, h: 900 }), true, 'phone allows bottom')
+  assert.equal(paneModel.canSplit(ws, 'p0', 'diagonal', 'wide', big), false, 'a non-edge is never splittable')
+})
+
+test('canSplit: MAX_PANES and MAX_DEPTH bounds', () => {
+  const big = { w: 2000, h: 1400 }
+  // Four leaves already → no fifth pane.
+  assert.equal(paneModel.canSplit(fourPaneWs('p1'), 'p1', 'right', 'wide', big), false, 'a fifth pane is refused')
+
+  // Three leaves, a leaf at depth two → a split there would be depth three.
+  const three = paneModel.normalize({
+    v: 1,
+    layout: {
+      id: 's0', dir: 'row', ratio: 0.5, a: 'p1',
+      b: { id: 's1', dir: 'col', a: 'p2', b: 'p3', ratio: 0.5 },
+    },
+    panes: {
+      p1: { id: 'p1', tabs: [makeTab('chat', 'a')], activeTabKey: 'chat:a' },
+      p2: { id: 'p2', tabs: [makeTab('chat', 'b')], activeTabKey: 'chat:b' },
+      p3: { id: 'p3', tabs: [makeTab('chat', 'c')], activeTabKey: 'chat:c' },
+    },
+    focusedPaneId: 'p2',
+    nextId: 4,
+  })
+  assert.equal(paneModel.canSplit(three, 'p2', 'right', 'wide', big), false, 'a depth-three split is refused')
+  assert.equal(paneModel.canSplit(three, 'p1', 'top', 'wide', big), true, 'a depth-one leaf can still split')
+})
+
+test('canSplit: minimum pane size within the current projected rect', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  // A row split needs (w - gap)/2 ≥ 280 on each half; 560 is just under.
+  assert.equal(paneModel.canSplit(ws, 'p0', 'right', 'wide', { w: 560, h: 600 }), false,
+    'too narrow to seat two 280px columns')
+  // But a col split of the same rect works — height is ample.
+  assert.equal(paneModel.canSplit(ws, 'p0', 'top', 'wide', { w: 560, h: 600 }), true,
+    'a vertical split fits because each half clears 200px')
+  // A short rect fails the col split on height.
+  assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'wide', { w: 1000, h: 380 }), false,
+    'too short to seat two 200px rows')
+  assert.equal(paneModel.canSplit(ws, 'nope', 'right', 'wide', { w: 1000, h: 700 }), false,
+    'an unknown pane can not split')
+})
+
 test('flattenRollbackPriority keeps the focused active tab through legacy truncation', () => {
   // Two panes, eight tabs, focus on pB whose active tab is chat:f6.
   const ws = paneModel.normalize({

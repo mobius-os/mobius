@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  _anchorReapplyNeeded,
   _computeSpacerH,
   _pinReapplyNeeded,
   _scrollModeForDiagnostics,
@@ -350,6 +351,86 @@ test('pin reapply is idle when the pinned send is still at its target', () => {
   assert.equal(
     _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' }, 1000),
     false,
+  )
+})
+
+// A scroll element whose ANCHOR_AT target row is resolvable by data-key.
+function anchorScrollEl({ scrollHeight, scrollTop, clientHeight, offsetTop }) {
+  return {
+    scrollHeight,
+    scrollTop,
+    clientHeight,
+    querySelector(selector) {
+      return selector === '[data-key="k-1"]' ? { offsetTop } : null
+    },
+  }
+}
+
+test('anchor reapply fires when the anchor row shifted since the last apply', () => {
+  // The anchor's offsetTop moved (content grew above it) — the reader would
+  // otherwise drift off the message they were reading. This is the same
+  // offsetTop-shift case PIN repairs.
+  assert.equal(
+    _anchorReapplyNeeded(
+      anchorScrollEl({ scrollHeight: 2000, scrollTop: 300, clientHeight: 600, offsetTop: 360 }),
+      { kind: 'ANCHOR_AT', key: 'k-1', offset: 60 },
+      100, // last anchor top differs from the current 360
+    ),
+    true,
+  )
+})
+
+test('anchor reapply fires when scrollTop was clamped short but the target is now reachable', () => {
+  // target = 1000 - 40 = 960; maxScrollTop = 2000 - 700 = 1300 ≥ 960 reachable;
+  // scrollTop 500 < 960 → clamped short.
+  assert.equal(
+    _anchorReapplyNeeded(
+      { scrollHeight: 2000, scrollTop: 500, clientHeight: 700,
+        querySelector: (s) => s === '[data-key="k-1"]' ? { offsetTop: 1000 } : null },
+      { kind: 'ANCHOR_AT', key: 'k-1', offset: 40 },
+      1000, // unchanged offsetTop, so only the clamp drives it
+    ),
+    true,
+  )
+})
+
+test('anchor reapply waits until the target is reachable to avoid stepwise jitter', () => {
+  // maxScrollTop = 1500 - 700 = 800 < target 960 → NOT reachable → no re-apply
+  // (mirrors the pin: never re-clamp toward a still-growing layout).
+  assert.equal(
+    _anchorReapplyNeeded(
+      { scrollHeight: 1500, scrollTop: 500, clientHeight: 700,
+        querySelector: (s) => s === '[data-key="k-1"]' ? { offsetTop: 1000 } : null },
+      { kind: 'ANCHOR_AT', key: 'k-1', offset: 40 },
+      1000,
+    ),
+    false,
+  )
+})
+
+test('anchor reapply is idle when the anchor is settled at its target', () => {
+  // target = 1000 - 40 = 960; scrollTop = 960; offsetTop unchanged → no-op.
+  assert.equal(
+    _anchorReapplyNeeded(
+      { scrollHeight: 2000, scrollTop: 960, clientHeight: 700,
+        querySelector: (s) => s === '[data-key="k-1"]' ? { offsetTop: 1000 } : null },
+      { kind: 'ANCHOR_AT', key: 'k-1', offset: 40 },
+      1000,
+    ),
+    false,
+  )
+})
+
+test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
+  const el = anchorScrollEl({ scrollHeight: 2000, scrollTop: 300, clientHeight: 600, offsetTop: 360 })
+  assert.equal(_anchorReapplyNeeded(el, { kind: 'FOLLOW_BOTTOM' }, 100), false)
+  assert.equal(_anchorReapplyNeeded(null, { kind: 'ANCHOR_AT', key: 'k-1', offset: 0 }, 100), false)
+  assert.equal(
+    _anchorReapplyNeeded(
+      { scrollHeight: 2000, scrollTop: 0, clientHeight: 600, querySelector: () => null },
+      { kind: 'ANCHOR_AT', key: 'missing', offset: 0 }, 100,
+    ),
+    false, 'an unresolved anchor row never demands a re-apply',
   )
 })
 

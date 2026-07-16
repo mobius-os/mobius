@@ -289,6 +289,35 @@ export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
   return el.offsetTop !== lastPinTop || clampedShort || driftedPastTarget
 }
 
+/** Resolve the row an ANCHOR_AT mode targets: the element whose `data-key`
+ *  equals the mode's key. */
+function _anchorEl(scrollEl, key) {
+  if (!scrollEl || key == null) return null
+  const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key
+  return scrollEl.querySelector(`[data-key="${esc}"]`)
+}
+
+/** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
+ *  settled anchor drifts off its reader-chosen position when either the anchor
+ *  element's offsetTop SHIFTED (content grew above it) or scrollTop was CLAMPED
+ *  below / past the target and the target is now reachable again. Gating on
+ *  those conditions (never "every layout tick") keeps steady-state streaming
+ *  below the anchor a no-op, so the post-reveal repair this enables cannot
+ *  reintroduce the May-2026 re-apply-every-RO-firing jitter. Background panes
+ *  resize routinely once panes exist, which is why the anchor now needs the
+ *  clamp-repair PIN already had (design §2 prerequisite). */
+export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
+  if (!scrollEl || mode?.kind !== 'ANCHOR_AT') return false
+  const el = _anchorEl(scrollEl, mode.key)
+  if (!el) return false
+  const target = Math.max(0, el.offsetTop - mode.offset)
+  const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
+  const targetReachable = maxScrollTop >= target - 1
+  const clampedShort = scrollEl.scrollTop < target - 1 && targetReachable
+  const driftedPastTarget = scrollEl.scrollTop > target + 1 && targetReachable
+  return el.offsetTop !== lastAnchorTop || clampedShort || driftedPastTarget
+}
+
 
 /** Validates a saved ScrollMode against current state. A valid reader anchor
  * is exact. With no resolvable location, show the latest real content once as
@@ -729,6 +758,19 @@ export default function useScrollMode({
   // finished loading, an error/question card rendered), which the identity
   // gate above otherwise misses. Stays null when no pin is active.
   const lastPinTopRef = useRef(null)
+  // The ANCHOR_AT twin of lastPinTopRef — the anchor element's offsetTop at the
+  // last apply, so the post-reveal anchor clamp-repair only fires on a real
+  // shift/clamp (design §2). Null when no anchor is active.
+  const lastAnchorTopRef = useRef(null)
+  // A pane-geometry resize (divider commit, projection/mode flip, rotation)
+  // hands its projected CONTENT height here; sizeSpacer consumes it under the
+  // reader-ownership gate so the (possibly LOWER) floor rides the same deferred
+  // pass as the spacer mutation. Null except in-flight.
+  const pendingPaneHeightRef = useRef(null)
+  // Set inside the layout effect to the live pane-resize runner; the returned
+  // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
+  // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
+  const paneResizeRunRef = useRef(null)
   // Tracks physical tail position independently from modeRef. A stale
   // PIN_USER_MSG can survive after the reader manually returns to the bottom;
   // when the keyboard opens, visualViewport fires AFTER the viewport has
@@ -1061,6 +1103,20 @@ export default function useScrollMode({
       // while at the bottom, went to the middle not the top" bug. Grow-only: a
       // keyboard-OPEN shrink is ignored, so Chat-UX constraint #4 (keyboard
       // open/close must not resize the spacer) still holds.
+      //
+      // The ONE sanctioned lowering of the grow-only floor: a committed pane
+      // geometry change (divider/projection/rotation) delivers the layout-
+      // derived pane height through pendingPaneHeightRef, which may be SMALLER
+      // than the current floor (a narrower/shorter pane). Consume it here, under
+      // the same reader-ownership gate as every other write in this pass, before
+      // the grow-only clientHeight bump re-raises it if the real pane is taller.
+      // The visualViewport keyboard path never sets this ref, so its floor stays
+      // strictly grow-only (design §2).
+      if (pendingPaneHeightRef.current != null && layoutOwnsScroll()) {
+        const ph = pendingPaneHeightRef.current
+        if (Number.isFinite(ph) && ph > 0) fullViewHRef.current = ph
+        pendingPaneHeightRef.current = null
+      }
       if (scrollEl.clientHeight > fullViewHRef.current) {
         fullViewHRef.current = scrollEl.clientHeight
       }
@@ -1102,13 +1158,19 @@ export default function useScrollMode({
       if (modeRef.current !== lastAppliedModeRef.current) {
         writeMode(scrollEl, modeRef.current, 'layout:mode-transition')
         lastAppliedModeRef.current = modeRef.current
-        // Record the pin baseline (or clear it) so the RO's re-pin-on-shift
-        // check below has a reference offsetTop for this pin.
+        // Record the pin/anchor baseline (or clear both) so the RO's
+        // re-apply-on-shift checks below have a reference offsetTop.
         if (modeRef.current.kind === 'PIN_USER_MSG') {
           const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
           lastPinTopRef.current = el ? el.offsetTop : null
+          lastAnchorTopRef.current = null
+        } else if (modeRef.current.kind === 'ANCHOR_AT') {
+          const el = _anchorEl(scrollEl, modeRef.current.key)
+          lastAnchorTopRef.current = el ? el.offsetTop : null
+          lastPinTopRef.current = null
         } else {
           lastPinTopRef.current = null
+          lastAnchorTopRef.current = null
         }
       }
     }
@@ -1120,6 +1182,20 @@ export default function useScrollMode({
       writeMode(scrollEl, modeRef.current, 'layout:repair-pin')
       const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
       lastPinTopRef.current = el ? el.offsetTop : null
+      lastAppliedModeRef.current = modeRef.current
+      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+    }
+
+    // The ANCHOR_AT twin of settlePinnedMode — the post-reveal clamp-repair.
+    // Re-applies only when _anchorReapplyNeeded says the anchor shifted or was
+    // clamped (never every firing), so it does not fight the reader or jitter.
+    function settleAnchoredMode() {
+      if (!_anchorReapplyNeeded(scrollEl, modeRef.current, lastAnchorTopRef.current)) {
+        return
+      }
+      writeMode(scrollEl, modeRef.current, 'layout:repair-anchor')
+      const el = _anchorEl(scrollEl, modeRef.current.key)
+      lastAnchorTopRef.current = el ? el.offsetTop : null
       lastAppliedModeRef.current = modeRef.current
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
@@ -1169,6 +1245,44 @@ export default function useScrollMode({
     }
     syncLayout()
 
+    // The scrollApi.paneResized(projectedHeightPx) contract (design §2,
+    // constraint 1). Shell calls this on COMMITTED pane-geometry changes for a
+    // MOUNTED chat — divider pointerup, projection/mode flip, pane open/close
+    // affecting this chat, rotation — with the pane's new projected CONTENT
+    // height (the LAYOUT-derived height, never scrollEl.clientHeight, so a
+    // keyboard-shrunk viewport can not stick the floor). It lowers the grow-only
+    // floor to that height and re-applies the active mode: FOLLOW_BOTTOM snaps
+    // the tail, PIN_USER_MSG re-pins, ANCHOR_AT re-anchors. The whole pass
+    // respects the reader-gesture ownership gate (R5): while a reader gesture
+    // owns scroll, it DEFERS everything (the floor lowering is applied by
+    // sizeSpacer only under the gate) and the reader-yield replay runs it. The
+    // visualViewport keyboard path must never call this — divider/projection
+    // shrink and keyboard shrink stay structurally separate.
+    function runPaneResize(projectedHeightPx) {
+      pendingPaneHeightRef.current =
+        (Number.isFinite(projectedHeightPx) && projectedHeightPx > 0)
+          ? projectedHeightPx
+          : pendingPaneHeightRef.current
+      if (!layoutOwnsScroll()) {
+        // Defer the floor lowering, spacer mutation, and mode re-apply as one
+        // replayable pass; the deferred syncLayout({forceApply}) consumes the
+        // pending height and re-applies the current mode when ownership yields.
+        deferLayoutUntilReaderYields()
+        return
+      }
+      sizeSpacer()
+      const k = modeRef.current.kind
+      if (k === 'FOLLOW_BOTTOM') {
+        writeMode(scrollEl, modeRef.current, 'pane:resize-follow')
+        nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+      } else if (k === 'PIN_USER_MSG') {
+        settlePinnedMode()
+      } else if (k === 'ANCHOR_AT') {
+        settleAnchoredMode()
+      }
+    }
+    paneResizeRunRef.current = runPaneResize
+
     // Reveal only from trusted idle cache or after authoritative history/first
     // catch-up, once current image frames settle and layout stays quiet for
     // 50ms. REVEAL_CAP_MS remains the escape hatch for a request that stalls.
@@ -1204,15 +1318,17 @@ export default function useScrollMode({
     // Re-applies content-tracking modes:
     //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
     //                   glued to the tail.
-    //   ANCHOR_AT     — only during the reveal window (before the
-    //                   chat becomes visible). Lazy renderers (KaTeX,
-    //                   highlight.js, markdown re-wrap) settle in the
-    //                   first ~1s and shift the anchor's offsetTop;
-    //                   re-anchoring keeps the saved position accurate
-    //                   on chat restore. After reveal, re-applying
-    //                   ANCHOR_AT would cause the May 2026 mid-stream
-    //                   jitter so we stop.
-    //   PIN_USER_MSG  — never re-applied; same jitter risk.
+    //   ANCHOR_AT     — during the reveal window, re-applied every firing
+    //                   (lazy renderers — KaTeX, highlight.js, markdown
+    //                   re-wrap — settle in the first ~1s and shift the
+    //                   anchor's offsetTop; re-anchoring keeps the saved
+    //                   position accurate on restore). AFTER reveal it gets the
+    //                   same conditional two-case clamp-repair PIN has
+    //                   (settleAnchoredMode) — a divider/projection resize can
+    //                   clamp a background pane's anchor, so it must be repaired
+    //                   — but only on a real shift/clamp, never every firing.
+    //   PIN_USER_MSG  — conditional two-case repair only (settlePinnedMode);
+    //                   never re-applied unconditionally (jitter risk).
     //
     const ro = new ResizeObserver(() => {
       if (scrollEl.clientHeight > fullViewHRef.current) {
@@ -1266,6 +1382,16 @@ export default function useScrollMode({
         // target means we re-pin exactly once, when the settled layout
         // can actually hold the message at the top.
         settlePinnedMode()
+      } else if (k === 'ANCHOR_AT' && mayWriteScroll) {
+        // POST-REVEAL ANCHOR_AT repair (the pre-reveal case is handled by the
+        // first branch above). Background panes resize routinely once panes
+        // exist (design §2 prerequisite), and a settled anchor deserves the
+        // SAME two-case repair PIN just got: re-apply only when the anchor's
+        // offsetTop shifted or scrollTop was clamped and the target is reachable
+        // again. _anchorReapplyNeeded gates it exactly like the pin, so
+        // steady-state streaming below the anchor stays a no-op — no May-2026
+        // jitter, no fight with the reader (whose first scroll flips the mode).
+        settleAnchoredMode()
       }
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
@@ -1409,6 +1535,7 @@ export default function useScrollMode({
       }
       mountMutationObserver?.disconnect()
       ro.disconnect()
+      if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)
       scrollEl.removeEventListener('touchstart', onUserInput)
@@ -1554,6 +1681,15 @@ export default function useScrollMode({
     writeMode,
   ])
 
+  // Shell calls this on committed pane-geometry changes for a mounted chat
+  // (design §2). A stable identity is required — ChatView wires it to a
+  // prop-change effect. Forwards to the live in-effect runner; no-op before the
+  // scroll DOM mounts (single-pane chats never call it).
+  const paneResized = useCallback((projectedHeightPx) => {
+    const run = paneResizeRunRef.current
+    if (run) run(projectedHeightPx)
+  }, [])
+
   return {
     modeRef,
     gestureWindowUntilRef,
@@ -1568,5 +1704,6 @@ export default function useScrollMode({
     reapplyActiveMode,
     settleNonPin,
     settleStreamingPin,
+    paneResized,
   }
 }

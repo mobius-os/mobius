@@ -16,11 +16,11 @@ import {
   isCacheableOpaqueEmbedDocument,
   isImmutableAppAsset,
   isPackagedAppAsset,
-  isPublicAppModulePath,
+  isOpaqueFramePublicAssetPath,
   packagedAppAssetCacheKey,
   isStaleRuntimeCache,
   supersededVersionKeys,
-  withPublicAppImportCors,
+  withOpaqueFramePublicAssetCors,
 } from '../../sw-cache-policy.js'
 
 test('runtime cache cleanup keeps current cache names', () => {
@@ -45,19 +45,22 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
 })
 
-test('only public app imports cross the opaque app-frame origin', () => {
-  assert.equal(isPublicAppModulePath('/vendor/react@19.2.7/react.mjs'), true)
-  assert.equal(isPublicAppModulePath('/mobius-runtime.js'), true)
-  assert.equal(isPublicAppModulePath('/vendorfoo/module.mjs'), false)
-  assert.equal(isPublicAppModulePath('/assets/index.js'), false)
+test('only public executable assets cross the opaque app-frame origin', () => {
+  assert.equal(isOpaqueFramePublicAssetPath('/vendor/react@19.2.7/react.mjs'), true)
+  assert.equal(isOpaqueFramePublicAssetPath('/mobius-runtime.js'), true)
+  assert.equal(isOpaqueFramePublicAssetPath('/assets/index-abc.js'), true)
+  assert.equal(isOpaqueFramePublicAssetPath('/assets/index-abc.css'), true)
+  assert.equal(isOpaqueFramePublicAssetPath('/vendorfoo/module.mjs'), false)
+  assert.equal(isOpaqueFramePublicAssetPath('/assetsfoo/index.js'), false)
+  assert.equal(isOpaqueFramePublicAssetPath('/icons/icon-192.png'), false)
 })
 
-test('cached public app imports are readable from opaque app frames', async () => {
+test('cached public assets are readable from opaque app frames', async () => {
   const original = new Response('export default 1', {
     status: 200,
     headers: { 'Content-Type': 'text/javascript' },
   })
-  const repaired = withPublicAppImportCors(original)
+  const repaired = withOpaqueFramePublicAssetCors(original)
   assert.notEqual(repaired, original)
   assert.equal(repaired.headers.get('access-control-allow-origin'), '*')
   assert.equal(await repaired.text(), 'export default 1')
@@ -65,8 +68,8 @@ test('cached public app imports are readable from opaque app frames', async () =
   const alreadyReadable = new Response('ok', {
     headers: { 'Access-Control-Allow-Origin': '*' },
   })
-  assert.equal(withPublicAppImportCors(alreadyReadable), alreadyReadable)
-  assert.equal(withPublicAppImportCors(null), null)
+  assert.equal(withOpaqueFramePublicAssetCors(alreadyReadable), alreadyReadable)
+  assert.equal(withOpaqueFramePublicAssetCors(null), null)
 })
 
 test('hashed packaged-app asset names are immutable', () => {

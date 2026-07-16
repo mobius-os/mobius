@@ -14,6 +14,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const APP_ID = 990001
@@ -94,9 +95,16 @@ async function measure(page) {
 }
 
 async function seedTabs(page, tabs) {
-  await page.addInitScript(([key, t]) => {
-    try { sessionStorage.setItem(key, JSON.stringify(t)) } catch { /* private mode */ }
-  }, ['mobius-open-tabs', tabs])
+  const workspace = paneModel.serializeWorkspace(paneModel.seedFromFlatTabs(tabs))
+  await page.addInitScript(([workspaceKey, workspaceRaw, legacyKey, t]) => {
+    try {
+      // Match the shell's dual-write persistence contract. The versioned
+      // workspace is authoritative; the flat key only supports one-release
+      // rollback and may already contain an older projection.
+      sessionStorage.setItem(workspaceKey, workspaceRaw)
+      sessionStorage.setItem(legacyKey, JSON.stringify(t))
+    } catch { /* private mode */ }
+  }, [paneModel.STORAGE_KEY, workspace, 'mobius-open-tabs', tabs])
 }
 
 test.describe('Tabs', () => {

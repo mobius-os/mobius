@@ -1,0 +1,221 @@
+/* Multi-pane workspace chrome (design §2). All theme-var based, matching the
+   shell conventions. This stylesheet only styles the tiled (≥2 visible leaves)
+   presentation — a single-pane workspace renders today's DOM verbatim (Shell's
+   parity branch) and never touches any class here. */
+
+/* A content wrapper (app iframe or PaneChatView) that is the active tab of a
+   VISIBLE pane. Shell writes its rect inline (top/left/width/height from the
+   pane's content rect); this clears the base `.shell__view` inset:0 so the
+   inline width/height win, and makes it visible + interactive. Everything else
+   keeps the full-bleed hidden pattern. */
+.shell__view--paned {
+  right: auto;
+  bottom: auto;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* The chrome layer — sibling after the content wrappers, over the whole content
+   box, transparent to pointers except its own interactive children. */
+.workspace__chrome {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* Per-pane tab strip. Reuses .shell__tabstrip (flex row, horizontal tab
+   overflow, hairline, bg, and — importantly — its coarse-pointer scrollbar
+   hiding) but positioned absolutely into the pane's strip row. */
+.workspace__strip {
+  position: absolute;
+  pointer-events: auto;
+  border-radius: 8px 8px 0 0;
+}
+
+/* The focused pane's strip gets a slightly stronger seam so keyboard/Back
+   affinity is visible even before the ring is noticed. */
+.workspace__strip--focused {
+  border-bottom-color: color-mix(in srgb, var(--accent) 55%, var(--border-light));
+}
+
+/* A 1px accent ring on the focused pane (design §2). Non-interactive; sits
+   above content but below the strips/dividers it shares the layer with. */
+.workspace__focus-ring {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 9px;
+  z-index: 2;
+}
+
+/* Divider: a 44px hit target with a 1px hairline centered in it that thickens
+   to a 3px accent bar on hover/focus (design §2). touch-action:none so a touch
+   drag resizes instead of scrolling (the makeSplit wiring). */
+.workspace__divider {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 4;
+}
+.workspace__divider--v { cursor: col-resize; }
+.workspace__divider--h { cursor: row-resize; }
+.workspace__divider:focus-visible { outline: none; }
+
+.workspace__divider-bar {
+  background: var(--border-light);
+  border-radius: 2px;
+  transition: background 120ms ease, width 120ms ease, height 120ms ease;
+}
+.workspace__divider--v .workspace__divider-bar { width: 1px; height: 100%; }
+.workspace__divider--h .workspace__divider-bar { height: 1px; width: 100%; }
+
+.workspace__divider--v:hover .workspace__divider-bar,
+.workspace__divider--v:focus-visible .workspace__divider-bar { width: 3px; }
+.workspace__divider--h:hover .workspace__divider-bar,
+.workspace__divider--h:focus-visible .workspace__divider-bar { height: 3px; }
+.workspace__divider:hover .workspace__divider-bar,
+.workspace__divider:focus-visible .workspace__divider-bar {
+  background: var(--accent);
+}
+
+/* Phone/compact overflow chip — opens the pane switcher sheet. */
+.workspace__pane-chip {
+  position: absolute;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg) 88%, var(--text) 6%);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 5;
+  -webkit-tap-highlight-color: transparent;
+}
+.workspace__pane-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Bottom sheet: pane switcher. */
+.workspace__sheet-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  background: color-mix(in srgb, #000 40%, transparent);
+  display: flex;
+  align-items: flex-end;
+  z-index: 6;
+}
+.workspace__sheet {
+  width: 100%;
+  max-height: 60%;
+  overflow-y: auto;
+  background: var(--bg);
+  border-top: 1px solid var(--border-light);
+  border-radius: 16px 16px 0 0;
+  padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  /* Match the shell's named scrollers: coarse pointers must not render a
+     persistent scrollbar track (Chromium Android). */
+  scrollbar-width: none;
+  animation: workspace-sheet-in 180ms ease-out;
+}
+.workspace__sheet::-webkit-scrollbar { width: 0; height: 0; }
+
+@keyframes workspace-sheet-in {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.workspace__sheet-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 8px 8px;
+}
+.workspace__sheet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 10px;
+  padding: 12px;
+  border: none;
+  background: none;
+  border-radius: 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+.workspace__sheet-row--visible {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+}
+.workspace__sheet-row-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workspace__sheet-row-count {
+  flex-shrink: 0;
+  min-width: 20px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--bg) 80%, var(--text) 8%);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+/* Tab context menu — the split path. Fixed at the pointer. */
+.workspace__menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 168px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border-light);
+  background: var(--bg);
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 28%, transparent);
+  /* No persistent scrollbar track on coarse pointers, matching the shell. */
+  scrollbar-width: none;
+}
+.workspace__menu::-webkit-scrollbar { width: 0; height: 0; }
+.workspace__menu-item {
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.workspace__menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+}
+.workspace__menu-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace__sheet { animation: none; }
+  .workspace__divider-bar { transition: none; }
+}
