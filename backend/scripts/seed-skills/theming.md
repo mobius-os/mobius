@@ -38,12 +38,16 @@ curl -s "$API_BASE_URL/api/storage/shared/theme.css" -H "Authorization: Bearer $
 
 Check `/data/shared/theme-mode` for `"light"` / `"dark"`. Make CSS work in both modes by using the standard variables (`--bg`, `--surface`, `--text`, `--accent`, `--border`, `--danger`, `--green`, `--font`, `--mono`, …) rather than hardcoded colors.
 
-**Before overwriting `theme.css`, snapshot for a named undo.** The server auto-snapshots the prior `theme.css` to `theme.css.bak-<unix-ts>` on every overwrite, and `?reset-theme=1` (or the recovery page) rolls back a theme that breaks the UI — so a revert path always exists. Still snapshot first for your own undo:
+**Before overwriting `theme.css`, snapshot for a named undo.** The server auto-snapshots the prior `theme.css` to `theme.css.bak-<unix-ts>` on every overwrite, and `?reset-theme=1` (or the recovery page) rolls back a theme that breaks the UI — so a revert path always exists. Still snapshot first for your own undo, and keep that backup under persistent `/data/shared`; `/tmp` is cleared on restart:
 
 ```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/storage/shared/theme.css" \
-  > "/tmp/theme.backup.$(date +%s).css"
+theme_backup="/data/shared/theme.css.bak-agent-$(date +%s)"
+cp -- /data/shared/theme.css "$theme_backup"
 ```
+
+To return to the built-in theme, use `POST /api/theme/reset`, `/?reset-theme=1`, or the recovery page. Do not treat truncating `theme.css` as a complete visual reset: the current document can retain injected variables or an inline body background until the supported reset path removes the override and the shell reloads.
+
+Keep experimental overlays bounded and cheap. Full-viewport animated gradients and blend modes can obscure content or consume substantial CPU even when a screenshot looks fine. Exercise animation, scrolling, and hover behavior for 10–15 seconds, and provide a `prefers-reduced-motion` fallback for every non-essential animation.
 
 ---
 
