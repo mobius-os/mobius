@@ -3785,6 +3785,7 @@ export default function ChatView({
                   classes borrow its shimmer rule; .chat__thinking survives
                   for the e2e presence probe. */}
               <div className="chat__thinking chat__activity chat__activity--running">
+                <span className="chat__activity-icon chat__activity-icon--spacer" aria-hidden="true" />
                 <span className="chat__activity-label">
                   <span className="chat__activity-label-text">Thinking</span>
                   <span className="chat__activity-label-sweep" aria-hidden="true">Thinking</span>

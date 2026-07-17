@@ -1005,6 +1005,13 @@
   color: var(--muted); /* CONTRACT: low-contrast status glyph */
 }
 
+/* No-icon lines (thinking / thought) reserve the icon column so their label
+   aligns with the icon-bearing lines instead of jutting ~19px left. Matches
+   the 13px glyph; the header's 6px gap supplies the rest. */
+.chat__activity-icon--spacer {
+  width: 13px;
+}
+
 .chat__activity--error .chat__activity-icon {
   color: var(--danger); /* CONTRACT: vivid danger — a step in the stretch failed */
 }
@@ -1065,13 +1072,18 @@
   .chat__activity--running .chat__activity-label-sweep { display: none !important; }
 }
 
-/* The band crosses in the first ~42% of the cycle (~1s), then holds off the
-   text for the remainder — both endpoints park it past the glyphs so the
-   loop's snap from end to start is invisible. Only mask-position animates. */
+/* The band crosses in the first ~42% of the cycle (~1s), then rests fully
+   OFF the text for the remainder (muted line, no visible band) before the
+   next pass. The end position (-50%) is past the point where the band clears
+   the right edge (~-40%, measured) — an earlier -20% left it parked bright on
+   the last glyphs through the whole rest, so the band appeared to "stay at the
+   finish then disappear" at the loop (owner report, 2026-07-17). Both endpoints
+   now sit off the glyphs, so the loop's snap is invisible. Only mask-position
+   animates. */
 @keyframes chat-cadenced-mask {
   0% { -webkit-mask-position: 120% 0; mask-position: 120% 0; }
-  42% { -webkit-mask-position: -20% 0; mask-position: -20% 0; }
-  100% { -webkit-mask-position: -20% 0; mask-position: -20% 0; }
+  42% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
+  100% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
 }
 
 .chat__activity-chip {

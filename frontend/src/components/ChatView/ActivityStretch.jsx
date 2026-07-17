@@ -209,9 +209,12 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
             <ActivityTypeIcon kind={leadToolIcon} />
           </span>
         ) : (
-          // Thinking-only: no icon at all — a bare shimmering "Thinking"
-          // live, a bare "Thought for Ns" settled.
-          null
+          // Thinking-only: no VISIBLE icon (a bare shimmering "Thinking" live,
+          // "Thought for Ns" settled), but reserve the icon column so the
+          // label's left edge aligns with the icon-bearing lines — otherwise
+          // the bare lines sit ~19px further left than every tool line (owner
+          // report, 2026-07-17).
+          <span className="chat__activity-icon chat__activity-icon--spacer" aria-hidden="true" />
         )}
         <span className="chat__activity-label">
           <span className="chat__activity-label-text">{text}</span>
