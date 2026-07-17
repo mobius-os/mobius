@@ -825,10 +825,24 @@ export default function Shell() {
     }
   }, [visibleAppIds])
 
+  // Id → row Maps, rebuilt only when the chat/app lists change. labelForTab and
+  // the single-pane strip previously ran a linear chats.find/apps.find PER tab
+  // PER render — thousands of scans on an instance with hundreds of chats and a
+  // 3-4 pane strip (finding: labelForTab O(tabs × chats/apps)). One O(1) lookup.
+  const chatById = useMemo(() => {
+    const m = new Map()
+    for (const c of chats) m.set(String(c.id), c)
+    return m
+  }, [chats])
+  const appById = useMemo(() => {
+    const m = new Map()
+    for (const a of apps) m.set(String(a.id), a)
+    return m
+  }, [apps])
   const labelForTab = useCallback((tab) => {
-    if (tab.kind === 'chat') return chats.find(c => String(c.id) === tab.id)?.title || 'Chat'
-    return apps.find(a => String(a.id) === tab.id)?.name || 'App'
-  }, [chats, apps])
+    if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
+    return appById.get(tab.id)?.name || 'App'
+  }, [chatById, appById])
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
@@ -2438,9 +2452,7 @@ export default function Shell() {
             const isChat = tab.kind === 'chat'
             // Label resolution is the shell's job (it holds the live lists);
             // identity, active-ness, and the nav target are the tab model's.
-            const meta = isChat
-              ? chats.find(c => String(c.id) === tab.id)
-              : apps.find(a => String(a.id) === tab.id)
+            const meta = isChat ? chatById.get(tab.id) : appById.get(tab.id)
             const label = isChat ? (meta?.title || 'Chat') : (meta?.name || 'App')
             const active = tabModel.isTabActive(tab, {
               view: activeView, chatId: activeChatId, appId: activeAppId,

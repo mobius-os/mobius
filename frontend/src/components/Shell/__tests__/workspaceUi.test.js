@@ -141,3 +141,16 @@ test('the context menu offers Close pane when another pane can absorb the space'
   assert.match(shell, /type: 'CLOSE_PANE', paneId: tabMenu\.paneId/)
   assert.match(shell, /Close pane/)
 })
+
+test('tab labels resolve through memoized id Maps, not per-render linear scans', () => {
+  // labelForTab and the single-pane strip use O(1) Map lookups keyed by id.
+  assert.match(shell, /const chatById = useMemo/)
+  assert.match(shell, /const appById = useMemo/)
+  assert.match(shell, /chatById\.get\(tab\.id\)/)
+  assert.doesNotMatch(shell, /chats\.find\(c => String\(c\.id\) === tab\.id\)/)
+})
+
+test('the divider and drag paths coalesce their per-move work into a rAF', () => {
+  assert.match(chrome, /rafId = requestAnimationFrame\(\(\) => \{ rafId = 0; paint/)
+  assert.match(dragBinding, /moveRAF = requestAnimationFrame\(doMoveWork\)/)
+})

@@ -245,7 +245,18 @@ export default function WorkspaceChrome({
     }
 
     let finished = false
-    const onMove = (ev) => paint(ev.clientX, ev.clientY)
+    let rafId = 0
+    let lastX = 0
+    let lastY = 0
+    // rAF-coalesce the imperative repaint: a pointermove can fire several times
+    // per frame, and each paint re-projects and resizes BOTH panes' live chat/app
+    // wrappers. One paint per frame keeps a mid-range phone smooth.
+    const onMove = (ev) => {
+      lastX = ev.clientX
+      lastY = ev.clientY
+      if (rafId) return
+      rafId = requestAnimationFrame(() => { rafId = 0; paint(lastX, lastY) })
+    }
     // Teardown is bound to WINDOW (not the divider handle) and also runs on
     // lostpointercapture/blur: an out-of-band tree change — a chat/app delete or
     // an incoming agent placement — can unmount THIS split's handle mid-drag, and
@@ -257,6 +268,7 @@ export default function WorkspaceChrome({
     const end = () => {
       if (finished) return
       finished = true
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0 }
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', end)
