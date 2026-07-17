@@ -277,12 +277,15 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.locator('.workspace__divider').focus()
     await page.keyboard.press('ArrowRight')
     await page.keyboard.press('ArrowRight')
+    // Keyboard divider steps bloom over 180ms (unlike pointer drags, which
+    // suppress the transition), so wait past the animation before sampling.
     await page.evaluate(() => new Promise(r =>
-      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120)))))
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 250)))))
     expect(await rememberedChatRootIsCurrent(page), 'no remount across resize').toBe(true)
     const afterResize = await rememberedChatScroll(page)
     expect(afterResize, 'chat A scroller present after resize').not.toBeNull()
-    expect(afterResize.nearBottom, 'still following after resize').toBe(true)
+    await expect.poll(async () => (await rememberedChatScroll(page)).nearBottom,
+      { message: 'still following after resize' }).toBe(true)
 
     // 2) Cross-pane move of chat A itself (p0 collapses to a single pane; the
     //    ChatView must not remount and FOLLOW must re-apply).

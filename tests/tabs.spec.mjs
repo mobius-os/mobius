@@ -225,12 +225,16 @@ test.describe('Tabs', () => {
 
     await expect(page.locator('.workspace__strip')).toHaveCount(2)
     await expect(page.locator('.shell__view--paned')).toHaveCount(2)
-    const rects = await page.locator('.shell__view--paned').evaluateAll(nodes => nodes.map(node => {
-      const r = node.getBoundingClientRect()
-      return { x: r.x, y: r.y, w: r.width, h: r.height }
-    }))
-    expect(rects.every(r => r.w >= 280 && r.h >= 200)).toBe(true)
-    expect(Math.abs(rects[0].x - rects[1].x)).toBeGreaterThan(100)
+    // Layout commits animate over 180ms (the pane bloom), so geometry must be
+    // polled until it settles rather than read on the first post-click frame.
+    await expect.poll(async () => {
+      const rects = await page.locator('.shell__view--paned').evaluateAll(nodes => nodes.map(node => {
+        const r = node.getBoundingClientRect()
+        return { x: r.x, y: r.y, w: r.width, h: r.height }
+      }))
+      return rects.every(r => r.w >= 280 && r.h >= 200)
+        && Math.abs(rects[0].x - rects[1].x) > 100
+    }).toBe(true)
 
     // Native chat content focuses its pane through wrapper capture.
     await page.locator('.chat').dispatchEvent('pointerdown')
