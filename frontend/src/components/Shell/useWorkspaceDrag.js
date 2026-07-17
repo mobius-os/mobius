@@ -302,6 +302,27 @@ export default function useWorkspaceDrag({
         autoRAF = requestAnimationFrame(autoStep)
       }
 
+      // The per-frame drag work (chip follow, hit-test, preview, auto-scroll) is
+      // rAF-coalesced: a pointermove fires several times per frame, and each pass
+      // writes the fixed chip, forces a layout read (contentBox), allocates a
+      // fresh hit-test result, and writes preview styles. Batching to one pass per
+      // frame drops the forced-reflow + GC churn to at most one per frame.
+      let moveRAF = 0
+      const doMoveWork = () => {
+        moveRAF = 0
+        if (!armed || cleaned) return
+        const { x: cx, y: cy } = lastPoint
+        positionChip(cx, cy, isTouch, key)
+        // While the drawer still covers the panes, show no preview (the glide-close
+        // crossing is handled synchronously in onMove).
+        if (sourceKind === 'drawer' && drawerOpenRef.current) {
+          curZone = null; renderPreview(null); stopAutoScroll(); return
+        }
+        updateAutoScroll(cx, cy)
+        const next = hitTest(toLocal(cx, cy), scene, curZone)
+        renderPreview(next)
+        curZone = next
+      }
       const onMove = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
         lastPoint = { x: ev.clientX, y: ev.clientY }
@@ -316,20 +337,15 @@ export default function useWorkspaceDrag({
           if (!armed) return
         }
         ev.preventDefault?.()
-        positionChip(ev.clientX, ev.clientY, isTouch, key)
-
-        // Drawer drag-out: while the drawer still covers the panes, nothing
-        // arms; crossing 24px past its inner edge glides it closed and reveals
-        // the drop zones underneath (design §3.1).
-        if (sourceKind === 'drawer' && drawerEdgeX != null) {
-          if (!glided && crossedDrawerExit(ev.clientX, drawerEdgeX)) { glided = true; closeDrawer?.() }
-          if (drawerOpenRef.current) { curZone = null; renderPreview(null); stopAutoScroll(); return }
+        // Drawer drag-out glide-close must fire SYNCHRONOUSLY (it dispatches
+        // closeDrawer and stands the OS gesture down); the heavy hit-test/preview
+        // work is deferred to the coalesced rAF pass above (design §3.1).
+        if (sourceKind === 'drawer' && drawerEdgeX != null && !glided
+            && crossedDrawerExit(ev.clientX, drawerEdgeX)) {
+          glided = true
+          closeDrawer?.()
         }
-
-        updateAutoScroll(ev.clientX, ev.clientY)
-        const next = hitTest(toLocal(ev.clientX, ev.clientY), scene, curZone)
-        renderPreview(next)
-        curZone = next
+        if (!moveRAF) moveRAF = requestAnimationFrame(doMoveWork)
       }
 
       // Re-derive the drop against a FRESH scene at the release point: geometry
@@ -398,6 +414,7 @@ export default function useWorkspaceDrag({
         if (cleaned) return
         cleaned = true
         clearTimeout(holdTimer)
+        if (moveRAF) { cancelAnimationFrame(moveRAF); moveRAF = 0 }
         stopAutoScroll()
         window.removeEventListener('pointermove', onMove, true)
         window.removeEventListener('pointerup', onUp, true)
