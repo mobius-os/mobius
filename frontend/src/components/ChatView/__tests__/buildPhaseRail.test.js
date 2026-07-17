@@ -74,25 +74,33 @@ test('railAtRunStart resets to the shared empty rail', () => {
   assert.equal(railAtRunStart(), EMPTY_BUILD_PHASE_RAIL)
 })
 
-test('build rail is the final footer status strip directly above the composer', () => {
+test('footer stacks connection → notices → rail → queued → composer', () => {
+  // Owner spec 2026-07-17: queued messages sit directly ON the composer (they
+  // are the input's extension — the next sends), the build rail directly
+  // above them, attention notices above that, and the connection/retry row
+  // tops the stack. Pinned as a source scan so a refactor can't silently
+  // reshuffle the foot.
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
   const composer = chatView.indexOf('<ChatInputBar', footStart)
   const foot = chatView.slice(footStart, composer)
   const rail = foot.indexOf('className="chat__build-rail"')
+  const queued = foot.indexOf('<QueuedMessages')
+  const connection = foot.indexOf('<ConnectionStatus')
 
-  assert.ok(footStart >= 0 && composer > footStart && rail >= 0,
-    'the footer, build rail, and composer must all be present')
+  assert.ok(footStart >= 0 && composer > footStart && rail >= 0 && queued >= 0,
+    'the footer, build rail, queued tray, and composer must all be present')
+  assert.ok(rail < queued, 'the build rail stacks above the queued tray')
   for (const notice of [
     'className="chat__open-app"',
     'className="chat__question-nudge"',
     'className="chat__resume-nudge"',
-    '<ConnectionStatus',
-    '<QueuedMessages',
   ]) {
     const noticeIndex = foot.indexOf(notice)
     assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
     assert.ok(noticeIndex < rail,
-      `${notice} must stack above the build rail, never between it and the composer`)
+      `${notice} must stack above the build rail`)
+    assert.ok(connection >= 0 && connection < noticeIndex,
+      'the connection/retry row tops the stack')
   }
 })
 

@@ -252,10 +252,13 @@ function MsgContentInner({
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.map((node, nodeIdx) => {
           if (node.group) {
-            // A stretch is LIVE only when it's the trailing node of the active
-            // answer's stream — the agent is working in it right now (spinner /
-            // thinking ticker). A settled stretch above the stream is not live and
-            // never re-renders on its own.
+            // A stretch is LIVE only when it's the trailing node of the
+            // active answer while the TURN is running — the agent is working
+            // in it right now (label shimmer). isStreaming here carries turn
+            // liveness, not payload-source choice: a DB partial shown through
+            // the reconnect catch-up window is still live (see ChatView's
+            // isStreaming prop). A settled stretch above the tail never
+            // re-renders on its own.
             const live = isActiveAnswer && isStreaming && nodeIdx === nodes.length - 1
             // Key the stretch by its FIRST entry (assistantBlockKey): a
             // thinking-first stretch keeps its thinking idx, a tool-first stretch
