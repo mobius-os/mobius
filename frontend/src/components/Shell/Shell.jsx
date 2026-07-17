@@ -61,6 +61,7 @@ import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
+import { deriveContentVisibility } from './workspaceView.js'
 
 // Resolves the service worker to post warm-up messages to. The page is
 // uncontrolled on its very first load (clientsClaim only takes over once
@@ -170,9 +171,6 @@ export default function Shell() {
     () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
     [workspace, workspaceMode, contentRect],
   )
-  // ≥2 visible leaves is the ONLY trigger for pane chrome; one leaf is today's
-  // shell exactly.
-  const multiPane = projection.visibleLeaves.length >= 2
   // The committed visible pane set the nav adapter reads. Settings-open is
   // applied separately inside isVisibleApp, so it is NOT excluded here.
   const visiblePaneIds = useMemo(() => new Set(projection.visibleLeaves), [projection])
@@ -198,7 +196,37 @@ export default function Shell() {
   // Settings is a full-workspace overlay (§9) — while it is up we suppress the
   // chrome and positioned rects (panes stay mounted but hidden).
   const settingsActive = activeView === 'settings'
-  const workspaceChromeActive = multiPane && !settingsActive
+
+  // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
+  // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
+  // full-viewport — only while that app is the active canvas of the FOCUSED
+  // pane, so switching to chat/settings/another app restores chrome
+  // automatically and switching back re-enters without a re-post. The request
+  // reaches us through AppCanvas, which verifies the message's event.source
+  // against its own iframe before forwarding — the ACTIVE-iframe-only guarantee
+  // lives there. Declared here (before the content-visibility derivation) so
+  // immersive can solo its pane over the whole workspace (§4/§9). Full contract:
+  // lib/immersive.js.
+  const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
+  // Stable identity — AppCanvas's message-listener effect depends on it.
+  const handleImmersive = useCallback((appId, value) => {
+    dispatchImmersive({ type: 'request', appId, value })
+  }, [])
+  const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
+
+  // The single derivation of what content the render paints and where (design
+  // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
+  // branches are unit-tested in workspaceView.test.js, and so one commit flips
+  // every dependent flag together.
+  const contentVisibility = useMemo(
+    () => deriveContentVisibility({
+      workspace, projection, settingsActive, immersiveActive, immersiveAppId,
+    }),
+    [workspace, projection, settingsActive, immersiveActive, immersiveAppId],
+  )
+  const { multiPane, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
+  const workspaceChromeActive = contentVisibility.chromeActive
+  const chatPanesVisible = contentVisibility.chatPanesVisible
   // navTo is a per-render function; stable callbacks (handleAppError, passed to
   // AppCanvas's []-dep message listener) reach the latest one through this ref
   // so their identity never churns and the listener never re-registers.
@@ -661,23 +689,13 @@ export default function Shell() {
     }
     return map
   }, [workspaceChromeActive, projection, workspace])
-  // The focused pane's active tab key (null under Settings). Drives the
-  // AppCanvas focused-pane-only `active` prop (insets + immersive holder).
-  const focusedActiveKey = settingsActive
-    ? null
-    : (workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null)
-  // The tabKey shown full-bleed in single-pane, non-settings mode. Null in
-  // multi-pane (positioned via visibleTabRects) or under Settings. This is what
-  // makes the derived triple, not a legacy global scalar, decide which single
-  // wrapper is visible (finding C).
-  const fullBleedKey = multiPane ? null : focusedActiveKey
-  // The string app ids that are the active tab of a visible pane (Settings
-  // overlays everything). Drives the AppCanvas `visible` prop + the pinned set
-  // of the synchronous iframe-cache derivation (design §2/§4).
-  const visibleAppIds = useMemo(
-    () => (settingsActive ? new Set() : paneModel.visibleAppIds(workspace, projection.visibleLeaves)),
-    [settingsActive, workspace, projection],
-  )
+  // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
+  // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
+  // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
+  // the single wrapper painted over the whole box (single-pane, or the immersive
+  // holder); visibleAppIds is the app set that paints + stays frame-visible
+  // (Settings hides all; immersive solos the holder so every sibling frame goes
+  // visibility:false).
   // The chat ids that are the active tab of a visible pane — membership, not
   // equality with one global id, is what a pane-aware attention/repair rule
   // tests (design §2 M13, finding D-iii).
@@ -1131,21 +1149,6 @@ export default function Shell() {
   useEffect(() => {
     for (const id of visibleAppIds) clearAppAttention(Number(id))
   }, [visibleAppIds, clearAppAttention])
-
-  // Immersive mode (moebius:immersive, .pm/128). The state is the id of
-  // the app holding an immersive request (or null); it's APPLIED — bar
-  // hidden, canvas full-viewport — only while that app is the active
-  // canvas, so switching to chat/settings/another app restores chrome
-  // automatically and switching back re-enters without a re-post. The
-  // request reaches us through AppCanvas, which verifies the message's
-  // event.source against its own iframe before forwarding — the ACTIVE-
-  // iframe-only guarantee lives there. Full contract: lib/immersive.js.
-  const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
-  // Stable identity — AppCanvas's message-listener effect depends on it.
-  const handleImmersive = useCallback((appId, value) => {
-    dispatchImmersive({ type: 'request', appId, value })
-  }, [])
-  const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
 
   // Immersive games request OS fullscreen to also drop the Android status bar
   // and paint under the notch — but ENTER must come from the app, because the
@@ -2571,7 +2574,7 @@ export default function Shell() {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
-                visible={!settingsActive && role !== 'held'}
+                visible={chatPanesVisible && role !== 'held'}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
                 composerFocusRequest={role === 'active' ? composerFocusRequest : null}
