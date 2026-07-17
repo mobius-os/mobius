@@ -18,8 +18,9 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 // AND tool blocks, so a build turn's pre-prose burst reads as one quiet ~32px
 // line instead of alternating "> Thought" lines and bordered tool cards — the
 // answer keeps the screen. Collapsed, the borderless dim header carries live
-// status (a spinner while a tool runs, a pulse dot + "Thinking for Ns" while the
-// agent reasons) and a FAILED step's danger triangle + exit chip, all readable
+// status (a periodic shimmer over the label — bare "Thinking", or the muted
+// type glyph + progressive activities while tools run) and a FAILED step's
+// danger triangle + exit chip, all readable
 // WITHOUT expanding. Expanded, it renders the chronological timeline: thinking
 // bodies inline (dim StandardMarkdown) and tools as their own ToolBlock rows,
 // which still own the lazy-fetch of large output.
@@ -36,9 +37,9 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 //      overflow-anchor:none plus manual scroll anchoring (see the "Chat UX —
 //      non-negotiable constraints" reference), so the height churn displaced
 //      whatever the reader was looking at.
-// The premise was also false: liveness does NOT need the body open — the header
-// spinner / pulse dot plus the running-first activity summary already say what
-// is executing. So the sole open/close signal is `userOpen`, and no effect or
+// The premise was also false: liveness does NOT need the body open — the label
+// shimmer plus the running-first activity summary already say what is
+// executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
 // Muted type glyphs for a settled line's first activity (terminal for
 // commands, magnifier for search, …). Deliberately tiny and stroke-light so
@@ -114,10 +115,6 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
     .find(e => e?.item?.type === 'tool' && e.item.status === 'running')?.item
     || entries.find(e => e?.item?.type === 'tool')?.item
   const leadToolIcon = toolActivityIcon(leadTool?.tool)
-  const toolRunning = entries.some(
-    e => e?.item?.type === 'tool' && e.item.status === 'running',
-  )
-
   // Deriving the state parses each tool's output for its exit code, so memoize
   // on a cheap signature (see activityMemoSig for the exact staleness contract:
   // head+tail output slices catch an equal-length exit-code flip; thinking
@@ -175,7 +172,6 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
   return (
     <div className={
       `chat__activity chat__activity--${displayState}`
-      + (live ? ' chat__activity--live' : '')
       + (open ? ' chat__activity--open' : '')
     }>
       <button

@@ -86,8 +86,9 @@ export function coalesceThinkingEntries(entries) {
 // Derive the collapsed status of a tool group from its children: a failed tool
 // dominates (so a broken step is visible without expanding), then a running
 // tool, else done. Shared by ActivityStretch (via activityStreamState), which
-// maps this to the header status — spinner while 'running', a danger triangle +
-// exit chip on 'error', no icon on 'done' — all readable WITHOUT expanding,
+// maps this to the header status — label shimmer while 'running', a danger
+// triangle + exit chip on 'error', the muted type glyph on 'done' — all
+// readable WITHOUT expanding,
 // since the stretch stays collapsed by default (see ActivityStretch).
 //
 // "Failed" comes from the result's exit code, NOT a tool status — the stream
@@ -99,7 +100,7 @@ export function coalesceThinkingEntries(entries) {
 // still-running tool has no final output yet, so it can't be "failed" here.
 //
 // `running` wins over `error`: while ANY child is still live the header reads
-// as in-progress (the spinner), even if an earlier child already failed — the
+// as in-progress (the shimmer), even if an earlier child already failed — the
 // failure surfaces once the run settles and the state resolves to 'error'.
 // Checking running first also short-circuits the parse-heavy failure scan on
 // every streaming frame while the run is in flight.
@@ -118,8 +119,8 @@ export function toolGroupState(tools) {
 //
 // While the run is LIVE, the currently-running tool's activity leads the
 // summary, so the collapsed header reads what is executing NOW rather than the
-// run's first tool. This is the stretch's liveness signal while collapsed (with
-// the header spinner), since the line never force-opens mid-run — see
+// run's first tool. This is what the collapsed line's shimmer sweeps over,
+// since the line never force-opens mid-run — see
 // ActivityStretch. The running tool is normally the tail item; when nothing
 // is running (a done/persisted group) the order is plain first-seen.
 // Pure — no React, no mutation of the input array.
@@ -187,7 +188,7 @@ export function thoughtDurationLabel(durationMs) {
 // Collapsed status of a whole activity stretch: reuses toolGroupState (running >
 // error > done, failure read from the exit code) but a LIVE thinking tail forces
 // 'running' — while the agent is actively reasoning the line reads in-progress
-// (the pulse dot), and an earlier benign nonzero exit stays quiet until the run
+// (the shimmering bare "Thinking"), and an earlier nonzero exit stays quiet until the run
 // settles (running-wins). Empty tools + no live tail settles 'done'.
 export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
   if (liveThinkingTail) return 'running'
@@ -199,8 +200,8 @@ export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
 // (so the caller's memo keeps owning the parse-heavy failure scan). A live
 // trailing stretch is in-progress for its WHOLE life — including the gap
 // between one tool ending and the next event, where no tool is 'running' —
-// so tense (activityCollapsedLabel's live||running branch), the spinner, and
-// the shimmer all stay in agreement instead of a settled type glyph or the
+// so tense (activityCollapsedLabel's live||running branch) and the shimmer
+// stay in agreement instead of a settled face or the
 // failure triangle flashing in mid-turn beside present-tense copy (review
 // round 2, both reviewers). Failure surfaces when the stretch actually
 // settles (live=false), consistent with running-wins.
