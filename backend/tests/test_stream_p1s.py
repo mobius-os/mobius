@@ -13,7 +13,11 @@ import unittest.mock as mock
 
 import pytest
 
-from app.broadcast import ChatBroadcast, _EVENT_LOG_MAX
+from app.broadcast import (
+  ChatBroadcast,
+  _EVENT_LOG_MAX,
+  _TEXT_LOG_SEGMENT_MAX,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +219,19 @@ def test_text_events_coalesced_in_log():
   assert received[0]["content"] == "foo"
   assert received[1]["content"] == "bar"
   assert received[2]["content"] == "baz"
+
+
+def test_text_coalescing_segments_long_replies_without_changing_content():
+  """Long replies stay linear instead of recopying one ever-growing string."""
+  bc = ChatBroadcast("bounded-coalesce-test")
+  chunk = "x" * 1024
+  count = (_TEXT_LOG_SEGMENT_MAX // len(chunk)) + 2
+  for _ in range(count):
+    bc.publish({"type": "text", "content": chunk})
+
+  assert len(bc.event_log) == 2
+  assert all(event["type"] == "text" for event in bc.event_log)
+  assert "".join(event["content"] for event in bc.event_log) == chunk * count
 
 
 def test_text_coalesce_broken_by_boundary():

@@ -15,6 +15,33 @@ def _commit_count(repo: Path) -> int:
   )
 
 
+def test_polling_scandir_skips_data_git_and_generated_trees(tmp_path):
+  """The reliable polling watcher must not rescan known-noise trees."""
+  from app.app_watcher import _source_tree_scandir
+
+  root = tmp_path / "apps"
+  source = root / "notes"
+  for path in (
+    root / "77" / "storage",
+    source / ".git" / "objects",
+    source / "node_modules" / "package",
+    source / "static" / "assets",
+    source / "src",
+  ):
+    path.mkdir(parents=True)
+  (source / "index.jsx").write_text("export default () => null")
+  (source / "fetch.sh").write_text("#!/bin/sh\n")
+  (source / "src" / "view.jsx").write_text("export const View = null")
+
+  root_names = {entry.name for entry in _source_tree_scandir(root, str(root))}
+  source_names = {
+    entry.name for entry in _source_tree_scandir(root, str(source))
+  }
+
+  assert root_names == {"notes"}
+  assert source_names == {"fetch.sh", "index.jsx", "src"}
+
+
 @pytest.mark.asyncio
 async def test_watcher_commits_successful_recompile_and_noops_unchanged(
   client, owner_token,

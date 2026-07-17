@@ -21,6 +21,11 @@ log = logging.getLogger("moebius.broadcast")
 # typical turn produces far fewer events — and coalescing text chunks below
 # keeps the effective count well under it.
 _EVENT_LOG_MAX = 10_000
+# Bound adjacent text coalescing so a long streamed reply does not repeatedly
+# copy its entire accumulated body for every small delta (quadratic CPU and
+# allocator churn). Reconnect clients already consume an ordered event list,
+# so consecutive 64 KiB text segments are wire-equivalent to one giant entry.
+_TEXT_LOG_SEGMENT_MAX = 64 * 1024
 
 # Global registry of active broadcasts, keyed by chat_id.
 _broadcasts: dict[str, "ChatBroadcast"] = {}
@@ -117,6 +122,8 @@ class ChatBroadcast:
       event_type == "text"
       and self.event_log
       and self.event_log[-1].get("type") == "text"
+      and len(self.event_log[-1].get("content") or "")
+        + len(event.get("content") or "") <= _TEXT_LOG_SEGMENT_MAX
     ):
       # Merge into the last entry in-place (the entry is already in the log;
       # mutating it here is safe — subscribers got the original chunk live and

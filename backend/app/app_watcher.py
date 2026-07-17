@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
-from watchdog.observers.polling import PollingObserver
+from watchdog.observers.polling import PollingObserverVFS
 
 from app import app_git, fs_locks, models, source_dirs
 from app.compiler import recompile_app_bundle
@@ -50,6 +52,40 @@ _IGNORED_SOURCE_PARTS = {
   "static",
 }
 _MAX_FAILURE_SUMMARY = 160
+
+
+def _source_tree_scandir(
+  apps_root: Path,
+  path: str | None,
+) -> Iterator[os.DirEntry[str]]:
+  """Yield only paths the app-source handler can act on.
+
+  ``PollingObserver`` otherwise snapshots every descendant once per second.
+  On a production volume that includes numeric app-data dirs, per-app git
+  object databases, and dependency trees, almost all of those stats are
+  guaranteed to be discarded by ``_source_dir_for_changed_path`` later. Keep
+  the reliable polling behavior while pruning those trees at traversal time.
+  """
+  scan_path = path or "."
+  try:
+    at_root = Path(scan_path).resolve() == apps_root
+    entries = os.scandir(scan_path)
+  except OSError:
+    return
+  with entries:
+    for entry in entries:
+      name = entry.name
+      # The handler ignores hidden and generated subtrees. Excluding them here
+      # also handles symlinked dependency trees such as node_modules.
+      if name.startswith(".") or name in _IGNORED_SOURCE_PARTS:
+        continue
+      if at_root and name.isdigit():
+        try:
+          if entry.is_dir(follow_symlinks=True):
+            continue
+        except OSError:
+          continue
+      yield entry
 
 
 def _compact_failure_text(text: str) -> str:
@@ -491,13 +527,13 @@ class _JsxHandler(FileSystemEventHandler):
 
 def start_watcher(
   loop: asyncio.AbstractEventLoop,
-) -> tuple[PollingObserver, _JsxHandler]:
+) -> tuple[PollingObserverVFS, _JsxHandler]:
   """Starts a watchdog Observer on app source directories.
 
   Returns `(observer, handler)` so the caller can stop the observer
   AND drain the handler's pending debounce timers on shutdown.
   """
-  apps_dir = Path(get_settings().data_dir) / "apps"
+  apps_dir = (Path(get_settings().data_dir) / "apps").resolve()
   apps_dir.mkdir(parents=True, exist_ok=True)
   handler = _JsxHandler(loop)
   # PollingObserver, not the default inotify Observer: inotify events are
@@ -506,7 +542,10 @@ def start_watcher(
   # an app-update merge un-recompiled and the merge unfinalized (.pm/124).
   # Polling stats the small source trees on an interval — reliable everywhere,
   # negligible cost for these watch roots.
-  observer = PollingObserver()
+  observer = PollingObserverVFS(
+    stat=os.stat,
+    listdir=lambda path: _source_tree_scandir(apps_dir, path),
+  )
   watched: list[str] = []
   for root in _source_roots():
     if root.is_dir():
