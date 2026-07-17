@@ -235,6 +235,23 @@ test('pushes increment from the current shell position and retain routes', () =>
   }
 })
 
+test('app entries retain reversible runtime correlation for Forward', () => {
+  const { history } = installBrowserMocks({ withNavigation: false })
+  try {
+    replaceNavEntry('base', '/shell/', { view: 'canvas', chatId: 'a', appId: 7 })
+    const appNav = { appId: '7', requestId: 'nav-1', label: 'report', reversible: true }
+    const entry = pushNavEntry(
+      'app',
+      { view: 'canvas', chatId: 'a', appId: 7 },
+      { appNav },
+    )
+    assert.deepEqual(entry.appNav, appNav)
+    assert.equal(history.state, entry)
+  } finally {
+    clearBrowserMocks()
+  }
+})
+
 test('updateCurrentNavEntry preserves position and can promote drawer to nav', () => {
   const { history, navigation } = installBrowserMocks()
   try {
@@ -248,6 +265,26 @@ test('updateCurrentNavEntry preserves position and can promote drawer to nav', (
     })
     assert.equal(history.state, updated)
     assert.equal(navigation.getCurrentState(), updated)
+  } finally {
+    clearBrowserMocks()
+  }
+})
+
+test('updateCurrentNavEntry can retire reversible app correlation in place', () => {
+  const { history } = installBrowserMocks()
+  try {
+    replaceNavEntry('base', '/shell/', { view: 'canvas', chatId: 'a', appId: 7 })
+    const entry = pushNavEntry(
+      'app',
+      { view: 'canvas', chatId: 'a', appId: 7 },
+      { appNav: { appId: '7', requestId: 'nav-1', reversible: true } },
+    )
+    const updated = updateCurrentNavEntry(entry.route, { kind: 'nav', appNav: null })
+    assert.equal(updated.kind, 'nav')
+    assert.equal(updated.index, entry.index)
+    assert.equal(updated.entryId, entry.entryId)
+    assert.equal('appNav' in updated, false)
+    assert.equal(history.state, updated)
   } finally {
     clearBrowserMocks()
   }

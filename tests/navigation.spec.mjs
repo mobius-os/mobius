@@ -602,7 +602,7 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect((await getNavState(page)).drawerOpen).toBe(false)
   })
 
-  test('20c. revisiting a consumed app entry does not close nested state twice', async ({ page }) => {
+  test('20c. legacy Forward lands at app base and the next Back leaves once', async ({ page }) => {
     await setup(page)
     await openDrawer(page)
     await navigateToApp(page, 0)
@@ -628,9 +628,63 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
 
     await goForward(page) // physical entry returns; nested level cannot
-    await goBack(page) // must absorb, not close it again or over-pop the shell
-    expect((await getNavState(page)).hasCanvas).toBe(true)
+    await goBack(page) // one ordinary Back leaves the app base
+    expect((await getNavState(page)).hasChat).toBe(true)
     expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
+  })
+
+  test('20d. reversible app entries restore on Forward and unwind once again', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    await navigateToApp(page, 0)
+    const iframe = page.locator('iframe[data-app-id]').first()
+    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
+    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
+    if (!appFrame) test.skip(true, 'app frame did not load')
+
+    await appFrame.evaluate(() => {
+      window.__mobiusBackCount = 0
+      window.__mobiusForwardCount = 0
+      window.__mobiusTestNavHandle = window.mobius.nav.open('e2e-report', {
+        onBack() { window.__mobiusBackCount += 1 },
+        onForward() { window.__mobiusForwardCount += 1 },
+      })
+    })
+    await page.waitForFunction(() => history.state?.kind === 'app')
+
+    await goBack(page)
+    expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(1)
+    await goForward(page)
+    await expect.poll(() => appFrame.evaluate(() => window.__mobiusForwardCount)).toBe(1)
+    await goBack(page)
+    expect(await appFrame.evaluate(() => window.__mobiusBackCount)).toBe(2)
+    expect((await getNavState(page)).hasCanvas).toBe(true)
+  })
+
+  test('20e. rejected Forward restoration retires the ghost app step', async ({ page }) => {
+    await setup(page)
+    await openDrawer(page)
+    await navigateToApp(page, 0)
+    const iframe = page.locator('iframe[data-app-id]').first()
+    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
+    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
+    if (!appFrame) test.skip(true, 'app frame did not load')
+
+    await appFrame.evaluate(() => {
+      // Deliberately announce a reversible id the runtime never registered.
+      // This models a fresh/evicted frame: its runtime-level responder must
+      // explicitly reject the unknown restoration request.
+      window.parent.postMessage({
+        type: 'moebius:nav-push',
+        label: 'report',
+        requestId: 'e2e-evicted-report',
+        reversible: true,
+      }, '*')
+    })
+    await page.waitForFunction(() => history.state?.kind === 'app')
+    await goBack(page)
+    await goForward(page)
+    await page.waitForFunction(() => history.state?.kind === 'nav', null, { timeout: 2000 })
 
     await goBack(page)
     expect((await getNavState(page)).hasChat).toBe(true)
@@ -1138,5 +1192,55 @@ test.describe('Split-pane navigation (PR2 gate)', () => {
     expect(await frameB.evaluate(() => window.__navBack)).toBe(0)
     expect(page.frames().includes(frameB), 'sibling app B survived the retirement').toBe(true)
     await expect(page.locator('.shell__view--active')).toBeVisible()
+  })
+
+  test('27. a visible background pane restores its reversible entry on Forward', async ({ page }) => {
+    await bootTwoAppPanes(page)
+    const frameA = await appFrameFor(page, PANE_APP_A)
+    const frameB = await appFrameFor(page, PANE_APP_B)
+    expect(frameA, 'app A frame mounted').not.toBeNull()
+    expect(frameB, 'app B frame mounted').not.toBeNull()
+
+    await armBackCounter(frameA)
+    await frameB.evaluate((id) => {
+      window.__navBack = 0
+      window.__navForward = 0
+      window.addEventListener('message', (event) => {
+        const message = event?.data
+        if (message?.type === 'moebius:nav-back') window.__navBack += 1
+        if (message?.type === 'moebius:nav-forward') {
+          window.__navForward += 1
+          window.parent.postMessage({
+            type: 'moebius:nav-forward-ack',
+            requestId: message.requestId,
+          }, '*')
+        }
+      })
+      // B begins as the visible but unfocused pane. Its push must still be
+      // accepted, attributed to p1, and focus that owner pane.
+      window.parent.postMessage({
+        type: 'moebius:nav-push',
+        appId: id,
+        requestId: 'pane-b-report',
+        label: 'report',
+        reversible: true,
+      }, '*')
+    }, PANE_APP_B)
+    await page.waitForFunction(id => (
+      history.state?.kind === 'app'
+        && history.state?.route?.appId === id
+        && history.state?.appNav?.requestId === 'pane-b-report'
+    ), PANE_APP_B)
+
+    await page.evaluate(() => history.back())
+    await expect.poll(() => frameB.evaluate(() => window.__navBack)).toBe(1)
+    expect(await frameA.evaluate(() => window.__navBack)).toBe(0)
+
+    await page.evaluate(() => history.forward())
+    await expect.poll(() => frameB.evaluate(() => window.__navForward)).toBe(1)
+
+    await page.evaluate(() => history.back())
+    await expect.poll(() => frameB.evaluate(() => window.__navBack)).toBe(2)
+    expect(await frameA.evaluate(() => window.__navBack)).toBe(0)
   })
 })

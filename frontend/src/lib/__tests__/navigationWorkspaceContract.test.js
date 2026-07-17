@@ -30,10 +30,15 @@ test('ordinary Back restores a hidden sentinel owner before messaging it', () =>
 })
 
 test('app-entry consumption cannot decrement the same owner twice', () => {
-  assert.match(
-    navigation,
-    /if \(!rec \|\| rec\.status !== 'live'\) \{\s*consumedAppEntryIdsRef\.current\.add\(entryId\)\s*return/,
+  const consume = navigation.slice(
+    navigation.indexOf('const consumeAppEntry'),
+    navigation.indexOf('// Retire every live physical entry'),
   )
+  const idempotentGuard = consume.indexOf("if (!rec || rec.status !== 'live')")
+  const decrement = consume.indexOf('const n = m.get(key) || 0')
+  assert.ok(idempotentGuard >= 0)
+  assert.ok(decrement > idempotentGuard)
+  assert.match(consume, /rec\.status = reversible \? 'dormant' : 'consumed'/)
 })
 
 test('removing the live iframe retires its host navigation even without an AppCanvas unmount', () => {

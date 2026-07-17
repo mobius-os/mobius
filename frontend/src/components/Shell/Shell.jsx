@@ -198,7 +198,8 @@ export default function Shell() {
     navTo, backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
-    appNavPush, appNavPop, appNavReset, retireAppHistory, tombstoneRoute,
+    appNavPush, appNavPop, appNavReset, appNavForwardResult,
+    retireAppHistory, tombstoneRoute,
   } = useNavigation({
     workspace,
     workspaceStateRef,
@@ -2538,6 +2539,7 @@ export default function Shell() {
               onNavPop={appNavPop}
               onNavReset={appNavReset}
               onAppFocus={focusAppPane}
+              onNavForwardResult={appNavForwardResult}
               onImmersive={handleImmersive}
               onIntentDelivered={handleAppIntentDelivered}
               onAppError={handleAppError}

@@ -291,11 +291,15 @@ export default function useNavigation({
   // stays put while traversing iframe-created phantom entries; the next tagged
   // destination can then still be compared with the last shell position.
   const currentNavStateRef = useRef(null)
-  // An app-local level is destructive: Back tells the iframe to close it, and
-  // Forward cannot recreate it. Remember the unique physical entry so a later
-  // Forward -> Back traversal is absorbed instead of over-popping shell state.
-  // Retired (evicted-frame) entries are kept here for the page lifetime too.
+  // Legacy app-local levels are destructive: Back tells the iframe to close
+  // them, and Forward cannot recreate them. Remember those physical entries so
+  // revisiting one can safely degrade to the app base. Reversible entries use
+  // their runtime correlation instead; retired entries stay consumed too.
   const consumedAppEntryIdsRef = useRef(new Set())
+  // Forward into a reversible app entry is tentative until the exact runtime
+  // explicitly acknowledges or rejects the matching request. This is keyed by
+  // app + request id because browser/device timing is not a restoration signal.
+  const pendingAppForwardsRef = useRef(new Map())
   // Resources deleted this session, as `chat:<id>` / `app:<id>` keys. The in-
   // memory navStack is scrubbed on delete, but a PHYSICAL history route payload
   // can survive; restoreRoute rejects a tombstoned target so Back/Forward cannot
@@ -321,28 +325,35 @@ export default function useNavigation({
 
   // Register a new live app entry: record its owner + increment its count. Both
   // structures, exactly once (contract §3.1.3).
-  const addAppEntry = useCallback((entryId, paneId, appId) => {
+  const addAppEntry = useCallback((entryId, paneId, appId, appNav = null) => {
     if (!entryId) return
     appEntryOwnersRef.current.set(entryId, {
-      paneId: String(paneId), appId: String(appId), status: 'live',
+      paneId: String(paneId), appId: String(appId), status: 'live', appNav,
     })
     const key = ownerKeyOf(paneId, appId)
     const m = appSentinelCountsRef.current
     m.set(key, (m.get(key) || 0) + 1)
   }, [])
 
-  // Consume one physical app entry: decrement its owner count, flip its registry
-  // status, and remember its id so a Forward->Back re-absorbs it. `ownerKey` is
-  // passed when the caller already resolved it (the entry may have moved panes,
-  // so its ORIGINAL owner key governs accounting even when focus is elsewhere).
-  const consumeAppEntry = useCallback((entryId, ownerKey) => {
+  // Consume one physical app entry: decrement its owner count and flip its
+  // registry status. Legacy/retired slots enter the consumed set; reversible
+  // slots become dormant so Forward can revive their runtime correlation.
+  // `ownerKey` is passed when the caller already resolved it (the entry may
+  // have moved panes, so its ORIGINAL owner key governs accounting even when
+  // focus is elsewhere).
+  const consumeAppEntry = useCallback((entryId, ownerKey, appNav = null) => {
     if (!entryId) return
     const rec = appEntryOwnersRef.current.get(entryId)
+    const reversible = appNav?.reversible === true || rec?.appNav?.reversible === true
     // Consumption is idempotent. A Forward→Back traversal or a synthetic/user
     // race can revisit an already-consumed physical entry; it must not decrement
     // a different still-live level owned by the same pane/app.
     if (!rec || rec.status !== 'live') {
-      consumedAppEntryIdsRef.current.add(entryId)
+      if (reversible && rec?.status === 'dormant') {
+        consumedAppEntryIdsRef.current.delete(entryId)
+      } else {
+        consumedAppEntryIdsRef.current.add(entryId)
+      }
       return
     }
     const key = ownerKey || (rec ? ownerKeyOf(rec.paneId, rec.appId) : null)
@@ -352,8 +363,9 @@ export default function useNavigation({
       if (n === 1) m.delete(key)
       else if (n > 1) m.set(key, n - 1)
     }
-    if (rec && rec.status === 'live') rec.status = 'consumed'
-    consumedAppEntryIdsRef.current.add(entryId)
+    rec.status = reversible ? 'dormant' : 'consumed'
+    if (reversible) consumedAppEntryIdsRef.current.delete(entryId)
+    else consumedAppEntryIdsRef.current.add(entryId)
   }, [])
 
   // Retire every live physical entry for an app before its iframe unmounts
@@ -370,11 +382,16 @@ export default function useNavigation({
   const retireAppHistory = useCallback((appId, reason = 'evict') => {
     const target = String(appId)
     for (const [entryId, rec] of appEntryOwnersRef.current) {
-      if (rec.appId === target && rec.status === 'live') {
+      if (rec.appId === target && rec.status !== 'retired') {
         consumedAppEntryIdsRef.current.add(entryId)
         rec.status = 'retired'
         rec.retiredReason = reason
       }
+    }
+    for (const [key, pending] of pendingAppForwardsRef.current) {
+      if (pending.appId !== target) continue
+      clearTimeout(pending.timer)
+      pendingAppForwardsRef.current.delete(key)
     }
     const m = appSentinelCountsRef.current
     for (const key of [...m.keys()]) {
@@ -401,9 +418,10 @@ export default function useNavigation({
     return navRoute(view, content.chatId, content.appId, content.paneId)
   }, [workspaceStateRef])
 
-  const pushShellEntry = useCallback((kind, route) => {
+  const pushShellEntry = useCallback((kind, route, appNav = null) => {
     const state = pushNavEntry(kind, route, {
       currentState: currentNavStateRef.current,
+      appNav,
     })
     currentNavStateRef.current = state
     return state
@@ -465,7 +483,7 @@ export default function useNavigation({
    * message-listener effect depends on it — a churning identity would tear it
    * down and re-register on every Shell render, dropping frame-mounted messages.
    */
-  const appNavPush = useCallback((appId) => {
+  const appNavPush = useCallback((appId, navMeta = {}) => {
     if (appId == null) return false
     const ws = workspaceStateRef.current.ws
     if (!isVisibleApp(ws, appId)) return false
@@ -476,13 +494,83 @@ export default function useNavigation({
     if ((appSentinelCountsRef.current.get(ownerKey) || 0) >= MAX_APP_SENTINELS) return false
     // Focus the visible owner pane (design §5: an app gesture focuses its pane).
     dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
+    const appNav = {
+      appId: String(appId),
+      requestId: typeof navMeta.requestId === 'string' ? navMeta.requestId : null,
+      label: typeof navMeta.label === 'string' ? navMeta.label : null,
+      reversible: navMeta.reversible === true,
+    }
     let state
     try {
-      state = pushShellEntry('app', navRoute('canvas', null, Number(appId), pane.id))
+      state = pushShellEntry(
+        'app',
+        navRoute('canvas', null, Number(appId), pane.id),
+        appNav,
+      )
     } catch { return false }
-    addAppEntry(navEntryId(state), pane.id, appId)
+    addAppEntry(navEntryId(state), pane.id, appId, appNav)
     return true
   }, [addAppEntry, dispatchWorkspace, isVisibleApp, pushShellEntry, workspaceStateRef])
+
+  const appNavForwardResult = useCallback((appId, requestId, restored) => {
+    if (typeof requestId !== 'string') return
+    const ownerId = String(appId)
+    const key = `${ownerId}:${requestId}`
+    const pending = pendingAppForwardsRef.current.get(key)
+    if (!pending || pending.appId !== ownerId) return
+    pendingAppForwardsRef.current.delete(key)
+    clearTimeout(pending.timer)
+
+    const current = currentNavStateRef.current
+    if (!restored) {
+      if (navEntryId(current) === pending.entryId && current?.kind === 'app') {
+        currentNavStateRef.current = updateCurrentNavEntry(
+          current.route,
+          { kind: 'nav', appNav: null },
+        )
+      }
+      return
+    }
+
+    const stillCurrent = navEntryId(current) === pending.entryId && current?.kind === 'app'
+    const stillUnderCurrent = Number.isInteger(current?.index)
+      && Number.isInteger(pending.index)
+      && current.index > pending.index
+    if (!stillCurrent && !stillUnderCurrent) {
+      // The owner backed out before the restoration reply arrived. Balance the
+      // late runtime activation rather than keeping hidden detail state without
+      // a live shell sentinel.
+      const iframe = document.querySelector(`iframe[data-app-id="${ownerId}"]`)
+      iframe?.contentWindow?.postMessage({
+        type: 'moebius:nav-back',
+        requestId,
+      }, '*')
+      return
+    }
+
+    const rec = appEntryOwnersRef.current.get(pending.entryId)
+    if (!rec || rec.status === 'retired') {
+      const iframe = document.querySelector(`iframe[data-app-id="${ownerId}"]`)
+      iframe?.contentWindow?.postMessage({
+        type: 'moebius:nav-back',
+        requestId,
+      }, '*')
+      if (stillCurrent) {
+        currentNavStateRef.current = updateCurrentNavEntry(
+          current.route,
+          { kind: 'nav', appNav: null },
+        )
+      }
+      return
+    }
+    if (rec.status !== 'live') {
+      rec.status = 'live'
+      const ownerKey = ownerKeyOf(rec.paneId, rec.appId)
+      const counts = appSentinelCountsRef.current
+      counts.set(ownerKey, (counts.get(ownerKey) || 0) + 1)
+    }
+    consumedAppEntryIdsRef.current.delete(pending.entryId)
+  }, [])
 
   const pumpLocalAppPop = useCallback(() => {
     if (appLocalPopInFlightRef.current) return
@@ -764,12 +852,77 @@ export default function useNavigation({
       const route = destination?.route
       // A nav entry represents a shell-level transition. Back destructively
       // removed its source from navStack, so Forward rebuilds that one edge.
-      // App entries do not: they represent nested iframe state that the host
-      // cannot recreate once the app consumed moebius:nav-back.
+      // App entries are nested within their shell route, so they do not add a
+      // shell edge here. Reversible ones restore through the explicit runtime
+      // handshake below; legacy ones remain intentionally destructive.
       if (destination?.kind === 'nav' && isRestorableRoute(sourceRoute)) {
         navStackRef.current.push(sourceRoute)
       }
       restoreRoute(route)
+
+      // A legacy app has no reconstruction callback. Forward lands at its base
+      // route and promotes this physical slot to an ordinary shell entry, so
+      // the next Back is never swallowed by a dead app sentinel.
+      if (destination?.kind === 'app'
+          && !destination.appNav?.reversible
+          && isConsumedAppEntry(destination)) {
+        const entryId = navEntryId(destination)
+        if (entryId) consumedAppEntryIdsRef.current.delete(entryId)
+        currentNavStateRef.current = updateCurrentNavEntry(
+          route,
+          { kind: 'nav', appNav: null },
+        )
+      }
+
+      // A reversible entry is tentative until the retained runtime explicitly
+      // says whether its closure survived. Counts/registry state are revived
+      // only in appNavForwardResult after the correlated acknowledgement.
+      if (destination?.kind === 'app' && destination.appNav?.reversible) {
+        const ownerId = String(destination.appNav.appId ?? route?.appId ?? '')
+        const requestId = destination.appNav.requestId
+        const entryId = navEntryId(destination)
+        if (ownerId && typeof requestId === 'string' && entryId) {
+          const pendingKey = `${ownerId}:${requestId}`
+          const existing = pendingAppForwardsRef.current.get(pendingKey)
+          if (existing) clearTimeout(existing.timer)
+          const pending = {
+            appId: ownerId,
+            entryId,
+            index: destination.index,
+            timer: null,
+          }
+          pending.timer = setTimeout(() => {
+            if (pendingAppForwardsRef.current.get(pendingKey) !== pending) return
+            pendingAppForwardsRef.current.delete(pendingKey)
+            const current = currentNavStateRef.current
+            if (navEntryId(current) !== entryId || current?.kind !== 'app') return
+            // Transport-failure cleanup only: if a runtime restored but its ack
+            // was lost, balance that activation before retiring the slot.
+            const iframe = document.querySelector(`iframe[data-app-id="${ownerId}"]`)
+            iframe?.contentWindow?.postMessage({
+              type: 'moebius:nav-back',
+              requestId,
+            }, '*')
+            currentNavStateRef.current = updateCurrentNavEntry(
+              current.route,
+              { kind: 'nav', appNav: null },
+            )
+          }, 5000)
+          pendingAppForwardsRef.current.set(pendingKey, pending)
+          setTimeout(() => {
+            const iframe = document.querySelector(`iframe[data-app-id="${ownerId}"]`)
+            iframe?.contentWindow?.postMessage({
+              type: 'moebius:nav-forward',
+              requestId,
+            }, '*')
+          }, 0)
+        } else {
+          currentNavStateRef.current = updateCurrentNavEntry(
+            route,
+            { kind: 'nav', appNav: null },
+          )
+        }
+      }
       if (destination?.kind === 'drawer') {
         drawerPushedRef.current = true
         drawerOpenRef.current = true
@@ -803,6 +956,9 @@ export default function useNavigation({
     }
 
     function markConsumedAppEntry(state) {
+      // Reversible entries are dormant after Back, not destroyed. Forward may
+      // reactivate the same runtime handle and the next Back must reach it.
+      if (state?.appNav?.reversible) return
       const id = state?.kind === 'app' ? navEntryId(state) : null
       if (id) consumedAppEntryIdsRef.current.add(id)
     }
@@ -829,6 +985,16 @@ export default function useNavigation({
         return
       }
       const sourceEntryId = source?.kind === 'app' ? navEntryId(source) : null
+      // Back can race the explicit Forward acknowledgement. The physical
+      // traversal already returns to the app base; do not pop a shell edge while
+      // the runtime decides. A late positive ack is balanced by
+      // appNavForwardResult with the same request id.
+      const pendingForward = sourceEntryId
+        ? [...pendingAppForwardsRef.current.values()].find(
+          (pending) => pending.entryId === sourceEntryId,
+        )
+        : null
+      if (source?.appNav?.reversible && pendingForward) return
       // (2) Consumed/retired app source: atomic semantic discard. The physical
       // traversal is real, but there is no nested level to close a second time
       // and no shell edge to pop. If the retired source is ALSO the in-flight
@@ -869,7 +1035,7 @@ export default function useNavigation({
           return
         }
         appLocalPopsRef.current = appLocalPopsRef.current.filter((e) => e !== inFlightPop)
-        consumeAppEntry(inFlightPop.targetEntryId, inFlightPop.ownerKey)
+        consumeAppEntry(inFlightPop.targetEntryId, inFlightPop.ownerKey, source?.appNav)
         // Only remember THIS entry consumed when it is actually the request's
         // target (L2) — a coincidental owner match on a different entry must not
         // tombstone an unrelated live sentinel.
@@ -907,7 +1073,7 @@ export default function useNavigation({
               tabModel.tabKey(tabModel.makeTab('app', sourceOwner.appId)),
             )
           }
-          consumeAppEntry(sourceEntryId, sourceOwnerKey)
+          consumeAppEntry(sourceEntryId, sourceOwnerKey, source.appNav)
           // This ordinary Back consumed the sentinel directly, so any queued
           // nav-pop for the SAME physical entry is now satisfied — drop it or the
           // dead request wedges the FIFO head forever (finding: FIFO wedge).
@@ -915,7 +1081,10 @@ export default function useNavigation({
           if (pane && pane.id !== workspaceStateRef.current.ws.focusedPaneId) {
             dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
           }
-          iframe.contentWindow.postMessage({ type: 'moebius:nav-back' }, '*')
+          iframe.contentWindow.postMessage({
+            type: 'moebius:nav-back',
+            requestId: source.appNav?.requestId,
+          }, '*')
           // Defensive re-pump (L1): a queued request behind this one can now run.
           setTimeout(resumeLocalAppPops, 0)
           return
@@ -1137,6 +1306,7 @@ export default function useNavigation({
     appNavPush,
     appNavPop,
     appNavReset,
+    appNavForwardResult,
     retireAppHistory,
     tombstoneRoute,
   }

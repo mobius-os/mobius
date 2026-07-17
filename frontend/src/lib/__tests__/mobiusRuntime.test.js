@@ -144,6 +144,81 @@ test('nav helper waits for ack before owning a back entry', async () => {
   })
 })
 
+test('reversible nav restores the same app view on Forward and can unwind again', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const events = []
+    const nav = makeNav()
+    const handle = nav.open('report', {
+      onBack: () => events.push('back'),
+      onForward: () => events.push('forward'),
+    })
+    const push = parent.messages.at(-1).data
+    assert.equal(push.reversible, true)
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    assert.deepEqual(await handle.outcome, { status: 'owned' })
+
+    window.emit({ type: 'moebius:nav-back', requestId: push.requestId })
+    assert.deepEqual(events, ['back'])
+    assert.equal(parent.messages.filter((msg) => msg.data.type === 'moebius:nav-pop').length, 0)
+
+    window.emit({ type: 'moebius:nav-forward', requestId: push.requestId })
+    assert.deepEqual(events, ['back', 'forward'])
+    assert.equal(
+      parent.messages.filter((msg) => msg.data.type === 'moebius:nav-forward-ack').length,
+      1,
+    )
+    window.emit({ type: 'moebius:nav-back', requestId: push.requestId })
+    assert.deepEqual(events, ['back', 'forward', 'back'])
+  })
+})
+
+test('a reversible in-app close keeps Forward restoration but emits one pop', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    let forwards = 0
+    const handle = makeNav().open('report', {
+      onBack() {},
+      onForward() { forwards += 1 },
+    })
+    const push = parent.messages.at(-1).data
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    await handle.outcome
+
+    handle.close()
+    assert.equal(parent.messages.filter((msg) => msg.data.type === 'moebius:nav-pop').length, 1)
+    window.emit({ type: 'moebius:nav-forward', requestId: push.requestId })
+    assert.equal(forwards, 1)
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:nav-forward-ack')
+  })
+})
+
+test('a fresh runtime explicitly rejects Forward state it cannot reconstruct', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    makeNav()
+    window.emit({ type: 'moebius:nav-forward', requestId: 'missing-entry' })
+    assert.deepEqual(parent.messages.at(-1).data, {
+      type: 'moebius:nav-forward-rejected',
+      requestId: 'missing-entry',
+    })
+  })
+})
+
+test('Forward is rejected when onForward synchronously closes the restored view', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    let handle
+    handle = makeNav().open('report', {
+      onBack() {},
+      onForward() { handle.close() },
+    })
+    const push = parent.messages.at(-1).data
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    await handle.outcome
+    window.emit({ type: 'moebius:nav-back', requestId: push.requestId })
+
+    window.emit({ type: 'moebius:nav-forward', requestId: push.requestId })
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:nav-forward-rejected')
+  })
+})
+
 test('microphone capability correlates shell capture and exposes PCM to the app', async () => {
   await withFakeWindow(async ({ window, parent }) => {
     const levels = []

@@ -3136,17 +3136,86 @@ export function makeSplit() {
 
 export function makeNav() {
   const stack = []
+  const entries = new Set()
+  const entriesByRequestId = new Map()
 
-  function open(label, onBack) {
+  function postForwardResult(type, requestId) {
+    try {
+      window.parent.postMessage({ type, requestId }, window.location.origin)
+    } catch (e) {}
+  }
+
+  // One runtime-level responder makes Forward negotiation total: even a fresh
+  // runtime with no retained closure explicitly rejects the request. The shell
+  // never has to infer restoration from elapsed time or device speed.
+  function onForwardMessage(event) {
+    if (event.origin !== window.location.origin) return
+    if (event.source !== window.parent) return
+    const msg = event.data
+    if (msg?.type !== 'moebius:nav-forward' || typeof msg.requestId !== 'string') return
+    const entry = entriesByRequestId.get(msg.requestId)
+    if (!entry || !entry.reversible || entry.done || entry.disposed) {
+      postForwardResult('moebius:nav-forward-rejected', msg.requestId)
+      return
+    }
+    if (entry.active) {
+      // Idempotent retry after a lost ack: the semantic view is already live.
+      postForwardResult('moebius:nav-forward-ack', msg.requestId)
+      return
+    }
+    entry.owned = true
+    entry.active = true
+    stack.push(entry)
+    try {
+      entry.onForward()
+    } catch (error) {
+      const idx = stack.indexOf(entry)
+      if (idx !== -1) stack.splice(idx, 1)
+      entry.active = false
+      entry.owned = false
+      console.error('[Möbius nav] Could not restore app view on Forward', error)
+      postForwardResult('moebius:nav-forward-rejected', msg.requestId)
+      return
+    }
+    // onForward may synchronously decide that the view cannot remain open and
+    // call its own handle.close(). Do not acknowledge a sentinel the app has
+    // already retired during restoration.
+    if (!entry.active || !entry.owned) {
+      postForwardResult('moebius:nav-forward-rejected', msg.requestId)
+      return
+    }
+    postForwardResult('moebius:nav-forward-ack', msg.requestId)
+  }
+  if (window.parent !== window) window.addEventListener('message', onForwardMessage)
+
+  function open(label, onBackOrHandlers, onForwardArg) {
+    // A new push discards the browser's Forward branch. Retire dormant runtime
+    // entries from that branch so their closures cannot accumulate forever.
+    for (const old of [...entries]) {
+      if (!old.active && old.settled) old.dispose?.()
+    }
+    const handlers = onBackOrHandlers
+      && typeof onBackOrHandlers === 'object'
+      ? onBackOrHandlers
+      : { onBack: onBackOrHandlers, onForward: onForwardArg }
+    const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const entry = {
+      requestId,
       owned: false,
+      active: false,
       done: false,
+      disposed: false,
       settled: false,
       cleanupTimer: null,
       readyResolve: null,
       outcomeResolve: null,
-      onBack: typeof onBack === 'function' ? onBack : null,
+      onBack: typeof handlers.onBack === 'function' ? handlers.onBack : null,
+      onForward: typeof handlers.onForward === 'function' ? handlers.onForward : null,
+      reversible: typeof handlers.onForward === 'function',
+      dispose: null,
     }
+    entries.add(entry)
+    entriesByRequestId.set(requestId, entry)
     const outcome = new Promise((resolve) => {
       entry.outcomeResolve = resolve
     })
@@ -3167,7 +3236,6 @@ export function makeNav() {
         entry.readyResolve = null
       }
     }
-    const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const timer = setTimeout(() => {
       // Ownership is unknown on timeout: the shell may have installed the
       // sentinel but its ack may be delayed. Mark the request abandoned and
@@ -3176,13 +3244,28 @@ export function makeNav() {
       settleOutcome('timeout')
       entry.cleanupTimer = setTimeout(() => {
         entry.settled = true
-        window.removeEventListener('message', onMessage)
+        dispose()
       }, 30000)
     }, 5000)
 
+    const dispose = () => {
+      if (entry.disposed) return
+      entry.disposed = true
+      entry.done = true
+      entry.active = false
+      entry.owned = false
+      const idx = stack.indexOf(entry)
+      if (idx !== -1) stack.splice(idx, 1)
+      entries.delete(entry)
+      if (entriesByRequestId.get(requestId) === entry) entriesByRequestId.delete(requestId)
+      clearTimeout(timer)
+      if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
+      window.removeEventListener('message', onMessage)
+    }
+    entry.dispose = dispose
+
     const close = (fromShell = false) => {
       if (entry.done) return
-      entry.done = true
       const idx = stack.indexOf(entry)
       if (idx !== -1) stack.splice(idx, 1)
       if (!fromShell && entry.owned) {
@@ -3190,13 +3273,19 @@ export function makeNav() {
           window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
         } catch (e) {}
       }
+      entry.active = false
       entry.owned = false
-      if (!entry.settled) settleOutcome('cancelled')
-      if (entry.settled || fromShell) {
-        clearTimeout(timer)
-        if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
-        window.removeEventListener('message', onMessage)
+      if (!entry.settled) {
+        // Preserve request correlation long enough to compensate a late ack
+        // with nav-pop; disposing now would strand a shell sentinel.
+        entry.done = true
+        settleOutcome('cancelled')
+        return
       }
+      // A reversible, settled entry stays dormant so browser Forward can
+      // reactivate the same app state. Legacy/back-only entries retain their
+      // destructive behavior and are disposed immediately.
+      if (!entry.reversible || !entry.settled) dispose()
     }
 
     function onMessage(event) {
@@ -3205,6 +3294,7 @@ export function makeNav() {
       const msg = event.data
       if (msg?.type === 'moebius:nav-back') {
         if (stack[stack.length - 1] !== entry) return
+        if (msg.requestId && msg.requestId !== requestId) return
         close(true)
         if (entry.onBack) entry.onBack()
         return
@@ -3221,10 +3311,11 @@ export function makeNav() {
           // A close-before-ack already settled the public outcome as
           // `cancelled`; the late ack is compensated with exactly one pop.
           settleOutcome('owned')
-          window.removeEventListener('message', onMessage)
+          dispose()
           return
         }
         entry.owned = true
+        entry.active = true
         stack.push(entry)
         settleOutcome('owned')
       } else if (msg.type === 'moebius:nav-push-rejected') {
@@ -3233,7 +3324,7 @@ export function makeNav() {
         if (entry.cleanupTimer !== null) clearTimeout(entry.cleanupTimer)
         entry.owned = false
         settleOutcome('rejected')
-        window.removeEventListener('message', onMessage)
+        dispose()
       }
     }
 
@@ -3241,6 +3332,10 @@ export function makeNav() {
     if (window.parent === window) {
       clearTimeout(timer)
       entry.settled = true
+      // There is no shell-owned history slot to revisit in standalone mode.
+      // Keep the visible close control, but do not retain a dormant Forward
+      // closure after that control is used.
+      entry.reversible = false
       settleOutcome('standalone')
       window.removeEventListener('message', onMessage)
       return {
@@ -3253,14 +3348,19 @@ export function makeNav() {
     }
     try {
       window.parent.postMessage(
-        { type: 'moebius:nav-push', label: label || 'app-detail', requestId },
+        {
+          type: 'moebius:nav-push',
+          label: label || 'app-detail',
+          requestId,
+          reversible: entry.reversible,
+        },
         window.location.origin,
       )
     } catch (e) {
       clearTimeout(timer)
       entry.settled = true
       settleOutcome('error')
-      window.removeEventListener('message', onMessage)
+      dispose()
     }
 
     return {

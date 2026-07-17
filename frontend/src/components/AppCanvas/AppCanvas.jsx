@@ -233,7 +233,8 @@ export default function AppCanvas({
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
   pendingIntent = null,
-  onNavPush, onNavPop, onNavReset, onAppFocus, onImmersive, onIntentDelivered, onAppError,
+  onNavPush, onNavPop, onNavReset, onNavForwardResult,
+  onAppFocus, onImmersive, onIntentDelivered, onAppError,
 }) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
@@ -653,7 +654,11 @@ export default function AppCanvas({
         // VISIBLE (active tab of any visible pane), not focused — a background
         // split's app is still interactive (contract §3.3.6). The shell's own
         // isVisibleApp re-checks pane ownership as the authority.
-        const ok = visibleRef.current ? onNavPush?.(appId) : false
+        const ok = visibleRef.current ? onNavPush?.(appId, {
+          requestId: msg.requestId,
+          label: msg.label,
+          reversible: msg.reversible === true,
+        }) : false
         // Echo the iframe's optional requestId on both ack and reject so the app
         // can correlate when multiple nav-pushes are in flight. Apps that don't
         // pass a requestId get undefined back (backwards compatible).
@@ -678,13 +683,20 @@ export default function AppCanvas({
             '*',
           )
         }
+      } else if (msg.type === 'moebius:nav-forward-ack') {
+        onNavForwardResult?.(appId, msg.requestId, true)
+      } else if (msg.type === 'moebius:nav-forward-rejected') {
+        onNavForwardResult?.(appId, msg.requestId, false)
       } else if (msg.type === 'moebius:nav-pop') {
         onNavPop?.(appId)
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId, appSlug, onNavPush, onNavPop, onAppFocus, onImmersive, onAppError, queryClient])
+  }, [
+    appId, appSlug, onNavPush, onNavPop, onNavForwardResult,
+    onAppFocus, onImmersive, onAppError, queryClient,
+  ])
 
   // Capabilities belong to a visible workspace pane, not merely the focused
   // pane. Finish/cancel active-frame work before a cached app becomes hidden.

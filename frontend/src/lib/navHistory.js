@@ -9,10 +9,8 @@
 //           fallback distinguish Back from Forward without guessing.
 //   route — the restorable shell view at this entry. Forward traversal cannot
 //           be reconstructed from the destructive navStack alone.
-//   kind  — base | drawer | app | nav. Unlike the original count-only model,
-//           kind is now also used to restore a drawer on Forward; app remains
-//           informational because a consumed app-local nested view cannot be
-//           recreated by the host.
+//   kind  — base | drawer | app | nav. Drawer and reversible app entries carry
+//           enough metadata to restore their semantic state on Forward.
 //
 // The classic History store and Navigation API store are independent. Every
 // write below is mirrored to both or NavigationEvent.destination.getState()
@@ -25,8 +23,20 @@ function newEntryId() {
   return `mobius-${Date.now()}-${++_entrySequence}`
 }
 
-export function navState(kind, { index = 0, route = null, entryId = null } = {}) {
-  return { __mobiusNav: true, kind, index, route, ...(entryId ? { entryId } : {}) }
+export function navState(kind, {
+  index = 0,
+  route = null,
+  entryId = null,
+  appNav = null,
+} = {}) {
+  return {
+    __mobiusNav: true,
+    kind,
+    index,
+    route,
+    ...(entryId ? { entryId } : {}),
+    ...(appNav ? { appNav } : {}),
+  }
 }
 
 export function isMobiusNavState(state) {
@@ -135,12 +145,16 @@ function mirrorCurrentEntry(state) {
   }
 }
 
-export function pushNavEntry(kind, route = null, { currentState = history.state } = {}) {
+export function pushNavEntry(kind, route = null, {
+  currentState = history.state,
+  appNav = null,
+} = {}) {
   const current = navEntryIndex(currentState)
   const state = navState(kind, {
     index: current == null ? 0 : current + 1,
     route,
     entryId: newEntryId(),
+    appNav,
   })
   history.pushState(state, '')
   mirrorCurrentEntry(state)
@@ -164,12 +178,19 @@ export function replaceNavEntry(kind, url = '', route = null) {
 // Route state changes after some pushes (notably Shell.newChat, which owns its
 // state mutation). Refresh the current tagged entry without changing position.
 // `kind` optionally promotes a consumed drawer sentinel to a semantic nav entry.
-export function updateCurrentNavEntry(route, { kind } = {}) {
+export function updateCurrentNavEntry(route, options = {}) {
+  const { kind } = options
   if (!isMobiusNavState(history.state)) return null
   const state = {
     ...history.state,
     kind: kind || history.state.kind,
     route,
+  }
+  // Omitted means preserve existing correlation. `null` deliberately retires
+  // it when a reversible app entry cannot be reconstructed after Forward.
+  if (Object.prototype.hasOwnProperty.call(options, 'appNav')) {
+    if (options.appNav) state.appNav = options.appNav
+    else delete state.appNav
   }
   history.replaceState(state, '')
   mirrorCurrentEntry(state)

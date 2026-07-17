@@ -1017,17 +1017,24 @@ Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: stor
 Most mini-apps don't need any of this. **Skip unless your app has drill-downs, modals, or nested views.**
 
 For simple internal navigation, use the runtime helper. It asks the shell to
-install a real top-level back target, then calls your callback when the user
-uses device/browser back:
+install a real top-level back target and keeps that entry reversible, so Back
+closes the nested view and browser Forward reconstructs the same view:
 
 ```jsx
 const navRef = useRef(null)
 
 async function openDetail(item) {
   navRef.current?.close()
-  const handle = window.mobius.nav.open('app-detail', () => {
-    navRef.current = null
-    setSelected(null)
+  let handle = null
+  handle = window.mobius.nav.open('app-detail', {
+    onBack: () => {
+      navRef.current = null
+      setSelected(null)
+    },
+    onForward: () => {
+      navRef.current = handle
+      setSelected(item)
+    },
   })
   navRef.current = handle
   const { status } = await handle.outcome
@@ -1121,6 +1128,18 @@ The shell installs a back-sentinel in its own history on `nav-push`, so the OS s
 **Rules of the protocol:**
 
 - Pick ONE model per nested-view level — combining `iframe.history.pushState` with this protocol scrambles the back stack.
+- Prefer the reversible object form
+  `nav.open(label, { onBack, onForward })`. The legacy
+  `nav.open(label, onBack)` form remains valid, but its nested view is
+  intentionally destructive: browser Forward can return to the app's base
+  route only, not reconstruct that view. That fallback is still a normal shell
+  step—the next Back leaves the base route once; it is never a ghost sentinel.
+- A nested iframe participates in Chromium's *joint session history*. Mount it
+  once with its final `srcDoc`/URL. Changing `srcDoc`, `src`, or calling its
+  own `history.pushState` after the app sentinel is installed can create an
+  invisible extra Back step (the apparent “takes two Back gestures” bug).
+  Prepare remote images/content before mounting, or update an already-mounted
+  document through `postMessage` without navigating it.
 - With the runtime helper, every code path that exits a nested view (including
   the in-app X button) MUST call its own `handle.close()`. The helper sends the
   matching `nav-pop` only when it actually owns a shell entry. Raw-protocol
@@ -1131,4 +1150,13 @@ The shell installs a back-sentinel in its own history on `nav-push`, so the OS s
 
 **Across app switches:** app-sentinels are preserved across drawer-driven app switches. Nest 2 levels in Klix, drawer-tap to Notes, and the user gets browser-style back (first back returns to Klix showing its nested view, then unwinds Klix, last back exits). Your iframe stays mounted in the LRU cache while invisible, so its state is preserved — just respond to `moebius:nav-back` correctly even when currently invisible (by the time it arrives, your iframe is visible again).
 
-**No tree restoration:** the protocol stores a count, not a stack of labels. If you push 3 sentinels (list → detail → edit) and the host sends 3 `nav-back` events, your app must unwind them in order. Keep your own breadcrumb if the hierarchy is non-trivial.
+**Forward restoration:** the runtime retains each reversible entry's handlers.
+After Back it keeps the entry dormant; when browser Forward revisits the same
+shell slot it calls that entry's `onForward`, then acknowledges successful
+restoration to the shell. If the iframe was evicted/reloaded and the closure no
+longer exists, the fresh runtime explicitly rejects restoration and the shell
+retires that ghost slot instead of swallowing the next Back. The
+`reversible`, `moebius:nav-forward`, and forward-result messages are runtime
+internals: raw-protocol callers remain one-way and must not set `reversible`
+themselves. For multi-level navigation, each level needs its own reversible
+helper closure; labels are diagnostic, not a serialized navigation tree.
