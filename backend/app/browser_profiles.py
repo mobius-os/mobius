@@ -93,6 +93,47 @@ def _tree_bytes(path: Path) -> int:
   return total
 
 
+def _active_profile_names(root: Path) -> set[str]:
+  """Return profile directory names referenced by live Chromium processes.
+
+  Runner registry state covers chat turns but not named browser sessions such
+  as Reflection, QA, or settings checks. Reading proc cmdlines keeps those
+  profiles out of cache/profile deletion without trusting their directory name.
+  """
+  active = set()
+  proc = Path("/proc")
+  if not proc.is_dir():
+    return active
+  try:
+    children = proc.iterdir()
+  except OSError:
+    return active
+  root = root.resolve()
+  for child in children:
+    if not child.name.isdigit():
+      continue
+    try:
+      args = (child / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+      continue
+    for index, raw in enumerate(args):
+      value = raw.decode("utf-8", errors="replace")
+      profile_value = None
+      if value.startswith("--user-data-dir="):
+        profile_value = value.split("=", 1)[1]
+      elif value == "--user-data-dir" and index + 1 < len(args):
+        profile_value = args[index + 1].decode("utf-8", errors="replace")
+      if not profile_value:
+        continue
+      try:
+        profile = Path(profile_value).resolve()
+        if profile.parent == root:
+          active.add(profile.name)
+      except (OSError, RuntimeError):
+        pass
+  return active
+
+
 def chat_activity_snapshot(db: Session) -> dict[str, dict]:
   rows = db.query(
     models.Chat.id,
@@ -120,6 +161,7 @@ def enforce_browser_profile_quota(
   max_bytes: int | None = None,
   low_water_bytes: int | None = None,
   inactive_days: int | None = None,
+  active_profile_names: set[str] | None = None,
 ) -> dict:
   """Prune regenerable caches, then oldest inactive profiles, at high water."""
   root = Path(data_dir) / "agent-browser-profiles"
@@ -138,15 +180,19 @@ def enforce_browser_profile_quota(
     "AGENT_BROWSER_PROFILE_INACTIVE_DAYS", _DEFAULT_INACTIVE_DAYS,
   )
   cutoff_seconds = inactive_days * 86400
+  active_profile_names = (
+    _active_profile_names(root)
+    if active_profile_names is None else active_profile_names
+  )
 
   profiles = []
   if root.is_dir():
     for path in root.iterdir():
       match = _CHAT_PROFILE.fullmatch(path.name)
-      if not match or not path.is_dir():
+      if path.is_symlink() or not path.is_dir():
         continue
-      chat_id = match.group(1)
-      chat = chats.get(chat_id)
+      chat_id = match.group(1) if match else None
+      chat = chats.get(chat_id) if chat_id else None
       activity = chat.get("activity_at") if chat else None
       if activity is not None and activity.tzinfo is not None:
         activity = activity.astimezone(UTC).replace(tzinfo=None)
@@ -157,14 +203,20 @@ def enforce_browser_profile_quota(
       activity = activity or fallback_activity
       age_seconds = max(0.0, (now - activity).total_seconds())
       active = (
-        chat_id in active_chat_ids
+        path.name in active_profile_names
+        or (chat_id is not None and chat_id in active_chat_ids)
         or (chat and chat.get("run_status") == "running")
       )
-      eligible = not active and (
-        chat is None
-        or chat.get("deleted_at") is not None
-        or age_seconds >= cutoff_seconds
-      )
+      if chat_id is None:
+        # Named/legacy profiles are included in the byte budget and cache
+        # pruning, but their durable state receives the full inactivity grace.
+        eligible = not active and age_seconds >= cutoff_seconds
+      else:
+        eligible = not active and (
+          chat is None
+          or chat.get("deleted_at") is not None
+          or age_seconds >= cutoff_seconds
+        )
       profiles.append({
         "path": path,
         "chat_id": chat_id,
@@ -194,7 +246,7 @@ def enforce_browser_profile_quota(
     for profile in cache_candidates:
       for rel in _CACHE_PATHS:
         cache = profile["path"] / rel
-        if not cache.is_dir():
+        if cache.is_symlink() or not cache.is_dir():
           continue
         before = _tree_bytes(cache)
         shutil.rmtree(cache, ignore_errors=True)
@@ -219,6 +271,9 @@ def enforce_browser_profile_quota(
   result = {
     "last_run_at": datetime.now(UTC).isoformat(),
     "profile_count": len(profiles),
+    "non_chat_profile_count": sum(
+      1 for profile in profiles if profile["chat_id"] is None
+    ),
     "bytes_before": bytes_before,
     "bytes_after": total,
     "reclaimed_bytes": max(0, bytes_before - total),

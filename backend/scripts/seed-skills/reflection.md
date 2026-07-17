@@ -8,7 +8,7 @@ graph files. Lingering files are user data, not proof that the capability is
 installed. Reflection still works from the always-on per-chat Digests/Summaries,
 interviews, app evidence, and ordinary activity data.
 
-Your goal and how-to for the nightly pass: triage the day's chats by their summaries and interview the agents whose day shows difficulties or learnings, improve your skills from what you learn (including THIS skill), review Memory's maintenance log for system-improvement signals, fix and harden the apps, research what the partner cares about, then write a brief. This file is the source of truth for the reflection run. You can edit it — adapt how you reflect as you learn what's worth doing.
+Your goal and how-to for the nightly pass: improve the partner's **long-term productivity**. Triage the day's chats by their summaries and interview the agents whose day shows difficulties or learnings, improve your skills from what you learn (including THIS skill), review Memory's maintenance log for system-improvement signals, steward the platform's resource and usage costs, fix and harden the apps, research what the partner cares about, then write a brief. This file is the source of truth for the reflection run. You can edit it — adapt how you reflect as you learn what's worth doing.
 
 **Why you do this — the point is not just to *know* the partner, it's to make Möbius itself better for them, every night, in whatever way the day revealed.** Skills, apps, Memory's maintenance evidence, and what you research are all levers; pull whichever the day's signal points at. The real test is **anticipation**: when the partner wakes and asks tomorrow's question, you should *already* have prepared for it — improved the procedure that failed, fixed the app that broke, researched the thing they'll want next, or flagged the right decision in the brief. A good night means fewer cold-starts tomorrow: the partner asks, and you (or the next daytime agent) already has the context, the connection, or the app ready. Be **creative** about how — a recurring interest might deserve a brand-new app, a fresh batch of recommendations, a pre-staged answer, or a sharper skill. Capture everything worth keeping in the right owner: Memory owns memory facts and consolidation; Reflection owns the system-improvement loop and the morning report. **Anticipation is driven by signal, never invented** — every prepared item must trace to something the day actually surfaced and clear the anti-noise bar below; a night that surfaced nothing worth preparing prepares nothing, and an honest, quiet brief beats a speculative one.
 
@@ -22,7 +22,7 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`) — 
 
 - **Be conservative and reversible.** You are operating on the partner's live platform while they sleep. Everything you change is in `/data`'s git history — but prefer changes you'd be comfortable explaining in the morning. **Never auto-apply anything risky** (security fixes with behavior change, destructive data ops, dependency major-bumps, anything that hits paid external APIs or notifies other people). Surface those in the brief as a proposal with a one-tap question, don't do them.
 - **Commit as you go.** After each discrete chunk — a skill edit, a system-improvement note, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
-- **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. A short brief the partner reads fully beats a long one they skim.
+- **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. The same rule applies to your own diagnostics: a command without a fresh trigger or an explicit due date is resource noise. A short brief the partner reads fully beats a long one they skim.
 - **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/memory.md` only when interpreting Memory's update log or proposing memory-system improvements. This skill orchestrates; those skills hold the per-task contracts.
 - **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
 - **The deliverable is non-negotiable: write the brief.** Reflection may improve skills, apps, and system routines before that, but a partial night with a truthful brief beats a perfect investigation that never ships.
@@ -33,11 +33,13 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`) — 
 
 Work through these as one multi-turn goal. Earlier phases feed later ones — the interviews surface what to fix, the fixes inform the brief. Don't skip the interviews to get to the fun parts — real testimony from the agent that did the work beats reconstructing its day from artifacts; the summary-first triage below decides WHICH agents are worth that spend.
 
-The order is: review-your-own-runs (0) → interviews (1) → skill edits (2) → **Memory-system review from update logs** (3) → app triage (4) → research (5) → brief (6). Do not consolidate Memory's graph here; the Memory app's scheduled job owns that. Your job is to notice whether Memory's own process is serving future agents well and to improve the surrounding system when it is not.
+The order is: review-your-own-runs + resource pulse (0) → interviews (1) → skill edits (2) → **Memory-system review from update logs** (3) → resource stewardship (3.5) → app triage (4) → research (5) → brief (6). Do not consolidate Memory's graph here; the Memory app's scheduled job owns that. Your job is to notice whether Memory's own process is serving future agents well and to improve the surrounding system when it is not.
 
 ### 0. REVIEW YOUR OWN RECENT RUNS — one read, first
 
 Read `inputs/reflection-run-history.txt`: your own recent exit codes (+ durations), `reflection.log` friction, and recent self-edits to this skill. If a failure or friction **recurs across nights**, that's tonight's first thing to fix — carry it into phase 2. One read, one decision; don't let it grow (the brief is still the floor). Absent, or a first tracked run → note it and move on.
+
+Read `inputs/resource-snapshot.json`, `inputs/resource-history.jsonl`, and `inputs/resource-decisions.jsonl` in the same pass. The snapshot already paid for tonight's observation: it always contains cheap disk/cgroup counters and contains a bounded deep `/data` inventory only when due, under pressure, or after unusual growth. The history supplies recent trends and the last deep inventory; the decisions ledger says what prior runs changed, the measured result, when to look again, and what trigger permits an earlier review. **Do not rerun broad `du`, recursive `find`, browser sweeps, or equivalent diagnostics when the snapshot is fresh and the relevant decision is neither due nor triggered.** Missing or failed telemetry is a reason to repair telemetry, not permission to launch an unbounded scan.
 
 Also read `inputs/prev-question-answers.json` here (present when the partner tapped a recent brief's question cards). Those answers were saved for THIS run — no live agent waited on them. Note each decision now and **act on it in phase 2**: build the feature they picked, apply the fix they approved, drop the declines. Absent on first runs or when no questions were asked → move on.
 
@@ -159,6 +161,71 @@ Use `/data/shared/skills/memory.md` as the contract for what Memory should have
 done, not as permission for Reflection to do that work. When you make a
 system-facing change, commit it with `pm-commit 'memory-system: <what and why>'`.
 
+### 3.5. STEWARD RESOURCES — trends first, cleanup second
+
+Resource efficiency is part of user productivity: a full disk stops work, a
+leaked browser consumes RAM, repeated model/tool calls waste time, and on
+Railway persistent storage, memory, CPU, and network usage can directly affect
+the bill. Treat a snapshot whose `platform` is `railway` with particular cost
+discipline, but keep the same habits on self-hosted systems.
+
+Start with `inputs/resource-snapshot.json`, the bounded
+`inputs/resource-history.jsonl`, and the recent
+`inputs/resource-decisions.jsonl`; do not begin with shell reconnaissance.
+
+- **Use trends and thresholds.** Compare the cheap pulse with recent history.
+  Inspect the deep inventory only when `deep_scan.ran` and note whether it was
+  complete. One large category is a lead, not permission to delete it.
+- **Make review cadence adaptive.** Every resource area has a next review and
+  an early trigger. A new or unstable leak may be checked tomorrow. After a
+  programmatic cap has held through several observations, stretch the cadence
+  from daily → 3 days → weekly → monthly. Reset it only when its trigger fires
+  (pressure, growth, error, or regression). This is how hardened areas become
+  cheaper to maintain instead of permanent nightly rituals.
+- **Prefer prevention over recurring cleanup.** If workers repeatedly leave the
+  same image, worktree, browser process, session file, import tree, or cache,
+  fix its owner: register cleanup before creation, label it with owner and
+  expiry, add a low-water quota, and retain a bounded metric. Reflection may
+  clean the odd residue tonight; it should not become the garbage collector for
+  a deterministic lifecycle bug.
+- **Automatic cleanup has a high evidence bar.** You may remove a narrowly
+  resolved target only when it is demonstrably regenerable or expired, is not
+  active or referenced, and the deletion is reversible or its owner contract
+  explicitly makes it disposable. Measure expected bytes first and actual
+  bytes after. Never broadly prune, delete by an unresolved glob, or auto-delete
+  chats, credentials, databases, source changes, or uncertain backups. Propose
+  those with exact retention options instead.
+- **Instrument every fix.** Define the metric and expected effect as part of the
+  change. The next run reads the new measurement, records whether it worked,
+  and tweaks the mechanism only when evidence misses the expectation. Do not
+  repeatedly run the implementation command merely to "make sure."
+- **Minimize Reflection's own footprint.** Digest before raw logs; sample before
+  full scans; reuse prior verified evidence; fork only chats with a new signal;
+  open a browser only for a specific unconfirmed behavior; avoid speculative
+  web research; stop once the question is answered. Prefer one bounded helper
+  that emits analytics over many nightly shell commands. Keep Reflection's
+  logs, histories, reports, browser profile, and CLI sessions under explicit
+  retention budgets too—an observer is not exempt from the policy it enforces.
+
+After any cleanup, quota, retention, or cadence decision, append one structured
+record with the installed helper (quote values as single arguments):
+
+```bash
+python3 /data/apps/reflection/resource_monitor.py record \
+  --ledger /data/apps/reflection/resource-decisions.jsonl \
+  --area '<stable area name>' \
+  --evidence '<metric, trend, active/reference check>' \
+  --action '<what changed or why no action was needed>' \
+  --result '<measured outcome>' \
+  --next-review-at '<ISO timestamp>' \
+  --review-trigger '<specific condition that permits an earlier check>' \
+  --bytes-reclaimed '<integer bytes when applicable>'
+```
+
+The ledger is the durable handoff to future Reflection runs, not brief filler.
+Mention resource work in the morning brief only when it materially saved cost,
+prevented a risk, changed user-visible behavior, or needs a decision.
+
 ### 4. IMPROVE APPS — triage with the digest, then fix and propose
 
 **Only improve apps the partner actually touched.** This is the leading rule. The `per-app-digest.json` staged in `inputs/` is your first stop — read it before reviewing any app. It gives you: `opens_24h` (how many times the partner opened the app today), `signal_counts` (what events fired), `app_errors_24h` + `recent_app_errors` (UNCAUGHT crashes the browser caught — present even when the app never calls `signal('error')`, so this is the primary crash signal), `last_5_errors` (errors the app EXPLICITLY reported via `signal('error')`), and `has_signals` (whether the app emits analytics at all). The digest's top-level `shell_errors_24h` counts owner-shell errors (no app). Sort by `opens_24h` descending. An app with `opens_24h == 0` and no recent errors does not need attention tonight — skip it unless an interview specifically flagged it.
@@ -190,6 +257,7 @@ The whole run — interviews, skill edits, Memory-system review, app triage, res
 | 1. Interviews | ≤12 | Light pass on cron-only nights (≤5) |
 | 2. Skill edits | ≤5 | Only confirmed gaps from interviews |
 | 3. Memory-system review | ≤7 | Read Memory update logs/outcomes and improve the process only when there is real signal |
+| 3.5. Resource stewardship | ≤5 | Snapshot + ledger first; broad diagnostics only when due/triggered |
 | 4. App triage + fixes | ≤13 | Digest-first; skip apps with 0 opens |
 | 5. Research | ≤5 | Only if a clear topic cleared the bar; otherwise skip |
 | 6. Brief | ≤10 | Hard stop at 10 — never let this exceed budget |
@@ -275,7 +343,7 @@ Append ONE carrier as a sibling AFTER `</article>` (or after your brief's root e
 
 The `questions` array is the EXACT shell QuestionCard shape: `{question, header, multiSelect, options:[{label, description}]}`. Questions are **optional — zero is a normal night**: ship cards only when something genuinely wants the partner's input, and several when they're real (ranked-feature picks, a security fix awaiting approval, "should I build X", or **direction-gathering** — which of tonight's brainstormed ideas would actually be useful). Never invent a question to fill the section; `header` is a 1–2 word category; set `multiSelect` only when more than one answer makes sense. The JSON must be valid — a malformed carrier is silently dropped, so the brief still ships. **Say plainly in the brief that these guide tomorrow night, not tonight** — there is no live agent waiting, so don't write "answer below and I'll act now." When the partner taps an answer, the app saves it to `question-answers/<date>.json`; your **next run's** `fetch.sh` stages it at `inputs/prev-question-answers.json` and you act on it in phase 2.
 
-**Carry forward an unanswered question — never silently retire it.** A question card from an earlier brief that went *untapped* is NOT answered: no tap ≠ "no" — the partner may simply not have engaged that night (the feedback surface is easy to scroll past). If the decision is still genuinely useful and unresolved, **re-include the SAME question in tonight's brief** (don't spawn variants; a short "still open from <date>" keeps it honest) — and retire it once answered, moot, or resolved in a chat. But **answering is optional and never a gate**: the partner not tapping is normal, the night's work continues at full value regardless, and open cards must never pile into a backlog — carry the one or two still-genuinely-open decisions quietly and drop the rest. The cards are a lightweight way for the partner to steer you when they feel like it, not homework you assign them.
+**Treat unanswered questions as channel evidence, not answers.** No tap is not "no," but repeated non-response means this channel is currently low-yield. Carry a still-essential question at most once; otherwise retire it without inferring a preference, choose the safest reversible default where one exists, and keep delivering value without waiting. Ask fewer, sharper questions in later briefs and record the engagement lesson in this skill or the resource decision ledger as appropriate. Answering is optional and never a gate, and open cards must never become homework or a backlog.
 
 > **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/$APP_ID/reports/<date>.html` (the numeric storage dir above, NOT the slug dir). A plain brief the partner can read beats a perfect one that never posts.
 
