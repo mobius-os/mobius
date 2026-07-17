@@ -140,3 +140,17 @@ export function effectiveToolName(tool) {
   }
   return name
 }
+
+// DISTINCTIVE activities break out of the mundane fold and stand as their own
+// activity line, rather than collapsing into the combined "Edited files, read
+// files, ran commands" summary (owner ref 2026-07-17). The read/grep/edit/bash
+// plumbing is the agent's background housekeeping — one calm folded line is
+// right — but a notable beat like viewing an image is worth seeing on its own,
+// so scanning the transcript tells the story. Extensible: skill reads, context
+// compaction, and subagent spawns join here once the backend surfaces their
+// events (today only image views are frontend-detectable — a Skill load is
+// swallowed into a chip, not a tool block).
+const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage'])
+export function isDistinctiveActivityTool(item) {
+  return item?.type === 'tool' && DISTINCTIVE_ACTIVITIES.has(effectiveToolName(item))
+}

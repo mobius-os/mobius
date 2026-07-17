@@ -5,6 +5,7 @@ import {
   toolActivitySingular,
   toolActivityPastSingular,
   effectiveToolName,
+  isDistinctiveActivityTool,
 } from './toolActivityLabel.js'
 
 // Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
@@ -19,6 +20,12 @@ import {
 //
 // Rules:
 //   - any run of entries whose item.type is 'tool' OR 'thinking' becomes a group
+//   - a DISTINCTIVE tool (isDistinctiveActivityTool — today an image view)
+//     breaks the run and stands as its OWN single-entry group, so notable beats
+//     punctuate the flow on their own line instead of folding into the combined
+//     "Edited files, read files, ran commands" summary (owner ref 2026-07-17).
+//     Consecutive distinctive tools each get their own line — they do not
+//     accumulate.
 //   - any non-activity entry (text, question, error) breaks the run and passes
 //     through, so interleave order is preserved exactly (interleave is sacred —
 //     these are the blocks a reader must not lose the position of)
@@ -42,7 +49,10 @@ export function groupActivityRuns(entries) {
 
   for (const entry of entries) {
     const type = entry?.item?.type
-    if (type === 'tool' || type === 'thinking') {
+    if (isDistinctiveActivityTool(entry?.item)) {
+      flush()
+      nodes.push({ group: [entry] })
+    } else if (type === 'tool' || type === 'thinking') {
       run.push(entry)
     } else {
       flush()

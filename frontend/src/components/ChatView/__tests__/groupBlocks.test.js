@@ -268,3 +268,35 @@ test('toolGroupState: reads output_exit_code field on a reduced block', () => {
   // A still-running tool keeps the group 'running' even with a failed sibling.
   assert.equal(toolGroupState([carved, { type: 'tool', status: 'running' }]), 'running')
 })
+
+test('a distinctive tool (image view) breaks out into its own line', () => {
+  // A Read of an image is a ViewImage activity — a notable beat that stands on
+  // its own line instead of folding into the surrounding mundane run (owner ref
+  // 2026-07-17). Around it, the read/edit/bash plumbing still folds normally.
+  const img = { file_path: '/tmp/shot.png' }
+  const nodes = groupActivityRuns([
+    e(tool({ tool: 'Edit' })),
+    e(tool({ tool: 'Bash' })),
+    e(tool({ tool: 'Read', input: img })),          // image → own line
+    e(tool({ tool: 'Read', input: { file_path: '/x.js' } })),  // plain read, own run
+    e(tool({ tool: 'Read', input: img })),          // image → own line
+  ])
+  // [Edit,Bash] fold · image · [plain Read] · image
+  assert.equal(nodes.length, 4)
+  assert.equal(nodes[0].group.length, 2)            // Edit + Bash folded
+  assert.equal(nodes[1].group.length, 1)            // the image view, alone
+  assert.equal(nodes[1].group[0].item.input, img)
+  assert.equal(nodes[2].group.length, 1)            // the plain read, its own run
+  assert.equal(nodes[3].group.length, 1)            // the trailing image view, alone
+})
+
+test('consecutive image views each get their own line — they do not accumulate', () => {
+  const img = { file_path: '/a.png' }
+  const nodes = groupActivityRuns([
+    e(tool({ tool: 'Read', input: img })),
+    e(tool({ tool: 'Read', input: img })),
+    e(tool({ tool: 'Read', input: img })),
+  ])
+  assert.equal(nodes.length, 3)
+  for (const n of nodes) assert.equal(n.group.length, 1)
+})
