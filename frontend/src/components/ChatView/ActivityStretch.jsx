@@ -214,23 +214,22 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           null
         )}
         <span className="chat__activity-label">
-          <span className="chat__activity-label-text">
-            {text}
-            {displayState === 'running' && (
-              // The ChatGPT cadenced-shimmer mechanism, transplanted from
-              // the owner's captured CSS (2026-07-17): the sweep is a masked
-              // WINDOW that translates across a counter-translated bright
-              // copy of the text — the two transforms cancel so the bright
-              // copy always aligns with the base, while the mask band slides
-              // over it. Transform+mask stays on the compositor; the base
-              // text below is normal colored text, so letters can never
-              // blank. Duplicated text is aria-hidden and invisible outside
-              // the band.
-              <span className="chat__activity-label-sweep" aria-hidden="true">
-                <span className="chat__activity-label-highlight">{text}</span>
-              </span>
-            )}
-          </span>
+          <span className="chat__activity-label-text">{text}</span>
+          {displayState === 'running' && (
+            // The ChatGPT cadenced-shimmer mechanism (owner-captured CSS,
+            // 2026-07-17): a masked window translating across a counter-
+            // translated bright copy — transforms cancel, so the copy stays
+            // aligned while only the window moves. The sweep is a SIBLING of
+            // the text span, positioned against the LABEL (a blockified flex
+            // item): anchoring it inside the inline text span put the
+            // absolute box at the mercy of inline-containing-block quirks,
+            // which rendered the copy as a second visible "Thinking"
+            // (owner report, 2026-07-17). aria-hidden keeps the duplicate
+            // out of AT.
+            <span className="chat__activity-label-sweep" aria-hidden="true">
+              <span className="chat__activity-label-highlight">{text}</span>
+            </span>
+          )}
         </span>
         {displayState === 'error' && exitCode != null && (
           <span className="chat__activity-chip">exit {exitCode}</span>

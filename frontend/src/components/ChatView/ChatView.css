@@ -1038,8 +1038,16 @@
    step count so the sweep portion keeps exactly 48 steps (1s / 41.67% of a
    2.4s cycle → 48 / 0.4167 ≈ 115 total; the rest-phase steps land on
    identical off-screen frames and are invisible). */
-.chat__activity-label-text {
+/* The LABEL (a blockified flex item) is the sweep's positioning anchor —
+   position:relative on the inline text span was at the mercy of
+   inline-containing-block quirks and rendered the bright copy as a second
+   visible "Thinking" (owner report, 2026-07-17). The label's box hugs the
+   text (flex: 0 1 auto), so inset:0 tracks the glyphs exactly. */
+.chat__activity-label {
   position: relative;
+}
+
+.chat__activity-label-text {
   color: inherit;
 }
 
