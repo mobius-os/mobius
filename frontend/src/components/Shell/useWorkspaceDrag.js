@@ -4,6 +4,7 @@ import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, crossedDrawerExit,
+  rootEdgeAllowed,
 } from './dragController.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
@@ -243,7 +244,7 @@ export default function useWorkspaceDrag({
           document.body.style.userSelect = 'none'
           document.body.style.webkitUserSelect = 'none'
         }
-        const allowRootEdge = !isTouch && sceneInputsRef.current.mode !== 'phone'
+        const allowRootEdge = rootEdgeAllowed(isTouch, sceneInputsRef.current.mode)
         scene = buildSceneNow(buildSource(), allowRootEdge)
         ensureOverlays()
         positionChip(start.x, start.y, isTouch, key)
@@ -354,7 +355,7 @@ export default function useWorkspaceDrag({
       // A zone that flipped infeasible resolves to null and the drop cancels
       // visibly (the chip/preview animate away), never a silent reducer no-op.
       function commitDrop() {
-        const allowRootEdge = !isTouch && sceneInputsRef.current.mode !== 'phone'
+        const allowRootEdge = rootEdgeAllowed(isTouch, sceneInputsRef.current.mode)
         const fresh = buildSceneNow(buildSource(), allowRootEdge)
         // Commit ONLY the operation the preview promised: releaseZone returns the
         // fresh zone iff it is structurally identical to the previewed one, else

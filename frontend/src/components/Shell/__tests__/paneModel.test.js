@@ -592,14 +592,6 @@ test('prune drops dead-backed tabs; a null live set keeps everything', () => {
   assertInvariants(kept)
 })
 
-test('visibleTabs returns each pane active tab in order', () => {
-  const ws = paneModel.moveTab(
-    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
-    'chat:b', { paneId: 'p0', edge: 'right' },
-  )
-  assert.deepEqual(paneModel.visibleTabs(ws).map(tabKey), ['chat:a', 'chat:b'])
-})
-
 // ── Projection: geometry (projectLayout / modeForRect / canSplit) ───────────
 
 // A depth-2, four-leaf tree: s0 row → s1 col(p1,p2) | s2 col(p3,p4).

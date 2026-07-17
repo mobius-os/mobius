@@ -1,7 +1,5 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
-import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import Drawer from '../Drawer/Drawer.jsx'
@@ -63,6 +61,7 @@ import {
 import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { deriveContentVisibility } from './workspaceView.js'
+import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
 
 // Resolves the service worker to post warm-up messages to. The page is
 // uncontrolled on its very first load (clientsClaim only takes over once
@@ -284,6 +283,16 @@ export default function Shell() {
     coldRestoredCanvasAppId != null ? [String(coldRestoredCanvasAppId)] : []
   )
   const [warmVersion, setWarmVersion] = useState(0)
+  // Drop every warm-LRU id matching `matches` and bump the version so the
+  // synchronous rendered-set derivation re-runs. The version bump is load-bearing
+  // (renderedAppIds deps on it); funnelling all four eviction sites through one
+  // helper makes it impossible to drop an id without the bump (finding: warm-LRU
+  // pattern hand-repeated four times).
+  const dropFromWarmLru = useCallback((matches) => {
+    if (!warmLruRef.current.some(matches)) return
+    warmLruRef.current = warmLruRef.current.filter(id => !matches(id))
+    setWarmVersion(v => v + 1)
+  }, [])
   const [appIntents, setAppIntents] = useState({})
   // Ids ever observed PRESENT in a fetched /api/apps list. The eviction
   // effect below treats an app as uninstalled only on a genuine
@@ -1317,10 +1326,7 @@ export default function Shell() {
     }
     // Drop any warm-only stale frame (not a tab, so CLOSE_TAB was a no-op for it)
     // so its 404'ing iframe unmounts.
-    if (warmLruRef.current.some(id => staleSet.has(String(id)))) {
-      warmLruRef.current = warmLruRef.current.filter(id => !staleSet.has(String(id)))
-      setWarmVersion(v => v + 1)
-    }
+    dropFromWarmLru(id => staleSet.has(String(id)))
   }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
       navStackRef, retireAppHistory, dispatchWorkspace])
 
@@ -1375,10 +1381,7 @@ export default function Shell() {
       reason: 'deleted',
     })
     const sid = String(coldRestoredCanvasAppId)
-    if (warmLruRef.current.some(id => String(id) === sid)) {
-      warmLruRef.current = warmLruRef.current.filter(id => String(id) !== sid)
-      setWarmVersion(v => v + 1)
-    }
+    dropFromWarmLru(id => String(id) === sid)
   }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace])
 
   // Warm the SW app-code cache once per shell load for the apps the user
@@ -2247,10 +2250,7 @@ export default function Shell() {
     retireAppHistory(id, 'deleted')
     tombstoneRoute('app', id)
     const sid = String(id)
-    if (warmLruRef.current.some(cid => String(cid) === sid)) {
-      warmLruRef.current = warmLruRef.current.filter(cid => String(cid) !== sid)
-      setWarmVersion(v => v + 1)
-    }
+    dropFromWarmLru(cid => String(cid) === sid)
     navStackRef.current = navStackRef.current.filter(
       e => !(e.view === 'canvas' && String(e.appId) === sid)
     )
@@ -2308,10 +2308,7 @@ export default function Shell() {
     // empty internal nav stack (contract §4.1.5) — and drop any warm-only frame.
     retireAppHistory(id, 'data-reset')
     const sid = String(id)
-    if (warmLruRef.current.some(cid => String(cid) === sid)) {
-      warmLruRef.current = warmLruRef.current.filter(cid => String(cid) !== sid)
-      setWarmVersion(v => v + 1)
-    }
+    dropFromWarmLru(cid => String(cid) === sid)
     clearAppFrameStorage(id)
     clearCachedAppToken(id)
     await clearAppRuntimeData(id)
@@ -2455,47 +2452,32 @@ export default function Shell() {
           // as it does for a WorkspaceChrome strip; dragging a tab out with ≥2
           // tabs present splits the pane.
           data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
+          onKeyDown={(e) => stripKeyDown(e, openTabs, (tab) => closeTab(tab.kind, tab.id))}
         >
           {openTabs.map(tab => {
-            const isChat = tab.kind === 'chat'
-            // Label resolution is the shell's job (it holds the live lists);
-            // identity, active-ness, and the nav target are the tab model's.
-            const meta = isChat ? chatById.get(tab.id) : appById.get(tab.id)
-            const label = isChat ? (meta?.title || 'Chat') : (meta?.name || 'App')
-            const active = tabModel.isTabActive(tab, {
-              view: activeView, chatId: activeChatId, appId: activeAppId,
-            })
-            const TabIcon = isChat ? MessageSquare : AppWindow
+            // Active-ness comes from the workspace's OWN focused active tab, not
+            // the legacy nav triple (retires tabModel.isTabActive); label, target,
+            // drag key, and close route through the shared PaneTab, so the
+            // .shell__tab chrome is defined once for both strips.
+            const key = tabModel.tabKey(tab)
+            const active = key === focusedActiveKey
             return (
-              <div
-                key={tabModel.tabKey(tab)}
-                className={`shell__tab${active ? ' shell__tab--active' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="shell__tab-open"
-                  aria-current={active ? 'true' : undefined}
-                  data-drag-key={paneModel.WORKSPACE_SPLITS_ENABLED ? tabModel.tabKey(tab) : undefined}
-                  onClick={() => {
-                    const { view, opts } = tabModel.tabNavTarget(tab)
-                    navTo(view, opts)
-                  }}
-                  onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED
-                    ? (e) => openTabMenu(e, tab, null)
-                    : undefined}
-                >
-                  <TabIcon size={13} aria-hidden="true" />
-                  <span className="shell__tab-text">{label}</span>
-                </button>
-                <button
-                  type="button"
-                  className="shell__tab-close"
-                  aria-label={`Close ${label} tab`}
-                  onClick={() => closeTab(tab.kind, tab.id)}
-                >
-                  <X size={13} aria-hidden="true" />
-                </button>
-              </div>
+              <PaneTab
+                key={key}
+                tab={tab}
+                label={labelForTab(tab)}
+                active={active}
+                tabIndex={active ? 0 : -1}
+                dragKey={paneModel.WORKSPACE_SPLITS_ENABLED ? key : undefined}
+                onActivate={() => {
+                  const { view, opts } = tabModel.tabNavTarget(tab)
+                  navTo(view, opts)
+                }}
+                onClose={() => closeTab(tab.kind, tab.id)}
+                onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED
+                  ? (e) => openTabMenu(e, tab, null)
+                  : undefined}
+              />
             )
           })}
         </nav>

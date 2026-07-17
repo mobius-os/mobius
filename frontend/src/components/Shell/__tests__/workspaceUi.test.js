@@ -9,6 +9,7 @@ const css = readFileSync(
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
+const paneStrip = readFileSync(new URL('../PaneStrip.jsx', import.meta.url), 'utf8')
 const walkthrough = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
 )
@@ -168,10 +169,20 @@ test('strips sit above dividers so the 44px grab never occludes a tab', () => {
   assert.match(rule, /z-index:\s*5/)
 })
 
-test('the strips are roving-tabindex toolbars', () => {
-  assert.match(chrome, /tabIndex=\{active \? 0 : -1\}/)
-  assert.match(chrome, /onKeyDown=\{onStripKeyDown\}/)
-  assert.match(chrome, /e\.key === 'ArrowRight'/)
+test('the strips are roving-tabindex toolbars (one shared implementation)', () => {
+  assert.match(paneStrip, /export function stripKeyDown/)
+  assert.match(paneStrip, /tabIndex=\{active \? 0 : -1\}/)
+  assert.match(paneStrip, /e\.key === 'ArrowRight'/)
+  // Both containers route their keydown through the shared roving helper.
+  assert.match(paneStrip, /stripKeyDown\(e, pane\.tabs, onClose\)/)
+  assert.match(shell, /stripKeyDown\(e, openTabs,/)
+})
+
+test('the single-pane strip derives active from the workspace, retiring isTabActive', () => {
+  assert.match(shell, /active = key === focusedActiveKey/)
+  // No live CALL to the retired legacy-triple predicate.
+  assert.doesNotMatch(shell, /tabModel\.isTabActive\(/)
+  assert.doesNotMatch(paneStrip, /isTabActive\(/)
 })
 
 test('the pane chip and sheet rows carry an activity dot for hidden panes', () => {

@@ -34,53 +34,6 @@ export function tabKey(tab) {
   return `${tab.kind}:${tab.id}`
 }
 
-// Add to the open set (idempotent), keeping the most-recent MAX_TABS.
-export function addTab(tabs, kind, id) {
-  return tabs.some(t => sameTab(t, kind, id))
-    ? tabs
-    : [...tabs, makeTab(kind, id)].slice(-MAX_TABS)
-}
-
-// Semantic chat -> artifact placement for today's single-strip workspace.
-// The shell calls this when server truth says a chat produced a runnable app;
-// it deliberately does NOT navigate, so the owner's current view/focus stays
-// put. A future pane workspace keeps this operation at the call site and routes
-// the app to the pane beside the chat instead of changing the event contract.
-export function addBuiltAppForChat(tabs, chatId, appId, protectedTab = null) {
-  if (tabs.some(t => sameTab(t, 'app', appId))) return tabs
-
-  const next = [...tabs]
-  let chatIndex = next.findIndex(t => sameTab(t, 'chat', chatId))
-  if (chatIndex === -1) {
-    next.push(makeTab('chat', chatId), makeTab('app', appId))
-  } else {
-    next.splice(chatIndex + 1, 0, makeTab('app', appId))
-  }
-
-  // Preserve the newly-related chat/app pair at the flat strip's cap. This is
-  // intentionally local to the current projection; a pane will apply its own
-  // per-pane capacity policy later.
-  while (next.length > MAX_TABS) {
-    chatIndex = next.findIndex(t => sameTab(t, 'chat', chatId))
-    const appIndex = next.findIndex(t => sameTab(t, 'app', appId))
-    const protectedIndex = protectedTab
-      ? next.findIndex(t => sameTab(t, protectedTab.kind, protectedTab.id))
-      : -1
-    const removable = next.findIndex((_, index) => (
-      index !== chatIndex && index !== appIndex && index !== protectedIndex
-    ))
-    if (removable === -1) break
-    next.splice(removable, 1)
-  }
-  return next
-}
-
-// Remove a tab — used both when the owner closes one and when its chat/app is
-// deleted (so a stale tab can never navigate into a 404 / dead iframe).
-export function removeTab(tabs, kind, id) {
-  return tabs.filter(t => !sameTab(t, kind, id))
-}
-
 // The navTo(view, opts) target for opening a tab. App ids MUST be numeric:
 // the iframe LRU dedups with a strict !==, so a string app id would sit beside
 // the numeric one and mount the app twice. chatIds are strings throughout.
@@ -88,15 +41,6 @@ export function tabNavTarget(tab) {
   return tab.kind === 'app'
     ? { view: 'canvas', opts: { appId: Number(tab.id) } }
     : { view: 'chat', opts: { chatId: tab.id } }
-}
-
-// Is this tab the item currently shown? `view` is the { view, chatId, appId }
-// nav focus. This maps today's single global focus to a tab; a pane in the
-// workspace model instead compares by tabKey (see ARCHITECTURE.md).
-export function isTabActive(tab, view) {
-  return tab.kind === 'app'
-    ? view.view === 'canvas' && String(view.appId) === tab.id
-    : view.view === 'chat' && String(view.chatId) === tab.id
 }
 
 const STORAGE_KEY = 'mobius-open-tabs'

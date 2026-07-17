@@ -1,7 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
 import Layers from 'lucide-react/dist/esm/icons/layers.mjs'
-import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import * as tabModel from './tabModel.js'
 import {
@@ -9,6 +7,7 @@ import {
 } from './paneModel.js'
 import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import { PaneStrip } from './PaneStrip.jsx'
 
 // The chrome layer for a tiled (≥2 visible leaves) workspace (design §2). It is
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
@@ -66,96 +65,6 @@ function dividerHitRect(d) {
     return { x: Math.round(d.x + d.w / 2 - HIT / 2), y: d.y, w: HIT, h: d.h }
   }
   return { x: d.x, y: Math.round(d.y + d.h / 2 - HIT / 2), w: d.w, h: HIT }
-}
-
-function PaneStrip({
-  pane, paneRect, focused, labelForTab,
-  onActivate, onClose, onFocus, onTabContextMenu,
-}) {
-  const stripRef = useRef(null)
-  // Roving-tabindex toolbar (design §3.6, WAI-ARIA toolbar): the strip is ONE
-  // tab stop (only the active tab's button is tabbable), and arrow keys move
-  // focus between tabs, so a 4-pane × 6-tab workspace is not ~48 sequential Tab
-  // stops. Home/End jump to the ends; Delete/Backspace closes the focused tab
-  // (its close button is out of the tab order).
-  const onStripKeyDown = (e) => {
-    const buttons = [...(stripRef.current?.querySelectorAll('[role="tab"]') || [])]
-    const i = buttons.indexOf(document.activeElement)
-    if (i === -1) return
-    let next = -1
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = Math.min(i + 1, buttons.length - 1)
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = Math.max(i - 1, 0)
-    else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = buttons.length - 1
-    else if (e.key === 'Delete' || e.key === 'Backspace') {
-      e.preventDefault()
-      onClose(pane.tabs[i])
-      return
-    } else return
-    e.preventDefault()
-    buttons[next]?.focus()
-  }
-  return (
-    <div
-      ref={stripRef}
-      className={`workspace__strip shell__tabstrip${focused ? ' workspace__strip--focused' : ''}`}
-      data-pane-strip={pane.id}
-      role="tablist"
-      aria-label="Pane tabs"
-      style={{ left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H }}
-      onKeyDown={onStripKeyDown}
-      onPointerDown={(e) => {
-        // Focus on strip-WHITESPACE pointerdown only. A tab activation focuses via
-        // navTo, so pre-focusing on the tab's own pointerdown would advance the
-        // workspace ref BEFORE navTo snapshots the source route — the just-clicked
-        // pane becomes its own (wrong) back-target (finding: pointerdown-focus
-        // before navTo snapshot).
-        if (!e.target.closest('.shell__tab')) onFocus(pane.id)
-      }}
-    >
-      {pane.tabs.map(tab => {
-        const isChat = tab.kind === 'chat'
-        const key = tabModel.tabKey(tab)
-        const active = key === pane.activeTabKey
-        const TabIcon = isChat ? MessageSquare : AppWindow
-        const label = labelForTab(tab)
-        return (
-          <div
-            key={key}
-            className={`shell__tab${active ? ' shell__tab--active' : ''}`}
-          >
-            <button
-              type="button"
-              className="shell__tab-open"
-              role="tab"
-              aria-selected={active ? 'true' : 'false'}
-              // Roving tabindex: only the active tab is a tab stop; arrows reach
-              // the rest (onStripKeyDown).
-              tabIndex={active ? 0 : -1}
-              // The drag controller (useWorkspaceDrag) picks tab drag sources up
-              // by this attribute via a delegated pointerdown; only present when
-              // the splits flag is on so the flag-off build carries no drag hooks.
-              data-drag-key={WORKSPACE_SPLITS_ENABLED ? key : undefined}
-              onClick={() => onActivate(pane.id, tab)}
-              onContextMenu={(e) => onTabContextMenu(e, tab, pane.id)}
-            >
-              <TabIcon size={13} aria-hidden="true" />
-              <span className="shell__tab-text">{label}</span>
-            </button>
-            <button
-              type="button"
-              className="shell__tab-close"
-              aria-label={`Close ${label} tab`}
-              tabIndex={-1}
-              onClick={() => onClose(tab)}
-            >
-              <X size={13} aria-hidden="true" />
-            </button>
-          </div>
-        )
-      })}
-    </div>
-  )
 }
 
 function Divider({ divider, onPointerDown, onKeyDown, onDoubleClick }) {

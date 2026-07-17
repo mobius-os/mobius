@@ -106,6 +106,15 @@ export function holdMsFor(sourceKind) {
   return sourceKind === 'drawer' ? DRAWER_HOLD_MS : TAB_HOLD_MS
 }
 
+// Whether the workspace-root-edge drop zone may arm for this pointer + mode: it
+// is fine-pointer only (touch collides with the OS edge-back gesture) and never
+// on a phone (portrait width can't sustain a side split). The single predicate
+// both drag-binding sites read, so this zone policy lives in the layer that owns
+// every other threshold, not duplicated in the hook.
+export function rootEdgeAllowed(isTouch, mode) {
+  return !isTouch && mode !== 'phone'
+}
+
 // The chip's top-left offset from the pointer, given the pointer type.
 export function chipOffset(point, isTouch) {
   return isTouch
