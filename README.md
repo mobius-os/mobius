@@ -111,7 +111,7 @@ Möbius uses an agent account you already control. Connect one of these provider
 - **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan.
 - **Claude Code**: sign in with a supported Claude Code plan
 
-Möbius uses provider sign-in, so the default setup does not require a separate API key.
+Möbius uses provider sign-in, so the default setup does not require a separate API key. Reflection also watches resource trends and hardens recurring leaks: especially on Railway, where persistent storage, RAM, CPU, and network usage contribute to fair-use cost, it favors bounded caches, adaptive inspections, and measured cleanup over repeated broad scans.
 
 ## Launch your Möbius
 

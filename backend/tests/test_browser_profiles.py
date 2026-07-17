@@ -15,6 +15,17 @@ def _profile(root, chat_id, *, cache_bytes, durable_bytes):
   return profile
 
 
+def _named_profile(root, name, *, cache_bytes, durable_bytes):
+  profile = root / "agent-browser-profiles" / name
+  cache = profile / "Default" / "Cache"
+  cache.mkdir(parents=True)
+  (cache / "cache.bin").write_bytes(b"c" * cache_bytes)
+  durable = profile / "Default" / "IndexedDB"
+  durable.mkdir(parents=True)
+  (durable / "state.bin").write_bytes(b"d" * durable_bytes)
+  return profile
+
+
 def test_railway_defaults_fit_below_managed_volume_limit(monkeypatch):
   for name in (
     "RAILWAY_ENVIRONMENT",
@@ -112,3 +123,80 @@ def test_quota_prunes_recent_closed_cache_before_old_durable_profile(tmp_path):
   # are safe, while only the recent cache contributes reclaimed bytes.
   assert result["cache_dirs_pruned"] == 2
   assert result["profiles_pruned"] == 0
+
+
+def test_quota_counts_and_prunes_cache_from_closed_named_profile(tmp_path):
+  profile = _named_profile(
+    tmp_path, "reflection", cache_bytes=100, durable_bytes=20,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), now=now, max_bytes=90, low_water_bytes=20,
+    inactive_days=30, active_profile_names=set(),
+  )
+
+  assert profile.exists()
+  assert not (profile / "Default" / "Cache").exists()
+  assert (profile / "Default" / "IndexedDB" / "state.bin").exists()
+  assert result["profile_count"] == 1
+  assert result["non_chat_profile_count"] == 1
+  assert result["cache_dirs_pruned"] == 1
+
+
+def test_quota_never_prunes_live_named_profile(tmp_path):
+  profile = _named_profile(
+    tmp_path, "reflection", cache_bytes=100, durable_bytes=20,
+  )
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), now=now, max_bytes=1, low_water_bytes=0,
+    inactive_days=0, active_profile_names={"reflection"},
+  )
+
+  assert profile.exists()
+  assert (profile / "Default" / "Cache").exists()
+  assert result["reclaimed_bytes"] == 0
+
+
+def test_quota_ignores_symlinked_profile_directory(tmp_path):
+  root = tmp_path / "agent-browser-profiles"
+  root.mkdir()
+  outside = tmp_path / "outside"
+  outside.mkdir()
+  (outside / "state.bin").write_bytes(b"x" * 100)
+  (root / "linked").symlink_to(outside, target_is_directory=True)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), max_bytes=1, low_water_bytes=0,
+    inactive_days=0, active_profile_names=set(),
+  )
+
+  assert outside.exists()
+  assert (outside / "state.bin").exists()
+  assert result["profile_count"] == 0
+
+
+def test_quota_ignores_symlinked_cache_directory(tmp_path):
+  profile = tmp_path / "agent-browser-profiles" / "reflection"
+  profile.mkdir(parents=True)
+  outside_cache = tmp_path / "outside-cache"
+  outside_cache.mkdir()
+  (outside_cache / "cache.bin").write_bytes(b"c" * 100)
+  default = profile / "Default"
+  default.mkdir()
+  (default / "Cache").symlink_to(outside_cache, target_is_directory=True)
+  durable = default / "IndexedDB"
+  durable.mkdir()
+  (durable / "state.bin").write_bytes(b"d" * 20)
+
+  result = enforce_browser_profile_quota(
+    tmp_path, {}, set(), max_bytes=1, low_water_bytes=0,
+    inactive_days=30, active_profile_names=set(),
+  )
+
+  assert outside_cache.exists()
+  assert (outside_cache / "cache.bin").exists()
+  assert (default / "Cache").is_symlink()
+  assert result["cache_dirs_pruned"] == 0
