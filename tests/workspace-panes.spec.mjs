@@ -436,3 +436,144 @@ test.describe('Workspace panes (PR2 gate)', () => {
   })
 
 })
+
+/**
+ * PR3 drag controller (design §8 PR3 row). Mouse-path drags of a strip tab
+ * exercise the whole binding end-to-end: the delegated pointerdown arms past
+ * slop, geometric hit-testing picks the zone, and the drop dispatches exactly
+ * one reducer action — asserted through the persisted workspace blob (the same
+ * authority the PR2 cases read). Touch long-press cannot be expressed with
+ * Playwright's mouse-only pointer input, so that case is skipped with a reason;
+ * its geometry is covered exhaustively by the dragController unit suite.
+ */
+
+// p0 = [chatA, chatC] (focused, C active), p1 = [chatB]. A two-tab source pane
+// so a drag OUT of it leaves the pane alive and the moves are unambiguous.
+function twoPanesThreeTabs(a, b, c) {
+  let ws = paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
+  ])
+  ws = paneModel.moveTab(ws, `chat:${b}`, { root: true, edge: 'right' })
+  return paneModel.focusPane(ws, 'p0')
+}
+
+function whichPaneHas(ws, tabKey) {
+  for (const [pid, pane] of Object.entries(ws.panes)) {
+    if (pane.tabs.some(t => `${t.kind}:${t.id}` === tabKey)) return pid
+  }
+  return null
+}
+
+async function readWs(page) {
+  return page.evaluate(k => JSON.parse(sessionStorage.getItem(k)), paneModel.STORAGE_KEY)
+}
+
+/** Press on a source element, arm past slop, glide to a target point, release —
+ *  the mouse-path drag Chromium delivers as real pointer events. */
+async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {}) {
+  const box = await sourceLocator.boundingBox()
+  const sx = box.x + box.width / 2
+  const sy = box.y + box.height / 2
+  await page.mouse.move(sx, sy)
+  await page.mouse.down()
+  await page.mouse.move(sx + 10, sy, { steps: 3 }) // clear the 5px slop → arm
+  await page.mouse.move(toX, toY, { steps: 14 })
+  if (release) await page.mouse.up()
+}
+
+async function bootThreeTab(page, tag) {
+  await boot(page, WIDE)
+  const a = await createTaggedChat(page, `${tag}A`)
+  const b = await createTaggedChat(page, `${tag}B`)
+  const c = await createTaggedChat(page, `${tag}C`)
+  await mockApps(page, [])
+  await seedWorkspace(page, twoPanesThreeTabs(a.id, b.id, c.id))
+  await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
+  await waitTiled(page)
+  return { a, b, c }
+}
+
+test.describe('Workspace drag (PR3)', () => {
+  test('dragging a tab to a pane edge splits (one new pane)', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'dragEdge')
+    const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    // Drop inside p1's right edge band → split p1, C alone in the new pane.
+    await mouseDrag(page, src, p1.x + p1.width - 18, p1.y + p1.height / 2)
+    await expect.poll(async () => Object.keys((await readWs(page)).panes).length, {
+      timeout: 3000, message: 'the edge drop created a third pane',
+    }).toBe(3)
+    const ws = await readWs(page)
+    const home = whichPaneHas(ws, `chat:${c.id}`)
+    expect(ws.panes[home].tabs.length, 'C is alone in the new pane').toBe(1)
+    expect(whichPaneHas(ws, `chat:${b.id}`), 'B kept its own pane').not.toBe(home)
+  })
+
+  test('dragging a tab onto another strip inserts it there (move, no new pane)', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'dragStrip')
+    const strip = await page.locator('[data-pane-strip="p1"]').boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    await mouseDrag(page, src, strip.x + strip.width / 2, strip.y + strip.height / 2)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000, message: 'C landed in p1 via the caret' },
+    ).toBe('p1')
+    const ws = await readWs(page)
+    expect(Object.keys(ws.panes).length, 'still two panes (a move, not a split)').toBe(2)
+  })
+
+  test('dragging a tab to a pane center joins it as a tab', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'dragCenter')
+    const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    await mouseDrag(page, src, p1.x + p1.width / 2, p1.y + p1.height / 2)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000, message: 'C joined p1 as a tab' },
+    ).toBe('p1')
+    expect(Object.keys((await readWs(page)).panes).length).toBe(2)
+  })
+
+  test('Escape mid-drag cancels with no mutation', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'dragEsc')
+    const before = await readWs(page)
+    const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    // Arm and hover a live zone, then Escape before release.
+    await mouseDrag(page, src, p1.x + p1.width / 2, p1.y + p1.height / 2, { release: false })
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
+    const after = await readWs(page)
+    expect(whichPaneHas(after, `chat:${c.id}`), 'C never left p0').toBe('p0')
+    expect(Object.keys(after.panes).length).toBe(Object.keys(before.panes).length)
+  })
+
+  test('the undo toast restores a mis-dropped tab', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'dragUndo')
+    const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    await mouseDrag(page, src, p1.x + p1.width / 2, p1.y + p1.height / 2)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000 },
+    ).toBe('p1')
+    // The 6s toast offers Undo; clicking it restores the pre-drop tree.
+    const undo = page.locator('.toast__action', { hasText: 'Undo' })
+    await expect(undo).toBeVisible({ timeout: 3000 })
+    await undo.click()
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000, message: 'Undo returned C to p0' },
+    ).toBe('p0')
+  })
+
+  // Touch long-press lift → drag cannot be expressed with Playwright's mouse
+  // pointer input (no synthetic touch hold in this harness), and the existing
+  // specs simulate only mouse/keyboard. The hold/slop thresholds and the touch
+  // escalation (hold→release-in-place = menu) are covered as pure predicates in
+  // dragController.test.js; a device path would need real touch events.
+  test.skip('touch long-press lifts a tab into a drag', async () => {
+    // Intentionally skipped — no touch-hold primitive in the mocked harness.
+  })
+})
