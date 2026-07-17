@@ -570,11 +570,21 @@ async def _record_collab_child_links(
 
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
-  # Collab items surface as subagent observability, NOT as a plain tool block:
-  # a spawn/sendInput/… becomes a task_start so the shell renders it on the same
-  # subagent lane Claude's Task tool uses. Guarded on non-None so an SDK without
-  # the type (or a test fake omitting the key) skips straight to the tool
-  # branches below.
+  # Collab items would surface as subagent observability (a task_start on the
+  # same lane Claude's Task tool uses). RUNTIME REALITY (verified live on
+  # codex-cli 0.144.4, gpt-5.6-sol delegating a sub-task): the SDK does NOT
+  # deliver a `collabAgentToolCall` ThreadItem for a real spawn. Instead the
+  # spawn shows up as an `inter_agent_communication_metadata` record plus an
+  # `agent_message` carrying a "Message Type: NEW_TASK / Task name: <agent_path>"
+  # payload, and the child runs as a FORKED thread (its own rollout, session_meta
+  # `source.subagent.thread_spawn` with parent_thread_id). So this branch is
+  # currently dead at runtime — it stays because the typed item exists in the SDK
+  # and a future codex build may start emitting it. The HISTORICAL view already
+  # works without it: the Workflows parser attributes the forked child rollout to
+  # this chat via parent_thread_id → the parent thread's session-link. What's NOT
+  # yet wired is the LIVE chip + the child session-link recording, which need the
+  # runner to detect the NEW_TASK agent_message / inter-agent metadata and the
+  # forked child's thread id (tracked as a follow-up card).
   collab_cls = sdk.get("CollabAgentToolCallThreadItem")
   if collab_cls is not None and isinstance(item, collab_cls):
     return {
