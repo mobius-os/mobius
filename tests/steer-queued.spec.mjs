@@ -281,6 +281,100 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
 
+  test('a row action steers only that message and preserves its queued sibling', async ({ page }) => {
+    const TEXT1 = 'send this queued message now'
+    const TEXT2 = 'leave this message queued'
+    const messagePosts = []
+    let queueCount = 0
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
+      let body = {}
+      try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
+      messagePosts.push(body)
+
+      if (body.force_steer) {
+        const siblingPost = messagePosts.find(post => (
+          !post.force_steer && post.content === TEXT2
+        ))
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'steered',
+            chat_id: 'mock',
+            pending_messages: [{
+              role: 'user',
+              content: TEXT2,
+              ts: 990002,
+              cid: siblingPost.cid,
+            }],
+          }),
+        })
+      }
+
+      if (body.content === 'first message') {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'started',
+            message: {
+              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+            },
+          }),
+        })
+      }
+
+      queueCount += 1
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'queued',
+          ts: 990000 + queueCount,
+          position: queueCount,
+        }),
+      })
+    })
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
+      await new Promise(resolve => setTimeout(resolve, 8000))
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: sseBody([{ type: 'catch_up_done' }, { type: 'text', content: 'streaming...' }]),
+      }).catch(() => {})
+    })
+
+    await setupChat(page)
+    await newChat(page)
+    await sendMessage(page, 'first message')
+    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await sendMessage(page, TEXT1)
+    await sendMessage(page, TEXT2)
+
+    const rowSteerButtons = page.getByRole('button', {
+      name: 'Send this queued message now',
+    })
+    await expect(rowSteerButtons).toHaveCount(2, { timeout: 5000 })
+    await rowSteerButtons.first().click()
+
+    await expect.poll(
+      () => messagePosts.filter(post => post.force_steer).length,
+      { timeout: 5000 },
+    ).toBe(1)
+    const steerPost = messagePosts.find(post => post.force_steer)
+    const firstQueuePost = messagePosts.find(post => (
+      !post.force_steer && post.content === TEXT1
+    ))
+    expect(steerPost.consume_pending_cids).toEqual([firstQueuePost.cid])
+    expect(steerPost.content).toBe(TEXT1)
+
+    await expect(page.locator('.queued__row')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('.queued__row')).toContainText(TEXT2)
+    await expect(page.locator('.queued__row')).not.toContainText(TEXT1)
+  })
+
   test('a steer while reading above the tail preserves the live stream and held position', async ({ page }) => {
     // Regression for bug #1: a force_steer must inject into the LIVE turn,
     // not trigger the fresh-send reset. The old code ran sendMessage's
