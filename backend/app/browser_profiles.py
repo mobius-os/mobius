@@ -27,7 +27,10 @@ _CACHE_PATHS = (
 )
 _DEFAULT_MAX_BYTES = 2 * 1024**3
 _DEFAULT_LOW_WATER_BYTES = 1536 * 1024**2
+_RAILWAY_DEFAULT_MAX_BYTES = 128 * 1024**2
+_RAILWAY_DEFAULT_LOW_WATER_BYTES = 96 * 1024**2
 _DEFAULT_INACTIVE_DAYS = 30
+_DEFAULT_SWEEP_SECONDS = 60 * 60
 _status = {
   "last_run_at": None,
   "profile_count": 0,
@@ -45,6 +48,35 @@ def _env_int(name: str, default: int) -> int:
   except ValueError:
     return default
   return value if value >= 0 else default
+
+
+def _running_on_railway() -> bool:
+  return any(os.environ.get(name) for name in (
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_ENVIRONMENT_ID",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+  ))
+
+
+def default_browser_profile_quota() -> tuple[int, int]:
+  """Return platform-aware high/low water defaults.
+
+  Railway Trial and Free volumes are smaller than the ordinary 2 GiB profile
+  ceiling, so using the self-host default there would wait until after the
+  whole volume was full. Operator env overrides are still applied by the
+  quota function below.
+  """
+  if _running_on_railway():
+    return _RAILWAY_DEFAULT_MAX_BYTES, _RAILWAY_DEFAULT_LOW_WATER_BYTES
+  return _DEFAULT_MAX_BYTES, _DEFAULT_LOW_WATER_BYTES
+
+
+def browser_profile_sweep_seconds() -> int:
+  """Return a bounded sweep interval, with an operator override."""
+  return max(60, _env_int(
+    "AGENT_BROWSER_PROFILE_SWEEP_SECONDS", _DEFAULT_SWEEP_SECONDS,
+  ))
 
 
 def _tree_bytes(path: Path) -> int:
@@ -92,12 +124,13 @@ def enforce_browser_profile_quota(
   """Prune regenerable caches, then oldest inactive profiles, at high water."""
   root = Path(data_dir) / "agent-browser-profiles"
   now = now or datetime.now(UTC).replace(tzinfo=None)
+  default_max_bytes, default_low_water_bytes = default_browser_profile_quota()
   max_bytes = max_bytes if max_bytes is not None else _env_int(
-    "AGENT_BROWSER_PROFILE_MAX_BYTES", _DEFAULT_MAX_BYTES,
+    "AGENT_BROWSER_PROFILE_MAX_BYTES", default_max_bytes,
   )
   low_water_bytes = (
     low_water_bytes if low_water_bytes is not None else _env_int(
-      "AGENT_BROWSER_PROFILE_LOW_WATER_BYTES", _DEFAULT_LOW_WATER_BYTES,
+      "AGENT_BROWSER_PROFILE_LOW_WATER_BYTES", default_low_water_bytes,
     )
   )
   low_water_bytes = min(low_water_bytes, max_bytes)

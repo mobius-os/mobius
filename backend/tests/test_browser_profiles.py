@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+from app import browser_profiles
 from app.browser_profiles import enforce_browser_profile_quota
 
 
@@ -12,6 +13,33 @@ def _profile(root, chat_id, *, cache_bytes, durable_bytes):
   durable.mkdir(parents=True)
   (durable / "state.bin").write_bytes(b"d" * durable_bytes)
   return profile
+
+
+def test_railway_defaults_fit_below_managed_volume_limit(monkeypatch):
+  for name in (
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_ENVIRONMENT_ID",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+  ):
+    monkeypatch.delenv(name, raising=False)
+  assert browser_profiles.default_browser_profile_quota() == (
+    2 * 1024**3, 1536 * 1024**2,
+  )
+
+  monkeypatch.setenv("RAILWAY_PROJECT_ID", "project-test")
+  assert browser_profiles.default_browser_profile_quota() == (
+    128 * 1024**2, 96 * 1024**2,
+  )
+
+
+def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
+  monkeypatch.delenv("AGENT_BROWSER_PROFILE_SWEEP_SECONDS", raising=False)
+  assert browser_profiles.browser_profile_sweep_seconds() == 3600
+  monkeypatch.setenv("AGENT_BROWSER_PROFILE_SWEEP_SECONDS", "10")
+  assert browser_profiles.browser_profile_sweep_seconds() == 60
+  monkeypatch.setenv("AGENT_BROWSER_PROFILE_SWEEP_SECONDS", "7200")
+  assert browser_profiles.browser_profile_sweep_seconds() == 7200
 
 
 def test_quota_prunes_regenerable_cache_before_profile(tmp_path):

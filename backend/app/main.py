@@ -441,11 +441,14 @@ async def lifespan(app):
       # Keep boot latency predictable; the first quota scan is low-priority.
       await _asyncio.sleep(300)
       while True:
+        _profile_sweep_seconds = 60 * 60
         try:
           from app.browser_profiles import (
+            browser_profile_sweep_seconds,
             chat_activity_snapshot,
             enforce_browser_profile_quota,
           )
+          _profile_sweep_seconds = browser_profile_sweep_seconds()
           from app.runner_registry import registry as _runner_registry
           _bp_db = _SweepSession()
           try:
@@ -469,7 +472,7 @@ async def lifespan(app):
           _log.error(
             "agent-browser profile quota failed: %s", _exc, exc_info=True,
           )
-        await _asyncio.sleep(24 * 60 * 60)
+        await _asyncio.sleep(_profile_sweep_seconds)
 
     _browser_profile_task = _asyncio.create_task(_browser_profile_loop())
   except Exception as exc:
