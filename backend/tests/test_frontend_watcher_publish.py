@@ -337,6 +337,7 @@ def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):
   assert env["CHOKIDAR_USEPOLLING"] == "1"
   assert env["CHOKIDAR_INTERVAL"] == "1000"
   assert "--max-old-space-size=512" in env["NODE_OPTIONS"]
+  assert cmd[0] == str(fw_dirs["frontend"] / "node_modules" / ".bin" / "vite")
   assert "--watch" in cmd
   assert ".dist-staging" in cmd
 

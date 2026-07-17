@@ -314,7 +314,9 @@ def _vite_env(
   env["CHOKIDAR_INTERVAL"] = env.get("CHOKIDAR_INTERVAL", "1000")
   # Rollup's warm watch graph is intentionally long-lived, but V8 otherwise
   # expands toward the container limit and retains close to a gigabyte. Keep a
-  # predictable ceiling while preserving an explicit operator override.
+  # predictable ceiling while preserving an explicit operator override. Lower
+  # ceilings can finish a cold build but OOM on an incremental service-worker
+  # rebuild, so 512 MiB remains the reliability-tested floor.
   node_options = env.get("NODE_OPTIONS", "")
   if "--max-old-space-size" not in node_options and "--max_old_space_size" not in node_options:
     env["NODE_OPTIONS"] = f"{node_options} --max-old-space-size=512".strip()
@@ -322,9 +324,12 @@ def _vite_env(
 
 
 def _vite_build_cmd(out_dir: Path, *, watch: bool) -> list[str]:
+  # Launch Vite's checked-in executable directly. Keeping ``npx`` around for
+  # the lifetime of watch mode retains an npm process (and its shell child) in
+  # addition to Vite, costing tens of MiB while also making health report the
+  # wrapper instead of the actual builder.
   cmd = [
-    "npx",
-    "vite",
+    str(_FRONTEND_DIR / "node_modules" / ".bin" / "vite"),
     "build",
     "--configLoader",
     "runner",

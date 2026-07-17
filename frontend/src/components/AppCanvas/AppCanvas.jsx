@@ -16,7 +16,7 @@ import { startMicrophoneCapture } from '../../lib/microphoneCapture.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
-import { WifiOff } from 'lucide-react'
+import WifiOff from 'lucide-react/dist/esm/icons/wifi-off.mjs'
 import './AppCanvas.css'
 
 // =================================================================

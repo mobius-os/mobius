@@ -62,7 +62,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import { FileText, Info } from 'lucide-react'
+import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
+import Info from 'lucide-react/dist/esm/icons/info.mjs'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 
 export default function ComposerPopover({

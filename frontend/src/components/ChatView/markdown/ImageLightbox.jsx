@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { Download, X } from 'lucide-react'
+import Download from 'lucide-react/dist/esm/icons/download.mjs'
+import X from 'lucide-react/dist/esm/icons/x.mjs'
 import useDialogFocus from '../../../hooks/useDialogFocus.js'
 import {
   clampImageScale,

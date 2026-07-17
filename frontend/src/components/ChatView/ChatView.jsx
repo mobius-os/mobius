@@ -7,7 +7,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check } from 'lucide-react'
+import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'

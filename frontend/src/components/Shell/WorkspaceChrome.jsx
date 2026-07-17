@@ -1,5 +1,8 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { MessageSquare, AppWindow, X, Layers } from 'lucide-react'
+import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
+import Layers from 'lucide-react/dist/esm/icons/layers.mjs'
+import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
+import X from 'lucide-react/dist/esm/icons/x.mjs'
 import * as tabModel from './tabModel.js'
 import {
   projectLayout, STRIP_H, WORKSPACE_SPLITS_ENABLED,
