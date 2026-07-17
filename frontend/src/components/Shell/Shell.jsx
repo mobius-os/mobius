@@ -626,13 +626,6 @@ export default function Shell() {
         : [],
     )
   }, [tabStripEngaged, workspace])
-  // navTo now owns the OPEN_TAB dispatch (design §1), so openInTab is only a
-  // routed navTo — drawer selections, tab activation, CTA, and protocol opens
-  // all go through navTo and therefore cannot bypass workspace ownership.
-  const openInTab = useCallback((kind, id, paneId) => {
-    const { view, opts } = tabModel.tabNavTarget(tabModel.makeTab(kind, id))
-    navTo(view, paneId ? { ...opts, paneId } : opts)
-  }, [navTo])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.
@@ -2389,7 +2382,6 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onOpenInTab={openInTab}
         onNewChat={() => newChat({ focusComposer: true })}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}

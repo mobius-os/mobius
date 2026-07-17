@@ -31,8 +31,6 @@ export default function Drawer({
   activeChatId,
   onChat,
   onApp,
-  // Open a chat/app as a pinned tab in the shell tab strip: onOpenInTab(kind, id).
-  onOpenInTab,
   onNewChat,
   onDeleteChat,
   onDeleteApp,
@@ -542,7 +540,6 @@ export default function Drawer({
                     if (next && next !== chat.title) renameChat(chat.id, next)
                   }}
                   onPin={(next) => pinChat(chat.id, next)}
-                  onOpenInTab={onOpenInTab ? () => onOpenInTab('chat', chat.id) : undefined}
                   onDelete={() => onDeleteChat(chat.id)}
                 />
               )) : (
@@ -588,7 +585,6 @@ export default function Drawer({
                       if (next && next !== app.name) renameApp(app.id, next)
                     }}
                     onPin={(next) => pinApp(app.id, next)}
-                    onOpenInTab={onOpenInTab ? () => onOpenInTab('app', app.id) : undefined}
                     onDelete={() => onDeleteApp?.(app.id)}
                     onDeleteData={() => onDeleteAppData?.(app.id)}
                     onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
@@ -663,7 +659,6 @@ function DrawerRow({
   onRenameCancel,
   onRenameSubmit,
   onPin,
-  onOpenInTab,
   onDelete,
   onDeleteData,
   onInstall,
@@ -807,17 +802,6 @@ function DrawerRow({
           </span>
         )}
       </button>
-      {onOpenInTab && (
-        <button
-          type="button"
-          className="drawer__open-tab"
-          aria-label={`Open ${label} in tab`}
-          title="Open in tab"
-          onClick={onOpenInTab}
-        >
-          <Plus width={16} height={16} aria-hidden="true" />
-        </button>
-      )}
       <Menu
         forceOpen={menuOpen}
         onOpen={() => onMenuToggle(true)}
