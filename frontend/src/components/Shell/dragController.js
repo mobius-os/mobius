@@ -22,6 +22,7 @@ import {
   STRIP_H, PANE_GAP, MAX_PANE_TABS,
   canSplit as paneCanSplit, canRootSplit, projectLayout,
 } from './paneModel.js'
+import { tabKey } from './tabModel.js'
 
 // ── Pointer thresholds (design §3.1) — exported as the tuned constants and as
 // pure predicates so the binding never hard-codes a number and the tests pin
@@ -186,8 +187,10 @@ export function caretZone(point, pane, prevZone = null) {
   if (prevIdx != null && prevIdx !== index && Math.abs(prevIdx - index) === 1) {
     const lo = Math.min(prevIdx, index)
     const boundary = (tabs[lo].left + tabs[lo].right) / 2
-    if (index > prevIdx) index = point.x > boundary + HYSTERESIS_PX ? index : prevIdx
-    else index = point.x < boundary - HYSTERESIS_PX ? index : prevIdx
+    // Flip at EXACTLY HYSTERESIS_PX past the tab midpoint (>= / <=), consistent
+    // with every other zone family (finding: hysteresis boundary consistency).
+    if (index > prevIdx) index = point.x >= boundary + HYSTERESIS_PX ? index : prevIdx
+    else index = point.x <= boundary - HYSTERESIS_PX ? index : prevIdx
   }
   let caretX = pane.rect.x + STRIP_CARET_PAD
   if (index > 0 && tabs[index - 1]) caretX = tabs[index - 1].right + 1
@@ -227,8 +230,13 @@ export function edgeZone(point, pane, scene, prevZone) {
   const source = scene.source
   const isSource = source && source.paneId === pane.paneId
   // Dropping a pane's only tab back onto its own edge is a no-op — never light.
+  // Two ways to be that sole tab: a STRIP drag whose source pane is this pane and
+  // holds one tab, OR a DRAWER drag of an item already open as this pane's sole
+  // tab (a drawer source carries no paneId, so isSource misses it — finding:
+  // sole-item drawer-drag rename). Either splits nothing but a pane id.
   const singleSource = isSource && (source.paneTabCount || 0) <= 1
-  if (singleSource) return null
+  const draggingSoleTabHere = !!(source && source.key && pane.soleTabKey === source.key)
+  if (singleSource || draggingSoleTabHere) return null
 
   const allowed = scene.mode === 'phone'
     ? ['top', 'bottom']
@@ -248,14 +256,21 @@ export function edgeZone(point, pane, scene, prevZone) {
   for (const edge of allowed) {
     if (!pane.canSplit[edge]) continue
     const { v, band } = pen[edge]
-    // The hysteresis margin, converted from px to penetration units (penetration
-    // changes by 1/band per pixel). The current owner edge holds until the
-    // pointer is HYSTERESIS_PX past the band boundary; a competing edge (when the
-    // owner is this pane's center) must reach HYSTERESIS_PX inside the band.
+    // Hysteresis in penetration units (penetration changes by 1/band per pixel).
+    // The boundary flips at EXACTLY HYSTERESIS_PX everywhere (finding: hysteresis
+    // boundary consistency): the current owner edge is retained until the pointer
+    // is ≥10px past the band boundary (v ≤ -bonus, so lit while v > -bonus), and a
+    // challenger edge (when this pane's center owns the pointer) wins once it is
+    // ≥10px inside the band (v ≥ bonus). A fresh, un-owned edge lights anywhere
+    // inside its band.
     const bonus = HYSTERESIS_PX / band
-    const threshold = edge === prevEdge ? -bonus : (prevCenterHere ? bonus : 0)
-    if (v <= threshold) continue
-    const score = v + (edge === prevEdge ? bonus : 0)
+    const isPrevEdge = edge === prevEdge
+    let lit
+    if (isPrevEdge) lit = v > -bonus
+    else if (prevCenterHere) lit = v >= bonus
+    else lit = v > 0
+    if (!lit) continue
+    const score = v + (isPrevEdge ? bonus : 0)
     if (!best || score > best.score) best = { edge, score }
   }
   if (!best) return null
@@ -277,11 +292,18 @@ export function centerZone(point, pane, scene) {
 // previous root-edge owner.
 export function rootEdgeZone(point, scene, prevZone) {
   const c = scene.contentRect
-  // Hysteresis widens ONLY the edge that previously owned the pointer — the old
-  // code widened every edge whenever any root edge had owned, letting an
-  // opposite edge grab the pointer 10px early (review — hysteresis flap).
+  // The root-edge strip is the OUTER band of the content box, so the point must
+  // be INSIDE that box on BOTH axes: a pointer level with the header, 5px shy of
+  // the left edge, is NOT a left-split target (finding: root-edge orthogonal-axis
+  // gate). Without this, dist.left alone armed a split for a point outside the
+  // content rect on the vertical axis.
+  if (!contains(c, point)) return null
+  // Hysteresis widens ONLY the edge that previously owned the pointer, and only
+  // UP TO (not through) HYSTERESIS_PX past the base boundary — the owner is lost
+  // at EXACTLY 10px past, matching every other zone family (finding: hysteresis
+  // boundary consistency). The old code widened every edge whenever any root
+  // edge had owned, letting an opposite edge grab the pointer 10px early.
   const prevRootEdge = (prevZone && prevZone.type === 'root-edge') ? prevZone.edge : null
-  const marginFor = (edge) => ROOT_EDGE_PX + (edge === prevRootEdge ? HYSTERESIS_PX : 0)
   const dist = {
     left: point.x - c.x,
     right: c.x + c.w - point.x,
@@ -293,7 +315,10 @@ export function rootEdgeZone(point, scene, prevZone) {
     : new Set(['left', 'right', 'top', 'bottom'])
   const cands = []
   for (const edge of ['left', 'right', 'top', 'bottom']) {
-    if (dist[edge] >= 0 && dist[edge] <= marginFor(edge)) cands.push([edge, dist[edge]])
+    const d = dist[edge]
+    const base = d >= 0 && d <= ROOT_EDGE_PX
+    const held = edge === prevRootEdge && d > ROOT_EDGE_PX && d < ROOT_EDGE_PX + HYSTERESIS_PX
+    if (base || held) cands.push([edge, d])
   }
   cands.sort((a, b) => a[1] - b[1])
   for (const [edge] of cands) {
@@ -370,6 +395,17 @@ export function zoneEq(a, b) {
     && a.edge === b.edge && a.index === b.index
 }
 
+// The zone a release is allowed to COMMIT: the freshly hit-tested zone ONLY when
+// it is structurally identical to the one the preview promised (design §3.4). If
+// a concurrent placement filled a cap or a resize removed space between the last
+// move and the release, the previewed zone flips infeasible and the fresh
+// hit-test falls through to a DIFFERENT zone (e.g. an edge → a center join);
+// committing that would perform an operation the user never previewed, so the
+// drop CANCELS (null) rather than silently degrading to a tab join.
+export function releaseZone(freshZone, previewedZone) {
+  return freshZone && zoneEq(freshZone, previewedZone) ? freshZone : null
+}
+
 // Build a scene from the live workspace + projection. `measureTabs(paneId)`
 // returns that pane's measured tab rects ([{ key, left, right }] in content
 // coordinates); the binding supplies it from the DOM, tests supply a stub. The
@@ -379,12 +415,17 @@ export function zoneEq(a, b) {
 export function buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureTabs) {
   const panes = projection.visibleLeaves.map((paneId) => {
     const rect = projection.rects[paneId]
+    const paneTabs = ws.panes[paneId] ? ws.panes[paneId].tabs : []
     return {
       paneId,
       rect,
       // The pane's live tab count gates whether its center/strip zones may light
       // (paneAcceptsJoin) — a full pane must not offer a join it would refuse.
-      tabCount: ws.panes[paneId] ? ws.panes[paneId].tabs.length : 0,
+      tabCount: paneTabs.length,
+      // The key of this pane's SOLE tab (else null): edgeZone suppresses a split
+      // that would just rename a single-tab pane, including a drawer drag of the
+      // item already open here.
+      soleTabKey: paneTabs.length === 1 ? tabKey(paneTabs[0]) : null,
       tabs: measureTabs ? (measureTabs(paneId) || []) : [],
       canSplit: {
         left: paneCanSplit(ws, paneId, 'left', mode, contentRect),

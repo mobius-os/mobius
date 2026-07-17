@@ -80,6 +80,21 @@ _OPEN_ITEM_PLACEMENTS = frozenset({"beside-source", "with-source", "with-focus"}
 _OPEN_ITEM_ACTIVATIONS = frozenset({"background", "foreground"})
 
 
+def _is_numeric_app_id(value: str | None) -> bool:
+  """True iff `value` names an integer app id (the frontend's
+  Number.isInteger(Number(x)) posture).
+
+  App tabs dedup on a numeric id, so a non-numeric app itemId/sourceId becomes
+  NaN in tabNavTarget and never resolves — the shell drops the malformed source
+  and degrades to with-focus, placing the item in a DIFFERENT pane than asked.
+  Reject it at the wire (422) so strict validation is real for app ids too.
+  """
+  try:
+    return float(value).is_integer()
+  except (TypeError, ValueError):
+    return False
+
+
 class NotifyBody(BaseModel):
   # extra="forbid": an unknown key is a 422, not a silently-ignored extra. The
   # design (§6.3) calls the loose original schema out by name — the type
@@ -134,6 +149,8 @@ class NotifyBody(BaseModel):
       # the shell would drop it, so reject at the wire instead of a silent 204.
       if not (self.itemId or "").strip():
         raise ValueError("open_item requires a non-empty itemId")
+      if self.itemKind == "app" and not _is_numeric_app_id(self.itemId):
+        raise ValueError("open_item app itemId must be numeric")
       # source is optional, but its kind + id travel together and the kind is
       # enum-checked; an absent source degrades to with-focus in the resolver.
       if (self.sourceKind is None) != (self.sourceId is None):
@@ -142,6 +159,8 @@ class NotifyBody(BaseModel):
         raise ValueError("open_item sourceKind must be in {app, chat}")
       if self.sourceId is not None and not self.sourceId.strip():
         raise ValueError("open_item sourceId must be non-empty when present")
+      if self.sourceKind == "app" and not _is_numeric_app_id(self.sourceId):
+        raise ValueError("open_item app sourceId must be numeric")
       if self.placement is not None and self.placement not in _OPEN_ITEM_PLACEMENTS:
         raise ValueError("open_item placement is not a recognized value")
       if self.activation is not None and self.activation not in _OPEN_ITEM_ACTIVATIONS:

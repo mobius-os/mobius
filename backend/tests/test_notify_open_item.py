@@ -94,6 +94,12 @@ async def test_open_item_without_source_is_accepted(client, auth):
     {"type": "open_item", "itemKind": "app", "itemId": "1", "sourceId": "c"},
     {"type": "open_item", "itemKind": "app", "itemId": "1",
      "sourceKind": "widget", "sourceId": "c"},
+    # an APP itemId / sourceId must be NUMERIC — app tabs dedup on a numeric id,
+    # so a non-numeric one would become NaN and silently land in the wrong pane.
+    {"type": "open_item", "itemKind": "app", "itemId": "not-a-number"},
+    {"type": "open_item", "itemKind": "app", "itemId": "1.5"},
+    {"type": "open_item", "itemKind": "app", "itemId": "1",
+     "sourceKind": "app", "sourceId": "not-a-number"},
     # foreign fields may not ride an open_item.
     {"type": "open_item", "itemKind": "app", "itemId": "1", "label": "hi"},
     {"type": "open_item", "itemKind": "app", "itemId": "1", "chatId": "c"},
@@ -165,5 +171,23 @@ async def test_open_item_accepts_a_well_formed_but_nonexistent_item(client, auth
     assert r.status_code == 204, r.text
     ev = await asyncio.wait_for(q.get(), timeout=1.0)
     assert ev["itemId"] == "999999"
+  finally:
+    sb.unsubscribe(q)
+
+
+@pytest.mark.asyncio
+async def test_open_item_numeric_app_source_accepted(client, auth):
+  """A numeric app sourceId is valid (it names a real app tab), while a chat
+  sourceId stays free-form — only app ids are constrained to be numeric."""
+  sb = get_system_broadcast()
+  q = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify", headers=auth,
+      json=_open_item_body(itemId="7", sourceKind="app", sourceId="42"),
+    )
+    assert r.status_code == 204, r.text
+    ev = await asyncio.wait_for(q.get(), timeout=1.0)
+    assert ev["sourceKind"] == "app" and ev["sourceId"] == "42"
   finally:
     sb.unsubscribe(q)

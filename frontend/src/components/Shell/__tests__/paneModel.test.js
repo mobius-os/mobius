@@ -1378,3 +1378,106 @@ test('canSplit judges the first split against the POST-inset box, not the full r
   // A taller phone clears MIN_PANE_H even after the inset.
   assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 400, h: 520 }), true)
 })
+
+// ── nextId is a monotonic high-water mark (no id reuse after a collapse) ──────
+
+test('normalize never reissues a freed pane/split id (nextId does not regress)', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', 'b'), { paneId: 'p0', edge: 'right' })
+  assert.ok(ws.panes.p1, 'the split minted p1')
+  const highWater = ws.nextId
+  // Collapse the new pane back to a single pane.
+  ws = paneModel.closeTab(ws, 'chat:b')
+  assert.deepEqual(Object.keys(ws.panes), ['p0'], 'p1 collapsed away')
+  assert.ok(ws.nextId >= highWater, 'nextId did not regress below the freed ids')
+  // The NEXT split must not reuse the freed p1 (a stale history hint for the dead
+  // p1 must not suddenly match a live pane).
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', 'c'), { paneId: 'p0', edge: 'right' })
+  assert.equal(ws.panes.p1, undefined, 'the freed p1 id was NOT reused')
+})
+
+test('normalize repairs a stored nextId that LAGS the live ids', () => {
+  // A corrupt blob whose nextId trails the live max is bumped past it, so the
+  // next mint cannot collide with an existing node.
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', 'b'), { paneId: 'p0', edge: 'right' })
+  const corrupt = { ...ws, nextId: 1 } // lags p1/s2 in the live tree
+  const fixed = paneModel.normalize(corrupt)
+  assert.ok(fixed.nextId > 2, 'nextId cleared the live max even from a lagging blob')
+})
+
+// ── wide-mode degrades rather than paint panes below the minimum ─────────────
+
+test('a 4-pane wide tree degrades to the focused pair when the box cannot fit it', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 1), { paneId: 'p0', edge: 'right' })
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 2), { paneId: 'p0', edge: 'right' })
+  const rightRep = paneModel.paneOf(ws, 'app:1').id
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 3), { paneId: rightRep, edge: 'right' })
+  assert.equal(paneModel.paneIdsInOrder(ws).length, 4, 'built a 4-leaf horizontal tree')
+
+  // A roomy viewport shows all four.
+  const wide = paneModel.projectLayout(ws, 'wide', { x: 0, y: 0, w: 1600, h: 900 })
+  assert.equal(wide.visibleLeaves.length, 4)
+
+  // 960px cannot fit 4×280 columns, so wide degrades to the compact focused pair
+  // and never paints a pane below MIN_PANE_W.
+  const narrow = paneModel.projectLayout(ws, 'wide', { x: 0, y: 0, w: 960, h: 900 })
+  assert.equal(narrow.visibleLeaves.length, 2, 'degraded to the focused pair')
+  for (const id of narrow.visibleLeaves) {
+    assert.ok(narrow.rects[id].w >= paneModel.MIN_PANE_W, `${id} clears the width floor`)
+  }
+})
+
+// ── sole-item self-split is a true no-op (not a rename) ──────────────────────
+
+test('moving a pane sole tab onto its own edge is a no-op', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  assert.equal(paneModel.moveTab(ws, 'chat:a', { paneId: 'p0', edge: 'right' }), ws,
+    'same-pane sole-tab edge split is refused')
+  assert.equal(paneModel.moveTab(ws, 'chat:a', { root: true, edge: 'right' }), ws,
+    'root-splitting the sole tab of the sole pane is refused')
+})
+
+test('a drawer drop of an already-open sole item onto its pane edge does not toast', () => {
+  const state = paneModel.initialWorkspaceState(paneModel.seedFromFlatTabs([makeTab('chat', 'a')]))
+  const dropped = paneModel.workspaceReducer(state, {
+    type: 'OPEN_TAB_AT', tab: makeTab('chat', 'a'), target: { paneId: 'p0', edge: 'right' }, label: 'Moved Chat',
+  })
+  assert.equal(dropped, state, 'the no-op drop leaves state (and the undo slot) untouched — no false toast')
+})
+
+// ── route-pane reconciliation follows moves and degrades dead hints ──────────
+
+test('reconcileRoutePanes points a hint at the pane that now holds its item', () => {
+  const prev = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')])
+  const next = paneModel.moveTab(prev, 'chat:b', { paneId: 'p0', edge: 'right' })
+  const bPane = paneModel.paneOf(next, 'chat:b').id
+  assert.notEqual(bPane, 'p0', 'b left p0 for a new pane')
+  const routes = [{ view: 'chat', chatId: 'b', appId: null, paneId: 'p0' }]
+  const rec = paneModel.reconcileRoutePanes(routes, prev, next)
+  assert.equal(rec[0].paneId, bPane, 'the moved item route followed it (source pane survived)')
+})
+
+test('reconcileRoutePanes degrades a dead-pane hint for a closed item to the sibling', () => {
+  const prev = paneModel.moveTab(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
+    'chat:b', { paneId: 'p0', edge: 'right' },
+  )
+  const bPane = paneModel.paneOf(prev, 'chat:b').id
+  const next = paneModel.closeTab(prev, 'chat:b') // bPane collapses
+  assert.equal(next.panes[bPane], undefined)
+  const routes = [{ view: 'chat', chatId: 'b', appId: null, paneId: bPane }]
+  const rec = paneModel.reconcileRoutePanes(routes, prev, next)
+  assert.equal(rec[0].paneId, 'p0', 'the dead-pane hint degraded to the surviving sibling')
+})
+
+test('reconcileRoutePanes returns the SAME array when nothing changed', () => {
+  const ws = paneModel.moveTab(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
+    'chat:b', { paneId: 'p0', edge: 'right' },
+  )
+  const bPane = paneModel.paneOf(ws, 'chat:b').id
+  const routes = [{ view: 'chat', chatId: 'b', appId: null, paneId: bPane }] // already correct
+  assert.equal(paneModel.reconcileRoutePanes(routes, ws, ws), routes)
+})

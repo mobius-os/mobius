@@ -7,7 +7,7 @@ import {
   EDGE_BAND_MIN, EDGE_BAND_CAP_W, EDGE_BAND_CAP_H,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
-  rootEdgeZone, hitTest, zoneTarget, zoneEq, buildScene, paneAcceptsJoin,
+  rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene, paneAcceptsJoin,
 } from '../dragController.js'
 import * as paneModel from '../paneModel.js'
 import { STRIP_H } from '../paneModel.js'
@@ -400,4 +400,78 @@ test('canRootSplit refuses a side split on a phone', () => {
   assert.equal(paneModel.canRootSplit(ws, 'right', 'phone', content), false)
   // Top/bottom can still stack if the halves clear the min height.
   assert.equal(paneModel.canRootSplit(ws, 'top', 'phone', content), true)
+})
+
+// ── root-edge orthogonal-axis gate (a point must be INSIDE the content box) ───
+
+test('root-edge does not arm for a point outside the content box on the other axis', () => {
+  const p = pane('p0', { x: 8, y: 8, w: 984, h: 784 })
+  const s = scene([p], { allowRootEdge: true }) // content { x:0, y:0, w:1000, h:800 }
+  // 8px shy of the LEFT edge but ABOVE the content (level with the header) — not
+  // a left-split target: it is outside the box on the vertical axis.
+  assert.equal(rootEdgeZone({ x: 8, y: -5 }, s, null), null)
+  assert.equal(hitTest({ x: 8, y: -5 }, s, null), null)
+  // The same horizontal offset, INSIDE the box vertically, DOES arm a left split.
+  assert.equal(rootEdgeZone({ x: 8, y: 400 }, s, null).edge, 'left')
+})
+
+// ── hysteresis flips at EXACTLY 10px across every zone family ─────────────────
+
+test('a caret crossing commits at exactly HYSTERESIS_PX, not one pixel later', () => {
+  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
+    tabs: [{ key: 'a', left: 0, right: 100 }, { key: 'b', left: 100, right: 200 }],
+  })
+  const prev = { type: 'strip', paneId: 'p0', index: 0 } // midpoint of tab a = 50
+  assert.equal(caretZone({ x: 59, y: 5 }, p, prev).index, 0, '<10px past holds')
+  assert.equal(caretZone({ x: 60, y: 5 }, p, prev).index, 1, 'exactly 10px past flips')
+})
+
+test('a root-edge owner is lost at exactly HYSTERESIS_PX past its band', () => {
+  const p = pane('p0', { x: 8, y: 8, w: 984, h: 784 })
+  const s = scene([p], { allowRootEdge: true })
+  const prev = { type: 'root-edge', edge: 'left' }
+  assert.equal(rootEdgeZone({ x: 25, y: 400 }, s, prev).edge, 'left', '<10px past holds')
+  assert.equal(rootEdgeZone({ x: 26, y: 400 }, s, prev), null, 'exactly 10px past drops')
+})
+
+test('a challenger edge wins from an owning center at exactly HYSTERESIS_PX inside', () => {
+  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }) // left band = 88px
+  const s = scene([p])
+  const prev = { type: 'center', paneId: 'p0' }
+  // x=78 is exactly 10px inside the left band boundary (at x=88) → edge wins.
+  assert.equal(hitTest({ x: 78, y: 300 }, s, prev).edge, 'left', 'exactly 10px in flips')
+  assert.equal(hitTest({ x: 79, y: 300 }, s, prev).type, 'center', '9px in still center')
+})
+
+// ── releaseZone: commit only the previewed operation (TOCTOU) ─────────────────
+
+test('releaseZone commits an identical zone and cancels a flipped one', () => {
+  const previewed = { type: 'edge', paneId: 'p0', edge: 'right', rect: {} }
+  const same = { type: 'edge', paneId: 'p0', edge: 'right', rect: {} }
+  const flipped = { type: 'center', paneId: 'p0', rect: {} } // edge fell to a join
+  assert.equal(releaseZone(same, previewed), same, 'same operation commits')
+  assert.equal(releaseZone(flipped, previewed), null, 'a different operation cancels')
+  assert.equal(releaseZone(null, previewed), null, 'no fresh zone cancels')
+})
+
+// ── sole-tab suppression: a drawer drag of the pane's only tab never splits ───
+
+test('edgeZone suppresses a split of the pane holding the dragged sole tab', () => {
+  const soleKey = 'chat:5'
+  const p = { paneId: 'p0', rect: { x: 0, y: 0, w: 400, h: 600 }, tabs: [],
+    canSplit: { left: true, right: true, top: true, bottom: true }, soleTabKey: soleKey }
+  // Drawer source (no paneId) whose key IS this pane's sole tab → no edge lights.
+  const s = scene([p], { source: { key: soleKey, paneId: null } })
+  assert.equal(edgeZone({ x: 10, y: 300 }, p, s, null), null)
+  // A different dragged item DOES light the edge.
+  const other = scene([p], { source: { key: 'app:9', paneId: null } })
+  assert.equal(edgeZone({ x: 10, y: 300 }, p, other, null).edge, 'left')
+})
+
+test('buildScene records each single-tab pane sole key', () => {
+  const ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: '5' }])
+  const content = { x: 0, y: 0, w: 1400, h: 900 }
+  const proj = paneModel.projectLayout(ws, 'wide', content)
+  const s = buildScene(ws, proj, 'wide', content, null, true, () => [])
+  assert.equal(s.panes[0].soleTabKey, 'chat:5')
 })
