@@ -2836,6 +2836,114 @@ export default function ChatView({
   // message lands in the transcript and renders inline via the
   // `steered_into_turn` SSE event (onSteeredIntoTurn above), so we just
   // drop those rows from the local tray.
+  // The shared force-steer core: given serverTs-CONFIRMED queue rows (in
+  // queue order), optimistically hide them, POST one force_steer selecting
+  // them by cid, and reconcile or restore. Restore re-hydrates the full
+  // confirmed queue snapshot (not just the steered rows) so a single-row
+  // steer can never downgrade its still-queued siblings — hydrate marks every
+  // passed row serverTs-confirmed, and rows the snapshot omits would be
+  // demoted by preserveMissing.
+  async function steerRows(steerRowsList) {
+    const steerTexts = steerRowsList
+      .map(m => (m.content || '').trim())
+      .filter(Boolean)
+    const content = steerTexts.join('\n\n')
+    const consumePendingCids = steerRowsList.map(m => cidOf(m))
+    // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
+    const seenNames = new Set()
+    const attachments = []
+    for (const m of steerRowsList) {
+      for (const a of (m.attachments || [])) {
+        if (a && a.name && !seenNames.has(a.name)) {
+          seenNames.add(a.name)
+          attachments.push(a)
+        }
+      }
+    }
+    if (!content) return
+
+    const fullConfirmedSnapshot = (pendingQueue.pendingMessagesRef.current || [])
+      .filter(m => typeof m.ts === 'number' && m.serverTs === true)
+    let queueAfterOptimisticPromote = null
+    function restoreOptimisticSteerQueue() {
+      // If another path touched the queue while the POST was in flight
+      // (notably the natural turn-end drain), every pendingQueue mutation
+      // assigns a fresh array. In that case the other path won the race,
+      // so restoring our stale snapshot would resurrect duplicate chips.
+      if (
+        queueAfterOptimisticPromote !== null
+        && pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote
+      ) {
+        pendingQueue.hydrate(fullConfirmedSnapshot, { preserveMissing: true })
+      }
+    }
+
+    try {
+      const steerIsFirstUser = isFirstVisibleUserMessage()
+      // Fast-forward is a deliberate visibility action, unlike automatic
+      // queue drain. Capture the reader's ACTUAL position now: bottom pins,
+      // reading elsewhere holds. A later real scroll during the POST still
+      // invalidates this snapshot through the intent version.
+      const steerWillPin = shouldPinSend({
+        scrollEl: scrollRef.current,
+        mode: modeRef.current,
+        isFirstUserMsg: steerIsFirstUser,
+      })
+      steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+      // The queued tray is part of the footer height. If it stays visible
+      // until after the steered row is inserted, the scroll system pins with
+      // one layout and then immediately reflows when the tray disappears — the
+      // visible "down, then up" fast-forward jump. Hide only the confirmed
+      // rows this request is steering; restore the snapshot below if the
+      // backend says the turn was not steered.
+      pendingQueue.promoteManyByCid(consumePendingCids)
+      queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
+      const result = await streamSend(content, attachments, {
+        forceSteer: true,
+        consumePendingCids,
+        steeredMessages: steerRowsList.map(m => ({
+          ts: m.ts,
+          cid: cidOf(m),
+          content: m.content || '',
+          ...(m.attachments ? { attachments: m.attachments } : {}),
+        })),
+      })
+      if (result?.status === 'steered') {
+        // The steered rows now render inline (onSteeredIntoTurn promotes
+        // them from the SSE event + transcript). Drop them from the local
+        // tray. Reconcile against the server's authoritative remaining
+        // queue when present, else remove exactly the steered cids.
+        if (Array.isArray(result.pending_messages)) {
+          pendingQueue.hydrate(result.pending_messages)
+        } else {
+          for (const c of consumePendingCids) pendingQueue.cancelByCid(c)
+        }
+        forgetQueuedPinIntent({ cidList: consumePendingCids })
+      }
+      if (result?.status !== 'steered') {
+        steerPinIntentRef.current = null
+        restoreOptimisticSteerQueue()
+      }
+      // not_steered (the turn closed between the gate and the POST) or any
+      // other status: restore the queue and let it drain at turn-end. The
+      // tray may disappear briefly during the optimistic steer attempt, but
+      // it never gets lost.
+    } catch {
+      steerPinIntentRef.current = null
+      restoreOptimisticSteerQueue()
+      // Network/POST error — restore the queue for the turn-end drain.
+    }
+  }
+
+  // STEER (fast-forward): inject the queued messages into the LIVE turn
+  // at the next natural boundary, instead of hard-stopping (handleStop)
+  // or waiting for turn-end (the default queue drain). Mirrors handleStop's
+  // structure — re-entry guard, snapshot-before-await — but never
+  // interrupts the running turn. The backend force-steers (bypassing the
+  // steer_enabled opt-in) for BOTH providers; on success the steered
+  // message lands in the transcript and renders inline via the
+  // `steered_into_turn` SSE event (onSteeredIntoTurn above), so we just
+  // drop those rows from the local tray.
   async function handleSteer() {
     if (handlingSteerRef.current) return
     handlingSteerRef.current = true
@@ -2864,100 +2972,33 @@ export default function ChatView({
         m => typeof m.ts === 'number' && m.serverTs === true,
       )
       if (!allServerConfirmed) return
+      await steerRows(confirmedSnapshot)
+    } finally {
+      handlingSteerRef.current = false
+    }
+  }
 
-      // The provider-facing steer text: the non-empty trimmed contents joined
-      // by "\n\n", in pending order. The backend no longer byte-matches this
-      // against the queue — it selects the durable rows by cid — so the join is
-      // just the text delivered into the live turn. consume_pending_cids is
-      // every snapshot entry's stable cid (the backend selects pending rows by
-      // this set and rebuilds its own rows over them).
-      const steerTexts = confirmedSnapshot
-        .map(m => (m.content || '').trim())
-        .filter(Boolean)
-      const content = steerTexts.join('\n\n')
-      const consumePendingCids = confirmedSnapshot.map(m => cidOf(m))
-      // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
-      const seenNames = new Set()
-      const attachments = []
-      for (const m of confirmedSnapshot) {
-        for (const a of (m.attachments || [])) {
-          if (a && a.name && !seenNames.has(a.name)) {
-            seenNames.add(a.name)
-            attachments.push(a)
-          }
-        }
+  // Per-row steer (owner ask, 2026-07-17): the tray's arrow beside a row's
+  // cancel-X sends exactly THAT queued message into the live turn, leaving
+  // its siblings queued. Same core as the fast-forward button — one cid in
+  // consume_pending_cids instead of all of them; the backend already selects
+  // pending rows by cid. Only the tapped row needs server confirmation (the
+  // all-confirmed gate above exists because handleSteer consumes the whole
+  // queue); an unconfirmed row gets one reconcile retry, then bails and
+  // stays queued.
+  async function handleSteerOne(cid) {
+    if (handlingSteerRef.current) return
+    handlingSteerRef.current = true
+    try {
+      const findRow = () => (pendingQueue.pendingMessagesRef.current || [])
+        .find(m => cidOf(m) === cid)
+      let row = findRow()
+      if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
+        await reconcileRuntimeState()
+        row = findRow()
       }
-      if (!content) return
-
-      let queueAfterOptimisticPromote = null
-      function restoreOptimisticSteerQueue() {
-        // If another path touched the queue while the POST was in flight
-        // (notably the natural turn-end drain), every pendingQueue mutation
-        // assigns a fresh array. In that case the other path won the race,
-        // so restoring our stale snapshot would resurrect duplicate chips.
-        if (
-          queueAfterOptimisticPromote !== null
-          && pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote
-        ) {
-          pendingQueue.hydrate(confirmedSnapshot, { preserveMissing: true })
-        }
-      }
-
-      try {
-        const steerIsFirstUser = isFirstVisibleUserMessage()
-        // Fast-forward is a deliberate visibility action, unlike automatic
-        // queue drain. Capture the reader's ACTUAL position now: bottom pins,
-        // reading elsewhere holds. A later real scroll during the POST still
-        // invalidates this snapshot through the intent version.
-        const steerWillPin = shouldPinSend({
-          scrollEl: scrollRef.current,
-          mode: modeRef.current,
-          isFirstUserMsg: steerIsFirstUser,
-        })
-        steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
-        // The queued tray is part of the footer height. If it stays visible
-        // until after the steered row is inserted, the scroll system pins with
-        // one layout and then immediately reflows when the tray disappears — the
-        // visible "down, then up" fast-forward jump. Hide only the confirmed
-        // rows this request is steering; restore the snapshot below if the
-        // backend says the turn was not steered.
-        pendingQueue.promoteManyByCid(consumePendingCids)
-        queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
-        const result = await streamSend(content, attachments, {
-          forceSteer: true,
-          consumePendingCids,
-          steeredMessages: confirmedSnapshot.map(m => ({
-            ts: m.ts,
-            cid: cidOf(m),
-            content: m.content || '',
-            ...(m.attachments ? { attachments: m.attachments } : {}),
-          })),
-        })
-        if (result?.status === 'steered') {
-          // The steered rows now render inline (onSteeredIntoTurn promotes
-          // them from the SSE event + transcript). Drop them from the local
-          // tray. Reconcile against the server's authoritative remaining
-          // queue when present, else remove exactly the steered cids.
-          if (Array.isArray(result.pending_messages)) {
-            pendingQueue.hydrate(result.pending_messages)
-          } else {
-            for (const c of consumePendingCids) pendingQueue.cancelByCid(c)
-          }
-          forgetQueuedPinIntent({ cidList: consumePendingCids })
-        }
-        if (result?.status !== 'steered') {
-          steerPinIntentRef.current = null
-          restoreOptimisticSteerQueue()
-        }
-        // not_steered (the turn closed between the gate and the POST) or any
-        // other status: restore the queue and let it drain at turn-end. The
-        // tray may disappear briefly during the optimistic steer attempt, but
-        // it never gets lost.
-      } catch {
-        steerPinIntentRef.current = null
-        restoreOptimisticSteerQueue()
-        // Network/POST error — restore the queue for the turn-end drain.
-      }
+      if (!row || !(typeof row.ts === 'number' && row.serverTs === true)) return
+      await steerRows([row])
     } finally {
       handlingSteerRef.current = false
     }
@@ -3686,7 +3727,12 @@ export default function ChatView({
                   for the e2e presence probe. */}
               <div className="chat__thinking chat__activity chat__activity--running">
                 <span className="chat__activity-label">
-                  <span className="chat__activity-label-text">Thinking</span>
+                  <span className="chat__activity-label-text">
+                    Thinking
+                    <span className="chat__activity-label-sweep" aria-hidden="true">
+                      Thinking
+                    </span>
+                  </span>
                 </span>
               </div>
             </li>
@@ -3709,59 +3755,73 @@ export default function ChatView({
           reconnecting={reconnecting}
           onRetry={retry}
         />
-        {openAppCtas.length > 0 && (
-          <div className="chat__open-app">
-            {openAppCtas.map(({ app, vm }) => {
-              const pulsing = pulsedAppId === Number(app.id)
-              return (
-                <button
-                  key={app.id}
-                  className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
-                  aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
-                  onClick={() => onOpenApp?.(app.id)}
+        {/* A lost connection empties the stack: while connectionError is
+            set, nudges, rail, and the queued tray hide so the one thing on
+            screen is the problem and its Retry (owner ask, 2026-07-17).
+            The healthy sleep/wake reattach note (`reconnecting`) does NOT
+            hide anything — the stream is being replaced, not failing. */}
+        {!connectionError && (
+          <>
+          {openAppCtas.length > 0 && (
+            <div className="chat__open-app">
+              {openAppCtas.map(({ app, vm }) => {
+                const pulsing = pulsedAppId === Number(app.id)
+                return (
+                  <button
+                    key={app.id}
+                    className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
+                    aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
+                    onClick={() => onOpenApp?.(app.id)}
+                  >
+                    {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          {hasPendingQuestion && pendingCardOffscreen && (
+            <button
+              type="button"
+              className="chat__question-nudge"
+              onClick={revealConversationTail}
+            >
+              Möbius asked you something — tap to answer
+            </button>
+          )}
+          {hasPendingResume && resumeCardOffscreen && (
+            <button
+              type="button"
+              className="chat__resume-nudge"
+              onClick={revealConversationTail}
+            >
+              {pendingResumeBlock?.pause?.resets_at
+                ? 'Rate limit reached — tap to resume'
+                : 'Turn paused — tap to resume'}
+            </button>
+          )}
+          {buildPhaseRail.length > 0 && (
+            <div className="chat__build-rail" role="group" aria-label="Build progress">
+              {buildPhaseRail.map(phase => (
+                <span
+                  key={phase.ts}
+                  className={`chat__build-phase${
+                    phase.current ? ' chat__build-phase--current' : ''
+                  }`}
+                  aria-current={phase.current ? 'step' : undefined}
                 >
-                  {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
-                </button>
-              )
-            })}
-          </div>
+                  <span className="chat__build-phase-label">{phase.label}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          <QueuedMessages
+            items={pendingQueue.pendingMessages}
+            onCancel={handleCancelPending}
+            onSteerOne={handleSteerOne}
+            steerActive={turnActive}
+          />
+          </>
         )}
-        {hasPendingQuestion && pendingCardOffscreen && (
-          <button
-            type="button"
-            className="chat__question-nudge"
-            onClick={revealConversationTail}
-          >
-            Möbius asked you something — tap to answer
-          </button>
-        )}
-        {hasPendingResume && resumeCardOffscreen && (
-          <button
-            type="button"
-            className="chat__resume-nudge"
-            onClick={revealConversationTail}
-          >
-            {pendingResumeBlock?.pause?.resets_at
-              ? 'Rate limit reached — tap to resume'
-              : 'Turn paused — tap to resume'}
-          </button>
-        )}
-        {buildPhaseRail.length > 0 && (
-          <div className="chat__build-rail" role="group" aria-label="Build progress">
-            {buildPhaseRail.map(phase => (
-              <span
-                key={phase.ts}
-                className={`chat__build-phase${
-                  phase.current ? ' chat__build-phase--current' : ''
-                }`}
-                aria-current={phase.current ? 'step' : undefined}
-              >
-                <span className="chat__build-phase-label">{phase.label}</span>
-              </span>
-            ))}
-          </div>
-        )}
-        <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
         <ChatInputBar
           input={input}
           onInputChange={handleComposerInputChange}

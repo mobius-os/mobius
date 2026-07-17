@@ -1023,39 +1023,41 @@
   font-size: 13px;
 }
 
-/* Liveness IS the label: a narrow contrast band sweeps the live text
-   left-to-right in ~1.8s, then rests ~2.7s before the next pass (the
-   Codex/ChatGPT idiom — owner ask, 2026-07-17; the first cut's 1.15s sweep
-   read as too hurried). No spinner, no pulse dot, no ellipsis: the type
-   glyph holds still and only the light moves over steady letters. The
-   gradient clips to the INNER span (.chat__activity-label-text) while the
-   outer label keeps a real color, so the truncation ellipsis never inherits
-   transparent fill. The gradient must COVER the text at every keyframe —
-   with transparent fill, any uncovered glyph is invisible; with
-   background-size 260%, positions 0%..100% are exactly the coverage-complete
-   range (the band parks off-edge INSIDE the image at both ends), and the
-   background-color underlay is a belt-and-braces backing for the same
-   invariant. An earlier draft rested at -100% — the image fully off the
-   box — which blanked the label for the whole rest phase. The base color
-   rides --act-base so the header's hover/press lift (see the rule above)
-   reaches the shimmering text too, not just the ellipsis. */
-.chat__activity-label { --act-base: var(--muted); }
-.chat__activity-header:hover .chat__activity-label,
-.chat__activity-header:active .chat__activity-label { --act-base: var(--text); }
-
+/* Liveness IS the label — via the ChatGPT cadenced-shimmer architecture the
+   owner pointed to (2026-07-17): the label's base text stays NORMAL, fully
+   colored text (hover lift, truncation ellipsis, and forced colors all just
+   work), and a separate aria-hidden overlay span carries the same text with
+   only a narrow bright band visible. The band crosses in ~1.0s and rests
+   ~1.2s (snappier than the first cut's 1.8s/2.7s — owner call). Because the
+   base text is never transparent, no gradient position can ever blank a
+   letter — the failure class of the previous background-clip approach is
+   structurally impossible. The overlay clips (not ellipsizes), so during a
+   pass over a truncated label the band crosses the visible glyphs and slides
+   under the ellipsis. */
 .chat__activity-label-text {
+  position: relative;
   color: inherit;
 }
 
+/* Hidden by default: shown only when the animated gradient text is actually
+   supported and motion is allowed; forced-colors kills it outright. */
+.chat__activity-label-sweep { display: none; }
+
 @media (prefers-reduced-motion: no-preference) {
   @supports ((-webkit-background-clip: text) or (background-clip: text)) {
-    .chat__activity--running .chat__activity-label-text {
-      background-color: var(--act-base);
+    .chat__activity-label-sweep {
+      display: block;
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      pointer-events: none;
+      color: transparent;
       background-image: linear-gradient(
         100deg,
-        var(--act-base) 42%,
+        transparent 42%,
         color-mix(in srgb, var(--text) 94%, var(--bg)) 50%,
-        var(--act-base) 58%
+        transparent 58%
       );
       background-repeat: no-repeat;
       background-size: 260% 100%;
@@ -1063,37 +1065,22 @@
       -webkit-background-clip: text;
       background-clip: text;
       -webkit-text-fill-color: transparent;
-      color: transparent;
-      animation: chat-activity-sweep 4.5s linear infinite;
+      animation: chat-activity-sweep 2.2s linear infinite;
     }
   }
 }
 
+@media (forced-colors: active) {
+  .chat__activity-label-sweep { display: none !important; }
+}
+
+/* Sweep 0%→45% of the cycle (~1.0s), rest for the remainder (~1.2s).
+   Decreasing background-position-x with an oversized image moves the band
+   left→right; both endpoints park the band off the visible text. */
 @keyframes chat-activity-sweep {
   0% { background-position: 100% 0; }
-  40% { background-position: 0% 0; }
+  45% { background-position: 0% 0; }
   100% { background-position: 0% 0; }
-}
-
-/* Reduced motion: static, not a substitute pulse — the live label simply
-   holds full text color (present tense carries the state; the aria name says
-   "in progress"). Forced colors: same, in system ink. */
-@media (prefers-reduced-motion: reduce) {
-  .chat__activity--running .chat__activity-label-text {
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    color: var(--text);
-    animation: none !important;
-  }
-}
-
-@media (forced-colors: active) {
-  .chat__activity--running .chat__activity-label-text {
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    color: CanvasText;
-    animation: none !important;
-  }
 }
 
 .chat__activity-chip {
@@ -2356,6 +2343,27 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.queued__steer {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin: 4px 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted); /* CONTRACT: low-contrast icon on opaque fill */
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.queued__steer:hover {
+  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
+  color: var(--accent); /* CONTRACT: vivid accent — this action feeds the live turn */
 }
 
 .queued__cancel {

@@ -214,7 +214,20 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           null
         )}
         <span className="chat__activity-label">
-          <span className="chat__activity-label-text">{text}</span>
+          <span className="chat__activity-label-text">
+            {text}
+            {displayState === 'running' && (
+              // The sweep is a separate aria-hidden overlay carrying the SAME
+              // text with only a bright band visible (the ChatGPT
+              // cadenced-shimmer architecture) — the base text below stays
+              // normal, fully-colored text, so no gradient math can ever
+              // blank a letter. Duplicated text is invisible to AT and to
+              // pixels outside the band.
+              <span className="chat__activity-label-sweep" aria-hidden="true">
+                {text}
+              </span>
+            )}
+          </span>
         </span>
         {displayState === 'error' && exitCode != null && (
           <span className="chat__activity-chip">exit {exitCode}</span>

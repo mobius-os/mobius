@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './chatRuntimeState.js'
 
@@ -19,7 +20,7 @@ const TRUNCATE_AT = 80
  * transcript so it's clear these are "not yet sent" turns. Lives between
  * the chat list and the input form. Empty queue → nothing rendered.
  */
-export default function QueuedMessages({ items, onCancel }) {
+export default function QueuedMessages({ items, onCancel, onSteerOne, steerActive }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
 
@@ -128,6 +129,24 @@ export default function QueuedMessages({ items, onCancel }) {
                     {isExpanded ? text : preview}
                   </span>
                 </button>
+                {steerActive && msg.serverTs === true && (
+                  // Per-row fast-forward (owner ask, 2026-07-17): the same
+                  // double-chevron as the composer's steer button, icon-only —
+                  // send exactly THIS message into the running turn now.
+                  // Rendered only while a turn is live and the row is
+                  // server-confirmed (an optimistic row's cid selects nothing
+                  // on the backend).
+                  <button
+                    type="button"
+                    className="queued__steer"
+                    onPointerDown={(e) => e.preventDefault()}
+                    onClick={() => onSteerOne?.(cidOf(msg))}
+                    aria-label="Send this queued message now"
+                    title="Send now"
+                  >
+                    <DoubleChevronRight width={14} height={14} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="queued__cancel"
