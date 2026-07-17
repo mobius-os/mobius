@@ -2596,6 +2596,19 @@ export default function ChatView({
     if (handlingStopRef.current) return
     handlingStopRef.current = true
     try {
+      // An in-flight steer POST must settle before Stop snapshots: its
+      // optimistic promote has already hidden rows this snapshot would
+      // otherwise miss, and Stop's clear() would suppress the steer's
+      // restore guard — the not_steered path would then lose those rows
+      // everywhere (see steerInFlightRef). Bounded so a hung POST can't
+      // wedge Stop; on timeout we proceed with today's (pre-fix) behavior.
+      const steerInFlight = steerInFlightRef.current
+      if (steerInFlight) {
+        await Promise.race([
+          steerInFlight.catch(() => {}),
+          new Promise(resolve => setTimeout(resolve, 4000)),
+        ])
+      }
       // Snapshot the queue before doing anything destructive. Stop ALWAYS
       // interrupts the current turn and resends any queued messages as ONE
       // fresh follow-up turn — it never folds them into the still-running
@@ -2826,6 +2839,15 @@ export default function ChatView({
   // double-fire is still wasteful. Synchronous flip at entry, cleared in
   // finally.
   const handlingSteerRef = useRef(false)
+  // The in-flight steer POST as an awaitable, so Stop can serialize behind
+  // it. Without this, a Stop tapped mid-steer snapshots a queue the steer
+  // already optimistically emptied, clear()s (suppressing the steer's
+  // restore identity guard), and wipes server pending — a not_steered
+  // resolution then has nowhere to put the rows back: silent loss
+  // (review 2026-07-17). Stop awaiting the steer first sees post-steer
+  // truth in both resolutions: steered rows are in the transcript, or the
+  // restore has already returned them to the queue.
+  const steerInFlightRef = useRef(null)
 
   // STEER (fast-forward): inject the queued messages into the LIVE turn
   // at the next natural boundary, instead of hard-stopping (handleStop)
@@ -2844,6 +2866,19 @@ export default function ChatView({
   // passed row serverTs-confirmed, and rows the snapshot omits would be
   // demoted by preserveMissing.
   async function steerRows(steerRowsList) {
+    // A Stop that has already begun owns the queue's fate (it clears and
+    // resends); starting a steer under it would race the teardown.
+    if (handlingStopRef.current) return
+    const run = steerRowsImpl(steerRowsList)
+    steerInFlightRef.current = run
+    try {
+      await run
+    } finally {
+      if (steerInFlightRef.current === run) steerInFlightRef.current = null
+    }
+  }
+
+  async function steerRowsImpl(steerRowsList) {
     const steerTexts = steerRowsList
       .map(m => (m.content || '').trim())
       .filter(Boolean)
@@ -3755,12 +3790,17 @@ export default function ChatView({
           reconnecting={reconnecting}
           onRetry={retry}
         />
-        {/* A lost connection empties the stack: while connectionError is
-            set, nudges, rail, and the queued tray hide so the one thing on
-            screen is the problem and its Retry (owner ask, 2026-07-17).
-            The healthy sleep/wake reattach note (`reconnecting`) does NOT
-            hide anything — the stream is being replaced, not failing. */}
-        {!connectionError && (
+        {/* A LOST connection empties the stack: while the terminal
+            'disconnected' state is set, nudges, rail, and the queued tray
+            hide so the one thing on screen is the problem and its Retry
+            (owner ask, 2026-07-17). ONLY 'disconnected' gates: 'retrying'
+            is a transient bare-EOF auto-reconnect that clears itself in
+            ~300ms — blanking and popping the whole stack on every mobile
+            blip would be flicker, not signal (review 2026-07-17; the
+            reconnect effect keys on the same distinction). The healthy
+            sleep/wake reattach note (`reconnecting`) likewise hides
+            nothing — the stream is being replaced, not failing. */}
+        {connectionError !== 'disconnected' && (
           <>
           {openAppCtas.length > 0 && (
             <div className="chat__open-app">

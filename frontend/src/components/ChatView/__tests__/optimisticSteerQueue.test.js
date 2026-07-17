@@ -33,3 +33,36 @@ test('optimistic steer restore only hydrates when no queue mutation won the race
     'the restore helper must hydrate the stale snapshot only if the queue array identity is unchanged',
   )
 })
+
+test('Stop serializes behind an in-flight steer; steer bails under a committed Stop', () => {
+  // The Stop×steer race (review 2026-07-17): Stop snapshotting mid-steer
+  // loses the optimistically-hidden rows on a not_steered resolution. The
+  // contract is two-sided — handleStop awaits steerInFlightRef (bounded)
+  // BEFORE its queue snapshot, and steerRows refuses to start once a Stop
+  // owns the teardown.
+  const stopIdx = source.indexOf('async function handleStop()')
+  const awaitIdx = source.indexOf('steerInFlightRef.current', stopIdx)
+  const snapshotIdx = source.indexOf('Snapshot the queue before doing anything destructive', stopIdx)
+  assert.ok(stopIdx >= 0 && awaitIdx > stopIdx && snapshotIdx > awaitIdx,
+    'handleStop must await the in-flight steer before snapshotting the queue')
+  assert.match(
+    source,
+    /async function steerRows\(steerRowsList\) \{[\s\S]*?if \(handlingStopRef\.current\) return/,
+    'steerRows must bail when a Stop has already committed to the teardown',
+  )
+})
+
+test('the foot stack hides only on the TERMINAL disconnect, not retrying blips', () => {
+  // 'retrying' is a ~300ms transparent auto-reconnect; gating on it would
+  // blank and pop the rail/tray on every mobile blip (review 2026-07-17).
+  assert.match(
+    source,
+    /connectionError !== 'disconnected' && \(/,
+    'the foot gate must key on the terminal disconnected state only',
+  )
+  assert.doesNotMatch(
+    source,
+    /\{!connectionError && \(\s*<>/,
+    'the broad !connectionError gate must not return',
+  )
+})
