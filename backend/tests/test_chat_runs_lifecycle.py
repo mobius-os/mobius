@@ -105,6 +105,43 @@ def test_hard_purge_deletes_orphaned_run_records(client, auth):
   assert _runs("purge-me") == {}, "run records purged with the chat, not orphaned"
 
 
+def _seed_session_link(provider, session_id, chat_id):
+  db = SessionLocal()
+  try:
+    db.add(models.ChatSessionLink(
+      provider=provider, session_id=session_id, chat_id=chat_id,
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+
+def _session_links(chat_id):
+  db = SessionLocal()
+  try:
+    return [
+      r.session_id for r in db.query(models.ChatSessionLink)
+      .filter(models.ChatSessionLink.chat_id == chat_id).all()
+    ]
+  finally:
+    db.close()
+
+
+def test_hard_purge_deletes_session_links(client, auth):
+  """A chat's append-only session->chat link rows (subagent observability) must
+  be purged with the chat — same no-FK-cascade lifecycle as chat_runs, else the
+  table grows unbounded and the endpoint returns links to a dead chat."""
+  old = datetime.now(UTC).replace(tzinfo=None) - SOFT_DELETE_TTL - SOFT_DELETE_TTL
+  _seed_chat("purge-links", deleted_at=old)
+  _seed_session_link("claude", "sess-purge-1", "purge-links")
+  _seed_session_link("codex", "sess-purge-2", "purge-links")
+  # Listing chats runs the purge sweep.
+  r = client.get("/api/chats", headers=auth)
+  assert r.status_code == 200
+  assert _chat_state("purge-links") is None, "chat row hard-deleted"
+  assert _session_links("purge-links") == [], "session links purged with the chat"
+
+
 def test_orphan_sweep_does_not_mask_a_failed_destructive_reconcile(monkeypatch):
   """If a chat's destructive reconcile FAILS + rolls back (run_status stays
   "running"), the non-destructive orphan sweep must NOT flip its run record to

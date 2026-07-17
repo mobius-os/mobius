@@ -246,6 +246,13 @@ def list_chats(
     db.query(models.ToolOutput).filter(
       models.ToolOutput.chat_id == c.id
     ).delete(synchronize_session=False)
+    # Drop the chat's session->chat link rows (subagent observability) with it —
+    # same no-FK-cascade lifecycle as chat_runs. A link records every provider
+    # session this chat was ever seen under; once the chat is gone for good the
+    # links resolve to nothing, so purge them here rather than leak dead rows.
+    db.query(models.ChatSessionLink).filter(
+      models.ChatSessionLink.chat_id == c.id
+    ).delete(synchronize_session=False)
     db.delete(c)
   # Hard-delete abandoned empties — chats that were created, never had
   # a message sent (no session_id, no messages, no pending queue), and
@@ -283,6 +290,9 @@ def list_chats(
     # no FK cascade on SQLite, so these would orphan otherwise).
     db.query(models.ChatRun).filter(
       models.ChatRun.chat_id == c.id
+    ).delete(synchronize_session=False)
+    db.query(models.ChatSessionLink).filter(
+      models.ChatSessionLink.chat_id == c.id
     ).delete(synchronize_session=False)
     db.delete(c)
   # Notification TTL: rows are written by agent-driven push calls

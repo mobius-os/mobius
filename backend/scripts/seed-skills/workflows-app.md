@@ -2,13 +2,19 @@
 
 When a turn leaned on background helpers, the Workflows app is where the partner watches what those helpers did. `Read` this before ending any turn in which you ran background work, so you leave the partner a way to look in.
 
-This skill is only about *surfacing* that work — it does NOT teach you how to run it. The Claude CLI ships the guidance for orchestrating helpers, and arming an orchestrated run is the `ultracode` effort tier. Your job here is the after-the-fact link, not the run.
+This skill is only about *surfacing* that work — it does NOT teach you how to run it. The Claude CLI ships the guidance for orchestrating helpers, and arming an orchestrated run is the highest effort tier. Your job here is the after-the-fact link, not the run.
+
+<!-- This file is Read on every background-work turn, so it deliberately avoids
+     the literal top-effort-tier keyword: that word anywhere in the turn's
+     context can arm the orchestration tool on its own. Describe the tier;
+     never name it. -->
+
 
 ---
 
 ## When this applies
 
-Any turn where you fanned work out to background helpers or an orchestrated run — the Task/Agent tools, an `ultracode` Workflow, or a Codex collab (spawn/send/resume). A plain turn with ordinary tool calls does not count; leave the Workflows link off those.
+Any turn where you fanned work out to background helpers or an orchestrated run — the Task/Agent tools, an orchestrated Workflow fleet, or a Codex collab (spawn/send/resume). A plain turn with ordinary tool calls does not count; leave the Workflows link off those.
 
 ---
 

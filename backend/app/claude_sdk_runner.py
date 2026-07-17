@@ -71,7 +71,6 @@ log = logging.getLogger(__name__)
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 from claude_agent_sdk.types import (
-  TERMINAL_TASK_STATUSES,
   AssistantMessage,
   PermissionResultAllow,
   PermissionResultDeny,
@@ -84,13 +83,27 @@ from claude_agent_sdk.types import (
   TaskNotificationMessage,
   TaskProgressMessage,
   TaskStartedMessage,
-  TaskUpdatedMessage,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
   ToolUseBlock,
   UserMessage,
 )
+
+# The background-task terminal-state surface (TaskUpdatedMessage + the
+# TERMINAL_TASK_STATUSES set) is newer than our SDK FLOOR pin
+# (claude-agent-sdk>=0.2.87 in the Dockerfile). Import it defensively so a build
+# that resolves an in-range older SDK lacking these symbols still boots the
+# whole Claude runner — the task_updated branch below simply becomes a no-op
+# (its class is None, so the isinstance guard is never true), matching how the
+# Codex runner guards its own newer collab types. When the type is present the
+# branch handles killed/stopped background tasks whose terminal state arrives
+# ONLY as a task_updated patch.
+try:
+  from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, TaskUpdatedMessage
+except ImportError:
+  TERMINAL_TASK_STATUSES = frozenset()
+  TaskUpdatedMessage = None
 
 from app import activity
 from app.pending_questions import PendingQuestion
@@ -140,21 +153,25 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
 
   Advances two records from the same sighting: the CURRENT-session pointer on
   the chat row (via the single-writer actor, since it lives on the hot Chat
-  row), and the append-only ``chat_session_links`` map (a direct write on the
-  runner's own ``db`` session — a distinct table with no lost-update race, so
-  it does not go through the actor). The link record is what survives the
-  provider switch / session reset that later NULLs ``Chat.session_id``.
+  row), and the append-only ``chat_session_links`` map. The link write goes
+  through ``record_session_link_async``, which commits on its OWN short-lived
+  session in a worker thread — NOT the runner's ``db`` (which chat.py closes
+  before the long run, and which the later ``Chat.session_id`` save reuses), so
+  a link-write stall or failure can neither block the loop nor poison that
+  shared session. The ``db`` argument is unused here now, kept for the call
+  signature. The link record is what survives the provider switch / session
+  reset that later NULLs ``Chat.session_id``.
   """
-  if db is None or not chat_id or not session_id:
+  if not chat_id or not session_id:
     return
   try:
     from app.chat_writer import PersistSessionId, await_ack, get_writer
-    from app.session_links import record_session_link
+    from app.session_links import record_session_link_async
     ack = get_writer().submit(
       PersistSessionId(chat_id=chat_id, session_id=session_id)
     )
     await await_ack(ack)
-    record_session_link(db, "claude", session_id, chat_id)
+    await record_session_link_async("claude", session_id, chat_id)
   except Exception:
     log.warning(
       "Claude session id persistence failed chat_id=%s session_id=%s",
@@ -677,7 +694,7 @@ def dispatch_sdk_message(
         "tool_use_id": sdk_msg.tool_use_id,
       })
       return current_session_id, None
-    if isinstance(sdk_msg, TaskUpdatedMessage):
+    if TaskUpdatedMessage is not None and isinstance(sdk_msg, TaskUpdatedMessage):
       # A background task's terminal state can arrive ONLY as a task_updated
       # patch, with no accompanying TaskNotificationMessage — a task stopped via
       # TaskStop reports status "killed" here and the matching notification is

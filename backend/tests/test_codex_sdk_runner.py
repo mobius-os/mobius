@@ -1230,8 +1230,10 @@ def test_record_collab_child_links_attributes_spawned_children(db):
 
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(tool="spawnAgent", receivers=["child-A", "child-B"])
-  codex_sdk_runner._record_collab_child_links(
-    item, sdk, db=db, chat_id="collab-chat",
+  asyncio.run(
+    codex_sdk_runner._record_collab_child_links(
+      item, sdk, chat_id="collab-chat",
+    )
   )
 
   db.expire_all()
@@ -1252,8 +1254,10 @@ def test_record_collab_child_links_ignores_non_spawn_ops(db):
 
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(tool="sendInput", receivers=["child-A"])
-  codex_sdk_runner._record_collab_child_links(
-    item, sdk, db=db, chat_id="collab-chat-2",
+  asyncio.run(
+    codex_sdk_runner._record_collab_child_links(
+      item, sdk, chat_id="collab-chat-2",
+    )
   )
 
   assert db.get(models.ChatSessionLink, ("codex", "child-A")) is None

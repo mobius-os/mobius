@@ -130,25 +130,26 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
 
   Advances two records from the same sighting: the CURRENT-session pointer on
   the chat row (via the single-writer actor, since it lives on the hot Chat
-  row), and the append-only ``chat_session_links`` map (a direct write on the
-  runner's own ``db`` session — a distinct table with no lost-update race, so
-  it does not go through the actor). This funnel runs on BOTH a fresh
-  ``thread_start`` and a ``thread_resume``: the caller sets ``thread.id`` from
-  either path before invoking it, so the codex thread id is recorded (and
-  re-sighted idempotently on resume) with no second call site. The link record
-  is what survives the provider switch / session reset that later NULLs
-  ``Chat.session_id``. Mirrors ``claude_sdk_runner._persist_session_id``.
+  row), and the append-only ``chat_session_links`` map (via
+  ``record_session_link_async``, which commits on its own short-lived session in
+  a worker thread — never the runner's ``db``, which chat.py closes before the
+  long run). This funnel runs on BOTH a fresh ``thread_start`` and a
+  ``thread_resume``: the caller sets ``thread.id`` from either path before
+  invoking it, so the codex thread id is recorded (and re-sighted idempotently
+  on resume) with no second call site. The link record is what survives the
+  provider switch / session reset that later NULLs ``Chat.session_id``. Mirrors
+  ``claude_sdk_runner._persist_session_id``.
   """
-  if db is None or not chat_id or not session_id:
+  if not chat_id or not session_id:
     return
   try:
     from app.chat_writer import PersistSessionId, await_ack, get_writer
-    from app.session_links import record_session_link
+    from app.session_links import record_session_link_async
     ack = get_writer().submit(
       PersistSessionId(chat_id=chat_id, session_id=session_id)
     )
     await await_ack(ack)
-    record_session_link(db, "codex", session_id, chat_id)
+    await record_session_link_async("codex", session_id, chat_id)
   except Exception:
     log.warning(
       "Codex session id persistence failed chat_id=%s session_id=%s",
@@ -540,8 +541,8 @@ def _collab_summary(item: Any) -> str | None:
   return "; ".join(messages)[:_COLLAB_SUMMARY_MAX]
 
 
-def _record_collab_child_links(
-  item: Any, sdk: dict[str, Any], *, db: Any, chat_id: str,
+async def _record_collab_child_links(
+  item: Any, sdk: dict[str, Any], *, chat_id: str,
 ) -> None:
   """Attribute a spawned sub-agent's thread to this chat.
 
@@ -549,9 +550,10 @@ def _record_collab_child_links(
   recording each in the append-only session->chat map keeps the child's own
   rollout resolvable back to this chat even though it streams on its own thread.
   Gated on the spawn operation (that is when a NEW child id first appears; the
-  other ops reference children already recorded at their spawn). Idempotent —
-  ``record_session_link`` upserts — and never raises: observability must not
-  break the notification loop.
+  other ops reference children already recorded at their spawn). Idempotent, and
+  never raises: observability must not break the notification loop. The write
+  goes through ``record_session_link_async`` (own session, worker thread) so it
+  neither blocks the stream loop nor touches the runner's shared ``db``.
   """
   try:
     collab_cls = sdk.get("CollabAgentToolCallThreadItem")
@@ -559,9 +561,9 @@ def _record_collab_child_links(
       return
     if _collab_op(item) != "spawnAgent":
       return
-    from app.session_links import record_session_link
+    from app.session_links import record_session_link_async
     for child_id in getattr(item, "receiver_thread_ids", None) or []:
-      record_session_link(db, "codex", child_id, chat_id)
+      await record_session_link_async("codex", child_id, chat_id)
   except Exception:
     log.debug("codex collab child-link recording failed", exc_info=True)
 
@@ -1394,7 +1396,7 @@ async def run_codex_sdk_turn(
           # A spawn's child thread ids first appear on its collab item; record
           # the session->chat link now so the child rollout stays attributed
           # even if we never resume it directly.
-          _record_collab_child_links(item, sdk, db=db, chat_id=chat_id)
+          await _record_collab_child_links(item, sdk, chat_id=chat_id)
           continue
 
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
@@ -1413,7 +1415,7 @@ async def run_codex_sdk_turn(
           # Also record child links here (idempotent) in case receiver_thread_ids
           # only populates on completion — a missed link silently loses the
           # attribution this recording exists to provide.
-          _record_collab_child_links(item, sdk, db=db, chat_id=chat_id)
+          await _record_collab_child_links(item, sdk, chat_id=chat_id)
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
