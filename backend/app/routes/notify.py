@@ -17,7 +17,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app import models
@@ -64,10 +64,28 @@ _SYSTEM_BUS_ONLY_EVENTS = frozenset({
   "shell_rebuild_failed",
   "app_build_failed",
   "app_created",
+  # open_item is an ACTION event (open this now); a chat reconnect replaying it
+  # would re-open the item a second time, so it rides the replay-free system bus.
+  "open_item",
 })
+
+# The typed fields an `open_item` request carries (split-pane design §6.3), plus
+# the closed enums their strings must belong to. Confined to `open_item` alone by
+# NotifyBody.confine_fields_per_type so the type whitelist stays the real contract.
+_OPEN_ITEM_FIELDS = (
+  "itemKind", "itemId", "sourceKind", "sourceId", "placement", "activation",
+)
+_OPEN_ITEM_KINDS = frozenset({"app", "chat"})
+_OPEN_ITEM_PLACEMENTS = frozenset({"beside-source", "with-source", "with-focus"})
+_OPEN_ITEM_ACTIVATIONS = frozenset({"background", "foreground"})
 
 
 class NotifyBody(BaseModel):
+  # extra="forbid": an unknown key is a 422, not a silently-ignored extra. The
+  # design (§6.3) calls the loose original schema out by name — the type
+  # whitelist is only a real contract if the field set is closed too.
+  model_config = ConfigDict(extra="forbid")
+
   type: str
   appId: str | None = None
   error: str | None = None
@@ -77,6 +95,16 @@ class NotifyBody(BaseModel):
   # build_phase.py sends the $CHAT_ID of its own running turn.
   label: str | None = None
   chatId: str | None = None
+  # open_item request fields (§6.3), confined to open_item events below. The
+  # source is TYPED (kind + id) because the internal vocabulary allows an app
+  # source, which a chat-only field could not express; placement/activation are
+  # enum-validated so a malformed value is a 422, never a silent default.
+  itemKind: str | None = None
+  itemId: str | None = None
+  sourceKind: str | None = None
+  sourceId: str | None = None
+  placement: str | None = None
+  activation: str | None = None
 
   @field_validator("type")
   @classmethod
@@ -87,13 +115,40 @@ class NotifyBody(BaseModel):
     return value
 
   @model_validator(mode="after")
-  def confine_build_phase_fields(self) -> "NotifyBody":
-    """Confine `label`/`chatId` to build_phase and bound the label.
+  def confine_fields_per_type(self) -> "NotifyBody":
+    """Confine every optional field to the one event type that owns it.
 
-    Either field on any other event type is rejected so the closed schema
-    keeps its meaning; a build_phase label is truncated to `_LABEL_MAX` so
-    one POST cannot render an unbounded string into the chat foot.
+    Each event type carries a closed field set: build_phase owns
+    `label`/`chatId`, open_item owns the typed request fields, and neither may
+    borrow the other's (nor `appId`/`error`). This is the per-type confinement
+    the design requires so the type whitelist stays the meaningful contract.
     """
+    if self.type == "open_item":
+      for name in ("label", "chatId", "appId", "error"):
+        if getattr(self, name) is not None:
+          raise ValueError(f"{name} is not valid for open_item events")
+      if self.itemKind not in _OPEN_ITEM_KINDS:
+        raise ValueError("open_item requires itemKind in {app, chat}")
+      if not self.itemId:
+        raise ValueError("open_item requires a non-empty itemId")
+      # source is optional, but its kind + id travel together and the kind is
+      # enum-checked; an absent source degrades to with-focus in the resolver.
+      if (self.sourceKind is None) != (self.sourceId is None):
+        raise ValueError("open_item sourceKind and sourceId must be set together")
+      if self.sourceKind is not None and self.sourceKind not in _OPEN_ITEM_KINDS:
+        raise ValueError("open_item sourceKind must be in {app, chat}")
+      if self.placement is not None and self.placement not in _OPEN_ITEM_PLACEMENTS:
+        raise ValueError("open_item placement is not a recognized value")
+      if self.activation is not None and self.activation not in _OPEN_ITEM_ACTIVATIONS:
+        raise ValueError("open_item activation is not a recognized value")
+      return self
+
+    # Non-open_item: none of the open_item fields may appear.
+    for name in _OPEN_ITEM_FIELDS:
+      if getattr(self, name) is not None:
+        raise ValueError(f"{name} is only valid for open_item events")
+
+    # build_phase owns label/chatId; every other type rejects them.
     if self.type != "build_phase":
       if self.label is not None:
         raise ValueError("label is only valid for build_phase events")
@@ -163,6 +218,19 @@ def notify(
     event["appId"] = body.appId
   if body.error is not None:
     event["error"] = body.error
+  # Carry the typed open_item request onto the event so the Shell resolver can
+  # confirm + place it. Only the fields the validator accepted are copied, so a
+  # spoofed extra can never ride along.
+  if body.type == "open_item":
+    event["itemKind"] = body.itemKind
+    event["itemId"] = body.itemId
+    if body.sourceKind is not None:
+      event["sourceKind"] = body.sourceKind
+      event["sourceId"] = body.sourceId
+    if body.placement is not None:
+      event["placement"] = body.placement
+    if body.activation is not None:
+      event["activation"] = body.activation
 
   # ALWAYS publish to the system broadcast — Shell subscribes to it
   # for system events regardless of which view the user is on.

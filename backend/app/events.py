@@ -58,6 +58,12 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   # first runnable bundle. Shell uses chatId + appId to place the preview; it is
   # system-bus-only so it is never replayed as a second workspace action.
   "app_created",
+  # Explicit agent-initiated "open this in the partner's workspace" request
+  # (split-pane design §6.3). The agent POSTs it with a typed item + optional
+  # source + placement/activation; Shell confirms the item exists, then routes
+  # it through the same pane-aware resolver as app_created. Like app_created it
+  # is system-bus-only (an action event must never replay on reconnect).
+  "open_item",
   "app_updated",
   "app_build_failed",
   "shell_rebuilding",

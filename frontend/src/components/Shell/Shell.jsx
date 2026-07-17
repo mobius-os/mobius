@@ -1646,6 +1646,27 @@ export default function Shell() {
           if (app) placeInWorkspace(placementRequest)
         }
       })
+    } else if (ev.type === 'open_item') {
+      // An explicit agent-initiated open (design §6.3), system-bus-only so it
+      // fires exactly once. Confirm the item actually exists in fresh server
+      // truth before placing — mirror the app_created confirm-guard so a spoofed
+      // or absent id is a silent no-op. App items also warm their code cache.
+      const request = workspaceRequestFromSystemEvent(ev)
+      if (request) {
+        const confirmAndPlace = async () => {
+          if (request.item.kind === 'app') {
+            const updatedApps = await refreshApps()
+            const app = updatedApps.find(a => String(a.id) === request.item.id)
+            if (!app) return
+            warmAppCode(app)
+          } else {
+            const updatedChats = await refreshChats()
+            if (!updatedChats.some(c => String(c.id) === request.item.id)) return
+          }
+          placeInWorkspace(request)
+        }
+        confirmAndPlace()
+      }
     } else if (ev.type === 'app_build_failed') {
       // System-bus-only (app_watcher publishes it there alone), so it arrives
       // exactly once — no dedup stamp needed.
