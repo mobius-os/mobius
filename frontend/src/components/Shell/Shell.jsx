@@ -150,9 +150,17 @@ export default function Shell() {
   useEffect(() => {
     const el = contentElRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
+    let resizeClassTimer = 0
     const ro = new ResizeObserver(() => {
       const w = Math.round(el.clientWidth)
       const h = Math.round(el.clientHeight)
+      // A window/keyboard resize rewrites pane rects every frame; suppress the
+      // layout-bloom transition while it is in flight and restore it 200ms after
+      // the last resize, so a subsequent discrete commit (drop/split) still
+      // blooms but a continuous resize stays crisp.
+      el.classList.add('workspace--resizing')
+      clearTimeout(resizeClassTimer)
+      resizeClassTimer = setTimeout(() => el.classList.remove('workspace--resizing'), 200)
       setContentRect(prev => {
         if (prev.w === w && prev.h === h) return prev
         // Flag-off single-pane never tiles, so a content-size change would
@@ -164,7 +172,7 @@ export default function Shell() {
       })
     })
     ro.observe(el)
-    return () => ro.disconnect()
+    return () => { ro.disconnect(); clearTimeout(resizeClassTimer) }
   }, [])
   const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
   const projection = useMemo(
@@ -2644,6 +2652,9 @@ export default function Shell() {
             navTo={navTo}
             labelForTab={labelForTab}
             onTabContextMenu={openTabMenu}
+            streamingChatIds={streamingChatIds}
+            attentionChatIds={attentionChatIds}
+            newAppIds={newAppIds}
           />
         )}
       </main>

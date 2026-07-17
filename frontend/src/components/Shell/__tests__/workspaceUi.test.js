@@ -154,3 +154,29 @@ test('the divider and drag paths coalesce their per-move work into a rAF', () =>
   assert.match(chrome, /rafId = requestAnimationFrame\(\(\) => \{ rafId = 0; paint/)
   assert.match(dragBinding, /moveRAF = requestAnimationFrame\(doMoveWork\)/)
 })
+
+test('a layout commit blooms the paned wrappers, suppressed while resizing', () => {
+  const rule = css.match(/\.shell__view--paned\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /transition:\s*top 180ms ease-out/)
+  assert.match(css, /\.workspace--resizing \.shell__view--paned[\s\S]*?transition: none/)
+  assert.match(shell, /el\.classList\.add\('workspace--resizing'\)/)
+  assert.match(chrome, /contentEl\.classList\.add\('workspace--resizing'\)/)
+})
+
+test('strips sit above dividers so the 44px grab never occludes a tab', () => {
+  const rule = css.match(/\.workspace__strip\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /z-index:\s*5/)
+})
+
+test('the strips are roving-tabindex toolbars', () => {
+  assert.match(chrome, /tabIndex=\{active \? 0 : -1\}/)
+  assert.match(chrome, /onKeyDown=\{onStripKeyDown\}/)
+  assert.match(chrome, /e\.key === 'ArrowRight'/)
+})
+
+test('the pane chip and sheet rows carry an activity dot for hidden panes', () => {
+  assert.match(chrome, /function paneHasActivity/)
+  assert.match(chrome, /workspace__pane-chip-dot/)
+  assert.match(chrome, /workspace__sheet-row-dot/)
+  assert.match(shell, /streamingChatIds=\{streamingChatIds\}/)
+})
