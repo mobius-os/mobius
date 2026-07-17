@@ -148,29 +148,6 @@ docker compose up -d --build
 
 Data under `/data` survives rebuilds.
 
-### Add owner-trusted full web services
-
-Ordinary Möbius mini-apps need no extra domain. Existing full web applications
-which require their own cookies, XHR, storage, or service worker can instead
-share one optional browser gateway which is distinct from the Möbius shell:
-
-```dotenv
-MOBIUS_SERVICE_GATEWAY_ORIGIN=https://services.mobius.example.com
-```
-
-For Docker/self-hosting, point that one hostname at the same server and restart
-the Compose project. For Railway, add that one sibling custom domain to the
-existing Möbius service, create the CNAME and verification TXT records Railway
-shows, then set the variable above to its exact HTTPS origin. This is a one-time
-deployment step: later owner-trusted services use
-`/services/<slug>` on the same gateway and need no new DNS entry.
-
-Each service must still opt in with `public_surface: true` in
-`/data/local-services.json`. The gateway exposes only enabled service paths and
-never the Möbius shell, API, or recovery surface. Because paths are not origins,
-services on the gateway form one trust group; use a separate origin for a
-service which must not trust its siblings.
-
 ## Contribute to the platform
 
 Möbius grows through apps, platform changes, testing, and discussion. A local improvement can stay private or become a reviewed contribution through the Contribute app and GitHub.
