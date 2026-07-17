@@ -2,7 +2,10 @@
 
 import asyncio
 import fcntl
+import os
 import shutil
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -325,24 +328,120 @@ def test_incomplete_watched_build_retries_before_warning(monkeypatch, caplog):
     loop.close()
 
 
-def test_vite_watch_uses_polling_and_staging_output(fw_dirs, monkeypatch):
-  monkeypatch.setenv("CHOKIDAR_USEPOLLING", "0")
-  monkeypatch.delenv("CHOKIDAR_INTERVAL", raising=False)
+def test_vite_demand_build_is_bounded_and_one_shot(fw_dirs, monkeypatch):
   monkeypatch.delenv("NODE_OPTIONS", raising=False)
   env = fw._vite_env()
-  cmd = fw._vite_build_cmd(fw_dirs["staging"], watch=True)
+  cmd = fw._vite_build_cmd(fw_dirs["staging"])
 
   assert env["MOBIUS_VITE_CACHE"] == str(fw_dirs["cache"])
   assert env["TMPDIR"] == str(fw_dirs["tmp"])
-  assert env["CHOKIDAR_USEPOLLING"] == "1"
-  assert env["CHOKIDAR_INTERVAL"] == "1000"
   assert "--max-old-space-size=512" in env["NODE_OPTIONS"]
   assert cmd[0] == str(fw_dirs["frontend"] / "node_modules" / ".bin" / "vite")
-  assert "--watch" in cmd
+  assert "--watch" not in cmd
   assert ".dist-staging" in cmd
 
 
-def test_warm_watcher_has_a_cross_process_singleton_lease(fw_dirs):
+def test_source_filter_and_scandir_exclude_generated_trees(fw_dirs):
+  frontend = fw_dirs["frontend"]
+  (frontend / "src").mkdir()
+  (frontend / "public").mkdir()
+  (frontend / "node_modules").mkdir()
+  (frontend / "dist").mkdir()
+  (frontend / "vite.config.js").write_text("", encoding="utf-8")
+
+  root_names = {
+    entry.name for entry in fw._source_tree_scandir(frontend, str(frontend))
+  }
+
+  assert root_names == {"public", "src", "vite.config.js"}
+  assert fw._is_frontend_source_path(frontend / "src" / "Shell.jsx")
+  assert fw._is_frontend_source_path(frontend / "public" / "icon.svg")
+  assert fw._is_frontend_source_path(frontend / "vite.config.js")
+  assert not fw._is_frontend_source_path(frontend / "dist" / "index.js")
+  assert not fw._is_frontend_source_path(frontend / "node_modules" / "x.js")
+
+
+def test_startup_build_skips_fresh_dist_but_recovers_newer_source(fw_dirs):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  source_file = src / "main.jsx"
+  source_file.write_text("export default 1\n", encoding="utf-8")
+  _write_build(fw_dirs["dist"], "fresh")
+
+  assert fw._startup_build_needed() is False
+  signature, _ = fw._source_snapshot()
+  assert fw._source_stamp_path().read_text(encoding="utf-8").strip() == signature
+
+  dist_ns = (fw_dirs["dist"] / "index.html").stat().st_mtime_ns
+  os.utime(source_file, ns=(dist_ns + 1, dist_ns + 1))
+  assert fw._startup_build_needed() is True
+
+  shutil.rmtree(fw_dirs["dist"])
+  assert fw._startup_build_needed() is True
+
+
+def test_edit_during_demand_build_requests_one_rerun(fw_dirs, monkeypatch):
+  (fw_dirs["frontend"] / "src").mkdir()
+  monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 0.0)
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  calls = []
+
+  def build(reason):
+    calls.append(reason)
+    if len(calls) == 1:
+      handler._request_build(str(fw_dirs["frontend"] / "src" / "second.js"))
+    else:
+      handler._closed.set()
+      handler._build_requested.set()
+
+  monkeypatch.setattr(handler, "_run_demand_build", build)
+  thread = threading.Thread(target=handler._build_loop)
+  try:
+    thread.start()
+    handler._request_build(str(fw_dirs["frontend"] / "src" / "first.js"))
+    thread.join(timeout=2)
+  finally:
+    handler._closed.set()
+    handler._build_requested.set()
+    thread.join(timeout=2)
+    loop.close()
+
+  assert calls == [
+    str(fw_dirs["frontend"] / "src" / "first.js"),
+    str(fw_dirs["frontend"] / "src" / "second.js"),
+  ]
+
+
+def test_idle_observer_requests_build_for_source_edit(fw_dirs, monkeypatch):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 0.01)
+  calls = []
+  called = threading.Event()
+
+  def build(_handler, reason):
+    calls.append(reason)
+    called.set()
+
+  monkeypatch.setattr(fw._FrontendHandler, "_run_demand_build", build)
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop)
+  try:
+    assert called.wait(timeout=2)
+    called.clear()
+    changed = src / "changed.js"
+    changed.write_text("export default 1\n", encoding="utf-8")
+    assert called.wait(timeout=3)
+  finally:
+    handler.close()
+    loop.close()
+
+  assert calls[0] == "startup"
+  assert calls[-1] == str(changed)
+
+
+def test_demand_watcher_has_a_cross_process_singleton_lease(fw_dirs):
   first = fw._acquire_watch_lock()
   try:
     with pytest.raises(RuntimeError, match="already active"):

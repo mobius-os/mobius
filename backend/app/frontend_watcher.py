@@ -1,13 +1,13 @@
-"""Warm frontend builder + atomic generation publisher.
+"""Demand-built frontend watcher + atomic generation publisher.
 
-Vite owns source watching: one long-lived ``vite build --watch`` keeps its
-module graph warm and writes only to ``.dist-staging``.  This module owns the
-separate publication step: after staging settles, or after an explicit
-``shell_apply_now``, copy staging to ``.dist-next``, validate the complete Vite
-shape, then swap ``.dist-next`` into ``dist`` through the existing attic hook.
+A lightweight polling observer watches frontend source. After edits settle, a
+one-shot Vite build writes only to ``.dist-staging`` and exits, releasing its
+Rollup graph. This module then copies staging to ``.dist-next``, validates the
+complete Vite shape, and swaps ``.dist-next`` into ``dist`` through the existing
+attic hook. Builds are serialized; an edit during a build requests one rerun.
 
 Failure handling:
-- Watch subprocess crashes are logged and restarted with backoff.
+- Build failures are logged and leave the previous generation served.
 - Broken staging never touches ``dist``; a failed publish leaves the previous
   generation served.
 - Container shutdown calls ``close()``, which SIGTERMs the Vite process group.
@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import filecmp
+import hashlib
 import logging
 import os
 import shutil
@@ -25,15 +26,22 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers.polling import PollingObserverVFS
 
 log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.75
-_STAGING_POLL_SECS = 1.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
+_ROOT_SOURCE_FILES = {
+  "index.html", "package-lock.json", "package.json", "vite.config.js",
+}
+_SOURCE_DIRS = {"public", "src"}
 _FRONTEND_DIR = Path(os.environ.get(
   "MOBIUS_FRONTEND_DIR", "/data/platform/frontend",
 ))
@@ -69,6 +77,113 @@ _ACTIVE_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
+
+
+def _source_tree_scandir(
+  frontend_root: Path,
+  path: str | None,
+) -> Iterator[os.DirEntry[str]]:
+  """Expose only build inputs to watchdog's once-per-second snapshot.
+
+  A recursive observer rooted at the editable frontend would otherwise stat
+  node_modules, build generations, caches, and git metadata even though none of
+  those paths can trigger a source build. At the root, admit only the explicit
+  config inputs and source directories; beneath source, prune hidden trees.
+  """
+  scan_path = path or "."
+  try:
+    at_root = Path(scan_path).resolve() == frontend_root.resolve()
+    entries = os.scandir(scan_path)
+  except OSError:
+    return
+  with entries:
+    for entry in entries:
+      if at_root:
+        if entry.name not in _ROOT_SOURCE_FILES | _SOURCE_DIRS:
+          continue
+      elif entry.name.startswith(".") or entry.name == "node_modules":
+        continue
+      yield entry
+
+
+def _is_frontend_source_path(path: str | Path) -> bool:
+  try:
+    rel = Path(path).resolve().relative_to(_FRONTEND_DIR.resolve())
+  except (OSError, RuntimeError, ValueError):
+    return False
+  if len(rel.parts) == 1:
+    return rel.name in _ROOT_SOURCE_FILES
+  return bool(rel.parts and rel.parts[0] in _SOURCE_DIRS)
+
+
+def _source_snapshot() -> tuple[str, int]:
+  """Return a cheap source identity and newest input mtime."""
+  paths = [
+    _FRONTEND_DIR / name for name in sorted(_ROOT_SOURCE_FILES)
+    if (_FRONTEND_DIR / name).is_file()
+  ]
+  for dirname in sorted(_SOURCE_DIRS):
+    root = _FRONTEND_DIR / dirname
+    if not root.is_dir():
+      continue
+    paths.extend(
+      path for path in root.rglob("*")
+      if path.is_file()
+      and not any(part.startswith(".") or part == "node_modules"
+                  for part in path.relative_to(root).parts)
+    )
+  digest = hashlib.sha256()
+  newest_ns = 0
+  for path in sorted(paths):
+    try:
+      stat = path.stat()
+      rel = path.relative_to(_FRONTEND_DIR).as_posix()
+    except (OSError, ValueError):
+      continue
+    newest_ns = max(newest_ns, stat.st_mtime_ns)
+    digest.update(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+  return digest.hexdigest(), newest_ns
+
+
+def _source_stamp_path() -> Path:
+  return _FRONTEND_DIR / ".source-build-signature"
+
+
+def _write_source_stamp(signature: str) -> None:
+  _source_stamp_path().write_text(signature + "\n", encoding="utf-8")
+
+
+def _startup_build_needed() -> bool:
+  """Avoid a full Vite build when served output already matches source.
+
+  Demand builds leave an exact cheap signature. Existing image builds predate
+  that marker, so seed it only when a complete dist is newer than every source
+  input. A missing/stale dist or any newer source edit still gets the normal
+  boot-time recovery build.
+  """
+  signature, newest_source_ns = _source_snapshot()
+  dist_complete = _complete_build(_DIST_DIR)
+  if dist_complete:
+    try:
+      if _source_stamp_path().read_text(encoding="utf-8").strip() == signature:
+        return False
+    except OSError:
+      pass
+  if dist_complete:
+    try:
+      oldest_completion_ns = min(
+        (_DIST_DIR / "index.html").stat().st_mtime_ns,
+        (_DIST_DIR / "sw.js").stat().st_mtime_ns,
+      )
+    except OSError:
+      oldest_completion_ns = 0
+    if newest_source_ns <= oldest_completion_ns:
+      try:
+        _write_source_stamp(signature)
+      except OSError:
+        log.warning("could not seed frontend source signature")
+      return False
+  return True
 
 
 class _StagingChangedDuringPublish(RuntimeError):
@@ -296,7 +411,7 @@ def _ensure_node_modules() -> None:
 def _vite_env(
   cache_dir: Path | None = None, tmp_dir: Path | None = None,
 ) -> dict[str, str]:
-  """Return Vite env with bounded memory and polling watch enabled."""
+  """Return the one-shot Vite build environment with bounded memory."""
   cache_dir = cache_dir if cache_dir is not None else _CACHE_DIR
   tmp_dir = tmp_dir if tmp_dir is not None else _TMP_DIR
   cache_dir.mkdir(parents=True, exist_ok=True)
@@ -304,30 +419,19 @@ def _vite_env(
   env = os.environ.copy()
   env["MOBIUS_VITE_CACHE"] = str(cache_dir)
   env["TMPDIR"] = str(tmp_dir)
-  # Docker volume events have been unreliable here. Vite/Rollup watch uses
-  # chokidar underneath, so force polling rather than reintroducing a Python
-  # source watcher beside Vite's own watch mode.
-  env["CHOKIDAR_USEPOLLING"] = "1"
-  # One second remains below the publication debounce and is fast enough for
-  # an interactive agent edit, while halving both source-tree stat churn and
-  # the staging signature scans versus the prior 500ms cadence.
-  env["CHOKIDAR_INTERVAL"] = env.get("CHOKIDAR_INTERVAL", "1000")
-  # Rollup's warm watch graph is intentionally long-lived, but V8 otherwise
-  # expands toward the container limit and retains close to a gigabyte. Keep a
-  # predictable ceiling while preserving an explicit operator override. Lower
-  # ceilings can finish a cold build but OOM on an incremental service-worker
-  # rebuild, so 512 MiB remains the reliability-tested floor.
+  # Bound peak build memory while preserving an explicit operator override.
+  # Lower ceilings can finish the main bundle but OOM while finalizing the
+  # service worker, so 512 MiB remains the reliability-tested floor.
   node_options = env.get("NODE_OPTIONS", "")
   if "--max-old-space-size" not in node_options and "--max_old_space_size" not in node_options:
     env["NODE_OPTIONS"] = f"{node_options} --max-old-space-size=512".strip()
   return env
 
 
-def _vite_build_cmd(out_dir: Path, *, watch: bool) -> list[str]:
-  # Launch Vite's checked-in executable directly. Keeping ``npx`` around for
-  # the lifetime of watch mode retains an npm process (and its shell child) in
-  # addition to Vite, costing tens of MiB while also making health report the
-  # wrapper instead of the actual builder.
+def _vite_build_cmd(out_dir: Path) -> list[str]:
+  # Launch Vite's checked-in executable directly. An ``npx`` wrapper retains
+  # an extra npm process and shell while the build runs, and makes health point
+  # at the wrapper instead of the actual builder.
   cmd = [
     str(_FRONTEND_DIR / "node_modules" / ".bin" / "vite"),
     "build",
@@ -337,8 +441,6 @@ def _vite_build_cmd(out_dir: Path, *, watch: bool) -> list[str]:
     out_dir.name,
     "--emptyOutDir",
   ]
-  if watch:
-    cmd.append("--watch")
   return cmd
 
 
@@ -452,7 +554,7 @@ def _run_vite_build_once(out_dir: Path) -> str:
   if out_dir.exists():
     shutil.rmtree(out_dir)
   result = subprocess.run(
-    _vite_build_cmd(out_dir, watch=False),
+    _vite_build_cmd(out_dir),
     cwd=str(_FRONTEND_DIR),
     env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
     stdout=subprocess.PIPE,
@@ -511,8 +613,8 @@ def publish_now(reason: str = "shell_apply_now") -> bool:
   return watcher.publish_now(reason)
 
 
-class _FrontendHandler:
-  """Supervises Vite watch and schedules staging publication."""
+class _FrontendHandler(FileSystemEventHandler):
+  """Detect source edits and serialize short-lived Vite builds."""
 
   def __init__(
     self,
@@ -527,27 +629,37 @@ class _FrontendHandler:
     self._state_lock = threading.Lock()
     self._proc_lock = threading.Lock()
     self._watch_proc: subprocess.Popen | None = None
+    self._build_requested = threading.Event()
+    self._last_source_change = 0.0
+    self._last_build_reason = "startup"
     self._staging_dirty = False
     self._incomplete_since: float | None = None
     self._incomplete_notified = False
     self._last_staging_signature = _tree_signature(_STAGING_DIST_DIR)
     self._watch_thread: threading.Thread | None = None
-    self._stage_thread: threading.Thread | None = None
+    self._source_observer: PollingObserverVFS | None = None
     self._watch_lock_fh = _acquire_watch_lock() if start_threads else None
     if start_threads:
       try:
+        self._source_observer = PollingObserverVFS(
+          stat=os.stat,
+          listdir=lambda path: _source_tree_scandir(_FRONTEND_DIR, path),
+          polling_interval=1.0,
+        )
+        self._source_observer.schedule(
+          self, str(_FRONTEND_DIR), recursive=True,
+        )
         self._watch_thread = threading.Thread(
-          target=self._watch_loop,
-          name="frontend-vite-watch",
+          target=self._build_loop,
+          name="frontend-vite-build",
           daemon=True,
         )
-        self._stage_thread = threading.Thread(
-          target=self._stage_poll_loop,
-          name="frontend-stage-poll",
-          daemon=True,
-        )
+        self._source_observer.start()
         self._watch_thread.start()
-        self._stage_thread.start()
+        # Recover an edit saved before a prior shutdown, but do not spend a
+        # full Vite heap on every ordinary container boot when dist is fresh.
+        if _startup_build_needed():
+          self._request_build("startup")
       except Exception:
         # One thread may already be running when the second .start() fails.
         # close() terminates and joins that partial startup before releasing
@@ -556,13 +668,21 @@ class _FrontendHandler:
         raise
 
   def close(self) -> None:
-    """Cancel publication timers and stop the Vite watch process."""
+    """Cancel pending work and stop the observer/current Vite build."""
     self._closed.set()
+    self._build_requested.set()
     self._cancel_pending_publish()
     self._terminate_watch_process(signal.SIGTERM)
-    for thread in (self._stage_thread, self._watch_thread):
-      if thread is not None:
-        thread.join(timeout=5)
+    if self._source_observer is not None:
+      try:
+        self._source_observer.stop()
+        if self._source_observer.ident is not None:
+          self._source_observer.join(timeout=2)
+      except RuntimeError:
+        pass
+      self._source_observer = None
+    if self._watch_thread is not None and self._watch_thread.ident is not None:
+      self._watch_thread.join(timeout=5)
     if self._watch_process_running():
       self._terminate_watch_process(signal.SIGKILL)
       if self._watch_thread is not None:
@@ -598,12 +718,40 @@ class _FrontendHandler:
     with self._state_lock:
       staging_dirty = self._staging_dirty
     return {
-      "running": pid is not None,
+      "running": not self._closed.is_set(),
+      "building": pid is not None,
       "pid": pid,
       "rss_bytes": rss_bytes,
       "staging_dirty": staging_dirty,
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
+
+  # Watchdog calls these on its own thread.
+  def on_modified(self, event) -> None:  # noqa: ANN001
+    if not event.is_directory:
+      self._request_build(event.src_path)
+
+  def on_created(self, event) -> None:  # noqa: ANN001
+    if not event.is_directory:
+      self._request_build(event.src_path)
+
+  def on_moved(self, event) -> None:  # noqa: ANN001
+    if not event.is_directory:
+      self._request_build(getattr(event, "dest_path", None) or event.src_path)
+
+  def on_deleted(self, event) -> None:  # noqa: ANN001
+    if not event.is_directory:
+      self._request_build(event.src_path)
+
+  def _request_build(self, reason: str) -> None:
+    if reason != "startup" and not _is_frontend_source_path(reason):
+      return
+    if self._closed.is_set():
+      return
+    with self._state_lock:
+      self._last_source_change = time.monotonic()
+      self._last_build_reason = reason
+    self._build_requested.set()
 
   def _on_loop_thread(self) -> bool:
     return threading.get_ident() == self._loop_thread_id
@@ -641,59 +789,99 @@ class _FrontendHandler:
       except OSError:
         return
 
-  def _watch_loop(self) -> None:
-    backoff = 1.0
+  def _build_loop(self) -> None:
     while not self._closed.is_set():
-      proc: subprocess.Popen | None = None
-      started_at = time.monotonic()
-      try:
-        _ensure_node_modules()
-        env = _vite_env()
-        cmd = _vite_build_cmd(_STAGING_DIST_DIR, watch=True)
-        proc = subprocess.Popen(
-          cmd,
-          cwd=str(_FRONTEND_DIR),
-          env=env,
-          stdout=subprocess.PIPE,
-          stderr=subprocess.STDOUT,
-          text=True,
-          start_new_session=True,
-        )
-        with self._proc_lock:
-          self._watch_proc = proc
-        log.info("frontend vite watch started: %s", " ".join(cmd))
-        if proc.stdout is not None:
-          for line in proc.stdout:
-            if line.strip():
-              log.info("vite watch: %s", line.rstrip())
-            if self._closed.is_set():
-              break
-        rc = proc.wait()
-      except Exception as exc:
-        rc = None
-        log.warning("frontend vite watch crashed before start: %s", exc)
-      finally:
-        with self._proc_lock:
-          if self._watch_proc is proc:
-            self._watch_proc = None
+      self._build_requested.wait()
       if self._closed.is_set():
         break
-      # A watch that survived a healthy stretch earns a fresh backoff — an
-      # isolated crash after hours of stability should restart in 1s, not
-      # inherit a 30s penalty from an unstable period long past.
-      if time.monotonic() - started_at >= 60.0:
-        backoff = 1.0
-      log.warning(
-        "frontend vite watch exited rc=%s; restarting in %.1fs", rc, backoff,
-      )
-      if self._closed.wait(backoff):
-        break
-      backoff = min(backoff * 2, _WATCH_RESTART_BACKOFF_MAX)
+      self._build_requested.clear()
 
-  def _stage_poll_loop(self) -> None:
-    while not self._closed.wait(_STAGING_POLL_SECS):
-      if self._refresh_staging_signature():
-        self._schedule_publish_from_thread("staging changed")
+      # Wait until the source tree has been quiet for the normal debounce.
+      # New edits update the shared timestamp, so one loop coalesces a burst.
+      while not self._closed.is_set():
+        with self._state_lock:
+          quiet_for = time.monotonic() - self._last_source_change
+          reason = self._last_build_reason
+        remaining = _DEBOUNCE_SECS - quiet_for
+        if remaining <= 0:
+          # Acknowledge every edit already covered by this build. A change
+          # racing after this clear sets the event again and earns one rerun.
+          self._build_requested.clear()
+          with self._state_lock:
+            if time.monotonic() - self._last_source_change < _DEBOUNCE_SECS:
+              continue
+            reason = self._last_build_reason
+          break
+        if self._closed.wait(remaining):
+          return
+
+      try:
+        self._run_demand_build(reason)
+      except Exception as exc:
+        if self._closed.is_set():
+          break
+        log.warning("frontend build failed after %s: %s", reason, exc)
+        _publish_system_event({
+          "type": "shell_rebuild_failed",
+          "error": str(exc),
+        })
+
+  def _run_demand_build(self, reason: str) -> None:
+    """Run one isolated build and publish it before releasing its heap."""
+    source_signature, _ = _source_snapshot()
+    _ensure_node_modules()
+    if _STAGING_DIST_DIR.exists():
+      shutil.rmtree(_STAGING_DIST_DIR)
+    cmd = _vite_build_cmd(_STAGING_DIST_DIR)
+    proc: subprocess.Popen | None = None
+    rc: int | None = None
+    output = ""
+    try:
+      proc = subprocess.Popen(
+        cmd,
+        cwd=str(_FRONTEND_DIR),
+        env=_vite_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+      )
+      with self._proc_lock:
+        self._watch_proc = proc
+      log.info("frontend demand build started after %s", reason)
+      try:
+        output, _ = proc.communicate(timeout=180)
+      except subprocess.TimeoutExpired as exc:
+        self._terminate_watch_process(signal.SIGTERM)
+        try:
+          output, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+          self._terminate_watch_process(signal.SIGKILL)
+          output, _ = proc.communicate()
+        raise RuntimeError("vite build timed out after 180 seconds") from exc
+      rc = proc.returncode
+    finally:
+      with self._proc_lock:
+        if self._watch_proc is proc:
+          self._watch_proc = None
+    if self._closed.is_set():
+      return
+    if rc != 0:
+      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+      detail = _tail(output) or f"vite build exited {rc}"
+      raise RuntimeError(detail)
+    if output.strip():
+      log.info("frontend demand build complete: %s", _tail(output, 1000))
+    if not self._refresh_staging_signature():
+      raise RuntimeError("vite build completed without a staging generation")
+    self._publish_dirty_sync(f"build:{reason}")
+    with self._state_lock:
+      publish_pending = self._staging_dirty
+    if not publish_pending:
+      try:
+        _write_source_stamp(source_signature)
+      except OSError:
+        log.warning("could not persist frontend source signature")
 
   def _refresh_staging_signature(self) -> bool:
     sig = _tree_signature(_STAGING_DIST_DIR)
@@ -802,7 +990,7 @@ class _FrontendHandler:
 def start_watcher(
   loop: asyncio.AbstractEventLoop,
 ) -> tuple[None, _FrontendHandler]:
-  """Start Vite watch supervision for whole-repo frontend edits."""
+  """Start demand-build supervision for whole-repo frontend edits."""
   src_dir = _FRONTEND_DIR / "src"
   if not src_dir.is_dir():
     raise FileNotFoundError(f"{src_dir} does not exist")
@@ -820,7 +1008,7 @@ def start_watcher(
     handler = _FrontendHandler(loop)
     with _ACTIVE_LOCK:
       _ACTIVE_WATCHER = handler
-  log.info("frontend warm watcher started on %s", _FRONTEND_DIR)
+  log.info("frontend demand-build watcher started on %s", _FRONTEND_DIR)
   return None, handler
 
 
@@ -884,6 +1072,7 @@ class _FrontendSupervisor:
   def health(self) -> dict:
     detail = self._handler.health() if self._handler is not None else {
       "running": False,
+      "building": False,
       "pid": None,
       "rss_bytes": None,
       "staging_dirty": False,
@@ -918,6 +1107,7 @@ def watcher_health() -> dict:
   return {
     "status": "stopped",
     "running": False,
+    "building": False,
     "pid": None,
     "rss_bytes": None,
     "staging_dirty": False,

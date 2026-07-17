@@ -24,6 +24,7 @@ dist/
 .assets-attic/
 .publish.lock
 .watch.lock
+.source-build-signature
 
 # OS
 .DS_Store
