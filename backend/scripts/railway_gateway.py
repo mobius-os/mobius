@@ -142,7 +142,13 @@ class Gateway(BaseHTTPRequestHandler):
       self.end_headers()
       if self.command != "HEAD":
         while True:
-          chunk = resp.read(64 * 1024)
+          # read() tries to fill the requested byte count before returning.
+          # That is fatal for Server-Sent Events: tiny events and keepalives
+          # remain buffered until the stream ends or reaches 64 KB, leaving
+          # Railway's edge with an apparently idle downstream request. read1()
+          # returns the next available decoded chunk so each event crosses the
+          # gateway as soon as the app emits it.
+          chunk = resp.read1(64 * 1024)
           if not chunk:
             break
           self.wfile.write(chunk)

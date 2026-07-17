@@ -200,6 +200,39 @@ _shutdown_railway_gateway() {
   exit "$_status"
 }
 
+_railway_child_running() {
+  _child_pid="$1"
+  _child_state=$(awk '/^State:/ { print $2; exit }' "/proc/${_child_pid}/status" 2>/dev/null) || return 1
+  [ -n "$_child_state" ] && [ "$_child_state" != "Z" ]
+}
+
+_wait_for_railway_child_exit() {
+  # Railway sees the gateway as pid1's public service, but the gateway can stay
+  # alive after uvicorn crashes and return 502 forever. Watch BOTH essential
+  # children. Any unexpected exit brings the whole container down so Railway's
+  # ON_FAILURE policy can restart a coherent gateway/app/recovery process set.
+  # kill -0 still succeeds for an exited child that has become a zombie. Read
+  # procfs state so either critical process is reaped and reported promptly.
+  while _railway_child_running "$_gateway_pid" && _railway_child_running "$_app_pid"; do
+    sleep 1
+  done
+
+  if ! _railway_child_running "$_app_pid"; then
+    wait "$_app_pid"
+    _child_status=$?
+    echo "FATAL: Railway app process exited with status $_child_status." >&2
+  else
+    wait "$_gateway_pid"
+    _child_status=$?
+    echo "FATAL: Railway gateway process exited with status $_child_status." >&2
+  fi
+
+  # A clean child exit is still a service failure: with ON_FAILURE, returning
+  # zero would leave the stopped deployment down instead of restarting it.
+  [ "$_child_status" -ne 0 ] || _child_status=1
+  return "$_child_status"
+}
+
 _start_platform_restart_poller() {
   [ "$_restart_poller_started" -eq 1 ] && return 0
   (
@@ -1269,9 +1302,9 @@ if [ "$_railway_gateway" -eq 1 ]; then
     echo "FATAL: Railway gateway exited before app startup." >&2
     _shutdown_railway_gateway 1
   fi
-  wait "$_gateway_pid"
-  _gateway_status=$?
-  _shutdown_railway_gateway "$_gateway_status"
+  _wait_for_railway_child_exit
+  _railway_status=$?
+  _shutdown_railway_gateway "$_railway_status"
 fi
 
 exec su -s /bin/sh mobius -c \
