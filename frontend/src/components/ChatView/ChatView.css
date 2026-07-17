@@ -1066,8 +1066,12 @@
       inset: 0 auto 0 0;
       overflow: hidden;
       transform: translateX(-50%);
-      -webkit-mask-image: linear-gradient(90deg, #0000 0%, #000 20% 30%, #0000 50% 100%);
-      mask-image: linear-gradient(90deg, #0000 0%, #000 20% 30%, #0000 50% 100%);
+      /* Explicit paired stops, NOT the double-position shorthand
+         (#000 20% 30%): engines that fail to parse the shorthand inside a
+         mask drop the ENTIRE mask, leaving the full bright copy visible as
+         a moving second label (owner-observed doubling, 2026-07-17). */
+      -webkit-mask-image: linear-gradient(90deg, #0000 0%, #000 20%, #000 30%, #0000 50%, #0000 100%);
+      mask-image: linear-gradient(90deg, #0000 0%, #000 20%, #000 30%, #0000 50%, #0000 100%);
       animation: chat-cadenced-sweep 2.4s steps(115, end) infinite;
     }
     .chat__activity--running .chat__activity-label-highlight {
