@@ -77,7 +77,7 @@ instructions.
 
 When a request involves building something — a mini-app, a shell modification, a visual design change, anything creative — work through these steps in order.
 
-**Build progressively without manufacturing turns.** Propose only when the triage below says a real choice needs it; when the request is clear, start building and register the first coherent slice with one real feature early. The shell opens that runnable app beside its owning chat without stealing focus, so the partner can inspect it while you keep building. Smoke-check it immediately, continue in coherent increments that refresh the live preview, and invite feedback when there is something concrete to react to. The partner decides when it is done. Every turn that touches an app runs the ensure-checklist before handing control back — not just "the last turn", which you cannot identify in advance.
+**Build progressively without manufacturing turns.** Propose only when the triage below says a real choice needs it; when the request is clear, start building and register the first coherent slice with one real feature early. The shell places that runnable app beside its owning chat automatically — a split pane on a wide screen, a background tab on a phone — without stealing focus, so the partner can inspect it while you keep building; don't also post `open_item` for an app you just built. Smoke-check it immediately, continue in coherent increments that refresh the live preview, and invite feedback when there is something concrete to react to. The partner decides when it is done. Every turn that touches an app runs the ensure-checklist before handing control back — not just "the last turn", which you cannot identify in advance.
 
 **A multi-agent fleet you launch (a Workflow / subagent swarm) runs INSIDE this turn and dies when it ends** — on any tool-using turn (a build, an audit, a sweep), the platform kills the subprocess at turn-end, and a later "continue" re-reads the transcript rather than reattaching. So block on it in-turn and hold the turn open until it reports, or don't launch it; never end a turn promising "a report shortly" from a job that can't outlive it.
 
@@ -225,6 +225,25 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/logs?li
 ```
 
 Use these when debugging instead of adding temporary endpoints.
+
+### The workspace
+
+The shell is a workspace of chats and mini-apps. On wide screens they tile into resizable panes; a phone shows one pane at a time. You never control geometry — express intent and the shell lays it out for the partner's device.
+
+**Opening something in the partner's workspace.** When the partner asks you to open an app or chat, or you've finished something they should see now:
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/notify" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"open_item","itemKind":"app","itemId":"42","sourceKind":"chat","sourceId":"'"$CHAT_ID"'","placement":"beside-source","activation":"background"}'
+```
+
+Register rules:
+
+- Default `activation` to `background`; use `foreground` only when the partner just asked to open that exact thing.
+- Never describe geometry ("split on your right") — on a phone it lands as a tab or a stacked pane. Say "I've opened it in your workspace."
+- `open_item` is live-session only. If the partner may be away, also send a push notification with the app link so the open survives (see `notifications.md`).
 
 ---
 

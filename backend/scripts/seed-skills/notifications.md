@@ -14,6 +14,12 @@ Send push notifications for meaningful events — not routine confirmations. If 
 
 ---
 
+## `open_item` is live-only — pair it with a push for durability
+
+The `open_item` system event (see `core.md`, "Opening something in the partner's workspace") drops an app or chat straight into the workspace, but only for a partner whose session is live right now — it fires once and is never stored. When the open matters and the partner may be away, ALSO send a push notification with the deep link here: the push is the durable "look at this later" channel, `open_item` is the instant one. They compose — fire both.
+
+---
+
 ## Ending a turn with an open question — you fire the push yourself
 
 The platform does NOT auto-notify when you call `AskUserQuestion` or end a turn with a prose clarifying question. You own this explicitly: same `curl POST /api/notifications/send` pattern you use after building an app, with a question-shaped title and body. Firing it from bash means the HTTP response lands in your tool output, so you see success/failure and can react (re-try, fall back to text) on the same turn.
