@@ -161,7 +161,12 @@ for (const scenario of SCENARIOS) {
       rail.boundingBox(),
       composer.boundingBox(),
     ])
-    expect((nudgeBox?.y ?? 0) + (nudgeBox?.height ?? 0)).toBeLessThan(railBox?.y)
+    // Order contract: nudge above rail, rail above composer. The nudge and
+    // rail are flush rows on one shared transient surface (2026-07-17 foot
+    // redesign), so their boundary is a shared edge — assert ≤, not <. The
+    // composer is a separate element below the surface and stays strictly
+    // lower.
+    expect((nudgeBox?.y ?? 0) + (nudgeBox?.height ?? 0)).toBeLessThanOrEqual(railBox?.y)
     expect((railBox?.y ?? 0) + (railBox?.height ?? 0)).toBeLessThan(composerBox?.y)
 
     await nudge.click()
