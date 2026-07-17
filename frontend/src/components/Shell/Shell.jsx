@@ -24,7 +24,7 @@ import {
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import {
-  applyWorkspaceRequestsToFlatTabs,
+  resolveWorkspaceRequest,
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
 } from './workspacePlacement.js'
@@ -138,6 +138,10 @@ export default function Shell() {
   // sentinel and the renderer emits today's DOM).
   const contentElRef = useRef(null)
   const [contentRect, setContentRect] = useState({ w: 0, h: 0 })
+  // Read at placement-dispatch time (below) so the resolver derives the current
+  // device mode + pane rects without re-creating placeInWorkspace every resize.
+  const contentRectRef = useRef(contentRect)
+  contentRectRef.current = contentRect
   useEffect(() => {
     const el = contentElRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
@@ -610,25 +614,33 @@ export default function Shell() {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
       : [requestOrRequests]
-    const protectedTab = activeViewRef.current === 'canvas' && activeAppIdRef.current != null
-      ? tabModel.makeTab('app', activeAppIdRef.current)
-      : activeViewRef.current === 'chat' && activeChatIdRef.current != null
-        ? tabModel.makeTab('chat', activeChatIdRef.current)
-        : null
-    // Dispatch the resolver as a FUNCTION, not a pre-resolved array: the reducer
-    // runs it against the current flat tabs, so two placements landing in one
-    // React batch compose (the second sees the first) instead of the second
-    // clobbering the first from a stale render snapshot. The flat resolver
-    // (workspacePlacement.js) is otherwise unchanged.
+    // The device mode + live app list are stable within one React batch, so read
+    // them once at dispatch time from refs (keeping this callback stable). The
+    // pane rects are re-derived per-workspace inside the resolve closure so
+    // batched placements compose on top of each other's splits.
+    const contentRect = contentRectRef.current
+    const mode = paneModel.modeForRect(contentRect)
+    const liveApps = appsRef.current
+    // Dispatch the resolver as a FUNCTION (workspace → workspace): the reducer
+    // runs it against the CURRENT reducer workspace, so two placements landing in
+    // one React batch compose (the second sees the first, splits and all) instead
+    // of clobbering each other from a stale render snapshot. Reverse order keeps
+    // producer order when several requests target one source (an insert-after-
+    // source pushes later items ahead otherwise — the flat convention, preserved).
     dispatchWorkspace({
       type: 'APPLY_PLACEMENT',
-      resolve: (flatTabs) => applyWorkspaceRequestsToFlatTabs(
-        flatTabs,
-        requests,
-        { protectedTab },
-      ),
+      resolve: (ws) => {
+        let next = ws
+        for (let i = requests.length - 1; i >= 0; i -= 1) {
+          const projected = paneModel.projectLayout(next, mode, contentRect)
+          next = resolveWorkspaceRequest(next, requests[i], {
+            mode, projected, contentRect, liveApps,
+          })
+        }
+        return next
+      },
     })
-  }, [activeAppIdRef, activeChatIdRef, activeViewRef])
+  }, [dispatchWorkspace])
   const tabStripVisible = tabStripEngaged && openTabs.length >= 1
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active

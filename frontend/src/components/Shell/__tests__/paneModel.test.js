@@ -293,6 +293,92 @@ test('openTab eviction is byte-identical to the legacy flat strip (oldest goes)'
   assertInvariants(afterG)
 })
 
+test('openTab afterKey inserts after the named member instead of appending (PR4)', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')])
+  ws = paneModel.openTab(ws, makeTab('app', 9), {
+    paneId: 'p0', afterKey: 'chat:a', activate: false, focus: false,
+  })
+  assert.deepEqual(paneModel.flatten(ws).map(tabKey), ['chat:a', 'app:9', 'chat:b'])
+  assert.equal(ws.panes.p0.activeTabKey, 'chat:b', 'a background insert leaves the active tab put')
+})
+
+test('openTab focus:false into another pane never moves focus (PR4 background rule)', () => {
+  const ws = paneModel.normalize({
+    v: 1,
+    layout: { id: 's1', dir: 'row', ratio: 0.5, a: 'p0', b: 'p1' },
+    panes: {
+      p0: { id: 'p0', tabs: [makeTab('chat', 'a')], activeTabKey: 'chat:a' },
+      p1: { id: 'p1', tabs: [makeTab('chat', 'b')], activeTabKey: 'chat:b' },
+    },
+    focusedPaneId: 'p0', nextId: 2,
+  })
+  const out = paneModel.openTab(ws, makeTab('app', 9), { paneId: 'p1', activate: false, focus: false })
+  assert.equal(out.focusedPaneId, 'p0', 'focus stayed on p0')
+  assert.equal(out.panes.p1.activeTabKey, 'chat:b', 'p1 on-screen tab unchanged')
+  assert.deepEqual(out.panes.p1.tabs.map(tabKey), ['chat:b', 'app:9'])
+})
+
+test('openTab protect spares named keys when a full pane must evict (PR4)', () => {
+  const full = ['a', 'b', 'c', 'd', 'e', 'f'].map(id => makeTab('chat', id))
+  const ws = paneModel.normalize({
+    v: 1, layout: 'p0',
+    panes: { p0: { id: 'p0', tabs: full, activeTabKey: 'chat:f' } },
+    focusedPaneId: 'p0', nextId: 1,
+  })
+  // Protect the oldest (chat:a); the next-oldest unprotected (chat:b) is evicted.
+  const out = paneModel.openTab(ws, makeTab('app', 9), {
+    paneId: 'p0', activate: false, focus: false, protect: new Set(['chat:a']),
+  })
+  const keys = out.panes.p0.tabs.map(tabKey)
+  assert.equal(keys.length, paneModel.MAX_PANE_TABS)
+  assert.ok(keys.includes('chat:a'), 'the protected oldest survived')
+  assert.ok(!keys.includes('chat:b'), 'the oldest UNPROTECTED tab was evicted')
+  assert.ok(keys.includes('app:9'))
+})
+
+test('splitPaneWithTab places a NEW tab alone in a fresh pane; focus:false stays put (PR4)', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  const bg = paneModel.splitPaneWithTab(ws, makeTab('app', 9), { paneId: 'p0', edge: 'right', focus: false })
+  const leaves = paneModel.paneIdsInOrder(bg)
+  assert.equal(leaves.length, 2)
+  assert.equal(bg.focusedPaneId, 'p0', 'a background split does not steal focus')
+  const other = bg.panes[leaves.find(id => id !== 'p0')]
+  assert.deepEqual(other.tabs.map(tabKey), ['app:9'])
+  assert.equal(other.activeTabKey, 'app:9', 'the item is active in the new pane')
+  assertInvariants(bg)
+
+  // focus:true moves focus to the new pane.
+  const fg = paneModel.splitPaneWithTab(ws, makeTab('app', 9), { paneId: 'p0', edge: 'bottom', focus: true })
+  assert.notEqual(fg.focusedPaneId, 'p0')
+  assert.equal(fg.panes[fg.focusedPaneId].activeTabKey, 'app:9')
+
+  // An already-open item, an unknown pane, or a malformed edge is a same-ref no-op.
+  const withApp = paneModel.openTab(ws, makeTab('app', 9), { activate: false })
+  assert.equal(paneModel.splitPaneWithTab(withApp, makeTab('app', 9), { paneId: 'p0', edge: 'right' }), withApp)
+  assert.equal(paneModel.splitPaneWithTab(ws, makeTab('app', 9), { paneId: 'nope', edge: 'right' }), ws)
+  assert.equal(paneModel.splitPaneWithTab(ws, makeTab('app', 9), { paneId: 'p0', edge: 'diagonal' }), ws)
+})
+
+test('splitPaneWithTab refuses to breach the pane-count / depth bound (PR4)', () => {
+  // Build a balanced 4-leaf tree (MAX_PANES): row(col(p0,·), col(p1,·)). A fifth
+  // split — more leaves AND deeper — must be a same-reference no-op.
+  let ws = paneModel.seedFromFlatTabs(
+    ['a', 'b', 'c', 'd'].map(id => makeTab('chat', id)),
+  )
+  ws = paneModel.moveTab(ws, 'chat:c', { paneId: 'p0', edge: 'right' })
+  ws = paneModel.moveTab(ws, 'chat:b', { paneId: 'p0', edge: 'bottom' })
+  ws = paneModel.moveTab(ws, 'chat:d', { paneId: 'p1', edge: 'bottom' })
+  assert.equal(paneModel.paneIdsInOrder(ws).length, paneModel.MAX_PANES)
+  const target = paneModel.paneIdsInOrder(ws)[0]
+  assert.equal(paneModel.splitPaneWithTab(ws, makeTab('app', 9), { paneId: target, edge: 'right' }), ws)
+})
+
+test('paneIdsInOrder returns live leaves in in-order sequence (PR4)', () => {
+  const ws = threeLeafAppWs()
+  assert.deepEqual(paneModel.paneIdsInOrder(ws), ['p1', 'p3', 'p2'])
+  assert.deepEqual(paneModel.paneIdsInOrder(paneModel.seedFromFlatTabs([makeTab('chat', 'x')])), ['p0'])
+})
+
 test('seedFromFlatTabs caps to the last MAX_PANE_TABS after dedup', () => {
   const tabs = []
   for (let i = 0; i < paneModel.MAX_PANE_TABS + 3; i += 1) tabs.push(makeTab('chat', `c${i}`))
@@ -983,20 +1069,25 @@ test('reducer PRUNE clears the undo slot', () => {
   assert.equal(pruned.undo, null, 'PRUNE clears the slot')
 })
 
-test('reducer APPLY_PLACEMENT preserves the active tab and is undoable', () => {
+test('reducer APPLY_PLACEMENT applies a workspace-level resolver and is undoable', () => {
   const seeded = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b'), makeTab('app', 7)])
   const start = { ws: paneModel.setActiveTab(seeded, 'p0', 'chat:a'), undo: { ws: seeded, label: 'prior' } }
   assert.equal(start.ws.panes.p0.activeTabKey, 'chat:a')
 
+  // The resolver is now workspace → workspace (the pane-aware path). A background
+  // open (activate:false, focus:false) must not disturb the pane's active tab —
+  // the reducer just runs it and snapshots undo.
   const applied = paneModel.workspaceReducer(start, {
     type: 'APPLY_PLACEMENT',
-    resolve: () => [makeTab('chat', 'a'), makeTab('app', 7), makeTab('app', 9)],
+    resolve: (ws) => paneModel.openTab(ws, makeTab('app', 9), {
+      paneId: 'p0', activate: false, focus: false,
+    }),
   })
   assert.deepEqual(
     paneModel.flatten(applied.ws),
-    [makeTab('chat', 'a'), makeTab('app', 7), makeTab('app', 9)],
+    [makeTab('chat', 'a'), makeTab('chat', 'b'), makeTab('app', 7), makeTab('app', 9)],
   )
-  assert.equal(applied.ws.panes.p0.activeTabKey, 'chat:a', 'the surviving active tab is kept')
+  assert.equal(applied.ws.panes.p0.activeTabKey, 'chat:a', 'a background placement leaves the active tab alone')
   assert.equal(applied.undo.ws, start.ws, 'placement snapshots the pre-placement workspace (undoable)')
 })
 
@@ -1006,13 +1097,13 @@ test('reducer APPLY_PLACEMENT composes batched dispatches instead of clobbering'
   // current reducer state makes the second see the first.
   const s0 = paneModel.initialWorkspaceState(paneModel.seedFromFlatTabs([makeTab('chat', 'home')]))
   const s1 = paneModel.workspaceReducer(s0, {
-    type: 'APPLY_PLACEMENT', resolve: (tabs) => [...tabs, makeTab('app', 1)],
+    type: 'APPLY_PLACEMENT', resolve: (ws) => paneModel.openTab(ws, makeTab('app', 1), { activate: false }),
   })
   const s2 = paneModel.workspaceReducer(s1, {
-    type: 'APPLY_PLACEMENT', resolve: (tabs) => [...tabs, makeTab('app', 2)],
+    type: 'APPLY_PLACEMENT', resolve: (ws) => paneModel.openTab(ws, makeTab('app', 2), { activate: false }),
   })
   const keys = paneModel.flatten(s2.ws).map(tabKey)
-  assert.ok(keys.includes('app:1'), 'first placement survives the second')
+  assert.ok(keys.includes('app:1'), 'first placement survives the second (resolve runs on current state)')
   assert.ok(keys.includes('app:2'), 'second placement is applied too')
 })
 

@@ -364,6 +364,13 @@ export function seedFromFlatTabs(tabs) {
   }
 }
 
+// Every live leaf pane id in in-order (left-to-right) sequence. The resolver
+// walks this to find the first companion pane and to protect visible tabs; it is
+// the public projection of the private leaf-walk the renderer already uses.
+export function paneIdsInOrder(ws) {
+  return leafIds(ws.layout).filter(id => ws.panes[id])
+}
+
 // The pane holding a given tab key, or null.
 export function paneOf(ws, tabKey) {
   for (const id of leafIds(ws.layout)) {
@@ -436,9 +443,36 @@ export function isValidWorkspaceBlob(raw) {
   }
 }
 
+// Choose which tab a full pane evicts to admit a new one. The OLDEST tab whose
+// key is NOT protected (design §3.6: the source, item, active, and visible tabs
+// are protected); the tab being inserted is never itself a candidate. When every
+// resident is protected, evict the oldest anyway as a last resort so the per-pane
+// cap always holds — the resolver's protect set is small (a handful of keys), so
+// this branch is only reachable for a pathological all-protected pane.
+function pickEvictable(tabs, protect, inserting) {
+  const insertingKey = tabModel.tabKey(inserting)
+  const protectedKeys = protect instanceof Set ? protect : new Set(protect || [])
+  for (const tab of tabs) {
+    const key = tabModel.tabKey(tab)
+    if (key === insertingKey || protectedKeys.has(key)) continue
+    return tab
+  }
+  return tabs[0]
+}
+
 // Open a tab and report whether the open forced an eviction (the reducer needs
 // that to decide undoability — an evicting open is undoable, a plain one is not).
-function doOpenTab(ws, tab, { paneId, activate = true } = {}) {
+// Options beyond the flat-strip open:
+//   afterKey  insert directly after the named member tab (a resolver inserting a
+//             built app right after its source chat); absent → append (legacy).
+//   protect   Set/array of tabKeys the eviction must spare (design §3.6); absent
+//             → the legacy tabs[0] eviction (byte-identical to the flat strip).
+//   focus     move focus to the target pane (default true). A BACKGROUND resolver
+//             placement passes focus:false so it can never switch which pane owns
+//             the keyboard/Back or which content is on screen (design §6.2).
+function doOpenTab(ws, tab, {
+  paneId, activate = true, afterKey = null, protect = null, focus = true,
+} = {}) {
   const clean = sanitizeTab(tab)
   if (!clean) return { ws, evicted: null }
   const key = tabModel.tabKey(clean)
@@ -449,7 +483,7 @@ function doOpenTab(ws, tab, { paneId, activate = true } = {}) {
   if (existing) {
     const candidate = {
       ...ws,
-      focusedPaneId: existing.id,
+      focusedPaneId: focus ? existing.id : ws.focusedPaneId,
       panes: {
         ...ws.panes,
         [existing.id]: {
@@ -468,19 +502,21 @@ function doOpenTab(ws, tab, { paneId, activate = true } = {}) {
   let tabs = target.tabs
   let evicted = null
   if (tabs.length >= MAX_PANE_TABS) {
-    // Legacy parity — PR1's gate is "no visible strip change." tabModel.addTab
-    // dropped the OLDEST tab unconditionally, so we do the same: no active-tab
-    // protection here. The design §3.6 protected + named + undoable eviction
-    // (which needs a toast to name what left) ships with PR3's toast UI. The
-    // evicting open still snapshots undo (see the reducer), so a future toast's
-    // Undo already has its restore point.
-    evicted = tabs[0]
-    tabs = tabs.slice(1)
+    evicted = pickEvictable(tabs, protect, clean)
+    const evIdx = tabs.indexOf(evicted)
+    tabs = [...tabs.slice(0, evIdx), ...tabs.slice(evIdx + 1)]
   }
-  tabs = [...tabs, clean]
+  // Insert after the named anchor (computed against the POST-eviction array so a
+  // dropped older tab can't shift the caret), else append.
+  let at = tabs.length
+  if (afterKey != null) {
+    const ai = tabs.findIndex(t => tabModel.tabKey(t) === afterKey)
+    if (ai !== -1) at = ai + 1
+  }
+  tabs = [...tabs.slice(0, at), clean, ...tabs.slice(at)]
   const candidate = {
     ...ws,
-    focusedPaneId: targetId,
+    focusedPaneId: focus ? targetId : ws.focusedPaneId,
     panes: {
       ...ws.panes,
       [targetId]: {
@@ -519,7 +555,10 @@ export function openTabAt(ws, tab, target) {
   // move out, so a drop onto a six-tab pane's edge cannot evict its oldest tab
   // or churn its active tab (review B1).
   if (target.edge != null && target.root === true) return rootSplitOpen(ws, clean, key, target.edge)
-  if (target.edge != null && target.paneId != null) return edgeSplitOpen(ws, clean, key, target.paneId, target.edge)
+  if (target.edge != null && target.paneId != null) {
+    // A drag drop is foreground — the drop gesture IS the intent (focus:true).
+    return splitPaneWithTab(ws, clean, { paneId: target.paneId, edge: target.edge })
+  }
   if (target.paneId != null) {
     // center-join / strip-caret: this genuinely adds the item to the target
     // pane. The drag layer only lights these zones when the pane has room
@@ -644,25 +683,10 @@ function rootSplitMove(ws, src, tab, tabKey, edge) {
   })
 }
 
-// Split a pane on an edge to place a BRAND-NEW tab (a drawer item not yet in the
-// workspace) alone in the new pane. The counterpart of edgeSplitMove for an open
-// rather than a move: it NEVER touches the target pane's tab set — no transient
-// insert, no oldest-tab eviction at MAX_PANE_TABS, no activeTabKey swap. That
-// transient-insert-then-move-out was the drawer-drop eviction bug (review B1).
-function edgeSplitOpen(ws, tab, tabKey, paneId, edge) {
-  if (!ws.panes[paneId]) return ws
-  const newPaneId = `p${ws.nextId}`
-  const splitId = `s${ws.nextId + 1}`
-  const panes = { ...ws.panes, [newPaneId]: { id: newPaneId, tabs: [tab], activeTabKey: tabKey } }
-  const layout = replaceLeaf(ws.layout, paneId, splitNodeFor(edge, splitId, paneId, newPaneId, 0.5))
-  return commitBounded(ws, {
-    ...ws, layout, panes, focusedPaneId: newPaneId, nextId: ws.nextId + 2,
-  })
-}
-
 // Root-split the whole workspace to place a brand-new tab alone in the new pane.
-// The counterpart of rootSplitMove for an open — again never touching any
-// existing pane's tab set.
+// The counterpart of rootSplitMove for an open — never touching any existing
+// pane's tab set. The drag layer's root-edge drop takes this path (a leaf split
+// goes through splitPaneWithTab below).
 function rootSplitOpen(ws, tab, tabKey, edge) {
   const newPaneId = `p${ws.nextId}`
   const splitId = `s${ws.nextId + 1}`
@@ -670,6 +694,35 @@ function rootSplitOpen(ws, tab, tabKey, edge) {
   const layout = splitNodeFor(edge, splitId, ws.layout, newPaneId, 0.5)
   return commitBounded(ws, {
     ...ws, layout, panes, focusedPaneId: newPaneId, nextId: ws.nextId + 2,
+  })
+}
+
+// Split `paneId` on `edge`, placing a BRAND-NEW tab alone in the freshly created
+// pane (the item is active there — it is the pane's only tab). This is the single
+// leaf-split-open primitive: a drawer/drop open (openTabAt) and the pane-aware
+// resolver (design §6.2 auto-split) both take it. It NEVER touches the target
+// pane's tab set — no transient insert, no oldest-tab eviction, no activeTabKey
+// swap (that transient-insert-then-move-out was the drawer-drop eviction bug,
+// review B1). Focus moves to the new pane iff `focus`: a drag drop is foreground,
+// while a background resolver placement passes focus:false so a new pane replaces
+// nothing on screen and keyboard/Back stay put. Refused (same reference) when the
+// tab is invalid/already open, the pane or edge is unknown, or the split would
+// breach the pane-count / depth bound (commitBounded).
+export function splitPaneWithTab(ws, tab, { paneId, edge, focus = true } = {}) {
+  const clean = sanitizeTab(tab)
+  if (!clean || !ws.panes[paneId] || !EDGES.has(edge)) return ws
+  const key = tabModel.tabKey(clean)
+  if (paneOf(ws, key)) return ws
+  const newPaneId = `p${ws.nextId}`
+  const splitId = `s${ws.nextId + 1}`
+  const panes = { ...ws.panes, [newPaneId]: { id: newPaneId, tabs: [clean], activeTabKey: key } }
+  const layout = replaceLeaf(ws.layout, paneId, splitNodeFor(edge, splitId, paneId, newPaneId, 0.5))
+  return commitBounded(ws, {
+    ...ws,
+    layout,
+    panes,
+    focusedPaneId: focus ? newPaneId : ws.focusedPaneId,
+    nextId: ws.nextId + 2,
   })
 }
 
@@ -1182,27 +1235,6 @@ export function parseWorkspace(raw, { fallbackTabs = [] } = {}) {
   }
 }
 
-// Replace the focused pane's tabs with a flat resolver output — the PR1 bridge
-// that keeps applyWorkspaceRequestsToFlatTabs (workspacePlacement.js) behind the
-// existing placeInWorkspace seam. The pane's active tab is preserved when it is
-// still in the list, else it falls to the last tab.
-function applyFlat(ws, tabs) {
-  const pane = ws.panes[ws.focusedPaneId]
-  if (!pane) return ws
-  // Cap defensively so a placement can never persist an over-cap pane; the flat
-  // resolver already trims to tabModel.MAX_TABS, so this is a belt-and-braces
-  // guard on the invariant, not a behavior change.
-  const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
-  const keys = clean.map(tabModel.tabKey)
-  const active = (pane.activeTabKey != null && keys.includes(pane.activeTabKey))
-    ? pane.activeTabKey
-    : (keys.length ? keys[keys.length - 1] : null)
-  return commit(ws, {
-    ...ws,
-    panes: { ...ws.panes, [pane.id]: { ...pane, tabs: clean, activeTabKey: active } },
-  })
-}
-
 // The reducer's initial state: a workspace plus an empty single-slot undo.
 export function initialWorkspaceState(ws) {
   return { ws, undo: null }
@@ -1228,11 +1260,12 @@ export function initialWorkspaceState(ws) {
 // nothing, because the resource is gone and ANY older snapshot could resurrect
 // it — the exact hazard the flat-strip model had no defense against.
 // APPLY_PLACEMENT is undoable (agent rearrangements are reversible per design)
-// and, crucially, takes a `resolve` FUNCTION rather than a pre-resolved array:
-// the reducer runs it against the CURRENT reducer state, so two placements
-// dispatched in one React batch compose (the second sees the first) instead of
-// the second clobbering the first from a stale render snapshot. Returns the SAME
-// state reference on a no-op.
+// and, crucially, takes a `resolve` FUNCTION (workspace → workspace) rather than
+// a pre-resolved value: the reducer runs it against the CURRENT reducer state, so
+// two placements dispatched in one React batch compose (the second sees the
+// first, splits and all) instead of the second clobbering the first from a stale
+// render snapshot. The pane-aware resolver lives in workspacePlacement.js and
+// returns a normalized workspace. Returns the SAME state reference on a no-op.
 export function workspaceReducer(state, action) {
   const { ws, undo } = state
   switch (action.type) {
@@ -1295,9 +1328,11 @@ export function workspaceReducer(state, action) {
       return { ws: next, undo: null }
     }
     case 'APPLY_PLACEMENT': {
-      // resolve: (flatTabs) => flatTabs' — run against the CURRENT flat tabs so
-      // batched placements compose instead of clobbering each other.
-      const next = applyFlat(ws, action.resolve(flatten(ws)))
+      // resolve: (ws) => ws' — the pane-aware resolver (workspacePlacement.js)
+      // run against the CURRENT reducer workspace so batched placements compose
+      // instead of clobbering each other from a stale snapshot. It returns a
+      // normalized workspace, the SAME reference on a no-op.
+      const next = action.resolve(ws)
       if (next === ws) return state
       return { ws: next, undo: { ws, label: 'Workspace placement' } }
     }
