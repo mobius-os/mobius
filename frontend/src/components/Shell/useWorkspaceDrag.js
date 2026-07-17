@@ -1,28 +1,55 @@
 import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
+import { STRIP_H } from './paneModel.js'
 import {
-  buildScene, hitTest, zoneTarget, chipOffset,
+  buildScene, hitTest, zoneTarget, chipOffset, STRIP_CARET_PAD,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, crossedDrawerExit,
 } from './dragController.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
 // only the side-effects the pure dragController.js cannot: pointer capture, the
 // hold/slop timers, the chip/preview/shield/pre-glow DOM, the drawer stand-down,
-// and the ONE reducer dispatch on drop. Every geometric decision is delegated to
-// the pure module, so this file has no thresholds or zone math of its own.
+// strip auto-scroll, and the ONE reducer dispatch on drop. Every geometric
+// decision is delegated to the pure module, so this file has no thresholds or
+// zone math of its own.
 //
 // Architecture (design §3.1): a single capture-phase `pointerdown` on the
 // document identifies a drag source by its `data-drag-key` (strip tabs in the
-// chrome, rows in the drawer) and geometrically hit-tests against projectLayout
-// rects — never DOM-event bubbling, because iframes swallow events and the
-// drawer is inert. Everything is gated behind `enabled` (WORKSPACE_SPLITS_ENABLED),
-// so with the flag off the listener never installs and the shell is unchanged.
+// chrome AND the single-pane top strip, rows in the drawer) and geometrically
+// hit-tests against projectLayout rects — never DOM-event bubbling, because
+// iframes swallow events and the drawer is inert. Everything is gated behind
+// `enabled` (WORKSPACE_SPLITS_ENABLED); with the flag off the listener never
+// installs and the shell is unchanged.
+
+const STRIP_ZONE_H = STRIP_H + STRIP_CARET_PAD
+const AUTO_SCROLL_EDGE = 32 // px from a strip's scroll edge that arms auto-scroll
+const AUTO_SCROLL_STEP = 6 // px/frame
 
 // Split a tab key ("chat:5" / "app:42") back into a tabModel tab.
 function tabFromKey(key) {
   const i = key.indexOf(':')
   if (i < 0) return null
   return tabModel.makeTab(key.slice(0, i), key.slice(i + 1))
+}
+
+function cssEscape(v) {
+  return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(v)) : String(v)
+}
+
+// A one-shot capture-phase click swallow — the pointer-capture compat click
+// lands on the original source AFTER the shield is gone, so shield timing can't
+// stop it; consuming the next click here does (design §3.1, `suppressNextClick`).
+function suppressNextClick() {
+  let cleared = false
+  const clear = () => {
+    if (cleared) return
+    cleared = true
+    window.removeEventListener('click', onClick, true)
+    clearTimeout(timer)
+  }
+  const onClick = (ev) => { ev.stopPropagation(); ev.preventDefault(); clear() }
+  window.addEventListener('click', onClick, true)
+  const timer = setTimeout(clear, 400)
 }
 
 export default function useWorkspaceDrag({
@@ -36,6 +63,7 @@ export default function useWorkspaceDrag({
   dragActiveRef, // shared flag the Drawer's swipe-close handlers stand down on
   drawerOpenRef,
   closeDrawer,
+  openDrawer,
   openTabMenuAtRef, // ref → (clientX, clientY, tab, paneId) => void
   onDragStart, // dismiss the coachmark on the first real drag
 }) {
@@ -46,11 +74,13 @@ export default function useWorkspaceDrag({
     let shieldEl = null
     let chipEl = null
     let previewEl = null
+    // The one in-flight session's teardown, so an unmount / disable can tear a
+    // live drag down cleanly — no orphaned shield.
+    let activeCleanup = null
 
     function contentBox() {
       return contentElRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
     }
-    // Viewport client coords → content-local coords (projectLayout's space).
     function toLocal(clientX, clientY) {
       const box = contentBox()
       return { x: clientX - box.left, y: clientY - box.top }
@@ -95,11 +125,9 @@ export default function useWorkspaceDrag({
 
     // Render (or clear) the drop preview for a zone. Geometry is written inline
     // (content-local px); appearance + morph transitions come from the CSS.
-    function renderPreview(zone, prevZone) {
+    function renderPreview(zone) {
       if (!previewEl) return
       if (!zone) { previewEl.classList.remove('is-visible'); return }
-      // Toggle the morph class only when the zone identity changes, so a
-      // same-zone reposition doesn't re-trigger the first-appear fade.
       previewEl.classList.toggle('workspace__drop-preview--caret', zone.type === 'strip')
       const { rect } = zone
       previewEl.style.left = `${rect.x}px`
@@ -144,20 +172,6 @@ export default function useWorkspaceDrag({
       return buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureTabs)
     }
 
-    function commitDrop(key, zone) {
-      const target = zoneTarget(zone)
-      if (!target) return
-      const tab = tabFromKey(key)
-      if (!tab) return
-      const label = (labelForTabRef.current) ? labelForTabRef.current(tab) : 'tab'
-      const before = workspaceStateRef.current.ws
-      dispatchWorkspace({ type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}` })
-      // Shell's dispatch advances workspaceStateRef synchronously, so a genuine
-      // change is observable now — only toast (and only offer Undo) when the
-      // workspace actually moved (a self-drop no-op stays silent).
-      if (workspaceStateRef.current.ws !== before) showUndoToast(`Moved ${label}`)
-    }
-
     // ── One drag session ──────────────────────────────────────────────────────
     function startSession(downEvent, srcEl, sourceKind, key, paneId) {
       const isTouch = downEvent.pointerType !== 'mouse'
@@ -165,34 +179,62 @@ export default function useWorkspaceDrag({
       const pointerId = downEvent.pointerId
       let armed = false
       let cancelled = false
+      let cleaned = false
       let holdTimer = null
       let curZone = null
       let scene = null
       let drawerEdgeX = null
       let glided = false
       let prevBodySelect = ''
-      let ctxListener = null
+      let lastPoint = { x: start.x, y: start.y }
+      // Auto-scroll (§3.2) state.
+      let autoRAF = null
+      let autoStripEl = null
+      let autoPaneId = null
+      let autoDir = 0
 
-      const arm = () => {
-        if (cancelled) return
-        armed = true
-        dragActiveRef.current = true // the Drawer's swipe-close handlers stand down
-        onDragStart?.() // dismiss the coachmark
-        try { srcEl.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
-        // Callout/selection suppression for the whole hold (§3.1).
+      const buildSource = () => ({
+        key,
+        paneId,
+        paneTabCount: paneId
+          ? (workspaceStateRef.current.ws.panes[paneId]?.tabs.length || 0)
+          : 0,
+      })
+
+      // iOS callout/selection suppression begins NOW (pointerdown), scoped to the
+      // source, for the WHOLE hold window — not at arm, when the magnifier has
+      // already won. `contextmenu` is prevented for a touch source too.
+      let ctxListener = null
+      let touchMovePreventer = null
+      if (isTouch) {
         prevBodySelect = document.body.style.userSelect
         document.body.style.userSelect = 'none'
         document.body.style.webkitUserSelect = 'none'
         srcEl.style.webkitTouchCallout = 'none'
-        const allowRootEdge = !isTouch && sceneInputsRef.current.mode !== 'phone'
-        const source = {
-          key,
-          paneId,
-          paneTabCount: paneId
-            ? (workspaceStateRef.current.ws.panes[paneId]?.tabs.length || 0)
-            : 0,
+        srcEl.style.userSelect = 'none'
+        ctxListener = (ev) => ev.preventDefault()
+        window.addEventListener('contextmenu', ctxListener, true)
+        // Dynamic touch-action mid-gesture is ignored by the browser; a
+        // non-passive touchmove that preventDefaults ONLY while armed is what
+        // actually blocks Android `pan-y` native scrolling after lift, while
+        // pre-hold movement still scrolls.
+        touchMovePreventer = (ev) => { if (armed) ev.preventDefault() }
+        document.addEventListener('touchmove', touchMovePreventer, { passive: false })
+      }
+
+      const arm = () => {
+        if (cancelled || cleaned) return
+        armed = true
+        dragActiveRef.current = true // the Drawer's swipe-close handlers stand down
+        onDragStart?.() // dismiss the coachmark
+        try { srcEl.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
+        if (!isTouch) {
+          prevBodySelect = document.body.style.userSelect
+          document.body.style.userSelect = 'none'
+          document.body.style.webkitUserSelect = 'none'
         }
-        scene = buildSceneNow(source, allowRootEdge)
+        const allowRootEdge = !isTouch && sceneInputsRef.current.mode !== 'phone'
+        scene = buildSceneNow(buildSource(), allowRootEdge)
         ensureOverlays()
         positionChip(start.x, start.y, isTouch, key)
         preGlow(scene)
@@ -205,12 +247,59 @@ export default function useWorkspaceDrag({
       // Touch lift is a long-press; a pre-hold move yields to native scroll.
       if (isTouch) holdTimer = setTimeout(arm, holdMsFor(sourceKind))
 
+      function stopAutoScroll() {
+        if (autoRAF) { cancelAnimationFrame(autoRAF); autoRAF = null }
+        autoDir = 0
+        autoStripEl = null
+        autoPaneId = null
+      }
+      // Strip auto-scroll (§3.2): near an overflowing strip's edge, scroll it
+      // 6px/frame and re-measure so the caret keeps tracking under the pointer.
+      function updateAutoScroll(clientX, clientY) {
+        const box = contentBox()
+        const xL = clientX - box.left
+        const yL = clientY - box.top
+        let stripEl = null
+        let dir = 0
+        let pid = null
+        for (const pane of scene.panes) {
+          const r = pane.rect
+          if (xL < r.x || xL > r.x + r.w || yL < r.y || yL > r.y + STRIP_ZONE_H) continue
+          const el = contentElRef.current?.querySelector(`[data-pane-strip="${cssEscape(pane.paneId)}"]`)
+          pid = pane.paneId
+          if (el && el.scrollWidth > el.clientWidth + 1) {
+            const sb = el.getBoundingClientRect()
+            if (clientX < sb.left + AUTO_SCROLL_EDGE && el.scrollLeft > 0) { stripEl = el; dir = -1 }
+            else if (clientX > sb.right - AUTO_SCROLL_EDGE
+              && el.scrollLeft < el.scrollWidth - el.clientWidth) { stripEl = el; dir = 1 }
+          }
+          break
+        }
+        autoStripEl = stripEl
+        autoPaneId = pid
+        autoDir = dir
+        if (dir !== 0 && !autoRAF) autoRAF = requestAnimationFrame(autoStep)
+        else if (dir === 0) stopAutoScroll()
+      }
+      function autoStep() {
+        if (!armed || autoDir === 0 || !autoStripEl) { autoRAF = null; return }
+        autoStripEl.scrollLeft += autoDir * AUTO_SCROLL_STEP
+        const p = scene?.panes.find(pp => pp.paneId === autoPaneId)
+        if (p) p.tabs = measureTabs(autoPaneId) // re-measure the scrolled strip
+        const next = hitTest(toLocal(lastPoint.x, lastPoint.y), scene, curZone)
+        renderPreview(next)
+        curZone = next
+        autoRAF = requestAnimationFrame(autoStep)
+      }
+
       const onMove = (ev) => {
+        if (ev.pointerId !== pointerId) return // ignore a second finger
+        lastPoint = { x: ev.clientX, y: ev.clientY }
         const dx = ev.clientX - start.x
         const dy = ev.clientY - start.y
         if (!armed) {
           if (isTouch) {
-            if (preHoldMoveCancels(dx, dy)) { cancelled = true; clearTimeout(holdTimer); cleanup() }
+            if (preHoldMoveCancels(dx, dy)) { cancelled = true; cleanup() }
             return
           }
           if (passedSlop(dx, dy)) arm()
@@ -219,80 +308,118 @@ export default function useWorkspaceDrag({
         ev.preventDefault?.()
         positionChip(ev.clientX, ev.clientY, isTouch, key)
 
-        // Drawer drag-out: while the chip is still over the drawer, nothing
-        // arms; crossing 24px past the drawer's inner edge glides it closed and
-        // reveals the panes' drop zones underneath (design §3.1).
-        const overDrawer = sourceKind === 'drawer' && drawerEdgeX != null
-          && (drawerOpenRef.current || ev.clientX <= drawerEdgeX)
-        if (sourceKind === 'drawer' && !glided && drawerEdgeX != null
-            && crossedDrawerExit(ev.clientX, drawerEdgeX)) {
-          glided = true
-          closeDrawer?.()
+        // Drawer drag-out: while the drawer still covers the panes, nothing
+        // arms; crossing 24px past its inner edge glides it closed and reveals
+        // the drop zones underneath (design §3.1).
+        if (sourceKind === 'drawer' && drawerEdgeX != null) {
+          if (!glided && crossedDrawerExit(ev.clientX, drawerEdgeX)) { glided = true; closeDrawer?.() }
+          if (drawerOpenRef.current) { curZone = null; renderPreview(null); stopAutoScroll(); return }
         }
-        if (overDrawer && !glided) { curZone = null; renderPreview(null); return }
 
-        const pt = toLocal(ev.clientX, ev.clientY)
-        const next = hitTest(pt, scene, curZone)
-        // The preview morphs (CSS transition on geometry) on a same-element move
-        // and snaps class on a zone-kind change; renderPreview handles both.
-        renderPreview(next, curZone)
+        updateAutoScroll(ev.clientX, ev.clientY)
+        const next = hitTest(toLocal(ev.clientX, ev.clientY), scene, curZone)
+        renderPreview(next)
         curZone = next
       }
 
-      const onUp = (ev) => {
-        clearTimeout(holdTimer)
-        if (armed) {
-          const dx = ev.clientX - start.x
-          const dy = ev.clientY - start.y
-          // Releasing back over the drawer cancels (design §3.1).
-          const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
-            && ev.clientX <= drawerEdgeX && drawerOpenRef.current
-          if (isTouch && releasedInPlace(dx, dy)) {
-            // Lift → release-in-place = context menu (strip tabs reuse the stage-A
-            // menu; a drawer row keeps its own ⋮ menu, so it just cancels).
-            if (sourceKind === 'tab' && openTabMenuAtRef.current) {
-              const tab = tabFromKey(key)
-              openTabMenuAtRef.current(ev.clientX, ev.clientY, tab, paneId)
-            }
-          } else if (!backOverDrawer && curZone) {
-            commitDrop(key, curZone)
-          }
-        }
-        cleanup()
+      // Re-derive the drop against a FRESH scene at the release point: geometry
+      // or caps may have shifted since arm (resize, a concurrent placement), and
+      // a stale-lit zone must not commit an infeasible move (TOCTOU).
+      // A zone that flipped infeasible resolves to null and the drop cancels
+      // visibly (the chip/preview animate away), never a silent reducer no-op.
+      function commitDrop() {
+        const allowRootEdge = !isTouch && sceneInputsRef.current.mode !== 'phone'
+        const fresh = buildSceneNow(buildSource(), allowRootEdge)
+        const zone = hitTest(toLocal(lastPoint.x, lastPoint.y), fresh, curZone)
+        const target = zoneTarget(zone)
+        if (!target) return
+        const tab = tabFromKey(key)
+        if (!tab) return
+        const label = labelForTabRef.current ? labelForTabRef.current(tab) : 'tab'
+        const before = workspaceStateRef.current.ws
+        dispatchWorkspace({ type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}` })
+        if (workspaceStateRef.current.ws !== before) showUndoToast(`Moved ${label}`)
       }
 
-      const onCancel = () => { clearTimeout(holdTimer); cleanup() }
-      const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup() } }
+      const onUp = (ev) => {
+        if (ev.pointerId !== pointerId) return // ignore a second finger
+        if (!armed) { cleanup(); return }
+        const dx = ev.clientX - start.x
+        const dy = ev.clientY - start.y
+        // Releasing over the drawer's original region cancels — and, if the drag
+        // had already glided it closed, reopens it (design §3.1/§3.4).
+        // Geometric, so it no longer depends on the drawer still reporting open
+        // (which glide-close had already flipped false).
+        const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
+          && ev.clientX <= drawerEdgeX
+        if (isTouch && releasedInPlace(dx, dy)) {
+          // Lift → release-in-place = context menu. A strip tab reuses the
+          // stage-A pane menu; a drawer row opens its own ⋮ menu (adjudicated).
+          if (sourceKind === 'tab' && openTabMenuAtRef.current) {
+            openTabMenuAtRef.current(ev.clientX, ev.clientY, tabFromKey(key), paneId)
+          } else if (sourceKind === 'drawer') {
+            srcEl.closest('.drawer__row')?.querySelector('.drawer__more')?.click()
+          }
+          cleanup()
+        } else if (backOverDrawer) {
+          if (glided) openDrawer?.()
+          // Suppress the row's compat click so the cancel doesn't also select it.
+          cleanup({ suppressClick: true })
+        } else {
+          if (curZone) commitDrop()
+          cleanup({ suppressClick: true })
+        }
+      }
 
-      function cleanup() {
+      const onCancel = (ev) => { if (ev.pointerId === pointerId) cleanup() }
+      const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup() } }
+      const onLostCapture = (ev) => { if (ev.pointerId === pointerId) cleanup() }
+      const onWinBlur = () => cleanup()
+      const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup() }
+
+      function cleanup({ suppressClick = false } = {}) {
+        if (cleaned) return
+        cleaned = true
+        clearTimeout(holdTimer)
+        stopAutoScroll()
         window.removeEventListener('pointermove', onMove, true)
         window.removeEventListener('pointerup', onUp, true)
         window.removeEventListener('pointercancel', onCancel, true)
         window.removeEventListener('keydown', onKey, true)
-        if (ctxListener) { window.removeEventListener('contextmenu', ctxListener, true); ctxListener = null }
-        if (armed) {
-          try { srcEl.releasePointerCapture?.(pointerId) } catch { /* released */ }
+        window.removeEventListener('lostpointercapture', onLostCapture, true)
+        window.removeEventListener('blur', onWinBlur)
+        document.removeEventListener('visibilitychange', onVisibility)
+        if (ctxListener) window.removeEventListener('contextmenu', ctxListener, true)
+        if (touchMovePreventer) document.removeEventListener('touchmove', touchMovePreventer)
+        // Restore selection/callout (set at pointerdown for touch, at arm for mouse).
+        if (isTouch || armed) {
           document.body.style.userSelect = prevBodySelect
           document.body.style.webkitUserSelect = prevBodySelect
-          srcEl.style.webkitTouchCallout = ''
         }
+        srcEl.style.webkitTouchCallout = ''
+        srcEl.style.userSelect = ''
+        try { srcEl.releasePointerCapture?.(pointerId) } catch { /* released */ }
         dragActiveRef.current = false
         removeOverlays()
+        // The compat click fires after the shield is already gone; swallow it so
+        // a committed drop is exactly one action, not a drop + a tab/row click.
+        if (suppressClick) suppressNextClick()
+        if (activeCleanup === cleanup) activeCleanup = null
       }
+      activeCleanup = cleanup
 
-      // During a touch hold, the iOS callout/contextmenu must not win the gesture.
-      if (isTouch) {
-        ctxListener = (ev) => ev.preventDefault()
-        window.addEventListener('contextmenu', ctxListener, true)
-      }
       window.addEventListener('pointermove', onMove, { passive: false, capture: true })
       window.addEventListener('pointerup', onUp, true)
       window.addEventListener('pointercancel', onCancel, true)
       window.addEventListener('keydown', onKey, true)
+      window.addEventListener('lostpointercapture', onLostCapture, true)
+      window.addEventListener('blur', onWinBlur)
+      document.addEventListener('visibilitychange', onVisibility)
     }
 
     // ── Source detection (capture-phase, never preventDefault here) ───────────
     function onPointerDown(e) {
+      if (activeCleanup) return // one session at a time
       if (e.pointerType === 'mouse' && e.button !== 0) return
       if (!e.isPrimary) return
       const srcEl = e.target?.closest?.('[data-drag-key]')
@@ -310,14 +437,11 @@ export default function useWorkspaceDrag({
     document.addEventListener('pointerdown', onPointerDown, true)
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true)
+      activeCleanup?.() // tear down an in-flight drag
       removeOverlays()
     }
     // enabled is a module-load constant and every volatile input arrives through
     // a ref, so the listener installs exactly once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled])
-}
-
-function cssEscape(v) {
-  return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(v)) : String(v)
 }

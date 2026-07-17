@@ -853,6 +853,9 @@ export default function Shell() {
       message: label,
       variant: 'info',
       duration: 6000,
+      // Tagged so the honesty effect can retract exactly this toast when the
+      // undo slot clears (a stale Undo button must not lie).
+      wsUndo: true,
       action: { label: 'Undo', onAction: () => dispatchWorkspace({ type: 'UNDO_LAST' }) },
     })
   }, [dispatchWorkspace])
@@ -867,6 +870,7 @@ export default function Shell() {
     dragActiveRef,
     drawerOpenRef,
     closeDrawer,
+    openDrawer,
     openTabMenuAtRef,
     onDragStart: onWorkspaceDragStart,
   })
@@ -902,6 +906,10 @@ export default function Shell() {
   )
   // Cmd/Ctrl+Z restores the single-slot pre-mutation snapshot while no input is
   // focused (design §3.5). Flag-gated; a text field's own undo always wins.
+  // Documented limitation (PR3): key events do not cross the iframe boundary, so
+  // the chord is inert while a cross-origin app iframe holds focus. The undo
+  // TOAST is the primary, always-reachable recovery path — its honesty (below)
+  // is why this limitation is acceptable rather than a trap.
   useEffect(() => {
     if (!paneModel.WORKSPACE_SPLITS_ENABLED) return undefined
     const onKey = (e) => {
@@ -912,6 +920,15 @@ export default function Shell() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [dispatchWorkspace])
+
+  // Toast honesty (design §3.5): once the undo slot is cleared by a later action
+  // (a tab activate, focus change, a fresh open, a prune) the "Undo" button would
+  // silently no-op — so retract the workspace-undo toast the moment its snapshot
+  // is gone. Only the workspace toast is retracted (tagged `wsUndo`); an
+  // unrelated toast is left alone.
+  useEffect(() => {
+    if (workspaceState.undo == null) setToast(t => (t && t.wsUndo ? null : t))
+  }, [workspaceState.undo])
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -2285,7 +2302,17 @@ export default function Shell() {
           reset the send-reservation and freeze stream-follow (the reason the
           bespoke split view was parked). */}
       {tabStripVisible && !multiPane && (
-        <nav className="shell__tabstrip" inert={drawerOpen} aria-label="Open tabs">
+        <nav
+          className="shell__tabstrip"
+          inert={drawerOpen}
+          aria-label="Open tabs"
+          // The single-pane strip is the PRIMARY drag source once the flag is on
+          // (the coachmark teaches "drag tabs to split" here). Tag it with the
+          // sole pane's id so the drag controller resolves a source pane exactly
+          // as it does for a WorkspaceChrome strip; dragging a tab out with ≥2
+          // tabs present splits the pane.
+          data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
+        >
           {openTabs.map(tab => {
             const isChat = tab.kind === 'chat'
             // Label resolution is the shell's job (it holds the live lists);
@@ -2307,6 +2334,7 @@ export default function Shell() {
                   type="button"
                   className="shell__tab-open"
                   aria-current={active ? 'true' : undefined}
+                  data-drag-key={paneModel.WORKSPACE_SPLITS_ENABLED ? tabModel.tabKey(tab) : undefined}
                   onClick={() => {
                     const { view, opts } = tabModel.tabNavTarget(tab)
                     navTo(view, opts)

@@ -506,7 +506,13 @@ test.describe('Workspace drag (PR3)', () => {
     const ws = await readWs(page)
     const home = whichPaneHas(ws, `chat:${c.id}`)
     expect(ws.panes[home].tabs.length, 'C is alone in the new pane').toBe(1)
-    expect(whichPaneHas(ws, `chat:${b.id}`), 'B kept its own pane').not.toBe(home)
+    const bPane = whichPaneHas(ws, `chat:${b.id}`)
+    expect(bPane, 'B kept its own pane').not.toBe(home)
+    // The split target is untouched — no transient insert, no active-tab churn
+    // (review B1: the create-in-new-pane path never mutates the target pane).
+    expect(ws.panes[bPane].tabs.map(t => `${t.kind}:${t.id}`), 'B pane tab set intact')
+      .toEqual([`chat:${b.id}`])
+    expect(ws.panes[bPane].activeTabKey, 'B stays the active tab of its pane').toBe(`chat:${b.id}`)
   })
 
   test('dragging a tab onto another strip inserts it there (move, no new pane)', async ({ page }) => {
