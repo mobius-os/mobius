@@ -39,6 +39,7 @@ function PaneChatView({
   navTo,
   onChatMissing,
   onFirstMessage,
+  onDisplayReady,
 }) {
   // builtApps is derived PER chatId, memoized on the same signature Shell uses
   // for the primary chat — an unrelated app's refetch is a no-op for this pane.
@@ -75,6 +76,10 @@ function PaneChatView({
     onChatMissing?.(missingId, chatId)
   }, [chatId, onChatMissing])
 
+  const handleDisplayReady = useCallback((readyChatId) => {
+    onDisplayReady?.(paneId, readyChatId)
+  }, [onDisplayReady, paneId])
+
   return (
     <ErrorBoundary key={chatId} variant="inline" label="chat">
       <ChatView
@@ -94,6 +99,7 @@ function PaneChatView({
         onVoiceListeningChange={markVoiceListening}
         composerFocusRequest={composerFocusRequest}
         onComposerFocusHandled={onComposerFocusHandled}
+        onDisplayReady={onDisplayReady ? handleDisplayReady : null}
       />
     </ErrorBoundary>
   )

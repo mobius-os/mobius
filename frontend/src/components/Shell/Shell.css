@@ -193,6 +193,27 @@
   pointer-events: auto;
 }
 
+/* Chat-to-chat navigation keeps the last painted chat as an inert, opaque
+   cover while the incoming ChatView settles its saved scroll position below.
+   The layout-ready callback removes the cover in the same commit that promotes
+   staging to the ordinary active pane, so the transcript's intentional
+   visibility:hidden settlement frame is never exposed. */
+.shell__chat-view {
+  background: var(--bg);
+}
+
+.shell__chat-view--staging {
+  visibility: visible;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.shell__chat-view--held {
+  visibility: visible;
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
 .shell__tabstrip {
   flex-shrink: 0;

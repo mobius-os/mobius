@@ -280,6 +280,10 @@ export default function ChatView({
   // Settings, which aborted the mic; now it stays mounted, so we must stop voice
   // capture explicitly or the microphone would keep listening off-screen.
   hidden = false,
+  // Shell chat-to-chat handoff: fired from a layout effect once this mounted
+  // chat has a stable frame to paint. Empty/error chats are already stable;
+  // transcript chats wait for useScrollMode's existing hide-then-reveal gate.
+  onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
@@ -3138,6 +3142,13 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
+
+  const onDisplayReadyRef = useRef(onDisplayReady)
+  onDisplayReadyRef.current = onDisplayReady
+  const displayReady = revealed || showEmpty || showLoadError
+  useLayoutEffect(() => {
+    if (displayReady) onDisplayReadyRef.current?.(chatId)
+  }, [chatId, displayReady])
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
   // The captured bridge partial enters the active row before catch-up emits a
   // single item. That is the load-bearing part of Lever 1: when SSE becomes the

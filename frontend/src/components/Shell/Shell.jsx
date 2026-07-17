@@ -708,6 +708,74 @@ export default function Shell() {
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
   }, [projection, workspace])
 
+  // Last chat that reached a stable painted frame in each visible pane. On a
+  // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
+  // the incoming chat runs its existing hide/restore/reveal transaction below.
+  // The map advances only from the incoming ChatView's layout-ready callback,
+  // so rapid A -> B -> C navigation keeps A painted and replaces only staging B.
+  const [presentedChatByPane, setPresentedChatByPane] = useState(() => new Map())
+  const visibleChatPaneSignature = visibleChatPanes
+    .map(({ paneId, chatId }) => `${paneId}:${chatId}`)
+    .join('|')
+
+  // Drop state for panes whose active visible surface is no longer a chat.
+  // Same-pane A -> B deliberately keeps A until B reports display-ready.
+  useEffect(() => {
+    const livePaneIds = new Set(visibleChatPanes.map(({ paneId }) => String(paneId)))
+    setPresentedChatByPane(prev => {
+      let changed = false
+      const next = new Map(prev)
+      for (const paneId of next.keys()) {
+        if (!livePaneIds.has(String(paneId))) {
+          next.delete(paneId)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    // The primitive signature is the intentional dependency: visibleChatPanes
+    // is rebuilt from workspace objects and should not churn this cleanup.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleChatPaneSignature])
+
+  const handlePaneChatDisplayReady = useCallback((paneId, readyChatId) => {
+    const id = String(readyChatId)
+    const paneKey = String(paneId)
+    const pane = workspaceStateRef.current.ws.panes[paneId]
+      || workspaceStateRef.current.ws.panes[paneKey]
+    // Ignore a late ready signal from staging B after rapid navigation reached C.
+    if (pane?.activeTabKey !== `chat:${id}`) return
+    setPresentedChatByPane(prev => {
+      if (String(prev.get(paneKey) ?? '') === id) return prev
+      const next = new Map(prev)
+      next.set(paneKey, id)
+      return next
+    })
+  }, [workspaceStateRef])
+
+  // At most two ChatViews per transitioning pane: the last painted chat and the
+  // current active chat. Cross-pane moves are deduped by chat id, preserving the
+  // workspace's no-reparent identity rule rather than manufacturing a cover.
+  const chatPaneLayers = useMemo(() => {
+    const desiredIds = new Set(visibleChatPanes.map(({ chatId }) => String(chatId)))
+    const layers = []
+    for (const { paneId, chatId } of visibleChatPanes) {
+      const paneKey = String(paneId)
+      const activeId = String(chatId)
+      const previousId = presentedChatByPane.get(paneKey)
+      const transitioning = previousId && previousId !== activeId
+      if (transitioning && !desiredIds.has(previousId)) {
+        layers.push({ paneId, chatId: previousId, role: 'held' })
+      }
+      layers.push({
+        paneId,
+        chatId: activeId,
+        role: transitioning ? 'staging' : 'active',
+      })
+    }
+    return layers.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
+  }, [presentedChatByPane, visibleChatPanes])
+
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
   // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
   // from the projection REGARDLESS of LRU membership and are never evicted, so a
@@ -2470,35 +2538,46 @@ export default function Shell() {
           </div>
           )
         })}
-        {/* Chat panes — one PaneChatView per VISIBLE chat pane for EVERY mode,
-            chatId-sorted (stable order). The single visible chat renders through
-            the SAME list (full-bleed) so a split never remounts it (finding A).
-            PaneChatView parameterizes every callback by its own chatId + paneId. */}
-        {visibleChatPanes.map(({ paneId, chatId }) => {
+        {/* Chat panes — normally one PaneChatView per visible chat pane. During
+            a chat change the last painted chat remains as an inert opaque cover
+            over the incoming staging chat until its existing scroll controller
+            reports a stable frame. Layers remain chatId-sorted, so adding or
+            removing the bounded cover never reparents another chat wrapper. */}
+        {chatPaneLayers.map(({ paneId, chatId, role }) => {
           const tabKey = `chat:${chatId}`
-          const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
-          const fullBleed = !paned && tabKey === fullBleedKey
+          const paneActiveKey = workspace.panes[paneId]?.activeTabKey || tabKey
+          const paned = workspaceChromeActive ? visibleTabRects.get(paneActiveKey) : null
+          const fullBleed = !paned && paneActiveKey === fullBleedKey
+          const handoffClass = !settingsActive && role !== 'active'
+            ? ` shell__chat-view--${role}`
+            : ''
           return (
             <div
               key={chatId}
-              data-tab-key={multiPane ? tabKey : undefined}
+              data-tab-key={multiPane && role !== 'held' ? tabKey : undefined}
               className={paned
-                ? 'shell__view shell__view--paned'
-                : `shell__view ${fullBleed ? 'shell__view--active' : ''}`}
+                ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
+                : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`}
               style={paned
                 ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h }
                 : undefined}
-              onPointerDownCapture={paned ? () => dispatchWorkspace({ type: 'FOCUS', paneId }) : undefined}
+              inert={settingsActive || role !== 'active'}
+              aria-hidden={settingsActive || role !== 'active' ? 'true' : undefined}
+              onPointerDownCapture={paned && role === 'active'
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
+                : undefined}
             >
               <PaneChatView
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
-                visible={!settingsActive}
+                visible={!settingsActive && role !== 'held'}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
-                composerFocusRequest={composerFocusRequest}
-                onComposerFocusHandled={handleComposerFocusHandled}
+                composerFocusRequest={role === 'active' ? composerFocusRequest : null}
+                onComposerFocusHandled={role === 'active'
+                  ? handleComposerFocusHandled
+                  : null}
                 onSystemEvent={handleSystemEvent}
                 markStreamingStart={markStreamingStart}
                 markStreamingEnd={markStreamingEnd}
@@ -2509,6 +2588,9 @@ export default function Shell() {
                 navTo={navTo}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
+                onDisplayReady={role === 'held'
+                  ? null
+                  : handlePaneChatDisplayReady}
               />
             </div>
           )

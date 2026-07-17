@@ -986,8 +986,11 @@ test.describe('Scroll position', () => {
 
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.getByRole('button', { name: 'Settings', exact: true }).click()
-    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+    await page.getByRole('button', { name: 'New chat', exact: true }).click()
+    await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 5000 })
+    const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(decoyChatId).toBeTruthy()
+    expect(decoyChatId).not.toBe(chatId)
 
     returning = true
     await page.evaluate(() => {
@@ -997,9 +1000,23 @@ test.describe('Scroll position', () => {
         const el = document.querySelector('.chat__scroll')
         const target = document.querySelector('[data-key="entry-anchor"]')
         const visible = !!el && getComputedStyle(el).visibility !== 'hidden'
+        const held = !!document.querySelector('.shell__chat-view--held')
+        const activeLayer = document.querySelector(
+          '.shell__chat-view.shell__view--active',
+        )
+        const activeFrame = !!activeLayer && (
+          !!activeLayer.querySelector('.chat__empty-wrap')
+          || (() => {
+            const activeScroll = activeLayer.querySelector('.chat__scroll')
+            return !!activeScroll
+              && getComputedStyle(activeScroll).visibility !== 'hidden'
+          })()
+        )
         window.__entryTrajectory.push({
           t: Math.round(performance.now() - started),
           visible,
+          painted: held || activeFrame,
+          held,
           anchor: !!target,
           y: el && target
             ? Math.round(target.getBoundingClientRect().top - el.getBoundingClientRect().top)
@@ -1027,6 +1044,8 @@ test.describe('Scroll position', () => {
     const visibleRows = trajectory.filter(row => row.visible)
     expect(returnImageServed).toBe(true)
     expect(streamCount).toBeGreaterThan(0)
+    expect(trajectory.some(row => row.held)).toBe(true)
+    expect(trajectory.every(row => row.painted)).toBe(true)
     expect(visibleRows.length).toBeGreaterThan(2)
     expect(visibleRows.every(row => row.anchor && row.y != null)).toBe(true)
     const visibleYs = visibleRows.map(row => row.y)
