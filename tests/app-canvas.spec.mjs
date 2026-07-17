@@ -151,6 +151,10 @@ async function setupShellBasics(page) {
  *   - the frame endpoint returns our mock HTML
  */
 async function setupAppRoutes(page, appId, frameHTML) {
+  // This endpoint is polled while the canvas is open. Production returns a
+  // durable app revision; generating a new timestamp per request falsely tells
+  // AppCanvas that the bundle changed and replaces its iframe every second.
+  const appRevision = '2026-07-17T00:00:00.000Z'
   await page.setViewportSize({ width: 412, height: 915 })
   await page.addInitScript(() => {
     localStorage.setItem('token', 'mock-owner-token')
@@ -177,8 +181,8 @@ async function setupAppRoutes(page, appId, frameHTML) {
         compiled_path: `/data/compiled/app-${appId}.js`,
         chat_id: null,
         source_dir: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        created_at: appRevision,
+        updated_at: appRevision,
       }]),
     })
   })
