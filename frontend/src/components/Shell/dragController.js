@@ -115,6 +115,19 @@ export function rootEdgeAllowed(isTouch, mode) {
   return !isTouch && mode !== 'phone'
 }
 
+// Whether a drag source is BLOCKED from arming in the current view-mode (design:
+// view-mode toggle). In 'single' view-mode WITH a preserved multi-pane tree
+// (>=2 leaves) only one surface is on screen, so a split/move whose result the
+// user could not see is suppressed: the source does not arm and the attempted
+// gesture instead vibrates the view-mode toggle (the binding's onDragBlocked).
+// A single-leaf tree in single-mode STAYS draggable — a splitting drop is exactly
+// how the user asks for panes, and the drop flips viewMode to 'panes'. Panes mode
+// always arms. `leafCount` is the tree's live leaf count (paneIdsInOrder.length),
+// not the projected count, so a 3-leaf tree shown as a compact pair still blocks.
+export function dragArmingBlocked({ viewMode, leafCount } = {}) {
+  return viewMode === 'single' && (leafCount || 0) >= 2
+}
+
 // The chip's top-left offset from the pointer, given the pointer type.
 export function chipOffset(point, isTouch) {
   return isTouch

@@ -238,10 +238,11 @@ export default function Shell() {
   const contentVisibility = useMemo(
     () => deriveContentVisibility({
       workspace, projection, settingsActive, immersiveActive, immersiveAppId,
+      viewMode: workspace.viewMode,
     }),
     [workspace, projection, settingsActive, immersiveActive, immersiveAppId],
   )
-  const { multiPane, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
+  const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   const workspaceChromeActive = contentVisibility.chromeActive
   const chatPanesVisible = contentVisibility.chatPanesVisible
   // navTo is a per-render function; stable callbacks (handleAppError, passed to
@@ -972,6 +973,17 @@ export default function Shell() {
   // Filled by the first-use coachmark (§7); the first real drag dismisses it.
   const coachmarkDismissRef = useRef(null)
   const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
+  // The view-mode toggle lives in the Drawer (bottom Settings row). Toggling is a
+  // pure state flip — no navigation, no drawer close (the reducer's SET_VIEW_MODE
+  // preserves the undo slot and never touches focus). The vibrate ref is the
+  // Drawer toggle's imperative "shake" handle: when a drag is attempted while
+  // dragging is disabled (single-mode + multi-pane tree), the drag hook's
+  // onDragBlocked calls through it so the toggle shakes in place.
+  const viewModeVibrateRef = useRef(null)
+  const handleToggleViewMode = useCallback(
+    () => dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' }),
+    [dispatchWorkspace],
+  )
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
@@ -985,6 +997,7 @@ export default function Shell() {
     openDrawer,
     openTabMenuAtRef,
     onDragStart: onWorkspaceDragStart,
+    onDragBlocked: () => viewModeVibrateRef.current?.(),
   })
 
   // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
@@ -2413,6 +2426,9 @@ export default function Shell() {
         newAppIds={newAppIds}
         settingsWarning={providerAuth.anyDisconnected}
         dragActiveRef={dragActiveRef}
+        viewMode={workspace.viewMode}
+        onToggleViewMode={handleToggleViewMode}
+        viewModeVibrateRef={viewModeVibrateRef}
       />
 
       {showWalkthrough && (
@@ -2581,7 +2597,11 @@ export default function Shell() {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
-                visible={chatPanesVisible && role !== 'held'}
+                // Single view-mode paints only the focused pane full-bleed, so every
+              // NON-focused chat pane stops doing work (streaming/scroll) — the
+              // chat analogue of visibleAppIds soloing the focused app. Panes mode
+              // keeps every visible chat pane doing work.
+              visible={chatPanesVisible && (!single || paneId === workspace.focusedPaneId) && role !== 'held'}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
                 composerFocusRequest={role === 'active' ? composerFocusRequest : null}

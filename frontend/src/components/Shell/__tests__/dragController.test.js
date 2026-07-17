@@ -8,6 +8,7 @@ import {
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene, paneAcceptsJoin,
+  dragArmingBlocked,
 } from '../dragController.js'
 import * as paneModel from '../paneModel.js'
 import { STRIP_H } from '../paneModel.js'
@@ -474,4 +475,31 @@ test('buildScene records each single-tab pane sole key', () => {
   const proj = paneModel.projectLayout(ws, 'wide', content)
   const s = buildScene(ws, proj, 'wide', content, null, true, () => [])
   assert.equal(s.panes[0].soleTabKey, 'chat:5')
+})
+
+// ── Drag arming across view-mode (design: view-mode toggle) ─────────────────
+//
+// Single view-mode with a preserved multi-pane tree disables dragging (the
+// attempted gesture vibrates the toggle instead). Every other case arms.
+
+test('dragArmingBlocked: single view-mode with a multi-pane tree blocks (>=2 leaves)', () => {
+  assert.equal(dragArmingBlocked({ viewMode: 'single', leafCount: 2 }), true)
+  assert.equal(dragArmingBlocked({ viewMode: 'single', leafCount: 3 }), true)
+  assert.equal(dragArmingBlocked({ viewMode: 'single', leafCount: 4 }), true)
+})
+
+test('dragArmingBlocked: single view-mode with ONE leaf stays draggable (a split flips to panes)', () => {
+  assert.equal(dragArmingBlocked({ viewMode: 'single', leafCount: 1 }), false)
+  assert.equal(dragArmingBlocked({ viewMode: 'single', leafCount: 0 }), false)
+})
+
+test('dragArmingBlocked: panes view-mode always arms, regardless of leaf count', () => {
+  assert.equal(dragArmingBlocked({ viewMode: 'panes', leafCount: 1 }), false)
+  assert.equal(dragArmingBlocked({ viewMode: 'panes', leafCount: 4 }), false)
+})
+
+test('dragArmingBlocked: absent/empty inputs never block (defensive default)', () => {
+  assert.equal(dragArmingBlocked({}), false)
+  assert.equal(dragArmingBlocked(), false)
+  assert.equal(dragArmingBlocked({ viewMode: undefined, leafCount: 3 }), false)
 })

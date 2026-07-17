@@ -326,7 +326,12 @@ export function normalize(ws) {
   for (const id of splitIdsOf(layout)) maxId = Math.max(maxId, idSuffix(id))
   const storedNext = (Number.isInteger(ws.nextId) && ws.nextId > 0) ? ws.nextId : 0
   const nextId = Math.max(maxId + 1, storedNext)
-  const result = { v: 1, layout, panes, focusedPaneId: focused, nextId }
+  // viewMode is a preserved field, coerced to a valid value (absent/corrupt ->
+  // 'panes', design: forgiving parse). It never affects the tree, so it rides
+  // through normalize untouched except for this coercion; deepEqual below still
+  // returns the SAME reference when the input already carried the same mode.
+  const viewMode = coerceViewMode(ws.viewMode)
+  const result = { v: 1, viewMode, layout, panes, focusedPaneId: focused, nextId }
   return deepEqual(result, ws) ? ws : result
 }
 
@@ -349,13 +354,15 @@ function commitBounded(ws, candidate) {
 
 // Seed a single-pane workspace from today's flat open set. Tabs are sanitized,
 // deduped, and capped to the last MAX_PANE_TABS (legacy readOpenTabs posture);
-// the last tab is active (the on-screen one under the flat model).
+// the last tab is active (the on-screen one under the flat model). A fresh
+// workspace opens in 'panes' view-mode — the tiled default (see viewMode below).
 export function seedFromFlatTabs(tabs) {
   const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
   return {
     v: 1,
+    viewMode: 'panes',
     layout: paneId,
     panes: {
       [paneId]: {
@@ -367,6 +374,29 @@ export function seedFromFlatTabs(tabs) {
     focusedPaneId: paneId,
     nextId: 1,
   }
+}
+
+// The two view-modes. 'panes' is the tiled default; 'single' collapses a
+// preserved multi-pane tree down to the focused pane's active tab, painted
+// full-bleed (the workspaceView derivation reads viewMode; the tree is untouched
+// so toggling back re-projects it exactly). Any other/absent value is 'panes'.
+function coerceViewMode(mode) {
+  return mode === 'single' ? 'single' : 'panes'
+}
+
+// Set the view-mode. Pure; returns the SAME reference when it already holds the
+// target mode (the workspace convention, so React can bail on an unchanged tree).
+// It touches only viewMode — the layout/panes/focus/nextId are already normalized
+// and a mode flip never mutates them, so no re-normalize is needed.
+export function setViewMode(ws, mode) {
+  const next = coerceViewMode(mode)
+  if (ws.viewMode === next) return ws
+  return { ...ws, viewMode: next }
+}
+
+// Flip single <-> panes. Absent/'panes' -> 'single'; 'single' -> 'panes'.
+export function toggleViewMode(ws) {
+  return setViewMode(ws, ws.viewMode === 'single' ? 'panes' : 'single')
 }
 
 // Every live leaf pane id in in-order (left-to-right) sequence. The resolver
@@ -1346,6 +1376,12 @@ export function initialWorkspaceState(ws) {
 //   Clears the slot on change:  SET_ACTIVE, FOCUS, a plain (non-evicting)
 //                               OPEN_TAB, PRUNE, RESET_FLAT, and a CLOSE_TAB
 //                               with reason:'deleted'.
+//   Preserves the slot:         SET_VIEW_MODE — a pure view flip is ORTHOGONAL to
+//                               the tree, so it neither creates nor clears an undo
+//                               target (a pending tab-move stays undoable). This
+//                               is safe only because UNDO_LAST carries the CURRENT
+//                               view-mode forward: undoing a tree edit made across
+//                               a view flip reverts the edit, never the flip.
 //
 // PRUNE, RESET_FLAT, and reason:'deleted' close clear even when they change
 // nothing, because the resource is gone and ANY older snapshot could resurrect
@@ -1446,9 +1482,27 @@ export function workspaceReducer(state, action) {
         undo: { ws, label: 'Workspace placement', toast: action.toast || 'Agent arranged your workspace' },
       }
     }
+    case 'SET_VIEW_MODE': {
+      // A pure view flip (design: view-mode toggle). It never mutates the tree,
+      // so it is ORTHOGONAL to the undo slot: it neither creates nor clears it
+      // (a pending tab-move stays undoable) and it is itself reversible by
+      // toggling again, so it takes no slot of its own. mode 'toggle' flips;
+      // 'single'/'panes' set explicitly (the single-leaf split-drop passes
+      // 'panes' so the new pane actually shows).
+      const next = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
+      if (next === ws) return state
+      return { ws: next, undo }
+    }
     case 'UNDO_LAST': {
       if (!undo) return state
-      return { ws: undo.ws, undo: null }
+      // Restore the tree the slot captured, but KEEP the CURRENT view-mode: a
+      // view flip is not an undoable step, so undoing a tab-move must not also
+      // revert a single/panes toggle the user made afterward. Reuse the snapshot
+      // reference when the mode already matches (no gratuitous new object).
+      const restored = undo.ws.viewMode === ws.viewMode
+        ? undo.ws
+        : { ...undo.ws, viewMode: ws.viewMode }
+      return { ws: restored, undo: null }
     }
     case 'RESET_FLAT': {
       const next = seedFromFlatTabs(action.tabs)

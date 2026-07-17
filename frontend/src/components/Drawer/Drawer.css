@@ -548,6 +548,78 @@
   margin-top: auto;
   padding-top: 8px;
   border-top: 1px solid var(--border-light);
+  /* Footer row: Settings fills the width, the view-mode toggle sits inline at the
+     right. Flex row so the two controls sit side by side rather than the toggle
+     nesting inside the Settings button (mirrors .drawer__row's two-control split). */
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.drawer__group--bottom .drawer__item {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+/* ── View-mode toggle (single-screen <-> split-panes) ─────────── */
+
+/* Quiet by default (muted glyph, no chrome). The active (single) state gets a
+   soft accent tint via aria-pressed — never a loud fill, matching the pane
+   strips' understated active-tab treatment (workspace.css). */
+.drawer__viewmode {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+@media (hover: hover) and (pointer: fine) {
+  .drawer__viewmode:hover {
+    color: var(--text);
+    background: var(--surface);
+  }
+}
+.drawer__viewmode[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.drawer__viewmode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Attempted-drag feedback: a brief horizontal shake says "dragging is off in
+   single-screen mode." Fired by the drag controller via the toggle's vibrate ref. */
+.drawer__viewmode.is-vibrating {
+  animation: drawer-viewmode-shake 0.4s ease;
+}
+@keyframes drawer-viewmode-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+/* Reduced motion: no transform shake — a non-motion outline pulse instead, so the
+   "dragging is off" signal still lands without moving the control. */
+@media (prefers-reduced-motion: reduce) {
+  .drawer__viewmode.is-vibrating {
+    animation: drawer-viewmode-pulse 0.4s ease;
+    transform: none;
+  }
+  @keyframes drawer-viewmode-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50% { box-shadow: 0 0 0 2px var(--accent); }
+  }
 }
 
 /* ── Streaming pulse dot ───────────────────────────── */

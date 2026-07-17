@@ -113,3 +113,115 @@ test('exit restores the ordinary multi-pane view (derivation is stateless)', () 
   assert.equal(after.fullBleedKey, before.fullBleedKey)
   assert.deepEqual([...after.visibleAppIds], [...before.visibleAppIds])
 })
+
+// ── Single view-mode (design: view-mode toggle) ─────────────────────────────
+//
+// Single-mode collapses a preserved multi-pane tree to the focused pane's active
+// tab, full-bleed. It reuses the immersive/single-pane full-bleed path but is
+// driven by viewMode, not an overlay, and it is orthogonal to both overlays.
+
+test('single-mode, multi-pane, focused app: chrome off, holder full-bleed, only focused app visible', () => {
+  const ws = twoPaneChatAndApp() // right (app 42) pane focused
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsActive: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'single',
+  })
+  assert.equal(v.single, true)
+  assert.equal(v.multiPane, true, 'the tree is preserved — still two leaves')
+  assert.equal(v.chromeActive, false, 'no strips/dividers over a single surface')
+  assert.equal(v.fullBleedKey, 'app:42', 'the focused pane paints full-bleed')
+  // Only the focused pane's app stays frame-visible; the sibling chat pane hides.
+  assert.deepEqual([...v.visibleAppIds], ['42'])
+})
+
+test('single-mode with a focused CHAT pane paints the chat and hides the sibling app frame', () => {
+  // Focus p0 (the chat) instead of the app pane.
+  const ws = paneModel.focusPane(twoPaneChatAndApp(), 'p0')
+  assert.equal(ws.panes.p0.activeTabKey, tabKey(makeTab('chat', '5')))
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsActive: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'single',
+  })
+  assert.equal(v.single, true)
+  assert.equal(v.fullBleedKey, 'chat:5', 'the focused chat is the full-bleed surface')
+  // The sibling app 42 is NOT focused, so its frame goes visibility:false.
+  assert.deepEqual([...v.visibleAppIds], [])
+})
+
+test('single-mode preserves the tree: a panes -> single -> panes round-trip restores identical flags', () => {
+  const ws = twoPaneChatAndApp()
+  const projection = project(ws)
+  const panesBefore = deriveContentVisibility({
+    workspace: ws, projection, settingsActive: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
+  })
+  // Flip to single: the derivation changes, but ws + projection are untouched.
+  deriveContentVisibility({
+    workspace: ws, projection, settingsActive: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'single',
+  })
+  const panesAfter = deriveContentVisibility({
+    workspace: ws, projection, settingsActive: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
+  })
+  assert.equal(panesAfter.single, false)
+  assert.equal(panesAfter.chromeActive, panesBefore.chromeActive)
+  assert.equal(panesAfter.fullBleedKey, panesBefore.fullBleedKey)
+  assert.deepEqual([...panesAfter.visibleAppIds], [...panesBefore.visibleAppIds])
+})
+
+test('single-mode yields to Settings: the overlay governs and single is inert', () => {
+  const ws = twoPaneChatAndApp()
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsActive: true, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'single',
+  })
+  assert.equal(v.single, false, 'Settings takes precedence over view-mode')
+  assert.equal(v.chromeActive, false)
+  assert.equal(v.focusedActiveKey, null)
+  assert.equal(v.visibleAppIds.size, 0)
+  assert.equal(v.chatPanesVisible, false)
+})
+
+test('single-mode yields to immersive: the holder solo governs and single is inert', () => {
+  const ws = twoPaneChatAndApp() // app 42 focused, holds immersive
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsActive: false, immersiveActive: true, immersiveAppId: 42,
+    viewMode: 'single',
+  })
+  assert.equal(v.single, false, 'immersive takes precedence over view-mode')
+  assert.equal(v.chromeActive, false)
+  assert.equal(v.fullBleedKey, tabKey(makeTab('app', '42')))
+  assert.deepEqual([...v.visibleAppIds], ['42'])
+  assert.equal(v.chatPanesVisible, false)
+})
+
+test('single-mode on a single-pane workspace is a no-op (already full-bleed)', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('app', '42')])
+  const panes = deriveContentVisibility({
+    workspace: ws, projection: project(ws), settingsActive: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
+  })
+  const singleV = deriveContentVisibility({
+    workspace: ws, projection: project(ws), settingsActive: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'single',
+  })
+  // Same render either way — one pane always paints full-bleed.
+  assert.equal(singleV.fullBleedKey, panes.fullBleedKey)
+  assert.equal(singleV.chromeActive, panes.chromeActive)
+  assert.deepEqual([...singleV.visibleAppIds], [...panes.visibleAppIds])
+})
+
+test('viewMode defaults to panes when omitted (back-compat with the pre-toggle signature)', () => {
+  const ws = twoPaneChatAndApp()
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsActive: false, immersiveActive: false, immersiveAppId: null,
+  })
+  assert.equal(v.single, false)
+  assert.equal(v.chromeActive, true, 'absent viewMode tiles as before')
+})

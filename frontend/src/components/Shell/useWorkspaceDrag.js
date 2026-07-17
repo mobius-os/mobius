@@ -1,10 +1,10 @@
 import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
-import { STRIP_H } from './paneModel.js'
+import { STRIP_H, paneIdsInOrder } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, crossedDrawerExit,
-  rootEdgeAllowed,
+  rootEdgeAllowed, dragArmingBlocked,
 } from './dragController.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
@@ -77,6 +77,7 @@ export default function useWorkspaceDrag({
   openDrawer,
   openTabMenuAtRef, // ref → (clientX, clientY, tab, paneId) => void
   onDragStart, // dismiss the coachmark on the first real drag
+  onDragBlocked, // vibrate the view-mode toggle when a drag is disabled (single-mode, multi-pane tree)
 }) {
   useEffect(() => {
     if (!enabled) return undefined
@@ -235,6 +236,21 @@ export default function useWorkspaceDrag({
 
       const arm = () => {
         if (cancelled || cleaned) return
+        // Single view-mode with a preserved multi-pane tree disables dragging
+        // (design: view-mode toggle). Both arm paths — the mouse slop check and
+        // the touch hold timer — funnel through here, so blocking at the top
+        // covers both: vibrate the view-mode toggle and abandon the gesture
+        // instead of arming. suppressClick stops the compat click from also
+        // opening the row (the user moved to drag, not tap). The single-leaf case
+        // is NOT blocked — it falls through and arms so its splitting drop can
+        // opt back into panes (see commitDrop).
+        const wsNow = workspaceStateRef.current.ws
+        if (dragArmingBlocked({ viewMode: wsNow.viewMode, leafCount: paneIdsInOrder(wsNow).length })) {
+          onDragBlocked?.()
+          cancelled = true
+          cleanup({ suppressClick: true })
+          return
+        }
         armed = true
         dragActiveRef.current = true // the Drawer's swipe-close handlers stand down
         onDragStart?.() // dismiss the coachmark
@@ -371,7 +387,19 @@ export default function useWorkspaceDrag({
         // here: OPEN_TAB_AT stamps a `toast` on the slot only when the drop
         // actually mutates, so the toast can never outlive or mis-name its
         // snapshot (design §3.5).
+        // A splitting drop (edge or root split) made while in single view-mode is
+        // an explicit request for panes — the drop's whole intent is a second
+        // visible surface. Drag is only enabled in single-mode for a single-leaf
+        // tree, so this fires exactly on the 1->2-leaf split; flip the mode after
+        // the split lands so the new pane actually shows (design: view-mode
+        // toggle, single-leaf split path). A center/strip join keeps one leaf and
+        // stays single. Read viewMode BEFORE the split dispatch (the split never
+        // touches viewMode, but capturing first keeps the intent explicit).
+        const wasSingle = workspaceStateRef.current.ws.viewMode === 'single'
         dispatchWorkspace({ type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}` })
+        if (wasSingle && target.edge != null) {
+          dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'panes' })
+        }
       }
 
       const onUp = (ev) => {
