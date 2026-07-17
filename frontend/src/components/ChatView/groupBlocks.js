@@ -1,5 +1,11 @@
 import { toolBlockFailed } from './toolResultFormat.js'
-import { toolActivityLabel, toolActivityPastLabel } from './toolActivityLabel.js'
+import {
+  toolActivityLabel,
+  toolActivityPastLabel,
+  toolActivitySingular,
+  toolActivityPastSingular,
+  effectiveToolName,
+} from './toolActivityLabel.js'
 
 // Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
 // activity node, including a lone entry. A build turn's pre-prose burst is one
@@ -128,15 +134,21 @@ export function toolGroupSummary(tools) {
   // Search from the tail so "currently running" reads as the most-recent live
   // tool. Seeding `seen` with its label pins it first; the first-seen scan then
   // fills the rest, and the dedupe folds the running label back out if it also
-  // appears earlier.
+  // appears earlier. Count per label so a lone occurrence reads singular
+  // ("Running a command"); a countable activity with 2+ tools stays plural.
   const running = [...tools].reverse().find(t => t?.status === 'running')
   const seen = []
-  if (running) seen.push(toolActivityLabel(running.tool))
+  const counts = new Map()
+  const bump = label => counts.set(label, (counts.get(label) || 0) + 1)
+  if (running) seen.push(toolActivityLabel(effectiveToolName(running)))
   for (const t of tools) {
-    const label = toolActivityLabel(t?.tool)
+    const label = toolActivityLabel(effectiveToolName(t))
+    bump(label)
     if (!seen.includes(label)) seen.push(label)
   }
-  const head = seen.slice(0, 3).join(' · ')
+  const head = seen.slice(0, 3)
+    .map(label => counts.get(label) === 1 ? toolActivitySingular(label) : label)
+    .join(' · ')
   const extra = seen.length - 3
   return extra > 0 ? `${head} +${extra}` : head
 }
@@ -149,14 +161,20 @@ export function toolGroupSummary(tools) {
 // label, same as the live summary. Pure — no React, no mutation.
 export function toolGroupPastSummary(tools) {
   const seen = []
+  const counts = new Map()
   for (const t of tools) {
-    const past = toolActivityPastLabel(t?.tool)
-    const label = past || t?.tool || 'Tool'
+    const name = effectiveToolName(t)
+    const past = toolActivityPastLabel(name)
+    const label = past || name || 'Tool'
+    counts.set(label, (counts.get(label) || 0) + 1)
     if (!seen.some(s => s.label === label)) seen.push({ label, known: !!past })
   }
-  const shown = seen.slice(0, 3).map(({ label, known }, i) => (
-    i > 0 && known ? label.charAt(0).toLowerCase() + label.slice(1) : label
-  ))
+  const shown = seen.slice(0, 3).map(({ label, known }, i) => {
+    // A lone occurrence of a countable activity reads singular ("Ran a
+    // command"); 2+ stay plural. Only known (mapped) labels have singulars.
+    const text = counts.get(label) === 1 ? toolActivityPastSingular(label) : label
+    return i > 0 && known ? text.charAt(0).toLowerCase() + text.slice(1) : text
+  })
   const head = shown.join(', ')
   const extra = seen.length - 3
   return extra > 0 ? `${head} +${extra}` : head

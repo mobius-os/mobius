@@ -600,10 +600,10 @@ test.describe('SSE streaming (real React path)', () => {
     assertSpacerReasonable(m)
 
     // Once the tool settles, the compact line switches from progressive copy
-    // to the reviewed past-tense label and exposes the first activity's muted
+    // to the reviewed past-tense label (singular for a lone Read) and exposes the first activity's muted
     // type glyph. The spinner belongs only to a live tool.
     const activity = page.locator('.chat__activity').first()
-    await expect(activity.locator('.chat__activity-label')).toHaveText('Read files')
+    await expect(activity.locator('.chat__activity-label')).toHaveText('Read a file')
     await expect(activity.locator('[data-activity-kind="files"]')).toHaveCount(1)
     await expect(activity.locator('.chat__tool-spin')).toHaveCount(0)
   })

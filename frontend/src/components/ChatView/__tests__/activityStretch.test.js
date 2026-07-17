@@ -43,7 +43,7 @@ test('collapsed label — live tool running: the running-first activity rollup, 
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Bash', status: 'running' })),
   ]
-  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Running commands · Reading files')
+  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Running a command · Reading a file')
 })
 
 test('collapsed label — live thinking tail: a bare "Thinking" (no clock, no dots)', () => {
@@ -64,14 +64,14 @@ test('collapsed label — settled thinking-only with no duration: bare "Thought"
 
 test('collapsed label — settled mixed stretch: past-tense sentence, tools only', () => {
   // The reasoning is available on expand; the settled line stays a short
-  // scannable "what did it DO" summary in past tense — "Read files, edited
+  // scannable "what did it DO" summary in past tense — "Read a file, edited
   // code" (the Codex idiom), never a "Reading files" frozen in time.
   const entries = [
     e(think({ content: 'plan', duration_ms: 3000 })),
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Edit', status: 'done' })),
   ]
-  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Read files, edited code')
+  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Read a file, edited code')
 })
 
 test('toolGroupPastSummary: first-seen dedupe, lowercased continuations, raw names kept', () => {
@@ -79,12 +79,12 @@ test('toolGroupPastSummary: first-seen dedupe, lowercased continuations, raw nam
     toolGroupPastSummary([
       tool({ tool: 'Bash' }), tool({ tool: 'Read' }), tool({ tool: 'Glob' }),
     ]),
-    'Ran commands, read files',
+    'Ran a command, read files',
   )
   // An unmapped tool is an identifier, not prose: casing survives mid-sentence.
   assert.equal(
     toolGroupPastSummary([tool({ tool: 'Read' }), tool({ tool: 'CronCreate' })]),
-    'Read files, CronCreate',
+    'Read a file, CronCreate',
   )
   // Overflow folds into +N, same as the live rollup.
   assert.equal(
@@ -92,7 +92,7 @@ test('toolGroupPastSummary: first-seen dedupe, lowercased continuations, raw nam
       tool({ tool: 'Read' }), tool({ tool: 'Edit' }),
       tool({ tool: 'Bash' }), tool({ tool: 'Grep' }),
     ]),
-    'Read files, edited code, ran commands +1',
+    'Read a file, edited code, ran a command +1',
   )
 })
 
@@ -101,7 +101,7 @@ test('collapsed label — LIVE mixed stretch keeps the progressive running-first
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Bash', status: 'running' })),
   ]
-  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Running commands · Reading files')
+  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Running a command · Reading a file')
 })
 
 test('a running tool keeps progressive copy outside the trailing live stretch', () => {
@@ -109,7 +109,7 @@ test('a running tool keeps progressive copy outside the trailing live stretch', 
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Bash', status: 'running' })),
   ]
-  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Running commands · Reading files')
+  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Running a command · Reading a file')
   assert.equal(activityStreamState(entries.map(entry => entry.item)), 'running')
 })
 

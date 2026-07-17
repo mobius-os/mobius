@@ -9,7 +9,7 @@ import {
   thoughtDurationLabel,
 } from './groupBlocks.js'
 import { toolBlockExitCode } from './toolResultFormat.js'
-import { toolActivityIcon } from './toolActivityLabel.js'
+import { toolActivityIcon, effectiveToolName } from './toolActivityLabel.js'
 import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
@@ -95,6 +95,16 @@ function ActivityTypeIcon({ kind }) {
       </svg>
     )
   }
+  if (kind === 'image') {
+    // A framed picture with a horizon + sun — the "viewed an image" glyph.
+    return (
+      <svg {...common}>
+        <rect x="2" y="3" width="12" height="10" rx="2" />
+        <circle cx="6" cy="6.5" r="1.1" />
+        <path d="M2.5 11.5 6 8.5l2.5 2 2-1.5 2.5 2.5" />
+      </svg>
+    )
+  }
   return (
     <svg {...common}>
       <circle cx="8" cy="8" r="2.2" fill="currentColor" stroke="none" />
@@ -114,7 +124,7 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
   const leadTool = [...entries].reverse()
     .find(e => e?.item?.type === 'tool' && e.item.status === 'running')?.item
     || entries.find(e => e?.item?.type === 'tool')?.item
-  const leadToolIcon = toolActivityIcon(leadTool?.tool)
+  const leadToolIcon = toolActivityIcon(effectiveToolName(leadTool))
   // Deriving the state parses each tool's output for its exit code, so memoize
   // on a cheap signature (see activityMemoSig for the exact staleness contract:
   // head+tail output slices catch an equal-length exit-code flip; thinking

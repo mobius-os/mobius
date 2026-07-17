@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { formatToolResult } from './toolResultFormat.js'
-import { toolActivityLabel } from './toolActivityLabel.js'
+import { toolActivityLabel, effectiveToolName } from './toolActivityLabel.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 
 function sourceHost(url) {
@@ -163,7 +163,7 @@ export default function ToolBlock({ t, chatId }) {
           commands…", not "Running Bash..."); once done it shows the raw
           call (name + input) so what ran stays inspectable. */}
       <span className="chat__tool-name">
-        {t.status === 'running' ? `${toolActivityLabel(toolName)}…` : label}
+        {t.status === 'running' ? `${toolActivityLabel(effectiveToolName(t))}…` : label}
       </span>
       {failed && (
         <span className="chat__tool-exit chat__tool-exit--head">exit {exitCode}</span>

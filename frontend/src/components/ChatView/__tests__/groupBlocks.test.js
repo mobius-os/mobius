@@ -129,11 +129,12 @@ test('toolGroupSummary: distinct activity labels, first 3 + overflow', () => {
       tool({ tool: 'Read' }), tool({ tool: 'Read' }), tool({ tool: 'Edit' }),
       tool({ tool: 'Bash' }), tool({ tool: 'Grep' }), tool({ tool: 'Write' }),
     ]),
-    'Reading files · Editing code · Running commands +1'
+    // Read x2 stays plural; the lone Bash reads singular.
+    'Reading files · Editing code · Running a command +1'
   )
   assert.equal(
     toolGroupSummary([tool({ tool: 'Read' }), tool({ tool: 'Edit' })]),
-    'Reading files · Editing code'
+    'Reading a file · Editing code'
   )
   assert.equal(toolGroupSummary([tool({}), tool({})]), 'Tool')
 })
@@ -141,7 +142,7 @@ test('toolGroupSummary: distinct activity labels, first 3 + overflow', () => {
 test('toolGroupSummary: an unknown tool name passes through raw', () => {
   assert.equal(
     toolGroupSummary([tool({ tool: 'FooTool' }), tool({ tool: 'Bash' })]),
-    'FooTool · Running commands'
+    'FooTool · Running a command'
   )
 })
 
@@ -154,7 +155,7 @@ test('toolGroupSummary: the running tool leads while the run is live', () => {
       tool({ tool: 'Edit', status: 'done' }),
       tool({ tool: 'Bash', status: 'running' }),
     ]),
-    'Running commands · Reading files · Editing code'
+    'Running a command · Reading a file · Editing code'
   )
   // Dedupe still folds across the reorder: a running tool whose activity also
   // appears earlier collapses to the single leading entry (Glob → Reading files
@@ -175,7 +176,7 @@ test('toolGroupSummary: the running tool leads while the run is live', () => {
       tool({ tool: 'Edit', status: 'done' }),
       tool({ tool: 'WebSearch', status: 'running' }),
     ]),
-    'Browsing the web · Reading files · Searching the code +1'
+    'Browsing the web · Reading a file · Searching the code +1'
   )
   // No running tool → plain first-seen order (the done/persisted header),
   // identical to the pre-change behavior.
@@ -184,7 +185,7 @@ test('toolGroupSummary: the running tool leads while the run is live', () => {
       tool({ tool: 'Bash', status: 'done' }),
       tool({ tool: 'Read', status: 'done' }),
     ]),
-    'Running commands · Reading files'
+    'Running a command · Reading a file'
   )
 })
 
