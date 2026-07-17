@@ -910,19 +910,6 @@ export function flattenRollbackPriority(ws) {
   return out
 }
 
-// The on-screen tab of every leaf pane, in-order. PR1 has one pane, but the
-// renderer (PR2) walks all visible panes the same way.
-export function visibleTabs(ws) {
-  const out = []
-  for (const id of leafIds(ws.layout)) {
-    const pane = ws.panes[id]
-    if (!pane) continue
-    const active = pane.tabs.find(tab => tabModel.tabKey(tab) === pane.activeTabKey)
-    if (active) out.push(active)
-  }
-  return out
-}
-
 // ── Projection: the tree → renderable geometry (design §4) ──────────────────
 //
 // projectLayout is the SINGLE geometry authority for every mode. The renderer,
