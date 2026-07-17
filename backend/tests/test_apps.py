@@ -454,6 +454,26 @@ def test_get_icon_size_returns_smaller_cached_variant(client, auth, db):
   assert again.status_code == 304
   assert again.headers["Cache-Control"] == _CC
 
+  # A URL carrying the app's exact updated_at is content-addressed from the
+  # browser's perspective: any icon-changing update advances updated_at and
+  # therefore produces a new URL. Keep this response indefinitely so reopening
+  # the App Store never re-downloads unchanged icons.
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  versioned = client.get(
+    f"/api/apps/{app_id}/icon",
+    params={"size": 128, "v": row.updated_at.isoformat()},
+  )
+  assert versioned.status_code == 200
+  assert versioned.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+  # A guessed/stale version must not earn immutable caching.
+  stale_version = client.get(
+    f"/api/apps/{app_id}/icon",
+    params={"size": 128, "v": "stale"},
+  )
+  assert stale_version.status_code == 200
+  assert stale_version.headers["Cache-Control"] == _CC
+
 
 def test_get_icon_rejects_unsupported_size(client, auth, db):
   """An unsupported ?size= is a 400 so the variant cache can't be flooded."""

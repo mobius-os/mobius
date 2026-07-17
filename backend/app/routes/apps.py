@@ -1851,6 +1851,7 @@ async def get_icon(
   request: Request,
   db: Session = Depends(get_db),
   size: int | None = None,
+  v: str | None = None,
 ):
   """Public read of an app's icon PNG, so a mini-app can render its own logo
   with a plain `<img src="/api/apps/<id>/icon">` (e.g. as its file-drawer
@@ -1862,9 +1863,10 @@ async def get_icon(
 
   Icons are hundreds of KB and the store grid renders a dozen at once, so
   the old `Cache-Control: no-cache` made every grid open re-download ~4MB.
-  ETag on `updated_at` (same validator family as /module) + a 1h max-age:
-  repeat opens are free, and an app update advances the validator so the
-  next revalidation picks up the new icon within the hour.
+  ETag on `updated_at` (same validator family as /module) + a 1h max-age keeps
+  legacy URLs warm. Callers that include the exact `updated_at` as `?v=` get
+  a one-year immutable response instead: an app/icon update changes the URL,
+  so repeat Store opens never re-fetch unchanged icon bytes.
 
   `?size=` (64 or 128) returns a Pillow-downscaled variant — a full-res
   PNG is wasted bytes when the caller renders it as a 28px top-bar logo or
@@ -1888,9 +1890,15 @@ async def get_icon(
     raise HTTPException(404, "No icon set.")
   ts_us = int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0
   etag = f'W/"{ts_us}-{size}"' if size else f'W/"{ts_us}"'
+  version = app.updated_at.isoformat() if app.updated_at else "0"
+  versioned_url = v == version
   headers = {
     "ETag": etag,
-    "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+    "Cache-Control": (
+      "public, max-age=31536000, immutable"
+      if versioned_url
+      else "public, max-age=3600, stale-while-revalidate=86400"
+    ),
   }
   if request.headers.get("if-none-match") == etag:
     return Response(status_code=304, headers=headers)
