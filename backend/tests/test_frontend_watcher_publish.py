@@ -335,7 +335,7 @@ def test_vite_demand_build_is_bounded_and_one_shot(fw_dirs, monkeypatch):
 
   assert env["MOBIUS_VITE_CACHE"] == str(fw_dirs["cache"])
   assert env["TMPDIR"] == str(fw_dirs["tmp"])
-  assert "--max-old-space-size=512" in env["NODE_OPTIONS"]
+  assert "--max-old-space-size=384" in env["NODE_OPTIONS"]
   assert cmd[0] == str(fw_dirs["frontend"] / "node_modules" / ".bin" / "vite")
   assert "--watch" not in cmd
   assert ".dist-staging" in cmd

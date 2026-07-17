@@ -420,11 +420,11 @@ def _vite_env(
   env["MOBIUS_VITE_CACHE"] = str(cache_dir)
   env["TMPDIR"] = str(tmp_dir)
   # Bound peak build memory while preserving an explicit operator override.
-  # Lower ceilings can finish the main bundle but OOM while finalizing the
-  # service worker, so 512 MiB remains the reliability-tested floor.
+  # A 320 MiB ceiling can finish the main bundle but OOM while finalizing the
+  # service worker; consecutive isolated builds pass at 384 MiB.
   node_options = env.get("NODE_OPTIONS", "")
   if "--max-old-space-size" not in node_options and "--max_old_space_size" not in node_options:
-    env["NODE_OPTIONS"] = f"{node_options} --max-old-space-size=512".strip()
+    env["NODE_OPTIONS"] = f"{node_options} --max-old-space-size=384".strip()
   return env
 
 
