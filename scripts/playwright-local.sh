@@ -11,8 +11,9 @@ Möbius stack and can take several minutes. Prefer the GitHub PR checks.
 Run this on a Docker-capable host, not inside the Möbius app container:
   scripts/playwright-local.sh --allow-local-e2e <spec or --grep arguments>
 
-The runner keeps one reusable image tag per checkout to make later runs faster.
-Set MOBIUS_LOCAL_E2E_KEEP_CACHE=0 when disk retention is more important.
+The runner deletes its test image by default. Set
+MOBIUS_LOCAL_E2E_KEEP_CACHE=1 only for an intentionally retained per-checkout
+image; BuildKit already owns the ordinary build cache.
 EOF
   exit 2
 fi
@@ -63,12 +64,12 @@ image_name="${project}:test"
 # while the stable numeric suffix keeps the default tag Docker-safe.
 checkout_id="$(printf '%s' "$ROOT" | cksum | awk '{print $1}')"
 cache_image="${MOBIUS_LOCAL_E2E_CACHE_IMAGE:-mobius-local-e2e-cache-${checkout_id}:test}"
-keep_cache="${MOBIUS_LOCAL_E2E_KEEP_CACHE:-1}"
+keep_cache="${MOBIUS_LOCAL_E2E_KEEP_CACHE:-0}"
 if [[ "$keep_cache" != "0" && "$keep_cache" != "1" ]]; then
   echo "error: MOBIUS_LOCAL_E2E_KEEP_CACHE must be 0 or 1" >&2
   exit 2
 fi
-min_free_gb="${MOBIUS_LOCAL_E2E_MIN_FREE_GB:-8}"
+min_free_gb="${MOBIUS_LOCAL_E2E_MIN_FREE_GB:-20}"
 if [[ ! "$min_free_gb" =~ ^[0-9]+$ ]]; then
   echo "error: MOBIUS_LOCAL_E2E_MIN_FREE_GB must be a non-negative integer" >&2
   exit 2
@@ -87,6 +88,12 @@ MOBIUS_LOCAL_E2E_MIN_FREE_GB=0 only when this checkout already completed a
 cached build that is known to fit.
 EOF
   exit 2
+fi
+# Retention is opt-in. Remove a legacy cache tag from this checkout before the
+# build when the owner did not request it; image removal is reference-aware and
+# fails harmlessly if a container still uses the image.
+if [[ "$keep_cache" == "0" ]]; then
+  docker image rm "$cache_image" >/dev/null 2>&1 || true
 fi
 app_container="${project}-app"
 caddy_container="${project}-caddy"

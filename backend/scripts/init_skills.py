@@ -41,6 +41,9 @@ SEED_VERSION = "13"  # v13: remove the retired built-in image provider
 _UNMODIFIED_MIGRATIONS = {
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
+    # Resource-stewardship predecessor: propagate the adaptive analytics
+    # and self-throttling contract only to untouched copies.
+    "865dd241a99668b026cd9be90c472cfde562210df51f729b2c25929f6b3bd60a",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
