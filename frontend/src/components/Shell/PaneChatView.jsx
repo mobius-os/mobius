@@ -37,6 +37,7 @@ function PaneChatView({
   refreshChats,
   loadTheme,
   navTo,
+  onInternalNav,
   onChatMissing,
   onFirstMessage,
   onDisplayReady,
@@ -94,6 +95,7 @@ function PaneChatView({
         onChatMissing={handleChatMissing}
         builtApps={builtApps}
         onOpenApp={handleOpenApp}
+        onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
         onQuestionAnswered={refreshChats}
         onVoiceListeningChange={markVoiceListening}

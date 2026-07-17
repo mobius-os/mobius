@@ -257,6 +257,7 @@ export default function ChatView({
   onChatMissing,
   builtApps = NO_BUILT_APPS,
   onOpenApp,
+  onInternalNav,
   onMessageStart,
   onQuestionAnswered,
   onVoiceListeningChange,
@@ -286,6 +287,10 @@ export default function ChatView({
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
+  const handleInternalNav = useCallback((url) => {
+    onInternalNav?.(url)
+  }, [onInternalNav])
+  const internalNav = onInternalNav ? handleInternalNav : undefined
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
   // dead stream.
@@ -3719,6 +3724,7 @@ export default function ChatView({
                 chatId={chatId}
                 onQuestionAnswer={doSendSilent}
                 onResume={doSend}
+                onInternalNav={internalNav}
                 autoResumeEnabled={
                   isLastMsg && autoResumeEnabled
                 }
@@ -3758,6 +3764,7 @@ export default function ChatView({
               chatId={chatId}
               onAnswer={doSendSilent}
               onResume={activeAssistantIsStreaming ? undefined : doSend}
+              onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}
               autoResumeAvailable={showAutoResumeControl}
               autoResumeSaving={autoResumeSaving}

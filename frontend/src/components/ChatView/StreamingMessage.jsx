@@ -14,6 +14,7 @@ export default function StreamingMessage({
   chatId,
   onAnswer,
   onResume,
+  onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
   autoResumeSaving,
@@ -34,6 +35,7 @@ export default function StreamingMessage({
         chatId={chatId}
         onQuestionAnswer={onAnswer}
         onResume={onResume}
+        onInternalNav={onInternalNav}
         autoResumeEnabled={autoResumeEnabled}
         autoResumeAvailable={autoResumeAvailable}
         autoResumeSaving={autoResumeSaving}

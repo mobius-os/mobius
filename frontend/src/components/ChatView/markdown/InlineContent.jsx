@@ -15,12 +15,18 @@ const SAFE_IMAGE_PROTOCOLS = new Set(['http:', 'https:'])
  * Renders inline markdown tokens (text, bold, italic, code, links, math).
  * Takes a marked inline token array and produces React elements.
  */
-export default function InlineContent({ tokens }) {
+export default function InlineContent({ tokens, onInternalNav }) {
   if (!tokens) return null
-  return tokens.map((token, i) => <InlineToken key={i} token={token} />)
+  return tokens.map((token, i) => (
+    <InlineToken
+      key={i}
+      token={token}
+      onInternalNav={onInternalNav}
+    />
+  ))
 }
 
-function InlineToken({ token }) {
+function InlineToken({ token, onInternalNav }) {
   if (token.type === 'text') {
     return token.text
   }
@@ -36,11 +42,25 @@ function InlineToken({ token }) {
   }
 
   if (token.type === 'strong') {
-    return <strong><InlineContent tokens={token.tokens} /></strong>
+    return (
+      <strong>
+        <InlineContent
+          tokens={token.tokens}
+          onInternalNav={onInternalNav}
+        />
+      </strong>
+    )
   }
 
   if (token.type === 'em') {
-    return <em><InlineContent tokens={token.tokens} /></em>
+    return (
+      <em>
+        <InlineContent
+          tokens={token.tokens}
+          onInternalNav={onInternalNav}
+        />
+      </em>
+    )
   }
 
   if (token.type === 'codespan') {
@@ -50,7 +70,12 @@ function InlineToken({ token }) {
   if (token.type === 'link') {
     const href = safeLinkHref(token.href)
     if (!href) {
-      return <InlineContent tokens={token.tokens} />
+      return (
+        <InlineContent
+          tokens={token.tokens}
+          onInternalNav={onInternalNav}
+        />
+      )
     }
     return (
       <a
@@ -58,8 +83,27 @@ function InlineToken({ token }) {
         target="_blank"
         rel="noopener noreferrer"
         title={token.title || undefined}
+        onClick={(event) => {
+          if (!onInternalNav) return
+          let url
+          try {
+            url = new URL(href, location.origin)
+          } catch {
+            return
+          }
+          if (
+            url.origin === location.origin
+            && url.pathname.startsWith('/shell/')
+          ) {
+            event.preventDefault()
+            onInternalNav(url)
+          }
+        }}
       >
-        <InlineContent tokens={token.tokens} />
+        <InlineContent
+          tokens={token.tokens}
+          onInternalNav={onInternalNav}
+        />
       </a>
     )
   }
@@ -73,7 +117,14 @@ function InlineToken({ token }) {
   }
 
   if (token.type === 'del') {
-    return <del><InlineContent tokens={token.tokens} /></del>
+    return (
+      <del>
+        <InlineContent
+          tokens={token.tokens}
+          onInternalNav={onInternalNav}
+        />
+      </del>
+    )
   }
 
   // Suppress any stray HTML tokens to avoid tag leakage.

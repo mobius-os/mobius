@@ -8,7 +8,10 @@ import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, apiFetch, BASE, clearAppRuntimeData } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
-import useNavigation, { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
+import useNavigation, {
+  coldRestoredCanvasAppId,
+  deepLink,
+} from '../../hooks/useNavigation.js'
 import { replaceNavEntry } from '../../lib/navHistory.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
@@ -80,6 +83,12 @@ function _warmTargetSw() {
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
+
+function findAppForOpenTarget(list, target) {
+  if (target == null) return null
+  return (list || []).find(app =>
+    String(app.id) === String(target) || app.slug === target) || null
+}
 
 export default function Shell() {
   // ── Workspace reducer — the single live authority for pane contents, per-pane
@@ -1415,6 +1424,51 @@ export default function Shell() {
       .catch(() => [])
   }, [queryClient])
 
+  const openAppWithIntent = useCallback(async (target, rawIntent) => {
+    let app = findAppForOpenTarget(appsRef.current, target)
+    if (!app) {
+      const updatedApps = await refreshApps()
+      app = findAppForOpenTarget(updatedApps, target)
+    }
+    if (!app) {
+      setToast({
+        message: 'App is not installed yet.',
+        variant: 'info',
+        duration: 6000,
+      })
+      return
+    }
+    const intent = typeof rawIntent === 'string' ? rawIntent.trim() : ''
+    if (intent) {
+      setAppIntents((prev) => ({
+        ...prev,
+        [String(app.id)]: { intent, nonce: Date.now() },
+      }))
+    }
+    navTo('canvas', { appId: app.id })
+  }, [navTo, refreshApps])
+
+  const handleChatInternalNav = useCallback((url) => {
+    const app = url.searchParams.get('app')
+    const chat = url.searchParams.get('chat')
+    const intent = url.searchParams.get('intent')
+    if (app) {
+      void openAppWithIntent(app, intent)
+    } else if (chat) {
+      navTo('chat', { chatId: chat })
+    }
+  }, [navTo, openAppWithIntent])
+
+  const coldDeepLinkHandledRef = useRef(false)
+  useEffect(() => {
+    if (coldDeepLinkHandledRef.current) return
+    if (deepLink?.view !== 'canvas' || !deepLink.app) return
+    // Raw app targets are resolved here because navigation's boot parser can
+    // open numeric ids directly but cannot validate or resolve app slugs.
+    coldDeepLinkHandledRef.current = true
+    void openAppWithIntent(deepLink.app, deepLink.intent)
+  }, [openAppWithIntent])
+
   // Route a mini-app crash report to the chat that built the app (its
   // `chat_id`), falling back to a new chat when that chat was deleted. The
   // report is set as a DRAFT (not auto-sent) so the owner reviews before
@@ -1863,12 +1917,6 @@ export default function Shell() {
       'background-agents',
       'models',
     ])
-    const findAppForOpenTarget = (list, target) => {
-      if (target == null) return null
-      return (list || []).find(a =>
-        String(a.id) === String(target) || a.slug === target) || null
-    }
-
     async function onMessage(e) {
       // window 'message' events are for cross-frame postMessage from app
       // frames. NOT service-worker messages —
@@ -1913,24 +1961,7 @@ export default function Shell() {
         // handler's current list does not, and a silent return leaves the
         // user on the previous chat. Refetch once before giving up so
         // newly-installed external apps open from their own detail screen.
-        const target = e.data.appId
-        let app = findAppForOpenTarget(apps, target)
-        if (!app) {
-          const updatedApps = await refreshApps()
-          app = findAppForOpenTarget(updatedApps, target)
-        }
-        if (!app) {
-          showToast('App is not installed yet.', { duration: 6000 })
-          return
-        }
-        const intent = typeof e.data.intent === 'string' ? e.data.intent.trim() : ''
-        if (intent) {
-          setAppIntents((prev) => ({
-            ...prev,
-            [String(app.id)]: { intent, nonce: Date.now() },
-          }))
-        }
-        navTo('canvas', { appId: app.id })
+        await openAppWithIntent(e.data.appId, e.data.intent)
       } else if (e.data?.type === 'moebius:open-settings') {
         const rawSection = typeof e.data.section === 'string' ? e.data.section : ''
         const section = settingsSections.has(rawSection) ? rawSection : 'ai-providers'
@@ -1966,13 +1997,14 @@ export default function Shell() {
       // _safeTarget normalizes to this). Parse the query so a warm tap on
       // the new target lands on the right view, same as the legacy paths.
       if (/^\/shell\/?$/.test(path)) {
-        let app = null, chat = null
+        let app = null, chat = null, intent = null
         try {
           const params = new URLSearchParams(search)
           app = params.get('app')
           chat = params.get('chat')
+          intent = params.get('intent')
         } catch { /* no query */ }
-        if (app) navTo('canvas', { appId: parseInt(app, 10) })
+        if (app) void openAppWithIntent(app, intent)
         else if (chat) navTo('chat', { chatId: chat })
       }
     }
@@ -1987,7 +2019,7 @@ export default function Shell() {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [apps, navTo, refreshApps, refreshChats])
+  }, [navTo, openAppWithIntent, refreshChats])
 
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer } = {}) {
     // Keep the active chat when it is still an untouched blank; only POST a
@@ -2577,6 +2609,7 @@ export default function Shell() {
                 refreshChats={refreshChats}
                 loadTheme={loadTheme}
                 navTo={navTo}
+                onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
                 onDisplayReady={role === 'held'

@@ -9,19 +9,19 @@ import { highlightSync, highlightCode } from './highlight.js'
  * Each handles its own overflow and styling.
  */
 
-export function Paragraph({ token }) {
+export function Paragraph({ token, onInternalNav }) {
   return (
     <p className="md-paragraph">
-      <InlineContent tokens={token.tokens} />
+      <InlineContent tokens={token.tokens} onInternalNav={onInternalNav} />
     </p>
   )
 }
 
-export function Heading({ token }) {
+export function Heading({ token, onInternalNav }) {
   const Tag = `h${token.depth}`
   return (
     <Tag className={`md-heading md-heading--${token.depth}`}>
-      <InlineContent tokens={token.tokens} />
+      <InlineContent tokens={token.tokens} onInternalNav={onInternalNav} />
     </Tag>
   )
 }
@@ -64,7 +64,7 @@ export function CodeBlock({ token }) {
   )
 }
 
-export function Table({ token }) {
+export function Table({ token, onInternalNav }) {
   return (
     <div className="md-table-wrap">
       <table className="md-table">
@@ -72,7 +72,10 @@ export function Table({ token }) {
           <tr>
             {token.header.map((cell, i) => (
               <th key={i} style={token.align?.[i] ? { textAlign: token.align[i] } : undefined}>
-                <InlineContent tokens={cell.tokens} />
+                <InlineContent
+                  tokens={cell.tokens}
+                  onInternalNav={onInternalNav}
+                />
               </th>
             ))}
           </tr>
@@ -82,7 +85,10 @@ export function Table({ token }) {
             <tr key={i}>
               {row.map((cell, j) => (
                 <td key={j} style={token.align?.[j] ? { textAlign: token.align[j] } : undefined}>
-                  <InlineContent tokens={cell.tokens} />
+                  <InlineContent
+                    tokens={cell.tokens}
+                    onInternalNav={onInternalNav}
+                  />
                 </td>
               ))}
             </tr>
@@ -93,17 +99,21 @@ export function Table({ token }) {
   )
 }
 
-export function BlockQuote({ token }) {
+export function BlockQuote({ token, onInternalNav }) {
   return (
     <blockquote className="md-blockquote">
       {token.tokens?.map((child, i) => (
-        <BlockToken key={i} token={child} />
+        <BlockToken
+          key={i}
+          token={child}
+          onInternalNav={onInternalNav}
+        />
       ))}
     </blockquote>
   )
 }
 
-export function ListBlock({ token }) {
+export function ListBlock({ token, onInternalNav }) {
   const Tag = token.ordered ? 'ol' : 'ul'
   return (
     <Tag className="md-list" start={token.ordered ? token.start : undefined}>
@@ -111,9 +121,21 @@ export function ListBlock({ token }) {
         <li key={i} className="md-list-item">
           {item.tokens?.map((child, j) => {
             if (child.type === 'text' && child.tokens) {
-              return <InlineContent key={j} tokens={child.tokens} />
+              return (
+                <InlineContent
+                  key={j}
+                  tokens={child.tokens}
+                  onInternalNav={onInternalNav}
+                />
+              )
             }
-            return <BlockToken key={j} token={child} />
+            return (
+              <BlockToken
+                key={j}
+                token={child}
+                onInternalNav={onInternalNav}
+              />
+            )
           })}
         </li>
       ))}
@@ -152,14 +174,22 @@ export function HorizontalRule() {
  * Renders a single block-level token.
  * Used by BlockQuote and other nesting containers.
  */
-export function BlockToken({ token }) {
+export function BlockToken({ token, onInternalNav }) {
   switch (token.type) {
-    case 'paragraph': return <Paragraph token={token} />
-    case 'heading': return <Heading token={token} />
+    case 'paragraph': return (
+      <Paragraph token={token} onInternalNav={onInternalNav} />
+    )
+    case 'heading': return (
+      <Heading token={token} onInternalNav={onInternalNav} />
+    )
     case 'code': return <CodeBlock token={token} />
-    case 'table': return <Table token={token} />
-    case 'blockquote': return <BlockQuote token={token} />
-    case 'list': return <ListBlock token={token} />
+    case 'table': return <Table token={token} onInternalNav={onInternalNav} />
+    case 'blockquote': return (
+      <BlockQuote token={token} onInternalNav={onInternalNav} />
+    )
+    case 'list': return (
+      <ListBlock token={token} onInternalNav={onInternalNav} />
+    )
     case 'hr': return <HorizontalRule />
     case 'html': return null
     case 'space': return null
@@ -173,4 +203,5 @@ export function BlockToken({ token }) {
  */
 export const MemoBlock = memo(BlockToken, (prev, next) => {
   return prev.token.raw === next.token.raw
+    && prev.onInternalNav === next.onInternalNav
 })

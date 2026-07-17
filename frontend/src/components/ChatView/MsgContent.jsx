@@ -38,6 +38,7 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
   autoResumeSaving,
@@ -132,8 +133,12 @@ function MsgContentInner({
                   ? <ProgressiveMarkdown
                       text={text}
                       isStreaming={isStreaming && i === lastEntryIdx}
+                      onInternalNav={onInternalNav}
                     />
-                  : <StandardMarkdown text={text} />)
+                  : <StandardMarkdown
+                      text={text}
+                      onInternalNav={onInternalNav}
+                    />)
               : text}
           </div>
         )
@@ -295,8 +300,15 @@ function MsgContentInner({
         >
           {msg.role === 'assistant'
             ? (isActiveAnswer
-                ? <ProgressiveMarkdown text={text} isStreaming={isStreaming} />
-                : <StandardMarkdown text={text} />)
+                ? <ProgressiveMarkdown
+                    text={text}
+                    isStreaming={isStreaming}
+                    onInternalNav={onInternalNav}
+                  />
+                : <StandardMarkdown
+                    text={text}
+                    onInternalNav={onInternalNav}
+                  />)
             : text}
         </div>
       ) : null}
@@ -318,6 +330,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.chatId === next.chatId
     && prev.onQuestionAnswer === next.onQuestionAnswer
     && prev.onResume === next.onResume
+    && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled
     && prev.autoResumeAvailable === next.autoResumeAvailable
     && prev.autoResumeSaving === next.autoResumeSaving

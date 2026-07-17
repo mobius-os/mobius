@@ -28,7 +28,11 @@ function tokenize(text) {
  * the active answer switches from its DB partial to live SSE data; streaming
  * affordances are props, not a second markdown subtree.
  */
-export function ProgressiveMarkdown({ text, isStreaming = false }) {
+export function ProgressiveMarkdown({
+  text,
+  isStreaming = false,
+  onInternalNav,
+}) {
   const tokens = useMemo(() => tokenize(text), [text])
 
   return (
@@ -44,7 +48,13 @@ export function ProgressiveMarkdown({ text, isStreaming = false }) {
             return <MathBlock key={i} tex={token.text} />
           }
           if (token.type === 'space') return null
-          return <MemoBlock key={i} token={token} />
+          return (
+            <MemoBlock
+              key={i}
+              token={token}
+              onInternalNav={onInternalNav}
+            />
+          )
         })}
       </div>
       {isStreaming && <span className="chat__cursor" />}
@@ -57,7 +67,7 @@ export function ProgressiveMarkdown({ text, isStreaming = false }) {
  * StandardMarkdown — history mode.
  * One-shot render, no memoization overhead.
  */
-export function StandardMarkdown({ text }) {
+export function StandardMarkdown({ text, onInternalNav }) {
   const tokens = useMemo(() => tokenize(text), [text])
 
   return (
@@ -67,7 +77,13 @@ export function StandardMarkdown({ text }) {
           return <MathBlock key={i} tex={token.text} />
         }
         if (token.type === 'space') return null
-        return <BlockToken key={i} token={token} />
+        return (
+          <BlockToken
+            key={i}
+            token={token}
+            onInternalNav={onInternalNav}
+          />
+        )
       })}
     </div>
   )
