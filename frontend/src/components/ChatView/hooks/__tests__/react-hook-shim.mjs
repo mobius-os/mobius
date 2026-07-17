@@ -61,15 +61,18 @@ export function useRef(initial) {
   return _slots[i]
 }
 
-export function useCallback(fn /*, deps */) {
-  // The hooks under test rely on useCallback for identity stability
-  // but our tests don't observe identity across re-renders. Returning
-  // the function as-is preserves call semantics.
+export function useCallback(fn, deps) {
   const i = _slotIndex++
   if (_slots[i] === undefined) {
-    _slots[i] = { fn }
-  } else {
+    _slots[i] = { fn, deps }
+  } else if (
+    deps === undefined
+    || !Array.isArray(_slots[i].deps)
+    || deps.length !== _slots[i].deps.length
+    || deps.some((dep, idx) => !Object.is(dep, _slots[i].deps[idx]))
+  ) {
     _slots[i].fn = fn
+    _slots[i].deps = deps
   }
   return _slots[i].fn
 }

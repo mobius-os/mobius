@@ -85,15 +85,27 @@ function InlineToken({ token, onInternalNav }) {
         title={token.title || undefined}
         onClick={(event) => {
           if (!onInternalNav) return
+          if (
+            event.metaKey
+            || event.ctrlKey
+            || event.shiftKey
+            || event.altKey
+            || event.button !== 0
+          ) return
           let url
           try {
-            url = new URL(href, location.origin)
+            url = new URL(href, window.location.href)
           } catch {
             return
           }
+          const hasInternalTarget = (
+            (url.searchParams.has('app') && url.searchParams.get('app'))
+            || (url.searchParams.has('chat') && url.searchParams.get('chat'))
+          )
           if (
             url.origin === location.origin
-            && url.pathname.startsWith('/shell/')
+            && /^\/shell\/?$/.test(url.pathname)
+            && hasInternalTarget
           ) {
             event.preventDefault()
             onInternalNav(url)

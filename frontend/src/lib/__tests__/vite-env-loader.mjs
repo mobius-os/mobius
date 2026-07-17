@@ -13,6 +13,21 @@
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
+const REACT_SHIM = new URL(
+  '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs',
+  import.meta.url,
+).href
+
+export async function resolve(specifier, context, nextResolve) {
+  if (
+    specifier === 'react'
+    && context.parentURL?.endsWith('/components/Shell/useAppIntentNavigation.js')
+  ) {
+    return { url: REACT_SHIM, shortCircuit: true, format: 'module' }
+  }
+  return nextResolve(specifier, context)
+}
+
 export async function load(url, context, nextLoad) {
   // Only intercept project sources — leave node_modules alone.
   if (url.startsWith('file://') && url.includes('/src/') && url.endsWith('.js')) {

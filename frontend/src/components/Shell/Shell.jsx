@@ -65,6 +65,7 @@ import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { deriveContentVisibility } from './workspaceView.js'
 import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
+import useAppIntentNavigation from './useAppIntentNavigation.js'
 
 // Resolves the service worker to post warm-up messages to. The page is
 // uncontrolled on its very first load (clientsClaim only takes over once
@@ -83,12 +84,6 @@ function _warmTargetSw() {
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
-
-function findAppForOpenTarget(list, target) {
-  if (target == null) return null
-  return (list || []).find(app =>
-    String(app.id) === String(target) || app.slug === target) || null
-}
 
 export default function Shell() {
   // ── Workspace reducer — the single live authority for pane contents, per-pane
@@ -200,7 +195,7 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, openDrawer, closeDrawer,
-    navTo, backFiredRef, drawerPushedRef, navStackRef,
+    navTo, backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
     appNavPush, appNavPop, appNavReset, retireAppHistory, tombstoneRoute,
@@ -1424,50 +1419,40 @@ export default function Shell() {
       .catch(() => [])
   }, [queryClient])
 
-  const openAppWithIntent = useCallback(async (target, rawIntent) => {
-    let app = findAppForOpenTarget(appsRef.current, target)
-    if (!app) {
-      const updatedApps = await refreshApps()
-      app = findAppForOpenTarget(updatedApps, target)
-    }
-    if (!app) {
-      setToast({
-        message: 'App is not installed yet.',
-        variant: 'info',
-        duration: 6000,
-      })
-      return
-    }
-    const intent = typeof rawIntent === 'string' ? rawIntent.trim() : ''
-    if (intent) {
-      setAppIntents((prev) => ({
-        ...prev,
-        [String(app.id)]: { intent, nonce: Date.now() },
-      }))
-    }
-    navTo('canvas', { appId: app.id })
-  }, [navTo, refreshApps])
-
-  const handleChatInternalNav = useCallback((url) => {
-    const app = url.searchParams.get('app')
-    const chat = url.searchParams.get('chat')
-    const intent = url.searchParams.get('intent')
-    if (app) {
-      void openAppWithIntent(app, intent)
-    } else if (chat) {
-      navTo('chat', { chatId: chat })
-    }
-  }, [navTo, openAppWithIntent])
+  const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
+    appsRef,
+    refreshApps,
+    setToast,
+    setAppIntents,
+    navToRef,
+  })
 
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
     if (coldDeepLinkHandledRef.current) return
     if (deepLink?.view !== 'canvas' || !deepLink.app) return
-    // Raw app targets are resolved here because navigation's boot parser can
-    // open numeric ids directly but cannot validate or resolve app slugs.
     coldDeepLinkHandledRef.current = true
-    void openAppWithIntent(deepLink.app, deepLink.intent)
-  }, [openAppWithIntent])
+    if (Number.isFinite(deepLink.appId)) {
+      // useNavigation owns numeric cold-boot navigation and its single history
+      // edge. Shell only queues the opaque intent for the already-opened app.
+      const intent = typeof deepLink.intent === 'string' ? deepLink.intent.trim() : ''
+      if (intent) {
+        setAppIntents((prev) => ({
+          ...prev,
+          [String(deepLink.appId)]: { intent, nonce: Date.now() },
+        }))
+      }
+      return
+    }
+    // Navigation cannot resolve a slug without the apps list. If that requires
+    // a refresh, abandon the delayed open after any intervening shell route.
+    const startedAtEpoch = navigationEpochRef.current
+    void openAppWithIntent(
+      deepLink.app,
+      deepLink.intent,
+      () => navigationEpochRef.current === startedAtEpoch,
+    )
+  }, [navigationEpochRef, openAppWithIntent])
 
   // Route a mini-app crash report to the chat that built the app (its
   // `chat_id`), falling back to a new chat when that chat was deleted. The

@@ -219,6 +219,22 @@ export default function useNavigation({
   const historyInitializedRef = useRef(false)
 
   const navStackRef = useRef([])
+  // Monotonic shell-route generation. Delayed cold-boot slug resolution uses
+  // this to avoid reopening an app after the user navigated elsewhere.
+  const navigationEpochRef = useRef(0)
+  const projectedRouteRef = useRef({ activeView, activeChatId, activeAppId })
+  const projectedRoute = projectedRouteRef.current
+  if (
+    projectedRoute.activeView !== activeView
+    || projectedRoute.activeChatId !== activeChatId
+    || projectedRoute.activeAppId !== activeAppId
+  ) {
+    // Catch workspace-only route changes (for example, closing the active tab)
+    // that do not pass through navTo/restoreRoute. The explicit increments in
+    // those functions remain synchronous guards before React's next render.
+    navigationEpochRef.current += 1
+    projectedRouteRef.current = { activeView, activeChatId, activeAppId }
+  }
   // The refs mirror the render-time projection so Shell's asynchronous callbacks
   // (system events, shell-reload snapshot, restore probes) read the current
   // focused-pane triple without a stale closure. Assigned during render:
@@ -590,6 +606,8 @@ export default function useNavigation({
       return
     }
 
+    navigationEpochRef.current += 1
+
     // Ensure exactly one history entry sits above the current one to serve as
     // this navigation's back-target: retag a consumed drawer sentinel, else push
     // a fresh nav entry. Exactly one pushState/retag per navTo (§5.3.12).
@@ -626,6 +644,7 @@ export default function useNavigation({
   // current owner) and close Settings (contract §2.3).
   const restoreRoute = useCallback((route) => {
     if (!isRestorableRoute(route)) return
+    navigationEpochRef.current += 1
     if (route.view === 'settings') {
       setSettingsOpen(true)
       settingsOpenRef.current = true
@@ -1111,6 +1130,7 @@ export default function useNavigation({
     drawerPushedRef,
     drawerOpenRef,
     navStackRef,
+    navigationEpochRef,
     activeViewRef,
     activeChatIdRef,
     activeAppIdRef,
