@@ -38,8 +38,10 @@ function cssEscape(v) {
 
 // A one-shot capture-phase click swallow — the pointer-capture compat click
 // lands on the original source AFTER the shield is gone, so shield timing can't
-// stop it; consuming the next click here does (design §3.1, `suppressNextClick`).
-function suppressNextClick() {
+// stop it. Scope the guard to that source: a real drag often produces no compat
+// click at all, and a blanket "next click" guard would eat a quick Undo or other
+// unrelated action during this short window.
+function suppressNextSourceClick(sourceEl) {
   let cleared = false
   const clear = () => {
     if (cleared) return
@@ -47,7 +49,16 @@ function suppressNextClick() {
     window.removeEventListener('click', onClick, true)
     clearTimeout(timer)
   }
-  const onClick = (ev) => { ev.stopPropagation(); ev.preventDefault(); clear() }
+  const onClick = (ev) => {
+    const path = typeof ev.composedPath === 'function' ? ev.composedPath() : []
+    const belongsToSource = path.includes(sourceEl)
+      || ev.target === sourceEl
+      || sourceEl?.contains?.(ev.target)
+    if (!belongsToSource) return
+    ev.stopPropagation()
+    ev.preventDefault()
+    clear()
+  }
   window.addEventListener('click', onClick, true)
   const timer = setTimeout(clear, 400)
 }
@@ -403,7 +414,7 @@ export default function useWorkspaceDrag({
         removeOverlays()
         // The compat click fires after the shield is already gone; swallow it so
         // a committed drop is exactly one action, not a drop + a tab/row click.
-        if (suppressClick) suppressNextClick()
+        if (suppressClick) suppressNextSourceClick(srcEl)
         if (activeCleanup === cleanup) activeCleanup = null
       }
       activeCleanup = cleanup

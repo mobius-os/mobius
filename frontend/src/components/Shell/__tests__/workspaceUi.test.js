@@ -8,6 +8,7 @@ const css = readFileSync(
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
+const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
 const walkthrough = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
 )
@@ -95,6 +96,17 @@ test('the coachmark carries pointer-specific copy and dismisses without a stray 
   // 12s auto-dismiss, never an unrelated pointerdown.
   assert.match(shell, /setTimeout\(dismissWorkspaceCoachmark, 12000\)/)
   assert.doesNotMatch(shell, /coachmark[\s\S]{0,80}addEventListener\('pointerdown'/)
+  const hintRule = css.match(/\.workspace__coachmark\s*\{[\s\S]*?\}/)?.[0] || ''
+  const closeRule = css.match(/\.workspace__coachmark-close\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(hintRule, /pointer-events:\s*none/)
+  assert.match(closeRule, /pointer-events:\s*auto/)
+})
+
+test('post-drag click suppression is limited to the original source', () => {
+  assert.match(dragBinding, /function suppressNextSourceClick\(sourceEl\)/)
+  assert.match(dragBinding, /path\.includes\(sourceEl\)/)
+  assert.match(dragBinding, /if \(!belongsToSource\) return/)
+  assert.match(dragBinding, /suppressNextSourceClick\(srcEl\)/)
 })
 
 test('the undo chord is flag-gated and defers to focused inputs', () => {

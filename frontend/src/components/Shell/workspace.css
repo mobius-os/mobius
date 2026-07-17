@@ -345,6 +345,9 @@
   font-weight: 500;
   box-shadow: 0 6px 16px color-mix(in srgb, #000 24%, transparent);
   animation: workspace-coachmark-in 200ms ease-out;
+  /* The hint overlaps the strip by design, but must not make tabs inert for its
+     12-second lifetime. Only its explicit close control owns pointer input. */
+  pointer-events: none;
 }
 .workspace__coachmark-text { white-space: nowrap; }
 .workspace__coachmark-close {
@@ -358,6 +361,7 @@
   color: var(--muted);
   cursor: pointer;
   flex-shrink: 0;
+  pointer-events: auto;
 }
 .workspace__coachmark-close:hover {
   background: color-mix(in srgb, var(--text) 10%, transparent);
