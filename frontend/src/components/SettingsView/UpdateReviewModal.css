@@ -110,7 +110,7 @@
   flex-direction: column;
   gap: 16px;
   padding-right: 2px;
-  scrollbar-width: thin;
+  scrollbar-width: var(--shell-scrollbar-width, none);
 }
 
 .urm__notice {

@@ -230,7 +230,7 @@
   flex-direction: column;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  scrollbar-width: var(--shell-scrollbar-width, none);
   /* Bottom room equal to the 16px overlay fade, so the last row (e.g. the
      selected app) can scroll clear of the dimmed band instead of reading as
      pinned under the Settings divider. scroll-padding-bottom keeps
