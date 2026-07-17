@@ -724,6 +724,21 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
   })
 
+  test('22a. A deliberate drawer tap immediately after Back is not discarded', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    // Closing the drawer traverses history and arms the Android bare-click
+    // guard. A fresh owner tap has its own pointerdown, so it must clear that
+    // guard and reopen the drawer without waiting for the 400ms timeout.
+    await page.evaluate(() => history.back())
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    await page.getByRole('button', { name: 'Toggle navigation' }).click()
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'true')
+  })
+
   test('22b. Drawer scrim owns touch pans instead of the background', async ({ page }) => {
     await setup(page)
     await openDrawer(page)

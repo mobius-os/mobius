@@ -2379,6 +2379,13 @@ export default function Shell() {
           aria-label="Toggle navigation"
           aria-controls="navigation-drawer"
           aria-expanded={drawerOpen}
+          /* Android may synthesize a bare click over the logo after an OS Back
+             gesture. backFiredRef still filters that compatibility click, but
+             a deliberate new interaction starts with pointerdown/keydown and
+             must immediately clear the guard — never make the owner wait out a
+             blanket 400ms dead zone before the drawer responds. */
+          onPointerDown={() => { backFiredRef.current = false }}
+          onKeyDown={() => { backFiredRef.current = false }}
           onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
         >
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
