@@ -20,14 +20,8 @@
   transition: top 180ms ease-out, left 180ms ease-out,
     width 180ms ease-out, height 180ms ease-out;
 }
-.workspace__strip,
-.workspace__focus-ring {
-  transition: top 180ms ease-out, left 180ms ease-out,
-    width 180ms ease-out, height 180ms ease-out;
-}
 .workspace--resizing .shell__view--paned,
 .workspace--resizing .workspace__strip,
-.workspace--resizing .workspace__focus-ring,
 .workspace--resizing .workspace__divider {
   transition: none;
 }
@@ -48,6 +42,11 @@
   position: absolute;
   pointer-events: auto;
   border-radius: 8px 8px 0 0;
+  /* Match the paned wrappers' 180ms geometry bloom on a layout commit, so a
+     strip glides with its pane. Suppressed during a continuous resize via
+     `.workspace--resizing` above. */
+  transition: top 180ms ease-out, left 180ms ease-out,
+    width 180ms ease-out, height 180ms ease-out;
   /* Strips sit ABOVE dividers (z:4): a horizontal divider's 44px hit target
      overlaps the top of the strip in the pane below it, and a divider above the
      strip stole the top half of those tabs. The divider's VISUAL bar lives in
@@ -57,20 +56,37 @@
   z-index: 5;
 }
 
-/* The focused pane's strip gets a slightly stronger seam so keyboard/Back
-   affinity is visible even before the ring is noticed. */
-.workspace__strip--focused {
-  border-bottom-color: color-mix(in srgb, var(--accent) 55%, var(--border-light));
+/* Which tab is open in each pane, and which pane has focus, both read from the
+   strips' active pill — there is NO ring or border around any pane's content
+   (owner call, live testing). The base `.shell__tab--active` (Shell.css) already
+   tints the active pill with the accent; here we add DEGREE, scoped to the tiled
+   workspace so the single-pane top nav keeps its own look:
+     - every pane's active pill stays tinted, so a glance shows each pane's open
+       tab;
+     - the FOCUSED pane's active pill carries a 2px accent underline at full
+       strength;
+     - unfocused panes' active pills drop the underline and soften the tint, so
+       they read as secondary without any content-area chrome. */
+.workspace__strip--focused .shell__tab--active {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+.workspace__strip:not(.workspace__strip--focused) .shell__tab--active {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-light));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+}
+.workspace__strip:not(.workspace__strip--focused) .shell__tab--active
+  .shell__tab-open {
+  opacity: 0.72;
 }
 
-/* A 1px accent ring on the focused pane (design §2). Non-interactive; sits
-   above content but below the strips/dividers it shares the layer with. */
-.workspace__focus-ring {
-  position: absolute;
-  pointer-events: none;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
-  border-radius: 9px;
-  z-index: 2;
+/* Keyboard-only pane-focus signal. The strips carry no default focus ring
+   (index.css strips the UA outline), so a keyboard user tabbing between panes
+   needs one — but it must stay OFF for ordinary mouse/touch use. `:has(…
+   :focus-visible)` outlines the focused pane's strip (its chrome header, the
+   pane's keyboard entry point) only when a tab is focused via the keyboard. */
+.workspace__strip:has(.shell__tab-open:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* Divider: a 44px hit target with a 1px hairline centered in it that thickens
@@ -428,6 +444,5 @@
   .workspace__coachmark { animation: none; }
   /* No layout-commit bloom under reduced motion. */
   .shell__view--paned,
-  .workspace__strip,
-  .workspace__focus-ring { transition: none; }
+  .workspace__strip { transition: none; }
 }

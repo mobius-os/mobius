@@ -15,6 +15,17 @@ export function isHorizontalDrawerSwipe(dx, dy) {
 }
 
 /**
+ * The drawer's OPEN path must stand down while a workspace drag session is live,
+ * exactly like the swipe-CLOSE handlers do. A tab dragged toward the left root
+ * edge (to split a left pane) otherwise reads as a left-edge open gesture and
+ * pops the drawer over the drop target. `dragActive` is the shared drag flag's
+ * current value; anything but a live drag (false/undefined/null) allows the open.
+ */
+export function drawerOpenBlockedByDrag(dragActive) {
+  return dragActive === true
+}
+
+/**
  * Only a normally completed custom swipe owns its generated click.
  * A vertical scroll may start with diagonal noise, and touchcancel means the
  * browser took over the gesture; neither path may suppress a later tap.

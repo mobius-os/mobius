@@ -83,6 +83,10 @@ test('the drag shield owns the grabbing cursor over the whole viewport', () => {
   assert.match(rule, /position:\s*fixed/)
   assert.match(rule, /inset:\s*0/)
   assert.match(rule, /cursor:\s*grabbing/)
+  // The shield must out-layer the drawer (Drawer.css z-index 90/95) so a
+  // left-edge drag hits the drop zone, never the drawer beneath it.
+  const z = Number(rule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  assert.ok(z >= 100, `drag shield z-index ${z} must sit above the drawer (95)`)
 })
 
 test('reduced motion makes the drop preview instant', () => {
@@ -190,4 +194,31 @@ test('the pane chip and sheet rows carry an activity dot for hidden panes', () =
   assert.match(chrome, /workspace__pane-chip-dot/)
   assert.match(chrome, /workspace__sheet-row-dot/)
   assert.match(shell, /streamingChatIds=\{streamingChatIds\}/)
+})
+
+test('workspace mutations update the undo slot silently, with no toast', () => {
+  // The reducer still mints an undo slot every mutation (its own tests lock
+  // that), but the shell no longer surfaces a "Moved X · Undo" / agent-placement
+  // toast — the owner found them noisy. Recovery is the Cmd/Ctrl+Z chord.
+  assert.doesNotMatch(shell, /wsUndo:\s*true/)
+  assert.doesNotMatch(shell, /message:\s*slot\.toast/)
+  // The chord itself must remain.
+  assert.match(shell, /dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
+})
+
+test('the focused pane carries no always-on ring, only an active-tab signal', () => {
+  // No persistent ring element or its stylesheet rule.
+  assert.doesNotMatch(chrome, /data-focus-ring/)
+  assert.doesNotMatch(chrome, /workspace__focus-ring/)
+  assert.doesNotMatch(css, /\.workspace__focus-ring\s*\{/)
+  // Which tab is open per pane, and which pane has focus, read from the active
+  // pill: the focused strip's active pill gets a 2px accent underline; unfocused
+  // strips' active pills soften instead.
+  assert.match(css, /\.workspace__strip--focused \.shell__tab--active\s*\{[\s\S]*?inset 0 -2px 0/)
+  assert.match(css, /\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active/)
+})
+
+test('keyboard pane focus is visible but stays off for mouse and touch', () => {
+  // A keyboard-only outline on the pane's strip — never an always-on ring.
+  assert.match(css, /\.workspace__strip:has\(\.shell__tab-open:focus-visible\)\s*\{[\s\S]*?outline:/)
 })

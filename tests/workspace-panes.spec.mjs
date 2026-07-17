@@ -558,7 +558,7 @@ test.describe('Workspace drag (PR3)', () => {
     expect(Object.keys(after.panes).length).toBe(Object.keys(before.panes).length)
   })
 
-  test('the undo toast restores a mis-dropped tab', async ({ page }) => {
+  test('the undo chord restores a mis-dropped tab', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragUndo')
     const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
@@ -567,10 +567,11 @@ test.describe('Workspace drag (PR3)', () => {
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000 },
     ).toBe('p1')
-    // The 6s toast offers Undo; clicking it restores the pre-drop tree.
-    const undo = page.locator('.toast__action', { hasText: 'Undo' })
-    await expect(undo).toBeVisible({ timeout: 3000 })
-    await undo.click()
+    // There is no undo toast anymore (owner removed it as noise). Recovery is the
+    // Cmd/Ctrl+Z chord, which fires only while no text input holds focus. The
+    // restore assertion is unchanged.
+    await page.evaluate(() => document.activeElement?.blur?.())
+    await page.keyboard.press('Control+z')
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000, message: 'Undo returned C to p0' },

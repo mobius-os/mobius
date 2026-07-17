@@ -7,7 +7,17 @@ import {
   isHorizontalDrawerSwipe,
   shouldSuppressDrawerSwipeClick,
   clearDrawerGestureStyles,
+  drawerOpenBlockedByDrag,
 } from '../drawerLifecycle.js'
+
+test('the drawer open path stands down only while a drag is live', () => {
+  // A live drag blocks the open (a left-edge tab drag must split, not open the
+  // drawer); every non-live state — including an unset/absent ref — allows it.
+  assert.equal(drawerOpenBlockedByDrag(true), true)
+  assert.equal(drawerOpenBlockedByDrag(false), false)
+  assert.equal(drawerOpenBlockedByDrag(undefined), false)
+  assert.equal(drawerOpenBlockedByDrag(null), false)
+})
 
 test('closed drawer cleanup removes an interrupted swipe transform', () => {
   const removed = []

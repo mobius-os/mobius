@@ -119,6 +119,10 @@ export default function Shell() {
   // caller uses this wrapper — no raw dispatch survives it.
   const workspaceStateRef = useRef(workspaceState)
   workspaceStateRef.current = workspaceState
+  // Shared "a workspace drag is live" flag. Declared ABOVE useNavigation so the
+  // drawer's OPEN path can stand down on it (useWorkspaceDrag sets it on arm and
+  // the Drawer's swipe-CLOSE handlers already read it).
+  const dragActiveRef = useRef(false)
   // Set after useNavigation (needs navStackRef): reconciles in-memory restorable
   // route hints against every workspace transition (design §5.1.3).
   const onWorkspaceTransitionRef = useRef(null)
@@ -198,6 +202,7 @@ export default function Shell() {
     visiblePaneIds,
     blobValid,
     replaceImplicitBootTab,
+    dragActiveRef,
   })
 
   // Settings is a full-workspace overlay (§9) — while it is up we suppress the
@@ -959,7 +964,7 @@ export default function Shell() {
   // listeners when the flag is off, so the default build is byte-unchanged.
   // Volatile inputs travel through refs so the hook installs its single
   // document-level pointerdown listener exactly once (never re-registers).
-  const dragActiveRef = useRef(false)
+  // dragActiveRef is declared above useNavigation (the drawer OPEN path reads it).
   const sceneInputsRef = useRef(null)
   sceneInputsRef.current = { projection, mode: workspaceMode, contentRect }
   const labelForTabRef = useRef(labelForTab)
@@ -985,8 +990,10 @@ export default function Shell() {
   })
 
   // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
-  // The 6s "Undo" toast is driven by the undo slot's identity (effect below);
-  // this adds the keyboard chord and the discoverability coachmark.
+  // Workspace mutations update the reducer's single undo slot SILENTLY; the
+  // owner found the "Moved X · Undo" / "Agent arranged your workspace" toasts
+  // noise, so there is no per-mutation toast (owner call, live testing). Undo is
+  // the Cmd/Ctrl+Z chord below plus the discoverability coachmark.
   const [wsCoachmarkDismissed, setWsCoachmarkDismissed] = useState(
     () => coachmarkDismissed(typeof localStorage !== 'undefined'
       ? localStorage
@@ -1016,9 +1023,9 @@ export default function Shell() {
   // Cmd/Ctrl+Z restores the single-slot pre-mutation snapshot while no input is
   // focused (design §3.5). Flag-gated; a text field's own undo always wins.
   // Documented limitation (PR3): key events do not cross the iframe boundary, so
-  // the chord is inert while a cross-origin app iframe holds focus. The undo
-  // TOAST is the primary, always-reachable recovery path — its honesty (below)
-  // is why this limitation is acceptable rather than a trap.
+  // the chord is inert while a cross-origin app iframe holds focus — in that
+  // case click into the shell chrome (a strip tab or the divider) first, then
+  // press the chord.
   useEffect(() => {
     if (!paneModel.WORKSPACE_SPLITS_ENABLED) return undefined
     const onKey = (e) => {
@@ -1030,37 +1037,11 @@ export default function Shell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [dispatchWorkspace])
 
-  // Undo toast, bound to the undo-slot IDENTITY (design §3.5). The toast is
-  // driven by the slot itself, not raised imperatively at drop time, so it can
-  // never outlive or mis-name its snapshot: every reducer mutation mints a fresh
-  // slot object, and this effect fires on that identity change to
-  //   - raise the slot's own named toast (a drag/close/agent placement) — this
-  //     REPLACES any prior wsUndo toast, so a later mutation's toast can never
-  //     carry the earlier one's Undo, and an agent APPLY_PLACEMENT gets its own
-  //     "Agent arranged your workspace · Undo" instead of silently overwriting a
-  //     live drag's slot;
-  //   - retract the wsUndo toast when the slot clears (a focus/activate/prune)
-  //     OR is replaced by a SILENT slot (a divider resize, toast:null) — either
-  //     way the displayed Undo would now revert a mutation it doesn't name.
-  // The prev-slot ref makes the trigger a true identity change (React may re-run
-  // an effect on an unrelated dep churn; the ref no-ops those).
-  const prevUndoSlotRef = useRef(workspaceState.undo)
-  useEffect(() => {
-    const slot = workspaceState.undo
-    if (slot === prevUndoSlotRef.current) return
-    prevUndoSlotRef.current = slot
-    if (slot && slot.toast) {
-      setToast({
-        message: slot.toast,
-        variant: 'info',
-        duration: 6000,
-        wsUndo: true,
-        action: { label: 'Undo', onAction: () => dispatchWorkspace({ type: 'UNDO_LAST' }) },
-      })
-    } else {
-      setToast(t => (t && t.wsUndo ? null : t))
-    }
-  }, [workspaceState.undo, dispatchWorkspace])
+  // No per-mutation undo toast: the reducer still mints a fresh undo slot on
+  // every workspace mutation (its `toast` label included, for the reducer's own
+  // tests), but the shell deliberately does NOT surface it — the owner found the
+  // "Moved X · Undo" and "Agent arranged your workspace" toasts noisy. Recovery
+  // stays on the Cmd/Ctrl+Z chord above.
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -2628,8 +2609,8 @@ export default function Shell() {
         )}
         {/* Chrome layer — sibling AFTER the content wrappers, over the whole
             content box, carrying its own inert. Only at ≥2 visible leaves and
-            never while Settings overlays. Draws per-pane strips, focus ring,
-            dividers, and the phone overflow chip; no content lives here. */}
+            never while Settings overlays. Draws per-pane strips, dividers, and
+            the phone overflow chip; no content lives here. */}
         {workspaceChromeActive && (
           <WorkspaceChrome
             inert={drawerOpen}

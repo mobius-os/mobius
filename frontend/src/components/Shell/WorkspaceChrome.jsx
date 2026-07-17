@@ -13,8 +13,10 @@ import { PaneStrip } from './PaneStrip.jsx'
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
 // none except its own children, and carries its OWN `inert` (Shell passes it).
 // Nothing here reparents content — panes are rectangles the content wrappers are
-// positioned into; this layer only draws the strips, focus ring, dividers, and
-// the phone overflow chip/sheet over them.
+// positioned into; this layer only draws the strips, dividers, and the phone
+// overflow chip/sheet over them. There is no always-on focused-pane ring: which
+// tab each pane shows and which pane has focus both read from the strips' active
+// tab (see workspace.css), so no chrome frames any pane's content.
 //
 // Divider drag is imperative and React-free per frame (design §2): pointerdown
 // caches the affected wrapper/strip/divider elements, each move re-projects with
@@ -176,7 +178,6 @@ export default function WorkspaceChrome({
     for (const d of projection.dividers) {
       dividerEls.set(d.splitId, contentEl.querySelector(`[data-divider="${cssEsc(d.splitId)}"]`))
     }
-    const focusRingEl = contentEl.querySelector('[data-focus-ring]')
 
     let committed = divider.ratio
 
@@ -198,8 +199,6 @@ export default function WorkspaceChrome({
         setRect(el, dividerHitRect(d))
         el.setAttribute('aria-valuenow', String(Math.round(d.ratio * 100)))
       }
-      const fr = proj.rects[workspace.focusedPaneId]
-      if (focusRingEl && fr) setRect(focusRingEl, fr)
     }
 
     let finished = false
@@ -316,15 +315,6 @@ export default function WorkspaceChrome({
           />
         )
       })}
-
-      {focusRect && (
-        <div
-          className="workspace__focus-ring"
-          data-focus-ring
-          aria-hidden="true"
-          style={{ left: focusRect.x, top: focusRect.y, width: focusRect.w, height: focusRect.h }}
-        />
-      )}
 
       {projection.dividers.map(divider => (
         <Divider

@@ -59,7 +59,7 @@ test('multi-pane immersive solos the holder over the whole workspace', () => {
     workspace: ws, projection: project(ws),
     settingsActive: false, immersiveActive: true, immersiveAppId: 42,
   })
-  // Chrome hidden: no strips, dividers, or focus ring paint over the solo.
+  // Chrome hidden: no strips or dividers paint over the solo.
   assert.equal(v.chromeActive, false)
   // The holder paints full-bleed over the entire content box.
   assert.equal(v.fullBleedKey, holderKey)

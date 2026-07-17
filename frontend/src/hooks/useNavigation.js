@@ -12,6 +12,7 @@ import {
   updateCurrentNavEntry,
 } from '../lib/navHistory.js'
 import { resolveInitialNav } from '../lib/resolveInitialNav.js'
+import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
 
@@ -176,6 +177,7 @@ export default function useNavigation({
   visiblePaneIds,
   blobValid,
   replaceImplicitBootTab,
+  dragActiveRef,
 }) {
   // Resolve the initial view AND whether HOME must be seeded beneath it as the
   // back-stack root, in ONE place (resolveInitialNav) — enforces "HOME is always
@@ -383,6 +385,11 @@ export default function useNavigation({
   }, [])
 
   function openDrawer() {
+    // Stand down while a workspace drag is live — symmetric to the Drawer's
+    // swipe-CLOSE handlers (both touch and pointer). A tab dragged toward the
+    // left root edge otherwise surfaces the drawer over the drop target instead
+    // of splitting a left pane (owner report, live testing).
+    if (drawerOpenBlockedByDrag(dragActiveRef?.current)) return
     // Synchronous guard for a rapid double activation before React has rendered
     // `drawerOpen=true`. One drawer owns exactly one physical sentinel.
     if (drawerOpenRef.current) return
