@@ -43,31 +43,23 @@ test('collapsed label — live tool running: the running-first activity rollup, 
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Bash', status: 'running' })),
   ]
-  const label = activityCollapsedLabel(entries, { live: true })
-  assert.equal(label.text, 'Running commands · Reading files')
-  assert.equal(label.showEllipsis, false)
+  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Running commands · Reading files')
 })
 
-test('collapsed label — live thinking tail: "Thinking for Ns" + ellipsis', () => {
-  // duration_ms + lastAt anchor the elapsed; passing now === lastAt yields the
-  // exact stored duration, so the copy is deterministic.
-  const now = 1_000_000
-  const entries = [e(think({ content: 'x', duration_ms: 5000, lastAt: now }))]
-  const label = activityCollapsedLabel(entries, { live: true, now })
-  assert.equal(label.text, 'Thinking for 5 seconds')
-  assert.equal(label.showEllipsis, true)
+test('collapsed label — live thinking tail: a bare "Thinking" (no clock, no dots)', () => {
+  // The shimmer is the only motion; the measured duration surfaces at settle.
+  const entries = [e(think({ content: 'x', duration_ms: 5000, lastAt: 1_000_000 }))]
+  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Thinking')
 })
 
 test('collapsed label — settled thinking-only: "Thought for Ns", no ellipsis', () => {
   const entries = [e(think({ content: 'x', duration_ms: 12000 }))]
-  const label = activityCollapsedLabel(entries, { live: false })
-  assert.equal(label.text, 'Thought for 12 seconds')
-  assert.equal(label.showEllipsis, false)
+  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Thought for 12 seconds')
 })
 
 test('collapsed label — settled thinking-only with no duration: bare "Thought"', () => {
   const entries = [e(think({ content: 'x' }))]
-  assert.equal(activityCollapsedLabel(entries, { live: false }).text, 'Thought')
+  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Thought')
 })
 
 test('collapsed label — settled mixed stretch: past-tense sentence, tools only', () => {
@@ -79,9 +71,7 @@ test('collapsed label — settled mixed stretch: past-tense sentence, tools only
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Edit', status: 'done' })),
   ]
-  const label = activityCollapsedLabel(entries, { live: false })
-  assert.equal(label.text, 'Read files, edited code')
-  assert.equal(label.showEllipsis, false)
+  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Read files, edited code')
 })
 
 test('toolGroupPastSummary: first-seen dedupe, lowercased continuations, raw names kept', () => {
@@ -111,8 +101,7 @@ test('collapsed label — LIVE mixed stretch keeps the progressive running-first
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Bash', status: 'running' })),
   ]
-  const label = activityCollapsedLabel(entries, { live: true })
-  assert.equal(label.text, 'Running commands · Reading files')
+  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Running commands · Reading files')
 })
 
 test('a running tool keeps progressive copy outside the trailing live stretch', () => {
@@ -120,8 +109,7 @@ test('a running tool keeps progressive copy outside the trailing live stretch', 
     e(tool({ tool: 'Read', status: 'done' })),
     e(tool({ tool: 'Bash', status: 'running' })),
   ]
-  const label = activityCollapsedLabel(entries, { live: false })
-  assert.equal(label.text, 'Running commands · Reading files')
+  assert.equal(activityCollapsedLabel(entries, { live: false }), 'Running commands · Reading files')
   assert.equal(activityStreamState(entries.map(entry => entry.item)), 'running')
 })
 
@@ -135,15 +123,12 @@ test('settled activity labels and icons have neutral unknown-tool fallbacks', ()
 })
 
 test('collapsed label — a live thinking tail after a failed tool still reads "Thinking"', () => {
-  // running-wins: the danger chip waits for settle; live, the line is the ticker.
-  const now = 2_000_000
+  // running-wins: the danger chip waits for settle.
   const entries = [
     e(tool({ tool: 'Bash', status: 'done', output: failOutput })),
-    e(think({ content: 'recovering', duration_ms: 1000, lastAt: now })),
+    e(think({ content: 'recovering', duration_ms: 1000, lastAt: 2_000_000 })),
   ]
-  const label = activityCollapsedLabel(entries, { live: true, now })
-  assert.equal(label.text, 'Thinking for 1 second')
-  assert.equal(label.showEllipsis, true)
+  assert.equal(activityCollapsedLabel(entries, { live: true }), 'Thinking')
 })
 
 test('thoughtDurationLabel: whole seconds, clamps sub-second to 1s, bare "Thought" when unknown', () => {

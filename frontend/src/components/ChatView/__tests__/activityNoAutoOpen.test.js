@@ -39,17 +39,9 @@ test('the only open-state write is the user toggle, guarded by preserveTogglePos
 })
 
 test('no effect derives open state from running/live/props', () => {
-  // The only effect is the 1Hz thinking ticker; it must set `now`, never `open`.
-  const effectStart = src.indexOf('useEffect(() => {')
-  assert.notEqual(effectStart, -1, 'the live-thinking ticker effect exists')
-  // Slice to the effect's own dependency-array close, whatever its deps are
-  // named — anchoring on a specific dep once broke this guard into scanning
-  // the whole component below the effect.
-  const effectEnd = src.indexOf('}, [', effectStart)
-  assert.notEqual(effectEnd, -1, 'the ticker effect has a dependency array')
-  const effect = src.slice(effectStart, effectEnd)
-  assert.doesNotMatch(effect, /setUserOpen/,
-    'no effect opens or closes the stretch')
-  assert.doesNotMatch(effect, /setOpen/,
-    'no effect writes open state under a different name')
+  // Since the 1Hz thinking ticker was retired (bare "Thinking" has no clock),
+  // the component has NO effects at all — the strongest possible form of the
+  // no-auto-open guarantee: nothing can flip `open` outside the user's tap.
+  assert.doesNotMatch(src, /useEffect/,
+    'ActivityStretch has no effects; open state can only change in the tap handler')
 })

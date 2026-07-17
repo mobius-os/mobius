@@ -3673,7 +3673,15 @@ export default function ChatView({
 
           {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
             <li className="chat__msg chat__msg--assistant">
-              <div className="chat__thinking"><span /><span /><span /></div>
+              {/* Pre-first-event placeholder: the same bare shimmering
+                  "Thinking" the activity stretch shows — the extra activity
+                  classes borrow its shimmer rule; .chat__thinking survives
+                  for the e2e presence probe. */}
+              <div className="chat__thinking chat__activity chat__activity--running">
+                <span className="chat__activity-label">
+                  <span className="chat__activity-label-text">Thinking</span>
+                </span>
+              </div>
             </li>
           )}
         </ul>
@@ -3683,132 +3691,153 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
-        {openAppCtas.length > 0 && (
-          <div className="chat__open-app">
-            {openAppCtas.map(({ app, vm }) => {
-              const pulsing = pulsedAppId === Number(app.id)
-              return (
-                <button
-                  key={app.id}
-                  className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
-                  aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
-                  onClick={() => onOpenApp?.(app.id)}
-                >
-                  {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
-                </button>
-              )
-            })}
-          </div>
-        )}
-        {hasPendingQuestion && pendingCardOffscreen && (
-          <button
-            type="button"
-            className="chat__question-nudge"
-            onClick={revealConversationTail}
-          >
-            Möbius asked you something — tap to answer
-          </button>
-        )}
-        {hasPendingResume && resumeCardOffscreen && (
-          <button
-            type="button"
-            className="chat__resume-nudge"
-            onClick={revealConversationTail}
-          >
-            {pendingResumeBlock?.pause?.resets_at
-              ? 'Rate limit reached — tap to resume'
-              : 'Turn paused — tap to resume'}
-          </button>
-        )}
-        <ConnectionStatus
-          error={connectionError}
-          reconnecting={reconnecting}
-          onRetry={retry}
-        />
+        {/* Queued messages lead the foot stack: they are upcoming user turns,
+            so they render as an extension of the transcript — directly under
+            the chat, above all transient chrome (owner ask, 2026-07-17). */}
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
-        {buildPhaseRail.length > 0 && (
-          <div className="chat__build-rail" role="group" aria-label="Build progress">
-            {buildPhaseRail.map(phase => (
-              <span
-                key={phase.ts}
-                className={`chat__build-phase${
-                  phase.current ? ' chat__build-phase--current' : ''
-                }`}
-              >
-                <span className="chat__build-phase-dot" aria-hidden="true" />
-                <span className="chat__build-phase-label">{phase.label}</span>
-              </span>
-            ))}
-          </div>
-        )}
-        <ChatInputBar
-          input={input}
-          onInputChange={handleComposerInputChange}
-          onSubmit={handleSubmit}
-          inputRef={inputRef}
-          sending={composerBusy}
-          listening={listening}
-          listeningRef={listeningRef}
-          onManualVoiceEdit={acceptManualEdit}
-          onToggleVoice={toggleVoice}
-          onStop={handleStop}
-          onSteer={handleSteer}
-          canSteer={canSteer}
-          canRequestSteer={canRequestSteer}
-          offline={!online}
-          sendFailure={sendFailure}
-          submissionBlocked={providerSwitching}
-          pendingFiles={pendingFiles}
-          onAddFiles={handleComposerAddFiles}
-          onRemoveFile={handleComposerRemoveFile}
-          attachTriggerRef={attachTriggerRef}
-          leftButtons={
-            <>
-              <ComposerPopover
-                chatInfo={showPicker ? chatInfo : null}
-                chatId={chatId}
-                onAttachClick={() => attachTriggerRef.current?.()}
-                /* Derive live — `chatInfo.has_assistant_turns` is set
-                   once on mount via the API and never refreshed when
-                   the running turn finishes. Without this OR, sending
-                   a message and getting a reply in the same session
-                   would skip the cross-provider handoff confirmation:
-                   the user could flip Claude ↔ Codex mid-chat without
-                   preparing the incoming provider's context. */
-                hasAssistantTurns={
-                  (chatInfo?.has_assistant_turns ?? false)
-                  || messages.some(m => m.role === 'assistant')
-                }
-                autoResumeEnabled={autoResumeEnabled}
-                autoResumeSaving={autoResumeSaving}
-                autoResumeError={
-                  autoResumeErrorSource === 'settings' ? autoResumeError : ''
-                }
-                onAutoResumeChange={
-                  embedded ? undefined : handleAutoResumeSettingsChange
-                }
-                onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
-                  // Merge into chatInfo so the next render reflects the
-                  // PATCH without a roundtrip. effective is authoritative
-                  // (backend re-merged on top of the current global file).
-                  // `provider` only changes when the user picked a new one —
-                  // preserve the existing value otherwise so an unrelated
-                  // PATCH doesn't wipe it.
-                  setChatInfo(prev => prev ? ({
-                    ...prev,
-                    agent_settings_json: agent_settings_json,
-                    provider: provider || prev.provider,
-                    effective: effective || prev.effective,
-                  }) : prev)
-                }}
-                providerSwitchState={providerSwitchState}
-                onOpenInspector={() => setShowInspector(true)}
-                onOpenSummary={() => setShowSummary(true)}
-                embedded={embedded}
+        {/* Everything below is transient CHROME, grouped on one quiet surface
+            (.chat__transients) sitting on top of the composer: open-app CTA,
+            attention nudges, connection state, build progress — one material,
+            one hairline, flat rows (order pinned by attention-nudges.spec:
+            nudges above rail, rail above composer). The composer-stack
+            wrapper also owns the bottom fade scrim so the queue above stays
+            unwashed (see ChatView.css). The group renders only when at least
+            one row exists, so an idle chat gets no empty bordered box. */}
+        <div className="chat__composer-stack">
+          {(openAppCtas.length > 0
+            || (hasPendingQuestion && pendingCardOffscreen)
+            || (hasPendingResume && resumeCardOffscreen)
+            || !!connectionError || reconnecting
+            || buildPhaseRail.length > 0) && (
+            <div className="chat__transients">
+              {openAppCtas.length > 0 && (
+                <div className="chat__open-app">
+                  {openAppCtas.map(({ app, vm }) => {
+                    const pulsing = pulsedAppId === Number(app.id)
+                    return (
+                      <button
+                        key={app.id}
+                        className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
+                        aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
+                        onClick={() => onOpenApp?.(app.id)}
+                      >
+                        {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+              {hasPendingQuestion && pendingCardOffscreen && (
+                <button
+                  type="button"
+                  className="chat__question-nudge"
+                  onClick={revealConversationTail}
+                >
+                  Möbius asked you something — tap to answer
+                </button>
+              )}
+              {hasPendingResume && resumeCardOffscreen && (
+                <button
+                  type="button"
+                  className="chat__resume-nudge"
+                  onClick={revealConversationTail}
+                >
+                  {pendingResumeBlock?.pause?.resets_at
+                    ? 'Rate limit reached — tap to resume'
+                    : 'Turn paused — tap to resume'}
+                </button>
+              )}
+              <ConnectionStatus
+                error={connectionError}
+                reconnecting={reconnecting}
+                onRetry={retry}
               />
+              {buildPhaseRail.length > 0 && (
+                <div className="chat__build-rail" role="group" aria-label="Build progress">
+                  {buildPhaseRail.map(phase => (
+                    <span
+                      key={phase.ts}
+                      className={`chat__build-phase${
+                        phase.current ? ' chat__build-phase--current' : ''
+                      }`}
+                      aria-current={phase.current ? 'step' : undefined}
+                    >
+                      <span className="chat__build-phase-label">{phase.label}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <ChatInputBar
+            input={input}
+            onInputChange={handleComposerInputChange}
+            onSubmit={handleSubmit}
+            inputRef={inputRef}
+            sending={composerBusy}
+            listening={listening}
+            listeningRef={listeningRef}
+            onManualVoiceEdit={acceptManualEdit}
+            onToggleVoice={toggleVoice}
+            onStop={handleStop}
+            onSteer={handleSteer}
+            canSteer={canSteer}
+            canRequestSteer={canRequestSteer}
+            offline={!online}
+            sendFailure={sendFailure}
+            submissionBlocked={providerSwitching}
+            pendingFiles={pendingFiles}
+            onAddFiles={handleComposerAddFiles}
+            onRemoveFile={handleComposerRemoveFile}
+            attachTriggerRef={attachTriggerRef}
+            leftButtons={
+              <>
+                <ComposerPopover
+                  chatInfo={showPicker ? chatInfo : null}
+                  chatId={chatId}
+                  onAttachClick={() => attachTriggerRef.current?.()}
+                  /* Derive live — `chatInfo.has_assistant_turns` is set
+                     once on mount via the API and never refreshed when
+                     the running turn finishes. Without this OR, sending
+                     a message and getting a reply in the same session
+                     would skip the cross-provider handoff confirmation:
+                     the user could flip Claude ↔ Codex mid-chat without
+                     preparing the incoming provider's context. */
+                  hasAssistantTurns={
+                    (chatInfo?.has_assistant_turns ?? false)
+                    || messages.some(m => m.role === 'assistant')
+                  }
+                  autoResumeEnabled={autoResumeEnabled}
+                  autoResumeSaving={autoResumeSaving}
+                  autoResumeError={
+                    autoResumeErrorSource === 'settings' ? autoResumeError : ''
+                  }
+                  onAutoResumeChange={
+                    embedded ? undefined : handleAutoResumeSettingsChange
+                  }
+                  onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
+                    // Merge into chatInfo so the next render reflects the
+                    // PATCH without a roundtrip. effective is authoritative
+                    // (backend re-merged on top of the current global file).
+                    // `provider` only changes when the user picked a new one —
+                    // preserve the existing value otherwise so an unrelated
+                    // PATCH doesn't wipe it.
+                    setChatInfo(prev => prev ? ({
+                      ...prev,
+                      agent_settings_json: agent_settings_json,
+                      provider: provider || prev.provider,
+                      effective: effective || prev.effective,
+                    }) : prev)
+                  }}
+                  providerSwitchState={providerSwitchState}
+                  onOpenInspector={() => setShowInspector(true)}
+                  onOpenSummary={() => setShowSummary(true)}
+                  embedded={embedded}
+                />
             </>
           }
         />
+        </div>
       </div>
     </div>
   )

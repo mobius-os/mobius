@@ -655,22 +655,16 @@
 /* ── Typing indicator ─────────────────────────────── */
 
 .chat__thinking {
+  /* The pre-first-event placeholder is the same quiet line the activity
+     stretch renders: a bare shimmering "Thinking" (the bouncing-dots trio it
+     replaced was the last triple-dot element — owner ask, 2026-07-17). The
+     class name survives for the e2e presence probe; the shimmer rides the
+     shared .chat__activity--running label rule via the extra classes in
+     ChatView.jsx. */
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 6px;
+  min-height: 32px;
 }
-
-.chat__thinking span {
-  display: block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--border); /* CONTRACT: used as a 1px separator stripe — border color repurposed as fill */
-  animation: thinking 1.2s ease-in-out infinite;
-}
-.chat__thinking span:nth-child(2) { animation-delay: 0.2s; }
-.chat__thinking span:nth-child(3) { animation-delay: 0.4s; }
 
 @keyframes thinking {
   0%, 60%, 100% { transform: scale(1); opacity: 0.4; }
@@ -679,29 +673,6 @@
 
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
-/* The standalone "> Thought" disclosure is gone — thinking now flows into the
-   unified activity stretch (see ActivityStretch + the .chat__activity family
-   below). Two pieces of the old reasoning lane survive because the stretch
-   reuses them: the animated live-thinking ellipsis and the dim markdown body
-   that renders a thinking entry when the stretch is expanded. */
-.chat__reasoning-ellipsis {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 1px;
-  margin-left: 2px;
-}
-.chat__reasoning-ellipsis span {
-  display: inline-block;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.35;
-  transform: translateY(-1px);
-  animation: reasoningEllipsis 1.15s ease-in-out infinite;
-}
-.chat__reasoning-ellipsis span:nth-child(2) { animation-delay: 0.16s; }
-.chat__reasoning-ellipsis span:nth-child(3) { animation-delay: 0.32s; }
 
 @keyframes reasoningEllipsis {
   0%, 70%, 100% { opacity: 0.3; transform: translateY(-1px) scale(0.78); }
@@ -742,16 +713,16 @@
 /* ── Connection status ───────────────────────────── */
 
 .connection-status {
+  min-height: 36px;
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  padding: 6px 16px;
+  padding: 8px 12px;
   font-size: 12px;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
-  border-top: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  color: var(--muted); /* CONTRACT: low-contrast status text in the transient family */
 }
+
+.connection-status__retry { margin-left: auto; }
 
 .connection-status__text { opacity: 0.8; }
 
@@ -1060,23 +1031,6 @@
   color: var(--danger); /* CONTRACT: vivid danger — a step in the stretch failed */
 }
 
-/* The live-thinking pulse dot (reuses the cursorPulse keyframe): a quiet "the
-   agent is reasoning now" beat, distinct from the tool-run spinner. Under
-   reduced motion the dot stays as a static liveness marker — present but still. */
-.chat__activity-icon--think {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.6;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .chat__activity-icon--think {
-    animation: cursorPulse 1.5s ease-in-out infinite;
-  }
-}
-
 .chat__activity-label {
   /* No stretch: the label and its trailing chip group left as one compact
      unit (the ChatGPT idiom) rather than spreading across the row. The header
@@ -1089,6 +1043,68 @@
   white-space: nowrap;
   color: var(--muted); /* CONTRACT: calm prose voice — regular UI font, NOT --mono; identifiers live in the expanded ToolBlock */
   font-size: 13px;
+}
+
+/* Liveness IS the label: a narrow contrast band sweeps the live text
+   left-to-right in ~1.15s, then rests ~2.45s before the next pass (the
+   Codex/ChatGPT idiom — owner ask, 2026-07-17). No spinner, no pulse dot, no
+   ellipsis: the type glyph holds still and only the text breathes. The
+   gradient clips to the INNER span (.chat__activity-label-text) while the
+   outer label keeps a real color, so the browser-generated truncation
+   ellipsis never inherits transparent fill. Decreasing background-position-x
+   with an oversized image moves the band left→right; the identical 32%→100%
+   keyframes are the rest. background-position is a small repaint on one 13px
+   line — no will-change, no glow, no transform overlay. */
+.chat__activity-label-text {
+  color: inherit;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports ((-webkit-background-clip: text) or (background-clip: text)) {
+    .chat__activity--running .chat__activity-label-text {
+      background-image: linear-gradient(
+        100deg,
+        var(--muted) 42%,
+        color-mix(in srgb, var(--text) 94%, var(--bg)) 50%,
+        var(--muted) 58%
+      );
+      background-repeat: no-repeat;
+      background-size: 260% 100%;
+      background-position: 100% 0;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: transparent;
+      animation: chat-activity-sweep 3.6s linear infinite;
+    }
+  }
+}
+
+@keyframes chat-activity-sweep {
+  0% { background-position: 100% 0; }
+  32% { background-position: -100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* Reduced motion: static, not a substitute pulse — the live label simply
+   holds full text color (present tense carries the state; the aria name says
+   "in progress"). Forced colors: same, in system ink. */
+@media (prefers-reduced-motion: reduce) {
+  .chat__activity--running .chat__activity-label-text {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--text);
+    animation: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .chat__activity--running .chat__activity-label-text {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: CanvasText;
+    animation: none !important;
+  }
 }
 
 .chat__activity-chip {
@@ -1298,20 +1314,33 @@
    the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted.
    Percentage stops so the embedded (shorter) composer gets a proportional fade.
    Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
-   colour. */
-.chat__foot::before {
+   colour. The scrim lives on .chat__composer-stack (NOT the whole foot): the
+   queued bubbles above the stack are transcript, not chrome, and stay
+   unwashed. */
+.chat__composer-stack {
+  position: relative;
+  /* The wrapper is structure, not a surface: children opt back into pointer
+     events individually (same contract as .chat__foot). isolation pins the
+     ::before scrim into this stacking context so it can never wash the
+     queued bubbles ABOVE the stack — they keep the transcript's unwashed
+     background (owner ask: queue reads as chat, chrome sits on the fade). */
+  isolation: isolate;
+  pointer-events: none;
+}
+
+.chat__composer-stack::before {
   content: "";
   position: absolute;
-  left: 0;
-  right: 0;
-  top: -100px;
-  bottom: 0;
+  left: -12px;
+  right: -12px;
+  top: -72px;
+  bottom: -8px;
   background: linear-gradient(
     to bottom,
     transparent 0%,
-    color-mix(in srgb, var(--bg) 0%, transparent) 68%,
-    color-mix(in srgb, var(--bg) 12%, transparent) 76%,
-    color-mix(in srgb, var(--bg) 42%, transparent) 88%,
+    color-mix(in srgb, var(--bg) 0%, transparent) 44%,
+    color-mix(in srgb, var(--bg) 14%, transparent) 58%,
+    color-mix(in srgb, var(--bg) 46%, transparent) 78%,
     var(--bg) 98%
   );
   pointer-events: none;
@@ -1321,17 +1350,14 @@
 /* In the embedded composer the app sheet owns the safe area, so there is no
    device gesture strip to fill and the shorter, flat-bottomed foot doesn't want
    the tall fade. Keep it subtle: just enough to soften content under the pill. */
-.chat-embed .chat__foot::before {
+.chat-embed .chat__composer-stack::before {
   top: -44px;
   bottom: 0;
 }
 
 .chat__foot .queued,
-.chat__foot .connection-status,
+.chat__foot .chat__transients,
 .chat__foot .chat__attach-tray,
-.chat__foot .chat__question-nudge,
-.chat__foot .chat__resume-nudge,
-.chat__foot .chat__open-app,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
@@ -1552,32 +1578,32 @@
    the whole conversation rather than the queued tray. */
 .chat__question-nudge,
 .chat__resume-nudge {
-  display: block;
-  margin: 0 auto 8px;
-  padding: 5px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
-  background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  color: var(--accent); /* CONTRACT: vivid accent text */
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--accent); /* CONTRACT: vivid accent text — this row asks for a tap */
+  font: inherit;
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
+  text-align: left;
   cursor: pointer;
-  /* Same transform/opacity entrance as the CTA (foot ResizeObserver contract).
-     No fill mode — a filled transform would permanently override the :active
-     press scale below; see the CTA button's entrance note. */
-  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
-  transition: background 0.15s, color 0.15s, transform 0.08s;
+  transition: background 0.15s;
 }
+
 .chat__question-nudge:hover,
 .chat__resume-nudge:hover {
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: #fff;
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill */
 }
+
 .chat__question-nudge:active,
-.chat__resume-nudge:active { transform: scale(0.96); }
+.chat__resume-nudge:active {
+  background: var(--surface2);
+}
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {
@@ -2059,71 +2085,64 @@
   to   { box-shadow: 0 0 0 7px transparent; }
 }
 
-.chat__open-app {
+/* ── Transient chrome family ───────────────────────────────────────────────
+   One quiet surface for everything that floats between queue and composer:
+   open-app CTA, attention nudges, connection state, build progress. One
+   frosted material, one hairline, 12px radius, flat rows with internal
+   dividers — no per-row cards, pills, or accent outlines (owner ask,
+   2026-07-17: "so they all work together nicely"). Accent is reserved for
+   actionable text; danger for a lost connection. The group animates its
+   entrance ONCE; rows don't re-run chat-foot-rise individually. */
+.chat__transients {
   max-width: 720px;
   margin: 0 auto 8px;
-  display: flex;
-  /* One CTA row per built app, stacked and right-aligned (most recent last). */
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 0 4px;
-  pointer-events: none;
+  overflow: hidden;
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on the frosted card */
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent); /* CONTRACT: frosted surface floor over the chat */
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
+  animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
 }
 
-.chat__open-app > * {
-  pointer-events: auto;
+.chat__transients > * + * {
+  border-top: 1px solid var(--border-light); /* CONTRACT: internal row divider */
+}
+
+.chat__open-app {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat__open-app > * + * {
+  border-top: 1px solid var(--border-light); /* CONTRACT: internal row divider */
 }
 
 .chat__open-app-btn {
-  /* Frosted accent card: an accent-tinted translucent SURFACE floor (so it
-     reads as a card over any chat content) plus a backdrop-blur that softens
-     the chat behind it — the same frosted-glass technique as the composer
-     pill (.chat__pill). The old `var(--accent-dim)` alone had no surface and
-     no blur, so live chat showed through it SHARP and it read as a stray
-     transparent overlay floating on the messages. */
-  background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
-  color: var(--accent); /* CONTRACT: vivid accent text */
-  border-radius: 8px;
-  padding: 8px 16px;
-  max-width: min(100%, 360px);
-  position: relative; /* anchors the recompile-pulse ring pseudo-element */
-  overflow: hidden; /* long app names ellipsis; an element's OWN box-shadow
-                       (the plant ring below) is not clipped by its overflow */
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 500;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text); /* CONTRACT: high-contrast actionable row text */
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
   cursor: pointer;
-  /* Entrance on plant: rise in, then one subtle accent ring (the button's own
-     box-shadow, so overflow:hidden doesn't clip it). Both run once on mount
-     and never replay — the recompile pulse rides a pseudo-element, not this
-     list, so toggling that class can't restart these. NO fill mode on the
-     rise: a filled animation's transform keeps applying after it ends and —
-     animations outrank author rules in the cascade — would beat the :active
-     press scale below forever. With no delay there is no pre-play gap for
-     fill to cover, and the `to` keyframe equals the natural styles, so the
-     end of the animation is seamless. */
-  animation:
-    chat-foot-rise 0.22s var(--ease-out-soft, ease-out),
-    chat-cta-ring 0.9s ease-out 0.12s;
-  transition: background 0.15s, transform 0.08s;
+  transition: background 0.15s;
+  position: relative;
 }
 
 .chat__open-app-btn:hover {
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill */
 }
 
-.chat__open-app-btn:active { transform: scale(0.97); }
+.chat__open-app-btn:active { background: var(--surface2); }
 
-/* Recompile confirmation: a one-shot INSET accent ring on a pseudo-element. It
-   plays whenever the --pulse class toggles without disturbing the button's own
-   one-time entrance animation, and an inset ring stays inside overflow:hidden
-   (a descendant's box-shadow would otherwise be clipped). Label swap is in JSX. */
 .chat__open-app-btn--pulse::after {
   content: '';
   position: absolute;
@@ -2149,26 +2168,23 @@
    ResizeObserver publishes --composer-h off its height, so a height animation
    would fight the composer clearance. */
 .chat__build-rail {
-  max-width: 720px;
-  margin: 0 auto 8px;
+  min-height: 36px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 10px;
-  padding: 7px 12px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface) 78%, transparent); /* CONTRACT: frosted surface floor over the chat */
-  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on the frosted card */
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  gap: 4px 8px;
+  padding: 8px 12px;
   font-size: 12px;
-  line-height: 1.3;
-  animation: build-rail-in 0.22s ease both;
+  line-height: 1.35;
 }
 
-@keyframes build-rail-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
+/* Milestones separated by a small neutral mark, not dots (the family is
+   text-first): every phase but the first grows a "›" lead-in. */
+.chat__build-phase + .chat__build-phase::before {
+  content: "›";
+  color: var(--muted);
+  margin-right: 8px;
+  font-weight: 400;
 }
 
 .chat__build-phase {
@@ -2177,14 +2193,6 @@
   gap: 6px;
   min-width: 0;
   color: var(--muted); /* CONTRACT: low-contrast text — earlier phases read as dim history */
-}
-
-.chat__build-phase-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
 }
 
 .chat__build-phase-label {
@@ -2199,63 +2207,59 @@
   color: var(--text); /* CONTRACT: high-contrast text on the current milestone */
   font-weight: 600;
 }
-.chat__build-phase--current .chat__build-phase-dot {
-  background: var(--accent); /* CONTRACT: vivid accent marks the live phase */
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
 
 @media (prefers-reduced-motion: reduce) {
-  .chat__build-rail,
+  .chat__transients,
+  .queued,
   .chat__copy-toast { animation: none; }
   .chat__send,
   .chat__steer,
   .chat__stop { animation: none; }
 }
 
-/* ── Queued messages tray ──────────────────────────── */
-
+/* ── Queued messages — an extension of the transcript ─────────────────────
+   Upcoming user turns lead the foot stack (owner ask, 2026-07-17): right-
+   aligned pending bubbles with the user bubble's corner signature, on an
+   opaque low-accent fill + hairline — NOT the sent bubble's saturated
+   gradient (they haven't been sent), and never dashed borders or whole-row
+   opacity (drop-zone/disabled semantics, and they cost text contrast). No
+   card tray around them; the collapse control is one quiet caption. */
 .queued {
   max-width: 768px;
-  margin: 0 auto 8px;
-  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
-  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  border-radius: 12px;
-  padding: 6px;
+  margin: 0 auto 10px;
+  padding: 0 6px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  /* Same transform/opacity entrance as the CTA — the tray shares the foot's
-     ResizeObserver, so no height/margin animation here. No fill mode: see the
-     CTA button's entrance note. */
+  gap: 5px;
+  /* Same transform/opacity entrance as the transient group — the foot's
+     ResizeObserver handles height, so no height/margin animation here. */
   animation: chat-foot-rise 0.22s var(--ease-out-soft, ease-out);
 }
 
 .queued__hdr {
-  display: flex;
+  align-self: flex-end;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px 6px;
-  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  margin-bottom: 4px;
-  gap: 8px;
-  cursor: pointer;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 0;
   border-radius: 6px;
-  transition: background 0.15s;
+  background: transparent;
+  color: var(--muted); /* CONTRACT: low-contrast caption over the scrim */
+  font-size: 11px;
+  line-height: 1.35;
+  cursor: pointer;
   user-select: none;
 }
 
 .queued__hdr:hover {
-  background: var(--surface2); /* CONTRACT: secondary opaque fill */
+  color: var(--text); /* CONTRACT: high-contrast lift marks the tappable caption */
 }
 
 .queued__hdr:focus-visible {
   outline: 2px solid var(--accent, currentColor);
   outline-offset: -2px;
-}
-
-.queued--collapsed .queued__hdr {
-  border-bottom: 0;
-  margin-bottom: 0;
 }
 
 .queued--collapsed {
@@ -2264,7 +2268,6 @@
 
 .queued__hdr-chevron {
   flex-shrink: 0;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   transition: transform 0.15s;
 }
 
@@ -2275,38 +2278,35 @@
 .queued__items {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: flex-end;
+  gap: 6px;
+  /* A large queue must not eat the mobile viewport (keyboard open): cap it
+     and scroll locally — still a transcript extension, just a bounded one. */
+  max-height: min(28dvh, 224px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 2px 2px;
 }
 
 .queued__count {
   font-size: 11px;
-  font-weight: 600;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.queued__hint {
-  font-size: 11px;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  opacity: 0.75;
-  flex: 1;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 500;
+  color: inherit;
 }
 
 .queued__row {
+  align-self: flex-end;
   display: flex;
   align-items: flex-start;
   gap: 4px;
-  border-radius: 8px;
+  width: fit-content;
+  max-width: min(85%, 75ch);
+  /* The user bubble's corner signature marks "this is your turn"; the low-
+     accent opaque fill + hairline mark "not sent yet". */
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border-light)); /* CONTRACT: accent-tinted hairline on opaque fill */
+  border-radius: 18px 18px 5px 18px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface)); /* CONTRACT: opaque pending-bubble fill, sits on --bg */
   transition: background 0.15s;
-}
-
-.queued__row:hover {
-  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
 }
 
 .queued__toggle {
@@ -2314,7 +2314,7 @@
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  padding: 8px 6px 8px 10px;
+  padding: 9px 4px 9px 14px;
   background: none;
   border: none;
   text-align: left;
@@ -2358,7 +2358,7 @@
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  margin: 4px 4px 0 0;
+  margin: 5px 5px 0 0;
   display: flex;
   align-items: center;
   justify-content: center;

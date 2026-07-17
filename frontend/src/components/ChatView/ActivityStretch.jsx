@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import {
@@ -107,28 +107,16 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
 
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
-  // The settled line's glyph is its FIRST activity's — the same first-seen
-  // order the past-tense summary leads with, so icon and words agree.
-  const firstTool = entries.find(e => e?.item?.type === 'tool')?.item
-  const firstToolIcon = toolActivityIcon(firstTool?.tool)
+  // The line's glyph matches its LEADING label word: the currently-running
+  // tool's activity while one runs (toolGroupSummary leads with it), else the
+  // first-seen activity (the past-tense sentence leads with that).
+  const leadTool = [...entries].reverse()
+    .find(e => e?.item?.type === 'tool' && e.item.status === 'running')?.item
+    || entries.find(e => e?.item?.type === 'tool')?.item
+  const leadToolIcon = toolActivityIcon(leadTool?.tool)
   const toolRunning = entries.some(
     e => e?.item?.type === 'tool' && e.item.status === 'running',
   )
-
-  // The 1Hz ticker runs ONLY while the live tail is thinking — the sole moving
-  // part of a collapsed stretch is then the "Thinking for Ns" clock. A live tool
-  // run advertises itself with the spinner (no tick needed) and a settled stretch
-  // never re-renders on its own. This is the exact scope of the old
-  // ActiveThinkingDisclosure timer, moved here; the elapsed reads through
-  // thinkingElapsedMs (inside activityCollapsedLabel) so it stays replay-invariant
-  // across a reconnect burst.
-  const [now, setNow] = useState(() => Date.now())
-  const tickerActive = liveThinkingTail && !toolRunning
-  useEffect(() => {
-    if (!tickerActive) return undefined
-    const id = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [tickerActive])
 
   // Deriving the state parses each tool's output for its exit code, so memoize
   // on a cheap signature (see activityMemoSig for the exact staleness contract:
@@ -161,12 +149,11 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
   // OUTSIDE the memo because `live` is not part of the signature.
   const displayState = activityDisplayState(state, { live })
   // The label is memoized on the same signature so a prose typewriter frame
-  // never rebuilds the dedup'd activity rollup for every stretch above it. The
-  // 1Hz `now` tick re-derives it only while the live thinking clock is the
-  // moving part; `live` flips it once at settle.
-  const { text, showEllipsis } = useMemo(
-    () => activityCollapsedLabel(entries, { live, now }),
-    [sig, live, now], // eslint-disable-line react-hooks/exhaustive-deps
+  // never rebuilds the dedup'd activity rollup for every stretch above it;
+  // `live` flips it once at settle.
+  const text = useMemo(
+    () => activityCollapsedLabel(entries, { live }),
+    [sig, live], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
   // The user's toggle is the ONLY open/close signal — no force-open (see the
@@ -181,7 +168,9 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
     : ''
   const stateNote = displayState === 'error'
     ? `, a step failed${exitCode != null ? ` with exit ${exitCode}` : ''}`
-    : ''
+    : displayState === 'running'
+      ? ', in progress'
+      : ''
 
   return (
     <div className={
@@ -203,12 +192,7 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         aria-expanded={open}
         aria-label={`${text}${stepNote}${stateNote}`}
       >
-        {liveThinkingTail && !toolRunning ? (
-          // The agent is reasoning now — a quiet pulse, distinct from the spinner.
-          <span className="chat__activity-icon chat__activity-icon--think" aria-hidden="true" />
-        ) : displayState === 'running' ? (
-          <span className="chat__tool-spin" />
-        ) : displayState === 'error' ? (
+        {displayState === 'error' ? (
           <span className="chat__activity-icon" aria-hidden="true">
             {/* triangle — a step failed */}
             <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
@@ -218,31 +202,24 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
             </svg>
           </span>
         ) : toolCount > 0 ? (
-          // A genuinely SETTLED tool stretch (displayState keeps a live one on
-          // the spinner through inter-tool gaps): a muted TYPE glyph for the
-          // line's first activity (terminal, magnifier, …) — informative
-          // structure in the Codex idiom, not a success mark; a thinking-only
-          // line stays bare.
+          // The muted TYPE glyph — live and settled alike (the Codex idiom:
+          // the icon stays put, only the text shimmers). No spinner, no pulse
+          // dot: liveness is the label shimmer (ChatView.css --running rule).
           <span
             className="chat__activity-icon"
-            data-activity-kind={firstToolIcon}
+            data-activity-kind={leadToolIcon}
             aria-hidden="true"
           >
-            <ActivityTypeIcon kind={firstToolIcon} />
+            <ActivityTypeIcon kind={leadToolIcon} />
           </span>
         ) : (
-          // Settled thinking-only: no icon — "Thought for Ns" says it all, and
-          // a checkmark on every done run would be noise.
+          // Thinking-only: no icon at all — a bare shimmering "Thinking"
+          // live, a bare "Thought for Ns" settled.
           null
         )}
-        <span className="chat__activity-label">{text}</span>
-        {showEllipsis && (
-          <span className="chat__reasoning-ellipsis" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
-        )}
+        <span className="chat__activity-label">
+          <span className="chat__activity-label-text">{text}</span>
+        </span>
         {displayState === 'error' && exitCode != null && (
           <span className="chat__activity-chip">exit {exitCode}</span>
         )}
