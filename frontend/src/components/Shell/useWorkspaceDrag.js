@@ -69,7 +69,6 @@ export default function useWorkspaceDrag({
   sceneInputsRef, // ref → { projection, mode, contentRect }
   workspaceStateRef, // ref → { ws, undo } (advanced synchronously by Shell's dispatch)
   dispatchWorkspace,
-  showUndoToast, // (label) => void
   labelForTabRef, // ref → (tab) => string
   dragActiveRef, // shared flag the Drawer's swipe-close handlers stand down on
   drawerOpenRef,
@@ -347,9 +346,11 @@ export default function useWorkspaceDrag({
         const tab = tabFromKey(key)
         if (!tab) return
         const label = labelForTabRef.current ? labelForTabRef.current(tab) : 'tab'
-        const before = workspaceStateRef.current.ws
+        // The undo toast is driven by the reducer's undo slot (Shell), not raised
+        // here: OPEN_TAB_AT stamps a `toast` on the slot only when the drop
+        // actually mutates, so the toast can never outlive or mis-name its
+        // snapshot (design §3.5).
         dispatchWorkspace({ type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}` })
-        if (workspaceStateRef.current.ws !== before) showUndoToast(`Moved ${label}`)
       }
 
       const onUp = (ev) => {

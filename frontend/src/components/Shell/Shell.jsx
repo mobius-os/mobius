@@ -944,26 +944,12 @@ export default function Shell() {
   // Filled by the first-use coachmark (§7); the first real drag dismisses it.
   const coachmarkDismissRef = useRef(null)
   const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
-  // The 6s "Moved X — Undo" toast wired to the single-slot UNDO_LAST (§3.5),
-  // built on the shell's existing toast slot.
-  const showUndoToast = useCallback((label) => {
-    setToast({
-      message: label,
-      variant: 'info',
-      duration: 6000,
-      // Tagged so the honesty effect can retract exactly this toast when the
-      // undo slot clears (a stale Undo button must not lie).
-      wsUndo: true,
-      action: { label: 'Undo', onAction: () => dispatchWorkspace({ type: 'UNDO_LAST' }) },
-    })
-  }, [dispatchWorkspace])
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
     sceneInputsRef,
     workspaceStateRef,
     dispatchWorkspace,
-    showUndoToast,
     labelForTabRef,
     dragActiveRef,
     drawerOpenRef,
@@ -974,7 +960,7 @@ export default function Shell() {
   })
 
   // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
-  // The 6s "Moved X — Undo" toast is raised at drop time by showUndoToast above;
+  // The 6s "Undo" toast is driven by the undo slot's identity (effect below);
   // this adds the keyboard chord and the discoverability coachmark.
   const [wsCoachmarkDismissed, setWsCoachmarkDismissed] = useState(
     () => coachmarkDismissed(typeof localStorage !== 'undefined'
@@ -1019,14 +1005,37 @@ export default function Shell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [dispatchWorkspace])
 
-  // Toast honesty (design §3.5): once the undo slot is cleared by a later action
-  // (a tab activate, focus change, a fresh open, a prune) the "Undo" button would
-  // silently no-op — so retract the workspace-undo toast the moment its snapshot
-  // is gone. Only the workspace toast is retracted (tagged `wsUndo`); an
-  // unrelated toast is left alone.
+  // Undo toast, bound to the undo-slot IDENTITY (design §3.5). The toast is
+  // driven by the slot itself, not raised imperatively at drop time, so it can
+  // never outlive or mis-name its snapshot: every reducer mutation mints a fresh
+  // slot object, and this effect fires on that identity change to
+  //   - raise the slot's own named toast (a drag/close/agent placement) — this
+  //     REPLACES any prior wsUndo toast, so a later mutation's toast can never
+  //     carry the earlier one's Undo, and an agent APPLY_PLACEMENT gets its own
+  //     "Agent arranged your workspace · Undo" instead of silently overwriting a
+  //     live drag's slot;
+  //   - retract the wsUndo toast when the slot clears (a focus/activate/prune)
+  //     OR is replaced by a SILENT slot (a divider resize, toast:null) — either
+  //     way the displayed Undo would now revert a mutation it doesn't name.
+  // The prev-slot ref makes the trigger a true identity change (React may re-run
+  // an effect on an unrelated dep churn; the ref no-ops those).
+  const prevUndoSlotRef = useRef(workspaceState.undo)
   useEffect(() => {
-    if (workspaceState.undo == null) setToast(t => (t && t.wsUndo ? null : t))
-  }, [workspaceState.undo])
+    const slot = workspaceState.undo
+    if (slot === prevUndoSlotRef.current) return
+    prevUndoSlotRef.current = slot
+    if (slot && slot.toast) {
+      setToast({
+        message: slot.toast,
+        variant: 'info',
+        duration: 6000,
+        wsUndo: true,
+        action: { label: 'Undo', onAction: () => dispatchWorkspace({ type: 'UNDO_LAST' }) },
+      })
+    } else {
+      setToast(t => (t && t.wsUndo ? null : t))
+    }
+  }, [workspaceState.undo, dispatchWorkspace])
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
