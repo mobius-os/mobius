@@ -2541,6 +2541,7 @@ export default function Shell() {
               appName={app?.name}
               appSlug={app?.slug}
               offlineCapable={!!app?.offline_capable}
+              capabilityContract={app?.capability_contract || null}
               pendingIntent={appIntents[String(id)] || null}
               immersive={immersiveActive && String(immersiveAppId) === String(id)}
               onNavPush={appNavPush}

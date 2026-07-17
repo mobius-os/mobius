@@ -30,7 +30,7 @@ is a permission boundary, not a substitute for origin-bound browser features.
 Two shapes of app ship through different entry points, but both should be
 repo-ready from day one:
 
-- **A local-first app for this instance** (the common case, and what you build when the partner asks for "an app"): write source under `/data/apps/<slug>/` and run `register_app.py` once (see *Lifecycle* below). `register_app.py` reads `index.jsx`, not `mobius.json`, so local registration stays fast. Still keep a valid `mobius.json`, README, icon, and source `.gitignore` beside the source unless the app is truly throwaway; that makes "turn this into a repo/share it" a packaging step instead of archaeology.
+- **A local-first app for this instance** (the common case, and what you build when the partner asks for "an app"): write source under `/data/apps/<slug>/` and run `register_app.py` once (see *Lifecycle* below). The helper reads `index.jsx` plus the `capabilities` declaration from an adjacent `mobius.json`; later manifest edits synchronize through the same watcher as source. Keep a valid `mobius.json`, README, icon, and source `.gitignore` beside the source unless the app is truly throwaway; that makes "turn this into a repo/share it" a packaging step instead of archaeology.
 - **An installable app from a repo** (when the partner already wants to share/install it elsewhere): author `mobius.json` plus `index.jsx` in a root-level repo package, push it, then install with `POST /api/apps/install` and the raw manifest URL (see *Packaging / wrapping* above). The installer creates the `/data/apps/<slug>` repo and tracks upstream/local history.
 
 When unsure, build local-first, but leave the app repo-ready.
@@ -212,9 +212,9 @@ building chat, gives the partner an openable shell preview):
 python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>/index.jsx
 ```
 
-`register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat. When run from a live building chat, it also emits the app-update signal that lets that chat surface the open-preview affordance.
+`register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat. It also reads the versioned `capabilities` block from the adjacent `mobius.json`, has the backend normalize it into the runtime contract, and emits the app-update signal that lets a live building chat surface the open-preview affordance.
 
-**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or source-like modules under `/data/apps/<slug>/` change (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). If the partner already has the app open in the shell preview/canvas, each successful recompile refreshes them onto the newest compiled bundle; standalone PWAs may need refresh/reopen. The helper patches the existing row when the `source_dir` is the same, but registering from a different folder or bypassing the helper can still create duplicates. If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`. **Don't be fooled by a clean git tree:** the watcher auto-commits each recompile as an `agent edit` commit, so right after you save, `git -C /data/apps/<slug> status` is clean and `git add`/`git diff` show nothing — that is your edit having *landed*, not lost. Use `git log` to see the source commit — a landed edit advances BOTH `git log` and the `app-<id>.js` mtime (above); there is nothing to stage.
+**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx`, source-like modules, or `mobius.json` under `/data/apps/<slug>/` change (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). For local apps, a manifest edit and its normalized capability contract land atomically with the rebuilt bundle; an invalid or unknown declaration leaves the prior app live. Store-installed capability changes remain gated by the reviewed update flow. If the partner already has the app open in the shell preview/canvas, each successful recompile refreshes them onto the newest compiled bundle; standalone PWAs may need refresh/reopen. The helper patches the existing row when the `source_dir` is the same, but registering from a different folder or bypassing the helper can still create duplicates. If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error, broken import, or invalid capability declaration blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`. **Don't be fooled by a clean git tree:** the watcher auto-commits each recompile as an `agent edit` commit, so right after you save, `git -C /data/apps/<slug> status` is clean and `git add`/`git diff` show nothing — that is your edit having *landed*, not lost. Use `git log` to see the source commit — a landed edit advances BOTH `git log` and the `app-<id>.js` mtime (above); there is nothing to stage.
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
 
@@ -840,29 +840,50 @@ deep-link fallback so one provider failure cannot blank the app.
 
 A non-self external resource referenced at load time — a Google Fonts `<link>`/`@import`, any off-origin CDN script or stylesheet — can do worse than fail silently under the `default-src 'self'` CSP: it can HANG the in-app browser so the page never finishes loading and the whole app goes non-interactive (taps and anchors dead, "loading timeout"). So when the owner reports BOTH "X doesn't work" AND "loading timeout" in the same breath, treat the hang as the primary signal and grep the app for off-origin references first — it is not a scroll/offset bug. Vendor the font/asset same-origin or drop it; bundle fonts as a `@font-face` over a self-hosted file, never a CDN link.
 
-## Recording from the microphone
+## Host capabilities (microphone and future device/browser access)
 
-Shell-mounted mini-apps use an opaque origin by design. Direct calls to `navigator.mediaDevices.getUserMedia()` fail with an invalid security-origin error. Do not add `allow-same-origin` to fix it. Use the runtime bridge. The trusted shell owns microphone access and transfers bounded mono pulse-code modulation (PCM) samples to the exact visible app frame:
+Shell-mounted mini-apps have an opaque origin by design, so some origin-bound
+browser APIs cannot run directly. Do not add `allow-same-origin` or invent a
+feature-specific parent-message bridge. Declare a versioned capability in
+`mobius.json`, then use the single runtime broker:
 
-```js
-const recording = window.mobius.microphone.start({
-  maxSeconds: 8,                 // clamped to 0.1–60 seconds
-  onLevel: (level) => drawMeter(level), // optional 0–1 peak level
-})
-
-await recording.started          // permission granted; capture is active
-const resultPromise = recording.done
-
-// Later: both calls are safe even while the permission prompt is pending.
-recording.stop()                 // saves what has been captured
-// recording.cancel()            // rejects `done` with AbortError
-
-const { samples, sampleRate } = await resultPromise
-// samples is a mono Float32Array. Create an AudioBuffer, encode it, or persist
-// it using the app's existing audio format.
+```json
+"capabilities": {
+  "media.microphone.capture": {
+    "version": 1,
+    "reason": "Record a custom drum pad.",
+    "limits": { "max_duration_ms": 8000 }
+  }
+}
 ```
 
-The shell cancels capture when the app becomes hidden, reloads, or receives a freshly built frame. The same API records locally in the standalone progressive web app (PWA), where the shell cannot enforce those lifecycle boundaries. Keep a session ref and cancel it on unmount or navigation. Handle `NotAllowedError` with a useful browser-settings message. Never fall back to direct `getUserMedia()` in the opaque frame.
+```js
+const caps = window.mobius.capabilities
+if (!caps.available('media.microphone.capture', 1)) {
+  throw new Error('Microphone recording is unavailable.')
+}
+
+const recording = caps.open('media.microphone.capture', {
+  maxDurationMs: 8000, // cannot exceed the reviewed manifest ceiling
+})
+const unlisten = recording.on('level', drawMeter) // 0–1 peak
+await recording.ready
+
+// Safe even while the browser permission prompt is pending:
+const resultPromise = recording.finish() // save captured samples
+// recording.cancel()                     // reject with AbortError
+
+const { samples, sampleRate } = await resultPromise
+unlisten()
+```
+
+Every future host feature uses this same session shape: `ready`, `result`,
+`on(event)`, `control(action)`, `finish()`, and `cancel()`. One-shot operations
+can use `capabilities.invoke(name, input, {signal})`. The shell binds requests
+to the exact visible frame, enforces the reviewed name/version/limits, and
+cleans sessions up on navigation. Never probe or fall back to the blocked
+browser API from the opaque frame. The complete contract lives in the platform
+`CAPABILITIES.md`.
 
 ---
 

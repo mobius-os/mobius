@@ -46,11 +46,10 @@
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
 //     outcome distinguishes shell ownership from standalone fallback and
 //     request failures; see building-apps.md.
-//   window.mobius.microphone.start(opts)          -> recording session
-//     session.started resolves once capture begins; session.done resolves to
-//     {samples: Float32Array, sampleRate}; stop()/cancel() work before or after
-//     permission resolves. In-shell capture is brokered by the trusted parent
-//     because the app frame's opaque origin cannot call getUserMedia directly.
+//   window.mobius.capabilities.available(name, version?)
+//   window.mobius.capabilities.open(name, input)  -> capability session
+//     session.ready, session.result, session.on(event, cb), finish(), cancel()
+//   window.mobius.capabilities.invoke(name, input, {signal?}) -> one-shot result
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. In the default
 // shell mount the app has an opaque origin, so IndexedDB/OPFS/SQLite-wasm are
@@ -3326,228 +3325,340 @@ function appTokenClaims(token) {
   }
 }
 
-// ── Microphone bridge ────────────────────────────────────────────────────────
-// An opaque sandboxed frame is intentionally not a valid getUserMedia security
-// origin. The in-shell path asks AppCanvas to capture bounded mono PCM and send
-// only the samples back to this exact frame. The standalone host is top-level,
-// so it uses the same public API with a local capture implementation.
-export function makeMicrophone() {
-  let active = null
+// ── Host capability sessions ────────────────────────────────────────────────
+// Opaque app frames cannot use every origin-bound browser API directly. This
+// broker exposes one transport for every shell-owned operation instead of
+// growing one postMessage dialect per feature.
+//
+// A capability is independently versioned and declared in the reviewed app
+// contract. open() returns immediately so callers can cancel even while a
+// browser permission prompt is pending. Every session has the same lifecycle:
+// ready -> zero or more named events -> result/error, with generic controls.
+export class CapabilityError extends Error {
+  constructor(code, message, fields = {}) {
+    super(message || 'Capability request failed.')
+    this.name = fields.name || 'CapabilityError'
+    this.code = code || 'provider_error'
+    this.capability = fields.capability
+  }
+}
 
-  function start(options = {}) {
-    if (active) throw new Error('Another recording is already in progress.')
-    const requestId = globalThis.crypto?.randomUUID?.()
-      || `mic-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const maxValue = Number(options.maxSeconds)
-    const maxSeconds = Number.isFinite(maxValue) ? Math.max(0.1, Math.min(60, maxValue)) : 30
-    const onLevel = typeof options.onLevel === 'function' ? options.onLevel : null
-    let started = false
-    let settled = false
-    let startedResolve
-    let startedReject
-    let doneResolve
-    let doneReject
-    let localControl = null
-    let stopRequested = false
+function capabilityRequestId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `cap-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
 
-    const startedPromise = new Promise((resolve, reject) => {
-      startedResolve = resolve
-      startedReject = reject
-    })
-    const donePromise = new Promise((resolve, reject) => {
-      doneResolve = resolve
-      doneReject = reject
-    })
-    // A caller commonly awaits `started` before attaching to `done`; mark both
-    // as observed immediately so a permission rejection never becomes a noisy
-    // transient unhandled-rejection report.
-    startedPromise.catch(() => {})
-    donePromise.catch(() => {})
+function asCapabilityError(msg, capability) {
+  return new CapabilityError(
+    typeof msg?.code === 'string' ? msg.code : 'provider_error',
+    typeof msg?.message === 'string' ? msg.message : 'Capability request failed.',
+    { name: typeof msg?.name === 'string' ? msg.name : 'CapabilityError', capability },
+  )
+}
 
-    function clear() {
-      if (active === session) active = null
-      window.removeEventListener('message', onMessage)
+function standaloneMicrophoneProvider({ input, declaration, channel }) {
+  let stream
+  let context
+  let source
+  let processor
+  let silent
+  let timer
+  let settled = false
+  let finishRequested = false
+  let cancelRequested = false
+  const chunks = []
+  let sampleCount = 0
+
+  function cleanup() {
+    clearTimeout(timer)
+    if (processor) processor.onaudioprocess = null
+    for (const node of [processor, silent, source]) {
+      try { node?.disconnect?.() } catch (e) {}
     }
+    stream?.getTracks?.().forEach((track) => track.stop())
+    try { context?.close?.() } catch (e) {}
+  }
 
-    function fail(name, message) {
+  function finish(cancelled = false) {
+    if (settled) return
+    settled = true
+    cleanup()
+    if (cancelled) {
+      channel.error(new CapabilityError('aborted', 'Recording cancelled.', {
+        name: 'AbortError', capability: 'media.microphone.capture',
+      }))
+      return
+    }
+    const samples = new Float32Array(sampleCount)
+    let offset = 0
+    for (const chunk of chunks) {
+      samples.set(chunk, offset)
+      offset += chunk.length
+    }
+    channel.result({ samples, sampleRate: context?.sampleRate || 44100 })
+  }
+
+  ;(async () => {
+    try {
+      const mediaDevices = globalThis.navigator?.mediaDevices
+      const AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext
+      if (!mediaDevices?.getUserMedia) {
+        throw new CapabilityError('unavailable', 'Microphone recording is unavailable in this browser.')
+      }
+      if (!AudioContextCtor) {
+        throw new CapabilityError('unavailable', 'Audio recording is unavailable in this browser.')
+      }
+      stream = await mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      })
+      if (cancelRequested) { finish(true); return }
+
+      context = new AudioContextCtor()
+      if (context.state === 'suspended') await context.resume?.()
+      source = context.createMediaStreamSource(stream)
+      processor = context.createScriptProcessor(4096, 1, 1)
+      silent = context.createGain()
+      silent.gain.value = 0
+      source.connect(processor)
+      processor.connect(silent)
+      silent.connect(context.destination)
+
+      const declaredMax = Number(declaration?.limits?.max_duration_ms) || 30000
+      const requestedMax = Number(input?.maxDurationMs)
+      const durationMs = Math.max(100, Math.min(
+        declaredMax,
+        Number.isFinite(requestedMax) ? requestedMax : declaredMax,
+      ))
+      const maxFrames = Math.max(1, Math.round(context.sampleRate * durationMs / 1000))
+      processor.onaudioprocess = (event) => {
+        if (settled) return
+        const samples = event.inputBuffer.getChannelData(0)
+        const remaining = maxFrames - sampleCount
+        if (remaining <= 0) { finish(false); return }
+        const chunk = new Float32Array(samples.subarray(0, Math.min(samples.length, remaining)))
+        chunks.push(chunk)
+        sampleCount += chunk.length
+        let peak = 0
+        for (let i = 0; i < chunk.length; i += 1) peak = Math.max(peak, Math.abs(chunk[i]))
+        channel.event('level', Math.min(1, peak))
+        if (sampleCount >= maxFrames) finish(false)
+      }
+      timer = setTimeout(() => finish(false), durationMs + 100)
+      channel.ready({ sampleRate: context.sampleRate })
+      if (cancelRequested) finish(true)
+      else if (finishRequested) finish(false)
+    } catch (error) {
+      cleanup()
       if (settled) return
       settled = true
-      const error = new Error(message || 'Microphone recording failed.')
-      error.name = name || 'Error'
-      if (!started) startedReject(error)
-      doneReject(error)
-      clear()
+      channel.error(error)
+    }
+  })()
+
+  return {
+    control(action) {
+      if (action === 'cancel') {
+        cancelRequested = true
+        finish(true)
+      } else if (action === 'finish') {
+        finishRequested = true
+        if (context) finish(false)
+      }
+    },
+  }
+}
+
+const STANDALONE_CAPABILITY_PROVIDERS = {
+  'media.microphone.capture': standaloneMicrophoneProvider,
+}
+
+export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
+  const ownWindow = selfWindow || globalThis.window
+  const parentWindow = hostWindow || ownWindow?.parent
+  const embedded = !!ownWindow && parentWindow && parentWindow !== ownWindow
+  const sessions = new Map()
+  let currentDeclarations = declarations && typeof declarations === 'object' ? declarations : {}
+
+  function describe(name) {
+    const value = currentDeclarations?.[name]
+    return value && typeof value === 'object' ? value : null
+  }
+
+  function available(name, version) {
+    const declaration = describe(name)
+    if (!declaration) return false
+    if (version !== undefined && declaration.version !== version) return false
+    return embedded || typeof STANDALONE_CAPABILITY_PROVIDERS[name] === 'function'
+  }
+
+  function settle(session, mode, value) {
+    if (!session || session.settled) return
+    session.settled = true
+    sessions.delete(session.requestId)
+    if (mode === 'result') {
+      if (!session.readySettled) {
+        session.readySettled = true
+        session.readyResolve(undefined)
+      }
+      session.resultResolve(value)
+    } else {
+      const error = value instanceof Error
+        ? value
+        : asCapabilityError(value, session.capability)
+      if (!session.readySettled) {
+        session.readySettled = true
+        session.readyReject(error)
+      }
+      session.resultReject(error)
+    }
+  }
+
+  function onMessage(event) {
+    if (!embedded || event.source !== parentWindow || event.origin !== ownWindow.location.origin) return
+    const msg = event.data
+    if (!msg || typeof msg !== 'object' || typeof msg.requestId !== 'string') return
+    const session = sessions.get(msg.requestId)
+    if (!session || msg.capability !== session.capability) return
+    if (msg.type === 'moebius:capability-ready') {
+      if (session.readySettled || session.settled) return
+      session.readySettled = true
+      session.readyResolve(msg.value)
+    } else if (msg.type === 'moebius:capability-event') {
+      if (session.settled || typeof msg.event !== 'string') return
+      for (const listener of session.listeners.get(msg.event) || []) {
+        try { listener(msg.value) } catch (e) {}
+      }
+    } else if (msg.type === 'moebius:capability-result') {
+      settle(session, 'result', msg.value)
+    } else if (msg.type === 'moebius:capability-error') {
+      settle(session, 'error', msg)
+    }
+  }
+  ownWindow?.addEventListener?.('message', onMessage)
+
+  function open(capability, input = {}) {
+    const declaration = describe(capability)
+    if (!declaration) {
+      throw new CapabilityError('undeclared', `Capability \`${capability}\` is not declared by this app.`, { capability })
+    }
+    if (!available(capability, declaration.version)) {
+      throw new CapabilityError('unavailable', `Capability \`${capability}\` is unavailable in this host.`, { capability })
+    }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new CapabilityError('invalid_request', 'Capability input must be an object.', { capability })
     }
 
-    function complete(result) {
-      if (settled) return
-      settled = true
-      if (!started) {
-        started = true
-        startedResolve({ sampleRate: result.sampleRate })
-      }
-      doneResolve(result)
-      clear()
+    const requestId = capabilityRequestId()
+    let readyResolve
+    let readyReject
+    let resultResolve
+    let resultReject
+    const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject })
+    const result = new Promise((resolve, reject) => { resultResolve = resolve; resultReject = reject })
+    ready.catch(() => {})
+    result.catch(() => {})
+    const internal = {
+      requestId, capability, declaration, listeners: new Map(), settled: false,
+      readySettled: false, readyResolve, readyReject, resultResolve, resultReject,
+      localControl: null,
     }
-
-    function onMessage(event) {
-      if (event.source !== window.parent || event.origin !== window.location.origin) return
-      const msg = event.data
-      if (!msg || msg.requestId !== requestId) return
-      if (msg.type === 'moebius:microphone-started') {
-        if (settled || started) return
-        started = true
-        startedResolve({ sampleRate: Number(msg.sampleRate) || 44100 })
-        if (stopRequested) {
-          window.parent.postMessage({ type: 'moebius:microphone-stop', requestId }, window.location.origin)
-        }
-      } else if (msg.type === 'moebius:microphone-level') {
-        if (!settled && onLevel) {
-          try { onLevel(Math.max(0, Math.min(1, Number(msg.level) || 0))) } catch (e) {}
-        }
-      } else if (msg.type === 'moebius:microphone-result') {
-        const samples = msg.samples instanceof Float32Array
-          ? msg.samples
-          : new Float32Array(msg.samples || 0)
-        complete({ samples, sampleRate: Number(msg.sampleRate) || 44100 })
-      } else if (msg.type === 'moebius:microphone-error') {
-        fail(msg.name, msg.message)
-      }
-    }
-
-    function stop() {
-      if (settled) return donePromise
-      stopRequested = true
-      if (window.parent === window) {
-        if (started) localControl?.stop()
-      } else if (started) {
-        window.parent.postMessage({ type: 'moebius:microphone-stop', requestId }, window.location.origin)
-      }
-      return donePromise
-    }
-
-    function cancel() {
-      if (settled) return
-      if (window.parent === window) {
-        localControl?.cancel()
-      } else {
-        window.parent.postMessage({ type: 'moebius:microphone-cancel', requestId }, window.location.origin)
-      }
-      fail('AbortError', 'Recording cancelled.')
-    }
+    sessions.set(requestId, internal)
 
     const session = {
-      started: startedPromise,
-      done: donePromise,
-      stop,
-      cancel,
+      capability,
+      ready,
+      result,
+      on(event, listener) {
+        if (typeof event !== 'string' || typeof listener !== 'function') return () => {}
+        let group = internal.listeners.get(event)
+        if (!group) { group = new Set(); internal.listeners.set(event, group) }
+        group.add(listener)
+        return () => group.delete(listener)
+      },
+      control(action, value) {
+        if (internal.settled || typeof action !== 'string') return result
+        if (embedded) {
+          parentWindow.postMessage({
+            type: 'moebius:capability-control', requestId, capability, action, value,
+          }, ownWindow.location.origin)
+        } else {
+          internal.localControl?.control?.(action, value)
+        }
+        return result
+      },
+      finish() { return this.control('finish') },
+      cancel() {
+        if (internal.settled) return
+        if (embedded) {
+          parentWindow.postMessage({
+            type: 'moebius:capability-control', requestId, capability, action: 'cancel',
+          }, ownWindow.location.origin)
+        } else {
+          internal.localControl?.control?.('cancel')
+        }
+        settle(internal, 'error', new CapabilityError('aborted', 'Capability request cancelled.', {
+          name: 'AbortError', capability,
+        }))
+      },
     }
-    active = session
 
-    if (window.parent !== window) {
-      window.addEventListener('message', onMessage)
-      window.parent.postMessage({
-        type: 'moebius:microphone-start', requestId, maxSeconds,
-      }, window.location.origin)
-      return session
-    }
-
-    // Standalone PWA: capture locally, but preserve the exact same session API.
-    ;(async () => {
-      let stream
-      let context
-      let source
-      let processor
-      let silent
-      let timer
-      let localSettled = false
-      const chunks = []
-      let sampleCount = 0
-
-      function cleanup() {
-        clearTimeout(timer)
-        if (processor) processor.onaudioprocess = null
-        for (const node of [processor, silent, source]) {
-          try { node?.disconnect?.() } catch (e) {}
-        }
-        stream?.getTracks?.().forEach((track) => track.stop())
-        try { context?.close?.() } catch (e) {}
-      }
-
-      function finishLocal(cancelled) {
-        if (localSettled) return
-        localSettled = true
-        cleanup()
-        if (cancelled) {
-          fail('AbortError', 'Recording cancelled.')
-          return
-        }
-        const samples = new Float32Array(sampleCount)
-        let offset = 0
-        for (const chunk of chunks) {
-          samples.set(chunk, offset)
-          offset += chunk.length
-        }
-        complete({ samples, sampleRate: context.sampleRate })
-      }
-
-      localControl = {
-        stop: () => finishLocal(false),
-        cancel: () => finishLocal(true),
+    if (embedded) {
+      parentWindow.postMessage({
+        type: 'moebius:capability-open', requestId, capability,
+        version: declaration.version, input,
+      }, ownWindow.location.origin)
+    } else {
+      const provider = STANDALONE_CAPABILITY_PROVIDERS[capability]
+      const channel = {
+        ready(value) {
+          if (internal.readySettled || internal.settled) return
+          internal.readySettled = true
+          internal.readyResolve(value)
+        },
+        event(event, value) {
+          if (internal.settled) return
+          for (const listener of internal.listeners.get(event) || []) {
+            try { listener(value) } catch (e) {}
+          }
+        },
+        result(value) { settle(internal, 'result', value) },
+        error(error) { settle(internal, 'error', error) },
       }
       try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error('Microphone recording is unavailable in this browser.')
-        }
-        const Ctor = window.AudioContext || window.webkitAudioContext
-        if (!Ctor) throw new Error('Audio recording is unavailable in this browser.')
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-        })
-        if (settled) {
-          stream.getTracks().forEach((track) => track.stop())
-          return
-        }
-        context = new Ctor()
-        if (context.state === 'suspended') await context.resume?.()
-        source = context.createMediaStreamSource(stream)
-        processor = context.createScriptProcessor(4096, 1, 1)
-        silent = context.createGain()
-        silent.gain.value = 0
-        source.connect(processor)
-        processor.connect(silent)
-        silent.connect(context.destination)
-        const maxFrames = Math.max(1, Math.round(context.sampleRate * maxSeconds))
-        processor.onaudioprocess = (event) => {
-          if (localSettled) return
-          const input = event.inputBuffer.getChannelData(0)
-          const remaining = maxFrames - sampleCount
-          const chunk = new Float32Array(input.subarray(0, Math.min(input.length, remaining)))
-          chunks.push(chunk)
-          sampleCount += chunk.length
-          if (onLevel) {
-            let peak = 0
-            for (let i = 0; i < chunk.length; i += 1) peak = Math.max(peak, Math.abs(chunk[i]))
-            try { onLevel(Math.min(1, peak)) } catch (e) {}
-          }
-          if (sampleCount >= maxFrames) finishLocal(false)
-        }
-        started = true
-        startedResolve({ sampleRate: context.sampleRate })
-        if (stopRequested) finishLocal(false)
-        else timer = setTimeout(() => finishLocal(false), maxSeconds * 1000 + 100)
+        internal.localControl = provider({ input, declaration, channel })
       } catch (error) {
-        cleanup()
-        fail(error?.name, error?.message)
+        settle(internal, 'error', error)
       }
-    })()
-
+    }
     return session
   }
 
-  return { start }
+  return {
+    available,
+    describe,
+    list: () => Object.keys(currentDeclarations).sort(),
+    open,
+    async invoke(capability, input = {}, { signal } = {}) {
+      const session = open(capability, input)
+      if (signal) {
+        if (signal.aborted) session.cancel()
+        else signal.addEventListener('abort', () => session.cancel(), { once: true })
+      }
+      return session.result
+    },
+    _updateDeclarations(next) {
+      currentDeclarations = next && typeof next === 'object' ? next : {}
+    },
+    _destroy() {
+      ownWindow?.removeEventListener?.('message', onMessage)
+      for (const session of sessions.values()) {
+        settle(session, 'error', new CapabilityError('aborted', 'Capability host was detached.', {
+          name: 'AbortError', capability: session.capability,
+        }))
+      }
+    },
+  }
 }
-
 function tokenMatchesRuntime(token, appId, appInstanceId) {
   const claims = appTokenClaims(token)
   if (!claims || claims.scope !== 'app' || String(claims.app_id) !== String(appId)) {
@@ -3561,17 +3672,19 @@ function tokenMatchesRuntime(token, appId, appInstanceId) {
 
 let _runtimeContext = null
 
-export function init({ appId, appInstanceId = null, getToken }) {
+export function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
   const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
   if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
     // Hosts may replace their token broker after a refresh. Keep one runtime and
     // one listener set, but route future requests through the newest function.
     _runtimeContext.tokenRef.current = getToken
+    _runtimeContext.capabilities?._updateDeclarations(capabilityContract?.runtime || {})
     return _runtimeContext.api
   }
   if (_runtimeContext) {
     _runtimeContext.signal?._destroy?.()
     _runtimeContext.storage?._destroy?.()
+    _runtimeContext.capabilities?._destroy?.()
   }
 
   const tokenRef = { current: getToken }
@@ -3581,7 +3694,7 @@ export function init({ appId, appInstanceId = null, getToken }) {
   }
   const storage = makeStorage({ appId, appInstanceId, getToken: scopedToken })
   const signal = makeSignal(appId, storage, appInstanceId)
-  const microphone = makeMicrophone()
+  const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -3609,13 +3722,13 @@ export function init({ appId, appInstanceId = null, getToken }) {
     // window.mobius.createUseDocument(React)`.
     createUseDocument: (React) => createUseDocument(storage, React),
     signal,
-    microphone,
+    capabilities,
     chat: makeChat({ appId, getToken: scopedToken, storage }),
     nav: makeNav(),
     split: makeSplit(),
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive

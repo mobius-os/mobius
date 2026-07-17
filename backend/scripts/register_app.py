@@ -102,6 +102,27 @@ def _notify(token: str, base: str, event_type: str, **kwargs):
     pass  # notify is best-effort; don't abort on failure
 
 
+def _read_capabilities(source_dir: str) -> dict:
+  """Read the one runtime-capability declaration beside index.jsx."""
+  manifest_path = os.path.join(source_dir, "mobius.json")
+  try:
+    with open(manifest_path, encoding="utf-8") as f:
+      manifest = json.load(f)
+  except FileNotFoundError:
+    return {}
+  except (OSError, json.JSONDecodeError) as exc:
+    print(f"Cannot read mobius.json: {exc}", file=sys.stderr)
+    sys.exit(1)
+  if not isinstance(manifest, dict):
+    print("mobius.json must contain a JSON object.", file=sys.stderr)
+    sys.exit(1)
+  capabilities = manifest.get("capabilities") or {}
+  if not isinstance(capabilities, dict):
+    print("mobius.json `capabilities` must be an object.", file=sys.stderr)
+    sys.exit(1)
+  return capabilities
+
+
 def main() -> None:
   if len(sys.argv) != 4:
     print(
@@ -123,6 +144,7 @@ def main() -> None:
   # watcher can resolve `<app_dir>/index.jsx` change events back to
   # this app's DB row exactly, without slugify-guessing the name.
   source_dir = os.path.dirname(os.path.abspath(jsx_path))
+  capabilities = _read_capabilities(source_dir)
 
   token = os.environ.get("AGENT_TOKEN")
   if not token:
@@ -161,6 +183,7 @@ def main() -> None:
         "jsx_source": jsx_source,
         "chat_id": chat_id,
         "source_dir": source_dir,
+        "capabilities": capabilities,
       },
     )
   else:
@@ -174,6 +197,7 @@ def main() -> None:
         "jsx_source": jsx_source,
         "chat_id": chat_id,
         "source_dir": source_dir,
+        "capabilities": capabilities,
       },
     )
 

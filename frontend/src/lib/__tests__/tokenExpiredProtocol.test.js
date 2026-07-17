@@ -121,7 +121,7 @@ test('protocol: token expiry recovery preserves offline-latch semantics', () => 
 })
 
 test('protocol: an already-mounted frame accepts refreshed credentials', () => {
-  assert.match(frameSource, /if \(msg\.type === 'moebius:frame-init'\) \{\s+acceptToken\(msg\.token\);\s+if \(initialized\) return;/)
+  assert.match(frameSource, /if \(msg\.type === 'moebius:frame-init'\) \{\s+currentCapabilityContract = msg\.capabilityContract \|\| null;\s+acceptToken\(msg\.token\);\s+if \(initialized\) return;/)
   assert.match(frameSource, /getToken: runtimeToken/)
   assert.match(frameSource, /token: currentToken/)
 })

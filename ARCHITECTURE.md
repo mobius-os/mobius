@@ -216,6 +216,10 @@ Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI pro
 
 ## App execution tiers
 
+Host-mediated device/browser access uses the versioned capability broker; see
+[`CAPABILITIES.md`](CAPABILITIES.md) for the manifest, app API, wire protocol,
+provider contract, lifecycle rules, and trust-tier escape hatches.
+
 | Tier | Boundary and capability | UX / standalone consequence |
 |---|---|---|
 | Ordinary mini-app | Shell-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default inside the shell. The shell owns install/offline identity; a home-screen shortcut may deep-link through the shell, but opacity alone does not create an independent PWA |

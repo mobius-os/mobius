@@ -428,6 +428,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # inside <script>. json.dumps already wraps the result in double
   # quotes, so callers interpolate it bare.
   app_name_js_literal = json.dumps(app_name).replace("</", "<\\/")
+  capability_contract_js_literal = json.dumps(
+    app.capability_contract or {}, separators=(",", ":"), ensure_ascii=True,
+  ).replace("</", "<\\/")
   app_bg = _app_background_color(app)
   # Single source of truth: pull the mini-app importmap from app-frame.html
   # instead of carrying a hand-synced brace-doubled copy here. Precomputed as a
@@ -807,6 +810,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     const APP_NAME = {app_name_js_literal};
     const APP_CHAT_ID = {json.dumps(app.chat_id or '')};
     const APP_VERSION = {app_v};
+    const CAPABILITY_CONTRACT = {capability_contract_js_literal};
 
     // Auth: read the owner JWT from localStorage (same origin so it's
     // visible). If missing, redirect to login with a return URL.
@@ -1112,6 +1116,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
             appId: APP_ID,
             appInstanceId: tokenAppInstanceId(appToken),
             getToken: runtimeToken,
+            capabilityContract: CAPABILITY_CONTRACT,
           }});
         }} catch (e) {{}}
         const bust = cacheBust ? '&_=' + Date.now() : '';

@@ -13,7 +13,105 @@ import json
 from typing import Any
 
 
-CONTRACT_SCHEMA = 1
+CONTRACT_SCHEMA = 2
+
+
+# Host-mediated browser capabilities. These are deliberately separate from
+# server API permissions: a runtime capability crosses the opaque iframe
+# boundary through the shell, while a server permission gates an authenticated
+# HTTP route. Both appear in the same install-review contract below.
+#
+# Capability ids are stable names. Each capability evolves independently via
+# its own integer version, so adding (say) camera v2 never forces every storage
+# or microphone consumer onto a new global runtime version.
+RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "media.microphone.capture": {
+    "version": 1,
+    "kind": "session",
+    "title": "Record audio",
+    "description": "Use the device microphone while this app is visible.",
+    "risk": "device",
+    "lifecycle": "active_frame",
+    "default_limits": {"max_duration_ms": 30_000},
+    "hard_limits": {"max_duration_ms": (100, 60_000)},
+  },
+}
+
+
+def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
+  """Validate and normalize manifest-declared host capabilities.
+
+  Unknown names or versions fail closed: an install surface cannot honestly
+  review a capability whose semantics this platform does not know. Optional
+  provider/plugin capability catalogs can extend this registry in the future;
+  they must supply the same stable definition shape before install review.
+  """
+  requested = manifest.get("capabilities") or {}
+  if not isinstance(requested, dict):
+    raise ValueError("Manifest `capabilities` must be an object.")
+
+  normalized: dict[str, Any] = {}
+  for capability_id in sorted(requested):
+    raw = requested[capability_id]
+    definition = RUNTIME_CAPABILITY_DEFINITIONS.get(capability_id)
+    if definition is None:
+      raise ValueError(f"Unknown capability `{capability_id}`.")
+    if not isinstance(raw, dict):
+      raise ValueError(
+        f"Manifest capability `{capability_id}` must be an object."
+      )
+
+    version = raw.get("version")
+    if version != definition["version"]:
+      raise ValueError(
+        f"Capability `{capability_id}` requires version "
+        f"{definition['version']}."
+      )
+    reason = raw.get("reason")
+    if reason is not None and (
+      not isinstance(reason, str) or not reason.strip() or len(reason) > 240
+    ):
+      raise ValueError(
+        f"Capability `{capability_id}` reason must be 1-240 characters."
+      )
+
+    raw_limits = raw.get("limits") or {}
+    if not isinstance(raw_limits, dict):
+      raise ValueError(
+        f"Capability `{capability_id}` limits must be an object."
+      )
+    unknown_limits = set(raw_limits) - set(definition["hard_limits"])
+    if unknown_limits:
+      raise ValueError(
+        f"Capability `{capability_id}` has unknown limits: "
+        + ", ".join(sorted(unknown_limits))
+        + "."
+      )
+    limits = dict(definition["default_limits"])
+    for key, value in raw_limits.items():
+      if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+          f"Capability `{capability_id}` limit `{key}` must be a number."
+        )
+      low, high = definition["hard_limits"][key]
+      if value < low or value > high:
+        raise ValueError(
+          f"Capability `{capability_id}` limit `{key}` must be between "
+          f"{low} and {high}."
+        )
+      limits[key] = int(value)
+
+    normalized[capability_id] = {
+      "version": definition["version"],
+      "kind": definition["kind"],
+      "title": definition["title"],
+      "description": definition["description"],
+      "risk": definition["risk"],
+      "lifecycle": definition["lifecycle"],
+      "reason": reason.strip() if isinstance(reason, str) else None,
+      "limits": limits,
+    }
+  return normalized
 
 
 def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -73,7 +171,68 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "capable": bool(manifest.get("offline_capable", False)),
       "contract": manifest.get("offline") or None,
     },
+    "runtime": normalize_runtime_capabilities(manifest),
   }
+
+
+def runtime_declaration_from_contract(
+  contract: dict[str, Any] | None,
+) -> dict[str, Any]:
+  """Recover the author-controlled part of a normalized runtime contract.
+
+  Normalized contracts contain host copy and lifecycle metadata in addition to
+  the declaration.  Local app metadata updates must not feed that host-owned
+  material back through the public declaration parser, so retain only the
+  version, reason, and reviewed limits.
+  """
+  runtime = contract.get("runtime", {}) if isinstance(contract, dict) else {}
+  if not isinstance(runtime, dict):
+    return {}
+  declaration: dict[str, Any] = {}
+  for capability_id, value in runtime.items():
+    if not isinstance(value, dict):
+      continue
+    declaration[capability_id] = {
+      "version": value.get("version"),
+      "reason": value.get("reason"),
+      "limits": dict(value.get("limits") or {}),
+    }
+  return declaration
+
+
+def contract_from_app_state(
+  app: Any,
+  *,
+  capabilities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Build an accurate contract for an owner-authored local app.
+
+  Store installs derive their complete contract from the reviewed manifest.
+  Local apps are created and edited directly by their owner, so their durable
+  database state is authoritative for server permissions while ``mobius.json``
+  is authoritative for host-mediated runtime capabilities.
+  """
+  if capabilities is None:
+    capabilities = runtime_declaration_from_contract(
+      getattr(app, "capability_contract", None),
+    )
+  manifest = {
+    "system_app": bool(getattr(app, "system_app", False)),
+    "system_prompt": getattr(app, "system_prompt_file", None),
+    "embeds_agent": bool(getattr(app, "embeds_agent", False)),
+    "permissions": {
+      "chat_log_access": getattr(app, "chat_log_access", "none"),
+      "filesystem_access": bool(getattr(app, "filesystem_access", False)),
+      "cross_app_access": getattr(app, "cross_app_access", "none"),
+      "share_with_apps": getattr(app, "share_with_apps", "none"),
+      "manage_apps": bool(getattr(app, "manage_apps", False)),
+      "github_access": bool(getattr(app, "github_access", False)),
+    },
+    "offline_capable": bool(getattr(app, "offline_capable", False)),
+    "offline": getattr(app, "offline_contract", None),
+    "capabilities": capabilities,
+  }
+  return contract_from_manifest(manifest)
 
 
 def canonical_contract_json(contract: dict[str, Any]) -> str:

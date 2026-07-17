@@ -1602,6 +1602,13 @@ async def create_app(
       # may set it — it's the identity key for install-vs-update
       # discrimination. See AppCreate's docstring for the threat model.
     )
+    from app.app_capabilities import contract_from_app_state
+    try:
+      app.capability_contract = contract_from_app_state(
+        app, capabilities=body.capabilities,
+      )
+    except ValueError as exc:
+      raise HTTPException(status_code=422, detail=str(exc))
     db.add(app)
     db.flush()  # assigns app.id without committing
     # Compile transactionally like every other recompile path: out-of-place to a
@@ -1721,6 +1728,26 @@ async def update_app(
       app.cross_app_access = body.cross_app_access
     if body.offline_capable is not None:
       app.offline_capable = body.offline_capable
+    if body.capabilities is not None and app.manifest_url is not None:
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Runtime capabilities for an installed app must change through its "
+          "reviewed manifest update."
+        ),
+      )
+    # Keep the local app's owner-readable contract synchronized with both its
+    # durable server permissions and its author declaration. Installed apps are
+    # bound to their reviewed manifest contract instead.
+    if app.manifest_url is None:
+      from app.app_capabilities import contract_from_app_state
+      try:
+        app.capability_contract = contract_from_app_state(
+          app, capabilities=body.capabilities,
+        )
+      except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
     # source_dir uniqueness + the recompile/commit run under the per-source-dir
     # lock (when it changed) so the new value is visible to a concurrent
     # uninstall's dedup check, and a conflicting dir is rejected BEFORE the

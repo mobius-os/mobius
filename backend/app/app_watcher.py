@@ -24,6 +24,7 @@ Failure handling:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -44,6 +45,7 @@ log = logging.getLogger(__name__)
 _DEBOUNCE_SECS = 1.0
 _INDEX_JSX = "index.jsx"
 _SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
+_DECLARATION_FILES = {"mobius.json"}
 _IGNORED_SOURCE_PARTS = {
   ".build",
   ".git",
@@ -191,9 +193,11 @@ def _source_dir_for_changed_path(path: str | Path) -> Path | None:
     # any other tracked file. Let every safe in-tree file wake the resolver
     # finalizer while MERGE_HEAD exists; the unresolved-marker gate below still
     # prevents a premature bundle swap.
-    if p.suffix not in _SOURCE_SUFFIXES and not (
-      source_dir / ".git" / "MERGE_HEAD"
-    ).exists():
+    if (
+      p.suffix not in _SOURCE_SUFFIXES
+      and p.name not in _DECLARATION_FILES
+      and not (source_dir / ".git" / "MERGE_HEAD").exists()
+    ):
       return None
     return source_dir
   return None
@@ -429,6 +433,32 @@ class _JsxHandler(FileSystemEventHandler):
                 return
           if pending_receipt is None:
             try:
+              # A local app's adjacent manifest is the sole declaration source
+              # for host-mediated capabilities. Synchronize it under the same
+              # DB/bundle transaction as the rebuild so code and authority can
+              # never land in different revisions. Store-installed apps retain
+              # the last explicitly reviewed manifest contract.
+              if app.manifest_url is None:
+                manifest_path = source_dir_path / "mobius.json"
+                if manifest_path.is_file():
+                  try:
+                    manifest = json.loads(
+                      manifest_path.read_text(encoding="utf-8")
+                    )
+                  except (OSError, json.JSONDecodeError) as exc:
+                    raise RuntimeError(f"Invalid mobius.json: {exc}") from exc
+                  if not isinstance(manifest, dict):
+                    raise RuntimeError("Invalid mobius.json: expected an object")
+                  capabilities = manifest.get("capabilities") or {}
+                else:
+                  capabilities = {}
+                from app.app_capabilities import contract_from_app_state
+                try:
+                  app.capability_contract = contract_from_app_state(
+                    app, capabilities=capabilities,
+                  )
+                except ValueError as exc:
+                  raise RuntimeError(f"Invalid mobius.json: {exc}") from exc
               await recompile_app_bundle(db, app, jsx_source)
               if app_git.is_repo(source_dir):
                 try:

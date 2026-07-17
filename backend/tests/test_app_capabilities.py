@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app import models
 from app.app_capabilities import contract_and_digest
+from app.app_capabilities import normalize_runtime_capabilities
 from tests.test_apps_install import (  # noqa: F401
   JSX,
   _bypass_cron_scaffold,
@@ -69,6 +70,101 @@ def test_preview_returns_server_derived_contract_and_digest(
   assert body["capability_contract"]["background"]["authority"] == (
     "scoped_system_job"
   )
+  assert body["capability_contract"]["schema"] == 2
+  assert body["capability_contract"]["runtime"] == {}
+
+
+def test_runtime_capability_is_independently_versioned_and_bounded():
+  manifest = _manifest(capabilities={
+    "media.microphone.capture": {
+      "version": 1,
+      "reason": "Record a custom drum pad.",
+      "limits": {"max_duration_ms": 8_000},
+    },
+  })
+  runtime = normalize_runtime_capabilities(manifest)
+  assert runtime == {
+    "media.microphone.capture": {
+      "version": 1,
+      "kind": "session",
+      "title": "Record audio",
+      "description": "Use the device microphone while this app is visible.",
+      "risk": "device",
+      "lifecycle": "active_frame",
+      "reason": "Record a custom drum pad.",
+      "limits": {"max_duration_ms": 8_000},
+    },
+  }
+
+
+def test_runtime_capability_rejects_unknown_name_version_and_limits():
+  for capabilities, message in (
+    ({"device.telepathy": {"version": 1}}, "Unknown capability"),
+    ({"media.microphone.capture": {"version": 2}}, "requires version 1"),
+    ({
+      "media.microphone.capture": {
+        "version": 1, "limits": {"max_duration_ms": 60_001},
+      },
+    }, "must be between"),
+  ):
+    try:
+      normalize_runtime_capabilities(_manifest(capabilities=capabilities))
+    except ValueError as exc:
+      assert message in str(exc)
+    else:
+      raise AssertionError("invalid capability declaration was accepted")
+
+
+def test_local_app_create_normalizes_runtime_capability(client, auth):
+  response = client.post("/api/apps/", headers=auth, json={
+    "name": "Recorder",
+    "description": "Records one sound",
+    "jsx_source": "export default function App(){ return <div/> }",
+    "capabilities": {
+      "media.microphone.capture": {
+        "version": 1,
+        "reason": "Record a custom sound",
+        "limits": {"max_duration_ms": 8000},
+      },
+    },
+  })
+
+  assert response.status_code == 201, response.text
+  runtime = response.json()["capability_contract"]["runtime"]
+  assert runtime["media.microphone.capture"]["version"] == 1
+  assert runtime["media.microphone.capture"]["limits"] == {
+    "max_duration_ms": 8000,
+  }
+
+
+def test_local_app_capability_replacement_is_explicit(client, auth):
+  created = client.post("/api/apps/", headers=auth, json={
+    "name": "Recorder",
+    "jsx_source": "export default function App(){ return <div/> }",
+    "capabilities": {
+      "media.microphone.capture": {"version": 1},
+    },
+  })
+  assert created.status_code == 201, created.text
+
+  response = client.patch(
+    f"/api/apps/{created.json()['id']}", headers=auth,
+    json={"capabilities": {}},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["capability_contract"]["runtime"] == {}
+
+
+def test_local_app_rejects_unknown_runtime_capability(client, auth):
+  response = client.post("/api/apps/", headers=auth, json={
+    "name": "Unsafe declaration",
+    "jsx_source": "export default function App(){ return <div/> }",
+    "capabilities": {"device.telepathy": {"version": 1}},
+  })
+
+  assert response.status_code == 422
+  assert "Unknown capability" in response.json()["detail"]
 
 
 def test_digest_mismatch_rejects_before_fetching_code_or_mutating(

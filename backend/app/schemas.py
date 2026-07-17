@@ -48,6 +48,10 @@ class AppCreate(BaseModel):
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False
+  # Host-mediated browser capabilities declared by the adjacent mobius.json.
+  # register_app.py reads this automatically. The server normalizes it into the
+  # owner-readable capability contract; callers never submit that contract.
+  capabilities: dict = Field(default_factory=dict)
   # Note: `manifest_url` is NOT accepted here. It is the identity key
   # the install endpoint uses to discriminate install-vs-update — a
   # caller spoofing it via direct POST could trick a later legitimate
@@ -71,6 +75,9 @@ class AppUpdate(BaseModel):
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
   offline_capable: bool | None = None
+  # None preserves the declaration. An object replaces it ({} removes all
+  # runtime capabilities). Store-installed apps remain manifest-review owned.
+  capabilities: dict | None = None
 
 
 class AppOut(BaseModel):

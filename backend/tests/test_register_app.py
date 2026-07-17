@@ -8,6 +8,7 @@ rename) is the fix.
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -131,3 +132,42 @@ def test_update_patch_includes_name(monkeypatch, tmp_path):
   mod.main()
 
   assert patches and patches[0]["name"] == "Memory"
+
+
+def test_registration_reads_runtime_capabilities_from_adjacent_manifest(
+  monkeypatch, tmp_path,
+):
+  """Local-first registration carries the same declaration as Store install."""
+  mod = _load_module()
+  entry = tmp_path / "index.jsx"
+  entry.write_text("export default function App() { return null }")
+  declared = {
+    "media.microphone.capture": {
+      "version": 1,
+      "reason": "Record a sound",
+      "limits": {"max_duration_ms": 8000},
+    },
+  }
+  (tmp_path / "mobius.json").write_text(json.dumps({
+    "capabilities": declared,
+  }))
+  posts = []
+
+  def fake_call(url, token, method, data=None):
+    if method == "GET":
+      return []
+    if method == "POST" and url.endswith("/api/apps/"):
+      posts.append(data)
+      return {"id": 9}
+    raise AssertionError(f"unexpected call: {method} {url}")
+
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  monkeypatch.setattr(sys, "argv", [
+    "register_app.py", "Recorder", "Records", str(entry),
+  ])
+  monkeypatch.setattr(mod, "_call", fake_call)
+  monkeypatch.setattr(mod, "_notify", lambda *_args, **_kwargs: None)
+
+  mod.main()
+
+  assert posts[0]["capabilities"] == declared

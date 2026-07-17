@@ -206,6 +206,15 @@ def validate_manifest_contract(manifest) -> None:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
 
+  # Runtime capabilities are normalized by the same canonical registry used
+  # to build the owner-reviewable install contract. Keep a single definition
+  # of names, versions, limits, and failure semantics.
+  from app.app_capabilities import normalize_runtime_capabilities
+  try:
+    normalize_runtime_capabilities(dict(manifest))
+  except ValueError as exc:
+    _fail(str(exc))
+
   validate_manifest_offline(manifest.get("offline"))
 
   seeds = manifest.get("storage_seeds", {})

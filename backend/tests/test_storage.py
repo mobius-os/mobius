@@ -1129,6 +1129,48 @@ async def test_watcher_recompiles_registered_app(client, owner_token):
 
 
 @pytest.mark.asyncio
+async def test_watcher_atomically_syncs_local_manifest_capabilities(
+  client, owner_token,
+):
+  """Editing mobius.json is enough; local apps need no manual re-register."""
+  import asyncio
+  import os
+  from app.app_watcher import _JsxHandler, _source_dir_for_changed_path
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "watch-capability")
+  os.makedirs(src, exist_ok=True)
+  created = client.post("/api/apps/", json={
+    "name": "watch-capability",
+    "description": "x",
+    "jsx_source": "export default function App(){ return <div>V0</div> }",
+    "source_dir": src,
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert created.status_code == 201, created.text
+  manifest_path = os.path.join(src, "mobius.json")
+  with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump({
+      "capabilities": {
+        "media.microphone.capture": {
+          "version": 1,
+          "reason": "Record a sound",
+          "limits": {"max_duration_ms": 8000},
+        },
+      },
+    }, f)
+
+  assert _source_dir_for_changed_path(manifest_path) is not None
+  await _JsxHandler(asyncio.get_running_loop())._recompile(manifest_path)
+
+  response = client.get(
+    f"/api/apps/{created.json()['id']}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200
+  runtime = response.json()["capability_contract"]["runtime"]
+  assert runtime["media.microphone.capture"]["reason"] == "Record a sound"
+
+
+@pytest.mark.asyncio
 async def test_watcher_recompiles_when_imported_module_changes(
   client, owner_token,
 ):

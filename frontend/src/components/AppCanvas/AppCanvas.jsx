@@ -12,7 +12,8 @@ import {
 } from '../../lib/appFrameStorage.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
-import { startMicrophoneCapture } from '../../lib/microphoneCapture.js'
+import { createCapabilityHost } from '../../lib/capabilityHost.js'
+import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -31,7 +32,8 @@ import './AppCanvas.css'
 // Parent messages are accepted only from the shell origin. Frame messages have
 // the opaque origin `null` and are attributed to an exact mounted contentWindow.
 //
-//   1. {type: 'moebius:frame-init', token, themeCss, bg}    parent → frame
+//   1. {type: 'moebius:frame-init', token, themeCss, bg,
+//       capabilityContract}                                parent → frame
 //      Fired by `sendInit()` below — on iframe.onLoad AND whenever the
 //      token query resolves (covers the case where the iframe loaded
 //      before the token was ready). Idempotent — the frame's own
@@ -101,10 +103,10 @@ import './AppCanvas.css'
 //      catalog surfaces that open an app directly into a setup/settings path
 //      without inventing app-specific deep links.
 //
-//   7. moebius:microphone-*                                bidirectional
-//      Opaque frames cannot call getUserMedia themselves. A visible
-//      frame requests a bounded capture; the trusted shell records mono PCM and
-//      transfers only those samples back to that exact contentWindow.
+//   7. moebius:capability-*                                bidirectional
+//      One versioned session protocol for every host-mediated browser feature.
+//      Exact-frame binding, reviewed declarations, lifecycle, errors, events,
+//      completion, and cancellation are generic; providers own feature details.
 //
 //   8. {type: 'moebius:frame-focus'}                       frame → parent
 //      Pointer input inside an opaque iframe cannot bubble into its positioned
@@ -156,31 +158,6 @@ function readDeviceInsets() {
   return readSafeAreaInsets(getComputedStyle(_insetProbe))
 }
 
-// Retire the broker session synchronously at shell lifecycle boundaries. The
-// control object does not exist while getUserMedia permission is pending, so
-// the cancellation flag is load-bearing: the async starter checks it before it
-// can announce or deliver anything to a frame that is no longer live.
-function cancelMicrophoneCapture(captureRef, { notifyFrame = false } = {}) {
-  const capture = captureRef.current
-  if (!capture) return
-  captureRef.current = null
-  capture.cancelled = true
-  if (notifyFrame) {
-    // A deactivated canvas stays mounted in the shell's LRU. Settle its runtime
-    // session so returning to that app can start a new recording; samples and
-    // unrelated permission errors remain suppressed by the ownership guards.
-    try {
-      capture.sourceWindow?.postMessage({
-        type: 'moebius:microphone-error',
-        requestId: capture.requestId,
-        name: 'AbortError',
-        message: 'Recording cancelled because the app is no longer active.',
-      }, '*')
-    } catch {}
-  }
-  capture.control?.cancel()
-}
-
 // The first-open loading surface — the emotional peak of a build, so it's
 // accent-forward rather than a generic gray spinner: the app name is present,
 // and shimmer skeleton bars hint a header + list are on their way. Shared by
@@ -228,6 +205,7 @@ function CanvasLoadingBrand({ appName }) {
 // by appId server-side), so it is identical for both buffered versions.
 export default function AppCanvas({
   appId, version = 0, appName, appSlug, offlineCapable = false,
+  capabilityContract = null,
   immersive = false,
   // Whether this app is the currently-visible canvas (canvas view + active
   // app). One prop, two consumers:
@@ -261,7 +239,6 @@ export default function AppCanvas({
   const [serviceSurface, setServiceSurface] = useState(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
-  const microphoneCaptureRef = useRef(null)
   // Fresh app tokens are persisted for their remaining short lifetime so a
   // fully cached app can cold-boot offline. The cache is app-id scoped and JWT
   // claims are checked on read; the long-lived owner token never enters a frame.
@@ -365,10 +342,9 @@ export default function AppCanvas({
           // AppCanvas can temporarily render a service/loading surface without
           // unmounting itself. Ref removal is the exhaustive boundary for the
           // exact live document, including those non-component teardown paths.
-          const capture = microphoneCaptureRef.current
-          if (v === liveVersionRef.current && capture?.sourceVersion === v) {
-            cancelMicrophoneCapture(microphoneCaptureRef)
-          }
+          capabilityHostRef.current?.detachSource?.(
+            framesRef.current.get(v)?.contentWindow,
+          )
           // A service-surface takeover can remove the live iframe without
           // unmounting AppCanvas or advancing the buffered version. Retire its
           // host sentinels at this exhaustive document-removal boundary too.
@@ -397,6 +373,31 @@ export default function AppCanvas({
   interactiveRef.current = interactive
   const visibleRef = useRef(visible)
   visibleRef.current = visible
+  const capabilityContractRef = useRef(capabilityContract)
+  capabilityContractRef.current = capabilityContract
+  const capabilityHostRef = useRef(null)
+  if (!capabilityHostRef.current) {
+    capabilityHostRef.current = createCapabilityHost({
+      providers: builtInCapabilityProviders(),
+      getDeclaration(capability) {
+        return capabilityContractRef.current?.runtime?.[capability] || null
+      },
+      // Every app visible in a workspace pane is live, even when another pane
+      // owns keyboard focus. Hidden cached apps and buffered incoming frames
+      // remain outside the capability boundary.
+      isActive() { return visibleRef.current },
+      send(target, message, transfer) {
+        try {
+          target?.postMessage?.(message, '*', transfer || [])
+        } catch {
+          target?.postMessage?.(message, '*')
+        }
+      },
+    })
+  }
+  useEffect(() => {
+    capabilityHostRef.current.reconcile()
+  }, [capabilityContract])
 
   function postToFrame(v, message) {
     // A sandboxed frame without allow-same-origin has an opaque origin, so the
@@ -441,6 +442,7 @@ export default function AppCanvas({
         themeCss: eff?.css ?? theme?.css,
         bg: eff?.bg ?? theme?.bg,
         storage: readAppFrameStorage(appId, undefined, appSlug),
+        capabilityContract,
       },
       '*',
     )
@@ -462,7 +464,7 @@ export default function AppCanvas({
   useEffect(() => {
     for (const v of framesRef.current.keys()) sendInit(v)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, appId, appSlug, version, theme?.css, theme?.bg])
+  }, [token, appId, appSlug, version, theme?.css, theme?.bg, capabilityContract])
 
   // Parent-side load timeout for the HIDDEN incoming frame. The frame's own 10s
   // "no init from parent" timeout cannot fire once we deliver init (its
@@ -606,104 +608,7 @@ export default function AppCanvas({
         return
       }
 
-      if (msg.type === 'moebius:microphone-start') {
-        // Reject, rather than truncate, an invalid correlation id. Truncation
-        // makes every response impossible for the requesting runtime to match.
-        const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 120
-          ? msg.requestId
-          : ''
-        const sourceWindow = e.source
-        if (!visibleRef.current || !requestId) return
-        if (microphoneCaptureRef.current) {
-          sourceWindow.postMessage({
-            type: 'moebius:microphone-error', requestId,
-            name: 'InvalidStateError', message: 'Another recording is already in progress.',
-          }, '*')
-          return
-        }
-
-        const pending = {
-          requestId, sourceWindow, sourceVersion: srcVersion,
-          control: null, stopRequested: false, cancelled: false,
-        }
-        microphoneCaptureRef.current = pending
-        ;(async () => {
-          try {
-            const control = await startMicrophoneCapture({
-              maxSeconds: msg.maxSeconds,
-              onLevel(level) {
-                if (microphoneCaptureRef.current !== pending
-                    || pending.cancelled
-                    || !visibleRef.current
-                    || pending.sourceVersion !== liveVersionRef.current) return
-                sourceWindow.postMessage({
-                  type: 'moebius:microphone-level', requestId, level,
-                }, '*')
-              },
-            })
-            pending.control = control
-            if (microphoneCaptureRef.current !== pending
-                || pending.cancelled
-                || !visibleRef.current
-                || pending.sourceVersion !== liveVersionRef.current) {
-              control.done.catch(() => {})
-              control.cancel()
-              return
-            }
-            sourceWindow.postMessage({
-              type: 'moebius:microphone-started', requestId,
-              sampleRate: control.sampleRate,
-            }, '*')
-            if (pending.stopRequested) control.stop()
-
-            const result = await control.done
-            const mayDeliver = microphoneCaptureRef.current === pending
-              && !pending.cancelled
-              && visibleRef.current
-              && pending.sourceVersion === liveVersionRef.current
-            if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
-            if (!mayDeliver) return
-            const samples = result.samples
-            try {
-              sourceWindow.postMessage({
-                type: 'moebius:microphone-result', requestId,
-                sampleRate: result.sampleRate, samples,
-              }, '*', [samples.buffer])
-            } catch {
-              sourceWindow.postMessage({
-                type: 'moebius:microphone-result', requestId,
-                sampleRate: result.sampleRate, samples,
-              }, '*')
-            }
-          } catch (error) {
-            const mayDeliver = microphoneCaptureRef.current === pending
-              && !pending.cancelled
-              && visibleRef.current
-              && pending.sourceVersion === liveVersionRef.current
-            if (microphoneCaptureRef.current === pending) microphoneCaptureRef.current = null
-            if (!mayDeliver || error?.name === 'AbortError') return
-            sourceWindow.postMessage({
-              type: 'moebius:microphone-error', requestId,
-              name: error?.name || 'Error',
-              message: error?.message || 'Microphone recording failed.',
-            }, '*')
-          }
-        })()
-        return
-      }
-
-      if (msg.type === 'moebius:microphone-stop' || msg.type === 'moebius:microphone-cancel') {
-        const capture = microphoneCaptureRef.current
-        if (!capture || capture.sourceWindow !== e.source || capture.requestId !== msg.requestId) return
-        if (msg.type === 'moebius:microphone-cancel') {
-          cancelMicrophoneCapture(microphoneCaptureRef)
-        } else if (capture.control) {
-          capture.control.stop()
-        } else {
-          capture.stopRequested = true
-        }
-        return
-      }
+      if (capabilityHostRef.current.handle(e.source, msg)) return
 
       if (msg.type === 'moebius:open-service') {
         const slug = typeof msg.service === 'string' ? msg.service : ''
@@ -781,20 +686,15 @@ export default function AppCanvas({
     return () => window.removeEventListener('message', onMessage)
   }, [appId, appSlug, onNavPush, onNavPop, onAppFocus, onImmersive, onAppError, queryClient])
 
-  // Captures belong to the exact visible document that requested them. Cancel
-  // before paint when the canvas leaves every visible pane or a buffered build is
-  // promoted. A still-mounted hidden frame receives only the correlated
-  // AbortError needed to settle its runtime session; samples and unrelated
-  // permission errors remain gated out.
+  // Capabilities belong to a visible workspace pane, not merely the focused
+  // pane. Finish/cancel active-frame work before a cached app becomes hidden.
   useLayoutEffect(() => {
-    const capture = microphoneCaptureRef.current
-    if (!capture) return
-    if (visible && capture.sourceVersion === swap.liveVersion) return
-    cancelMicrophoneCapture(microphoneCaptureRef, { notifyFrame: !visible })
-  }, [visible, swap.liveVersion])
+    if (visible) return
+    capabilityHostRef.current.deactivate()
+  }, [visible])
 
-  useLayoutEffect(() => () => {
-    cancelMicrophoneCapture(microphoneCaptureRef)
+  useEffect(() => () => {
+    capabilityHostRef.current.destroy()
   }, [])
 
   useEffect(() => {
@@ -1168,7 +1068,9 @@ export default function AppCanvas({
     // re-init below then runs the fresh document's handshake (this is exactly
     // why the parent never dedups frame-init).
     if (loadedDocsRef.current.has(v)) {
-      if (v === liveVersionRef.current) cancelMicrophoneCapture(microphoneCaptureRef)
+      capabilityHostRef.current.detachSource(
+        framesRef.current.get(v)?.contentWindow,
+      )
       dispatchSwap({ type: 'live-reload', version: v })
     }
     loadedDocsRef.current.add(v)
@@ -1223,7 +1125,7 @@ export default function AppCanvas({
             data-app-id={isLive ? appId : undefined}
             data-frame-version={v}
             sandbox="allow-scripts allow-forms allow-popups allow-top-navigation-by-user-activation"
-            allow="microphone; fullscreen"
+            allow="fullscreen"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />

@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   appChatMetadataBody,
-  makeMicrophone,
+  makeCapabilities,
   makeNav,
   makeSignal,
   overlayPending,
@@ -144,49 +144,72 @@ test('nav helper waits for ack before owning a back entry', async () => {
   })
 })
 
-test('microphone bridge correlates shell capture and exposes PCM to the app', async () => {
+test('microphone capability correlates shell capture and exposes PCM to the app', async () => {
   await withFakeWindow(async ({ window, parent }) => {
     const levels = []
-    const session = makeMicrophone().start({ maxSeconds: 8, onLevel: (v) => levels.push(v) })
+    const capabilities = makeCapabilities({
+      declarations: {
+        'media.microphone.capture': {
+          version: 1, limits: { max_duration_ms: 8000 },
+        },
+      },
+    })
+    const session = capabilities.open('media.microphone.capture', { maxDurationMs: 8000 })
+    session.on('level', (value) => levels.push(value))
     const start = parent.messages.at(-1).data
-    assert.equal(start.type, 'moebius:microphone-start')
-    assert.equal(start.maxSeconds, 8)
+    assert.equal(start.type, 'moebius:capability-open')
+    assert.equal(start.capability, 'media.microphone.capture')
+    assert.equal(start.input.maxDurationMs, 8000)
 
     window.emit({
-      type: 'moebius:microphone-started', requestId: start.requestId, sampleRate: 48000,
+      type: 'moebius:capability-ready', requestId: start.requestId,
+      capability: start.capability, value: { sampleRate: 48000 },
     })
-    assert.deepEqual(await session.started, { sampleRate: 48000 })
+    assert.deepEqual(await session.ready, { sampleRate: 48000 })
     window.emit({
-      type: 'moebius:microphone-level', requestId: start.requestId, level: 0.6,
+      type: 'moebius:capability-event', requestId: start.requestId,
+      capability: start.capability, event: 'level', value: 0.6,
     })
-    session.stop()
-    assert.equal(parent.messages.at(-1).data.type, 'moebius:microphone-stop')
+    session.finish()
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:capability-control')
+    assert.equal(parent.messages.at(-1).data.action, 'finish')
 
     const samples = new Float32Array([0.1, -0.2, 0.3])
     window.emit({
-      type: 'moebius:microphone-result', requestId: start.requestId,
-      sampleRate: 48000, samples,
+      type: 'moebius:capability-result', requestId: start.requestId,
+      capability: start.capability, value: { sampleRate: 48000, samples },
     })
-    const result = await session.done
+    const result = await session.result
     assert.equal(result.sampleRate, 48000)
     assert.deepEqual([...result.samples], [...samples])
     assert.deepEqual(levels, [0.6])
+    capabilities._destroy()
   })
 })
 
-test('microphone bridge can cancel while permission is still pending', async () => {
+test('microphone capability can cancel while permission is still pending', async () => {
   await withFakeWindow(async ({ parent }) => {
-    const session = makeMicrophone().start({ maxSeconds: 4 })
+    const capabilities = makeCapabilities({
+      declarations: {
+        'media.microphone.capture': {
+          version: 1, limits: { max_duration_ms: 4000 },
+        },
+      },
+    })
+    const session = capabilities.open('media.microphone.capture', { maxDurationMs: 4000 })
     session.cancel()
-    assert.equal(parent.messages.at(-1).data.type, 'moebius:microphone-cancel')
-    await assert.rejects(session.started, { name: 'AbortError' })
-    await assert.rejects(session.done, { name: 'AbortError' })
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:capability-control')
+    assert.equal(parent.messages.at(-1).data.action, 'cancel')
+    await assert.rejects(session.ready, { name: 'AbortError' })
+    await assert.rejects(session.result, { name: 'AbortError' })
+    capabilities._destroy()
   })
 })
 
 test('standalone microphone can stop while permission is still pending', async () => {
   const previousWindow = globalThis.window
   const previousNavigator = globalThis.navigator
+  const previousAudioContext = globalThis.AudioContext
   let grant
   let trackStopped = false
   const node = () => ({ connect() {}, disconnect() {} })
@@ -205,6 +228,7 @@ test('standalone microphone can stop while permission is still pending', async (
   }
   standalone.parent = standalone
   globalThis.window = standalone
+  globalThis.AudioContext = FakeAudioContext
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: {
@@ -214,16 +238,25 @@ test('standalone microphone can stop while permission is still pending', async (
     },
   })
   try {
-    const session = makeMicrophone().start({ maxSeconds: 2 })
-    session.stop()
+    const capabilities = makeCapabilities({
+      declarations: {
+        'media.microphone.capture': {
+          version: 1, limits: { max_duration_ms: 2000 },
+        },
+      },
+    })
+    const session = capabilities.open('media.microphone.capture', { maxDurationMs: 2000 })
+    session.finish()
     grant({ getTracks: () => [{ stop: () => { trackStopped = true } }] })
-    assert.deepEqual(await session.started, { sampleRate: 8000 })
-    const result = await session.done
+    assert.deepEqual(await session.ready, { sampleRate: 8000 })
+    const result = await session.result
     assert.equal(result.sampleRate, 8000)
     assert.equal(result.samples.length, 0)
     assert.equal(trackStopped, true)
+    capabilities._destroy()
   } finally {
     globalThis.window = previousWindow
+    globalThis.AudioContext = previousAudioContext
     Object.defineProperty(globalThis, 'navigator', {
       configurable: true,
       value: previousNavigator,

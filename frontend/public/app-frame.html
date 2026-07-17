@@ -459,7 +459,8 @@
     //   1. iframe finishes loading, this script runs (listener
     //      registered before iframe.onLoad fires in the parent).
     //   2. parent (AppCanvas.jsx) posts
-    //      {type:'moebius:frame-init', token, themeCss, bg} on
+    //      {type:'moebius:frame-init', token, themeCss, bg,
+    //       capabilityContract} on
     //      its iframe.onLoad handler.
     //   3. iframe applies theme, imports module with token, mounts.
     //   4. iframe posts {type:'moebius:frame-mounted', appId} AFTER the
@@ -487,6 +488,7 @@
 
     let initialized = false;
     let currentToken = null;
+    let currentCapabilityContract = null;
     let tokenRefreshPromise = null;
     let tokenRefreshResolve = null;
     let mountedRoot = null;
@@ -851,6 +853,7 @@
             appId: _FRAME_APP_ID,
             appInstanceId: tokenAppInstanceId(currentToken),
             getToken: runtimeToken,
+            capabilityContract: currentCapabilityContract,
           });
         } catch (e) {}
         const frameVersion = new URLSearchParams(window.location.search).get('v') || '0';
@@ -988,6 +991,7 @@
         return;
       }
       if (msg.type === 'moebius:frame-init') {
+        currentCapabilityContract = msg.capabilityContract || null;
         acceptToken(msg.token);
         if (initialized) return;
         initialized = true;
