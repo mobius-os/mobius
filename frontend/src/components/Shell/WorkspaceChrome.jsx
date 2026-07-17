@@ -244,18 +244,33 @@ export default function WorkspaceChrome({
       if (focusRingEl && fr) setRect(focusRingEl, fr)
     }
 
+    let finished = false
     const onMove = (ev) => paint(ev.clientX, ev.clientY)
-    const onUp = (ev) => {
-      handle.removeEventListener('pointermove', onMove)
-      handle.removeEventListener('pointerup', onUp)
-      handle.removeEventListener('pointercancel', onUp)
-      try { handle.releasePointerCapture(ev.pointerId) } catch { /* released */ }
+    // Teardown is bound to WINDOW (not the divider handle) and also runs on
+    // lostpointercapture/blur: an out-of-band tree change — a chat/app delete or
+    // an incoming agent placement — can unmount THIS split's handle mid-drag, and
+    // handle-bound listeners would then never fire, leaving body user-select stuck
+    // 'none' and the whole app unselectable until the next completed drag (finding:
+    // stuck user-select on divider unmount). setPointerCapture'd events still
+    // bubble to window while the handle lives; when it unmounts, lostpointercapture
+    // routes here. A splitId that vanished makes SET_RATIO a safe no-op.
+    const end = () => {
+      if (finished) return
+      finished = true
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      window.removeEventListener('lostpointercapture', end)
+      window.removeEventListener('blur', end)
+      try { handle.releasePointerCapture(e.pointerId) } catch { /* released */ }
       document.body.style.userSelect = prevUserSelect
       dispatchWorkspace({ type: 'SET_RATIO', splitId, ratio: committed })
     }
-    handle.addEventListener('pointermove', onMove)
-    handle.addEventListener('pointerup', onUp)
-    handle.addEventListener('pointercancel', onUp)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+    window.addEventListener('lostpointercapture', end)
+    window.addEventListener('blur', end)
   }, [contentElRef, dispatchWorkspace, mode, contentRect, projection, workspace])
 
   const onDividerKeyDown = useCallback((e, divider) => {
