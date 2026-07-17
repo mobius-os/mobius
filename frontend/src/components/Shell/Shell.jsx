@@ -52,6 +52,7 @@ import {
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
+import useWorkspaceDrag from './useWorkspaceDrag.js'
 import PaneChatView from './PaneChatView.jsx'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -775,6 +776,16 @@ export default function Shell() {
     tabMenuReturnFocusRef.current = e.currentTarget
     setTabMenu({ x: e.clientX, y: e.clientY, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
   }, [workspace])
+  // Coordinate variant for the drag controller's touch lift→release-in-place
+  // path (design §3.1) — same menu, opened at a point with no trigger element to
+  // restore focus to. Reads the workspace from the ref so an async open (a
+  // settled drag) sees the current tree.
+  const openTabMenuAt = useCallback((x, y, tab, paneId) => {
+    const owner = paneId || paneModel.paneOf(workspaceStateRef.current.ws, tabModel.tabKey(tab))?.id
+    if (!owner) return
+    tabMenuReturnFocusRef.current = null
+    setTabMenu({ x, y, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
+  }, [])
   const closeTabMenu = useCallback((restoreFocus = true) => {
     setTabMenu(null)
     if (!restoreFocus) return
@@ -816,6 +827,46 @@ export default function Shell() {
       document.removeEventListener('keydown', onKey, true)
     }
   }, [closeTabMenu, tabMenu])
+
+  // ── Workspace drag controller wiring (design §3, PR3) ─────────────────────
+  // All of this is gated behind WORKSPACE_SPLITS_ENABLED — the hook installs no
+  // listeners when the flag is off, so the default build is byte-unchanged.
+  // Volatile inputs travel through refs so the hook installs its single
+  // document-level pointerdown listener exactly once (never re-registers).
+  const dragActiveRef = useRef(false)
+  const sceneInputsRef = useRef(null)
+  sceneInputsRef.current = { projection, mode: workspaceMode, contentRect }
+  const labelForTabRef = useRef(labelForTab)
+  labelForTabRef.current = labelForTab
+  const openTabMenuAtRef = useRef(openTabMenuAt)
+  openTabMenuAtRef.current = openTabMenuAt
+  // Filled by the first-use coachmark (§7); the first real drag dismisses it.
+  const coachmarkDismissRef = useRef(null)
+  const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
+  // The 6s "Moved X — Undo" toast wired to the single-slot UNDO_LAST (§3.5),
+  // built on the shell's existing toast slot.
+  const showUndoToast = useCallback((label) => {
+    setToast({
+      message: label,
+      variant: 'info',
+      duration: 6000,
+      action: { label: 'Undo', onAction: () => dispatchWorkspace({ type: 'UNDO_LAST' }) },
+    })
+  }, [dispatchWorkspace])
+  useWorkspaceDrag({
+    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
+    contentElRef,
+    sceneInputsRef,
+    workspaceStateRef,
+    dispatchWorkspace,
+    showUndoToast,
+    labelForTabRef,
+    dragActiveRef,
+    drawerOpenRef,
+    closeDrawer,
+    openTabMenuAtRef,
+    onDragStart: onWorkspaceDragStart,
+  })
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -2161,6 +2212,7 @@ export default function Shell() {
         attentionChatIds={attentionChatIds}
         newAppIds={newAppIds}
         settingsWarning={providerAuth.anyDisconnected}
+        dragActiveRef={dragActiveRef}
       />
 
       {showWalkthrough && (

@@ -9,6 +9,7 @@ import {
   DRAWER_CLOSE_FALLBACK_MS,
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
+import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import InstallSheet from './InstallSheet.jsx'
 import './Drawer.css'
 
@@ -55,6 +56,12 @@ export default function Drawer({
   // valid. Drives a small warning dot on the Settings row — passive
   // nudge toward Reconnect, no modal, no banner.
   settingsWarning,
+  // Shared flag the workspace drag controller raises while a row is being
+  // dragged OUT of the drawer (design §3.1). The swipe-to-close touch handlers
+  // below consult it and STAND DOWN — they are React-passive listeners, so they
+  // cannot be preventDefault-ed by the controller's pointer capture; the flag is
+  // the only way they can yield the gesture. Null when the flag is off.
+  dragActiveRef,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
@@ -328,10 +335,17 @@ export default function Drawer({
 
   function onTouchStart(e) {
     if (!open || e.touches.length !== 1) return
+    // A row is being lifted out of the drawer — the drag controller owns this
+    // gesture; swipe-to-close stands down (design §3.1).
+    if (dragActiveRef?.current) { dragStart.current = null; return }
     swipingRef.current = false
     dragStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }
   }
   function onTouchMove(e) {
+    // Stand down mid-gesture too: a hold that armed the controller after
+    // touchstart must not also pan the panel. Passive listener, so we cannot
+    // preventDefault — bailing on the shared flag is the only lever we have.
+    if (dragActiveRef?.current) return
     if (!dragStart.current || e.touches.length !== 1) return
     const dx = e.touches[0].clientX - dragStart.current.x
     const dy = e.touches[0].clientY - dragStart.current.y
@@ -351,6 +365,8 @@ export default function Drawer({
     }
   }
   function onTouchEnd(e) {
+    // If the controller took over, it owns pointerup too — do nothing here.
+    if (dragActiveRef?.current) { dragStart.current = null; return }
     if (!dragStart.current) return
     const t = e.changedTouches[0]
     const dx = t.clientX - dragStart.current.x
@@ -616,6 +632,7 @@ export default function Drawer({
  * so the parent only orchestrates which row is currently expanded. */
 function DrawerRow({
   kind,
+  id,
   label,
   pinned,
   active,
@@ -743,6 +760,11 @@ function DrawerRow({
       <button
         type="button"
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
+        // Drag source for the workspace controller (design §3.1): a delegated
+        // pointerdown reads this to lift the row out of the drawer and into a
+        // pane. Only present when the splits flag is on; a plain tap still opens
+        // in the focused pane (the controller never arms without slop/hold).
+        data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
         onClick={onSelect}
       >
         {/* Status dot. Sits before the text so the user's eye

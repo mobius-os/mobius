@@ -80,6 +80,10 @@ function PaneStrip({
               className="shell__tab-open"
               role="tab"
               aria-selected={active ? 'true' : 'false'}
+              // The drag controller (useWorkspaceDrag) picks tab drag sources up
+              // by this attribute via a delegated pointerdown; only present when
+              // the splits flag is on so the flag-off build carries no drag hooks.
+              data-drag-key={WORKSPACE_SPLITS_ENABLED ? key : undefined}
               onClick={() => onActivate(pane.id, tab)}
               onContextMenu={(e) => onTabContextMenu(e, tab, pane.id)}
             >

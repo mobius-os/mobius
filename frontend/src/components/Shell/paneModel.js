@@ -497,6 +497,39 @@ export function openTab(ws, tab, opts) {
   return doOpenTab(ws, tab, opts).ws
 }
 
+// Open a tab AT a drop target (design §3.4) — the single-commit path a drag drop
+// takes so one Undo restores it. Unifies both drag sources: a strip tab already
+// in the workspace degrades to a plain moveTab; a drawer item not yet open is
+// created and placed. The tab lands exactly where the drop zone named it:
+//   { paneId }              center-join: append + activate in that pane
+//   { paneId, index }       strip caret: insert at the index
+//   { paneId, edge }        pane split: alone in a new pane on that edge
+//   { root: true, edge }    root split: alone in a new pane splitting the whole
+// A split places the item in a NEW pane, never leaving it in the target pane, so
+// it composes openTab-into-target then moveTab-out as one normalized result.
+// Same reference on a no-op (moveTab/openTab both honor it).
+export function openTabAt(ws, tab, target) {
+  const clean = sanitizeTab(tab)
+  if (!clean) return ws
+  const key = tabModel.tabKey(clean)
+  // Already open anywhere → this is a move, not an open (tab is unique).
+  if (paneOf(ws, key)) return moveTab(ws, key, target)
+  if (!target) return openTab(ws, clean)
+  if (target.edge != null && target.root === true) {
+    const opened = openTab(ws, clean, { paneId: ws.focusedPaneId, activate: true })
+    return moveTab(opened, key, { root: true, edge: target.edge })
+  }
+  if (target.edge != null && target.paneId != null) {
+    const opened = openTab(ws, clean, { paneId: target.paneId, activate: true })
+    return moveTab(opened, key, { paneId: target.paneId, edge: target.edge })
+  }
+  if (target.paneId != null) {
+    const opened = openTab(ws, clean, { paneId: target.paneId, activate: true })
+    return target.index != null ? moveTab(opened, key, { paneId: target.paneId, index: target.index }) : opened
+  }
+  return openTab(ws, clean)
+}
+
 // Close a tab; if it was the pane's active tab, activate the neighbour before it
 // (else the new last tab) — fixing today's close-the-viewed-tab-into-nothing.
 export function closeTab(ws, tabKey) {
@@ -998,6 +1031,31 @@ export function canSplit(ws, paneId, edge, mode, contentRect) {
   return rect.w >= MIN_PANE_W && childH >= MIN_PANE_H
 }
 
+// canRootSplit(ws, edge, mode, contentRect) — the whole-workspace-split sibling
+// of canSplit, for the root-edge drop zone (design §3.2). True iff wrapping the
+// whole tree in a new split on `edge` is allowed: within MAX_PANES / MAX_DEPTH
+// (a root split adds ONE level above every existing leaf, so it needs
+// depthOf(layout) + 1 ≤ MAX_DEPTH), permitted by the mode (phone → top/bottom
+// only), and each half of the inset content box clears MIN_PANE_W × MIN_PANE_H.
+// The drag layer greys the zone out on false — a cap or minimum is felt as "no
+// target", never an error, exactly like canSplit.
+export function canRootSplit(ws, edge, mode, contentRect) {
+  if (!ws || ws.layout == null) return false
+  if (!EDGES.has(edge)) return false
+  if (mode === 'phone' && edge !== 'top' && edge !== 'bottom') return false
+  const leaves = leafIds(ws.layout).filter(id => ws.panes[id])
+  if (leaves.length >= MAX_PANES) return false
+  if (depthOf(ws.layout) + 1 > MAX_DEPTH) return false
+  const box = insetRect(normalizeRect(contentRect), OUTER_MARGIN)
+  const row = edge === 'left' || edge === 'right'
+  if (row) {
+    const childW = (box.w - PANE_GAP) / 2
+    return childW >= MIN_PANE_W && box.h >= MIN_PANE_H
+  }
+  const childH = (box.h - PANE_GAP) / 2
+  return box.w >= MIN_PANE_W && childH >= MIN_PANE_H
+}
+
 // Recursively validate the layout tree's SHAPE: every node is a leaf string or a
 // well-formed split (string id, dir in {'row','col'}, ratio finite in
 // [0.1,0.9]), and split ids are unique. normalize keeps a corrupt split's fields
@@ -1163,6 +1221,14 @@ export function workspaceReducer(state, action) {
     }
     case 'MOVE_TAB': {
       const next = moveTab(ws, action.tabKey, action.target)
+      if (next === ws) return state
+      return { ws: next, undo: { ws, label: action.label || 'Moved tab' } }
+    }
+    case 'OPEN_TAB_AT': {
+      // A drag drop from a drawer row (open the item AT the zone) or a strip tab
+      // (degrades to a move). One commit, one undo slot — the drop is one tap
+      // from repaired (design §3.5).
+      const next = openTabAt(ws, action.tab, action.target)
       if (next === ws) return state
       return { ws: next, undo: { ws, label: action.label || 'Moved tab' } }
     }
