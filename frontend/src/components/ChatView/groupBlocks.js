@@ -1,6 +1,5 @@
 import { toolBlockFailed } from './toolResultFormat.js'
 import { toolActivityLabel, toolActivityPastLabel } from './toolActivityLabel.js'
-import { thinkingElapsedMs } from './streamReducers.js'
 
 // Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
 // activity node, including a lone entry. A build turn's pre-prose burst is one
@@ -235,7 +234,8 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
 
 // The single localization surface for the collapsed line's primary text. One
 // rule for the whole stretch, computed from its entries + the live hint:
-//   - live thinking tail (no tool running) → "Thinking for Ns" + animated dots
+//   - live thinking tail (no tool running) → a bare "Thinking" (shimmer is the
+//     motion; no clock, no dots)
 //   - a live stretch or any running tool → the progressive, running-first
 //     activity rollup (toolGroupSummary)
 //   - settled tools → the first-seen past-tense rollup (toolGroupPastSummary)
@@ -245,7 +245,7 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
 //   - thinking-only → "Thought for Ns" (the reasoning duration IS the content)
 // Cheap on every call (Map lookups + a duration sum), so it runs each render
 // without a memo; the parse-heavy failure state lives in activityStreamState.
-export function activityCollapsedLabel(entries, { live = false, now = Date.now() } = {}) {
+export function activityCollapsedLabel(entries, { live = false } = {}) {
   const tools = entries
     .filter(e => e?.item?.type === 'tool')
     .map(e => e.item)
@@ -254,18 +254,18 @@ export function activityCollapsedLabel(entries, { live = false, now = Date.now()
   const toolRunning = tools.some(t => t?.status === 'running')
 
   if (liveThinkingTail && !toolRunning) {
-    const secondsText = formatSeconds(thoughtSeconds(thinkingElapsedMs(lastItem, now)))
-    return { text: `Thinking for ${secondsText || 'a moment'}`, showEllipsis: true }
+    // Bare "Thinking" — no ticking clock, no ellipsis dots (owner ask,
+    // 2026-07-17, matching the Codex-app idiom): the label shimmer is the
+    // only movement. The measured duration still surfaces at settle as
+    // "Thought for Ns".
+    return 'Thinking'
   }
 
   if (tools.length > 0) {
     // A real running status keeps progressive copy even outside the trailing
-    // live stretch; otherwise the row could show a spinner beside "Ran
-    // commands". Only fully settled tools flip to the past-tense sentence.
-    return {
-      text: live || toolRunning ? toolGroupSummary(tools) : toolGroupPastSummary(tools),
-      showEllipsis: false,
-    }
+    // live stretch; otherwise the row could read past-tense while a tool is
+    // visibly running. Only fully settled tools flip to the past sentence.
+    return live || toolRunning ? toolGroupSummary(tools) : toolGroupPastSummary(tools)
   }
 
   // Sum only the FINITE thinking durations; if none carry one (a thinking block
@@ -279,5 +279,5 @@ export function activityCollapsedLabel(entries, { live = false, now = Date.now()
   const durationMs = durations.length
     ? durations.reduce((sum, ms) => sum + ms, 0)
     : undefined
-  return { text: thoughtDurationLabel(durationMs), showEllipsis: false }
+  return thoughtDurationLabel(durationMs)
 }

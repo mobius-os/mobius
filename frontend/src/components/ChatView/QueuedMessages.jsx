@@ -15,9 +15,13 @@ const TRUNCATE_AT = 80
  * first line. Click the row to expand and see the full content. Click
  * the X to cancel (DELETE the pending message on the backend).
  *
- * Visual model: a soft, slightly raised stack — distinct from the chat
- * transcript so it's clear these are "not yet sent" turns. Lives between
- * the chat list and the input form. Empty queue → nothing rendered.
+ * Visual model: an EXTENSION OF THE TRANSCRIPT (owner ask, 2026-07-17) —
+ * right-aligned pending user bubbles leading the foot stack, directly under
+ * the chat, with a quiet one-line caption as the collapse control. No card
+ * tray around them: they read as upcoming turns, not system chrome. Opaque
+ * low-accent fill + hairline (never dashed borders or whole-row opacity —
+ * those read as drop zones / disabled and cost contrast). Empty queue →
+ * nothing rendered.
  */
 export default function QueuedMessages({ items, onCancel }) {
   const [expanded, setExpanded] = useState(() => new Set())
@@ -46,39 +50,28 @@ export default function QueuedMessages({ items, onCancel }) {
     setCollapsed(c => !c)
   }
 
-  function onHdrKeyDown(e) {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault()
-      toggleCollapsed()
-    }
-  }
-
   const itemsId = 'queued-items'
 
   return (
     <div
       className={`queued${collapsed ? ' queued--collapsed' : ''}`}
-      role="list"
       aria-label="Queued messages"
     >
-      <div
+      <button
+        type="button"
         className="queued__hdr"
-        role="button"
-        tabIndex={0}
-        // Queued tray lives inside the composer footer. Keep textarea focus
-        // on touch/mouse taps so expanding/collapsing the tray does not
-        // collapse the soft keyboard mid-composition.
+        // Queued bubbles lead the composer footer. Keep textarea focus on
+        // touch/mouse taps so expanding/collapsing does not collapse the
+        // soft keyboard mid-composition. A real <button> (not role=button)
+        // so the caption is natively focusable/activatable — the root is a
+        // neutral labelled section, list semantics live on the items wrap.
         onPointerDown={(e) => e.preventDefault()}
         onClick={toggleCollapsed}
-        onKeyDown={onHdrKeyDown}
         aria-expanded={!collapsed}
         aria-controls={itemsId}
       >
         <span className="queued__count">
-          {items.length} queued
-        </span>
-        <span className="queued__hint">
-          Will send after the current turn finishes
+          {items.length} queued · Send after this turn
         </span>
         <svg
           className={`queued__hdr-chevron${collapsed ? ' queued__hdr-chevron--collapsed' : ''}`}
@@ -87,9 +80,9 @@ export default function QueuedMessages({ items, onCancel }) {
         >
           <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
-      </div>
+      </button>
       {!collapsed && (
-        <div id={itemsId} className="queued__items">
+        <div id={itemsId} className="queued__items" role="list">
           {items.map(msg => {
             const key = keyOf(msg)
             const text = stripAugmentation(msg.content || '')
