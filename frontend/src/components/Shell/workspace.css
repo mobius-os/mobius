@@ -240,7 +240,94 @@
   outline-offset: -2px;
 }
 
+/* ── Drag-to-organize overlays (design §3.3, PR3) ────────────────────────────
+   The drag controller (useWorkspaceDrag) creates these imperatively and writes
+   their GEOMETRY inline (content-local px for the preview/pre-glow, viewport px
+   for the chip); this stylesheet owns only their APPEARANCE and motion. All are
+   pointer-transparent except the shield, and none exist unless the splits flag
+   is on. */
+
+/* The single reused drop preview. Its rect is the exact geometry the drop would
+   produce (an edge's resulting half, a center's inset pane, a strip caret); the
+   morphing rectangle IS the whole preview language — no arrows, no text. */
+.workspace__drop-preview {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  opacity: 0;
+  /* First appearance fades in over 80ms; a zone-to-zone move MORPHS the same
+     rectangle over 120ms. Both live on one element so the vocabulary reads as a
+     single object gliding between targets. */
+  transition:
+    opacity 80ms ease,
+    left 120ms cubic-bezier(0.2, 0, 0, 1),
+    top 120ms cubic-bezier(0.2, 0, 0, 1),
+    width 120ms cubic-bezier(0.2, 0, 0, 1),
+    height 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+.workspace__drop-preview.is-visible { opacity: 1; }
+
+/* Strip caret variant: a solid accent bar (2×24px), no fill or border. */
+.workspace__drop-preview--caret {
+  border: none;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* Eligible-zone pre-glow: every drop-able pane glows faintly for 400ms on drag
+   start so the drop vocabulary demonstrates itself (design §3.3). */
+.workspace__drop-preglow {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+.workspace__drop-preglow.is-on { opacity: 1; }
+
+/* The full-viewport shield: owns the grabbing cursor and blocks iframe hover
+   artifacts while a drag is live. Transparent, so the preview shows through;
+   pointer-events:auto so an app iframe never sees the drag pointer. */
+.workspace__drag-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: transparent;
+  cursor: grabbing;
+}
+
+/* The drag chip trails the cursor (or floats above a touch point). Fixed layer,
+   pointer-transparent; the [hidden] guard keeps it out of layout pre-lift. */
+.workspace__drag-chip {
+  position: fixed;
+  z-index: 300;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  max-width: 220px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg) 92%, var(--text) 8%);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 6px 16px color-mix(in srgb, #000 30%, transparent);
+}
+.workspace__drag-chip[hidden] { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .workspace__sheet { animation: none; }
   .workspace__divider-bar { transition: none; }
+  /* Reduced motion: instant geometry + color, no fade or morph (design §3.3). */
+  .workspace__drop-preview { transition: none; }
+  .workspace__drop-preglow { transition: none; }
 }

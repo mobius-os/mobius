@@ -49,3 +49,38 @@ test('the pane switcher uses the shared modal focus and dismissal contract', () 
   assert.match(chrome, /aria-modal="true"/)
   assert.match(chrome, /aria-label="Close pane switcher"/)
 })
+
+test('the drop preview reads as an 18% accent fill with a 2px border and morph', () => {
+  const rule = css.match(/\.workspace__drop-preview\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /border:\s*2px solid var\(--accent\)/)
+  assert.match(rule, /var\(--accent\)\s*18%/)
+  assert.match(rule, /border-radius:\s*10px/)
+  // First-appear fade (80ms) + zone-to-zone morph (120ms cubic-bezier).
+  assert.match(rule, /opacity 80ms/)
+  assert.match(rule, /120ms cubic-bezier\(0\.2, 0, 0, 1\)/)
+})
+
+test('the strip caret variant drops the fill and border for a solid bar', () => {
+  const rule = css.match(/\.workspace__drop-preview--caret\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /border:\s*none/)
+  assert.match(rule, /background:\s*var\(--accent\)/)
+})
+
+test('the drag chip is a pointer-transparent fixed layer with a [hidden] guard', () => {
+  const rule = css.match(/\.workspace__drag-chip\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /position:\s*fixed/)
+  assert.match(rule, /pointer-events:\s*none/)
+  assert.match(css, /\.workspace__drag-chip\[hidden\]\s*\{\s*display:\s*none/)
+})
+
+test('the drag shield owns the grabbing cursor over the whole viewport', () => {
+  const rule = css.match(/\.workspace__drag-shield\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /position:\s*fixed/)
+  assert.match(rule, /inset:\s*0/)
+  assert.match(rule, /cursor:\s*grabbing/)
+})
+
+test('reduced motion makes the drop preview instant', () => {
+  const block = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(block, /\.workspace__drop-preview\s*\{\s*transition:\s*none/)
+})
