@@ -24,6 +24,20 @@ import useDialogFocus from '../../hooks/useDialogFocus.js'
 
 const HIT = 44 // divider hit target (the visible hairline is 1px inside it)
 
+// A shared empty set so the default props don't mint a new one each render.
+const EMPTY_SET = new Set()
+
+// A pane "has activity" if any of its tabs is a streaming/attention chat or a
+// newly-built app — the cue the phone chip + sheet surface for a HIDDEN pane so a
+// background change is visible without opening the sheet (design §4).
+function paneHasActivity(pane, streaming, attention, newApps) {
+  if (!pane) return false
+  return pane.tabs.some((t) => {
+    if (t.kind === 'chat') return streaming.has(String(t.id)) || attention.has(String(t.id))
+    return newApps.has(Number(t.id)) || newApps.has(String(t.id))
+  })
+}
+
 function cssEsc(v) {
   return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(v)) : String(v)
 }
@@ -58,13 +72,38 @@ function PaneStrip({
   pane, paneRect, focused, labelForTab,
   onActivate, onClose, onFocus, onTabContextMenu,
 }) {
+  const stripRef = useRef(null)
+  // Roving-tabindex toolbar (design §3.6, WAI-ARIA toolbar): the strip is ONE
+  // tab stop (only the active tab's button is tabbable), and arrow keys move
+  // focus between tabs, so a 4-pane × 6-tab workspace is not ~48 sequential Tab
+  // stops. Home/End jump to the ends; Delete/Backspace closes the focused tab
+  // (its close button is out of the tab order).
+  const onStripKeyDown = (e) => {
+    const buttons = [...(stripRef.current?.querySelectorAll('[role="tab"]') || [])]
+    const i = buttons.indexOf(document.activeElement)
+    if (i === -1) return
+    let next = -1
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = Math.min(i + 1, buttons.length - 1)
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = Math.max(i - 1, 0)
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = buttons.length - 1
+    else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault()
+      onClose(pane.tabs[i])
+      return
+    } else return
+    e.preventDefault()
+    buttons[next]?.focus()
+  }
   return (
     <div
+      ref={stripRef}
       className={`workspace__strip shell__tabstrip${focused ? ' workspace__strip--focused' : ''}`}
       data-pane-strip={pane.id}
       role="tablist"
       aria-label="Pane tabs"
       style={{ left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H }}
+      onKeyDown={onStripKeyDown}
       onPointerDown={(e) => {
         // Focus on strip-WHITESPACE pointerdown only. A tab activation focuses via
         // navTo, so pre-focusing on the tab's own pointerdown would advance the
@@ -90,6 +129,9 @@ function PaneStrip({
               className="shell__tab-open"
               role="tab"
               aria-selected={active ? 'true' : 'false'}
+              // Roving tabindex: only the active tab is a tab stop; arrows reach
+              // the rest (onStripKeyDown).
+              tabIndex={active ? 0 : -1}
               // The drag controller (useWorkspaceDrag) picks tab drag sources up
               // by this attribute via a delegated pointerdown; only present when
               // the splits flag is on so the flag-off build carries no drag hooks.
@@ -104,6 +146,7 @@ function PaneStrip({
               type="button"
               className="shell__tab-close"
               aria-label={`Close ${label} tab`}
+              tabIndex={-1}
               onClick={() => onClose(tab)}
             >
               <X size={13} aria-hidden="true" />
@@ -150,6 +193,9 @@ export default function WorkspaceChrome({
   navTo,
   labelForTab,
   onTabContextMenu,
+  streamingChatIds = EMPTY_SET,
+  attentionChatIds = EMPTY_SET,
+  newAppIds = EMPTY_SET,
 }) {
   const [sheetOpen, setSheetOpen] = useState(false)
   const sheetRef = useRef(null)
@@ -198,6 +244,9 @@ export default function WorkspaceChrome({
     try { handle.setPointerCapture(e.pointerId) } catch { /* not captured */ }
     const prevUserSelect = document.body.style.userSelect
     document.body.style.userSelect = 'none'
+    // Suppress the layout-bloom transition while the divider is dragged: rects are
+    // written imperatively per frame and a transition would lag them.
+    contentEl.classList.add('workspace--resizing')
     const box = contentEl.getBoundingClientRect()
     const { dir, splitId } = divider
 
@@ -276,6 +325,7 @@ export default function WorkspaceChrome({
       window.removeEventListener('blur', end)
       try { handle.releasePointerCapture(e.pointerId) } catch { /* released */ }
       document.body.style.userSelect = prevUserSelect
+      contentEl.classList.remove('workspace--resizing')
       dispatchWorkspace({ type: 'SET_RATIO', splitId, ratio: committed })
     }
     window.addEventListener('pointermove', onMove)
@@ -315,6 +365,12 @@ export default function WorkspaceChrome({
   // must reach the hidden panes regardless of the raw mode (finding: wide
   // min-width degrade would otherwise strand them).
   const showChip = WORKSPACE_SPLITS_ENABLED && hasOverflow
+  const hiddenActivity = useMemo(() => {
+    const visible = new Set(projection.visibleLeaves)
+    return allLeaves.some(id => !visible.has(id)
+      && paneHasActivity(workspace.panes[id], streamingChatIds, attentionChatIds, newAppIds))
+  }, [allLeaves, projection.visibleLeaves, workspace.panes,
+    streamingChatIds, attentionChatIds, newAppIds])
 
   const pickPane = useCallback((paneId) => {
     closeSheet()
@@ -383,6 +439,7 @@ export default function WorkspaceChrome({
         >
           <Layers size={13} aria-hidden="true" />
           <span>{projection.visibleLeaves.length}/{allLeaves.length}</span>
+          {hiddenActivity && <span className="workspace__pane-chip-dot" aria-hidden="true" />}
         </button>
       )}
 
@@ -421,7 +478,11 @@ export default function WorkspaceChrome({
                   onClick={() => pickPane(paneId)}
                 >
                   <span className="workspace__sheet-row-title">{label}</span>
-                  <span className="workspace__sheet-row-count">{pane?.tabs.length || 0}</span>
+                  <span className="workspace__sheet-row-meta">
+                    {paneHasActivity(pane, streamingChatIds, attentionChatIds, newAppIds)
+                      && <span className="workspace__sheet-row-dot" aria-hidden="true" />}
+                    <span className="workspace__sheet-row-count">{pane?.tabs.length || 0}</span>
+                  </span>
                 </button>
               )
             })}
