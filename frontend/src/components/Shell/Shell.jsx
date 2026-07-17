@@ -53,6 +53,9 @@ import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
+import {
+  HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
+} from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -867,6 +870,48 @@ export default function Shell() {
     openTabMenuAtRef,
     onDragStart: onWorkspaceDragStart,
   })
+
+  // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
+  // The 6s "Moved X — Undo" toast is raised at drop time by showUndoToast above;
+  // this adds the keyboard chord and the discoverability coachmark.
+  const [wsCoachmarkDismissed, setWsCoachmarkDismissed] = useState(
+    () => coachmarkDismissed(typeof localStorage !== 'undefined'
+      ? localStorage
+      : { getItem: () => '1' }),
+  )
+  const dismissWorkspaceCoachmark = useCallback(() => {
+    setWsCoachmarkDismissed(true)
+    try { localStorage.setItem(HINT_KEY, '1') } catch { /* private mode — shows once in memory */ }
+  }, [])
+  // The first real drag dismisses it (wired through the ref the drag hook calls).
+  coachmarkDismissRef.current = dismissWorkspaceCoachmark
+  const workspaceCoachmarkVisible = coachmarkArmed({
+    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
+    tabCount: openTabs.length,
+    dismissed: wsCoachmarkDismissed,
+  })
+  // Auto-dismiss after 12s — deliberately NOT on an unrelated pointerdown (§7.2).
+  useEffect(() => {
+    if (!workspaceCoachmarkVisible) return undefined
+    const t = setTimeout(dismissWorkspaceCoachmark, 12000)
+    return () => clearTimeout(t)
+  }, [workspaceCoachmarkVisible, dismissWorkspaceCoachmark])
+  // A coarse pointer gets the hold-to-move copy; a fine pointer, drag-to-split.
+  const [coarsePointer] = useState(
+    () => typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches,
+  )
+  // Cmd/Ctrl+Z restores the single-slot pre-mutation snapshot while no input is
+  // focused (design §3.5). Flag-gated; a text field's own undo always wins.
+  useEffect(() => {
+    if (!paneModel.WORKSPACE_SPLITS_ENABLED) return undefined
+    const onKey = (e) => {
+      if (!undoKeyPressed(e) || isEditableTarget(document.activeElement)) return
+      e.preventDefault()
+      dispatchWorkspace({ type: 'UNDO_LAST' })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [dispatchWorkspace])
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
@@ -2441,6 +2486,25 @@ export default function Shell() {
         >
           <Minimize2 size={18} aria-hidden="true" />
         </button>
+      )}
+      {/* First-use coachmark (design §7.2) — the discoverability path for the
+          existing user base (the walkthrough never re-fires). Arms at ≥2 tabs
+          with the splits flag on; dismissed by a drag, its ✕, or 12s — never by
+          an unrelated tap. */}
+      {workspaceCoachmarkVisible && (
+        <div className="workspace__coachmark" role="status" aria-live="polite" inert={drawerOpen}>
+          <span className="workspace__coachmark-text">
+            {coarsePointer ? 'Hold a tab to move it' : 'Drag tabs to split the view'}
+          </span>
+          <button
+            type="button"
+            className="workspace__coachmark-close"
+            aria-label="Dismiss hint"
+            onClick={dismissWorkspaceCoachmark}
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        </div>
       )}
       <Toast
         message={toast?.message}

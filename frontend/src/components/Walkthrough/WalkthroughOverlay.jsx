@@ -8,6 +8,8 @@ import {
   detectInstallPlatform,
   installCopyForPlatform,
 } from '../../utils/installPlatform.js'
+import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
+import { insertWorkspaceStep } from '../Shell/workspaceOnboarding.js'
 import './WalkthroughOverlay.css'
 
 // First-sign-in walkthrough. Renders as a centered modal styled to
@@ -38,8 +40,15 @@ import './WalkthroughOverlay.css'
 // theme, shell behavior, building apps) and the recovery flow are
 // the two things a new user genuinely cannot discover by tapping
 // around — everything else is visible from the drawer.
-const STEPS_FULL = ['intro', 'customize', 'install', 'safety-net', 'first-chat']
-const STEPS_NO_INSTALL = ['intro', 'customize', 'safety-net', 'first-chat']
+// The 'workspace' step (drag-to-split) is inserted after 'customize' only when
+// the splits flag is on (design §7.1) — teaching a gesture the flag-off build
+// can't perform would mislead. insertWorkspaceStep is a no-op when off.
+const STEPS_FULL = insertWorkspaceStep(
+  ['intro', 'customize', 'install', 'safety-net', 'first-chat'], WORKSPACE_SPLITS_ENABLED,
+)
+const STEPS_NO_INSTALL = insertWorkspaceStep(
+  ['intro', 'customize', 'safety-net', 'first-chat'], WORKSPACE_SPLITS_ENABLED,
+)
 
 export default function WalkthroughOverlay({ onDone }) {
   const queryClient = useQueryClient()
@@ -51,6 +60,10 @@ export default function WalkthroughOverlay({ onDone }) {
   const closingRef = useRef(false)
   const [platform] = useState(() => detectInstallPlatform())
   const [installCopy] = useState(() => installCopyForPlatform(platform))
+  // A coarse pointer gets the hold-to-lift copy; a fine pointer, drag-to-edge.
+  const [coarsePointer] = useState(
+    () => typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches,
+  )
   // Tracks whether copy-link succeeded so we can surface a confirm
   // toast on the iOS-non-Safari path.
   const [copyState, setCopyState] = useState(null)
@@ -216,6 +229,47 @@ export default function WalkthroughOverlay({ onDone }) {
               even how it talks to you. Ask in chat — "switch to a
               light theme," or "remove the voice button" — and it
               edits the code and shows you the result.
+            </p>
+            <div className="wt__actions">
+              <button
+                type="button"
+                className="wt__btn wt__btn--ghost"
+                onClick={skip}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                className="wt__btn wt__btn--primary"
+                onClick={next}
+              >
+                Next
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 'workspace' && (
+          <>
+            <h2 id="wt-title" className="wt__title">Work side by side</h2>
+            {/* A small looping mock of a tab dragging to an edge and snapping
+                into a split. Under prefers-reduced-motion the CSS swaps it for a
+                static before/after (design §7.1); both are decorative. */}
+            <div className="wt__ws-mock" aria-hidden="true">
+              <div className="wt__ws-mock-live">
+                <span className="wt__ws-mock-pane" />
+                <span className="wt__ws-mock-tab" />
+                <span className="wt__ws-mock-seam" />
+              </div>
+              <div className="wt__ws-mock-static">
+                <span className="wt__ws-mock-half" />
+                <span className="wt__ws-mock-half" />
+              </div>
+            </div>
+            <p className="wt__body">
+              {coarsePointer
+                ? 'Hold a chat or app to pick it up — drop it at the top or bottom to split the screen.'
+                : 'Drag any chat or app from the drawer to the edge of a pane to work side by side. Drop it in the middle to keep it as a tab.'}
             </p>
             <div className="wt__actions">
               <button

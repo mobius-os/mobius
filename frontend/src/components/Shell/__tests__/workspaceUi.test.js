@@ -8,6 +8,9 @@ const css = readFileSync(
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
+const walkthrough = readFileSync(
+  new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
+)
 
 test('the phone pane switcher keeps a 44px touch target', () => {
   const rule = css.match(/\.workspace__pane-chip\s*\{[\s\S]*?\}/)?.[0] || ''
@@ -83,4 +86,28 @@ test('the drag shield owns the grabbing cursor over the whole viewport', () => {
 test('reduced motion makes the drop preview instant', () => {
   const block = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(block, /\.workspace__drop-preview\s*\{\s*transition:\s*none/)
+})
+
+test('the coachmark carries pointer-specific copy and dismisses without a stray tap', () => {
+  assert.match(shell, /workspaceCoachmarkVisible/)
+  assert.match(shell, /coarsePointer \? 'Hold a tab to move it' : 'Drag tabs to split the view'/)
+  assert.match(shell, /onClick=\{dismissWorkspaceCoachmark\}/)
+  // 12s auto-dismiss, never an unrelated pointerdown.
+  assert.match(shell, /setTimeout\(dismissWorkspaceCoachmark, 12000\)/)
+  assert.doesNotMatch(shell, /coachmark[\s\S]{0,80}addEventListener\('pointerdown'/)
+})
+
+test('the undo chord is flag-gated and defers to focused inputs', () => {
+  assert.match(shell, /if \(!paneModel\.WORKSPACE_SPLITS_ENABLED\) return undefined[\s\S]*?undoKeyPressed\(e\)/)
+  assert.match(shell, /isEditableTarget\(document\.activeElement\)/)
+  assert.match(shell, /dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
+})
+
+test('the walkthrough inserts a flag-gated workspace step with pointer-specific copy', () => {
+  assert.match(walkthrough, /insertWorkspaceStep\(\s*\[[^\]]*'customize'[^\]]*\], WORKSPACE_SPLITS_ENABLED/)
+  assert.match(walkthrough, /step === 'workspace'/)
+  assert.match(walkthrough, /Drop it in the middle to keep it as a tab/)
+  assert.match(walkthrough, /drop it at the top or bottom to split the screen/)
+  // The reduced-motion static mock exists alongside the animated one.
+  assert.match(walkthrough, /wt__ws-mock-static/)
 })

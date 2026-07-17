@@ -245,3 +245,77 @@
     color: var(--text, #d4d4d8);
   }
 }
+
+/* ── Workspace step: drag-to-split mock (design §7.1) ─────────────────────────
+   A small looping demo of a tab dragging to an edge and snapping into a split.
+   Under prefers-reduced-motion it swaps to a static landed-split before/after.
+   Purely decorative (aria-hidden); theme vars carry standalone-shell fallbacks
+   like the rest of this card. */
+.wt__ws-mock {
+  position: relative;
+  width: 200px;
+  height: 104px;
+  margin: 4px auto 16px;
+}
+.wt__ws-mock-live,
+.wt__ws-mock-static {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border-light, #2a2a30);
+  background: color-mix(in srgb, var(--text, #d4d4d8) 4%, transparent);
+  overflow: hidden;
+}
+.wt__ws-mock-static { display: none; }
+.wt__ws-mock-pane {
+  position: absolute;
+  inset: 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text, #d4d4d8) 6%, transparent);
+}
+.wt__ws-mock-tab {
+  position: absolute;
+  top: 12px;
+  left: 40px;
+  width: 56px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--accent, #7c6cff);
+  animation: wt-ws-drag 3s ease-in-out infinite;
+}
+.wt__ws-mock-seam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  background: var(--accent, #7c6cff);
+  opacity: 0;
+  animation: wt-ws-seam 3s ease-in-out infinite;
+}
+@keyframes wt-ws-drag {
+  0%, 15% { transform: translate(0, 0); opacity: 1; }
+  55% { transform: translate(88px, 0); opacity: 1; }
+  70%, 100% { transform: translate(112px, 0); opacity: 0; }
+}
+@keyframes wt-ws-seam {
+  0%, 55% { opacity: 0; }
+  70%, 100% { opacity: 0.9; }
+}
+.wt__ws-mock-half {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: calc(50% - 12px);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text, #d4d4d8) 6%, transparent);
+}
+.wt__ws-mock-half:first-child { left: 8px; }
+.wt__ws-mock-half:last-child {
+  right: 8px;
+  background: color-mix(in srgb, var(--accent, #7c6cff) 22%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wt__ws-mock-live { display: none; }
+  .wt__ws-mock-static { display: block; }
+}
