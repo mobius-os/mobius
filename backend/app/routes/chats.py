@@ -335,6 +335,48 @@ def list_chats(
   ]
 
 
+@router.get("/session-links")
+def list_session_links(
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Returns the append-only provider-session -> chat identity map.
+
+  Owner-only observability over ``chat_session_links`` (session_links.py):
+  every provider session id a chat has ever been persisted under, newest
+  sighting first. Survives the provider switches / session resets that NULL
+  ``Chat.session_id``, so a session id still resolves to its chat here.
+
+  No pagination yet — the map grows a handful of rows per chat over its life (a
+  fresh session, a Codex thread after a switch, a re-resumed id) and rides the
+  chat's hard-purge, so a single instance's table stays small enough to return
+  whole. Add limit/offset here if a long-lived instance ever makes the response
+  unwieldy.
+
+  Declared before the ``/{chat_id}`` route below so FastAPI does not match
+  "session-links" as a chat id.
+  """
+  rows = db.query(models.ChatSessionLink).order_by(
+    models.ChatSessionLink.last_seen_at.desc()
+  ).all()
+  return {
+    "links": [
+      {
+        "provider": r.provider,
+        "session_id": r.session_id,
+        "chat_id": r.chat_id,
+        "first_seen_at": (
+          r.first_seen_at.isoformat() if r.first_seen_at else None
+        ),
+        "last_seen_at": (
+          r.last_seen_at.isoformat() if r.last_seen_at else None
+        ),
+      }
+      for r in rows
+    ]
+  }
+
+
 @router.post("", dependencies=[Depends(reject_cross_site)])
 def create_chat(
   body: ChatUpdate,

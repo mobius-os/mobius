@@ -22,6 +22,7 @@ from sqlalchemy import (
 )
 
 from app.database import Base
+from app.timeutil import now_naive_utc
 
 
 class Owner(Base):
@@ -244,6 +245,47 @@ class ChatRun(Base):
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)
+
+
+class ChatSessionLink(Base):
+  """Append-only provider-session -> chat identity map (subagent observability).
+
+  One row per (provider, session_id) the runner has ever persisted for a chat.
+  The invariant is append-only: a first sighting inserts, a re-sighting only
+  bumps ``last_seen_at``, and nothing on the normal path deletes a row (they
+  ride the chat's hard-purge, same as ``chat_runs``).
+
+  This is deliberately NOT ``Chat.session_id``. That column holds only the
+  CURRENT session and is wiped whenever the owner switches providers (a Claude
+  session id is not a valid Codex thread id, so the switch NULLs it in
+  ``routes/chats.py``) or a session otherwise resets. Once that live pointer
+  moves on, the old session id is unrecoverable from ``Chat``. This map never
+  forgets, so an observer can resolve any session id a chat was ever seen under
+  back to that chat — across provider switches and session resets.
+
+  Composite PK ``(provider, session_id)``: a session id is unique within a
+  provider, and one chat legitimately accumulates several rows over its life (a
+  fresh Claude session, a Codex thread after a switch, a re-resumed id). All
+  writes go through ``session_links.record_session_link`` — do not insert here
+  directly.
+
+  ``create_all`` builds this table on the next boot — a new table needs no ALTER
+  migration (see ``run_migrations``, which only ALTERs existing tables); existing
+  rows are untouched.
+  """
+
+  __tablename__ = "chat_session_links"
+
+  provider = Column(String(32), primary_key=True)
+  session_id = Column(String(128), primary_key=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  # Naive UTC to match SQLite's DATETIME round-trip (see timeutil.now_naive_utc),
+  # so `last_seen_at DESC` ordering compares like-for-like values. Both stamps
+  # are set explicitly by record_session_link; these defaults are the safety net.
+  first_seen_at = Column(DateTime, default=lambda: now_naive_utc())
+  last_seen_at = Column(DateTime, default=lambda: now_naive_utc())
 
 
 class ChatEmbedGrant(Base):

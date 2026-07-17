@@ -28,6 +28,7 @@ from claude_agent_sdk.types import (
   TaskNotificationMessage,
   TaskProgressMessage,
   TaskStartedMessage,
+  TaskUpdatedMessage,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
@@ -630,6 +631,13 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
       models.Chat.id == "claude-early"
     ).first()
     assert chat.session_id == "sess-early"
+    # The same sighting also records the append-only session->chat link, so the
+    # id resolves back to this chat even after a later switch NULLs
+    # Chat.session_id.
+    link = db.get(models.ChatSessionLink, ("claude", "sess-early"))
+    assert link is not None
+    assert link.chat_id == "claude-early"
+    assert link.first_seen_at == link.last_seen_at
   finally:
     db.close()
 
@@ -1017,14 +1025,18 @@ def test_dispatch_task_started():
     description="build app",
     uuid="u-1",
     session_id="sess-1",
+    tool_use_id="tu_spawn",
     task_type="build",
   )
   dispatch_sdk_message(msg, bus, None)
+  # tool_use_id rides task_start so a consumer can nest the sub-task under the
+  # parent turn's tool call.
   assert bus.events == [{
     "type": "task_start",
     "task_id": "t-1",
     "description": "build app",
     "task_type": "build",
+    "tool_use_id": "tu_spawn",
   }]
 
 
@@ -1038,11 +1050,13 @@ def test_dispatch_task_progress():
     usage={"total_tokens": 500, "tool_uses": 2, "duration_ms": 1000},
     uuid="u-1",
     session_id="sess-1",
+    tool_use_id="tu_spawn",
     last_tool_name="Bash",
   )
   dispatch_sdk_message(msg, bus, None)
   assert bus.events[0]["type"] == "task_progress"
   assert bus.events[0]["last_tool_name"] == "Bash"
+  assert bus.events[0]["tool_use_id"] == "tu_spawn"
 
 
 def test_dispatch_task_notification_done():
@@ -1056,6 +1070,7 @@ def test_dispatch_task_notification_done():
     summary="all good",
     uuid="u-1",
     session_id="sess-1",
+    tool_use_id="tu_spawn",
   )
   dispatch_sdk_message(msg, bus, None)
   assert bus.events == [{
@@ -1063,7 +1078,53 @@ def test_dispatch_task_notification_done():
     "task_id": "t-1",
     "status": "completed",
     "summary": "all good",
+    "tool_use_id": "tu_spawn",
   }]
+
+
+def test_dispatch_task_updated_terminal_emits_task_done():
+  """A background task's terminal state can arrive ONLY as a task_updated
+  patch (no task_notification) — e.g. a TaskStop reporting status "killed".
+  It must surface as the same task_done shape so a consumer clears the task."""
+  bus = _Bus()
+  msg = TaskUpdatedMessage(
+    subtype="task_updated",
+    data={},
+    task_id="t-1",
+    patch={"status": "killed", "end_time": 123},
+    status="killed",
+    session_id="sess-1",
+    uuid="u-1",
+  )
+  dispatch_sdk_message(msg, bus, None)
+  # summary + tool_use_id are absent on this SDK class, so the uniform
+  # task_done shape carries them as None.
+  assert bus.events == [{
+    "type": "task_done",
+    "task_id": "t-1",
+    "status": "killed",
+    "summary": None,
+    "tool_use_id": None,
+  }]
+
+
+def test_dispatch_task_updated_nonterminal_is_silent():
+  """Non-terminal task_updated patches (pending/running/paused, or a patch
+  carrying only end_time/result with no status) close nothing — they publish
+  no event rather than surfacing as noise or an unknown fallthrough."""
+  bus = _Bus()
+  for status in ("running", "paused", None):
+    msg = TaskUpdatedMessage(
+      subtype="task_updated",
+      data={},
+      task_id="t-1",
+      patch={"status": status} if status else {"end_time": 9},
+      status=status,
+      session_id="sess-1",
+      uuid="u-1",
+    )
+    dispatch_sdk_message(msg, bus, None)
+  assert bus.events == []
 
 
 def test_dispatch_result_message_returns_terminal():

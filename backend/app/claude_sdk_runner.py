@@ -71,6 +71,7 @@ log = logging.getLogger(__name__)
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 from claude_agent_sdk.types import (
+  TERMINAL_TASK_STATUSES,
   AssistantMessage,
   PermissionResultAllow,
   PermissionResultDeny,
@@ -83,6 +84,7 @@ from claude_agent_sdk.types import (
   TaskNotificationMessage,
   TaskProgressMessage,
   TaskStartedMessage,
+  TaskUpdatedMessage,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
@@ -134,15 +136,25 @@ def _claude_thinking_config(model: str | None) -> dict[str, str] | None:
 
 
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
-  """Best-effort early persistence for provider resume continuity."""
+  """Best-effort early persistence for provider resume continuity.
+
+  Advances two records from the same sighting: the CURRENT-session pointer on
+  the chat row (via the single-writer actor, since it lives on the hot Chat
+  row), and the append-only ``chat_session_links`` map (a direct write on the
+  runner's own ``db`` session — a distinct table with no lost-update race, so
+  it does not go through the actor). The link record is what survives the
+  provider switch / session reset that later NULLs ``Chat.session_id``.
+  """
   if db is None or not chat_id or not session_id:
     return
   try:
     from app.chat_writer import PersistSessionId, await_ack, get_writer
+    from app.session_links import record_session_link
     ack = get_writer().submit(
       PersistSessionId(chat_id=chat_id, session_id=session_id)
     )
     await await_ack(ack)
+    record_session_link(db, "claude", session_id, chat_id)
   except Exception:
     log.warning(
       "Claude session id persistence failed chat_id=%s session_id=%s",
@@ -637,11 +649,14 @@ def dispatch_sdk_message(
   """
   if isinstance(sdk_msg, SystemMessage):
     if isinstance(sdk_msg, TaskStartedMessage):
+      # tool_use_id ties this sub-task back to the parent turn's tool call that
+      # spawned it, so an observer can nest task events under their tool block.
       bc.publish({
         "type": "task_start",
         "task_id": sdk_msg.task_id,
         "description": sdk_msg.description,
         "task_type": sdk_msg.task_type,
+        "tool_use_id": sdk_msg.tool_use_id,
       })
       return current_session_id, None
     if isinstance(sdk_msg, TaskProgressMessage):
@@ -650,6 +665,7 @@ def dispatch_sdk_message(
         "task_id": sdk_msg.task_id,
         "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
         "last_tool_name": sdk_msg.last_tool_name,
+        "tool_use_id": sdk_msg.tool_use_id,
       })
       return current_session_id, None
     if isinstance(sdk_msg, TaskNotificationMessage):
@@ -658,7 +674,28 @@ def dispatch_sdk_message(
         "task_id": sdk_msg.task_id,
         "status": sdk_msg.status,
         "summary": sdk_msg.summary,
+        "tool_use_id": sdk_msg.tool_use_id,
       })
+      return current_session_id, None
+    if isinstance(sdk_msg, TaskUpdatedMessage):
+      # A background task's terminal state can arrive ONLY as a task_updated
+      # patch, with no accompanying TaskNotificationMessage — a task stopped via
+      # TaskStop reports status "killed" here and the matching notification is
+      # sometimes suppressed. Publish the same task_done shape on a terminal
+      # status so a consumer clears the task on a terminal signal from EITHER
+      # message. Non-terminal updates (pending/running/paused, or a patch with
+      # no status) carry no lifecycle-close a task_done would represent, so they
+      # are intentionally dropped rather than surfaced as noise. summary and
+      # tool_use_id are read via getattr — the SDK class omits them, so they
+      # resolve to None and the task_done shape stays uniform across both paths.
+      if sdk_msg.status in TERMINAL_TASK_STATUSES:
+        bc.publish({
+          "type": "task_done",
+          "task_id": sdk_msg.task_id,
+          "status": sdk_msg.status,
+          "summary": getattr(sdk_msg, "summary", None),
+          "tool_use_id": getattr(sdk_msg, "tool_use_id", None),
+        })
       return current_session_id, None
     if sdk_msg.subtype == "init":
       # Setup metadata only — no Möbius-side render.
