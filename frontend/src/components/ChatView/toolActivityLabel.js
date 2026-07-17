@@ -135,7 +135,13 @@ const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|bmp|avif)(?:[?#].*)?$/i
 export function effectiveToolName(tool) {
   const name = tool?.tool
   if (name === 'Read') {
-    const path = tool?.input?.file_path || tool?.input?.path || ''
+    // On the wire tool.input is the STRING summary the backend builds
+    // (summarize_tool_input -> the bare file_path for a Read), never the raw
+    // object -- see the useStreamConnection tool-item contract. Read the path
+    // from the string; keep the object shape as a defensive fallback so unit
+    // fixtures and any future object-shaped source still classify.
+    const raw = tool?.input
+    const path = typeof raw === 'string' ? raw : (raw?.file_path || raw?.path || '')
     if (typeof path === 'string' && IMAGE_PATH_RE.test(path)) return 'ViewImage'
   }
   return name

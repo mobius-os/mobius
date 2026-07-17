@@ -6,7 +6,11 @@ import {
   toolGroupState,
   toolGroupSummary,
 } from '../groupBlocks.js'
-import { toolActivityLabel } from '../toolActivityLabel.js'
+import {
+  toolActivityLabel,
+  effectiveToolName,
+  isDistinctiveActivityTool,
+} from '../toolActivityLabel.js'
 
 const e = item => ({ item })
 const tool = (extra = {}) => ({ type: 'tool', ...extra })
@@ -273,12 +277,12 @@ test('a distinctive tool (image view) breaks out into its own line', () => {
   // A Read of an image is a ViewImage activity — a notable beat that stands on
   // its own line instead of folding into the surrounding mundane run (owner ref
   // 2026-07-17). Around it, the read/edit/bash plumbing still folds normally.
-  const img = { file_path: '/tmp/shot.png' }
+  const img = '/tmp/shot.png'  // real wire shape: tool.input is the STRING path
   const nodes = groupActivityRuns([
     e(tool({ tool: 'Edit' })),
     e(tool({ tool: 'Bash' })),
     e(tool({ tool: 'Read', input: img })),          // image → own line
-    e(tool({ tool: 'Read', input: { file_path: '/x.js' } })),  // plain read, own run
+    e(tool({ tool: 'Read', input: '/x.js' })),  // plain read, own run
     e(tool({ tool: 'Read', input: img })),          // image → own line
   ])
   // [Edit,Bash] fold · image · [plain Read] · image
@@ -291,7 +295,7 @@ test('a distinctive tool (image view) breaks out into its own line', () => {
 })
 
 test('consecutive image views each get their own line — they do not accumulate', () => {
-  const img = { file_path: '/a.png' }
+  const img = '/a.png'
   const nodes = groupActivityRuns([
     e(tool({ tool: 'Read', input: img })),
     e(tool({ tool: 'Read', input: img })),
@@ -299,4 +303,23 @@ test('consecutive image views each get their own line — they do not accumulate
   ])
   assert.equal(nodes.length, 3)
   for (const n of nodes) assert.equal(n.group.length, 1)
+})
+
+test('effectiveToolName classifies image reads from the STRING wire input', () => {
+  // Production never sends tool.input as an object: summarize_tool_input turns a
+  // Read into the bare file_path STRING (backend/app/tool_summaries.py), and the
+  // useStreamConnection tool-item contract types input as a string. The earlier
+  // object-shaped fixtures hid that the classifier only worked on a shape that
+  // never occurs at runtime; pin the real shape here so it can't regress inert.
+  const T = (tool, input) => ({ type: 'tool', tool, input })
+  assert.equal(effectiveToolName(T('Read', '/tmp/shot.png')), 'ViewImage')
+  assert.equal(effectiveToolName(T('Read', '/tmp/SHOT.PNG')), 'ViewImage')       // case-insensitive
+  assert.equal(effectiveToolName(T('Read', '/tmp/a.jpeg?token=x')), 'ViewImage') // query suffix
+  assert.equal(effectiveToolName(T('Read', '/src/app.js')), 'Read')              // non-image folds
+  assert.equal(effectiveToolName(T('Bash', 'ls')), 'Bash')
+  // Defensive: an object shape (unit fixtures / any future source) still classifies.
+  assert.equal(effectiveToolName(T('Read', { file_path: '/o.webp' })), 'ViewImage')
+  // isDistinctiveActivityTool follows the string classification.
+  assert.equal(isDistinctiveActivityTool(T('Read', '/x.png')), true)
+  assert.equal(isDistinctiveActivityTool(T('Read', '/x.js')), false)
 })
