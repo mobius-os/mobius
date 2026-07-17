@@ -1167,35 +1167,35 @@ async def run_codex_sdk_turn(
     # silently stop emitting `item/tool/requestUserInput` after an
     # upgrade, check the upstream features list first.
     #
-    # Multi-agent (collab / spawn_agent) is DELIBERATELY NOT enabled here yet,
-    # even though the dispatch below already translates its items. The real knob
-    # exists on this pinned SDK (codex-cli 0.144.4): the feature namespace is
-    # `features.multi_agent_v2.*` (proven by the binary's own validation string
-    # "features.multi_agent_v2.min_wait_timeout_ms …"), and the collaboration
-    # mode is a `MultiAgentMode` enum — custom / explicitRequestOnly / proactive
-    # / concise — that resolves to the conservative `explicitRequestOnly` when
-    # left unset (spawns only when the user explicitly asks). Wiring it would be
-    # one more override line here, exactly like request_user_input above.
+    # Multi-agent (collab / spawn_agent) IS enabled — this is the Codex analog of
+    # Claude's Task/Workflow fleet, and the dispatch above translates its
+    # collabAgentToolCall items onto the same subagent lane. Enabling it is a
+    # single `features.multi_agent_v2.enabled=true` override (stage
+    # UnderDevelopment, hence the warning we suppress).
     #
-    # It is held because it is UNSAFE on our default model. Codex issue #31864
-    # ("All GPT-5.6 Sol turns fail because MultiAgentV2 uses reserved
-    # collaboration.spawn_agent") affects 0.144.0+ (we run 0.144.4) and our
-    # default codex model is `gpt-5.6-sol`: the spawn_agent tool defaults to the
-    # `collaboration` namespace, which gpt-5.6 reserves, so the Responses API
-    # rejects the tool schema on EVERY turn — not just spawn turns — bricking all
-    # Codex chats. The maintainer workaround is a namespace override
-    # (`features.multi_agent_v2.tool_namespace=agents`), but it is unverified on
-    # our model here and sits amid a live bug cluster on gpt-5.6 multi_agent_v2
-    # (#32031 rejects the default spawn call shape, #31814 can't set subagent
-    # models, #33447 bypasses max_threads). Per the trust-but-verify discipline
-    # that gated request_user_input behind probe3.py, do NOT enable this until a
-    # live gpt-5.6-sol turn (with the tool_namespace override) is confirmed. To
-    # turn it on after that probe, add both lines:
-    #   "features.multi_agent_v2.tool_namespace=agents",
-    #   "features.multi_agent_v2.default_wait_timeout_ms=<n>",  # optional tuning
-    # and (optionally) set the collaboration mode; unset = explicitRequestOnly.
+    # Why this is safe on gpt-5.6-sol despite the open Codex issue #31864 ("all
+    # GPT-5.6 Sol turns fail because MultiAgentV2 uses the reserved
+    # collaboration.spawn_agent schema"): that brick was VERIFIED NOT to occur on
+    # the codex-cli 0.144.3/0.144.4 binary we actually run. A live probe (enable
+    # the flag, prompt gpt-5.6-sol to delegate a computation to a sub-agent)
+    # spawned a real subagent thread — parent_thread_id linked, thread_source
+    # "subagent", correct result relayed — with zero reserved-schema errors and
+    # WITHOUT the `tool_namespace=agents` workaround the issue proposes. Codex
+    # exec / SDK ThreadStart does not auto-apply the interactive TUI's default
+    # MultiAgentV2 namespace that #31864 is about, so the collision never
+    # materializes here. (Prod Codex chats on gpt-5.6-sol already run clean, which
+    # is the same evidence at the always-on level.)
+    #
+    # Watch on a codex bump: #31864 is still open upstream, so re-run the delegate
+    # probe after any @openai/codex version change — if a future binary starts
+    # submitting the reserved `collaboration.spawn_agent` schema, add
+    # `features.multi_agent_v2.tool_namespace=agents` here (the reporter-confirmed
+    # bypass) and re-verify. The spawn events still surface even when unused, so a
+    # regression is visible as failing turns, not silent loss.
     config_overrides=[
       "features.default_mode_request_user_input=true",
+      "features.multi_agent_v2.enabled=true",
+      "suppress_unstable_features_warning=true",
     ],
   )
 
