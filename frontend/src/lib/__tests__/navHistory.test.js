@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  dropPopsForEntry,
   isMobiusNavState,
   isTopmostAppEntry,
   navEntryIndex,
@@ -301,4 +302,18 @@ test('a phantom entry (written to neither store) stays untagged in both', () => 
   } finally {
     clearBrowserMocks()
   }
+})
+
+
+test('dropPopsForEntry removes only requests targeting the consumed entry', () => {
+  const queue = [
+    { requestId: 1, targetEntryId: 'e-dead', appId: '5' },
+    { requestId: 2, targetEntryId: 'e-live', appId: '7' },
+  ]
+  const pruned = dropPopsForEntry(queue, 'e-dead')
+  assert.deepEqual(pruned.map((r) => r.requestId), [2],
+    'the request for the directly-consumed entry is dropped so it cannot wedge the FIFO head')
+  // A no-match returns the SAME array reference (no churn).
+  assert.equal(dropPopsForEntry(queue, 'e-none'), queue)
+  assert.equal(dropPopsForEntry(queue, null), queue)
 })

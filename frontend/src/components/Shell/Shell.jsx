@@ -119,20 +119,19 @@ export default function Shell() {
   // caller uses this wrapper — no raw dispatch survives it.
   const workspaceStateRef = useRef(workspaceState)
   workspaceStateRef.current = workspaceState
-  // Set after useNavigation (needs navStackRef): retargets in-memory restorable
-  // routes off a pane the reducer just removed (design §5.1.3).
-  const onPaneClosedRef = useRef(null)
+  // Set after useNavigation (needs navStackRef): reconciles in-memory restorable
+  // route hints against every workspace transition (design §5.1.3).
+  const onWorkspaceTransitionRef = useRef(null)
   const dispatchWorkspace = useCallback((action) => {
     const prev = workspaceStateRef.current
     const next = paneModel.workspaceReducer(prev, action)
     workspaceStateRef.current = next
-    // A reducer transition that dropped a pane (last-tab close or move) leaves
-    // its dead paneId in in-memory routes; retarget them to the surviving focus
-    // synchronously (using prev/next), before any restore reads them.
-    if (next.ws !== prev.ws
-        && Object.keys(next.ws.panes).length < Object.keys(prev.ws.panes).length) {
-      onPaneClosedRef.current?.(prev.ws, next.ws)
-    }
+    // ANY tab-placement/pane transition can strand a route's paneId hint — a
+    // cross-pane move (even when the source pane survives) leaves the moved tab's
+    // routes pointing at the old pane, and a pane collapse leaves dead-pane hints.
+    // Reconcile them synchronously (using prev/next), before any restore reads
+    // them, so a hint always names the pane that now holds its item.
+    if (next.ws !== prev.ws) onWorkspaceTransitionRef.current?.(prev.ws, next.ws)
     dispatchWorkspaceRaw(action)
   }, [])
 
@@ -232,22 +231,16 @@ export default function Shell() {
   // so their identity never churns and the listener never re-registers.
   const navToRef = useRef(navTo)
   navToRef.current = navTo
-  // Wire the pane-close route retargeting (design §5.1.3). navStackRef is stable,
-  // so recreating this closure each render is behaviourally identical. Each dead
-  // pane's routes retarget to the STRUCTURAL sibling the collapse chose (the
-  // nearest surviving leaf in the pre-transition order), NOT global focus — a
-  // background split can be removed while focus is elsewhere, and focus is not a
-  // sibling-selection algorithm. Physical history hints that can't be rewritten
-  // degrade via restoreRoute's dead-hint fallback.
-  onPaneClosedRef.current = (prevWs, nextWs) => {
-    const dead = Object.keys(prevWs.panes).filter(id => !nextWs.panes[id])
-    if (dead.length === 0) return
-    const siblingFor = new Map()
-    for (const d of dead) {
-      siblingFor.set(d, paneModel.survivingSiblingOf(prevWs, nextWs, d) || nextWs.focusedPaneId)
-    }
-    navStackRef.current = navStackRef.current.map(r =>
-      (r && siblingFor.has(r.paneId) ? { ...r, paneId: siblingFor.get(r.paneId) } : r))
+  // Reconcile in-memory route hints after every workspace transition (design
+  // §5.1.3). navStackRef is stable, so recreating this closure each render is
+  // behaviourally identical. reconcileRoutePanes points each hint at the pane
+  // that now holds its item (a cross-pane move follows its tab even when the
+  // source pane survived) and degrades a dead-pane hint to the structural
+  // sibling the collapse chose — NOT global focus, since a background split can
+  // be removed while focus is elsewhere. Physical history hints self-correct at
+  // restore time (OPEN_TAB dedups an open item to its true pane).
+  onWorkspaceTransitionRef.current = (prevWs, nextWs) => {
+    navStackRef.current = paneModel.reconcileRoutePanes(navStackRef.current, prevWs, nextWs)
   }
 
   const { loadTheme } = useTheme()
@@ -2749,6 +2742,22 @@ export default function Shell() {
             >
               Close tab
             </button>
+            {/* Close pane — a keyboard/menu affordance so a multi-tab pane need
+                not be dismissed one ✕ at a time (design §3.6). Only when there is
+                another pane to fall back to (never the single-pane strip). */}
+            {paneModel.WORKSPACE_SPLITS_ENABLED && tabMenu.paneId != null && otherPaneIds.length >= 1 && (
+              <button
+                type="button"
+                role="menuitem"
+                className="workspace__menu-item"
+                onClick={() => {
+                  dispatchWorkspace({ type: 'CLOSE_PANE', paneId: tabMenu.paneId })
+                  closeTabMenu()
+                }}
+              >
+                Close pane
+              </button>
+            )}
           </div>
         )
       })()}

@@ -312,15 +312,20 @@ export function normalize(ws) {
     focused = nearestSurviving(orderedIds, placed, ws.focusedPaneId)
   }
 
-  // Recompute the id generator from the tree itself rather than trusting the
-  // stored value: a persisted `nextId` that lags the live ids (a corrupt or
-  // rolled-back blob) would mint a colliding `pN`/`sN`, overwrite the existing
-  // node, and lose its tab when the duplicate leaf collapses. Deterministic
-  // repair: one past the largest pane/split suffix in play.
+  // The id generator is a MONOTONIC high-water mark. It must clear the largest
+  // live pane/split suffix (repairing a corrupt or rolled-back blob whose stored
+  // nextId LAGS — that would mint a colliding `pN`/`sN`, overwrite the node, and
+  // lose its tab when the duplicate leaf collapses), AND it must never REGRESS
+  // below the stored value: collapsing a split frees its `pN`/`sN`, and recomputing
+  // purely from the smaller live tree would reissue those exact ids so a stale
+  // physical-history hint for the dead pane suddenly matches a live one and
+  // restoreRoute targets the wrong pane (finding: id reuse). max() of both
+  // satisfies both directions.
   let maxId = 0
   for (const id of Object.keys(panes)) maxId = Math.max(maxId, idSuffix(id))
   for (const id of splitIdsOf(layout)) maxId = Math.max(maxId, idSuffix(id))
-  const nextId = maxId + 1
+  const storedNext = (Number.isInteger(ws.nextId) && ws.nextId > 0) ? ws.nextId : 0
+  const nextId = Math.max(maxId + 1, storedNext)
   const result = { v: 1, layout, panes, focusedPaneId: focused, nextId }
   return deepEqual(result, ws) ? ws : result
 }
@@ -415,6 +420,58 @@ export function visibleAppIds(ws, visibleLeaves) {
     if (active && active.kind === 'app') set.add(String(active.id))
   }
   return set
+}
+
+// The tab key an in-memory restorable route points at, or null for a route with
+// no concrete workspace item (Settings, or a home-seed chat route).
+function routeItemKey(route) {
+  if (!route || typeof route !== 'object') return null
+  if (route.view === 'canvas' && route.appId != null) return `app:${route.appId}`
+  if (route.view === 'chat' && !route.homeSeed && route.chatId != null) return `chat:${route.chatId}`
+  return null
+}
+
+// Retarget the `paneId` hints on a list of in-memory restorable routes after a
+// workspace transition (design §5.1.3). A route's hint should name the pane that
+// currently holds its item, so:
+//   - if the route's item is open in nextWs, the hint FOLLOWS it to that pane —
+//     this covers a cross-pane move even when the source pane survived (its old
+//     hint stays stale otherwise) and a last-tab move to a NON-sibling pane
+//     (the item's real destination, not the collapse sibling);
+//   - else, when the hint names a pane the transition removed, it degrades to
+//     the structural sibling the collapse chose (a closed tab reopened by Back
+//     lands beside where its pane used to be), or the focused pane as a last
+//     resort;
+//   - else it is left untouched.
+// Pure; returns the SAME array reference when nothing changed. Physical history
+// entries (which cannot be enumerated) self-correct at restore time because
+// OPEN_TAB dedups an already-open item to its true pane regardless of the hint.
+export function reconcileRoutePanes(routes, prevWs, nextWs) {
+  if (!Array.isArray(routes) || routes.length === 0) return routes
+  let changed = false
+  const out = routes.map((route) => {
+    if (!route || typeof route !== 'object') return route
+    const itemKey = routeItemKey(route)
+    if (itemKey) {
+      const pane = paneOf(nextWs, itemKey)
+      if (pane) {
+        if (pane.id === route.paneId) return route
+        changed = true
+        return { ...route, paneId: pane.id }
+      }
+    }
+    // No live item at this route (closed tab, or a paneless view): degrade only a
+    // hint that names a now-dead pane.
+    if (route.paneId != null && !nextWs.panes[route.paneId]) {
+      const sib = survivingSiblingOf(prevWs, nextWs, route.paneId) || nextWs.focusedPaneId
+      if (sib && sib !== route.paneId) {
+        changed = true
+        return { ...route, paneId: sib }
+      }
+    }
+    return route
+  })
+  return changed ? out : routes
 }
 
 // The surviving sibling a pane-removal collapse chose for a now-dead pane: the
@@ -675,6 +732,13 @@ function splitNodeFor(edge, splitId, existingSide, newPaneId, ratio) {
 
 function edgeSplitMove(ws, src, tab, tabKey, paneId, edge) {
   if (!ws.panes[paneId]) return ws
+  // Splitting a pane by moving its OWN sole tab onto its OWN edge is a true
+  // no-op: the source empties and collapses, leaving one pane in the same spot
+  // with a fresh id — a rename, not a move. Refuse it so a drawer-drag of an
+  // already-open sole item (whose source carries no paneId, so the drag layer's
+  // single-source guard misses it) can't churn the pane id or raise a false
+  // "Moved" toast (finding: sole-item drawer-drag rename).
+  if (src.id === paneId && src.tabs.length <= 1) return ws
   const newPaneId = `p${ws.nextId}`
   const splitId = `s${ws.nextId + 1}`
   const panes = { ...ws.panes }
@@ -687,6 +751,12 @@ function edgeSplitMove(ws, src, tab, tabKey, paneId, edge) {
 }
 
 function rootSplitMove(ws, src, tab, tabKey, edge) {
+  // Root-splitting the whole workspace by moving the SOLE tab of the SOLE pane
+  // is the same rename no-op as the edge case above — the source empties, the
+  // new pane is all that survives. Refuse it (finding: sole-item drawer-drag
+  // rename). With other panes present a root split is a real relocation, so the
+  // guard is scoped to the single-pane workspace only.
+  if (src.tabs.length <= 1 && leafIds(ws.layout).filter(id => ws.panes[id]).length <= 1) return ws
   const newPaneId = `p${ws.nextId}`
   const splitId = `s${ws.nextId + 1}`
   const panes = { ...ws.panes }
@@ -1066,15 +1136,28 @@ export function projectLayout(ws, mode, contentRect, ratioOverride = null) {
   const tree = ratioOverride ? withRatioOverride(ws.layout, ratioOverride) : ws.layout
   const box = insetRect(content, OUTER_MARGIN)
 
+  // Wide renders EVERY leaf — but only while the box can still honor the pane
+  // minimums. A 4-pane tree built legally at 1400px, shrunk to 960px, cannot fit
+  // four 280px columns; rendering it anyway clamps every pane below the floor
+  // (finding: wide min-width violation). So when the whole tree's aggregate
+  // minimum exceeds the box on either axis, degrade to the compact focused-pair
+  // projection (the overflow chip reaches the hidden panes) rather than paint
+  // sub-floor panes. Design intent (§4): wide = up to 4 leaves, all edges valid
+  // per minimums.
+  let effectiveMode = mode
   if (mode === 'wide') {
-    const rects = {}
-    const dividers = []
-    layoutTree(tree, box, rects, dividers)
-    return {
-      visibleLeaves: leafIds(tree).filter(id => ws.panes[id]),
-      rects,
-      dividers,
+    const fits = subtreeMinExtent(tree, 'w') <= box.w && subtreeMinExtent(tree, 'h') <= box.h
+    if (fits) {
+      const rects = {}
+      const dividers = []
+      layoutTree(tree, box, rects, dividers)
+      return {
+        visibleLeaves: leafIds(tree).filter(id => ws.panes[id]),
+        rects,
+        dividers,
+      }
     }
+    effectiveMode = 'compact'
   }
 
   // compact / phone: the focused leaf paired with its immediate sibling rep.
@@ -1092,7 +1175,7 @@ export function projectLayout(ws, mode, contentRect, ratioOverride = null) {
   const parentDir = parent.split.dir
   const parentRatio = parent.split.ratio
 
-  if (mode === 'compact') {
+  if (effectiveMode === 'compact') {
     const { rects, divider } = layoutPair(
       aId, bId, parentDir, parentRatio, box, true, parent.split.id,
     )

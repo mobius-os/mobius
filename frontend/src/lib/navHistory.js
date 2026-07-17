@@ -116,6 +116,19 @@ export function selectNavPopTarget(entries, appId, targetedEntryIds) {
   return null
 }
 
+// Drop every queued local-pop request that targets `entryId`. When an ordinary
+// shell Back consumes a hidden app's physical sentinel directly (handleBack
+// branch 4), the app's still-QUEUED nav-pop for that same entry becomes dead:
+// its target can never be topmost again, so it would wedge the single global
+// FIFO head and block every later app's pop (finding: FIFO wedge on ordinary
+// Back). Pruning the satisfied request when its entry is consumed keeps the
+// pump able to advance. Pure; returns the SAME array when nothing was dropped.
+export function dropPopsForEntry(queue, entryId) {
+  if (!Array.isArray(queue) || entryId == null) return queue
+  const next = queue.filter((req) => req.targetEntryId !== entryId)
+  return next.length === queue.length ? queue : next
+}
+
 function mirrorCurrentEntry(state) {
   if (typeof navigation !== 'undefined' && navigation.updateCurrentEntry) {
     navigation.updateCurrentEntry({ state })

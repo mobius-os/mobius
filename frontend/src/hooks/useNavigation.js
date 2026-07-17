@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
+  dropPopsForEntry,
   isMobiusNavState,
   isTopmostAppEntry,
   navEntryId,
@@ -454,6 +455,13 @@ export default function useNavigation({
   const pumpLocalAppPop = useCallback(() => {
     if (appLocalPopInFlightRef.current) return
     if (drawerOpenRef.current) return
+    // Drop any FIFO heads whose physical entry was already consumed (an ordinary
+    // Back can satisfy a hidden app's queued pop directly). A consumed entry can
+    // never be topmost again, so leaving it at the head would wedge the pump.
+    while (appLocalPopsRef.current.length
+      && consumedAppEntryIdsRef.current.has(appLocalPopsRef.current[0].targetEntryId)) {
+      appLocalPopsRef.current = appLocalPopsRef.current.slice(1)
+    }
     const next = appLocalPopsRef.current[0]   // ONLY the global FIFO head
     if (!next) return
     const ws = workspaceStateRef.current.ws
@@ -865,6 +873,10 @@ export default function useNavigation({
             )
           }
           consumeAppEntry(sourceEntryId, sourceOwnerKey)
+          // This ordinary Back consumed the sentinel directly, so any queued
+          // nav-pop for the SAME physical entry is now satisfied — drop it or the
+          // dead request wedges the FIFO head forever (finding: FIFO wedge).
+          appLocalPopsRef.current = dropPopsForEntry(appLocalPopsRef.current, sourceEntryId)
           if (pane && pane.id !== workspaceStateRef.current.ws.focusedPaneId) {
             dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
           }
@@ -1021,13 +1033,17 @@ export default function useNavigation({
   // Keep the current physical entry self-contained. snapshotRoute() re-stamps
   // the current focused pane + content ids; a derived projection cannot be
   // repaired by a scalar setter, so this only refreshes the entry's route.
+  // contentRoute.paneId is a dependency because moving the CURRENTLY-ACTIVE tab
+  // across panes changes only the owning pane — activeView/chatId/appId stay the
+  // same item — so without it the current entry keeps the OLD owner hint and Back
+  // targets the wrong pane (finding: restamp misses pane-only changes).
   useEffect(() => {
     if (!isMobiusNavState(history.state)) return
     const kind = history.state.kind === 'drawer' && !drawerPushedRef.current
       ? 'nav'
       : history.state.kind
     currentNavStateRef.current = updateCurrentNavEntry(snapshotRoute(), { kind })
-  }, [activeView, activeChatId, activeAppId, snapshotRoute])
+  }, [activeView, activeChatId, activeAppId, contentRoute.paneId, snapshotRoute])
 
   // A queued close from a hidden cached app becomes safe once shell Back restores
   // that app and its sentinel to the current tagged entry — or once a split/focus

@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import {
-  buildScene, hitTest, zoneTarget, chipOffset, STRIP_CARET_PAD,
+  buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, crossedDrawerExit,
 } from './dragController.js'
 
@@ -340,7 +340,11 @@ export default function useWorkspaceDrag({
       function commitDrop() {
         const allowRootEdge = !isTouch && sceneInputsRef.current.mode !== 'phone'
         const fresh = buildSceneNow(buildSource(), allowRootEdge)
-        const zone = hitTest(toLocal(lastPoint.x, lastPoint.y), fresh, curZone)
+        // Commit ONLY the operation the preview promised: releaseZone returns the
+        // fresh zone iff it is structurally identical to the previewed one, else
+        // null so a zone that flipped infeasible between the last move and the
+        // release cancels rather than silently committing a different mutation.
+        const zone = releaseZone(hitTest(toLocal(lastPoint.x, lastPoint.y), fresh, curZone), curZone)
         const target = zoneTarget(zone)
         if (!target) return
         const tab = tabFromKey(key)
@@ -374,12 +378,13 @@ export default function useWorkspaceDrag({
           }
           cleanup()
         } else if (backOverDrawer) {
-          if (glided) openDrawer?.()
-          // Suppress the row's compat click so the cancel doesn't also select it.
+          // Released back over the drawer = cancel; cleanup reopens it if glided.
           cleanup({ suppressClick: true })
         } else {
           if (curZone) commitDrop()
-          cleanup({ suppressClick: true })
+          // A release over a live zone is a commit (drawer stays closed); a
+          // release over NO zone is a cancel (cleanup reopens a glided drawer).
+          cleanup({ suppressClick: true, committed: !!curZone })
         }
       }
 
@@ -389,7 +394,7 @@ export default function useWorkspaceDrag({
       const onWinBlur = () => cleanup()
       const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup() }
 
-      function cleanup({ suppressClick = false } = {}) {
+      function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
         cleaned = true
         clearTimeout(holdTimer)
@@ -412,6 +417,13 @@ export default function useWorkspaceDrag({
         srcEl.style.userSelect = ''
         try { srcEl.releasePointerCapture?.(pointerId) } catch { /* released */ }
         dragActiveRef.current = false
+        // Glide-close is provisional (design §3.1 — nothing mutates until drop).
+        // A session that ends WITHOUT a committed drop — Escape, pointercancel,
+        // window blur, visibility loss, lost capture, a release over no zone, or a
+        // release back over the drawer — must restore the drawer it glided shut.
+        if (glided && !committed && sourceKind === 'drawer' && !drawerOpenRef.current) {
+          openDrawer?.()
+        }
         removeOverlays()
         // The compat click fires after the shield is already gone; swallow it so
         // a committed drop is exactly one action, not a drop + a tab/row click.

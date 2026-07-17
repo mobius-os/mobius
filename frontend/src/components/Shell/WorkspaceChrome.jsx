@@ -65,7 +65,14 @@ function PaneStrip({
       role="tablist"
       aria-label="Pane tabs"
       style={{ left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H }}
-      onPointerDown={() => onFocus(pane.id)}
+      onPointerDown={(e) => {
+        // Focus on strip-WHITESPACE pointerdown only. A tab activation focuses via
+        // navTo, so pre-focusing on the tab's own pointerdown would advance the
+        // workspace ref BEFORE navTo snapshots the source route — the just-clicked
+        // pane becomes its own (wrong) back-target (finding: pointerdown-focus
+        // before navTo snapshot).
+        if (!e.target.closest('.shell__tab')) onFocus(pane.id)
+      }}
     >
       {pane.tabs.map(tab => {
         const isChat = tab.kind === 'chat'
@@ -159,15 +166,23 @@ export default function WorkspaceChrome({
     dispatchWorkspace({ type: 'FOCUS', paneId })
   }, [dispatchWorkspace])
 
-  // Tab activation in a pane routes entirely through navTo (design §1): navTo's
-  // one OPEN_TAB into `paneId` activates the tab AND focuses the pane, and its
-  // back-target snapshot is the pane we're leaving. Pre-dispatching SET_ACTIVE/
-  // FOCUS here would advance the workspace ref before navTo snapshots it, making
-  // the just-activated tab its own (wrong) back-target.
+  // Tab activation in a pane routes through navTo (design §1): navTo's one
+  // OPEN_TAB into `paneId` activates the tab AND focuses the pane, and its
+  // back-target snapshot is the pane we're leaving. Clicking a pane's
+  // ALREADY-ACTIVE tab, though, is a focus-only action — focus is UI-local and
+  // must NOT push history (design §5); navTo would push a duplicate entry so Back
+  // appears to do nothing (finding: dup history entry for a focus-only click). So
+  // that case just focuses the pane.
   const activateTab = useCallback((paneId, tab) => {
+    const pane = workspace.panes[paneId]
+    const key = tabModel.tabKey(tab)
+    if (pane && pane.activeTabKey === key) {
+      dispatchWorkspace({ type: 'FOCUS', paneId })
+      return
+    }
     const { view, opts } = tabModel.tabNavTarget(tab)
     navTo(view, { ...opts, paneId })
-  }, [navTo])
+  }, [navTo, workspace, dispatchWorkspace])
 
   const closeTab = useCallback((tab) => {
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tab) })
@@ -268,9 +283,11 @@ export default function WorkspaceChrome({
     [workspace.panes],
   )
   const hasOverflow = allLeaves.length > projection.visibleLeaves.length
-  const showChip = WORKSPACE_SPLITS_ENABLED
-    && (mode === 'phone' || mode === 'compact')
-    && hasOverflow
+  // Overflow can occur in ANY mode: a wide viewport too small to fit every pane
+  // at its minimum degrades to the compact focused-pair projection, so the chip
+  // must reach the hidden panes regardless of the raw mode (finding: wide
+  // min-width degrade would otherwise strand them).
+  const showChip = WORKSPACE_SPLITS_ENABLED && hasOverflow
 
   const pickPane = useCallback((paneId) => {
     closeSheet()
