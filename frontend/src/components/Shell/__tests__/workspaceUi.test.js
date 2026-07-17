@@ -123,3 +123,21 @@ test('the walkthrough inserts a flag-gated workspace step with pointer-specific 
   // The reduced-motion static mock exists alongside the animated one.
   assert.match(walkthrough, /wt__ws-mock-static/)
 })
+
+test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
+  // The AppCanvas wrapper is wrapped in its own inline ErrorBoundary so one
+  // canvas throw degrades locally instead of replacing the whole shell.
+  assert.match(shell, /<ErrorBoundary key=\{`ab-\$\{id\}`\} variant="inline" label="app">/)
+})
+
+test('the divider drag tears down from the window, surviving a mid-drag unmount', () => {
+  // Window-bound listeners + a lostpointercapture teardown restore body
+  // user-select even if the divider handle unmounts mid-drag.
+  assert.match(chrome, /window\.addEventListener\('lostpointercapture', end\)/)
+  assert.match(chrome, /document\.body\.style\.userSelect = prevUserSelect/)
+})
+
+test('the context menu offers Close pane when another pane can absorb the space', () => {
+  assert.match(shell, /type: 'CLOSE_PANE', paneId: tabMenu\.paneId/)
+  assert.match(shell, /Close pane/)
+})

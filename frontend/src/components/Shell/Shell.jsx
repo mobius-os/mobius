@@ -61,6 +61,7 @@ import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
+import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { deriveContentVisibility } from './workspaceView.js'
 
 // Resolves the service worker to post warm-up messages to. The page is
@@ -2512,6 +2513,7 @@ export default function Shell() {
             // tiled path (finding D-i).
             onPointerDownCapture={paned ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
+            <ErrorBoundary key={`ab-${id}`} variant="inline" label="app">
             <AppCanvas
               appId={id}
               // Focused-pane-only: gates safe-area insets + the immersive holder
@@ -2540,6 +2542,7 @@ export default function Shell() {
               onIntentDelivered={handleAppIntentDelivered}
               onAppError={handleAppError}
             />
+            </ErrorBoundary>
           </div>
           )
         })}
