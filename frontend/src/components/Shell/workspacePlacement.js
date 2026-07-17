@@ -40,10 +40,14 @@ export function builtAppWorkspaceRequest(chatId, appId) {
 
 // Map an explicit `open_item` system event (the agent's typed POST /api/notify,
 // design §6.3) to a request. Unknown item kinds / ids are dropped (silent no-op);
-// an app id must be numeric (the tabNavTarget posture). A malformed or absent
-// source is simply omitted — the resolver then degrades to `with-focus`. Missing
-// placement/activation default to a background beside-source when a source is
-// present, else a background with-focus (the safe, non-focus-stealing default).
+// an app id must be numeric (the tabNavTarget posture). A malformed source (bad
+// kind, empty or non-numeric app id) is OMITTED, not fatal — the resolver then
+// degrades to `with-focus`. An OMITTED placement/activation defaults (background
+// beside-source when a source is present, else background with-focus), but a
+// PRESENT-but-unrecognized value is a silent no-op (returns null): a newer
+// backend may emit a v2 value that a cached older shell must skip, never coerce
+// to a wrong default (the forward-compat rule; the co-deployed backend's 422 is
+// the wire contract, this no-op is for in-image evolution).
 export function openItemWorkspaceRequest(event) {
   const kind = event?.itemKind
   if (kind !== 'app' && kind !== 'chat') return null
@@ -52,20 +56,23 @@ export function openItemWorkspaceRequest(event) {
   if (kind === 'app' && !Number.isInteger(Number(rawId))) return null
   const item = makeTab(kind, kind === 'app' ? Number(rawId) : rawId)
 
+  // A present-but-unknown placement/activation is a forward-compat no-op.
+  if (event?.placement != null && !PLACEMENTS.has(event.placement)) return null
+  if (event?.activation != null && !ACTIVATIONS.has(event.activation)) return null
+
+  // A well-formed source only; anything malformed is omitted (degrade to with-focus).
   let source = null
   const sKind = event?.sourceKind
   const sId = event?.sourceId
-  if ((sKind === 'chat' || sKind === 'app') && sId != null && String(sId).length > 0) {
-    if (sKind === 'app' && !Number.isInteger(Number(sId))) return null
+  if ((sKind === 'chat' || sKind === 'app')
+      && sId != null && String(sId).length > 0
+      && !(sKind === 'app' && !Number.isInteger(Number(sId)))) {
     source = makeTab(sKind, sKind === 'app' ? Number(sId) : sId)
   }
 
-  const placement = PLACEMENTS.has(event?.placement)
-    ? event.placement
-    : (source ? PLACE_BESIDE_SOURCE : PLACE_WITH_FOCUS)
-  const activation = ACTIVATIONS.has(event?.activation)
-    ? event.activation
-    : ACTIVATE_IN_BACKGROUND
+  const placement = event?.placement
+    ?? (source ? PLACE_BESIDE_SOURCE : PLACE_WITH_FOCUS)
+  const activation = event?.activation ?? ACTIVATE_IN_BACKGROUND
 
   return {
     type: WORKSPACE_OPEN_ITEM,
@@ -90,6 +97,20 @@ export function workspaceRequestsForBuiltApps(arrivals) {
     if (request) requests.push(request)
   }
   return requests
+}
+
+// The background attention target for a placement (design §6.2): a background
+// open lands as an inactive tab, so it earns the drawer/tab "new content" dot —
+// an app flags into the newAppIds set, a chat into attentionChatIds. A FOREGROUND
+// open is on screen and needs no dot. Returns {kind, id} to flag, or null. Kept
+// pure here so the Shell wiring (which owns the setters) stays a thin dispatch.
+export function attentionForRequest(request) {
+  if (!request || request.activation !== ACTIVATE_IN_BACKGROUND) return null
+  const item = request.item
+  if (!item) return null
+  if (item.kind === 'app') return { kind: 'app', id: Number(item.id) }
+  if (item.kind === 'chat') return { kind: 'chat', id: item.id }
+  return null
 }
 
 // ── The pane-aware resolver (design §6.2) ───────────────────────────────────
@@ -135,6 +156,48 @@ function protectKeys(ws, extraTabs) {
   }
   for (const tab of extraTabs || []) if (tab) keys.add(tabKey(tab))
   return keys
+}
+
+// The on-screen content of a workspace in a given mode: the active tab key of
+// every leaf the projection actually shows (wide shows all leaves; compact/phone
+// show a limited pair). This is what the user sees — the level the background
+// guarantee must hold at, not just per-pane activeTabKey.
+function visibleContentKeys(ws, mode, contentRect) {
+  const proj = paneModel.projectLayout(ws, mode, contentRect)
+  const keys = new Set()
+  for (const paneId of proj.visibleLeaves) {
+    const active = ws.panes[paneId]?.activeTabKey
+    if (active) keys.add(active)
+  }
+  return keys
+}
+
+// The projection-level background guarantee (design §6.2): a background placement
+// may ADD an on-screen pane but must never make a currently-visible pane's content
+// VANISH. A new pane appearing is fine (a single-pane tile blooming into two); a
+// compact/phone split that the limited projection can only show by dropping the
+// other visible pane is NOT (finding: compact multi-pane background split hid the
+// sibling). True iff every key visible before is still visible after.
+function preservesVisibleContent(before, after, mode, contentRect) {
+  const va = visibleContentKeys(after, mode, contentRect)
+  for (const key of visibleContentKeys(before, mode, contentRect)) {
+    if (!va.has(key)) return false
+  }
+  return true
+}
+
+// Attempt the auto-split of the source pane on its longer feasible axis. Returns
+// the split workspace when feasible AND — for a background split — projection-safe
+// (it drops no currently-visible pane); otherwise null so the caller degrades to a
+// tab. A foreground split is always allowed: the projection change (focus follows
+// the new pane) is the requested intent.
+function tryAutoSplit(ws, item, sourcePane, env, foreground) {
+  const edge = chooseSplitEdge(ws, sourcePane.id, env)
+  if (!edge) return null
+  const split = paneModel.splitPaneWithTab(ws, item, { paneId: sourcePane.id, edge, focus: foreground })
+  if (split === ws) return null
+  if (foreground) return split
+  return preservesVisibleContent(ws, split, env.mode, env.contentRect) ? split : null
 }
 
 // Insert the item as a tab directly after its source in the source's pane. The
@@ -228,11 +291,10 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   const paneCount = paneModel.paneIdsInOrder(ws).length
   if (paneCount <= 1) {
     // Tile, single pane: auto-split the source pane on its longer feasible axis;
-    // the item is active in the new pane, focus stays put unless foreground.
-    // Infeasible split → degrade to a background/companion tab beside the source.
-    const edge = chooseSplitEdge(ws, sourcePane.id, env)
-    if (edge) return paneModel.splitPaneWithTab(ws, item, { paneId: sourcePane.id, edge, focus: foreground })
-    return insertBesideSource(ws, item, sourcePane, source, foreground)
+    // the item is active in the new pane, focus stays put unless foreground. An
+    // infeasible or projection-unsafe split degrades to a tab beside the source.
+    return tryAutoSplit(ws, item, sourcePane, env, foreground)
+      || insertBesideSource(ws, item, sourcePane, source, foreground)
   }
 
   // Tile, multi-pane: companion pane → else split the source pane → else a
@@ -248,7 +310,21 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
       protect: protectKeys(ws, [source, item]),
     })
   }
-  const edge = chooseSplitEdge(ws, sourcePane.id, env)
-  if (edge) return paneModel.splitPaneWithTab(ws, item, { paneId: sourcePane.id, edge, focus: foreground })
-  return insertBesideSource(ws, item, sourcePane, source, foreground)
+  return tryAutoSplit(ws, item, sourcePane, env, foreground)
+    || insertBesideSource(ws, item, sourcePane, source, foreground)
+}
+
+// Fold a batch of requests through the resolver against one evolving workspace,
+// FORWARD (producer order), so a batch and the same requests delivered one-at-a-
+// time (each its own dispatch) reach the IDENTICAL workspace — every step re-
+// projects against the accumulated result so splits compose. env carries
+// {mode, contentRect, liveApps}; `projected` is derived per step. This is the
+// exact fold placeInWorkspace dispatches, extracted here so it is unit-testable.
+export function resolveWorkspaceRequests(ws, requests, env = {}) {
+  let next = ws
+  for (const request of requests || []) {
+    const projected = paneModel.projectLayout(next, env.mode || 'wide', env.contentRect)
+    next = resolveWorkspaceRequest(next, request, { ...env, projected })
+  }
+  return next
 }

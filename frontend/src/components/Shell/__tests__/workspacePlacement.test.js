@@ -11,9 +11,11 @@ import {
   PLACE_WITH_FOCUS,
   PLACE_WITH_SOURCE,
   WORKSPACE_OPEN_ITEM,
+  attentionForRequest,
   builtAppWorkspaceRequest,
   openItemWorkspaceRequest,
   resolveWorkspaceRequest,
+  resolveWorkspaceRequests,
   workspaceRequestFromSystemEvent,
 } from '../workspacePlacement.js'
 
@@ -43,6 +45,23 @@ function req(item, source, placement, activation) {
 }
 
 const keysOf = (pane) => pane.tabs.map(tabKey)
+
+// The on-screen content in a given mode: the active tab of every leaf the
+// projection shows. The projection-level background guarantee is that this set
+// never LOSES a member across a background placement (it may gain a new pane).
+function visibleActiveKeys(ws, mode, rect) {
+  const proj = paneModel.projectLayout(ws, mode, rect)
+  return new Set(proj.visibleLeaves.map((id) => ws.panes[id]?.activeTabKey).filter(Boolean))
+}
+
+// Assert a BACKGROUND placement dropped nothing from the screen (design §6.2):
+// visible-before ⊆ visible-after in the given mode.
+function assertNoVisibleContentVanished(before, after, mode, rect) {
+  const va = visibleActiveKeys(after, mode, rect)
+  for (const key of visibleActiveKeys(before, mode, rect)) {
+    assert.ok(va.has(key), `background placement hid on-screen content ${key} (${mode})`)
+  }
+}
 
 // ── Request vocabulary (design §6.1) ────────────────────────────────────────
 
@@ -104,7 +123,7 @@ test('open_item maps a chat item and honours foreground with-focus', () => {
   })
 })
 
-test('open_item defaults: background, and beside-source iff a source is present', () => {
+test('open_item defaults an OMITTED placement/activation but no-ops an UNKNOWN one', () => {
   const withSource = openItemWorkspaceRequest({
     itemKind: 'app', itemId: '9', sourceKind: 'chat', sourceId: 'c',
   })
@@ -115,16 +134,48 @@ test('open_item defaults: background, and beside-source iff a source is present'
   assert.equal(noSource.source, null)
   assert.equal(noSource.placement, PLACE_WITH_FOCUS)
   assert.equal(noSource.activation, ACTIVATE_IN_BACKGROUND)
+
+  // Forward-compat: a PRESENT-but-unrecognized value is a silent no-op (a cached
+  // older shell must skip a v2 value, never coerce it to a wrong default).
+  assert.equal(openItemWorkspaceRequest({
+    itemKind: 'app', itemId: '9', placement: 'open-in-window',
+  }), null)
+  assert.equal(openItemWorkspaceRequest({
+    itemKind: 'app', itemId: '9', activation: 'urgent',
+  }), null)
 })
 
-test('open_item drops malformed item ids and unknown kinds (silent no-op upstream)', () => {
+test('open_item drops malformed item ids but OMITS a malformed source (degrade)', () => {
   assert.equal(openItemWorkspaceRequest({ itemKind: 'app', itemId: 'not-a-number' }), null)
   assert.equal(openItemWorkspaceRequest({ itemKind: 'widget', itemId: '1' }), null)
   assert.equal(openItemWorkspaceRequest({ itemKind: 'app', itemId: '' }), null)
-  // An app source with a non-numeric id is rejected outright.
-  assert.equal(openItemWorkspaceRequest({
+  // A malformed source (non-numeric app id) is OMITTED, not fatal: the request
+  // survives with source:null and the resolver degrades it to with-focus.
+  const r = openItemWorkspaceRequest({
     itemKind: 'chat', itemId: 'c', sourceKind: 'app', sourceId: 'nope',
-  }), null)
+  })
+  assert.ok(r, 'the request is not dropped')
+  assert.equal(r.source, null, 'the malformed source is omitted')
+  assert.equal(r.placement, PLACE_WITH_FOCUS, 'no source → default with-focus')
+})
+
+// ── background attention target (design §6.2 dot) ───────────────────────────
+
+test('attentionForRequest flags a background open by kind, and nothing for foreground', () => {
+  const bgApp = openItemWorkspaceRequest({ itemKind: 'app', itemId: '42' })
+  assert.deepEqual(attentionForRequest(bgApp), { kind: 'app', id: 42 })
+
+  const bgChat = openItemWorkspaceRequest({ itemKind: 'chat', itemId: 'chat-z' })
+  assert.deepEqual(attentionForRequest(bgChat), { kind: 'chat', id: 'chat-z' })
+
+  const fgApp = openItemWorkspaceRequest({
+    itemKind: 'app', itemId: '42', activation: 'foreground',
+  })
+  assert.equal(attentionForRequest(fgApp), null, 'a foreground open is on screen — no dot')
+
+  assert.equal(attentionForRequest(null), null)
+  assert.equal(attentionForRequest(builtAppWorkspaceRequest('a', 41)).kind, 'app',
+    'a background built-app request also earns the dot')
 })
 
 // ── resolver: forward-compat / malformed request ────────────────────────────
@@ -221,6 +272,58 @@ test('beside-source + background · tile multi-pane, no companion: split the sou
   const newId = leaves.find(id => id !== 'p0' && id !== 'p1')
   assert.deepEqual(keysOf(out.panes[newId]), ['app:9'])
   assert.equal(out.focusedPaneId, 'p0', 'background split keeps focus')
+  // The new pane is ADDED; both previously-visible panes remain on screen (wide).
+  assertNoVisibleContentVanished(ws, out, 'wide', { w: 1400, h: 900 })
+})
+
+test('beside-source + background · COMPACT multi-pane: a split would hide the sibling → degrade to tab', () => {
+  // The blocker: compact shows only the focused pane + its sibling. Splitting the
+  // focused pane to add a 3rd leaf makes the projection drop the OTHER visible
+  // pane. A background placement must not do that — degrade to a tab beside source.
+  const ws = twoPaneWs([CHAT('a')], [CHAT('b')])
+  const rect = { w: 800, h: 560 } // compact (≥700×520, <960×600)
+  const out = resolveWorkspaceRequest(
+    ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_IN_BACKGROUND),
+    env(ws, { mode: 'compact', rect }),
+  )
+  assert.equal(paneModel.paneIdsInOrder(out).length, 2, 'no split — it would hide the sibling')
+  assert.deepEqual(keysOf(out.panes.p0), ['chat:a', 'app:9'], 'degraded to a background tab beside source')
+  assert.equal(out.panes.p0.activeTabKey, 'chat:a', 'the source pane keeps its on-screen tab')
+  assertNoVisibleContentVanished(ws, out, 'compact', rect)
+})
+
+test('beside-source + FOREGROUND compact multi-pane still splits (the projection change is intended)', () => {
+  const ws = twoPaneWs([CHAT('a')], [CHAT('b')])
+  const rect = { w: 800, h: 560 }
+  const out = resolveWorkspaceRequest(
+    ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_FOREGROUND),
+    env(ws, { mode: 'compact', rect }),
+  )
+  assert.equal(paneModel.paneIdsInOrder(out).length, 3, 'foreground split is allowed')
+  assert.equal(out.panes[out.focusedPaneId].activeTabKey, 'app:9', 'and focus follows the new pane')
+})
+
+test('the projection-level background guarantee holds for EVERY background cell', () => {
+  // For every background placement path, no currently-visible pane loses its
+  // on-screen content (a new pane may appear; nothing may vanish). The stronger
+  // form of §6.2 that would have caught the compact-split blocker.
+  const cases = [
+    // [label, ws, mode, rect, liveApps]
+    ['phone tab-insert', paneModel.seedFromFlatTabs([CHAT('a')]), 'phone', { w: 400, h: 800 }, []],
+    ['single-pane wide split', paneModel.seedFromFlatTabs([CHAT('a')]), 'wide', { w: 1400, h: 900 }, []],
+    ['single-pane compact split', paneModel.seedFromFlatTabs([CHAT('a')]), 'compact', { w: 800, h: 560 }, []],
+    ['wide multi-pane split', twoPaneWs([CHAT('a')], [CHAT('b')]), 'wide', { w: 1400, h: 900 }, [{ id: 9, chat_id: 'a' }]],
+    ['compact multi-pane (degrades)', twoPaneWs([CHAT('a')], [CHAT('b')]), 'compact', { w: 800, h: 560 }, [{ id: 9, chat_id: 'a' }]],
+    ['companion join', twoPaneWs([CHAT('a')], [APP(5)]), 'wide', { w: 1400, h: 900 }, [{ id: 5, chat_id: 'a' }, { id: 9, chat_id: 'a' }]],
+  ]
+  for (const [label, ws, mode, rect, liveApps] of cases) {
+    const out = resolveWorkspaceRequest(
+      ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_IN_BACKGROUND),
+      env(ws, { mode, rect, liveApps }),
+    )
+    assertNoVisibleContentVanished(ws, out, mode, rect)
+    assert.ok(out !== ws || label === 'no-op', `${label}: produced a placement`)
+  }
 })
 
 test('beside-source · tile: an infeasible split degrades to a background tab beside source', () => {
@@ -316,16 +419,42 @@ test('pane at MAX_PANE_TABS: protected eviction spares source, item, active, vis
   assert.equal(out.panes.p0.activeTabKey, 'app:7', 'the on-screen tab is unchanged')
 })
 
-// ── batched producer order (built-apps arrival) ─────────────────────────────
+// ── batch fold == sequential (the real placeInWorkspace fold) ───────────────
 
-test('two built apps for one chat keep producer order beside the source (phone)', () => {
-  // Mirrors placeInWorkspace folding two requests in reverse: A then B → A, B.
-  let ws = paneModel.seedFromFlatTabs([CHAT('a')])
+// The environment placeInWorkspace passes to resolveWorkspaceRequests.
+const batchEnv = (mode, rect, liveApps = []) => ({ mode, contentRect: rect, liveApps })
+
+// Deliver the same requests one dispatch at a time (each its own resolve) — what
+// the live app_created path does.
+function applySequential(ws, requests, e) {
+  let next = ws
+  for (const r of requests) next = resolveWorkspaceRequests(next, [r], e)
+  return next
+}
+
+test('a batch of built-app placements folds identically to sequential delivery (phone)', () => {
+  const seed = paneModel.seedFromFlatTabs([CHAT('a')])
   const requests = [builtAppWorkspaceRequest('a', 41), builtAppWorkspaceRequest('a', 42)]
-  for (let i = requests.length - 1; i >= 0; i -= 1) {
-    ws = resolveWorkspaceRequest(ws, requests[i], env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }))
-  }
-  assert.deepEqual(keysOf(ws.panes.p0), ['chat:a', 'app:41', 'app:42'])
+  const e = batchEnv('phone', { w: 400, h: 800 }, [{ id: 41, chat_id: 'a' }, { id: 42, chat_id: 'a' }])
+
+  const batched = resolveWorkspaceRequests(seed, requests, e)
+  const sequential = applySequential(seed, requests, e)
+  assert.deepEqual(paneModel.flatten(batched), paneModel.flatten(sequential), 'batch == sequential (phone)')
+})
+
+test('a batch of built-app placements folds identically to sequential delivery (wide)', () => {
+  // Wide: the first app auto-splits, the second companion-joins that app's pane.
+  const seed = paneModel.seedFromFlatTabs([CHAT('a')])
+  const requests = [builtAppWorkspaceRequest('a', 41), builtAppWorkspaceRequest('a', 42)]
+  const e = batchEnv('wide', { w: 1400, h: 900 }, [{ id: 41, chat_id: 'a' }, { id: 42, chat_id: 'a' }])
+
+  const batched = resolveWorkspaceRequests(seed, requests, e)
+  const sequential = applySequential(seed, requests, e)
+  assert.deepEqual(paneModel.flatten(batched), paneModel.flatten(sequential), 'batch == sequential (wide)')
+  // And build order is preserved in the companion pane: chat | [41, 42].
+  const appPane = paneModel.paneIdsInOrder(batched)
+    .map(id => batched.panes[id]).find(p => p.tabs.some(t => t.kind === 'app'))
+  assert.deepEqual(keysOf(appPane), ['app:41', 'app:42'])
 })
 
 // ── the durable-list reconnect wiring is still in place ─────────────────────

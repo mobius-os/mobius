@@ -24,7 +24,8 @@ import {
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import {
-  resolveWorkspaceRequest,
+  attentionForRequest,
+  resolveWorkspaceRequests,
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
 } from './workspacePlacement.js'
@@ -615,30 +616,26 @@ export default function Shell() {
       ? requestOrRequests
       : [requestOrRequests]
     // The device mode + live app list are stable within one React batch, so read
-    // them once at dispatch time from refs (keeping this callback stable). The
-    // pane rects are re-derived per-workspace inside the resolve closure so
-    // batched placements compose on top of each other's splits.
-    const contentRect = contentRectRef.current
+    // them once at dispatch time (keeping this callback stable). Prefer the live
+    // element size over the ResizeObserver-committed ref while it is still the
+    // {0,0} boot value — a placement dispatched in the sliver before the observer
+    // first fires would otherwise resolve in phone mode on a wide screen. Pane
+    // rects are re-derived per-workspace inside resolveWorkspaceRequests.
+    let contentRect = contentRectRef.current
+    if ((!contentRect.w || !contentRect.h) && contentElRef.current) {
+      contentRect = { w: contentElRef.current.clientWidth, h: contentElRef.current.clientHeight }
+    }
     const mode = paneModel.modeForRect(contentRect)
     const liveApps = appsRef.current
     // Dispatch the resolver as a FUNCTION (workspace → workspace): the reducer
-    // runs it against the CURRENT reducer workspace, so two placements landing in
-    // one React batch compose (the second sees the first, splits and all) instead
-    // of clobbering each other from a stale render snapshot. Reverse order keeps
-    // producer order when several requests target one source (an insert-after-
-    // source pushes later items ahead otherwise — the flat convention, preserved).
+    // runs it against the CURRENT reducer workspace, so placements landing in one
+    // React batch compose (the second sees the first, splits and all) instead of
+    // clobbering each other from a stale render snapshot. resolveWorkspaceRequests
+    // folds FORWARD so a batch reaches the same result as the same requests
+    // delivered one dispatch at a time (batch == sequential).
     dispatchWorkspace({
       type: 'APPLY_PLACEMENT',
-      resolve: (ws) => {
-        let next = ws
-        for (let i = requests.length - 1; i >= 0; i -= 1) {
-          const projected = paneModel.projectLayout(next, mode, contentRect)
-          next = resolveWorkspaceRequest(next, requests[i], {
-            mode, projected, contentRect, liveApps,
-          })
-        }
-        return next
-      },
+      resolve: (ws) => resolveWorkspaceRequests(ws, requests, { mode, contentRect, liveApps }),
     })
   }, [dispatchWorkspace])
   const tabStripVisible = tabStripEngaged && openTabs.length >= 1
@@ -1653,6 +1650,9 @@ export default function Shell() {
       // or absent id is a silent no-op. App items also warm their code cache.
       const request = workspaceRequestFromSystemEvent(ev)
       if (request) {
+        // A background open lands as an inactive tab, so it earns the drawer/tab
+        // "new content" dot (design §6.2). Foreground opens are on screen → none.
+        const attn = attentionForRequest(request)
         const confirmAndPlace = async () => {
           if (request.item.kind === 'app') {
             const updatedApps = await refreshApps()
@@ -1662,6 +1662,17 @@ export default function Shell() {
           } else {
             const updatedChats = await refreshChats()
             if (!updatedChats.some(c => String(c.id) === request.item.id)) return
+          }
+          // Reuse the app_created / chat-attention plumbing for the background dot.
+          if (attn?.kind === 'app') {
+            setNewAppIds(prev => withAppsFlagged(prev, [attn.id]))
+          } else if (attn?.kind === 'chat') {
+            setAttentionChatIds(prev => {
+              if (prev.has(attn.id)) return prev
+              const next = new Set(prev)
+              next.add(attn.id)
+              return next
+            })
           }
           placeInWorkspace(request)
         }

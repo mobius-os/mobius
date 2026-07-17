@@ -76,9 +76,16 @@ async def test_open_item_without_source_is_accepted(client, auth):
     # itemKind missing / not in {app, chat}.
     {"type": "open_item", "itemId": "42"},
     {"type": "open_item", "itemKind": "widget", "itemId": "42"},
-    # itemId missing / empty.
+    # itemId missing / empty / whitespace-only.
     {"type": "open_item", "itemKind": "app"},
     {"type": "open_item", "itemKind": "app", "itemId": ""},
+    {"type": "open_item", "itemKind": "app", "itemId": "   "},
+    # sourceId present-but-empty / whitespace passes the None-pairing check but
+    # names nothing — reject it at the wire rather than emit a 204 the shell drops.
+    {"type": "open_item", "itemKind": "app", "itemId": "1",
+     "sourceKind": "chat", "sourceId": ""},
+    {"type": "open_item", "itemKind": "app", "itemId": "1",
+     "sourceKind": "chat", "sourceId": "  "},
     # placement / activation not in their closed enums.
     {"type": "open_item", "itemKind": "app", "itemId": "1", "placement": "split-right"},
     {"type": "open_item", "itemKind": "app", "itemId": "1", "activation": "urgent"},

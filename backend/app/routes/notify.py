@@ -129,7 +129,10 @@ class NotifyBody(BaseModel):
           raise ValueError(f"{name} is not valid for open_item events")
       if self.itemKind not in _OPEN_ITEM_KINDS:
         raise ValueError("open_item requires itemKind in {app, chat}")
-      if not self.itemId:
+      # itemId / sourceId must be non-empty AND non-whitespace: an empty string
+      # passes a bare None-check and the pairing check below, but names nothing —
+      # the shell would drop it, so reject at the wire instead of a silent 204.
+      if not (self.itemId or "").strip():
         raise ValueError("open_item requires a non-empty itemId")
       # source is optional, but its kind + id travel together and the kind is
       # enum-checked; an absent source degrades to with-focus in the resolver.
@@ -137,6 +140,8 @@ class NotifyBody(BaseModel):
         raise ValueError("open_item sourceKind and sourceId must be set together")
       if self.sourceKind is not None and self.sourceKind not in _OPEN_ITEM_KINDS:
         raise ValueError("open_item sourceKind must be in {app, chat}")
+      if self.sourceId is not None and not self.sourceId.strip():
+        raise ValueError("open_item sourceId must be non-empty when present")
       if self.placement is not None and self.placement not in _OPEN_ITEM_PLACEMENTS:
         raise ValueError("open_item placement is not a recognized value")
       if self.activation is not None and self.activation not in _OPEN_ITEM_ACTIVATIONS:
@@ -220,7 +225,10 @@ def notify(
     event["error"] = body.error
   # Carry the typed open_item request onto the event so the Shell resolver can
   # confirm + place it. Only the fields the validator accepted are copied, so a
-  # spoofed extra can never ride along.
+  # spoofed extra can never ride along. Delivery is advisory + fire-once (§6.3):
+  # this route deliberately does NOT check the item exists — that is the shell's
+  # confirm-before-place guard (it refetches and no-ops on an absent id), so a
+  # well-formed request for a missing item is a valid 204 here, not a 404.
   if body.type == "open_item":
     event["itemKind"] = body.itemKind
     event["itemId"] = body.itemId
