@@ -144,6 +144,8 @@ def test_skills_count_capped(client, auth):
   "docs/contributing.md",  # directory
   "..\\contributing.md",   # backslash / traversal
   ".hidden.md",         # dotfile — skills-dir dotfiles are installer-owned
+  "IMPORTANT do X.md",  # prose/prompt injection
+  "<x>.md",             # markup-like prompt injection
 ])
 def test_skills_entry_shape_rejected(client, auth, bad):
   _expect_400(

@@ -3879,6 +3879,9 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
 DEFAULT_VIEWPORT_WIDTH = 412
 DEFAULT_VIEWPORT_HEIGHT = 915
 
+_APP_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
+_APP_SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
 
 def bounded_agent_browser_args(existing: str | None) -> str:
   """Preserve operator Chromium flags while supplying safe cache defaults."""
@@ -3914,35 +3917,33 @@ def _build_installed_app_skills_block(data_dir: str | Path) -> str:
   sidecar = skills_dir / ".app-skills.json"
   try:
     records = json.loads(sidecar.read_text(encoding="utf-8"))
-    if not isinstance(records, dict):
-      return ""
-    installed = []
-    for name, record in records.items():
-      # Installer metadata is an ownership boundary; surprising shapes must
-      # never turn arbitrary paths into agent instructions.
-      if (
-        not isinstance(name, str)
-        or Path(name).name != name
-        or not name.endswith(".md")
-        or not name.isprintable()
-        or not isinstance(record, dict)
-        or not isinstance(record.get("active"), bool)
-      ):
-        return ""
-      if record["active"] is not True:
-        continue
-      slug = record.get("slug")
-      if not isinstance(slug, str) or not slug or not slug.isprintable():
-        return ""
-      if (skills_dir / name).is_file():
-        installed.append((name, slug))
   except (OSError, ValueError):
     # Skill discovery is advisory; a damaged sidecar cannot block a chat turn.
     return ""
+  if not isinstance(records, dict):
+    return ""
+  installed = []
+  for name, record in records.items():
+    # Sidecar fields are untrusted opaque identifiers. Skip only the malformed
+    # record so one damaged app cannot hide every other installed skill.
+    if (
+      not isinstance(name, str)
+      or _APP_SKILL_NAME_RE.fullmatch(name) is None
+      or not isinstance(record, dict)
+      or not isinstance(record.get("active"), bool)
+    ):
+      continue
+    if record["active"] is not True:
+      continue
+    slug = record.get("slug")
+    if not isinstance(slug, str) or _APP_SKILL_SLUG_RE.fullmatch(slug) is None:
+      continue
+    if (skills_dir / name).is_file():
+      installed.append((name, slug))
   if not installed:
     return ""
   lines = [
-    "Installed app skills — Read /data/shared/skills/<name> before the "
+    f"Installed app skills — Read {skills_dir}/<name> before the "
     "task each one names:",
     *(f"- {name} (from {slug})" for name, slug in sorted(installed)),
   ]

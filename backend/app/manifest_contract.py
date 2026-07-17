@@ -28,6 +28,7 @@ _SOURCE_FILES_MANAGED_EXACT = frozenset((
   "index.jsx", ".gitignore", "init-cron.sh", ".mobius-static-assets.json",
 ))
 _CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
+_SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
 
 
 class ManifestContractError(ValueError):
@@ -268,13 +269,10 @@ def validate_manifest_contract(manifest) -> None:
       if isinstance(path, str) and "/" not in path
     }
     for index, path in enumerate(skills):
-      if not isinstance(path, str) or not path.endswith(".md") or path == ".md":
-        _fail(f"Manifest `skills[{index}]` must be a `<name>.md` filename.")
-      if "/" in path or "\\" in path or ".." in path or path.startswith("."):
+      if not isinstance(path, str) or _SKILL_FILENAME_OK.fullmatch(path) is None:
         _fail(
-          f"Manifest `skills[{index}]` {path!r} must be a bare .md basename — "
-          "no directories, no traversal, no dotfiles (dotfiles in the "
-          "skills dir are installer-owned)."
+          f"Manifest `skills[{index}]` must match "
+          "`^[a-z0-9][a-z0-9._-]*\\.md$`."
         )
       if path not in root_sources:
         _fail(
