@@ -588,6 +588,21 @@ export function closeTab(ws, tabKey) {
   })
 }
 
+// Close a whole pane: drop every tab it holds, then normalize (the emptied pane
+// collapses and its space returns to the surviving sibling, focus follows). The
+// keyboard/menu "Close pane" affordance (design §3.6) so a multi-tab pane need
+// not be dismissed one ✕ at a time. Reversible — the reducer snapshot restores
+// the pane and its tabs (the backing chats/apps were never deleted). Same
+// reference on a no-op (unknown pane).
+export function closePane(ws, paneId) {
+  const pane = ws.panes[paneId]
+  if (!pane) return ws
+  return commit(ws, {
+    ...ws,
+    panes: { ...ws.panes, [paneId]: { ...pane, tabs: [], activeTabKey: null } },
+  })
+}
+
 // Move a tab within/between panes. target is one of:
 //   { paneId, index? }  insert into an existing pane at index (append if absent)
 //   { paneId, edge }    split that pane on the edge, the tab alone in the new one
@@ -1241,7 +1256,13 @@ export function initialWorkspaceState(ws) {
 }
 
 // Single-slot-undo reducer over the workspace. state = { ws, undo } where undo
-// is { ws, label } | null.
+// is { ws, label, toast } | null. `toast` is the 6s toast message this slot
+// should surface (null = undoable but silent, e.g. a divider resize). A FRESH
+// undo object is minted on every set, so its IDENTITY changing is the signal the
+// UI binds its "Undo" toast to: when the slot is replaced or cleared, the old
+// toast's Undo would revert a DIFFERENT mutation than it names, so the UI
+// retracts/replaces it on any identity change (design §3.5 — a toast's Undo must
+// never revert a mutation it does not describe).
 //
 // The slot only ever holds the IMMEDIATELY-preceding mutation. This is the
 // invariant that keeps Undo honest: a snapshot carried across an intervening
@@ -1249,9 +1270,9 @@ export function initialWorkspaceState(ws) {
 // every action that changes the workspace either SETS the slot (it is the new
 // undo target) or CLEARS it — never leaves a stale one in place.
 //
-//   Sets the slot (undoable):   CLOSE_TAB (user close), MOVE_TAB / edge-splits,
-//                               an OPEN_TAB that evicted, SET_RATIO,
-//                               APPLY_PLACEMENT.
+//   Sets the slot (undoable):   CLOSE_TAB (user close), CLOSE_PANE, MOVE_TAB /
+//                               edge-splits, OPEN_TAB_AT, an OPEN_TAB that
+//                               evicted, SET_RATIO, APPLY_PLACEMENT.
 //   Clears the slot on change:  SET_ACTIVE, FOCUS, a plain (non-evicting)
 //                               OPEN_TAB, PRUNE, RESET_FLAT, and a CLOSE_TAB
 //                               with reason:'deleted'.
@@ -1278,7 +1299,7 @@ export function workspaceReducer(state, action) {
       // Only an evicting open is undoable (its snapshot restores the evicted
       // tab); a plain open clears the slot like any other non-undoable change.
       return evicted
-        ? { ws: next, undo: { ws, label: 'Opened tab' } }
+        ? { ws: next, undo: { ws, label: 'Opened tab', toast: action.label || 'Opened tab' } }
         : { ws: next, undo: null }
     }
     case 'CLOSE_TAB': {
@@ -1291,12 +1312,22 @@ export function workspaceReducer(state, action) {
       }
       // User close (the strip ✕): reversible.
       if (next === ws) return state
-      return { ws: next, undo: { ws, label: action.label || 'Closed tab' } }
+      const closeLabel = action.label || 'Closed tab'
+      return { ws: next, undo: { ws, label: closeLabel, toast: closeLabel } }
+    }
+    case 'CLOSE_PANE': {
+      // Closing a pane closes all its tabs at once (a keyboard/menu affordance —
+      // no per-tab clicks). Reversible: the snapshot restores the whole pane.
+      const next = closePane(ws, action.paneId)
+      if (next === ws) return state
+      const paneLabel = action.label || 'Closed pane'
+      return { ws: next, undo: { ws, label: paneLabel, toast: paneLabel } }
     }
     case 'MOVE_TAB': {
       const next = moveTab(ws, action.tabKey, action.target)
       if (next === ws) return state
-      return { ws: next, undo: { ws, label: action.label || 'Moved tab' } }
+      const moveLabel = action.label || 'Moved tab'
+      return { ws: next, undo: { ws, label: moveLabel, toast: moveLabel } }
     }
     case 'OPEN_TAB_AT': {
       // A drag drop from a drawer row (open the item AT the zone) or a strip tab
@@ -1304,7 +1335,8 @@ export function workspaceReducer(state, action) {
       // from repaired (design §3.5).
       const next = openTabAt(ws, action.tab, action.target)
       if (next === ws) return state
-      return { ws: next, undo: { ws, label: action.label || 'Moved tab' } }
+      const dropLabel = action.label || 'Moved tab'
+      return { ws: next, undo: { ws, label: dropLabel, toast: dropLabel } }
     }
     case 'SET_ACTIVE': {
       const next = setActiveTab(ws, action.paneId, action.tabKey)
@@ -1317,7 +1349,9 @@ export function workspaceReducer(state, action) {
     case 'SET_RATIO': {
       const next = setRatio(ws, action.splitId, action.ratio)
       if (next === ws) return state
-      return { ws: next, undo: { ws, label: action.label || 'Resized' } }
+      // Undoable via Cmd/Z but SILENT (toast:null) — a divider drag is a
+      // continuous control, not a discrete "one tap from repaired" mutation.
+      return { ws: next, undo: { ws, label: action.label || 'Resized', toast: null } }
     }
     case 'PRUNE': {
       const next = prune(ws, {
@@ -1334,7 +1368,13 @@ export function workspaceReducer(state, action) {
       // normalized workspace, the SAME reference on a no-op.
       const next = action.resolve(ws)
       if (next === ws) return state
-      return { ws: next, undo: { ws, label: 'Workspace placement' } }
+      // An agent rearrangement is especially undoable AND must be announced
+      // (design §3.5): it gets its OWN named toast rather than silently
+      // overwriting a live drag's toast slot.
+      return {
+        ws: next,
+        undo: { ws, label: 'Workspace placement', toast: action.toast || 'Agent arranged your workspace' },
+      }
     }
     case 'UNDO_LAST': {
       if (!undo) return state

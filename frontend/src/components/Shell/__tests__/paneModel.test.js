@@ -1091,6 +1091,60 @@ test('reducer APPLY_PLACEMENT applies a workspace-level resolver and is undoable
   assert.equal(applied.undo.ws, start.ws, 'placement snapshots the pre-placement workspace (undoable)')
 })
 
+// ── Undo-slot IDENTITY binding (design §3.5) — the UI binds its toast to the
+// slot object, so each mutation must mint a NEW slot with the right toast text
+// so a stale toast's Undo can never revert a mutation it does not name.
+
+test('every undoable mutation mints a fresh slot carrying its own toast text', () => {
+  const start = paneModel.initialWorkspaceState(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
+  )
+  const moved = paneModel.workspaceReducer(start, {
+    type: 'MOVE_TAB', tabKey: 'chat:b', target: { paneId: 'p0', edge: 'right' }, label: 'Moved B',
+  })
+  assert.equal(moved.undo.toast, 'Moved B', 'a drag/move names itself')
+
+  // A subsequent agent placement REPLACES the slot with a NEW identity and its
+  // OWN toast — never inheriting the drag's "Moved B" (the honesty regression).
+  const placed = paneModel.workspaceReducer(moved, {
+    type: 'APPLY_PLACEMENT',
+    resolve: (ws) => paneModel.openTab(ws, makeTab('app', 9), { paneId: moved.ws.focusedPaneId, activate: false, focus: false }),
+  })
+  assert.notEqual(placed.undo, moved.undo, 'the slot identity changed')
+  assert.equal(placed.undo.toast, 'Agent arranged your workspace', 'the placement names itself, not the drag')
+
+  // Undoing the placement must restore the post-move workspace, not the pre-move
+  // one — the slot the toast pointed at.
+  const undone = paneModel.workspaceReducer(placed, { type: 'UNDO_LAST' })
+  assert.equal(undone.ws, moved.ws, 'Undo reverts the placement it named, not the earlier move')
+})
+
+test('a divider resize is undoable but SILENT (toast:null) so it retracts a move toast', () => {
+  const start = paneModel.initialWorkspaceState(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
+  )
+  const moved = paneModel.workspaceReducer(start, {
+    type: 'MOVE_TAB', tabKey: 'chat:b', target: { paneId: 'p0', edge: 'right' }, label: 'Moved B',
+  })
+  assert.equal(moved.undo.toast, 'Moved B')
+  const splitId = paneModel.projectLayout(moved.ws, 'wide', { x: 0, y: 0, w: 1400, h: 900 }).dividers[0].splitId
+  const resized = paneModel.workspaceReducer(moved, { type: 'SET_RATIO', splitId, ratio: 0.6 })
+  assert.notEqual(resized.undo, moved.undo, 'the resize replaced the slot')
+  assert.equal(resized.undo.toast, null, 'a resize carries no toast — the move toast must retract')
+})
+
+test('CLOSE_PANE closes a whole pane, is undoable, and names itself', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 42), { paneId: ws.focusedPaneId, edge: 'right' })
+  const paneId = ws.focusedPaneId // the new app pane
+  const start = paneModel.initialWorkspaceState(ws)
+  const closed = paneModel.workspaceReducer(start, { type: 'CLOSE_PANE', paneId })
+  assert.equal(Object.keys(closed.ws.panes).length, 1, 'the pane collapsed away')
+  assert.equal(closed.undo.toast, 'Closed pane')
+  const undone = paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' })
+  assert.equal(undone.ws, ws, 'Undo restores the closed pane and its tabs')
+})
+
 test('reducer APPLY_PLACEMENT composes batched dispatches instead of clobbering', () => {
   // The former bug: two placements resolved against the same stale render
   // snapshot, so the second REPLACED the first. A resolve function run against
