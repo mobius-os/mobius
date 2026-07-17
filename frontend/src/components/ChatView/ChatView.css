@@ -1023,70 +1023,73 @@
   font-size: 13px;
 }
 
-/* Liveness IS the label — via the ChatGPT cadenced-shimmer architecture the
-   owner pointed to (2026-07-17): the label's base text stays NORMAL, fully
-   colored text (hover lift, truncation ellipsis, and forced colors all just
-   work), and a separate aria-hidden overlay span carries the same text with
-   only a narrow bright band visible. The band crosses in ~1.0s and rests
-   ~1.2s (snappier than the first cut's 1.8s/2.7s — owner call). Because the
-   base text is never transparent, no gradient position can ever blank a
-   letter — the failure class of the previous background-clip approach is
-   structurally impossible. The overlay clips (not ellipsizes), so during a
-   pass over a truncated label the band crosses the visible glyphs and slides
-   under the ellipsis. */
+/* Liveness IS the label — the ChatGPT cadenced shimmer, transplanted from
+   the owner's captured CSS (2026-07-17). Mechanism: the base label stays
+   NORMAL colored text; an aria-hidden sweep overlay is a masked WINDOW
+   (opaque band at 20-30% of the mask) that translates left→right while its
+   inner bright text copy counter-translates by the exact inverse — the two
+   transforms cancel, so the bright copy always aligns with the base and only
+   the window moves. Transform + mask stays on the compositor (no per-frame
+   paint), and because the base text is never transparent, no animation state
+   can blank a letter. The cadence is the source's literal one: the sweep
+   crosses in 1s at steps(48) — 48 discrete frames, the filmic tick the
+   owner liked — then rests ~1.4s. Their JS re-triggers a one-shot run on a
+   rhythm; we fold sweep+rest into one looping timeline instead, scaling the
+   step count so the sweep portion keeps exactly 48 steps (1s / 41.67% of a
+   2.4s cycle → 48 / 0.4167 ≈ 115 total; the rest-phase steps land on
+   identical off-screen frames and are invisible). */
 .chat__activity-label-text {
   position: relative;
   color: inherit;
 }
 
-/* Hidden by default: shown only when text masking is supported and motion is
-   allowed; forced-colors kills it outright. */
+/* Hidden until motion is allowed and mask-image is supported (an unmasked
+   sweep would paint the full bright copy over the base); forced colors
+   kills it outright. */
 .chat__activity-label-sweep { display: none; }
 
 @media (prefers-reduced-motion: no-preference) {
-  @supports ((-webkit-mask-image: linear-gradient(#000, transparent)) or (mask-image: linear-gradient(#000, transparent))) {
-    .chat__activity-label-sweep {
+  @supports ((-webkit-mask-image: linear-gradient(#000, #000)) or (mask-image: linear-gradient(#000, #000))) {
+    .chat__activity--running .chat__activity-label-sweep {
       display: block;
-      position: absolute;
-      inset: 0;
-      overflow: hidden;
-      white-space: nowrap;
       pointer-events: none;
-      color: color-mix(in srgb, var(--text) 94%, var(--bg));
-      -webkit-mask-image: linear-gradient(
-        100deg,
-        transparent 42%,
-        #000 50%,
-        transparent 58%
-      );
-      mask-image: linear-gradient(
-        100deg,
-        transparent 42%,
-        #000 50%,
-        transparent 58%
-      );
-      -webkit-mask-repeat: no-repeat;
-      mask-repeat: no-repeat;
-      -webkit-mask-size: 260% 100%;
-      mask-size: 260% 100%;
-      -webkit-mask-position: 100% 0;
-      mask-position: 100% 0;
-      animation: chat-activity-sweep 2.2s linear infinite;
+      width: 100%;
+      position: absolute;
+      inset: 0 auto 0 0;
+      overflow: hidden;
+      transform: translateX(-50%);
+      -webkit-mask-image: linear-gradient(90deg, #0000 0%, #000 20% 30%, #0000 50% 100%);
+      mask-image: linear-gradient(90deg, #0000 0%, #000 20% 30%, #0000 50% 100%);
+      animation: chat-cadenced-sweep 2.4s steps(115, end) infinite;
+    }
+    .chat__activity--running .chat__activity-label-highlight {
+      display: block;
+      width: 100%;
+      white-space: nowrap;
+      transform: translateX(50%);
+      color: color-mix(in srgb, var(--text) 94%, var(--bg)); /* CONTRACT: the bright band over the muted base */
+      animation: chat-cadenced-highlight 2.4s steps(115, end) infinite;
     }
   }
 }
 
 @media (forced-colors: active) {
-  .chat__activity-label-sweep { display: none !important; }
+  .chat__activity--running .chat__activity-label-sweep { display: none !important; }
 }
 
-/* Sweep 0%→45% of the cycle (~1.0s), rest for the remainder (~1.2s).
-   Decreasing mask-position-x with an oversized mask moves the band
-   left→right; both endpoints park the band off the visible text. */
-@keyframes chat-activity-sweep {
-  0% { -webkit-mask-position: 100% 0; mask-position: 100% 0; }
-  45% { -webkit-mask-position: 0% 0; mask-position: 0% 0; }
-  100% { -webkit-mask-position: 0% 0; mask-position: 0% 0; }
+/* Both rest positions park the window off the text, so the loop's snap from
+   end back to start is invisible. The keyframe percentages map the source's
+   1s one-shot run onto the first 41.67% of the 2.4s cycle. */
+@keyframes chat-cadenced-sweep {
+  0% { transform: translateX(-50%); }
+  41.67% { transform: translateX(125%); }
+  100% { transform: translateX(125%); }
+}
+
+@keyframes chat-cadenced-highlight {
+  0% { transform: translateX(50%); }
+  41.67% { transform: translateX(-125%); }
+  100% { transform: translateX(-125%); }
 }
 
 .chat__activity-chip {

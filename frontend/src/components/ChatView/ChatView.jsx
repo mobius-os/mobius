@@ -3789,7 +3789,7 @@ export default function ChatView({
                   <span className="chat__activity-label-text">
                     Thinking
                     <span className="chat__activity-label-sweep" aria-hidden="true">
-                      Thinking
+                      <span className="chat__activity-label-highlight">Thinking</span>
                     </span>
                   </span>
                 </span>

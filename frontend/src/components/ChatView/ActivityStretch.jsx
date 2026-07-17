@@ -217,14 +217,17 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           <span className="chat__activity-label-text">
             {text}
             {displayState === 'running' && (
-              // The sweep is a separate aria-hidden overlay carrying the SAME
-              // text with only a bright band visible (the ChatGPT
-              // cadenced-shimmer architecture) — the base text below stays
-              // normal, fully-colored text, so no gradient math can ever
-              // blank a letter. Duplicated text is invisible to AT and to
-              // pixels outside the band.
+              // The ChatGPT cadenced-shimmer mechanism, transplanted from
+              // the owner's captured CSS (2026-07-17): the sweep is a masked
+              // WINDOW that translates across a counter-translated bright
+              // copy of the text — the two transforms cancel so the bright
+              // copy always aligns with the base, while the mask band slides
+              // over it. Transform+mask stays on the compositor; the base
+              // text below is normal colored text, so letters can never
+              // blank. Duplicated text is aria-hidden and invisible outside
+              // the band.
               <span className="chat__activity-label-sweep" aria-hidden="true">
-                {text}
+                <span className="chat__activity-label-highlight">{text}</span>
               </span>
             )}
           </span>
