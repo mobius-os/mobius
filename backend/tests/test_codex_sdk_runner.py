@@ -1118,3 +1118,163 @@ def test_observe_skill_reads_never_raises(monkeypatch):
     _Cmd(f"cat {skills}/memory.md"), sdk, bc=_ExplodingBus(),
     chat_id="cx-2",
   )
+
+
+class _FakeCollabItem:
+  """Stand-in CollabAgentToolCallThreadItem exposing only what the collab
+  builders + child-link recorder read: id, tool.value, prompt, status.value,
+  agents_states[*].message, and receiver_thread_ids. Instances are registered
+  as the sdk["CollabAgentToolCallThreadItem"] class so isinstance dispatch fires."""
+
+  def __init__(
+    self,
+    *,
+    item_id="collab-1",
+    tool="spawnAgent",
+    prompt=None,
+    status="completed",
+    messages=None,
+    receivers=None,
+  ):
+    self.id = item_id
+    self.tool = SimpleNamespace(value=tool)
+    self.prompt = prompt
+    self.status = SimpleNamespace(value=status)
+    self.agents_states = {
+      f"child-{i}": SimpleNamespace(
+        message=m, status=SimpleNamespace(value="completed"),
+      )
+      for i, m in enumerate(messages or [])
+    }
+    self.receiver_thread_ids = receivers or []
+
+
+def test_tool_start_event_builds_collab_task_start():
+  # A collab spawn becomes a subagent task_start so the shell renders it on the
+  # same lane Claude's Task tool uses (task_type distinguishes the producer).
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(
+    item_id="c-1", tool="spawnAgent", prompt="review the diff for races",
+  )
+  event = codex_sdk_runner._tool_start_event(item, sdk)
+  assert event == {
+    "type": "task_start",
+    "task_id": "c-1",
+    "description": "spawnAgent: review the diff for races",
+    "task_type": "codex-collab",
+    "tool_use_id": "c-1",
+  }
+
+
+def test_tool_start_event_collab_description_truncates_long_prompt():
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(tool="spawnAgent", prompt="x" * 500)
+  event = codex_sdk_runner._tool_start_event(item, sdk)
+  assert len(event["description"]) == 120
+  assert event["description"].startswith("spawnAgent: xxx")
+
+
+def test_tool_completed_events_builds_collab_task_done_completed():
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(
+    item_id="c-2", status="completed",
+    messages=["found a bug", "wrote a test"],
+  )
+  events = codex_sdk_runner._tool_completed_events(item, sdk)
+  assert events == [{
+    "type": "task_done",
+    "task_id": "c-2",
+    "status": "done",
+    "summary": "found a bug; wrote a test",
+    "tool_use_id": "c-2",
+  }]
+
+
+def test_tool_completed_events_collab_task_done_failed_empty_summary():
+  # failed -> "failed"; a still-silent fleet (no messages) yields summary None,
+  # never an empty string.
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(item_id="c-3", status="failed", messages=[])
+  events = codex_sdk_runner._tool_completed_events(item, sdk)
+  assert events == [{
+    "type": "task_done",
+    "task_id": "c-3",
+    "status": "failed",
+    "summary": None,
+    "tool_use_id": "c-3",
+  }]
+
+
+def test_collab_branch_skipped_when_sdk_lacks_type():
+  # An SDK/build without the collab type registers None; the builders must fall
+  # through to their tool branches, never raise on isinstance(item, None).
+  sdk = {
+    "CollabAgentToolCallThreadItem": None,
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": type("WebSearchThreadItem", (), {}),
+    "AgentMessageThreadItem": type("AgentMessageThreadItem", (), {}),
+  }
+  assert codex_sdk_runner._tool_start_event(_FakeCollabItem(), sdk) is None
+  assert codex_sdk_runner._tool_completed_events(_FakeCollabItem(), sdk) == []
+
+
+def test_record_collab_child_links_attributes_spawned_children(db):
+  db.add(models.Chat(
+    id="collab-chat", title="t", messages=[], pending_messages=[],
+    provider="codex", session_id=None,
+  ))
+  db.commit()
+
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(tool="spawnAgent", receivers=["child-A", "child-B"])
+  codex_sdk_runner._record_collab_child_links(
+    item, sdk, db=db, chat_id="collab-chat",
+  )
+
+  db.expire_all()
+  a = db.get(models.ChatSessionLink, ("codex", "child-A"))
+  b = db.get(models.ChatSessionLink, ("codex", "child-B"))
+  assert a is not None and a.chat_id == "collab-chat"
+  assert b is not None and b.chat_id == "collab-chat"
+
+
+def test_record_collab_child_links_ignores_non_spawn_ops(db):
+  # sendInput / resumeAgent reference a child already recorded at its spawn;
+  # they must not mint a fresh first-sight row here (gate is spawn-only).
+  db.add(models.Chat(
+    id="collab-chat-2", title="t", messages=[], pending_messages=[],
+    provider="codex", session_id=None,
+  ))
+  db.commit()
+
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(tool="sendInput", receivers=["child-A"])
+  codex_sdk_runner._record_collab_child_links(
+    item, sdk, db=db, chat_id="collab-chat-2",
+  )
+
+  assert db.get(models.ChatSessionLink, ("codex", "child-A")) is None
+
+
+def test_persist_session_id_records_codex_link(db):
+  # Item 1: the persistence funnel (run on both thread_start and thread_resume)
+  # records the append-only codex session->chat link alongside the actor's
+  # Chat.session_id write.
+  db.add(models.Chat(
+    id="codex-persist", title="t", messages=[], pending_messages=[],
+    provider="codex", session_id=None,
+  ))
+  db.commit()
+
+  asyncio.run(
+    codex_sdk_runner._persist_session_id(db, "codex-persist", "thread-xyz")
+  )
+
+  db.expire_all()
+  link = db.get(models.ChatSessionLink, ("codex", "thread-xyz"))
+  assert link is not None
+  assert link.chat_id == "codex-persist"
+  assert link.first_seen_at == link.last_seen_at

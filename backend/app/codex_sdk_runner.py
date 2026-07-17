@@ -126,15 +126,29 @@ class _OverlapError(_BridgeError):
 
 
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
-  """Best-effort early persistence for provider resume continuity."""
+  """Best-effort early persistence for provider resume continuity.
+
+  Advances two records from the same sighting: the CURRENT-session pointer on
+  the chat row (via the single-writer actor, since it lives on the hot Chat
+  row), and the append-only ``chat_session_links`` map (a direct write on the
+  runner's own ``db`` session — a distinct table with no lost-update race, so
+  it does not go through the actor). This funnel runs on BOTH a fresh
+  ``thread_start`` and a ``thread_resume``: the caller sets ``thread.id`` from
+  either path before invoking it, so the codex thread id is recorded (and
+  re-sighted idempotently on resume) with no second call site. The link record
+  is what survives the provider switch / session reset that later NULLs
+  ``Chat.session_id``. Mirrors ``claude_sdk_runner._persist_session_id``.
+  """
   if db is None or not chat_id or not session_id:
     return
   try:
     from app.chat_writer import PersistSessionId, await_ack, get_writer
+    from app.session_links import record_session_link
     ack = get_writer().submit(
       PersistSessionId(chat_id=chat_id, session_id=session_id)
     )
     await await_ack(ack)
+    record_session_link(db, "codex", session_id, chat_id)
   except Exception:
     log.warning(
       "Codex session id persistence failed chat_id=%s session_id=%s",
@@ -243,7 +257,26 @@ def _sdk_imports() -> dict[str, Any]:
     WebSearchThreadItem,
   )
 
+  # Multi-agent (collab) types exist only on multi-agent-capable SDKs (the
+  # openai-codex multi_agent_v2 line). Import them defensively in their own
+  # block so an SDK that predates them still boots — a missing type here must
+  # not break the whole runner import. A None entry means "this SDK cannot emit
+  # collab items / spawned-child thread notifications", and every dispatch
+  # branch guards on non-None before its isinstance check. ThreadStartedNotification
+  # rides the same block because the only stream occurrence we act on is a
+  # spawned child announcing itself, which only happens once collab exists.
+  try:
+    from openai_codex.generated.v2_all import (
+      CollabAgentToolCallThreadItem,
+      ThreadStartedNotification,
+    )
+  except ImportError:
+    CollabAgentToolCallThreadItem = None
+    ThreadStartedNotification = None
+
   return {
+    "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
+    "ThreadStartedNotification": ThreadStartedNotification,
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
@@ -459,8 +492,96 @@ def _stamp_notification_item_id(event: dict[str, Any], payload: Any) -> None:
     event["tool_use_id"] = item_id
 
 
+# A collab task_start description is a short human label ("spawnAgent: <prompt>")
+# and the summary joins the sub-agents' last-known messages; both are bounded so
+# an oversized prompt or a chatty fleet can't bloat the wire event.
+_COLLAB_DESCRIPTION_MAX = 120
+_COLLAB_SUMMARY_MAX = 500
+
+
+def _collab_op(item: Any) -> str:
+  """The collab tool operation as its wire string (spawnAgent, sendInput, …).
+
+  ``item.tool`` is a ``CollabAgentTool`` enum on a real SDK item; a test fake may
+  pass the raw string. Read ``.value`` when present and fall back to ``str`` so
+  the caller never has to import the enum just to branch on the operation.
+  """
+  tool = getattr(item, "tool", None)
+  value = getattr(tool, "value", None)
+  if value:
+    return value
+  return str(tool) if tool is not None else "collab"
+
+
+def _collab_description(item: Any) -> str:
+  """Human label for a collab task_start: the op plus its prompt, truncated."""
+  op = _collab_op(item)
+  prompt = (getattr(item, "prompt", None) or "").strip()
+  text = f"{op}: {prompt}" if prompt else op
+  return text[:_COLLAB_DESCRIPTION_MAX]
+
+
+def _collab_summary(item: Any) -> str | None:
+  """Join the sub-agents' last-known status messages into one summary line.
+
+  ``agents_states`` maps a child thread id to a ``CollabAgentState`` whose
+  ``message`` is the agent's latest note (often None while running). Skip the
+  empties and return None when nothing is available, so a still-silent fleet
+  produces no summary rather than an empty string.
+  """
+  states = getattr(item, "agents_states", None) or {}
+  messages = []
+  for state in states.values():
+    message = (getattr(state, "message", None) or "").strip()
+    if message:
+      messages.append(message)
+  if not messages:
+    return None
+  return "; ".join(messages)[:_COLLAB_SUMMARY_MAX]
+
+
+def _record_collab_child_links(
+  item: Any, sdk: dict[str, Any], *, db: Any, chat_id: str,
+) -> None:
+  """Attribute a spawned sub-agent's thread to this chat.
+
+  A spawn's ``receiver_thread_ids`` are the freshly-spawned child thread ids;
+  recording each in the append-only session->chat map keeps the child's own
+  rollout resolvable back to this chat even though it streams on its own thread.
+  Gated on the spawn operation (that is when a NEW child id first appears; the
+  other ops reference children already recorded at their spawn). Idempotent —
+  ``record_session_link`` upserts — and never raises: observability must not
+  break the notification loop.
+  """
+  try:
+    collab_cls = sdk.get("CollabAgentToolCallThreadItem")
+    if collab_cls is None or not isinstance(item, collab_cls):
+      return
+    if _collab_op(item) != "spawnAgent":
+      return
+    from app.session_links import record_session_link
+    for child_id in getattr(item, "receiver_thread_ids", None) or []:
+      record_session_link(db, "codex", child_id, chat_id)
+  except Exception:
+    log.debug("codex collab child-link recording failed", exc_info=True)
+
+
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
+  # Collab items surface as subagent observability, NOT as a plain tool block:
+  # a spawn/sendInput/… becomes a task_start so the shell renders it on the same
+  # subagent lane Claude's Task tool uses. Guarded on non-None so an SDK without
+  # the type (or a test fake omitting the key) skips straight to the tool
+  # branches below.
+  collab_cls = sdk.get("CollabAgentToolCallThreadItem")
+  if collab_cls is not None and isinstance(item, collab_cls):
+    return {
+      "type": "task_start",
+      "task_id": item.id,
+      "description": _collab_description(item),
+      "task_type": "codex-collab",
+      "tool_use_id": item.id,
+    }
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     return {
       "type": "tool_start",
@@ -502,6 +623,22 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
 
 def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any]]:
   """Builds Möbius tool-end events from a completed typed item."""
+  # Collab item completes the subagent lane opened by its task_start (see
+  # _tool_start_event): a completed op becomes task_done. Guarded on non-None so
+  # an SDK without the type / a test fake omitting the key falls through to the
+  # tool branches below. Status maps completed->done, failed->failed; ItemCompleted
+  # only fires on a terminal item so any non-failed residual is reported as done.
+  collab_cls = sdk.get("CollabAgentToolCallThreadItem")
+  if collab_cls is not None and isinstance(item, collab_cls):
+    status = getattr(getattr(item, "status", None), "value", None)
+    return [{
+      "type": "task_done",
+      "task_id": item.id,
+      "status": "failed" if status == "failed" else "done",
+      "summary": _collab_summary(item),
+      "tool_use_id": item.id,
+    }]
+
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     output = (item.aggregated_output or "").strip()
     events: list[dict[str, Any]] = []
@@ -1027,6 +1164,34 @@ async def run_codex_sdk_turn(
     # this flag may rename or move in a future SDK bump; if turns
     # silently stop emitting `item/tool/requestUserInput` after an
     # upgrade, check the upstream features list first.
+    #
+    # Multi-agent (collab / spawn_agent) is DELIBERATELY NOT enabled here yet,
+    # even though the dispatch below already translates its items. The real knob
+    # exists on this pinned SDK (codex-cli 0.144.4): the feature namespace is
+    # `features.multi_agent_v2.*` (proven by the binary's own validation string
+    # "features.multi_agent_v2.min_wait_timeout_ms …"), and the collaboration
+    # mode is a `MultiAgentMode` enum — custom / explicitRequestOnly / proactive
+    # / concise — that resolves to the conservative `explicitRequestOnly` when
+    # left unset (spawns only when the user explicitly asks). Wiring it would be
+    # one more override line here, exactly like request_user_input above.
+    #
+    # It is held because it is UNSAFE on our default model. Codex issue #31864
+    # ("All GPT-5.6 Sol turns fail because MultiAgentV2 uses reserved
+    # collaboration.spawn_agent") affects 0.144.0+ (we run 0.144.4) and our
+    # default codex model is `gpt-5.6-sol`: the spawn_agent tool defaults to the
+    # `collaboration` namespace, which gpt-5.6 reserves, so the Responses API
+    # rejects the tool schema on EVERY turn — not just spawn turns — bricking all
+    # Codex chats. The maintainer workaround is a namespace override
+    # (`features.multi_agent_v2.tool_namespace=agents`), but it is unverified on
+    # our model here and sits amid a live bug cluster on gpt-5.6 multi_agent_v2
+    # (#32031 rejects the default spawn call shape, #31814 can't set subagent
+    # models, #33447 bypasses max_threads). Per the trust-but-verify discipline
+    # that gated request_user_input behind probe3.py, do NOT enable this until a
+    # live gpt-5.6-sol turn (with the tool_namespace override) is confirmed. To
+    # turn it on after that probe, add both lines:
+    #   "features.multi_agent_v2.tool_namespace=agents",
+    #   "features.multi_agent_v2.default_wait_timeout_ms=<n>",  # optional tuning
+    # and (optionally) set the collaboration mode; unset = explicitRequestOnly.
     config_overrides=[
       "features.default_mode_request_user_input=true",
     ],
@@ -1226,6 +1391,10 @@ async def run_codex_sdk_turn(
             _stamp_tool_use_id(event, item)
             bc.publish(event)
           _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)
+          # A spawn's child thread ids first appear on its collab item; record
+          # the session->chat link now so the child rollout stays attributed
+          # even if we never resume it directly.
+          _record_collab_child_links(item, sdk, db=db, chat_id=chat_id)
           continue
 
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
@@ -1241,6 +1410,10 @@ async def run_codex_sdk_turn(
           for event in _tool_completed_events(item, sdk):
             _stamp_tool_use_id(event, item)
             bc.publish(event)
+          # Also record child links here (idempotent) in case receiver_thread_ids
+          # only populates on completion — a missed link silently loses the
+          # attribution this recording exists to provide.
+          _record_collab_child_links(item, sdk, db=db, chat_id=chat_id)
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
@@ -1263,6 +1436,18 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ContextCompactedNotification"]):
           log.info("Codex context compacted for chat %s", chat_id)
+          continue
+
+        if sdk.get("ThreadStartedNotification") is not None and isinstance(
+          payload, sdk["ThreadStartedNotification"]
+        ):
+          # A spawned sub-agent announces its own thread on the parent turn's
+          # stream. We deliberately swallow it: the parent turn owns the Möbius
+          # wire, the child's work is surfaced through the collab task_start /
+          # task_done events, and its rollout is attributed to this chat via the
+          # session-link recorded on the spawn. Emitting a session_init here
+          # would repoint the chat at the child thread. Swallow, don't let it
+          # reach the fall-through as unknown-event noise.
           continue
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):
