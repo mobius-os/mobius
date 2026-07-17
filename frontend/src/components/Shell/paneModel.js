@@ -57,13 +57,12 @@ export const STRIP_H = 34
 
 // Multi-pane exposure waits for the pane-aware back/sentinel work (stage B).
 // Until then every user ENTRY POINT into splits — the context-menu split/move
-// items and the phone pane chip/sheet — stays gated off, so stage A ships inert
-// (zero visible change): the renderer paths all exist but are unreachable except
-// via a persisted multi-pane blob, which normalize/parse already tolerate. Flip
-// this (localStorage 'mobius:workspace-splits' = '1') in PR2 stage C. Read once
-// at module load; guarded because localStorage is absent in the test runtime.
+// items and the phone pane chip/sheet — is ON by default now that the PR2
+// gates (unit + positive-behavior e2e) are green; 'mobius:workspace-splits'
+// = '0' is the kill switch that restores the single-pane fallback. Read once
+// at module load; absent-localStorage runtimes get the default (enabled).
 export const WORKSPACE_SPLITS_ENABLED = (() => {
-  try { return localStorage.getItem('mobius:workspace-splits') === '1' } catch { return false }
+  try { return localStorage.getItem('mobius:workspace-splits') !== '0' } catch { return true }
 })()
 
 // The smallest a pane may be. canSplit refuses a split whose either resulting
