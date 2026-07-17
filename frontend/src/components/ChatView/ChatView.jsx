@@ -2852,6 +2852,7 @@ export default function ChatView({
   // truth in both resolutions: steered rows are in the transcript, or the
   // restore has already returned them to the queue.
   const steerInFlightRef = useRef(null)
+  const [steerBusy, setSteerBusy] = useState(false)
 
   // STEER (fast-forward): inject the queued messages into the LIVE turn
   // at the next natural boundary, instead of hard-stopping (handleStop)
@@ -2986,6 +2987,7 @@ export default function ChatView({
   async function handleSteer() {
     if (handlingSteerRef.current) return
     handlingSteerRef.current = true
+    setSteerBusy(true)
     try {
       const snapshot = pendingQueue.pendingMessagesRef.current
       // Only server-confirmed entries can be force-steered: the backend
@@ -3014,6 +3016,7 @@ export default function ChatView({
       await steerRows(confirmedSnapshot)
     } finally {
       handlingSteerRef.current = false
+      setSteerBusy(false)
     }
   }
 
@@ -3028,6 +3031,7 @@ export default function ChatView({
   async function handleSteerOne(cid) {
     if (handlingSteerRef.current) return
     handlingSteerRef.current = true
+    setSteerBusy(true)
     try {
       const findRow = () => (pendingQueue.pendingMessagesRef.current || [])
         .find(m => cidOf(m) === cid)
@@ -3040,6 +3044,7 @@ export default function ChatView({
       await steerRows([row])
     } finally {
       handlingSteerRef.current = false
+      setSteerBusy(false)
     }
   }
 
@@ -3113,8 +3118,16 @@ export default function ChatView({
   // steer a live turn with server-confirmed pending rows. Optimistic rows stay
   // visible in the tray but do not expose an inert fast-forward button.
   const composerBusy = turnActive || pendingQueue.pendingMessages.length > 0
-  const canSteer = canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
-  const canRequestSteer = turnActive && pendingQueue.pendingMessages.length > 0
+  // A connection failure owns the action slot until Retry succeeds. Keep both
+  // the visible fast-forward affordance and its keyboard shortcut inert while
+  // the stream is unavailable; otherwise the tray disappears but the composer
+  // can still offer an action whose request cannot reach the running turn.
+  const canSteer = connectionError !== 'disconnected' && !steerBusy
+    && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+  const canRequestSteer = connectionError !== 'disconnected'
+    && !steerBusy
+    && turnActive
+    && pendingQueue.pendingMessages.length > 0
 
   useEffect(() => {
     try {
@@ -3870,6 +3883,7 @@ export default function ChatView({
             onCancel={handleCancelPending}
             onSteerOne={handleSteerOne}
             steerActive={turnActive}
+            steerBusy={steerBusy}
           />
           </>
         )}

@@ -81,3 +81,33 @@ test('primary chat actions leave a brief empty beat before replacement', () => {
   assert.match(revealFrames, /100%\s*\{\s*opacity:\s*1/,
     'the incoming action should then appear')
 })
+
+test('running activity uses a masked solid-text sweep, not gradient-clipped text', () => {
+  const css = stripComments(chatCss)
+  const sweepRules = css
+    .match(/\.chat__activity-label-sweep\s*\{[^}]*\}/g)
+    ?.join('\n') || ''
+
+  assert.match(sweepRules, /mask-image:\s*linear-gradient/,
+    'the bright band should be revealed by a moving mask over solid text')
+  assert.doesNotMatch(sweepRules, /background-clip:\s*text/,
+    'the activity label must not use gradient-clipped text')
+  assert.doesNotMatch(sweepRules, /-webkit-text-fill-color:\s*transparent/,
+    'the base or sweep text must never depend on transparent text fill')
+})
+
+test('queued row actions expose real touch targets and keyboard focus', () => {
+  const css = stripComments(chatCss)
+  const steerRule = css.match(/\.queued__steer\s*\{[^}]*\}/)?.[0] || ''
+  const cancelRule = css.match(/\.queued__cancel\s*\{[^}]*\}/)?.[0] || ''
+  const focusRule = css.match(
+    /\.queued__steer:focus-visible,\s*\.queued__cancel:focus-visible\s*\{[^}]*\}/,
+  )?.[0] || ''
+
+  for (const rule of [steerRule, cancelRule]) {
+    assert.match(rule, /width:\s*44px/)
+    assert.match(rule, /height:\s*44px/)
+  }
+  assert.match(focusRule, /outline:\s*2px solid var\(--accent\)/,
+    'both icon-only actions need a visible keyboard focus indicator')
+})

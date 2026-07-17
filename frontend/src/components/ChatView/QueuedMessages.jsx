@@ -20,7 +20,9 @@ const TRUNCATE_AT = 80
  * transcript so it's clear these are "not yet sent" turns. Lives between
  * the chat list and the input form. Empty queue → nothing rendered.
  */
-export default function QueuedMessages({ items, onCancel, onSteerOne, steerActive }) {
+export default function QueuedMessages({
+  items, onCancel, onSteerOne, steerActive, steerBusy = false,
+}) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
 
@@ -143,6 +145,7 @@ export default function QueuedMessages({ items, onCancel, onSteerOne, steerActiv
                     onClick={() => onSteerOne?.(cidOf(msg))}
                     aria-label="Send this queued message now"
                     title="Send now"
+                    disabled={steerBusy}
                   >
                     <DoubleChevronRight width={14} height={14} />
                   </button>

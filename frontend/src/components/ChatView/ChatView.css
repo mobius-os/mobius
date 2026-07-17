@@ -1039,12 +1039,12 @@
   color: inherit;
 }
 
-/* Hidden by default: shown only when the animated gradient text is actually
-   supported and motion is allowed; forced-colors kills it outright. */
+/* Hidden by default: shown only when text masking is supported and motion is
+   allowed; forced-colors kills it outright. */
 .chat__activity-label-sweep { display: none; }
 
 @media (prefers-reduced-motion: no-preference) {
-  @supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  @supports ((-webkit-mask-image: linear-gradient(#000, transparent)) or (mask-image: linear-gradient(#000, transparent))) {
     .chat__activity-label-sweep {
       display: block;
       position: absolute;
@@ -1052,19 +1052,25 @@
       overflow: hidden;
       white-space: nowrap;
       pointer-events: none;
-      color: transparent;
-      background-image: linear-gradient(
+      color: color-mix(in srgb, var(--text) 94%, var(--bg));
+      -webkit-mask-image: linear-gradient(
         100deg,
         transparent 42%,
-        color-mix(in srgb, var(--text) 94%, var(--bg)) 50%,
+        #000 50%,
         transparent 58%
       );
-      background-repeat: no-repeat;
-      background-size: 260% 100%;
-      background-position: 100% 0;
-      -webkit-background-clip: text;
-      background-clip: text;
-      -webkit-text-fill-color: transparent;
+      mask-image: linear-gradient(
+        100deg,
+        transparent 42%,
+        #000 50%,
+        transparent 58%
+      );
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+      -webkit-mask-size: 260% 100%;
+      mask-size: 260% 100%;
+      -webkit-mask-position: 100% 0;
+      mask-position: 100% 0;
       animation: chat-activity-sweep 2.2s linear infinite;
     }
   }
@@ -1075,12 +1081,12 @@
 }
 
 /* Sweep 0%→45% of the cycle (~1.0s), rest for the remainder (~1.2s).
-   Decreasing background-position-x with an oversized image moves the band
+   Decreasing mask-position-x with an oversized mask moves the band
    left→right; both endpoints park the band off the visible text. */
 @keyframes chat-activity-sweep {
-  0% { background-position: 100% 0; }
-  45% { background-position: 0% 0; }
-  100% { background-position: 0% 0; }
+  0% { -webkit-mask-position: 100% 0; mask-position: 100% 0; }
+  45% { -webkit-mask-position: 0% 0; mask-position: 0% 0; }
+  100% { -webkit-mask-position: 0% 0; mask-position: 0% 0; }
 }
 
 .chat__activity-chip {
@@ -2347,9 +2353,9 @@
 
 .queued__steer {
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  margin: 4px 0 0;
+  width: 44px;
+  height: 44px;
+  margin: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2366,11 +2372,16 @@
   color: var(--accent); /* CONTRACT: vivid accent — this action feeds the live turn */
 }
 
+.queued__steer:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .queued__cancel {
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  margin: 4px 4px 0 0;
+  width: 44px;
+  height: 44px;
+  margin: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2385,6 +2396,12 @@
 .queued__cancel:hover {
   background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+}
+
+.queued__steer:focus-visible,
+.queued__cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* ── Screen-reader-only utility ─────────────────────────────────────────── */
@@ -2402,22 +2419,8 @@
 }
 
 /* ── Hit-area expansion for small × buttons ─────────────────────────────── */
-/* The inset-expansion ::after pattern from Drawer.css: the visual button
-   stays small but the tap target grows to ≥40px without affecting layout.
-   queued__cancel needs position: relative added (it has no positioning yet).
-   chat__attach-card-remove is already position: absolute — its ::after
-   simply expands the hit area in place. */
-.queued__cancel {
-  position: relative;
-}
-
-.queued__cancel::after {
-  content: '';
-  position: absolute;
-  /* queued__cancel is 28×28; expand to 40px on each axis */
-  inset: -6px;
-}
-
+/* Queued actions already carry real 44×44 targets. The attachment remove
+   control is absolutely positioned and keeps the inset-expansion pattern. */
 .chat__attach-card-remove::after {
   content: '';
   position: absolute;

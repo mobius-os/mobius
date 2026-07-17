@@ -104,6 +104,15 @@ test('footer stacks connection → notices → rail → queued → composer', ()
   }
 })
 
+test('connection failure hides queued actions and disables composer steering', () => {
+  assert.match(chatView, /\{connectionError !== 'disconnected' && \([\s\S]*?<QueuedMessages/,
+    'the lost-connection state should own the footer stack until Retry succeeds')
+  assert.match(chatView, /const canSteer = connectionError !== 'disconnected' && !steerBusy[\s\S]*?canFastForwardQueue/,
+    'the visible composer steer action must be gated by connection health')
+  assert.match(chatView, /const canRequestSteer = connectionError !== 'disconnected'[\s\S]*?!steerBusy[\s\S]*?turnActive/,
+    'the keyboard steer path must be gated by connection health too')
+})
+
 test('a send that merely enqueues preserves the in-flight build rail', () => {
   // An enqueued message emits NO rail transition — the rail changes only
   // through accumulate (build_phase) and railAtRunStart (a run actually

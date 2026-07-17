@@ -66,3 +66,11 @@ test('the foot stack hides only on the TERMINAL disconnect, not retrying blips',
     'the broad !connectionError gate must not return',
   )
 })
+
+test('a steer request disables sibling row actions until it settles', () => {
+  assert.match(source, /const \[steerBusy, setSteerBusy\] = useState\(false\)/)
+  assert.match(source, /handlingSteerRef\.current = true\s+setSteerBusy\(true\)/)
+  assert.match(source, /handlingSteerRef\.current = false\s+setSteerBusy\(false\)/)
+  assert.match(source, /steerBusy=\{steerBusy\}/,
+    'the queued tray should receive the in-flight state for its row buttons')
+})
