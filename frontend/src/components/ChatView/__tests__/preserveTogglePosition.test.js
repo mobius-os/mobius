@@ -9,11 +9,15 @@ test('toggle position is corrected from the DOM mutation before rAF', () => {
   let mutationCallback = null
   let rafCallback = null
   let observedNode = null
+  let observedOptions = null
   let disconnected = false
 
   globalThis.MutationObserver = class {
     constructor(callback) { mutationCallback = callback }
-    observe(node) { observedNode = node }
+    observe(node, options) {
+      observedNode = node
+      observedOptions = options
+    }
     disconnect() { disconnected = true }
   }
   globalThis.requestAnimationFrame = (callback) => {
@@ -33,6 +37,8 @@ test('toggle position is corrected from the DOM mutation before rAF', () => {
 
     preserveTogglePosition(anchor)
     assert.equal(observedNode, parentElement)
+    assert.deepEqual(observedOptions, { childList: true },
+      'live descendant churn must not win the disclosure mutation race')
 
     top = 155
     mutationCallback()

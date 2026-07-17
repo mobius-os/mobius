@@ -546,6 +546,26 @@ export function readerInputMayScroll(type, key = '') {
 }
 
 
+/** A disclosure activation is a reading action even when it produces no native
+ * scroll event. Snapshotting the current message anchor before its body changes
+ * prevents a stale FOLLOW_BOTTOM mode from replaying after pointerup and
+ * dragging a near-foot activity header down into the newly-opened timeline. */
+export function readerInputActivatesDisclosure(
+  type,
+  key = '',
+  target = null,
+  pointerButton = 0,
+) {
+  const disclosure = target?.closest?.(
+    'button.chat__activity-header, button.chat__tool-header, button.chat__marker-header',
+  )
+  if (!disclosure) return false
+  return (type === 'pointerdown' && pointerButton === 0)
+    || type === 'touchstart'
+    || (type === 'keydown' && ['Enter', ' ', 'Spacebar'].includes(key))
+}
+
+
 /** Wheel and keyboard input have no pointer/touch release event. Their first
  * rendering frame is the deterministic no-scroll release: a real scroll is
  * dispatched before rAF and cancels it; an edge/no-op gesture resumes layout
@@ -1440,7 +1460,27 @@ export default function useScrollMode({
       })
     }
     const onUserInput = (event) => {
-      if (!readerInputMayScroll(event?.type, event?.key)) return
+      const activatesDisclosure = readerInputActivatesDisclosure(
+        event?.type,
+        event?.key,
+        event?.target,
+        event?.button,
+      )
+      if (!activatesDisclosure
+          && !readerInputMayScroll(event?.type, event?.key)) return
+      if (activatesDisclosure) {
+        // A disclosure tap says "hold what I am reading", not "keep following
+        // the conversation tail". Latch that intent BEFORE React changes the
+        // body height. The normal gesture gate below then defers ResizeObserver
+        // writes until pointerup, at which point it replays this anchor rather
+        // than the stale FOLLOW_BOTTOM that caused the non-repeatable jump.
+        const anchor = anchorModeFromScroll(scrollEl)
+        if (anchor) {
+          readerLocationExplicitRef.current = true
+          transitionMode(anchor, 'reader:disclosure-toggle')
+          persistMode()
+        }
+      }
       // Input and its first scroll event are ordered, but not guaranteed to be
       // less than 250ms apart under a busy renderer. Keep layout ownership
       // suspended until that first event actually lands; after it, the normal

@@ -22,6 +22,7 @@ import {
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
   physicalBottomAnchorModeFromScroll,
+  readerInputActivatesDisclosure,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
   settledPinMode,
@@ -175,6 +176,38 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
   assert.equal(readerInputMayScroll('wheel'), true)
   assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('disclosure activation is recognized as an anchor-latching reading action', () => {
+  const disclosureTarget = {
+    closest: selector => selector.includes('button.chat__activity-header') ? {} : null,
+  }
+  const ordinaryTarget = { closest: () => null }
+  const staticStatusTarget = {
+    // A static status row has the base visual class but is a div, not a button.
+    closest: selector => selector.startsWith('button.') ? null : {},
+  }
+
+  assert.equal(readerInputActivatesDisclosure(
+    'pointerdown', '', disclosureTarget), true)
+  assert.equal(readerInputActivatesDisclosure(
+    'pointerdown', '', disclosureTarget, 2), false,
+  'opening a context menu must not manufacture reading intent')
+  assert.equal(readerInputActivatesDisclosure(
+    'touchstart', '', disclosureTarget), true)
+  assert.equal(readerInputActivatesDisclosure(
+    'keydown', 'Enter', disclosureTarget), true)
+  assert.equal(readerInputActivatesDisclosure(
+    'keydown', ' ', disclosureTarget), true)
+  assert.equal(readerInputActivatesDisclosure(
+    'keydown', 'a', disclosureTarget), false)
+  assert.equal(readerInputActivatesDisclosure(
+    'wheel', '', disclosureTarget), false)
+  assert.equal(readerInputActivatesDisclosure(
+    'pointerdown', '', ordinaryTarget), false)
+  assert.equal(readerInputActivatesDisclosure(
+    'pointerdown', '', staticStatusTarget), false,
+  'a non-interactive status row must not stop live follow')
 })
 
 test('inputs without an end event get a next-frame no-scroll release', () => {

@@ -608,6 +608,90 @@ test.describe('SSE streaming (real React path)', () => {
     await expect(activity.locator('.chat__tool-spin')).toHaveCount(0)
   })
 
+  test('16b. Near-foot activity taps hold position while live descendants churn', async ({ page }) => {
+    const events = [
+      { type: 'catch_up_done' },
+      // Put the final activity disclosure close to the viewport foot once the
+      // reader reaches physical bottom. Multiple steps make its open body tall
+      // enough that a stale FOLLOW_BOTTOM replay produces an obvious jump.
+      { type: 'text', content: 'Lead-in context. '.repeat(90) },
+    ]
+    for (let i = 0; i < 8; i++) {
+      events.push(
+        { type: 'tool_start', tool: 'Read', input: `/tmp/step-${i}.txt` },
+        { type: 'tool_output', content: `step ${i} output` },
+        { type: 'tool_end' },
+      )
+    }
+    events.push({ type: 'done' })
+
+    await setupWithSSE(page, events)
+    await newChat(page)
+    await sendMessage(page, 'Near-foot disclosure test')
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+
+    // Enter FOLLOW_BOTTOM through the same input→scroll sequence as a reader,
+    // rather than assigning scrollTop as app-owned test setup.
+    await page.evaluate(async () => {
+      const s = document.querySelector('.chat__scroll')
+      s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 100)
+      await new Promise(requestAnimationFrame)
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = s.scrollHeight
+      s.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))
+      await new Promise(r => setTimeout(r, 300))
+    })
+
+    const header = page.locator('.chat__activity-header').last()
+    await expect(header).toBeVisible()
+    const before = await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      const b = [...document.querySelectorAll('.chat__activity-header')].at(-1)
+      const sr = s.getBoundingClientRect()
+      return {
+        top: b.getBoundingClientRect().top,
+        relativeTop: b.getBoundingClientRect().top - sr.top,
+        viewport: s.clientHeight,
+        gap: s.scrollHeight - s.scrollTop - s.clientHeight,
+      }
+    })
+    expect(before.gap).toBeLessThanOrEqual(4)
+    expect(before.relativeTop).toBeGreaterThan(before.viewport * 0.55)
+    expect(before.relativeTop).toBeLessThan(before.viewport - 20)
+
+    // Simulate status/output churn inside an open live activity timeline. The
+    // toggle guard must observe only its direct body transition, not let these
+    // unrelated descendant mutations win the correction race.
+    await page.evaluate(() => {
+      window.__disclosureChurn = setInterval(() => {
+        const timeline = [...document.querySelectorAll('.chat__activity-timeline')].at(-1)
+        if (!timeline) return
+        const marker = document.createElement('i')
+        marker.hidden = true
+        timeline.appendChild(marker)
+        marker.remove()
+      }, 5)
+    })
+
+    try {
+      const box = await header.boundingBox()
+      expect(box).not.toBeNull()
+      for (let i = 0; i < 10; i++) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+        await page.evaluate(() => new Promise(r =>
+          requestAnimationFrame(() => requestAnimationFrame(r))))
+        const top = await header.evaluate(el => el.getBoundingClientRect().top)
+        expect(Math.abs(top - before.top), `toggle ${i + 1} drift`).toBeLessThanOrEqual(2)
+      }
+    } finally {
+      await page.evaluate(() => clearInterval(window.__disclosureChurn))
+    }
+  })
+
   test('17. Long SSE response fills the reservation and follows the tail', async ({ page }) => {
     const events = [
       { type: 'catch_up_done' },

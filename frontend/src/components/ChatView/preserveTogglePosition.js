@@ -69,7 +69,14 @@ export function preserveTogglePosition(anchorEl) {
 
   if (typeof MutationObserver === 'function' && anchorEl.parentElement) {
     observer = new MutationObserver(settle)
-    observer.observe(anchorEl.parentElement, { childList: true, subtree: true })
+    // The disclosure body is always a DIRECT sibling of the header. Observe
+    // only that wrapper's child list: an open live activity stretch keeps
+    // changing text, tool status, and timeline children below this level. A
+    // subtree observer can therefore settle on unrelated stream churn before
+    // React inserts/removes the disclosure body, making the same tap hold on
+    // one attempt and drift on the next. Direct-child observation names the
+    // actual transition and leaves live descendants out of the race.
+    observer.observe(anchorEl.parentElement, { childList: true })
   }
 
   // Safety fallback for an unusual disclosure that changes layout without a
