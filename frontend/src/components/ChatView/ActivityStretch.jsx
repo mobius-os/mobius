@@ -216,19 +216,16 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         <span className="chat__activity-label">
           <span className="chat__activity-label-text">{text}</span>
           {displayState === 'running' && (
-            // The ChatGPT cadenced-shimmer mechanism (owner-captured CSS,
-            // 2026-07-17): a masked window translating across a counter-
-            // translated bright copy — transforms cancel, so the copy stays
-            // aligned while only the window moves. The sweep is a SIBLING of
-            // the text span, positioned against the LABEL (a blockified flex
-            // item): anchoring it inside the inline text span put the
-            // absolute box at the mercy of inline-containing-block quirks,
-            // which rendered the copy as a second visible "Thinking"
-            // (owner report, 2026-07-17). aria-hidden keeps the duplicate
-            // out of AT.
-            <span className="chat__activity-label-sweep" aria-hidden="true">
-              <span className="chat__activity-label-highlight">{text}</span>
-            </span>
+            // The shimmer: a solid-text bright overlay aligned to the base
+            // (position:absolute inset:0, NO transform) with only the MASK
+            // sliding a bright band across it (ChatView.css). The earlier
+            // counter-translate version transformed BOTH the overlay window
+            // and the copy so they'd cancel — but in WebKit they did not,
+            // rendering a doubled/offset "Thinking" (owner report,
+            // 2026-07-17). With nothing transformed, the overlay can only
+            // ever sit exactly over the base, so a drifting ghost is
+            // impossible; the animation is the mask position alone.
+            <span className="chat__activity-label-sweep" aria-hidden="true">{text}</span>
           )}
         </span>
         {displayState === 'error' && exitCode != null && (

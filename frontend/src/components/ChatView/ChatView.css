@@ -1023,64 +1023,40 @@
   font-size: 13px;
 }
 
-/* Liveness IS the label — the ChatGPT cadenced shimmer, transplanted from
-   the owner's captured CSS (2026-07-17). Mechanism: the base label stays
-   NORMAL colored text; an aria-hidden sweep overlay is a masked WINDOW
-   (opaque band at 20-30% of the mask) that translates left→right while its
-   inner bright text copy counter-translates by the exact inverse — the two
-   transforms cancel, so the bright copy always aligns with the base and only
-   the window moves. Transform + mask stays on the compositor (no per-frame
-   paint), and because the base text is never transparent, no animation state
-   can blank a letter. The cadence is the source's literal one: the sweep
-   crosses in 1s at steps(48) — 48 discrete frames, the filmic tick the
-   owner liked — then rests ~1.4s. Their JS re-triggers a one-shot run on a
-   rhythm; we fold sweep+rest into one looping timeline instead, scaling the
-   step count so the sweep portion keeps exactly 48 steps (1s / 41.67% of a
-   2.4s cycle → 48 / 0.4167 ≈ 115 total; the rest-phase steps land on
-   identical off-screen frames and are invisible). */
-/* The LABEL (a blockified flex item) is the sweep's positioning anchor —
-   position:relative on the inline text span was at the mercy of
-   inline-containing-block quirks and rendered the bright copy as a second
-   visible "Thinking" (owner report, 2026-07-17). The label's box hugs the
-   text (flex: 0 1 auto), so inset:0 tracks the glyphs exactly. */
-.chat__activity-label {
-  position: relative;
-}
-
-.chat__activity-label-text {
-  color: inherit;
-}
-
-/* Hidden until motion is allowed and mask-image is supported (an unmasked
-   sweep would paint the full bright copy over the base); forced colors
-   kills it outright. */
+/* Liveness IS the label — a masked solid-text sweep (the sibling's chat-
+   polish contract, chatUiPolish.test.js). The base text stays normal muted
+   text; an aria-hidden overlay carries the SAME text in a brighter colour,
+   aligned exactly over the base (position:absolute; inset:0; NO transform),
+   and a bright band is slid across it by animating the MASK POSITION alone,
+   in ChatGPT's stepped cadence (~1s sweep at steps(48), then ~1.4s rest,
+   folded into one 2.4s loop). The earlier version translated the overlay
+   window AND its text so the two would cancel; in WebKit they did not,
+   painting a doubled/offset "Thinking" (owner report, 2026-07-17). With
+   NOTHING transformed the overlay can only sit over the base — a drifting
+   ghost is impossible — and because the text is solid (never transparent
+   fill) it can never blank either. */
+.chat__activity-label { position: relative; }
 .chat__activity-label-sweep { display: none; }
 
 @media (prefers-reduced-motion: no-preference) {
   @supports ((-webkit-mask-image: linear-gradient(#000, #000)) or (mask-image: linear-gradient(#000, #000))) {
     .chat__activity--running .chat__activity-label-sweep {
       display: block;
-      pointer-events: none;
-      width: 100%;
       position: absolute;
-      inset: 0 auto 0 0;
-      overflow: hidden;
-      transform: translateX(-50%);
-      /* Explicit paired stops, NOT the double-position shorthand
-         (#000 20% 30%): engines that fail to parse the shorthand inside a
-         mask drop the ENTIRE mask, leaving the full bright copy visible as
-         a moving second label (owner-observed doubling, 2026-07-17). */
-      -webkit-mask-image: linear-gradient(90deg, #0000 0%, #000 20%, #000 30%, #0000 50%, #0000 100%);
-      mask-image: linear-gradient(90deg, #0000 0%, #000 20%, #000 30%, #0000 50%, #0000 100%);
-      animation: chat-cadenced-sweep 2.4s steps(115, end) infinite;
-    }
-    .chat__activity--running .chat__activity-label-highlight {
-      display: block;
-      width: 100%;
+      inset: 0;
+      pointer-events: none;
       white-space: nowrap;
-      transform: translateX(50%);
-      color: color-mix(in srgb, var(--text) 94%, var(--bg)); /* CONTRACT: the bright band over the muted base */
-      animation: chat-cadenced-highlight 2.4s steps(115, end) infinite;
+      overflow: hidden;
+      color: color-mix(in srgb, var(--text) 94%, var(--bg)); /* CONTRACT: the bright band colour over the muted base */
+      -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 18%, #000 32%, transparent 50%);
+      mask-image: linear-gradient(90deg, transparent 0%, #000 18%, #000 32%, transparent 50%);
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+      -webkit-mask-size: 300% 100%;
+      mask-size: 300% 100%;
+      -webkit-mask-position: 120% 0;
+      mask-position: 120% 0;
+      animation: chat-cadenced-mask 2.4s steps(48, end) infinite;
     }
   }
 }
@@ -1089,19 +1065,13 @@
   .chat__activity--running .chat__activity-label-sweep { display: none !important; }
 }
 
-/* Both rest positions park the window off the text, so the loop's snap from
-   end back to start is invisible. The keyframe percentages map the source's
-   1s one-shot run onto the first 41.67% of the 2.4s cycle. */
-@keyframes chat-cadenced-sweep {
-  0% { transform: translateX(-50%); }
-  41.67% { transform: translateX(125%); }
-  100% { transform: translateX(125%); }
-}
-
-@keyframes chat-cadenced-highlight {
-  0% { transform: translateX(50%); }
-  41.67% { transform: translateX(-125%); }
-  100% { transform: translateX(-125%); }
+/* The band crosses in the first ~42% of the cycle (~1s), then holds off the
+   text for the remainder — both endpoints park it past the glyphs so the
+   loop's snap from end to start is invisible. Only mask-position animates. */
+@keyframes chat-cadenced-mask {
+  0% { -webkit-mask-position: 120% 0; mask-position: 120% 0; }
+  42% { -webkit-mask-position: -20% 0; mask-position: -20% 0; }
+  100% { -webkit-mask-position: -20% 0; mask-position: -20% 0; }
 }
 
 .chat__activity-chip {
