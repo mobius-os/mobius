@@ -663,6 +663,12 @@
      ChatView.jsx. */
   display: flex;
   align-items: center;
+  /* Land the placeholder label exactly where the first real activity line
+     does: the settled line sits inside .chat__tools (6px left pad) and its
+     header adds a 6px icon->label gap. Mirror both here so the label does
+     not jump ~12px right when the first thinking block replaces this. */
+  gap: 6px;
+  padding-left: 6px;
   min-height: 32px;
 }
 
@@ -990,8 +996,8 @@
 
 /* With the chevron gone the resting line is deliberately bare, so pointer and
    touch users get their disclosure cue on interaction instead: the label lifts
-   to full text color on hover and press (review round 2 — discoverability
-   without resting chrome). Keyboard users already have the focus ring. */
+   to full text color on hover and press, giving discoverability without
+   resting chrome. Keyboard users already have the focus ring. */
 .chat__activity-header:hover .chat__activity-label,
 .chat__activity-header:active .chat__activity-label {
   color: var(--text); /* CONTRACT: high-contrast lift marks the tappable line */

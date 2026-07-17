@@ -2699,7 +2699,7 @@ export default function ChatView({
           // turn-end drain already promoted into a continuation (right as
           // Stop landed) is gone from the queue, so it's absent here and
           // must NOT be re-sent — that was the natural-finish-races-Stop
-          // double-send (PM 115).
+          // double-send.
           if (clearedPendingCids === null && Array.isArray(data?.cleared_pending_cids)) {
             clearedPendingCids = data.cleared_pending_cids
           }
@@ -2818,8 +2818,8 @@ export default function ChatView({
       // Resend the queued work as ONE fresh turn — but ONLY the messages
       // the backend confirms it cleared. Same SHARED resolveResend the
       // timeout branch uses, so the two paths can't drift: empty cleared
-      // set → nothing re-sent (the natural-finish-races-Stop double-send,
-      // PM 115), exact match → that subset, partial/legacy → full combined.
+      // set → nothing re-sent (the natural-finish-races-Stop double-send),
+      // exact match → that subset, partial/legacy → full combined.
       const { text: resendText, attachments: resendAttachments } =
         resolveResend(clearedPendingCids)
 

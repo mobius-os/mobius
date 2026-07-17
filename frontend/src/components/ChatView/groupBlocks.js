@@ -99,9 +99,10 @@ export function coalesceThinkingEntries(entries) {
   return out
 }
 
-// Derive the collapsed status of a tool group from its children: a failed tool
-// dominates (so a broken step is visible without expanding), then a running
-// tool, else done. Shared by ActivityStretch (via activityStreamState), which
+// Derive the collapsed status of a tool group from its children: while any tool
+// is still running the group reads in-progress; once settled, a failed child
+// shows error (so a broken step is visible without expanding), else done.
+// Shared by ActivityStretch (via activityStreamState), which
 // maps this to the header status — label shimmer while 'running', a danger
 // triangle + exit chip on 'error', the muted type glyph on 'done' — all
 // readable WITHOUT expanding,
@@ -230,8 +231,8 @@ export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
 // between one tool ending and the next event, where no tool is 'running' —
 // so tense (activityCollapsedLabel's live||running branch) and the shimmer
 // stay in agreement instead of a settled face or the
-// failure triangle flashing in mid-turn beside present-tense copy (review
-// round 2, both reviewers). Failure surfaces when the stretch actually
+// failure triangle flashing in mid-turn beside present-tense copy. Failure
+// surfaces when the stretch actually
 // settles (live=false), consistent with running-wins.
 export function activityDisplayState(state, { live = false } = {}) {
   if (live && state !== 'running') return 'running'
@@ -245,7 +246,7 @@ export function activityDisplayState(state, { live = false } = {}) {
 // can live in replace-semantics output — Claude's plain-text "Exit code N"
 // head is START-anchored and a JSON envelope may serialize exit_code first or
 // last — so an equal-length replacement that flips the exit code cannot leave
-// a stale success line (review round 2). Thinking entries contribute a
+// a stale success line. Thinking entries contribute a
 // constant: their content length must NOT bust the memo on typewriter frames.
 export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
   return entries
