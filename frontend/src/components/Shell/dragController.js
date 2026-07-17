@@ -19,7 +19,8 @@
 // emits its pane rects in. The binding subtracts the content bounding rect once.
 
 import {
-  STRIP_H, PANE_GAP, canSplit as paneCanSplit, canRootSplit, projectLayout,
+  STRIP_H, PANE_GAP, MAX_PANE_TABS,
+  canSplit as paneCanSplit, canRootSplit, projectLayout,
 } from './paneModel.js'
 
 // ── Pointer thresholds (design §3.1) — exported as the tuned constants and as
@@ -163,25 +164,50 @@ export function rootPreviewRect(content, edge) {
   return edgePreviewRect(content, edge)
 }
 
-// The strip caret's insertion index + preview rect for a point over a pane's
-// strip. Tabs are the pane's measured tab rects (content-local left/right); the
-// caret lands before the first tab whose midpoint the pointer is left of, else
-// after the last tab.
-export function caretZone(point, pane) {
-  const tabs = pane.tabs || []
-  let index = tabs.length
-  let caretX = pane.rect.x + STRIP_CARET_PAD
+// The raw caret index for a point: before the first tab whose midpoint the
+// pointer is left of, else after the last tab.
+function rawCaretIndex(point, tabs) {
   for (let i = 0; i < tabs.length; i += 1) {
-    const mid = (tabs[i].left + tabs[i].right) / 2
-    if (point.x < mid) { index = i; caretX = tabs[i].left - 1; break }
-    caretX = tabs[i].right + 1
+    if (point.x < (tabs[i].left + tabs[i].right) / 2) return i
   }
+  return tabs.length
+}
+
+// The strip caret's insertion index + preview rect for a point over a pane's
+// strip. Tabs are the pane's measured tab rects (content-local left/right).
+// `prevZone` damps single-slot jitter at a tab midpoint: an adjacent flip only
+// commits once the pointer is HYSTERESIS_PX past the boundary (a fast multi-slot
+// jump takes the raw index immediately).
+export function caretZone(point, pane, prevZone = null) {
+  const tabs = pane.tabs || []
+  let index = rawCaretIndex(point, tabs)
+  const prevIdx = (prevZone && prevZone.type === 'strip' && prevZone.paneId === pane.paneId)
+    ? prevZone.index : null
+  if (prevIdx != null && prevIdx !== index && Math.abs(prevIdx - index) === 1) {
+    const lo = Math.min(prevIdx, index)
+    const boundary = (tabs[lo].left + tabs[lo].right) / 2
+    if (index > prevIdx) index = point.x > boundary + HYSTERESIS_PX ? index : prevIdx
+    else index = point.x < boundary - HYSTERESIS_PX ? index : prevIdx
+  }
+  let caretX = pane.rect.x + STRIP_CARET_PAD
+  if (index > 0 && tabs[index - 1]) caretX = tabs[index - 1].right + 1
+  if (index < tabs.length && tabs[index]) caretX = tabs[index].left - 1
   return {
     type: 'strip',
     paneId: pane.paneId,
     index,
     rect: { x: caretX, y: pane.rect.y + 5, w: CARET_W, h: CARET_H },
   }
+}
+
+// Whether a pane can accept a JOIN (center or strip caret) — it has room, or the
+// source already lives there (a same-pane reorder never grows the count). A
+// full pane's strip/center zones must not light, so a drop can't refuse or evict
+// after the preview promised a landing spot (review — feasibility gating).
+export function paneAcceptsJoin(scene, pane) {
+  const src = scene.source
+  if (src && src.paneId === pane.paneId) return true
+  return (pane.tabCount || 0) < MAX_PANE_TABS
 }
 
 // The strip region a caret owns: the strip row plus a small pad below it.
@@ -251,7 +277,11 @@ export function centerZone(point, pane, scene) {
 // previous root-edge owner.
 export function rootEdgeZone(point, scene, prevZone) {
   const c = scene.contentRect
-  const margin = ROOT_EDGE_PX + (prevZone && prevZone.type === 'root-edge' ? HYSTERESIS_PX : 0)
+  // Hysteresis widens ONLY the edge that previously owned the pointer — the old
+  // code widened every edge whenever any root edge had owned, letting an
+  // opposite edge grab the pointer 10px early (review — hysteresis flap).
+  const prevRootEdge = (prevZone && prevZone.type === 'root-edge') ? prevZone.edge : null
+  const marginFor = (edge) => ROOT_EDGE_PX + (edge === prevRootEdge ? HYSTERESIS_PX : 0)
   const dist = {
     left: point.x - c.x,
     right: c.x + c.w - point.x,
@@ -263,7 +293,7 @@ export function rootEdgeZone(point, scene, prevZone) {
     : new Set(['left', 'right', 'top', 'bottom'])
   const cands = []
   for (const edge of ['left', 'right', 'top', 'bottom']) {
-    if (dist[edge] >= 0 && dist[edge] <= margin) cands.push([edge, dist[edge]])
+    if (dist[edge] >= 0 && dist[edge] <= marginFor(edge)) cands.push([edge, dist[edge]])
   }
   cands.sort((a, b) => a[1] - b[1])
   for (const [edge] of cands) {
@@ -289,10 +319,13 @@ function paneAt(point, scene) {
 // hysteresis; pass null for a fresh test. Returns a zone with a `rect` (the
 // preview geometry) or null (no drop target — the drop cancels).
 export function hitTest(point, scene, prevZone = null) {
+  const pane = paneAt(point, scene)
+  const canJoin = pane ? paneAcceptsJoin(scene, pane) : false
+
   // 1. strip caret — checked first so a drop over the tabs always reads as an
   // insert, even in the outer-margin corner where a root edge would also apply.
-  const pane = paneAt(point, scene)
-  if (pane && overStrip(point, pane)) return caretZone(point, pane)
+  // A full pane's strip does not light (the caret would refuse at drop).
+  if (pane && overStrip(point, pane)) return canJoin ? caretZone(point, pane, prevZone) : null
 
   // 2. workspace-root edge — fine pointers only.
   if (scene.allowRootEdge) {
@@ -300,12 +333,15 @@ export function hitTest(point, scene, prevZone = null) {
     if (re) return re
   }
 
-  // 3. pane edge, then 4. center — both need a pane under the point.
+  // 3. pane edge, then 4. center — both need a pane under the point; center only
+  // lights when the pane can accept the join.
   if (pane) {
     const ez = edgeZone(point, pane, scene, prevZone)
     if (ez) return ez
-    const cz = centerZone(point, pane, scene)
-    if (cz) return cz
+    if (canJoin) {
+      const cz = centerZone(point, pane, scene)
+      if (cz) return cz
+    }
   }
   return null
 }
@@ -346,6 +382,9 @@ export function buildScene(ws, projection, mode, contentRect, source, allowRootE
     return {
       paneId,
       rect,
+      // The pane's live tab count gates whether its center/strip zones may light
+      // (paneAcceptsJoin) — a full pane must not offer a join it would refuse.
+      tabCount: ws.panes[paneId] ? ws.panes[paneId].tabs.length : 0,
       tabs: measureTabs ? (measureTabs(paneId) || []) : [],
       canSplit: {
         left: paneCanSplit(ws, paneId, 'left', mode, contentRect),

@@ -7,7 +7,7 @@ import {
   EDGE_BAND_MIN, EDGE_BAND_CAP_W, EDGE_BAND_CAP_H,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
-  rootEdgeZone, hitTest, zoneTarget, zoneEq, buildScene,
+  rootEdgeZone, hitTest, zoneTarget, zoneEq, buildScene, paneAcceptsJoin,
 } from '../dragController.js'
 import * as paneModel from '../paneModel.js'
 import { STRIP_H } from '../paneModel.js'
@@ -257,6 +257,67 @@ test('center never lights over the source pane', () => {
   assert.equal(hitTest({ x: 607, y: 300 }, s).type, 'center')
 })
 
+// ── feasibility gating: a full pane's strip/center never light ───────────────
+
+test('a full pane offers no center or strip zone (feasibility gating)', () => {
+  const full = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
+    tabs: [{ key: 'a', left: 10, right: 90 }],
+  })
+  full.tabCount = 6 // MAX_PANE_TABS
+  const other = pane('p1', { x: 407, y: 0, w: 400, h: 600 })
+  const s = scene([full, other], { source: { key: 'chat:x', paneId: null, paneTabCount: 0 } })
+  // Center of the full pane → suppressed.
+  assert.equal(hitTest({ x: 200, y: 300 }, s), null)
+  // Over the full pane's strip → suppressed.
+  assert.equal(hitTest({ x: 40, y: 5 }, s), null)
+  // The roomy sibling still joins.
+  assert.equal(hitTest({ x: 607, y: 300 }, s).type, 'center')
+})
+
+test('a same-pane reorder still lights the strip of a full source pane', () => {
+  // The source already lives here, so a reorder never grows the count → allowed.
+  const full = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
+    tabs: [{ key: 'a', left: 10, right: 90 }],
+  })
+  full.tabCount = 6
+  const s = scene([full], { source: { key: 'chat:a', paneId: 'p0', paneTabCount: 6 } })
+  assert.equal(hitTest({ x: 40, y: 5 }, s).type, 'strip')
+})
+
+test('paneAcceptsJoin: room OR same-source-pane', () => {
+  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 })
+  p.tabCount = 6
+  assert.equal(paneAcceptsJoin(scene([p], { source: null }), p), false)
+  assert.equal(paneAcceptsJoin(scene([p], { source: { paneId: 'p0' } }), p), true)
+  p.tabCount = 2
+  assert.equal(paneAcceptsJoin(scene([p], { source: null }), p), true)
+})
+
+// ── caret hysteresis (jitter damping at a tab midpoint) ──────────────────────
+
+test('caret index holds through midpoint jitter within the hysteresis margin', () => {
+  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
+    tabs: [{ key: 'a', left: 0, right: 100 }, { key: 'b', left: 100, right: 200 }],
+  })
+  // Owner index 0 (before tab a). Nudging 4px past tab-a's midpoint (50) → still 0.
+  const prev = { type: 'strip', paneId: 'p0', index: 0 }
+  assert.equal(caretZone({ x: 54, y: 5 }, p, prev).index, 0)
+  // 12px past the midpoint (beyond HYSTERESIS_PX) → flips to 1.
+  assert.equal(caretZone({ x: 62, y: 5 }, p, prev).index, 1)
+})
+
+// ── root-edge hysteresis widens only the SAME edge ───────────────────────────
+
+test('root-edge hysteresis widens only the previously-owned edge', () => {
+  const p = pane('p0', { x: 8, y: 8, w: 984, h: 784 })
+  const s = scene([p], { allowRootEdge: true })
+  // Owner = left root edge. A point 22px in on the LEFT stays left (16+10 band).
+  const prevLeft = { type: 'root-edge', edge: 'left' }
+  assert.equal(rootEdgeZone({ x: 22, y: 400 }, s, prevLeft).edge, 'left')
+  // The SAME 22px-in point on the RIGHT is NOT widened by a left owner → no zone.
+  assert.equal(rootEdgeZone({ x: 1000 - 22, y: 400 }, s, prevLeft), null)
+})
+
 // ── zoneTarget mapping (drop → exactly one reducer target) ───────────────────
 
 test('zoneTarget maps each zone kind to one MOVE_TAB target', () => {
@@ -301,6 +362,8 @@ test('buildScene projects panes and evaluates the shared feasibility predicates'
   assert.equal(s.rootCanSplit.left, true)
   // Tab measurement flowed through.
   assert.equal(s.panes[0].tabs[0].right, 60)
+  // Live tab count is carried for the join-feasibility gate.
+  assert.equal(s.panes[0].tabCount, 1)
 })
 
 test('buildScene suppresses root split at the depth cap', () => {

@@ -73,6 +73,59 @@ test('openTabAt returns the same reference on a no-op', () => {
   assert.equal(paneModel.openTabAt(ws, tabModel.makeTab('chat', '1'), { paneId: 'p0' }), ws)
 })
 
+test('openTabAt edge-split into a FULL pane never evicts or churns the target (review B1)', () => {
+  // A single pane at MAX_PANE_TABS. The old path opened the item into the pane
+  // (evicting the oldest, swapping activeTabKey) before moving it out.
+  const six = Array.from({ length: paneModel.MAX_PANE_TABS }, (_, i) => ({ kind: 'chat', id: `c${i}` }))
+  const ws = paneModel.seedFromFlatTabs(six)
+  const beforeKeys = ws.panes.p0.tabs.map(tabModel.tabKey)
+  const beforeActive = ws.panes.p0.activeTabKey
+  const next = paneModel.openTabAt(ws, tabModel.makeTab('app', 99), { paneId: 'p0', edge: 'right' })
+  // p0's six tabs AND its active tab are byte-identical — nothing evicted.
+  assert.deepEqual(next.panes.p0.tabs.map(tabModel.tabKey), beforeKeys)
+  assert.equal(next.panes.p0.activeTabKey, beforeActive)
+  // The item landed alone in the newly focused pane.
+  const focused = next.panes[next.focusedPaneId]
+  assert.notEqual(next.focusedPaneId, 'p0')
+  assert.deepEqual(focused.tabs.map(tabModel.tabKey), ['app:99'])
+  assert.equal(leaves(next), 2)
+})
+
+test('openTabAt root-split leaves every existing pane untouched', () => {
+  const ws = twoPanes()
+  const p0Before = ws.panes.p0
+  const p1Before = ws.panes.p1
+  const next = paneModel.openTabAt(ws, tabModel.makeTab('app', 8), { root: true, edge: 'left' })
+  assert.deepEqual(next.panes.p0.tabs.map(tabModel.tabKey), p0Before.tabs.map(tabModel.tabKey))
+  assert.deepEqual(next.panes.p1.tabs.map(tabModel.tabKey), p1Before.tabs.map(tabModel.tabKey))
+  assert.equal(next.panes.p0.activeTabKey, p0Before.activeTabKey)
+})
+
+// ── indexMove: same-pane caret reorder is off-by-one-safe (review — moving right)
+
+function onePane(ids) {
+  return paneModel.seedFromFlatTabs(ids.map(id => ({ kind: 'chat', id })))
+}
+const order = (ws) => ws.panes.p0.tabs.map(t => t.id)
+
+test('same-pane reorder lands a tab AT the caret when moving right', () => {
+  // [A,B,C,D], drop B between C and D (caret index 3) → [A,C,B,D], not after D.
+  const ws = onePane(['A', 'B', 'C', 'D'])
+  assert.deepEqual(order(paneModel.moveTab(ws, 'chat:B', { paneId: 'p0', index: 3 })), ['A', 'C', 'B', 'D'])
+})
+
+test('same-pane reorder to the end appends correctly', () => {
+  const ws = onePane(['A', 'B', 'C', 'D'])
+  assert.deepEqual(order(paneModel.moveTab(ws, 'chat:B', { paneId: 'p0', index: 4 })), ['A', 'C', 'D', 'B'])
+})
+
+test('same-pane reorder to the front and leftward stay correct', () => {
+  const ws = onePane(['A', 'B', 'C', 'D'])
+  assert.deepEqual(order(paneModel.moveTab(ws, 'chat:B', { paneId: 'p0', index: 0 })), ['B', 'A', 'C', 'D'])
+  // Move D (index 3) to between A and B (index 1): target < source → no shift.
+  assert.deepEqual(order(paneModel.moveTab(ws, 'chat:D', { paneId: 'p0', index: 1 })), ['A', 'D', 'B', 'C'])
+})
+
 // ── OPEN_TAB_AT reducer: single-slot undo makes a drop reversible ────────────
 
 test('OPEN_TAB_AT sets the undo slot and UNDO_LAST restores the pre-drop tree', () => {

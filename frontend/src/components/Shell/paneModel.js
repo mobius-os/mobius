@@ -515,15 +515,15 @@ export function openTabAt(ws, tab, target) {
   // Already open anywhere → this is a move, not an open (tab is unique).
   if (paneOf(ws, key)) return moveTab(ws, key, target)
   if (!target) return openTab(ws, clean)
-  if (target.edge != null && target.root === true) {
-    const opened = openTab(ws, clean, { paneId: ws.focusedPaneId, activate: true })
-    return moveTab(opened, key, { root: true, edge: target.edge })
-  }
-  if (target.edge != null && target.paneId != null) {
-    const opened = openTab(ws, clean, { paneId: target.paneId, activate: true })
-    return moveTab(opened, key, { paneId: target.paneId, edge: target.edge })
-  }
+  // Splits build a fresh pane directly — never insert into the target pane and
+  // move out, so a drop onto a six-tab pane's edge cannot evict its oldest tab
+  // or churn its active tab (review B1).
+  if (target.edge != null && target.root === true) return rootSplitOpen(ws, clean, key, target.edge)
+  if (target.edge != null && target.paneId != null) return edgeSplitOpen(ws, clean, key, target.paneId, target.edge)
   if (target.paneId != null) {
+    // center-join / strip-caret: this genuinely adds the item to the target
+    // pane. The drag layer only lights these zones when the pane has room
+    // (canJoin), so the cap eviction inside openTab is unreachable from a drop.
     const opened = openTab(ws, clean, { paneId: target.paneId, activate: true })
     return target.index != null ? moveTab(opened, key, { paneId: target.paneId, index: target.index }) : opened
   }
@@ -584,11 +584,23 @@ function indexMove(ws, src, tab, tabKey, destId, index) {
   // does not change the count.
   if (destId !== src.id && dest.tabs.length >= MAX_PANE_TABS) return ws
   const panes = { ...ws.panes }
+  const srcIdx = src.tabs.findIndex(t => tabModel.tabKey(t) === tabKey)
   const srcTabs = src.tabs.filter(t => tabModel.tabKey(t) !== tabKey)
   const base = destId === src.id
     ? srcTabs
     : dest.tabs.filter(t => tabModel.tabKey(t) !== tabKey)
-  const at = (index == null || index < 0 || index > base.length) ? base.length : index
+  // The caret index is measured against the pane's CURRENT tab list, source
+  // included. For a same-pane reorder the source has been spliced out of `base`,
+  // so every target slot PAST the source's old position shifts down by one —
+  // map in original-list coordinates FIRST, then clamp. Clamping before the
+  // shift landed a rightward drag one slot too far ([A,B,C,D]: B between C,D →
+  // after D). Cross-pane keeps the index as-is (the source was never in dest).
+  let at
+  if (index == null || index < 0) at = base.length
+  else {
+    at = (destId === src.id && srcIdx !== -1 && index > srcIdx) ? index - 1 : index
+    at = Math.max(0, Math.min(at, base.length))
+  }
   const destTabs = [...base.slice(0, at), tab, ...base.slice(at)]
   if (destId === src.id) {
     panes[src.id] = { ...src, tabs: destTabs }
@@ -626,6 +638,35 @@ function rootSplitMove(ws, src, tab, tabKey, edge) {
   const panes = { ...ws.panes }
   panes[src.id] = { ...src, tabs: src.tabs.filter(t => tabModel.tabKey(t) !== tabKey) }
   panes[newPaneId] = { id: newPaneId, tabs: [tab], activeTabKey: tabKey }
+  const layout = splitNodeFor(edge, splitId, ws.layout, newPaneId, 0.5)
+  return commitBounded(ws, {
+    ...ws, layout, panes, focusedPaneId: newPaneId, nextId: ws.nextId + 2,
+  })
+}
+
+// Split a pane on an edge to place a BRAND-NEW tab (a drawer item not yet in the
+// workspace) alone in the new pane. The counterpart of edgeSplitMove for an open
+// rather than a move: it NEVER touches the target pane's tab set — no transient
+// insert, no oldest-tab eviction at MAX_PANE_TABS, no activeTabKey swap. That
+// transient-insert-then-move-out was the drawer-drop eviction bug (review B1).
+function edgeSplitOpen(ws, tab, tabKey, paneId, edge) {
+  if (!ws.panes[paneId]) return ws
+  const newPaneId = `p${ws.nextId}`
+  const splitId = `s${ws.nextId + 1}`
+  const panes = { ...ws.panes, [newPaneId]: { id: newPaneId, tabs: [tab], activeTabKey: tabKey } }
+  const layout = replaceLeaf(ws.layout, paneId, splitNodeFor(edge, splitId, paneId, newPaneId, 0.5))
+  return commitBounded(ws, {
+    ...ws, layout, panes, focusedPaneId: newPaneId, nextId: ws.nextId + 2,
+  })
+}
+
+// Root-split the whole workspace to place a brand-new tab alone in the new pane.
+// The counterpart of rootSplitMove for an open — again never touching any
+// existing pane's tab set.
+function rootSplitOpen(ws, tab, tabKey, edge) {
+  const newPaneId = `p${ws.nextId}`
+  const splitId = `s${ws.nextId + 1}`
+  const panes = { ...ws.panes, [newPaneId]: { id: newPaneId, tabs: [tab], activeTabKey: tabKey } }
   const layout = splitNodeFor(edge, splitId, ws.layout, newPaneId, 0.5)
   return commitBounded(ws, {
     ...ws, layout, panes, focusedPaneId: newPaneId, nextId: ws.nextId + 2,
