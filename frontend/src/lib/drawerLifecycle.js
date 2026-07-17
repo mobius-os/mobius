@@ -5,6 +5,40 @@
 // a fallback for reduced-motion / interrupted transitions where transitionend
 // does not fire; the normal path releases on the real transform event.
 export const DRAWER_CLOSE_FALLBACK_MS = 350
+export const DRAWER_SWIPE_THRESHOLD_PX = 10
+export const DRAWER_SWIPE_DOMINANCE = 1.15
+
+/** True only when the current displacement is decisively sideways. */
+export function isHorizontalDrawerSwipe(dx, dy) {
+  return Math.abs(dx) > DRAWER_SWIPE_THRESHOLD_PX
+    && Math.abs(dx) > Math.abs(dy) * DRAWER_SWIPE_DOMINANCE
+}
+
+/**
+ * Only a normally completed custom swipe owns its generated click.
+ * A vertical scroll may start with diagonal noise, and touchcancel means the
+ * browser took over the gesture; neither path may suppress a later tap.
+ */
+export function shouldSuppressDrawerSwipeClick({
+  sawHorizontalMove,
+  cancelled = false,
+  dx = 0,
+  dy = 0,
+}) {
+  return !cancelled && !!sawHorizontalMove && isHorizontalDrawerSwipe(dx, dy)
+}
+
+/**
+ * Distinguish a touch-generated compatibility click from keyboard, assistive,
+ * programmatic, or mouse activation. Pointer/key starts normally clear the
+ * guard first; this check also fails open for detail=0 accessibility clicks.
+ */
+export function isGeneratedTouchClick(event) {
+  const firesTouchEvents = event?.sourceCapabilities?.firesTouchEvents
+  if (firesTouchEvents === true) return true
+  if (firesTouchEvents === false) return false
+  return Number(event?.detail) > 0
+}
 
 /**
  * Remove every DOM mutation made by Drawer.jsx's touch-drag handlers.

@@ -754,32 +754,37 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
 
-    // Reproduce the phone sequence without waiting out the old suppressor's
-    // 400ms fallback: scroll vertically, lift, then immediately tap Settings.
-    // A vertical pan is native scrolling, not the custom horizontal
-    // swipe-to-close gesture, so the destination click must pass through.
+    // Reproduce the Android sequence without waiting out the old suppressor's
+    // 400ms fallback: a noisy diagonal sample briefly looks horizontal, then
+    // native pan-y takes over and emits touchcancel. The immediately-following
+    // destination tap must pass; cancellation is not a custom swipe completion.
     await page.locator('.drawer').evaluate((drawer) => {
-      const point = (y) => new Touch({
+      const point = (x, y) => new Touch({
         identifier: 37,
         target: drawer,
-        clientX: 180,
+        clientX: x,
         clientY: y,
       })
       drawer.dispatchEvent(new TouchEvent('touchstart', {
         bubbles: true,
         cancelable: true,
-        touches: [point(520)],
+        touches: [point(180, 520)],
       }))
       drawer.dispatchEvent(new TouchEvent('touchmove', {
         bubbles: true,
         cancelable: true,
-        touches: [point(390)],
+        touches: [point(165, 512)],
       }))
-      drawer.dispatchEvent(new TouchEvent('touchend', {
+      drawer.dispatchEvent(new TouchEvent('touchmove', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(165, 390)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchcancel', {
         bubbles: true,
         cancelable: true,
         touches: [],
-        changedTouches: [point(390)],
+        changedTouches: [point(165, 390)],
       }))
 
       const settings = [...drawer.querySelectorAll('button')]
@@ -790,6 +795,88 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await expect(page.locator('.settings')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('22ca. Swipe click suppression cannot survive into a later tap', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    // Some browsers emit the swipe's synthetic click; others suppress it. Arm
+    // the guard with a short horizontal swipe that snaps back, but deliberately
+    // omit that generated click. The next genuine Playwright tap starts with
+    // pointerdown and must clear the stale same-gesture guard before clicking.
+    await page.locator('.drawer').evaluate((drawer) => {
+      const point = (x, y) => new Touch({
+        identifier: 38,
+        target: drawer,
+        clientX: x,
+        clientY: y,
+      })
+      drawer.dispatchEvent(new TouchEvent('touchstart', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(180, 420)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchmove', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(150, 421)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchend', {
+        bubbles: true,
+        cancelable: true,
+        touches: [],
+        changedTouches: [point(150, 421)],
+      }))
+    })
+
+    await page.getByRole('button', { name: 'Settings' }).click()
+    await expect(page.locator('.settings')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('22cb. A swipe-generated click cannot activate the row under its lift', async ({ page }) => {
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    await page.locator('.drawer').evaluate((drawer) => {
+      const point = (x, y) => new Touch({
+        identifier: 39,
+        target: drawer,
+        clientX: x,
+        clientY: y,
+      })
+      drawer.dispatchEvent(new TouchEvent('touchstart', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(180, 420)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchmove', {
+        bubbles: true,
+        cancelable: true,
+        touches: [point(150, 421)],
+      }))
+      drawer.dispatchEvent(new TouchEvent('touchend', {
+        bubbles: true,
+        cancelable: true,
+        touches: [],
+        changedTouches: [point(150, 421)],
+      }))
+
+      const settings = [...drawer.querySelectorAll('button')]
+        .find(button => button.textContent.trim() === 'Settings')
+      settings?.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        detail: 1,
+        clientX: 150,
+        clientY: 421,
+      }))
+    })
+
+    expect((await getNavState(page)).drawerOpen).toBe(true)
+    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
   })
 
   test('22d. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
