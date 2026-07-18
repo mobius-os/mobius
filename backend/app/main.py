@@ -341,6 +341,28 @@ async def lifespan(app):
       _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
   except Exception as exc:
     _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
+  # Route the app-watcher and provider model-registry diagnostics to the
+  # durable rotating chat.log handler. Both loggers otherwise land only on
+  # stdout (via lastResort), which evaporates on container recreation — that
+  # is exactly what erased the forensic trail for the beat-machine app-update
+  # incident. Keep stdout too: the handler is ADDED, propagation stays on. The
+  # SAME shared handler instance is attached (never a second RotatingFileHandler
+  # on the same path, which would race on rotation). app_watcher runs at INFO
+  # so the merge-replay wait-states are captured; the model-registry child logs
+  # only its warning.
+  try:
+    from app.chat import get_chat_log_handler
+    _diag_handler = get_chat_log_handler()
+    for _diag_name, _diag_level in (
+      ("app.app_watcher", logging.INFO),
+      ("app.providers.models", logging.WARNING),
+    ):
+      _diag_logger = logging.getLogger(_diag_name)
+      if _diag_handler not in _diag_logger.handlers:
+        _diag_logger.addHandler(_diag_handler)
+      _diag_logger.setLevel(_diag_level)
+  except Exception as exc:
+    _log.error("chat.log diagnostic routing failed: %s", exc, exc_info=True)
   # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
   # auto-recompile and refresh the served bundle — agents don't need to
   # re-run register_app.py just to push a code change.

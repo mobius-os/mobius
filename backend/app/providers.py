@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__name__)
+# Model-registry diagnostics ride a dedicated child logger so lifespan wiring
+# (main.py) can route them to the durable chat.log handler without also
+# capturing unrelated provider logs. A child of `app.providers`, so records
+# still propagate to stdout.
+_model_registry_log = logging.getLogger(f"{__name__}.models")
 
 
 # Fallback models per provider, ordered the same way the pickers display
@@ -1126,7 +1131,7 @@ async def list_models(
         live_ids = await _fetch_provider_models(provider_id, data_dir)
         entries = _live_model_entries(provider_id, live_ids)
       except Exception as exc:  # noqa: BLE001 — fallback is the contract
-        log.warning(
+        _model_registry_log.warning(
           "model registry fetch failed for %s: %s; using KNOWN_MODELS",
           provider_id, exc,
         )

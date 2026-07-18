@@ -78,6 +78,37 @@ from app.runner_registry import registry
 from app.runtime_types import ChatEvent
 
 
+_chat_log_handler: RotatingFileHandler | None = None
+
+
+def get_chat_log_handler() -> RotatingFileHandler:
+  """Returns the process-wide rotating handler for `/data/logs/chat.log`.
+
+  Exposed so subsystems OUTSIDE the `moebius.chat` logger tree (the app
+  watcher's merge-replay path, the provider model-registry fetch) can attach
+  the SAME handler instance and have their diagnostics survive container
+  recreation. Sharing one handler — never a second `RotatingFileHandler` on
+  the same path — is load-bearing: two handlers rotating one file race and
+  corrupt it. Memoized on first call.
+  """
+  global _chat_log_handler
+  if _chat_log_handler is None:
+    settings = get_settings()
+    log_dir = Path(settings.data_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+      log_dir / "chat.log",
+      maxBytes=50 * 1024 * 1024,
+      backupCount=3,
+      encoding="utf-8",
+    )
+    handler.setFormatter(
+      logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    _chat_log_handler = handler
+  return _chat_log_handler
+
+
 def _get_logger() -> logging.Logger:
   """Returns a logger that writes to the data/logs/chat.log file.
 
@@ -91,19 +122,7 @@ def _get_logger() -> logging.Logger:
   logger = logging.getLogger("moebius.chat")
   if logger.handlers:
     return logger
-  settings = get_settings()
-  log_dir = Path(settings.data_dir) / "logs"
-  log_dir.mkdir(parents=True, exist_ok=True)
-  handler = RotatingFileHandler(
-    log_dir / "chat.log",
-    maxBytes=50 * 1024 * 1024,
-    backupCount=3,
-    encoding="utf-8",
-  )
-  handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-  )
-  logger.addHandler(handler)
+  logger.addHandler(get_chat_log_handler())
   logger.setLevel(
     logging.DEBUG if os.getenv("MOEBIUS_CHAT_DEBUG") else logging.INFO
   )
