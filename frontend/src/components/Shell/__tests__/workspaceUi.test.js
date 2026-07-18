@@ -182,6 +182,18 @@ test('the strips are roving-tabindex toolbars (one shared implementation)', () =
   assert.match(shell, /stripKeyDown\(e, openTabs,/)
 })
 
+test('middle-click closes a tab through the shared close path (web/desktop only)', () => {
+  // auxclick with button 1 routes to the SAME onClose the ✕ uses — no parallel
+  // close mechanism (identical undo/history semantics). Shared by both strips
+  // because PaneTab is the one tab implementation.
+  assert.match(paneStrip, /onAuxClick=\{\(e\) => \{ if \(e\.button === 1\) \{ e\.preventDefault\(\); onClose\(\) \} \}\}/)
+  // mousedown button 1 is prevented so the platform autoscroll circle never shows.
+  assert.match(paneStrip, /onMouseDown=\{\(e\) => \{ if \(e\.button === 1\) e\.preventDefault\(\) \}\}/)
+  // A middle press can never arm a drag: the drag hook bails on any non-primary
+  // mouse button before it reads data-drag-key.
+  assert.match(dragBinding, /if \(e\.pointerType === 'mouse' && e\.button !== 0\) return/)
+})
+
 test('the single-pane strip derives active from the workspace, retiring isTabActive', () => {
   assert.match(shell, /active = key === focusedActiveKey/)
   // No live CALL to the retired legacy-triple predicate.

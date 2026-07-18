@@ -491,6 +491,10 @@ export default function useWorkspaceDrag({
     // ── Source detection (capture-phase, never preventDefault here) ───────────
     function onPointerDown(e) {
       if (activeCleanup) return // one session at a time
+      // Primary-button-only: a non-primary mouse button never arms a drag. This
+      // is also what lets middle-click-to-close a tab (PaneStrip's auxclick) be
+      // safe — a middle press (button 1) returns here, so it can never start a
+      // tab drag before the close fires.
       if (e.pointerType === 'mouse' && e.button !== 0) return
       if (!e.isPrimary) return
       const srcEl = e.target?.closest?.('[data-drag-key]')

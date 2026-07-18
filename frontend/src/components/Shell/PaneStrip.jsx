@@ -59,6 +59,16 @@ export function PaneTab({
         // when the splits flag is on so a flag-off build carries no drag hooks.
         data-drag-key={dragKey}
         onClick={onActivate}
+        // Middle-click closes the tab (standard browser-tab convention), routed
+        // through the SAME onClose the ✕ button uses — identical semantics (undo
+        // slot, history retargeting); no parallel close path. auxclick is the
+        // standard middle-activation event; the mousedown preventDefault stops
+        // the platform autoscroll circle from appearing on the press. Web/desktop
+        // only — middle-click has no touch equivalent, so there is nothing to gate.
+        // A middle press cannot arm a drag: useWorkspaceDrag's onPointerDown bails
+        // on any non-primary mouse button before it reads data-drag-key.
+        onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); onClose() } }}
+        onMouseDown={(e) => { if (e.button === 1) e.preventDefault() }}
         onContextMenu={onContextMenu}
       >
         <TabIcon size={13} aria-hidden="true" />
