@@ -679,6 +679,7 @@ _SECURITY_HEADER_NAMES = frozenset(name for name, _ in _SECURITY_HEADERS)
 _X_FRAME_OPTIONS = b"x-frame-options"
 _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
+_PUBLISHED_SITE_PREFIX = "/sites/"
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy.
@@ -687,6 +688,26 @@ _STATIC_EMBED_CSP = (
   "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
   "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
   "media-src 'self' blob:; worker-src 'self' blob:"
+)
+
+# Published sites (`/sites/<token>/`) are public snapshots of the owner's own
+# agent-authored artifacts and Web Studio builds. The `sandbox` directive
+# (WITHOUT allow-same-origin) forces the top-level document into an opaque
+# origin so its JS cannot read the shell origin's localStorage/cookies/JWT —
+# the credential boundary this closes. Unlike a packaged embed we do NOT lock
+# resource loading to `'self'`: `/sites/` also serves multi-file Web Studio
+# sites that may legitimately pull external assets, and the opaque-origin
+# sandbox is the actual isolation, not resource confinement. We keep the
+# sandbox capability set minimal (no modals/downloads/pointer-lock, never
+# allow-popups-to-escape-sandbox) and add cheap defense-in-depth
+# (object-src/base-uri/frame-ancestors). Residual accepted: a compromised
+# external script a published page chose to include can read that page's own
+# share token + public artifact data, but never the shell origin or the owner
+# JWT. Must be enforcing, never Report-Only. X-Frame-Options SAMEORIGIN is
+# KEPT (published pages open top-level; no cross-site framing need).
+_PUBLISHED_SITE_CSP = (
+  "sandbox allow-scripts allow-forms allow-popups; "
+  "object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
 )
 
 
@@ -720,11 +741,14 @@ class _SecurityHeadersMiddleware:
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
 
-    # Frameability and sandboxing are one policy for this exact namespace; keep
-    # both decisions adjacent so no response can receive only the exception.
-    opaque_static_embed = (scope.get("path") or "").startswith(
-      _OPAQUE_STATIC_EMBED_PREFIX
-    )
+    # Frameability and sandboxing are one policy for these namespaces; keep the
+    # decisions adjacent so no response can receive only part of the boundary.
+    path = scope.get("path") or ""
+    opaque_static_embed = path.startswith(_OPAQUE_STATIC_EMBED_PREFIX)
+    published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
+    # Both namespaces need an ENFORCED response CSP and the same protection on
+    # the generic-500 path; only the embed also drops X-Frame-Options.
+    response_sandboxed = opaque_static_embed or published_site
     response_headers = _SECURITY_HEADERS
     replaced_header_names = _SECURITY_HEADER_NAMES
     if opaque_static_embed or _frame_policy_exception(scope):
@@ -732,10 +756,15 @@ class _SecurityHeadersMiddleware:
         (name, value) for name, value in _SECURITY_HEADERS
         if name != _X_FRAME_OPTIONS
       ]
-    if opaque_static_embed:
+    if response_sandboxed:
+      csp = _STATIC_EMBED_CSP if opaque_static_embed else _PUBLISHED_SITE_CSP
+      # Copy before appending so we never mutate the _SECURITY_HEADERS module
+      # constant (the published-site branch leaves X-Frame-Options in place, so
+      # response_headers is still that shared list here).
+      response_headers = list(response_headers)
       response_headers.append((
         _CONTENT_SECURITY_POLICY,
-        _STATIC_EMBED_CSP.encode("ascii"),
+        csp.encode("ascii"),
       ))
       replaced_header_names = replaced_header_names | {
         _CONTENT_SECURITY_POLICY
@@ -761,7 +790,7 @@ class _SecurityHeadersMiddleware:
       # Starlette's unhandled-error response is outside user middleware. Send
       # this namespace's generic 500 through our wrapper before re-raising so
       # the outer layer still logs it without bypassing the sandbox boundary.
-      if opaque_static_embed and not response_started:
+      if response_sandboxed and not response_started:
         response = Response(
           "Internal Server Error",
           status_code=500,

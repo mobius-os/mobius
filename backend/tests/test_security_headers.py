@@ -11,11 +11,81 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 
 from app import main
-from app.main import _STATIC_EMBED_CSP, app
+from app.main import _PUBLISHED_SITE_CSP, _STATIC_EMBED_CSP, app
 
 
 def _headers(path="/api/health"):
   return TestClient(app).get(path).headers
+
+
+def _publish_site(token, rel, body):
+  import os
+  from pathlib import Path
+  p = Path(os.environ.get("DATA_DIR", "/tmp")) / "published" / token / rel
+  p.parent.mkdir(parents=True, exist_ok=True)
+  p.write_text(body, encoding="utf-8")
+
+
+def test_published_site_runs_at_opaque_origin_but_keeps_frame_boundary():
+  # A published /sites/ page must be sandboxed to an opaque origin (so its JS
+  # cannot read the shell's localStorage/JWT) while keeping X-Frame-Options.
+  token = "a1b2c3d4" * 4  # distinct 32-hex token; avoids other tests' fixtures
+  _publish_site(token, "index.html", "<h1>live</h1>")
+  h = TestClient(app).get(f"/sites/{token}/").headers
+  assert h.get("content-security-policy") == _PUBLISHED_SITE_CSP
+  assert "sandbox " in _PUBLISHED_SITE_CSP
+  assert "allow-same-origin" not in _PUBLISHED_SITE_CSP
+  # Do NOT lock resources to 'self' — /sites/ also serves external-asset sites.
+  assert "default-src" not in _PUBLISHED_SITE_CSP
+  # Frame boundary is kept for published pages (unlike the opaque embed).
+  assert h.get("x-frame-options") == "SAMEORIGIN"
+  assert h.get("x-content-type-options") == "nosniff"
+
+
+def test_published_site_sandbox_survives_a_404_and_a_500(monkeypatch):
+  # The boundary must ride the generic-404 and unhandled-500 paths too, not
+  # only a successful serve — an error response must never drop the sandbox.
+  h404 = TestClient(app).get("/sites/deadbeefdeadbeef/nope.html").headers
+  assert h404.get("content-security-policy") == _PUBLISHED_SITE_CSP
+
+  from app.routes import published as published_mod
+  monkeypatch.setattr(
+    published_mod, "_serve",
+    lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("serve boom")),
+  )
+  r500 = TestClient(app, raise_server_exceptions=False).get(
+    "/sites/ffffffffffffffff/"
+  )
+  assert r500.status_code == 500
+  assert r500.headers.get("content-security-policy") == _PUBLISHED_SITE_CSP
+
+
+def test_bundled_caddy_mirrors_published_site_sandbox():
+  caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
+  lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
+  # /sites/ stays inside @notFrameableEmbed so it keeps X-Frame-Options
+  # SAMEORIGIN; its shell CSP is then overridden with the sandbox policy.
+  assert "@publishedSite path /sites/*" in lines
+  assert "/sites/*" not in (
+    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover*"
+  ), "published sites must keep the SAMEORIGIN frame boundary"
+  pub_csp = next(
+    line for line in lines
+    if line.startswith("header @publishedSite >Content-Security-Policy ")
+  )
+  assert "sandbox allow-scripts" in pub_csp
+  assert "allow-same-origin" not in pub_csp
+  assert "default-src" not in pub_csp  # external-asset sites must keep loading
+  # The override must appear AFTER the shell-CSP line so it wins for /sites/.
+  shell_idx = next(
+    i for i, line in enumerate(lines)
+    if line.startswith("header @notFrameableEmbed >Content-Security-Policy ")
+  )
+  pub_idx = next(
+    i for i, line in enumerate(lines)
+    if line.startswith("header @publishedSite >Content-Security-Policy ")
+  )
+  assert pub_idx > shell_idx
 
 
 def test_standard_security_headers_present():
