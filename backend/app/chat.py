@@ -229,7 +229,7 @@ class _ChatEventSink:
   # here: publish() rejects question events outright — they go through
   # publish_question()'s save-before-broadcast barrier instead.)
   _IMMEDIATE_SAVE_TYPES = frozenset(
-    {"tool_start", "tool_end", "error"}
+    {"tool_start", "tool_end", "task_start", "task_done", "error"}
   )
 
   def __init__(self, bc, chat_id: str, run_token: str | None = None):
