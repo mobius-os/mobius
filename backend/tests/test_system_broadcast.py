@@ -102,6 +102,52 @@ def test_chat_broadcast_fans_out_to_phone_and_web_subscribers():
   assert len(bc.subscribers) == 2
 
 
+def test_task_progress_coalesces_by_task_id_in_log():
+  """A run of task_progress ticks for one sub-task collapses to ONE log entry
+  (the latest), while task_start / task_done stay discrete and the live push
+  still carries every tick verbatim (card 187)."""
+  bc = ChatBroadcast("progress-chat")
+  _, sub = bc.subscribe()
+
+  bc.publish({"type": "task_start", "task_id": "t1", "tool_use_id": "u1"})
+  bc.publish({
+    "type": "task_progress", "task_id": "t1", "last_tool_name": "Read",
+  })
+  bc.publish({
+    "type": "task_progress", "task_id": "t1", "last_tool_name": "Bash",
+  })
+  bc.publish({
+    "type": "task_progress", "task_id": "t1", "last_tool_name": "Edit",
+  })
+  bc.publish({
+    "type": "task_done", "task_id": "t1", "status": "done", "tool_use_id": "u1",
+  })
+
+  # The log holds exactly one task_progress — the LATEST tick — in its original
+  # position (right after task_start), plus the discrete start/done markers.
+  types = [e.get("type") for e in bc.event_log]
+  assert types == ["task_start", "task_progress", "task_done"]
+  progress = next(e for e in bc.event_log if e["type"] == "task_progress")
+  assert progress["last_tool_name"] == "Edit"
+
+  # A second concurrent sub-task keeps its own coalesced entry.
+  bc.publish({
+    "type": "task_progress", "task_id": "t2", "last_tool_name": "Grep",
+  })
+  bc.publish({
+    "type": "task_progress", "task_id": "t2", "last_tool_name": "Write",
+  })
+  t2 = [e for e in bc.event_log if e.get("task_id") == "t2"]
+  assert len(t2) == 1 and t2[0]["last_tool_name"] == "Write"
+
+  # The live wire is never coalesced: subscribers saw every raw event.
+  live = [sub.get_nowait() for _ in range(7)]
+  assert [e.get("type") for e in live] == [
+    "task_start", "task_progress", "task_progress", "task_progress",
+    "task_done", "task_progress", "task_progress",
+  ]
+
+
 def _drain_actor():
   """Block until the writer actor has processed everything queued so far.
 

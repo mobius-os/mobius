@@ -95,6 +95,34 @@ class ChatBroadcast:
     self.completed_at: Optional[float] = None
     self.last_event_at: Optional[float] = time.monotonic()
 
+  def _coalesce_task_progress(self, event: dict) -> bool:
+    """Replace a prior same-task_id `task_progress` entry in place (card 187).
+
+    A background sub-task emits a `task_progress` tick (usage + last_tool_name)
+    repeatedly while it runs. Each tick is cumulative, so only the LATEST per
+    task_id is meaningful on reconnect catch-up; appending every tick would grow
+    event_log without bound for a long-running sub-task. Find the existing
+    task_progress for this task_id and overwrite it in place — keeping its
+    position in the stream stable — mirroring the adjacent-text coalescing
+    above. Unlike text, ticks are not adjacent (tool/text events interleave), so
+    scan the log rather than only its tail. `task_start` / `task_done` are
+    discrete lifecycle markers and are never coalesced. Returns True when an
+    existing entry was replaced (caller must not also append), False when this is
+    the first tick for the task (caller appends).
+    """
+    task_id = event.get("task_id")
+    if task_id is None:
+      return False
+    for i in range(len(self.event_log) - 1, -1, -1):
+      prior = self.event_log[i]
+      if (
+        prior.get("type") == "task_progress"
+        and prior.get("task_id") == task_id
+      ):
+        self.event_log[i] = event
+        return True
+    return False
+
   def publish(self, event: dict):
     """Appends event to log and pushes to all subscriber queues.
 
@@ -103,7 +131,8 @@ class ChatBroadcast:
     is always the raw event — coalescing is log-only so in-flight streaming
     clients receive every chunk verbatim. A reconnecting client replays the
     coalesced log, which is semantically equivalent (same final text) with
-    fewer entries.
+    fewer entries. `task_progress` ticks coalesce by task_id the same way (see
+    _coalesce_task_progress).
 
     When the log reaches _EVENT_LOG_MAX the oldest entry is dropped to keep
     the cap. The tail (most recent state) is always preserved.
@@ -132,6 +161,9 @@ class ChatBroadcast:
       self.event_log[-1] = dict(
         prev, content=(prev.get("content") or "") + (event.get("content") or "")
       )
+    elif event_type == "task_progress" and self._coalesce_task_progress(event):
+      # Replaced the prior same-task_id tick in place; nothing to append.
+      pass
     else:
       self.event_log.append(event)
       # Drop the oldest entry when the cap is exceeded to bound memory.
