@@ -1464,3 +1464,16 @@ async def test_turn_without_rate_limit_event_has_no_resets_key(monkeypatch):
 
   assert result["error"] is None
   assert "rate_limit_resets_at" not in result
+
+
+def test_clip_task_text_bounds_and_coerces():
+  """task_* text is clipped at emission: None stays None, an oversized string is
+  truncated, and a non-string (SDK shape drift) is coerced so it can't crash a
+  downstream render."""
+  from app.claude_sdk_runner import _clip_task_text
+  assert _clip_task_text(None, 100) is None
+  assert _clip_task_text("ok", 100) == "ok"
+  big = "x" * 5000
+  out = _clip_task_text(big, 2000)
+  assert len(out) == 2000 and out.endswith("…")
+  assert _clip_task_text({"a": 1}, 100) == "{'a': 1}"

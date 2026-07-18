@@ -114,6 +114,30 @@ from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
 
 
+# Bounds for the subagent task_* text fields. Unlike ordinary tool output these
+# never pass through the excerpt/stash reducer, so they are clipped at emission
+# to keep an oversized provider string off the wire, the in-memory event log,
+# and Chat.messages. A description/summary is a one-line label + short outcome; a
+# last_tool_name is a tool name — both are generous.
+_TASK_TEXT_CAP = 2000
+_TASK_LABEL_CAP = 200
+
+
+def _clip_task_text(value: object, cap: int) -> str | None:
+  """Coerce a task_* text field to a bounded string (or None).
+
+  None passes through as None (a genuinely absent field). Anything else is
+  str()-coerced — so SDK shape drift that hands us a non-string can't ride
+  through to a React child and crash the render — then truncated to ``cap``.
+  """
+  if value is None:
+    return None
+  text = value if isinstance(value, str) else str(value)
+  if len(text) > cap:
+    return text[: cap - 1] + "…"
+  return text
+
+
 def _thinking_event(content: str, segment_id: str | None = None) -> dict:
   """Build a reasoning delta, preserving its content-block identity."""
   event = {
@@ -668,10 +692,15 @@ def dispatch_sdk_message(
     if isinstance(sdk_msg, TaskStartedMessage):
       # tool_use_id ties this sub-task back to the parent turn's tool call that
       # spawned it, so an observer can nest task events under their tool block.
+      # description/summary/last_tool_name are clipped at emission: unlike
+      # ordinary tool output they bypass the excerpt/stash reduction, so an
+      # oversized provider string would otherwise ride the wire, the in-memory
+      # event log, and Chat.messages verbatim. Clipping also coerces a
+      # non-string (SDK shape drift) to text so a downstream render can't crash.
       bc.publish({
         "type": "task_start",
         "task_id": sdk_msg.task_id,
-        "description": sdk_msg.description,
+        "description": _clip_task_text(sdk_msg.description, _TASK_TEXT_CAP),
         "task_type": sdk_msg.task_type,
         "tool_use_id": sdk_msg.tool_use_id,
       })
@@ -681,7 +710,7 @@ def dispatch_sdk_message(
         "type": "task_progress",
         "task_id": sdk_msg.task_id,
         "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
-        "last_tool_name": sdk_msg.last_tool_name,
+        "last_tool_name": _clip_task_text(sdk_msg.last_tool_name, _TASK_LABEL_CAP),
         "tool_use_id": sdk_msg.tool_use_id,
       })
       return current_session_id, None
@@ -690,7 +719,7 @@ def dispatch_sdk_message(
         "type": "task_done",
         "task_id": sdk_msg.task_id,
         "status": sdk_msg.status,
-        "summary": sdk_msg.summary,
+        "summary": _clip_task_text(sdk_msg.summary, _TASK_TEXT_CAP),
         "tool_use_id": sdk_msg.tool_use_id,
       })
       return current_session_id, None

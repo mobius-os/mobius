@@ -54,9 +54,15 @@ function elapsedMs(helper, now) {
 // one-line summary if the backend provided one.
 function subLine(helper) {
   if (helper.status === 'running') {
-    return helper.last_tool_name ? toolActivityLabel(helper.last_tool_name) : null
+    // String-coerce before toolActivityLabel: it returns its input verbatim for
+    // an unknown tool name, so a non-string (SDK shape drift / a malformed
+    // persisted block) would otherwise reach a React child and throw "Objects
+    // are not valid as a React child". The runner also clips this at emission;
+    // this is the render-side backstop for legacy/other-provider data.
+    return helper.last_tool_name != null
+      ? toolActivityLabel(String(helper.last_tool_name)) : null
   }
-  return helper.summary ? String(helper.summary) : null
+  return helper.summary != null ? String(helper.summary) : null
 }
 
 function StatusDot({ status }) {
