@@ -65,6 +65,18 @@ export const WORKSPACE_SPLITS_ENABLED = (() => {
   try { return localStorage.getItem('mobius:workspace-splits') !== '0' } catch { return true }
 })()
 
+// Kill switch for the builder-mode Settings tab. When enabled (the default),
+// sanitizeTab accepts the canonical `settings:settings` tab so Settings can live
+// in a pane; the nav adapter opens it as a tab in builder mode and as the
+// takeover overlay in single mode. When DISABLED, sanitizeTab drops a Settings
+// tab exactly like an unknown kind — so a rolled-back client (feature shipped,
+// then flag turned off) SCRUBS any persisted Settings tab before first render
+// and reverts to today's overlay everywhere (design: flag-off sanitization).
+// Read once at module load, mirroring WORKSPACE_SPLITS_ENABLED. '0' disables.
+export const BUILDER_SETTINGS_ENABLED = (() => {
+  try { return localStorage.getItem('mobius:builder-settings') !== '0' } catch { return true }
+})()
+
 // The smallest a pane may be. canSplit refuses a split whose either resulting
 // child would fall below this within the pane's current projected rect — the
 // shared feasibility predicate drag/menu/resolver all consult (design §3.2,
@@ -136,9 +148,22 @@ function clampRatio(ratio) {
 // Coerce one raw tab to a canonical tabModel tab, or null if it can't be a live
 // tab: this is tabModel.readOpenTabs's posture — drop unknown kinds, missing
 // ids, and app ids that aren't finite numbers (they would become NaN in
-// tabNavTarget and never resolve).
+// tabNavTarget and never resolve). The Settings tab is the one non-chat/app kind
+// accepted, and only under two conditions that make single-instance and rollback
+// safety structural rather than guarded-around:
+//   - the builder flag is ON — a flag-off (or older) shell drops it like any
+//     unknown kind, scrubbing a persisted Settings tab before first render;
+//   - the id is exactly the canonical 'settings' — a foreign settings id is NOT
+//     coerced to the canonical one (that would silently merge two distinct
+//     stored tabs into one key), it is dropped.
 function sanitizeTab(raw) {
-  if (!raw || (raw.kind !== 'chat' && raw.kind !== 'app') || raw.id == null) return null
+  if (!raw || raw.id == null) return null
+  if (raw.kind === 'settings') {
+    return (BUILDER_SETTINGS_ENABLED && String(raw.id) === tabModel.SETTINGS_ID)
+      ? tabModel.settingsTab()
+      : null
+  }
+  if (raw.kind !== 'chat' && raw.kind !== 'app') return null
   if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) return null
   return tabModel.makeTab(raw.kind, raw.id)
 }
@@ -428,6 +453,12 @@ export function focusedContentRoute(ws) {
   if (pane && activeKey) {
     const tab = pane.tabs.find(t => tabModel.tabKey(t) === activeKey)
     if (tab) {
+      // Settings carries no chat/app id — the focused pane simply shows the
+      // Settings surface. The derived `activeView` reads 'settings' whether that
+      // is a builder tab (here) OR the global overlay; the render tells them
+      // apart via the SEPARATE settingsOverlayOpen flag, never via this route
+      // (design: the overlay must not be conflated with focused-content-is-Settings).
+      if (tab.kind === 'settings') return { view: 'settings', chatId: null, appId: null, paneId }
       const { view, opts } = tabModel.tabNavTarget(tab)
       if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
       return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
@@ -920,6 +951,10 @@ export function flatten(ws) {
 // readOpenTabs keeps the LAST MAX_TABS, so the most relevant tabs must come
 // last: every background (non-focused) pane's tabs first, then the focused
 // pane's other tabs, then its active tab dead last so a rollback keeps it.
+// The Settings tab is filtered out: this projection feeds a chat/app-only
+// rollback mirror (readOpenTabs drops it on read anyway), so it never belongs
+// in the legacy key — dropping it here also keeps a chat/app active-last even
+// when Settings is the focused active tab.
 export function flattenRollbackPriority(ws) {
   const out = []
   const focusedId = ws.focusedPaneId
@@ -937,7 +972,7 @@ export function flattenRollbackPriority(ws) {
     const activeTab = focused.tabs.find(tab => tabModel.tabKey(tab) === active)
     if (activeTab) out.push(activeTab)
   }
-  return out
+  return out.filter(tab => !tabModel.isSettingsTab(tab))
 }
 
 // ── Projection: the tree → renderable geometry (design §4) ──────────────────

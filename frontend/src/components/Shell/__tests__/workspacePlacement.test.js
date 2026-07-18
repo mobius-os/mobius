@@ -159,6 +159,28 @@ test('open_item drops malformed item ids but OMITS a malformed source (degrade)'
   assert.equal(r.placement, PLACE_WITH_FOCUS, 'no source → default with-focus')
 })
 
+// Agents place chats and apps only; Settings is an owner-driven surface, never
+// an agent-requestable item. The itemKind whitelist (chat|app) is the structural
+// exclusion — a 'settings' open-item is dropped exactly like any unknown kind,
+// so no resolver path, source, or activation can smuggle a Settings tab into a
+// pane on the agent's behalf. (The backend open_item enum excludes it too.)
+test('an agent open_item can NEVER request the Settings tab', () => {
+  assert.equal(openItemWorkspaceRequest({ itemKind: 'settings', itemId: 'settings' }), null)
+  assert.equal(openItemWorkspaceRequest({
+    itemKind: 'settings', itemId: 'settings', activation: 'foreground',
+  }), null)
+  // Even paired with a valid relational source it is dropped, not degraded.
+  assert.equal(openItemWorkspaceRequest({
+    itemKind: 'settings', itemId: 'settings', sourceKind: 'chat', sourceId: 'c',
+    placement: PLACE_BESIDE_SOURCE,
+  }), null)
+  // The system-event bridge is the other agent entry point — it too yields nothing.
+  assert.equal(
+    workspaceRequestFromSystemEvent({ type: 'open_item', itemKind: 'settings', itemId: 'settings' }),
+    null,
+  )
+})
+
 // ── background attention target (design §6.2 dot) ───────────────────────────
 
 test('attentionForRequest flags a background open by kind, and nothing for foreground', () => {

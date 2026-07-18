@@ -90,3 +90,29 @@ test('writeOpenTabs round-trips through readOpenTabs', () => {
   tabModel.writeOpenTabs(tabs, store)
   assert.deepEqual(tabModel.readOpenTabs(store), tabs)
 })
+
+// ── Settings tab (builder mode) ─────────────────────────────────────────────
+
+test('settingsTab is the one canonical single-instance tab', () => {
+  assert.deepEqual(tabModel.settingsTab(), { kind: 'settings', id: 'settings' })
+  assert.equal(tabModel.tabKey(tabModel.settingsTab()), tabModel.SETTINGS_TAB_KEY)
+  assert.equal(tabModel.SETTINGS_TAB_KEY, 'settings:settings')
+  assert.ok(tabModel.isSettingsTab(tabModel.settingsTab()))
+  assert.ok(!tabModel.isSettingsTab(tabModel.makeTab('chat', 'settings')))
+})
+
+test('tabNavTarget maps the Settings tab to the settings view with no opts', () => {
+  assert.deepEqual(tabModel.tabNavTarget(tabModel.settingsTab()), { view: 'settings' })
+})
+
+test('readOpenTabs keeps the legacy projection chat/app-only (drops Settings)', () => {
+  const store = fakeStorage(JSON.stringify([
+    { kind: 'chat', id: 'a' },
+    { kind: 'settings', id: 'settings' },
+    { kind: 'app', id: 7 },
+  ]))
+  assert.deepEqual(tabModel.readOpenTabs(store), [
+    { kind: 'chat', id: 'a' },
+    { kind: 'app', id: '7' },
+  ])
+})
