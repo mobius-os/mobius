@@ -831,7 +831,13 @@ async def _send_message_locked(
         user_msgs = [reserved]
         consume_cids = [reserved_cid] if reserved_cid is not None else []
         steer_content = reserved.get("content", "")
-      # Claude converts at its interrupt boundary; its buffer is only a cache.
+      # Claude defers the A1/Q2 transcript split to the runner: at HTTP
+      # arrival the pre-interrupt text A1 has often not streamed yet, so
+      # a route-side split seals an EMPTY A1 and the real A1 then merges
+      # with A2 after the steered row (the fast-forward dropped-message
+      # bug). The runner splits at the interrupt boundary where A1 is
+      # complete. The reserved pending row is the durable copy; the
+      # handle buffer is only a delivery cache.
       defer_to_runner = provider == "claude"
       try:
         steered = await _steer_into_active_turn(
@@ -866,6 +872,11 @@ async def _send_message_locked(
               chat_id, user_msgs, consume_cids,
             )
           except Exception:
+            # The live turn has already absorbed the steer — it cannot be
+            # un-steered. The reserved pending row is still durable, so
+            # nothing is lost: a retry on the same cid re-converts without
+            # re-steering, and an abandoned retry drains via the idle
+            # sweep or the next send.
             log.warning(
               "steered transcript write did not persist chat_id=%s", chat_id,
             )

@@ -1552,6 +1552,14 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     pending = list(chat.pending_messages or [])
     if not _pending_head_is_stale(pending, now_ms):
       continue
+    # A limit-parked queue is NOT abandoned work: LIMIT_PARKED preserves
+    # pending precisely so it is not fired back into the exhausted limit
+    # (chat_queue.TerminalDisposition), and resuming it belongs to
+    # sweep_reset_parks (owner opt-in) or the user's own next send. The
+    # park row outlives run_status, so run_status IS NULL alone cannot
+    # distinguish "crashed drain" from "parked on purpose".
+    if _parked_until_for_chat(db, chat.id) is not None:
+      continue
     claimed = False
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
@@ -1562,6 +1570,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
             if (
               chat.run_status is not None
               or not _pending_head_is_stale(pending, now_ms)
+              or _parked_until_for_chat(db, chat.id) is not None
               or not mark_starting(chat.id)
             ):
               continue

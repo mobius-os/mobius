@@ -3367,5 +3367,9 @@ def supervise_writer() -> bool:
   if writer_needs_respawn():
     log.error("chat writer respawn did not produce a live actor")
   else:
-    log.error("chat writer respawn launched a fresh actor")
+    # A clean recovery is loud but not an ERROR: the standing error
+    # monitor greps chat.log for ERROR, and a self-healed blip must not
+    # read as an active incident. The fatal entry itself already logged
+    # at ERROR.
+    log.warning("chat writer respawn launched a fresh actor")
   return True

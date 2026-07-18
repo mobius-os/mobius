@@ -118,3 +118,76 @@ def test_idle_pending_sweep_respects_age_gate(monkeypatch):
   assert status is None
   assert [cid_of(row) for row in pending] == [f"cid-{chat_id}"]
   assert not registry.is_alive(chat_id)
+
+
+def _park_latest_run(chat_id: str, *, minutes_out: float) -> None:
+  from datetime import timedelta
+  db = SessionLocal()
+  try:
+    db.add(models.ChatRun(
+      id=f"rt-park-{chat_id}",
+      chat_id=chat_id,
+      status="parked",
+      started_at=datetime.now(UTC).replace(tzinfo=None),
+      parked_until=(
+        datetime.now(UTC).replace(tzinfo=None)
+        + timedelta(minutes=minutes_out)
+      ),
+      park_reason="provider_limit",
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+
+def test_idle_pending_sweep_leaves_limit_parked_queue_alone(monkeypatch):
+  """LIMIT_PARKED preserves pending so it is NOT refired into the limit.
+
+  The park row outlives run_status (ParkRun clears the marker), so a
+  parked chat looks idle to the run_status filter. Draining it would
+  consume the owner's queued work into a doomed turn and bypass the
+  auto-resume opt-in that sweep_reset_parks enforces.
+  """
+  chat_id = "idle-limit-parked"
+  _seed_pending(chat_id, age_secs=600)
+  _park_latest_run(chat_id, minutes_out=30)
+
+  swept, scheduled = _sweep(monkeypatch)
+
+  assert swept == []
+  assert scheduled == []
+  run_status, _messages, pending = _read(chat_id)
+  assert run_status is None
+  assert [m["content"] for m in pending] == ["recover me"]
+
+
+def test_idle_pending_sweep_skips_past_park_until_user_or_optin(monkeypatch):
+  """Even an EXPIRED park is not the idle sweep's to drain.
+
+  After the reset, resumption belongs to sweep_reset_parks (when the
+  owner opted in) or the user's own next send — never this sweep.
+  """
+  chat_id = "idle-expired-park"
+  _seed_pending(chat_id, age_secs=600)
+  _park_latest_run(chat_id, minutes_out=-5)
+
+  swept, scheduled = _sweep(monkeypatch)
+
+  assert swept == []
+  assert scheduled == []
+  _run_status, _messages, pending = _read(chat_id)
+  assert [m["content"] for m in pending] == ["recover me"]
+
+
+def test_idle_pending_sweep_stands_down_while_draining(monkeypatch):
+  """The restart drain gate owns the queue during a drain window."""
+  chat_id = "idle-during-drain"
+  _seed_pending(chat_id, age_secs=600)
+  monkeypatch.setattr(chat_mod, "draining", True)
+
+  swept, scheduled = _sweep(monkeypatch)
+
+  assert swept == []
+  assert scheduled == []
+  _run_status, _messages, pending = _read(chat_id)
+  assert [m["content"] for m in pending] == ["recover me"]
