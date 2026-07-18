@@ -353,19 +353,47 @@
      (the offline pill, when shown, keeps its own margin-left:auto and trails just
      before this control in the right cluster). */
   margin-left: auto;
-  width: 36px;
-  height: 36px;
+  /* At least a 44px touch target (design) — the glyph stays 18px, the button grows
+     its hit area. */
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   border: none;
-  border-radius: 9px;
+  border-radius: 11px;
   background: none;
   color: var(--muted);
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
   -webkit-tap-highlight-color: transparent;
+  /* Suppress the double-tap zoom on the target (so a quick double-activation is a
+     builder-enter, not a browser zoom) while KEEPING vertical scroll and pinch
+     zoom — the button owns only the horizontal swipe. Viewport zoom is never
+     disabled globally. */
+  touch-action: pan-y pinch-zoom;
+}
+/* The morph: ONE outer frame, a center divider that fades/scales between builder
+   (divider present) and single screen (divider faded). A CSS transition (~200ms,
+   the design's 180-220ms band) carries the state change; the is-morphing flourish
+   is a one-shot pop replayed on a double/swipe even when the mode is unchanged. */
+.shell__viewmode-glyph { overflow: visible; }
+.shell__viewmode-divider {
+  transform-origin: center;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+.shell__viewmode[aria-pressed="true"] .shell__viewmode-divider {
+  opacity: 0;
+  transform: scaleY(0.5);
+}
+.shell__viewmode.is-morphing .shell__viewmode-divider {
+  animation: shell-viewmode-morph 200ms ease;
+}
+@keyframes shell-viewmode-morph {
+  0% { transform: scaleY(0.4); opacity: 0; }
+  60% { transform: scaleY(1.18); opacity: 1; }
+  100% { transform: scaleY(1); opacity: 1; }
 }
 /* When the offline pill is present it already claims the auto margin, so keep a
    small gap before this control rather than a second full push. */
@@ -409,6 +437,9 @@
     animation: shell-viewmode-pulse 0.4s ease;
     transform: none;
   }
+  /* The morph switches INSTANTLY — no divider transition, no flourish animation. */
+  .shell__viewmode-divider { transition: none; }
+  .shell__viewmode.is-morphing .shell__viewmode-divider { animation: none; }
 }
 @keyframes shell-viewmode-pulse {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }

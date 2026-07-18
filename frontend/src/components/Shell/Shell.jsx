@@ -1060,6 +1060,15 @@ export default function Shell() {
     convertSettingsForModeTransition()
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
   }, [convertSettingsForModeTransition, dispatchWorkspace])
+  // The delightful double-activation + touch-swipe destination: idempotently
+  // ENTER builder mode. A no-op (state-wise) when already in builder — the toggle
+  // component still replays its morph flourish. When in single mode it runs the
+  // same overlay->tab conversion the toggle does, then flips to 'panes'.
+  const handleEnterBuilder = useCallback(() => {
+    if (workspaceStateRef.current.ws.viewMode === 'panes') return
+    convertSettingsForModeTransition()
+    dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'panes' })
+  }, [convertSettingsForModeTransition, dispatchWorkspace, workspaceStateRef])
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
@@ -2500,6 +2509,7 @@ export default function Shell() {
           <ViewModeToggle
             viewMode={workspace.viewMode}
             onToggle={handleToggleViewMode}
+            onEnterBuilder={handleEnterBuilder}
             vibrateRef={viewModeVibrateRef}
           />
         )}

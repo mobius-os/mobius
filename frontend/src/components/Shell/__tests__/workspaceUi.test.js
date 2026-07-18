@@ -249,24 +249,60 @@ test('the view-mode toggle is rendered in the shell top bar, in line with the lo
   assert.match(rule, /margin-left:\s*auto/)
 })
 
-test('the toggle exposes aria-pressed + a mode-specific aria-label and reads as a toggle', () => {
+test('the toggle exposes aria-pressed + a builder/single aria-label and reads as a toggle', () => {
   assert.match(viewModeToggleSrc, /aria-pressed=\{single\}/)
-  assert.match(viewModeToggleSrc, /aria-label=\{single \? 'Single screen' : 'Split panes'\}/)
-  assert.match(viewModeToggleSrc, /single \? <SingleGlyph \/> : <PanesGlyph \/>/)
+  assert.match(viewModeToggleSrc, /aria-label=\{single \? 'Single screen' : 'Builder mode'\}/)
+  // ONE morphing glyph (a single outer frame + a center divider), not a two-SVG swap.
+  assert.match(viewModeToggleSrc, /<ViewGlyph \/>/)
+  assert.match(viewModeToggleSrc, /className="shell__viewmode-divider"/)
+  assert.doesNotMatch(viewModeToggleSrc, /SingleGlyph|PanesGlyph/)
+})
+
+test('the toggle activation: instant tap, no-delay double → enter builder, touch swipe', () => {
+  // Single tap flips instantly via onToggle; a SECOND activation inside the window
+  // is swallowed and idempotently enters builder. There is NO delay on the tap.
+  assert.match(viewModeToggleSrc, /const DOUBLE_MS = 300/)
+  assert.match(viewModeToggleSrc, /now - lastActivateRef\.current < DOUBLE_MS/)
+  assert.match(viewModeToggleSrc, /if \(isDouble\) enterBuilder\(\)\s*\n\s*else onToggle\?\.\(\)/)
+  // Touch swipe-right (touch pointers only, dx >= 28, horizontal-dominant) enters builder.
+  assert.match(viewModeToggleSrc, /const SWIPE_DX = 28/)
+  assert.match(viewModeToggleSrc, /e\.pointerType === 'touch'/)
+  assert.match(viewModeToggleSrc, /dx >= SWIPE_DX && Math\.abs\(dx\) > Math\.abs\(dy\)/)
+  // enterBuilder calls the prop + replays the morph.
+  assert.match(viewModeToggleSrc, /onEnterBuilder\?\.\(\)/)
 })
 
 test('the bar toggle never opens or closes the drawer (pure state flip)', () => {
-  // The toggle button only calls onToggle — no drawer open/close CALL/handler in
+  // The toggle button only flips mode / enters builder — no drawer open/close in
   // the component (prose is fine; a usage is not).
-  assert.match(viewModeToggleSrc, /onClick=\{onToggle\}/)
+  assert.match(viewModeToggleSrc, /onClick=\{handleClick\}/)
   assert.doesNotMatch(viewModeToggleSrc, /onClose[=(?]/)
   assert.doesNotMatch(viewModeToggleSrc, /openDrawer|closeDrawer/)
-  // And Shell's toggle handler flips the mode + converts the Settings surface
-  // (overlay <-> builder tab) — but it must not touch the drawer.
+  // Shell's toggle handler flips the mode + converts the Settings surface (overlay
+  // <-> builder tab); the builder-enter handler is idempotent when already builder.
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
+  const enter = shell.match(/const handleEnterBuilder = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  assert.match(enter, /viewMode === 'panes'\) return/)
+  assert.match(enter, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'panes' \}\)/)
+})
+
+test('the toggle is a >=44px target with pan-y pinch-zoom and a CSS-only morph', () => {
+  const rule = shellCss.match(/\.shell__viewmode\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /width:\s*44px/)
+  assert.match(rule, /height:\s*44px/)
+  // Suppress double-tap zoom, keep vertical scroll + pinch (never disable viewport zoom).
+  assert.match(rule, /touch-action:\s*pan-y pinch-zoom/)
+  // The divider morphs via a ~200ms transition (design's 180-220ms band) + a keyframe.
+  const divider = shellCss.match(/\.shell__viewmode-divider\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(divider, /transition:\s*opacity 200ms[^;]*, transform 200ms/)
+  assert.match(shellCss, /@keyframes shell-viewmode-morph/)
+  assert.match(shellCss, /\.shell__viewmode\[aria-pressed="true"\] \.shell__viewmode-divider/)
+  // Reduced motion switches instantly (no transition, no flourish animation).
+  assert.match(shellCss, /\.shell__viewmode-divider \{ transition: none; \}/)
+  assert.match(shellCss, /\.shell__viewmode\.is-morphing \.shell__viewmode-divider \{ animation: none; \}/)
 })
 
 test('Shell threads viewMode into the content derivation and the per-pane chat gate', () => {
