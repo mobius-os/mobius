@@ -234,3 +234,32 @@ def test_chat_logs_install_validates_chat_log_access_value():
     assert False, "expected HTTPException for bad chat_log_access"
   except HTTPException as exc:
     assert exc.status_code == 400
+
+
+def test_chat_logs_orders_by_activity_not_updated(client, owner_token, db):
+  """Recency follows activity_at, matching the owner's drawer.
+
+  updated_at also moves on non-activity writes (a snapshot backfill
+  once bumped it for 312 historical chats), so a row whose updated_at
+  is newest but whose activity_at is oldest must still list last.
+  """
+  from datetime import datetime
+
+  old = _seed_chat(db, chat_id="old-activity")
+  new = _seed_chat(db, chat_id="new-activity")
+  # The "old" chat was touched by a migration (fresh updated_at) but
+  # its real activity predates the "new" chat's.
+  old.activity_at = datetime(2026, 1, 1)
+  old.updated_at = datetime(2026, 7, 1)
+  new.activity_at = datetime(2026, 6, 1)
+  new.updated_at = datetime(2026, 2, 1)
+  db.commit()
+
+  app = _make_app(db, "orderer", chat_log_access="summary")
+  token = _app_token(client, owner_token, app.id)
+  lst = client.get(
+    "/api/chat-logs", headers={"Authorization": f"Bearer {token}"},
+  )
+  assert lst.status_code == 200
+  ids = [i["id"] for i in lst.json()["items"]]
+  assert ids.index("new-activity") < ids.index("old-activity")

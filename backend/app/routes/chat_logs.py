@@ -22,6 +22,7 @@ who looked at what — closing the B↔C loop in the design.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import activity, chat_log_redaction as redact, models
@@ -73,10 +74,21 @@ def list_chat_logs(
   """
   _gate_summary(principal, db)
 
+  # Recency means "last real activity", same as the owner's drawer
+  # (routes/chats.py). updated_at also moves on non-activity writes —
+  # a backfill migration once bumped it for 312 historical chats and
+  # scrambled this listing — so activity_at leads and updated_at is
+  # only the fallback for rows that predate the column.
+  # id breaks timestamp ties so offset pagination is deterministic —
+  # equal keys with unspecified order can duplicate or drop rows
+  # across pages.
   base = (
     db.query(models.Chat)
     .filter(models.Chat.deleted_at.is_(None))
-    .order_by(models.Chat.updated_at.desc())
+    .order_by(
+      func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
+      models.Chat.id.desc(),
+    )
   )
   rows = base.offset(cursor).limit(limit + 1).all()
   has_more = len(rows) > limit
