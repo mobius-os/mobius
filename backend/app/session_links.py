@@ -112,5 +112,17 @@ def record_session_link(
     db.rollback()
     existing = db.get(models.ChatSessionLink, (provider, session_id))
     if existing is not None:
-      existing.last_seen_at = now
+      # Mirror the ordinary existing-row path: only re-sight (bump last_seen_at)
+      # when the winner maps to the SAME chat. A different chat_id means the
+      # winner owns this session id (first-writer-wins attribution); bumping its
+      # recency for our losing sighting would corrupt the audit ordering.
+      if existing.chat_id != chat_id:
+        log.warning(
+          "session-link race conflict: (%s, %s) won by chat %s, not %s — "
+          "keeping the first binding", provider, session_id,
+          existing.chat_id, chat_id,
+        )
+        return
+      if existing.last_seen_at is None or existing.last_seen_at < now:
+        existing.last_seen_at = now
       db.commit()
