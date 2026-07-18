@@ -435,6 +435,7 @@ async def lifespan(app):
   _writer_supervisor_task = None
   try:
     from app.chat import (
+      sweep_idle_pending_chats,
       sweep_reset_parks,
       sweep_stalled_live_runs,
       sweep_wedged_run_markers,
@@ -448,6 +449,7 @@ async def lifespan(app):
           _sw_db = _SweepSession()
           try:
             await sweep_wedged_run_markers(_sw_db)
+            await sweep_idle_pending_chats(_sw_db)
           finally:
             _sw_db.close()
         except _asyncio.CancelledError:

@@ -41,14 +41,9 @@ lock acquisition. It does NOT call back into `run_chat`; the caller
 (chat.py:_run_chat_impl) schedules the continuation AFTER the lock
 releases.
 
-Markerless pending queues are a tolerated steady state. A Stop's
-`ClearPending` committing just before a racing POST's `AppendPending`
-leaves `run_status=None` with a non-empty queue. Boot reconciliation
-(which only scans `run_status="running"`) deliberately does NOT consume
-these — auto-promoting at startup would spawn a turn after a crash. The
-repair path is the NEXT POST's stale-pending drain: it claims
-`mark_starting` and promotes queued follow-ups. Reconciliation only logs a warning
-so an accumulating queue is visible (see `reconcile_interrupted_chats`).
+Markerless pending queues are recoverable state. Boot reconciliation leaves
+them intact; the age-gated idle sweep or the next POST claims `mark_starting`
+before promoting them.
 """
 
 from __future__ import annotations

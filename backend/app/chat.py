@@ -1356,15 +1356,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     db.rollback()
     log.exception("reconcile_interrupted_chats: orphan run sweep failed")
 
-  # Markerless pending queues: a Stop's ClearPending committing BEFORE a
-  # racing POST's AppendPending leaves run_status=None with a non-empty queue.
-  # The stale scan above only matches run_status="running", so these are NOT
-  # recovered here — and must not be: auto-promoting at startup would spawn a
-  # turn after a crash, which startup deliberately avoids. The repair path is
-  # the next POST's stale-pending drain (it claims mark_starting and promotes
-  # the head). Surface them as a warning so an accumulating, never-drained
-  # queue is visible rather than silent. (The set is bounded — single-owner —
-  # and this runs once at boot, so the broad idle-chat scan is acceptable.)
+  # Boot never starts markerless work; the age-gated runtime sweep claims it.
   try:
     markerless = (
       db.query(models.Chat)
@@ -1376,7 +1368,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       if chat.pending_messages:
         log.warning(
           "reconcile_interrupted_chats: markerless pending queue chat_id=%s "
-          "count=%d; left intact for the next-POST stale-pending drain",
+          "count=%d; left intact for the age-gated pending sweep",
           chat.id, len(chat.pending_messages),
         )
   except Exception:
@@ -1520,6 +1512,101 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
       "swept %d wedged run marker(s): %s", len(swept), ", ".join(swept),
     )
   return swept
+
+
+_IDLE_PENDING_MIN_AGE_SECS = 120.0
+
+
+def _pending_head_is_stale(
+  pending: list[dict], now_ms: int,
+) -> bool:
+  """Whether the queue head is old enough for an unattended claim."""
+  if not pending or not isinstance(pending[0], dict):
+    return False
+  timestamp = pending[0].get("ts")
+  if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+    return False
+  age_ms = _IDLE_PENDING_MIN_AGE_SECS * 1000
+  return timestamp <= now_ms - age_ms
+
+
+async def sweep_idle_pending_chats(db: Session) -> list[str]:
+  """Claim and start old pending queues whose chat has no run owner."""
+  log = _get_logger()
+  started: list[str] = []
+  if draining:
+    return started
+  try:
+    candidates = (
+      db.query(models.Chat)
+      .filter(models.Chat.run_status.is_(None))
+      .filter(models.Chat.deleted_at.is_(None))
+      .all()
+    )
+  except Exception:
+    log.exception("sweep_idle_pending_chats: query failed")
+    return started
+
+  now_ms = int(time.time() * 1000)
+  for chat in candidates:
+    pending = list(chat.pending_messages or [])
+    if not _pending_head_is_stale(pending, now_ms):
+      continue
+    claimed = False
+    try:
+      async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+        async with chat_queue.get_transition_lock(chat.id):
+          async with chat_queue.get_lock(chat.id):
+            db.expire(chat)
+            pending = list(chat.pending_messages or [])
+            if (
+              chat.run_status is not None
+              or not _pending_head_is_stale(pending, now_ms)
+              or not mark_starting(chat.id)
+            ):
+              continue
+            claimed = True
+            run_token = alloc_run_token()
+            messages, next_user, session_id = (
+              await chat_queue.promote_pending_messages_locked(
+                db, chat.id, run_token,
+              )
+            )
+            if next_user is None:
+              discard_starting(chat.id)
+              claimed = False
+              continue
+            get_system_broadcast().publish({
+              "type": "chat_run_started",
+              "chatId": chat.id,
+            })
+            if _schedule_continuation(
+              chat_id=chat.id,
+              messages=messages,
+              session_id=session_id,
+              provider_id=chat.provider,
+              next_user=next_user,
+              run_token=run_token,
+            ):
+              started.append(chat.id)
+            claimed = False
+    except asyncio.CancelledError:
+      if claimed:
+        discard_starting(chat.id)
+      raise
+    except Exception:
+      if claimed:
+        discard_starting(chat.id)
+      log.warning(
+        "idle-pending sweep failed chat_id=%s", chat.id, exc_info=True,
+      )
+  if started:
+    log.info(
+      "started %d idle pending chat(s): %s",
+      len(started),
+      ", ".join(started),
+    )
+  return started
 
 
 async def sweep_stalled_live_runs(db: Session) -> list[str]:
