@@ -403,6 +403,10 @@ test.describe('Desktop sidebar navigation', () => {
     await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
     await expect.poll(() => page.evaluate(() => history.state?.__mobiusNav)).toBe(true)
 
+    // Scope to the sidebar landmark: builder mode (the default view-mode) opens
+    // Settings as a canonical pane tab, so an unscoped `Settings` role query
+    // matches BOTH the sidebar nav item and that tab. This test is about the
+    // sidebar item's active highlight.
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     const settings = navigation.getByRole('button', { name: 'Settings', exact: true })
     await settings.click()

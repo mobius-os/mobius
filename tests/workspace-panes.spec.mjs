@@ -653,6 +653,9 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(brand).toHaveClass(/shell__brand--builder/) // builder is the accent state
     await brand.focus()
     await page.keyboard.press('Shift+Enter')
+    // On WIDE the persistent desktop sidebar is docked-OPEN by default, so scope
+    // the "no drawer opened" check to non-persistent (modal) drawers; the flip
+    // must not open a modal drawer, and aria-expanded must be unchanged.
     await expect(page.locator('.drawer.drawer--open:not(.drawer--persistent)')).toHaveCount(0)
     await expect(brand).toHaveAttribute('aria-expanded', navigationWasOpen)
 
@@ -696,11 +699,15 @@ test.describe('Workspace view-mode toggle', () => {
     // DRAG IS BUILDING (point 15): a single-mode drop commits builder mode — and
     // this works from BOTH the modal drawer (mobile) and the persistent desktop
     // sidebar (this WIDE viewport). ensureNavigationOpen covers either; a drawer/
-    // sidebar row dragged onto a pane center commits.
+    // sidebar row dragged onto a PANE INTERIOR commits.
     await ensureNavigationOpen(page)
     const content = await page.locator('.shell__content').boundingBox()
     const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
     await expect(row).toBeVisible()
+    // Drop into a pane INTERIOR, not the workspace center: the single-mode preview
+    // unfolds the parked TWO-pane layout, so content.width/2 is the inter-pane
+    // divider (a resize handle, not a drop zone) where a drop no-ops. 0.75 lands
+    // unambiguously inside the right pane's join zone.
     await mouseDrag(page, row, content.x + content.width * 0.75, content.y + content.height / 2)
 
     await expect.poll(async () => (await readWs(page)).viewMode, {
