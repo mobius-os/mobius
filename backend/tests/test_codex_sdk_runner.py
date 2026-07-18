@@ -1149,9 +1149,27 @@ class _FakeCollabItem:
     self.receiver_thread_ids = receivers or []
 
 
+def test_tool_start_event_collab_wait_op_is_partner_language():
+  # VERIFIED live reality on codex 0.144.5: a delegation turn streams the collab
+  # tool ONLY as the `wait` op, which carries no prompt. The chip must show the
+  # partner-language "Working in the background", never the wire op string
+  # ("wait:"), so the owner sees a helper is running without leaking internals.
+  sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
+  item = _FakeCollabItem(item_id="c-0", tool="wait", prompt=None)
+  event = codex_sdk_runner._tool_start_event(item, sdk)
+  assert event == {
+    "type": "task_start",
+    "task_id": "c-0",
+    "description": "Working in the background",
+    "task_type": "codex-collab",
+    "tool_use_id": "c-0",
+  }
+
+
 def test_tool_start_event_builds_collab_task_start():
-  # A collab spawn becomes a subagent task_start so the shell renders it on the
-  # same lane Claude's Task tool uses (task_type distinguishes the producer).
+  # Prompt-present path (a future SDK that surfaces the spawn op with a prompt,
+  # or this test fake): keep the "<op>: <prompt>" form so the chip names the
+  # delegated work. Not what fires today — the live wait op has no prompt.
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(
     item_id="c-1", tool="spawnAgent", prompt="review the diff for races",
@@ -1222,6 +1240,9 @@ def test_collab_branch_skipped_when_sdk_lacks_type():
 
 
 def test_record_collab_child_links_attributes_spawned_children(db):
+  # Locks the DEFENSIVE path: on codex 0.144.5 receiver_thread_ids is always
+  # empty so this never fires in production, but a future SDK that populates it
+  # on a spawn op must still attribute each child thread to this chat.
   db.add(models.Chat(
     id="collab-chat", title="t", messages=[], pending_messages=[],
     provider="codex", session_id=None,
