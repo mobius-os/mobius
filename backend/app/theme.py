@@ -198,6 +198,12 @@ def snapshot_theme_if_present(data_dir: str) -> str | None:
   same granularity the agent already uses informally and is fine
   for a recovery audit trail — the goal is "previous version is
   preserved," not "every keystroke."
+
+  Only the newest few snapshots are kept. `*.bak-*` is gitignored in
+  /data, so these files are the ONLY instant local recovery copies —
+  but deep history already lives in the /data git safety net, and an
+  unbounded pile (hundreds of files after a theme-editing session)
+  buries the useful recent ones.
   """
   src = Path(data_dir) / "shared" / "theme.css"
   if not src.exists():
@@ -205,7 +211,34 @@ def snapshot_theme_if_present(data_dir: str) -> str | None:
   ts = int(time.time())
   dst = src.with_name(f"theme.css.bak-{ts}")
   shutil.copy2(src, dst)
+  _prune_theme_snapshots(src.parent)
   return str(dst)
+
+
+# Instant-recovery depth: enough to survive a burst of bad edits in
+# one session; anything older is recoverable from /data git history.
+THEME_SNAPSHOT_KEEP = 5
+
+
+def _prune_theme_snapshots(shared_dir: Path) -> None:
+  """Deletes all but the newest THEME_SNAPSHOT_KEEP theme snapshots.
+
+  Sort key is the embedded unix timestamp (filename suffix), not
+  mtime — copy2 preserves the SOURCE file's mtime, so mtime ordering
+  would reflect when the theme was edited, not when it was snapshot.
+  Non-integer suffixes (hand-made backups) are left untouched.
+  """
+  snapshots = []
+  for path in shared_dir.glob("theme.css.bak-*"):
+    suffix = path.name.rsplit("-", 1)[-1]
+    if suffix.isdigit() and path.is_file():
+      snapshots.append((int(suffix), path))
+  snapshots.sort(reverse=True)
+  for _, path in snapshots[THEME_SNAPSHOT_KEEP:]:
+    try:
+      path.unlink()
+    except OSError:
+      pass
 
 
 def reset_theme_override(data_dir: str) -> dict:

@@ -530,3 +530,33 @@ def test_storage_write_theme_css_auto_snapshots(client, auth):
       if entry.startswith("theme.css"):
         os.remove(os.path.join(shared, entry))
 
+
+
+def test_snapshot_theme_prunes_old_backups(tmp_path):
+  """Only the newest THEME_SNAPSHOT_KEEP snapshots survive.
+
+  Ordering must come from the filename timestamp, not mtime — copy2
+  preserves the source mtime, which reflects when the theme was
+  edited, not when it was snapshot.
+  """
+  from app.theme import THEME_SNAPSHOT_KEEP
+
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  src = shared / "theme.css"
+  src.write_text(":root {}")
+  for ts in range(1000, 1000 + THEME_SNAPSHOT_KEEP + 3):
+    (shared / f"theme.css.bak-{ts}").write_text("old")
+  # A hand-made backup with a non-numeric suffix is never pruned.
+  keeper = shared / "theme.css.bak-manual"
+  keeper.write_text("mine")
+
+  snapshot_theme_if_present(str(tmp_path))
+
+  numeric = sorted(
+    p.name for p in shared.glob("theme.css.bak-*") if p != keeper
+  )
+  assert len(numeric) == THEME_SNAPSHOT_KEEP
+  # The oldest seeded snapshots are gone; the newest survive.
+  assert "theme.css.bak-1000" not in numeric
+  assert keeper.exists()
