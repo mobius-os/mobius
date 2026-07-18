@@ -16,7 +16,6 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import fs_locks
@@ -39,14 +38,25 @@ log = logging.getLogger("mobius.published")
 _legacy_warned_tokens: set[str] = set()
 
 
-# Keyed by client address, like every other public limiter in the app, and
-# scoped by VIEW rather than URL. slowapi's default key_style="url" folds the
-# request path into the bucket, so a caller could mint a fresh 60/minute
-# budget just by varying the {key} segment; "endpoint" keeps one bucket per
-# caller across the whole surface. Keying on the token instead would also make
-# every visitor of a shared site fight over a single budget.
+def _public_token_key(request: Request) -> str:
+  return request.path_params.get("token", "invalid")
+
+
+# Keyed per published site, scoped by VIEW rather than URL. The scope matters:
+# slowapi's default key_style="url" folds the request path into the bucket, so
+# a caller could mint a fresh 60/minute budget for every {key} it invented,
+# which made the limit unbounded in practice.
+#
+# The key stays the TOKEN rather than the client address on purpose. Public
+# traffic reaches this app through the proxy, and main.py deliberately refuses
+# to trust X-Forwarded-For for rate limiting (any client could spoof it), so
+# get_remote_address resolves to the proxy peer for EVERY public request —
+# a "per-client" limit would collapse into one global bucket that a single
+# visitor could use to starve every published site. Per-token keeps one site's
+# traffic from affecting another; the residual is that heavy traffic to one
+# site can throttle that same site, which is the blast radius we want.
 _public_data_limiter = Limiter(
-  key_func=get_remote_address, key_style="endpoint",
+  key_func=_public_token_key, key_style="endpoint",
 )
 
 

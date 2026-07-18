@@ -648,17 +648,81 @@ def test_artifact_data_write_respects_the_per_app_storage_backstop(
   assert "per-app limit" in response.text
 
 
-def test_public_data_limiter_buckets_per_client_not_per_url():
-  """slowapi's default key_style='url' folds {key} into the bucket.
+def test_public_data_limiter_buckets_per_site_not_per_url():
+  """One bucket per published site, not per requested key.
 
-  That would hand an unauthenticated caller a fresh 60/minute budget for every
-  key it invents, so this route pins the scope to the view and keys on the
-  client address like the app's other public limiters.
+  slowapi's default key_style="url" folds the path into the bucket, which
+  handed a caller a fresh 60/minute budget for every key it invented. The key
+  stays the token rather than the client address because public traffic
+  arrives through the proxy and the app refuses to trust X-Forwarded-For, so
+  a client-keyed limit would collapse into a single global bucket.
   """
-  from slowapi.util import get_remote_address
-
   from app.routes import published as published_mod
 
   limiter = published_mod._public_data_limiter
   assert limiter._key_style == "endpoint"
-  assert limiter._key_func is get_remote_address
+  assert limiter._key_func is published_mod._public_token_key
+
+  class _Req:
+    path_params = {"token": "a" * 32}
+
+  assert published_mod._public_token_key(_Req()) == "a" * 32
+
+
+def test_revoking_one_project_leaves_a_sibling_projects_publication(
+  client, auth,
+):
+  """A stray hint in project A must not revoke project B's live URL.
+
+  Hints live in app-writable storage and name only a token, so the registry
+  binding — not the hint — decides which publication a teardown may touch.
+  """
+  app_id = _create_app(client, auth)
+  _seed_site(app_id, "keep-me", "<h1>sibling</h1>")
+  kept = _publish(client, auth, app_id, "keep-me")
+
+  # Project "drop-me" carries a hint pointing at the SIBLING's token.
+  _seed_site(app_id, "drop-me", "<h1>doomed</h1>")
+  (_build_dir(app_id, "drop-me") / "publish-token.txt").write_text(
+    kept, encoding="utf-8",
+  )
+
+  response = client.delete(
+    f"/api/apps/{app_id}/publish?project_id=drop-me", headers=auth,
+  )
+  assert response.status_code in (200, 204), response.text
+
+  record = read_publication_record(get_settings(), kept)
+  assert record is not None and record.state == "active"
+  assert client.get(f"/sites/{kept}/").status_code == 200
+
+
+def test_unpublish_reports_failure_when_the_url_stays_live(
+  client, auth, monkeypatch,
+):
+  """A failed revocation must not answer ok while the page is still public.
+
+  Reporting success here — and dropping the token hint on the way out — would
+  tell the owner their artifact was unshared while anyone holding the link
+  could still read it.
+  """
+  app_id = _create_app(client, auth)
+  _seed_site(app_id, "still-live", "<h1>public</h1>")
+  token = _publish(client, auth, app_id, "still-live")
+
+  def _fail(*_args, **_kwargs):
+    raise OSError("simulated registry write failure")
+
+  monkeypatch.setattr(apps_route, "replace_publication_record", _fail)
+  response = client.delete(
+    f"/api/apps/{app_id}/publish?project_id=still-live", headers=auth,
+  )
+
+  assert response.status_code == 500, response.text
+  # Still serving, and the record still says so — no silent half-revoke.
+  record = read_publication_record(get_settings(), token)
+  assert record is not None and record.state == "active"
+  assert client.get(f"/sites/{token}/").status_code == 200
+  assert (
+    _build_dir(app_id, "still-live") / "publish-token.txt"
+  ).is_file(), "the hint must survive so the live URL stays reachable"

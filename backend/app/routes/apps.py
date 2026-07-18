@@ -2837,17 +2837,23 @@ async def _revoke_publish_token(
   app_gen: str | None,
   token: str,
   project_id: str | None,
-) -> None:
-  """Permanently revoke one owned/legacy token before physical cleanup."""
+) -> bool:
+  """Permanently revoke one owned token before physical cleanup.
+
+  Returns whether the token is now durably un-servable — either because the
+  revocation was written or because this app never owned it. False means a
+  reservation the caller asked about is STILL ACTIVE, so a caller that reports
+  success to the owner must not ignore it: the page would stay public.
+  """
   if not _TOKEN_RE.fullmatch(token or ""):
-    return
+    return True
   try:
     record = read_publication_record(settings, token)
   except InvalidPublicationRegistry as exc:
     # A corrupt reservation already fails closed.  Do not let an app-writable
     # hint authorize deleting the unknown reservation's snapshot.
     log.warning("cannot revoke invalid publication %s: %s", token, exc)
-    return
+    return False
   if record is None:
     # No reservation exists, so nothing here proves this app owns the token.
     # The only thing naming it is publish-token.txt, which lives in app-
@@ -2861,20 +2867,32 @@ async def _revoke_publish_token(
       "ignoring unregistered publish-token hint %s while revoking app %s",
       token, app_id,
     )
-    return
+    return True
   if record.app_id != app_id:
     log.warning(
       "ignoring publish-token hint %s owned by app %s while revoking app %s",
       token, record.app_id, app_id,
     )
-    return
+    return True
+  # A hint names a token but does not prove which PROJECT it belongs to, and
+  # hints live in app-writable storage. Checking app_id alone would let one
+  # project's stray hint permanently revoke and delete a sibling project's
+  # publication inside the same app, so honor the hint only when the registry
+  # agrees on the whole binding. `project_id=None` means the caller is tearing
+  # the app down wholesale and every project of the live generation goes.
+  if project_id is not None and record.project_id != project_id:
+    log.warning(
+      "ignoring publish-token hint %s for project %s while revoking project %s",
+      token, record.project_id, project_id,
+    )
+    return True
   try:
     if record.state != "revoked":
       record = replace_publication_record(settings, record, "revoked")
   except (OSError, InvalidPublicationRegistry,
           PublicationReservationConflict) as exc:
     log.error("failed to persist revocation for token %s: %s", token, exc)
-    return
+    return False
 
   # The durable revoked state is written before either best-effort rmtree.
   for root_name in ("published", "published-data"):
@@ -2890,6 +2908,9 @@ async def _revoke_publish_token(
     except OSError as exc:
       log.warning("revoked token %s cleanup failed for %s: %s",
                   token, target, exc)
+  # The snapshot rmtree above is best-effort cleanup; the durable `revoked`
+  # record already makes the token un-servable, so reaching here is success.
+  return True
 
 
 async def _revoke_app_publish_tokens(
@@ -3186,9 +3207,21 @@ async def unpublish_app_site(
     tokens = {record.token for record in records}
     if hint is not None:
       tokens.add(hint)
+    revoked = True
     for token in tokens:
-      await _revoke_publish_token(
+      if not await _revoke_publish_token(
         settings, app_id, app.token_nonce, token, project_id,
+      ):
+        revoked = False
+    # Only drop the hint once the URL is really dead. Deleting it after a
+    # failed revocation would remove the last pointer to a page that is still
+    # public, and answering {"ok": true} would tell the owner their artifact
+    # was unshared while anyone holding the link could still read it.
+    if not revoked:
+      raise HTTPException(
+        500,
+        "Could not revoke the public URL — it is still live. "
+        "Check storage health and try again.",
       )
     if not token_file.is_symlink():
       try:

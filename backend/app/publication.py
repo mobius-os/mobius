@@ -103,6 +103,11 @@ def _decode_record(token: str, raw: bytes) -> PublicationRecord:
     )
   except (UnicodeDecodeError, ValueError) as exc:
     raise InvalidPublicationRegistry("invalid registry JSON") from exc
+  except RecursionError as exc:
+    # RecursionError is a RuntimeError, so deeply nested input would escape the
+    # invalid-registry handling and surface as an unhandled 500 instead of
+    # failing closed like every other unreadable record.
+    raise InvalidPublicationRegistry("registry JSON is nested too deeply") from exc
   if not isinstance(value, dict) or set(value) != _REGISTRY_KEYS:
     raise InvalidPublicationRegistry("invalid registry schema")
   app_id = value["app_id"]
