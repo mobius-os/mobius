@@ -136,7 +136,16 @@ def test_revoked_token_is_permanently_reserved(client, auth):
   assert reservation.app_id == app_a and reservation.state == "revoked"
 
 
-def test_publish_backfills_a_legacy_snapshot(client, auth, db):
+def test_publish_never_adopts_an_unregistered_token_from_a_hint(
+  client, auth, db,
+):
+  """A pre-registry snapshot is inert: publishing mints a fresh token.
+
+  publish-token.txt lives in app-writable storage, so adopting the token it
+  names would let any app claim a public URL it does not own. The registry is
+  the sole ownership authority, so an unrecognized hint is ignored and the
+  untouched legacy snapshot keeps serving its old content.
+  """
   app_id = _create_app(client, auth)
   project_id = "tip-backfill"
   token = "3" * 32
@@ -148,12 +157,59 @@ def test_publish_backfills_a_legacy_snapshot(client, auth, db):
   snapshot.mkdir(parents=True, exist_ok=True)
   (snapshot / "index.html").write_text("legacy generation", encoding="utf-8")
 
-  assert _publish(client, auth, app_id, project_id) == token
+  minted = _publish(client, auth, app_id, project_id)
+
+  assert minted != token, "an unregistered hint must not be adopted"
+  assert read_publication_record(get_settings(), token) is None
+  assert (snapshot / "index.html").read_text() == "legacy generation"
   row = db.query(models.App).filter(models.App.id == app_id).one()
-  record = read_publication_record(get_settings(), token)
-  assert record.binding() == (app_id, row.token_nonce, project_id)
-  assert record.state == "active"
-  assert (snapshot / "index.html").read_text() == "new generation"
+  fresh = read_publication_record(get_settings(), minted)
+  assert fresh.binding() == (app_id, row.token_nonce, project_id)
+  assert fresh.state == "active"
+
+
+def test_unregistered_hint_cannot_hijack_another_apps_public_url(client, auth):
+  """App B must not take over a pre-registry URL published by app A."""
+  victim_token = "a" * 32
+  snapshot = Path(get_settings().data_dir) / "published" / victim_token
+  snapshot.mkdir(parents=True, exist_ok=True)
+  (snapshot / "index.html").write_text("VICTIM CONTENT", encoding="utf-8")
+
+  attacker = _create_app(client, auth, "attacker-app")
+  _seed_site(attacker, "evil", "ATTACKER CONTENT")
+  (_build_dir(attacker, "evil") / "publish-token.txt").write_text(
+    victim_token, encoding="utf-8",
+  )
+
+  minted = _publish(client, auth, attacker, "evil")
+
+  assert minted != victim_token
+  assert (snapshot / "index.html").read_text() == "VICTIM CONTENT"
+  record = read_publication_record(get_settings(), victim_token)
+  assert record is None, "attacker must not reserve the victim's token"
+
+
+def test_unregistered_hint_cannot_destroy_another_apps_snapshot(client, auth):
+  """Tearing down app B must not delete app A's pre-registry snapshot."""
+  victim_token = "b" * 32
+  snapshot = Path(get_settings().data_dir) / "published" / victim_token
+  snapshot.mkdir(parents=True, exist_ok=True)
+  (snapshot / "index.html").write_text("VICTIM CONTENT", encoding="utf-8")
+
+  attacker = _create_app(client, auth, "wiper-app")
+  _seed_site(attacker, "evil", "unused")
+  (_build_dir(attacker, "evil") / "publish-token.txt").write_text(
+    victim_token, encoding="utf-8",
+  )
+
+  # The app-data wipe is the cheapest teardown route that scans hint files.
+  assert client.delete(
+    f"/api/apps/{attacker}/data", headers=auth,
+  ).status_code in (200, 204)
+
+  assert snapshot.is_dir(), "victim snapshot destroyed by an unrelated app"
+  assert (snapshot / "index.html").read_text() == "VICTIM CONTENT"
+  assert read_publication_record(get_settings(), victim_token) is None
 
 
 def test_failed_first_publish_never_activates_orphan(
@@ -261,7 +317,29 @@ def test_every_teardown_path_revokes_before_cleanup(
   assert client.get(f"/sites/{token}/").status_code == 404
 
 
-def test_legacy_token_fallback_is_reserved_and_revoked(client, auth):
+def test_registered_token_is_revoked_when_its_app_is_deleted(client, auth):
+  """Deleting an app revokes the tokens the REGISTRY says it owns."""
+  app_id = _create_app(client, auth)
+  _seed_site(app_id, "tip-owned", "owned app")
+  token = _publish(client, auth, app_id, "tip-owned")
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  record = read_publication_record(get_settings(), token)
+  assert record is not None and record.state == "revoked"
+  assert client.get(f"/sites/{token}/").status_code == 404
+
+
+def test_deleting_an_app_leaves_an_unregistered_snapshot_alone(client, auth):
+  """A pre-registry snapshot survives its app's deletion, by design.
+
+  Only publish-token.txt — app-writable storage — names such a token, so
+  honoring it would let any app delete another's snapshot (and any app can
+  plant a token it does not own). We accept that a snapshot published before
+  the registry existed outlives its app rather than reopening that hole;
+  removing one is an explicit owner action. Instances carrying pre-registry
+  snapshots need a one-time reconciliation pass to adopt them into the
+  registry, which is where that cleanup belongs.
+  """
   app_id = _create_app(client, auth)
   project_id = "tip-legacy"
   token = "2" * 32
@@ -273,9 +351,8 @@ def test_legacy_token_fallback_is_reserved_and_revoked(client, auth):
   (snapshot / "index.html").write_text("legacy app", encoding="utf-8")
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
-  record = read_publication_record(get_settings(), token)
-  assert record is not None and record.state == "revoked"
-  assert client.get(f"/sites/{token}/").status_code == 404
+  assert read_publication_record(get_settings(), token) is None
+  assert snapshot.is_dir()
 
 
 def test_id_reuse_cannot_expose_replacement_app_data(client, auth, db):

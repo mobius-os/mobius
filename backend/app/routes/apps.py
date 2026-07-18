@@ -2842,22 +2842,28 @@ async def _revoke_publish_token(
     # hint authorize deleting the unknown reservation's snapshot.
     log.warning("cannot revoke invalid publication %s: %s", token, exc)
     return
-  if record is not None and record.app_id != app_id:
+  if record is None:
+    # No reservation exists, so nothing here proves this app owns the token.
+    # The only thing naming it is publish-token.txt, which lives in app-
+    # writable storage — any app can plant another app's token there and would
+    # otherwise get that app's public snapshot deleted. The registry is the
+    # sole ownership authority: a hint may POINT AT a record, never create one.
+    # Pre-registry snapshots are therefore inert rather than hint-revocable;
+    # removing one is an explicit owner action, not an app-triggered side
+    # effect.
+    log.warning(
+      "ignoring unregistered publish-token hint %s while revoking app %s",
+      token, app_id,
+    )
+    return
+  if record.app_id != app_id:
     log.warning(
       "ignoring publish-token hint %s owned by app %s while revoking app %s",
       token, record.app_id, app_id,
     )
     return
   try:
-    if record is None:
-      safe_gen = app_gen if isinstance(app_gen, str) and re.fullmatch(
-        r"[a-f0-9]{32}", app_gen,
-      ) else "0" * 32
-      record = new_publication_record(
-        token, app_id, safe_gen, project_id, state="revoked",
-      )
-      create_publication_record(settings, record)
-    elif record.state != "revoked":
+    if record.state != "revoked":
       record = replace_publication_record(settings, record, "revoked")
   except (OSError, InvalidPublicationRegistry,
           PublicationReservationConflict) as exc:
@@ -3064,7 +3070,6 @@ async def publish_app_site(
 
     token = _read_publish_token_hint(token_file)
     record = None
-    legacy_backfill = False
     if token is not None:
       try:
         hinted = read_publication_record(settings, token)
@@ -3075,20 +3080,15 @@ async def publish_app_site(
         and hinted.binding() == (app.id, app.token_nonce, project_id)
         and hinted.state == "active"
       ):
+        # Re-publishing an app's OWN registered token keeps its URL stable.
         record = hinted
-      elif hinted is None:
-        legacy_dest = published_root(settings) / token
-        if legacy_dest.is_dir() and not legacy_dest.is_symlink():
-          candidate = new_publication_record(
-            token, app.id, app.token_nonce, project_id, state="staged",
-          )
-          try:
-            create_publication_record(settings, candidate)
-          except PublicationReservationConflict:
-            pass
-          else:
-            record = candidate
-            legacy_backfill = True
+      # An unregistered token is deliberately NOT adopted. publish-token.txt
+      # sits in app-writable storage, so adopting a token merely because a
+      # hint names it and published/<token>/ happens to exist would let any
+      # app claim another app's already-shared public URL and overwrite its
+      # content. The registry is the sole ownership authority, so an
+      # unrecognized hint falls through to minting a fresh token below; the
+      # pre-registry snapshot keeps serving its old content untouched.
     if record is None:
       token, record = _mint_publish_record(settings, app, project_id)
 
@@ -3115,16 +3115,15 @@ async def publish_app_site(
       atomic_write(token_file, token)
       record = replace_publication_record(settings, record, "active")
     except BaseException:
+      # `record` is only ever a freshly minted staged reservation here, so a
+      # failed publish always revokes it and tears down anything promoted.
       if record.state == "staged":
         try:
-          if legacy_backfill and destination.is_dir():
-            replace_publication_record(settings, record, "active")
-          else:
-            replace_publication_record(settings, record, "revoked")
+          replace_publication_record(settings, record, "revoked")
         except (OSError, InvalidPublicationRegistry,
                 PublicationReservationConflict):
           pass
-      if promoted and not legacy_backfill and record.state == "staged":
+      if promoted and record.state == "staged":
         try:
           await asyncio.to_thread(shutil.rmtree, destination)
         except OSError:
