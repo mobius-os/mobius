@@ -7,6 +7,7 @@ import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
+import { verifyConnectivity } from '../lib/connectivityStore.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
@@ -214,6 +215,12 @@ export async function apiFetch(path, options = {}) {
   let res
   try {
     res = await fetch(`${BASE}/api${path}`, { ...fetchOptions, headers, signal })
+  } catch (error) {
+    // The request is evidence, not a verdict. Ask the shared reachability store
+    // to verify promptly; its hysteresis still prevents one transient failure
+    // from flapping every retained chat offline.
+    void verifyConnectivity()
+    throw error
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer)
   }
