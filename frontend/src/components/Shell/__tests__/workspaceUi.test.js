@@ -340,6 +340,8 @@ test('Shell wires the toggle handler, brand ref, and Shift+Enter (no drag-deny v
   assert.doesNotMatch(shell, /viewModeVibrateRef|onDragBlocked/)
   // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).
   assert.match(shell, /e\.shiftKey && e\.key === 'Enter'/)
+  assert.match(shell, /brandKeyboardModeClickRef\.current = true/)
+  assert.match(shell, /brandKeyboardModeClickRef\.current && e\.detail === 0/)
 })
 
 test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 180° twist + tint + living halo', () => {
@@ -495,6 +497,7 @@ test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any dro
   assert.match(dragBinding, /if \(flipToPanes\) \{[\s\S]*?convertSettingsForModeTransition\?\.\(\)/)
   // §8: "committed" is the ACTUAL workspace change, not a stale lit-zone flag.
   assert.match(dragBinding, /return workspaceStateRef\.current\.ws !== before/)
+  assert.match(dragBinding, /if \(moveRAF\) \{[\s\S]*?cancelAnimationFrame\(moveRAF\)[\s\S]*?doMoveWork\(\)/)
   assert.match(dragBinding, /const didCommit = curZone \? commitDrop\(\) : false/)
   // The drag-deny shake is gone from the CSS too.
   assert.doesNotMatch(shellCss, /is-vibrating|shell-brand-shake|shell-brand-pulse/)

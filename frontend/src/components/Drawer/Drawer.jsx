@@ -382,6 +382,9 @@ export default function Drawer({
 
   function handleDrawerTransitionEnd(e) {
     if (open || e.target !== e.currentTarget || e.propertyName !== 'transform') return
+    const width = e.currentTarget.getBoundingClientRect().width
+    const x = new DOMMatrixReadOnly(getComputedStyle(e.currentTarget).transform).m41
+    if (x > -width + 1) return
     setScrimBlocking(false)
   }
 

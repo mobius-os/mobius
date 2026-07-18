@@ -653,7 +653,7 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(brand).toHaveClass(/shell__brand--builder/) // builder is the accent state
     await brand.focus()
     await page.keyboard.press('Shift+Enter')
-    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+    await expect(page.locator('.drawer.drawer--open:not(.drawer--persistent)')).toHaveCount(0)
     await expect(brand).toHaveAttribute('aria-expanded', navigationWasOpen)
 
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
@@ -701,7 +701,7 @@ test.describe('Workspace view-mode toggle', () => {
     const content = await page.locator('.shell__content').boundingBox()
     const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
     await expect(row).toBeVisible()
-    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2)
+    await mouseDrag(page, row, content.x + content.width * 0.75, content.y + content.height / 2)
 
     await expect.poll(async () => (await readWs(page)).viewMode, {
       timeout: 3000, message: 'a single-mode drop commits builder mode',

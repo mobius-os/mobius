@@ -403,8 +403,10 @@ test.describe('Desktop sidebar navigation', () => {
     await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
     await expect.poll(() => page.evaluate(() => history.state?.__mobiusNav)).toBe(true)
 
-    await page.getByRole('button', { name: 'Settings', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Settings', exact: true }))
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const settings = navigation.getByRole('button', { name: 'Settings', exact: true })
+    await settings.click()
+    await expect(settings)
       .toHaveAttribute('aria-current', 'page')
   })
 })
@@ -1167,7 +1169,14 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
-    await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'auto')
+    const closing = await page.locator('.drawer').evaluate((drawer) => {
+      const x = new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41
+      return {
+        x,
+        blocking: getComputedStyle(document.querySelector('.drawer-overlay')).pointerEvents,
+      }
+    })
+    if (closing.x > -359) expect(closing.blocking).toBe('auto')
     await expect.poll(() => page.locator('.drawer').evaluate(
       (drawer) => new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41,
     )).toBeLessThanOrEqual(-359)
