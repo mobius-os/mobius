@@ -471,50 +471,14 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
-def test_run_codex_sdk_turn_resumes_subagent_activity_history(monkeypatch, caplog):
-  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
-  turn_handle = _FakeTurnHandle([
-    SimpleNamespace(
-      method="turn/completed",
-      payload=_FakeTurnCompletedNotification(completed_turn),
-    )
-  ])
-
-  activities = [
-    ("started", "/root/scout"),
-    ("started", "/root/builder"),
-    ("started", "/root/reviewer"),
-    ("interacted", "/root/reviewer"),
-    ("interrupted", "/root/reviewer"),
-    ("interacted", "/root/reviewer"),
-  ]
-
+def test_run_codex_sdk_turn_resume_validation_error_now_propagates(monkeypatch, caplog):
+  # Inverse of the old subAgentActivity resume test. The SDK now models
+  # subAgentActivity natively, so thread_resume no longer raises on that
+  # history and the compatibility fallback is gone. As a result, any resume
+  # validation error is a REAL failure again: it must surface as an error
+  # result, never be swallowed into a fake success + session_init.
   class ResumeValidationError(Exception):
-    def errors(self, include_url=False):
-      del include_url
-      errors = []
-      for item_index, (kind, agent_path) in enumerate(activities):
-        item = {
-          "type": "subAgentActivity",
-          "id": f"activity-{item_index}",
-          "kind": kind,
-          "agentThreadId": f"thread-{item_index}",
-          "agentPath": agent_path,
-        }
-        for variant_index in range(44):
-          errors.append({
-            "loc": (
-              "thread",
-              "turns",
-              1,
-              "items",
-              item_index,
-              f"KnownThreadItem{variant_index}",
-              "type",
-            ),
-            "input": item if variant_index % 2 == 0 else "subAgentActivity",
-          })
-      return errors
+    pass
 
   class FakeAsyncCodex:
     def __init__(self, config=None):
@@ -529,12 +493,9 @@ def test_run_codex_sdk_turn_resumes_subagent_activity_history(monkeypatch, caplo
     async def thread_resume(self, *_args, **_kwargs):
       raise ResumeValidationError("264 validation errors for ThreadResumeResponse")
 
-  sdk = _fake_sdk(FakeAsyncCodex)
-  sdk["AsyncThread"] = lambda _codex, thread_id: _FakeThread(
-    thread_id,
-    turn_handle,
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
   )
-  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
 
   bc = _FakeBroadcast()
   with caplog.at_level("WARNING", logger="moebius.chat"):
@@ -551,42 +512,30 @@ def test_run_codex_sdk_turn_resumes_subagent_activity_history(monkeypatch, caplo
       )
     )
 
-  assert result == {
-    "session_id": "requested-thread",
-    "cost_usd": None,
-    "error": None,
-  }
-  assert bc.events == [{
-    "type": "session_init",
-    "session_id": "requested-thread",
-  }]
-  assert "rejected subAgentActivity history" in caplog.text
+  assert result["session_id"] == "requested-thread"
+  assert result["error"] is not None
+  assert "ThreadResumeResponse" in result["error"]
+  # No session_init: the turn never reached a successful resume.
+  assert bc.events == []
+  # The removed fallback's warning must not reappear.
+  assert "rejected subAgentActivity history" not in caplog.text
 
 
-def test_subagent_activity_resume_compat_rejects_mixed_schema_drift():
-  class MixedValidationError(Exception):
-    def errors(self, include_url=False):
-      del include_url
-      return [
-        {
-          "loc": ("thread", "turns", 1, "items", 3, "KnownItem", "type"),
-          "input": {
-            "type": "subAgentActivity",
-            "id": "activity-1",
-            "kind": "started",
-            "agentThreadId": "thread-1",
-            "agentPath": "/root/scout",
-          },
-        },
-        {
-          "loc": ("thread", "model"),
-          "input": {"unexpected": "response drift"},
-        },
-      ]
+def test_subagent_activity_item_dispatch_is_noop():
+  # The native subAgentActivity marker is classified explicitly at both
+  # dispatch sites as a no-op: it opens and closes no Möbius tool block (the
+  # live delegation rides CollabAgentToolCallThreadItem's Task events instead).
+  class SubAgentActivityThreadItem:
+    def __init__(self):
+      self.kind = "started"
+      self.agent_path = "/root/scout"
+      self.agent_thread_id = "thread-1"
 
-  assert codex_sdk_runner._is_subagent_activity_resume_validation_error(
-    MixedValidationError(),
-  ) is False
+  sdk = {"SubAgentActivityThreadItem": SubAgentActivityThreadItem}
+  item = SubAgentActivityThreadItem()
+
+  assert codex_sdk_runner._tool_start_event(item, sdk) is None
+  assert codex_sdk_runner._tool_completed_events(item, sdk) == []
 
 
 def test_run_codex_sdk_turn_aborts_after_turn_before_stream_registration(monkeypatch):

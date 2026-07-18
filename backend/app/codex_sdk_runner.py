@@ -272,7 +272,7 @@ def _sdk_imports() -> dict[str, Any]:
   freely. TG-NEW should add a contract test that imports these symbols
   at test time so breakage is caught immediately.
   """
-  from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, Sandbox
+  from openai_codex import ApprovalMode, AsyncCodex, Sandbox
   from openai_codex.client import CodexConfig
   from openai_codex.errors import CodexRpcError, InvalidParamsError
   from openai_codex.types import ReasoningEffort, ReasoningSummary
@@ -306,23 +306,33 @@ def _sdk_imports() -> dict[str, Any]:
   # branch guards on non-None before its isinstance check. ThreadStartedNotification
   # rides the same block because the only stream occurrence we act on is a
   # spawned child announcing itself, which only happens once collab exists.
+  # SubAgentActivityThreadItem (the sub-agent lifecycle marker Codex persists in
+  # the parent thread's item history) landed natively in openai-codex
+  # rust-v0.145.0-alpha.13; importing it here replaces the earlier resume-time
+  # validation-error fallback that reconstructed the thread handle when the SDK
+  # could not parse this variant. Its dispatch is a documented no-op (see
+  # _tool_start_event / _tool_completed_events). test_codex_sdk_contract asserts
+  # this symbol stays importable so a future SDK that renames/drops it fails
+  # loudly instead of silently reintroducing the resume gap.
   try:
     from openai_codex.generated.v2_all import (
       CollabAgentToolCallThreadItem,
+      SubAgentActivityThreadItem,
       ThreadStartedNotification,
     )
   except ImportError:
     CollabAgentToolCallThreadItem = None
+    SubAgentActivityThreadItem = None
     ThreadStartedNotification = None
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
+    "SubAgentActivityThreadItem": SubAgentActivityThreadItem,
     "ThreadStartedNotification": ThreadStartedNotification,
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
     "AsyncCodex": AsyncCodex,
-    "AsyncThread": AsyncThread,
     "CodexConfig": CodexConfig,
     "CodexRpcError": CodexRpcError,
     "CommandExecutionOutputDeltaNotification": (
@@ -357,94 +367,6 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnCompletedNotification": TurnCompletedNotification,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
-
-
-def _is_subagent_activity_resume_validation_error(exc: Exception) -> bool:
-  """Whether a typed resume failed only on valid sub-agent history items.
-
-  Codex 0.143+ persists `subAgentActivity` ThreadItems, but the beta Python
-  SDK's generated ThreadItem union is still based on its 0.137 runtime and
-  does not include that variant. `thread/resume` has already succeeded in the
-  app-server before response-model validation raises, so the caller can safely
-  construct the public AsyncThread handle for the requested thread.
-
-  Keep this deliberately narrow. Any other validation drift must continue to
-  fail loudly rather than being mistaken for a successful resume.
-  """
-  errors_method = getattr(exc, "errors", None)
-  if not callable(errors_method):
-    return False
-  try:
-    errors = errors_method(include_url=False)
-  except TypeError:
-    errors = errors_method()
-  if not errors:
-    return False
-
-  required_fields = {
-    "type",
-    "id",
-    "kind",
-    "agentThreadId",
-    "agentPath",
-  }
-  item_locations: set[tuple[Any, ...]] = set()
-  validated_item_locations: set[tuple[Any, ...]] = set()
-  for error in errors:
-    if not isinstance(error, dict):
-      return False
-    location = tuple(error.get("loc", ()))
-    item = error.get("input")
-    if (
-      len(location) < 5
-      or location[0:2] != ("thread", "turns")
-      or location[3] != "items"
-    ):
-      return False
-    item_location = location[:5]
-    item_locations.add(item_location)
-    if isinstance(item, dict):
-      if (
-        item.get("type") != "subAgentActivity"
-        or not required_fields.issubset(item)
-      ):
-        return False
-      validated_item_locations.add(item_location)
-    elif item != "subAgentActivity":
-      # Pydantic reports literal discriminator failures against the string
-      # value itself, while missing-field failures carry the whole item.
-      return False
-  return item_locations == validated_item_locations
-
-
-async def _resume_codex_thread(
-  codex: Any,
-  session_id: str,
-  *,
-  sdk: dict[str, Any],
-  approval_mode: Any,
-  sandbox: Any,
-  cwd: str,
-  model: str | None,
-) -> Any:
-  """Resume a thread, tolerating the SDK's one known history-model gap."""
-  try:
-    return await codex.thread_resume(
-      session_id,
-      approval_mode=approval_mode,
-      sandbox=sandbox,
-      cwd=cwd,
-      model=model,
-    )
-  except Exception as exc:
-    if not _is_subagent_activity_resume_validation_error(exc):
-      raise
-    log.warning(
-      "Codex Python SDK rejected subAgentActivity history while resuming "
-      "thread %s; using the already-resumed public AsyncThread handle",
-      session_id,
-    )
-    return sdk["AsyncThread"](codex, session_id)
 
 
 def _model_dump(value: Any) -> Any:
@@ -657,6 +579,21 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
       "tool": "Task",
       "input": _collab_description(item),
     }
+  sub_activity_cls = sdk.get("SubAgentActivityThreadItem")
+  if sub_activity_cls is not None and isinstance(item, sub_activity_cls):
+    # subAgentActivity is Codex's sub-agent LIFECYCLE marker (agentPath,
+    # agentThreadId, kind) in the parent thread's item stream/history. The
+    # invariant: the sub-agent's actual tool work is surfaced elsewhere — live,
+    # the parent streams the delegation as the CollabAgentToolCallThreadItem
+    # `Task` events above; on resume, the parent's replayed history is never
+    # re-rendered (the runner uses only thread.id + thread.turn()). So the
+    # marker itself carries nothing Möbius opens as its own tool block. This is
+    # a DELIBERATE no-op, classified explicitly rather than left to fall through
+    # silently — surfacing sub-agent lifecycle as its own UI is a future UX
+    # decision, not an accident of omission (see test_codex_sdk_contract).
+    log.debug("codex subAgentActivity marker (no-op): kind=%s",
+              getattr(item, "kind", None))
+    return None
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     return {
       "type": "tool_start",
@@ -710,6 +647,15 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
       events.append({"type": "tool_output", "content": summary})
     events.append({"type": "tool_end"})
     return events
+
+  sub_activity_cls = sdk.get("SubAgentActivityThreadItem")
+  if sub_activity_cls is not None and isinstance(item, sub_activity_cls):
+    # Completion counterpart of the _tool_start_event no-op: the sub-agent
+    # lifecycle marker opens no Möbius tool block, so it closes none. The live
+    # delegation's open/close rides CollabAgentToolCallThreadItem (`Task`); this
+    # marker is classified explicitly to keep the invariant visible rather than
+    # silently returning [] by fall-through.
+    return []
 
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     output = (item.aggregated_output or "").strip()
@@ -1315,10 +1261,15 @@ async def run_codex_sdk_turn(
           model=model,
         )
       else:
-        thread = await _resume_codex_thread(
-          codex,
+        # Resume parses the thread's persisted history, which can include
+        # subAgentActivity items. The SDK's generated ThreadItem union models
+        # that variant natively (openai-codex rust-v0.145.0-alpha.13+), so
+        # thread_resume no longer raises the validation error the old
+        # _resume_codex_thread wrapper caught and worked around. Möbius uses only
+        # the returned handle's id + turn() (it never re-renders resumed
+        # history), so a native parse is a straight pass-through here.
+        thread = await codex.thread_resume(
           session_id,
-          sdk=sdk,
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           cwd=cwd,

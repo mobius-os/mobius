@@ -127,24 +127,63 @@ def test_request_user_input_bridge_has_no_user_answer_timeout():
   assert "_BRIDGE_USER_ANSWER_TIMEOUT" not in source
 
 
-def test_subagent_activity_resume_compatibility_is_still_required():
-  """Trip when the SDK grows native `subAgentActivity` support.
+def test_subagent_activity_is_natively_modeled_and_fallback_removed():
+  """Lock in the native subAgentActivity contract this SDK bump established.
 
-  Möbius currently resumes 0.143+ histories through a narrow compatibility
-  path because the beta Python SDK's generated ThreadItem union still targets
-  its 0.137 runtime. Once upstream adds the item, a dependency bump must fail
-  here until we remove that path and explicitly decide how live and replayed
-  sub-agent activity should appear in Möbius. This prevents native support
-  from being silently masked by a stale workaround.
+  This is the inverse of the earlier tripwire. Before openai-codex
+  rust-v0.145.0-alpha.13 the generated ThreadItem union omitted the
+  `subAgentActivity` variant, so resuming a thread whose history contained one
+  raised a validation error that `_resume_codex_thread` caught and worked
+  around. The pinned SDK now models the variant natively, the workaround is
+  gone, and the runner classifies the item explicitly (a documented no-op in
+  the tool-event dispatch). Assert every leg of that so a future SDK that
+  renames or drops the type — or a change that resurrects the fallback — fails
+  loudly rather than silently reopening the resume gap.
   """
+  import inspect
+
   pytest.importorskip("openai_codex")
   from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
 
   schema = json.dumps(v2_all.ThreadItem.model_json_schema())
-  native_model = getattr(v2_all, "SubAgentActivityThreadItem", None)
-  assert native_model is None and "subAgentActivity" not in schema, (
-    "The Codex Python SDK now exposes native subAgentActivity ThreadItems. "
-    "Remove _resume_codex_thread's compatibility fallback, import the native "
-    "item in _sdk_imports, and explicitly handle its live/replayed behavior "
-    "before accepting this SDK bump."
+  assert getattr(v2_all, "SubAgentActivityThreadItem", None) is not None, (
+    "The Codex SDK no longer exposes SubAgentActivityThreadItem. If upstream "
+    "renamed/dropped it, resuming a thread with sub-agent history may raise "
+    "again — decide the new handling before accepting the bump."
   )
+  assert "subAgentActivity" in schema
+
+  # The runner imports the native item and hands it to dispatch as a non-None
+  # entry (defensive block, so a predates-it SDK still boots).
+  assert codex_sdk_runner._sdk_imports()["SubAgentActivityThreadItem"] is not None
+
+  # The item is classified explicitly at the dispatch sites, not dropped by
+  # fall-through.
+  assert "SubAgentActivityThreadItem" in inspect.getsource(
+    codex_sdk_runner._tool_start_event
+  )
+  assert "SubAgentActivityThreadItem" in inspect.getsource(
+    codex_sdk_runner._tool_completed_events
+  )
+
+  # The old compatibility path is gone: neither the resume wrapper nor its
+  # error-classifier should linger as dead code.
+  assert not hasattr(codex_sdk_runner, "_resume_codex_thread")
+  assert not hasattr(codex_sdk_runner, "_is_subagent_activity_resume_validation_error")
+
+
+def test_reasoning_effort_enum_tolerates_unknown_efforts():
+  """Lock in the forgiving ReasoningEffort enum that unblocked models()/resume.
+
+  The 0.144.x generated enum was strict (none/minimal/low/medium/high/xhigh)
+  and rejected efforts the CLI advertises for newer models (e.g. gpt-5.6-sol's
+  `max`/`ultra`), breaking codex.models() and ThreadResumeResponse validation.
+  rust-v0.145.0-alpha.13 made it a forgiving `str, Enum` with a `_missing_`
+  hook. If a future SDK reverts to a strict enum, this fails loudly.
+  """
+  pytest.importorskip("openai_codex")
+  from openai_codex.types import ReasoningEffort
+
+  for value in ("high", "xhigh", "max", "ultra", "some-future-effort"):
+    assert ReasoningEffort(value).value == value

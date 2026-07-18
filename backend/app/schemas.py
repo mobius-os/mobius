@@ -305,8 +305,11 @@ class AgentSettingsOverride(BaseModel):
 
   model: str | None = None
   # Union of both SDKs' effort enums:
-  #   Codex `ReasoningEffort` (openai-codex 0.131+): none, minimal,
-  #     low, medium, high, xhigh.
+  #   Codex `ReasoningEffort` (openai-codex): none, minimal, low,
+  #     medium, high, xhigh — and, since rust-v0.145.0-alpha.13, a
+  #     forgiving `str` enum that also accepts the efforts newer models
+  #     advertise (gpt-5.6-sol: max, ultra) instead of rejecting them.
+  #     The picker scopes which values it actually offers per model.
   #   Claude `EffortLevel` (claude-agent-sdk): low, medium, high,
   #     xhigh, max (xhigh + max are Opus-tier only).
   # Plus one Möbius-only Claude tier: `ultracode` — the Claude Code
