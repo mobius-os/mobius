@@ -67,6 +67,7 @@ import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { deriveContentVisibility } from './workspaceView.js'
 import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
+import useDesktopSidebar from './useDesktopSidebar.js'
 
 // Resolves the service worker to post warm-up messages to. The page is
 // uncontrolled on its very first load (clientsClaim only takes over once
@@ -87,6 +88,12 @@ const SHELL_RELOAD_RECHECK_MS = 6000
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
+  const {
+    desktop: desktopSidebarMode,
+    open: desktopSidebarOpen,
+    setOpen: setDesktopSidebarOpen,
+  } = useDesktopSidebar()
+
   // ── Workspace reducer — the single live authority for pane contents, per-pane
   // active tabs, and focus (design §1). Declared ABOVE useNavigation so the
   // adapter derives its legacy triple from it. Init: forgiving read of the
@@ -211,6 +218,34 @@ export default function Shell() {
     dragActiveRef,
   })
 
+  // A mobile drawer is a history-backed virtual route. A desktop sidebar is a
+  // saved layout preference. Keep those state machines separate: while a mobile
+  // sentinel is being consumed after a resize, the UI remains modal and inert;
+  // only once it closes does the desktop layout become interactive.
+  const persistentDrawer = desktopSidebarMode && !drawerOpen
+  const drawerModeTransitioning = desktopSidebarMode && drawerOpen
+  const navigationOpen = persistentDrawer ? desktopSidebarOpen : drawerOpen
+  const modalDrawerOpen = !persistentDrawer && drawerOpen
+  const closeDrawerRef = useRef(closeDrawer)
+  closeDrawerRef.current = closeDrawer
+  useEffect(() => {
+    if (desktopSidebarMode && drawerOpen) closeDrawerRef.current()
+  }, [desktopSidebarMode, drawerOpen])
+
+  const brandButtonRef = useRef(null)
+  const immersiveExitRef = useRef(null)
+  const previousPersistentDrawerRef = useRef(persistentDrawer)
+  useLayoutEffect(() => {
+    const wasPersistent = previousPersistentDrawerRef.current
+    previousPersistentDrawerRef.current = persistentDrawer
+    const focused = document.activeElement
+    const drawer = document.getElementById('navigation-drawer')
+    if (!drawer?.contains(focused)) return
+    if ((persistentDrawer && !navigationOpen) || (wasPersistent && !persistentDrawer)) {
+      brandButtonRef.current?.focus()
+    }
+  }, [navigationOpen, persistentDrawer])
+
   // Settings is a full-workspace overlay (§9) — while it is up we suppress the
   // chrome and positioned rects (panes stay mounted but hidden).
   const settingsActive = activeView === 'settings'
@@ -231,6 +266,11 @@ export default function Shell() {
     dispatchImmersive({ type: 'request', appId, value })
   }, [])
   const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
+  useLayoutEffect(() => {
+    if (!immersiveActive) return
+    const drawer = document.getElementById('navigation-drawer')
+    if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
+  }, [immersiveActive])
 
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
@@ -1662,7 +1702,9 @@ export default function Shell() {
       chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
       refreshChats, dispatchWorkspace, workspaceStateRef, activeChatIdRef])
 
-  useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
+  useEffect(() => {
+    if (navigationOpen) { refreshApps(); refreshChats() }
+  }, [navigationOpen, refreshApps, refreshChats])
 
   // Deferred shell-update pickup: a service worker that finished installing and
   // is now WAITING (leashed — it never took over on its own), or index.html's
@@ -2022,7 +2064,7 @@ export default function Shell() {
     }
   }, [navTo, openAppWithIntent, refreshChats])
 
-  async function newChat({ draft, forceNew, exclude, autoSend, focusComposer } = {}) {
+  async function newChat({ draft, forceNew, exclude, autoSend, focusComposer, recordHistory } = {}) {
     // Keep the active chat when it is still an untouched blank; only POST a
     // fresh row when this explicit New-chat action needs one. Never borrow an
     // off-screen blank: another browser may have started it while this tab's
@@ -2108,7 +2150,10 @@ export default function Shell() {
       }
     }
 
-    const recordsHistory = !!(draft || forceNew || drawerPushedRef.current)
+    const changesRoute = activeViewRef.current !== 'chat'
+      || String(activeChatIdRef.current) !== String(chatId)
+    const recordsHistory = changesRoute
+      && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
     if (draft) {
       const draftText = String(draft)
       try {
@@ -2367,8 +2412,8 @@ export default function Shell() {
   }, [chats, activeChatId, activeView, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
-    <div className={`shell${immersiveActive ? ' shell--immersive' : ''}`}>
-      {/* inert on the header while the drawer is open so keyboard / AT
+    <div className={`shell${immersiveActive ? ' shell--immersive' : ''}${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`}>
+      {/* inert on the header while the modal drawer is open so keyboard / AT
           focus cannot reach shell-chrome behind the open drawer. The
           drawer itself gains focus on open (Drawer.jsx focus-management
           effect) and restores it here on close. React 19 reflects the
@@ -2376,16 +2421,17 @@ export default function Shell() {
           absent when false); the old `drawerOpen ? '' : undefined` form was
           a no-op because React 19 normalizes the known boolean attribute and
           an empty string serializes as falsy, so it never applied. */}
-      <header className="shell__bar" inert={drawerOpen}>
+      <header className="shell__bar" inert={modalDrawerOpen}>
         {/* The brand area (logo + wordmark) is the only drawer trigger. A
             native button provides pointer, keyboard, and assistive-technology
             behavior without recreating it with a role and key handler. */}
         <button
+          ref={brandButtonRef}
           type="button"
           className="shell__brand"
           aria-label="Toggle navigation"
           aria-controls="navigation-drawer"
-          aria-expanded={drawerOpen}
+          aria-expanded={navigationOpen}
           /* Android may synthesize a bare click over the logo after an OS Back
              gesture. backFiredRef still filters that compatibility click, but
              a deliberate new interaction starts with pointerdown/keydown and
@@ -2393,7 +2439,15 @@ export default function Shell() {
              blanket 400ms dead zone before the drawer responds. */
           onPointerDown={() => { backFiredRef.current = false }}
           onKeyDown={() => { backFiredRef.current = false }}
-          onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
+          onClick={() => {
+            if (backFiredRef.current) return
+            if (persistentDrawer) {
+              setDesktopSidebarOpen(!desktopSidebarOpen)
+              return
+            }
+            if (drawerOpen) closeDrawer()
+            else openDrawer()
+          }}
         >
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
@@ -2418,8 +2472,10 @@ export default function Shell() {
       </header>
 
       <Drawer
-        open={drawerOpen}
-        onClose={closeDrawer}
+        open={navigationOpen}
+        persistent={persistentDrawer}
+        interactionLocked={drawerModeTransitioning}
+        onClose={drawerModeTransitioning ? undefined : closeDrawer}
         apps={apps}
         activeView={activeView}
         activeAppId={activeAppId}
@@ -2427,7 +2483,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onNewChat={() => newChat({ focusComposer: true })}
+        onNewChat={() => newChat({ focusComposer: true, recordHistory: true })}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
@@ -2452,7 +2508,7 @@ export default function Shell() {
         />
       )}
 
-      {/* inert on the main content while the drawer is open — mirrors
+      {/* inert on the main content while the modal drawer is open — mirrors
           the drawer's own inert-when-closed contract, but inverted.
           Prevents pointer / keyboard events from reaching the chat or
           app canvas while the drawer is overlaid in front of it. Boolean
@@ -2469,7 +2525,7 @@ export default function Shell() {
       {tabStripVisible && !multiPane && (
         <nav
           className="shell__tabstrip"
-          inert={drawerOpen}
+          inert={modalDrawerOpen}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
           // (the coachmark teaches "drag tabs to split" here). Tag it with the
@@ -2507,7 +2563,7 @@ export default function Shell() {
           })}
         </nav>
       )}
-      <main className="shell__content" inert={drawerOpen} ref={contentElRef}>
+      <main className="shell__content" inert={modalDrawerOpen} ref={contentElRef}>
         {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
             wrappers (chatId-sorted) as ONE flat sibling set, never reparented.
             A wrapper is positioned (--paned) when its tab is a visible pane's
@@ -2554,7 +2610,7 @@ export default function Shell() {
               // suspend its iframe interaction while the drawer is open. This
               // cancels kinetic scrolling already in flight, in addition to the
               // shell blocking new pointer input.
-              interactive={visibleAppIds.has(String(id)) && !drawerOpen}
+              interactive={visibleAppIds.has(String(id)) && !modalDrawerOpen}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
@@ -2656,7 +2712,7 @@ export default function Shell() {
             the phone overflow chip; no content lives here. */}
         {workspaceChromeActive && (
           <WorkspaceChrome
-            inert={drawerOpen}
+            inert={modalDrawerOpen}
             workspace={workspace}
             projection={projection}
             mode={workspaceMode}
@@ -2680,10 +2736,11 @@ export default function Shell() {
           so the user's choice sticks for the rest of the visit. */}
       {immersiveActive && (
         <button
+          ref={immersiveExitRef}
           type="button"
           className="shell__immersive-exit"
           aria-label="Exit full screen"
-          inert={drawerOpen}
+          inert={modalDrawerOpen}
           onClick={() => dispatchImmersive({ type: 'exit' })}
         >
           <Minimize2 size={18} aria-hidden="true" />
@@ -2694,7 +2751,7 @@ export default function Shell() {
           with the splits flag on; dismissed by a drag, its ✕, or 12s — never by
           an unrelated tap. */}
       {workspaceCoachmarkVisible && (
-        <div className="workspace__coachmark" role="status" aria-live="polite" inert={drawerOpen}>
+        <div className="workspace__coachmark" role="status" aria-live="polite" inert={modalDrawerOpen}>
           <span className="workspace__coachmark-text">
             {coarsePointer ? 'Hold a tab to move it' : 'Drag tabs to split the view'}
           </span>

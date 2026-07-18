@@ -11,7 +11,7 @@ const canvas = readFileSync(resolve(src, 'components/AppCanvas/AppCanvas.jsx'), 
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
 
 test('drawer suspension reaches the live app frame before paint', () => {
-  assert.match(shell, /interactive=\{visibleAppIds\.has\(String\(id\)\) && !drawerOpen\}/)
+  assert.match(shell, /interactive=\{visibleAppIds\.has\(String\(id\)\) && !modalDrawerOpen\}/)
   assert.match(canvas, /useLayoutEffect\(\(\) => \{[\s\S]*sendInteractivity\(swap\.liveVersion, interactive, visible\)/)
   assert.match(canvas, /suspendScrolling:\s*visible\s*&&\s*!enabled/)
   assert.match(canvas, /moebius:frame-interactivity/)

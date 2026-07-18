@@ -24,6 +24,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const DESKTOP_SIDEBAR_STORAGE_KEY = 'mobius:desktop-sidebar-open:v1'
 const STREAM_ROUTE = /\/api\/chats\/[0-9a-f-]+\/stream$/
 const WIDE = { width: 1400, height: 900 }
 const PHONE = { width: 412, height: 760 }
@@ -64,6 +65,31 @@ async function boot(page, viewport = WIDE) {
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
     { timeout: 10000 })
+}
+
+async function ensureNavigationOpen(page) {
+  const toggle = page.getByLabel('Toggle navigation')
+  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
+  await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+}
+
+/** Drawer rows intentionally exclude chats with no messages. These workspace
+ *  drag tests create API-only chats so they can avoid agent runs; make only the
+ *  requested fixtures satisfy the drawer-list contract while preserving the
+ *  real backend response for every other field and chat. */
+async function exposeChatsInDrawer(page, chatIds) {
+  const visibleIds = new Set(chatIds.map(String))
+  await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const response = await route.fetch()
+    const chats = await response.json()
+    await route.fulfill({
+      response,
+      json: chats.map(chat => visibleIds.has(String(chat.id))
+        ? { ...chat, has_messages: true }
+        : chat),
+    })
+  })
 }
 
 /** Report the apps list as `apps`, each with a stubbed frame that COUNTS the
@@ -486,6 +512,11 @@ async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {})
 
 async function bootThreeTab(page, tag) {
   await boot(page, WIDE)
+  // These cases exercise full-width three-pane geometry. The persistent
+  // sidebar legitimately reduces the usable content rect, so make the
+  // workspace-width precondition explicit instead of relying on the old
+  // desktop drawer being overlaid.
+  await page.evaluate(key => localStorage.setItem(key, 'false'), DESKTOP_SIDEBAR_STORAGE_KEY)
   const a = await createTaggedChat(page, `${tag}A`)
   const b = await createTaggedChat(page, `${tag}B`)
   const c = await createTaggedChat(page, `${tag}C`)
@@ -611,12 +642,15 @@ test.describe('Workspace view-mode toggle', () => {
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('panes')
 
-    // The toggle is in the top bar — no drawer needed. Flipping must not open it.
+    // The toggle is in the top bar — no navigation interaction needed. Flipping
+    // view mode must preserve the responsive navigation's current state.
     const toggle = page.locator('.shell__viewmode')
+    const navigationToggle = page.getByLabel('Toggle navigation')
+    const navigationWasOpen = await navigationToggle.getAttribute('aria-expanded')
     await expect(toggle).toBeVisible()
     await expect(toggle).toHaveAttribute('aria-pressed', 'false')
     await toggle.click()
-    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+    await expect(navigationToggle).toHaveAttribute('aria-expanded', navigationWasOpen)
 
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     const single = await readWs(page)
@@ -643,6 +677,7 @@ test.describe('Workspace view-mode toggle', () => {
     const a = await createTaggedChat(page, 'vmDragA')
     const b = await createTaggedChat(page, 'vmDragB')
     await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id])
     await seedWorkspace(page, paneModel.setViewMode(twoChatPanes(a.id, b.id), 'single'))
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
@@ -652,15 +687,15 @@ test.describe('Workspace view-mode toggle', () => {
     expect(Object.keys(baseline.panes).length).toBe(2)
 
     // The only in-view drag source in single-mode is a drawer row.
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await ensureNavigationOpen(page)
     const row = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
     await expect(row).toBeVisible()
     const box = await row.boundingBox()
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2, { steps: 4 })
-    // The blocked arm shakes the BAR toggle (bar z-index 100 paints above scrim z 90).
+    // The blocked arm shakes the bar toggle, which remains visible above either
+    // the mobile scrim or the persistent desktop navigation.
     await expect(page.locator('.shell__viewmode.is-vibrating')).toHaveCount(1, { timeout: 2000 })
     await page.mouse.up()
 
@@ -705,13 +740,13 @@ test.describe('Workspace view-mode toggle', () => {
     const b = await createTaggedChat(page, 'vmJoinB')
     const c = await createTaggedChat(page, 'vmJoinC') // sits in the drawer, not open
     await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
     await seedWorkspace(page, singleLeafTwoTabs(a.id, b.id))
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
 
     // Drag a NOT-yet-open drawer row into the pane CENTER → join p0 as a tab (no split).
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await ensureNavigationOpen(page)
     const content = await page.locator('.shell__content').boundingBox()
     const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
     await expect(row).toBeVisible()

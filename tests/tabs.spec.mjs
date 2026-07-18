@@ -247,8 +247,13 @@ test.describe('Tabs', () => {
       .dispatchEvent('pointerdown')
     await expect(page.locator('.workspace__strip--focused')).toContainText('Demo App')
 
-    // The global drawer suspends kinetic interaction in every visible app pane.
+    // A docked desktop sidebar is ordinary layout and deliberately leaves app
+    // panes interactive. Switch to the modal breakpoint before asserting the
+    // global-drawer suspension contract.
+    await page.setViewportSize({ width: 900, height: 800 })
+    await expect(page.locator('.drawer')).not.toHaveClass(/drawer--persistent/)
     await page.locator('.shell__brand').click()
+    await expect(page.locator('.drawer')).toHaveClass(/drawer--open/)
     await expect(page
       .frameLocator(`iframe[data-app-id="${APP_ID}"]`)
       .locator('body'))

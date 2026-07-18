@@ -54,6 +54,13 @@ function isRestorableRoute(route) {
   return route && ['chat', 'canvas', 'settings'].includes(route.view)
 }
 
+function sameRoute(a, b) {
+  return a?.view === b?.view
+    && String(a?.chatId ?? '') === String(b?.chatId ?? '')
+    && String(a?.appId ?? '') === String(b?.appId ?? '')
+    && String(a?.paneId ?? '') === String(b?.paneId ?? '')
+}
+
 // Last active chat id, read defensively (private-mode / disabled storage throws).
 function safeStoredChatId() {
   try { return localStorage.getItem(ACTIVE_CHAT_KEY) } catch { return null }
@@ -174,10 +181,11 @@ export const coldRestoredCanvasAppId =
  *                       true when the only boot tab is the unpinned home
  *                       surface, which an explicit deep link replaces.
  *
- * Three load-bearing pieces remain: `openDrawer` pushes a sentinel history
- * entry; `navTo` updates internal state + `navStackRef` and does NOT call
- * pushState (the BFCache "two drawers" fix); every drawer-close path funnels
- * through `history.back()` → `handleBack`'s drawer-first guard.
+ * Three load-bearing pieces remain: `openDrawer` pushes one mobile sentinel;
+ * `navTo` retags that sentinel or pushes one ordinary destination; every modal
+ * close funnels through `history.back()` → `handleBack`'s drawer-first guard.
+ * Desktop sidebar preference and visibility intentionally live outside this
+ * hook in Shell/useDesktopSidebar.
  */
 export default function useNavigation({
   workspace,
@@ -265,6 +273,10 @@ export default function useNavigation({
   // True when openDrawer pushed an entry that hasn't been consumed by
   // a navigation or a back-gesture yet.
   const drawerPushedRef = useRef(false)
+  // A close may have to traverse untagged iframe-created entries before it
+  // reaches the tagged entry beneath the drawer sentinel. Keep that traversal
+  // serialized so the modal stays inert until the sentinel is truly consumed.
+  const drawerClosePendingRef = useRef(false)
   // Per-(pane, app) pending nav-sentinel counts installed via the
   // moebius:nav-push postMessage protocol. Keyed by ownerKeyOf(paneId, appId).
   const appSentinelCountsRef = useRef(new Map())
@@ -436,6 +448,7 @@ export default function useNavigation({
     // Synchronous guard for a rapid double activation before React has rendered
     // `drawerOpen=true`. One drawer owns exactly one physical sentinel.
     if (drawerOpenRef.current) return
+    drawerClosePendingRef.current = false
     // Do not let a just-issued app history traversal consume a drawer entry
     // pushed after it began. Preserve the user's intent and open once the
     // serialized local-pop pump is idle.
@@ -452,17 +465,22 @@ export default function useNavigation({
   }
 
   function closeDrawer() {
-    if (!drawerOpenRef.current) return
+    // A modal close owns one serialized traversal. Escape, overlay, toggle, and
+    // breakpoint cleanup can arrive in the same frame; a second back() would
+    // skip past the drawer's sentinel before the first traversal settles.
+    if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
       // Funnel through history.back() so handleBack handles the state
       // transition. This makes back-gesture and overlay-tap follow
       // exactly the same code path through handleBack, with the
       // drawer-first guard there preventing navStack over-pop.
+      drawerClosePendingRef.current = true
       history.back()
     } else {
       // Defensive: drawer open without a sentinel (shouldn't happen
       // in normal flow). Just close it directly.
       drawerOpenRef.current = false
+      drawerClosePendingRef.current = false
       setDrawerOpen(false)
     }
   }
@@ -694,6 +712,14 @@ export default function useNavigation({
       return
     }
 
+    // Clicking the current destination is a close/no-op, not a new semantic
+    // route. This matters for a persistent desktop sidebar, where the active row
+    // remains visible and repeated activations must not create dead Back steps.
+    if (sameRoute(previousRoute, nextRoute)) {
+      if (drawerOpenRef.current) closeDrawer()
+      return
+    }
+
     navigationEpochRef.current += 1
 
     // Ensure exactly one history entry sits above the current one to serve as
@@ -849,6 +875,7 @@ export default function useNavigation({
     }
 
     function handleForward(destination, sourceRoute) {
+      drawerClosePendingRef.current = false
       const route = destination?.route
       // A nav entry represents a shell-level transition. Back destructively
       // removed its source from navStack, so Forward rebuilds that one edge.
@@ -950,6 +977,13 @@ export default function useNavigation({
       }, 0)
     }
 
+    function continueDrawerCloseAfterPhantom() {
+      if (!drawerClosePendingRef.current) return
+      setTimeout(() => {
+        if (drawerClosePendingRef.current) history.back()
+      }, 0)
+    }
+
     function isConsumedAppEntry(state) {
       const id = state?.kind === 'app' ? navEntryId(state) : null
       return !!(id && consumedAppEntryIdsRef.current.has(id))
@@ -978,6 +1012,7 @@ export default function useNavigation({
       // drawer-open view AND closeDrawer's history.back().
       if (drawerOpenRef.current && drawerPushedRef.current) {
         drawerPushedRef.current = false
+        drawerClosePendingRef.current = false
         drawerOpenRef.current = false
         closeDrawerNextFrame()
         appLocalPopInFlightRef.current = false
@@ -1094,6 +1129,7 @@ export default function useNavigation({
       // pane. The route payload is the compatibility fallback for a tagged entry
       // whose in-memory stack was lost.
       drawerPushedRef.current = false
+      drawerClosePendingRef.current = false
       drawerOpenRef.current = false
       setDrawerOpen(false)
       const entry = navStackRef.current.pop()
@@ -1125,6 +1161,7 @@ export default function useNavigation({
             markConsumedAppEntry(source)
           }
           finishPhantomLocalPop()
+          continueDrawerCloseAfterPhantom()
           return
         }
         // Seek reached its pinned target: clear the in-flight seek and re-pump so
@@ -1191,6 +1228,7 @@ export default function useNavigation({
           markConsumedAppEntry(source)
         }
         finishPhantomLocalPop()
+        continueDrawerCloseAfterPhantom()
         return
       }
       currentNavStateRef.current = destination
