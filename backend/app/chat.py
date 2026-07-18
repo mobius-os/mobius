@@ -898,7 +898,11 @@ def _stall_exemption(
   """Derived exemptions from design 2.1: question, park, or draining."""
   if draining:
     return "draining"
-  if questions.get(chat_id) is not None:
+  # The registry entry can outlive its future while a provider callback
+  # unwinds. Only a genuinely unresolved future is a human wait; treating a
+  # completed entry as exempt forever strands the SDK process when it wedges
+  # after answer delivery.
+  if questions.is_waiting(chat_id):
     return "pending_question"
   if _is_future_park(_parked_until_for_chat(db, chat_id), now):
     return "parked"
