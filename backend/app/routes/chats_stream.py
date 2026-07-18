@@ -715,9 +715,11 @@ async def send_message(
   # makes the send reload and start on the newly committed provider. This
   # removes the actor-order race where a message could begin on the outgoing
   # provider while its handoff was still being synthesized.
+  # Lock order is transition then queue; all send predicates refresh inside.
   async with chat_queue.get_transition_lock(chat_id):
-    db.expire(chat)
-    return await _send_message_locked(body, chat_id, principal, db, chat)
+    async with chat_queue.get_lock(chat_id):
+      db.expire(chat)
+      return await _send_message_locked(body, chat_id, principal, db, chat)
 
 
 async def _send_message_locked(
@@ -803,8 +805,7 @@ async def _send_message_locked(
     # queued messages into a live steer. Codex injects into the running
     # SDK turn; Claude interrupts and re-prompts on the same client. On
     # success the user message goes into the transcript and a
-    # `steered_into_turn` event tells the client to render it inline. On
-    # False (closed-turn race) or any exception, fall through to the queue.
+    # `steered_into_turn` event tells the client to render it inline.
     provider = chat.provider or "claude"
     if (
       is_chat_running(chat_id)
@@ -812,60 +813,45 @@ async def _send_message_locked(
       and (body.force_steer or not chat.pending_messages)
       and _has_live_steerable_turn(chat_id, provider)
     ):
+      # Every provider delivery names a row already durable in pending.
       user_msg = _user_message_from_body(chat, body)
-      user_msgs = _user_messages_from_pending(
-        selected_force_pending or [], user_msg,
-      ) if body.force_steer else [user_msg]
-      # Every Claude steer — ordinary AND fast-forward (force_steer) — defers
-      # its transcript split to the runner. At HTTP arrival the pre-interrupt
-      # text A1 has often not streamed yet, so a route-side split sealed an
-      # empty A1 and the real A1 then merged with A2 after the steered row
-      # (the fast-forward "dropped message" bug). The runner splits at the
-      # interrupt boundary where A1 is complete. Codex has no interrupt
-      # boundary (it injects into the running turn) so it still splits here.
-      # Deferring force_steer moves the queued-row consume to the runner; the
-      # writer's AppendSteeredUserMessage tolerates rows a concurrent Stop
-      # already cleared (appends them anyway) so the fast-forwarded rows can't
-      # be dropped.
+      if body.force_steer:
+        user_msgs = _user_messages_from_pending(
+          selected_force_pending or [], user_msg,
+        )
+        consume_cids = list(body.consume_pending_cids or [])
+        steer_content = user_msg["content"]
+        reserved = None
+      else:
+        reserved = await _append_to_pending(
+          chat, body, db, initiated_by_app_id=principal.app_id,
+        )
+        db.expire(chat)
+        reserved_cid = cid_of(reserved)
+        user_msgs = [reserved]
+        consume_cids = [reserved_cid] if reserved_cid is not None else []
+        steer_content = reserved.get("content", "")
+      # Claude converts at its interrupt boundary; its buffer is only a cache.
       defer_to_runner = provider == "claude"
       try:
         steered = await _steer_into_active_turn(
-          provider, chat_id, user_msg["content"],
+          provider, chat_id, steer_content,
           user_msgs if defer_to_runner else None,
-          (body.consume_pending_cids or []) if defer_to_runner else None,
+          consume_cids if defer_to_runner else None,
         )
       except Exception:
-        # Any steer failure is non-fatal: log nothing louder than the
-        # runner already does and queue the message instead.
+        # A failed delivery leaves the reserved row pending.
         steered = False
       if steered:
         # A question tool is a synchronous human pause. Once the owner
-        # explicitly fast-forwards (or a steer-enabled chat auto-steers), the
-        # new message supersedes that pause; leaving its future registered
-        # would strand Codex waiting on a card that the transcript has already
-        # moved past. Retire it only AFTER the provider accepts the steer so a
-        # failed steer still leaves the original question answerable.
+        # fast-forwards (or a steer-enabled chat auto-steers), the new message
+        # supersedes that pause; leaving its future registered would strand
+        # Codex waiting on a card the transcript has moved past. Retire it only
+        # AFTER acceptance so a failed steer leaves the question answerable.
         questions.cancel(chat_id)
-        # Persist the steer so a reload renders Q1, A1, Q2, A2: seal the
-        # pre-interrupt assistant text (A1) as its own message, append this
-        # steered user row at the END, and reset the live sink so the
-        # post-steer continuation (A2) lands as a fresh assistant message.
-        #
-        # An ordinary Claude steer defers this to the RUNNER, which runs
-        # `split_for_steer` at the interrupt boundary (where A1 is complete):
-        # doing it here, before A1 has streamed, sealed an empty A1 and merged
-        # the real A1 with A2 after the steered row (the Q1, Q2, A1A2 reload
-        # bug). The response returns optimistic queue state; the runner's split
-        # (with a turn-end finally catch-all for durability) and the
-        # `steered_into_turn` broadcast below reconcile the client.
-        #
-        # Codex (no interrupt boundary — `turn.steer()` injects into the
-        # running turn) and Claude force-steers drive the split on this event
-        # loop, serialized with streaming snapshots. A turn with no registered
-        # sink (closed-turn race / non-SDK path) falls back to a plain
-        # end-of-transcript append.
         if defer_to_runner:
-          consumed = set(body.consume_pending_cids or [])
+          # The optimistic response mirrors the runner's cid conversion.
+          consumed = set(consume_cids)
           stored_result = {
             "stored_messages": user_msgs,
             "pending": [
@@ -874,15 +860,12 @@ async def _send_message_locked(
             ],
           }
         else:
+          # Codex append and pending removal commit atomically for one cid.
           try:
             stored_result = await _split_steer_at_route(
-              chat_id, user_msgs, body.consume_pending_cids or [],
+              chat_id, user_msgs, consume_cids,
             )
           except Exception:
-            # The transcript write didn't land, but the live turn already
-            # absorbed the steer — we can't un-steer. Surface the failure so
-            # the client refetches authoritative state rather than silently
-            # dropping the message.
             log.warning(
               "steered transcript write did not persist chat_id=%s", chat_id,
             )
@@ -916,6 +899,18 @@ async def _send_message_locked(
         return _steered_response(
           chat_id, stored_result.get("pending"),
         )
+      if body.force_steer:
+        return _not_steered_response(chat_id)
+      # A failed ordinary steer reports the existing reservation as queued.
+      db.expire(chat)
+      remaining = list(chat.pending_messages or [])
+      try:
+        position = (
+          [cid_of(m) for m in remaining].index(cid_of(reserved)) + 1
+        )
+      except ValueError:
+        position = len(remaining)
+      return _queued_response(reserved, position)
     if body.force_steer:
       return _not_steered_response(chat_id)
 

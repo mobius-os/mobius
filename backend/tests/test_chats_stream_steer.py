@@ -25,6 +25,8 @@ covered by `test_codex_sdk_runner.py`; here we only exercise the wiring.
 import asyncio
 from concurrent.futures import Future
 
+import pytest
+
 from app import models, questions
 from app.broadcast import create_broadcast, get_broadcast
 from app.chat_writer import cid_of
@@ -132,6 +134,8 @@ def test_steers_into_live_codex_turn_when_flag_on(
   steered_calls = []
 
   async def _fake_steer(cid, message):
+    reserved = _read_chat(chat_id).pending_messages
+    assert [row["content"] for row in reserved] == ["actually use blue"]
     steered_calls.append((cid, message))
     return True
 
@@ -890,16 +894,10 @@ def test_falls_back_to_queue_when_flag_off(client, auth, monkeypatch):
   assert [m["content"] for m in chat.pending_messages] == ["queued please"]
 
 
-def test_steers_into_live_claude_turn_when_flag_on(
+def test_steers_into_live_claude_turn_reserves_durable_pending(
   client, auth,
 ):
-  """claude + running + flag-on + live client: the steer payload is BUFFERED
-  on the handle, the response is `steered`, and a `steered_into_turn` event
-  renders it inline. The route deliberately does NOT write the transcript for
-  Claude — the runner seals A1 and appends the steered row at the interrupt
-  boundary (see test_claude_runner_splits_steer_at_boundary_not_http_arrival).
-  Writing it here at HTTP arrival, before A1 had streamed, sealed an empty A1
-  and merged the real A1 with A2 after the steered row on reload."""
+  """Claude buffers only a row already committed to pending."""
   chat_id = "claudechat"
   _make_claude_chat(chat_id, steer_enabled=True)
   handle = _make_active_claude_client(chat_id)
@@ -915,14 +913,18 @@ def test_steers_into_live_claude_turn_when_flag_on(
 
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
-  # The steer payload is buffered for the runner to split at the boundary.
+
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == ["actually use blue"]
+  reserved_cid = cid_of(chat.pending_messages[0])
+  assert [m["role"] for m in chat.messages] == ["user", "assistant"]
+
   assert [m["content"] for m in handle._steer_user_msgs] == [
     "actually use blue"
   ]
-  # The route did NOT touch the transcript — the runner owns the Claude split.
-  chat = _read_chat(chat_id)
-  assert [m["role"] for m in chat.messages] == ["user", "assistant"]
-  assert chat.pending_messages in (None, [])
+  assert cid_of(handle._steer_user_msgs[0]) == reserved_cid
+  assert handle._steer_consume_cids == [reserved_cid]
+
   # A `steered_into_turn` event was broadcast for the inline render.
   bc = get_broadcast(chat_id)
   steered_events = [
@@ -934,7 +936,7 @@ def test_steers_into_live_claude_turn_when_flag_on(
     {
       "role": "user",
       "ts": handle._steer_user_msgs[0]["ts"],
-      "cid": cid_of(handle._steer_user_msgs[0]),
+      "cid": reserved_cid,
       "content": "actually use blue",
     }
   ]
@@ -1008,6 +1010,83 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
   ]
   # The runner consumed the buffered payload (no double-split on turn end).
   assert handle._steer_user_msgs == []
+  assert _read_chat(chat_id).pending_messages in (None, [])
+
+
+def test_claude_reserved_row_survives_process_loss_and_sweep(
+  client, auth, monkeypatch,
+):
+  from datetime import UTC, datetime
+
+  from sqlalchemy.orm.attributes import flag_modified
+
+  from app import chat as chat_mod
+
+  chat_id = "claude-process-loss"
+  message_cid = "claude-process-loss-cid"
+  _make_claude_chat(chat_id, steer_enabled=True)
+  db = SessionLocal()
+  try:
+    chat = db.get(models.Chat, chat_id)
+    chat.run_status = "running"
+    chat.run_started_at = datetime.now(UTC)
+    db.add(models.ChatRun(
+      id=f"run-{chat_id}",
+      chat_id=chat_id,
+      status="running",
+      provider="claude",
+      started_at=datetime.now(UTC),
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+  handle = _make_active_claude_client(chat_id)
+  registry.register(handle)
+  bc = create_broadcast(chat_id)
+  response = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "survive restart", "cid": message_cid},
+    headers=auth,
+  )
+  assert response.status_code == 202
+  assert [cid_of(row) for row in _read_chat(chat_id).pending_messages] == [
+    message_cid,
+  ]
+  assert [cid_of(row) for row in handle._steer_user_msgs] == [message_cid]
+
+  registry.reset_for_tests()
+  bc.mark_completed()
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [chat_id]
+    chat = db.get(models.Chat, chat_id)
+    pending = list(chat.pending_messages or [])
+    pending[0]["ts"] -= 180_000
+    chat.pending_messages = pending
+    flag_modified(chat, "pending_messages")
+    db.commit()
+  finally:
+    db.close()
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod,
+    "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs) or True,
+  )
+  db = SessionLocal()
+  try:
+    assert asyncio.run(chat_mod.sweep_idle_pending_chats(db)) == [chat_id]
+  finally:
+    db.close()
+
+  chat = _read_chat(chat_id)
+  assert chat.pending_messages in (None, [])
+  assert len([
+    row for row in chat.messages if cid_of(row) == message_cid
+  ]) == 1
+  assert len(scheduled) == 1
 
 
 def test_claude_falls_back_to_queue_when_flag_off(
@@ -1126,3 +1205,220 @@ def test_falls_back_to_queue_when_steer_raises(client, auth, monkeypatch):
   assert res.json()["status"] == "queued"
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["queued please"]
+
+
+def test_codex_split_failure_keeps_one_reserved_row(
+  client, auth, monkeypatch,
+):
+  chat_id = "codex-split-failure"
+  message_cid = "split-failure-cid"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+  steer_calls = []
+
+  async def _steer(_chat_id, content):
+    steer_calls.append(content)
+    return True
+
+  async def _split(*_args):
+    raise RuntimeError("writer unavailable")
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _steer,
+  )
+  monkeypatch.setattr(
+    "app.routes.chats_stream._split_steer_at_route", _split,
+  )
+
+  first = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "keep this", "cid": message_cid},
+    headers=auth,
+  )
+  retry = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "keep this", "cid": message_cid},
+    headers=auth,
+  )
+
+  assert first.status_code == 503
+  assert retry.status_code == 202
+  assert retry.json()["status"] == "queued"
+  assert steer_calls == ["keep this"]
+  chat = _read_chat(chat_id)
+  assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
+  assert not [
+    row for row in chat.messages if cid_of(row) == message_cid
+  ]
+
+
+def test_request_cancellation_after_reserve_keeps_pending(
+  client, auth, monkeypatch,
+):
+  from app import schemas
+  from app.deps import Principal
+  from app.routes import chats_stream
+
+  chat_id = "cancel-after-reserve"
+  message_cid = "cancel-after-reserve-cid"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+  provider_entered = asyncio.Event()
+
+  async def _blocked_steer(_chat_id, _content):
+    provider_entered.set()
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _blocked_steer,
+  )
+
+  async def _run():
+    db = SessionLocal()
+    try:
+      owner = db.query(models.Owner).first()
+      task = asyncio.create_task(chats_stream.send_message(
+        schemas.SendMessage(content="durable", cid=message_cid),
+        chat_id,
+        Principal(owner=owner, app_id=None),
+        db,
+      ))
+      await asyncio.wait_for(provider_entered.wait(), timeout=2)
+      task.cancel()
+      with pytest.raises(asyncio.CancelledError):
+        await task
+    finally:
+      db.close()
+
+  asyncio.run(_run())
+  chat = _read_chat(chat_id)
+  assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
+  assert not [row for row in chat.messages if cid_of(row) == message_cid]
+
+
+def test_steer_wins_stop_race_converts_before_clear(
+  client, auth, monkeypatch,
+):
+  from app import chat as chat_mod
+  from app import schemas
+  from app.deps import Principal
+  from app.routes import chats_stream
+
+  chat_id = "steer-wins-stop"
+  message_cid = "steer-wins-stop-cid"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  handle = _make_active_codex_turn(chat_id)
+  registry.register(handle)
+  create_broadcast(chat_id)
+  provider_entered = asyncio.Event()
+  allow_provider = asyncio.Event()
+
+  async def _steer(_chat_id, _content):
+    provider_entered.set()
+    await allow_provider.wait()
+    return True
+
+  async def _stop(*_args, **_kwargs):
+    return True
+
+  handle.stop = _stop
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _steer,
+  )
+
+  async def _run():
+    db = SessionLocal()
+    try:
+      owner = db.query(models.Owner).first()
+      send = asyncio.create_task(chats_stream.send_message(
+        schemas.SendMessage(content="convert me", cid=message_cid),
+        chat_id,
+        Principal(owner=owner, app_id=None),
+        db,
+      ))
+      await asyncio.wait_for(provider_entered.wait(), timeout=2)
+      stop = asyncio.create_task(chat_mod.stop_chat_for(chat_id))
+      await asyncio.sleep(0)
+      assert not stop.done()
+      allow_provider.set()
+      response, _ = await asyncio.gather(send, stop)
+      assert response.status_code == 202
+      assert response.body
+    finally:
+      db.close()
+
+  asyncio.run(_run())
+  chat = _read_chat(chat_id)
+  durable = [
+    row for row in list(chat.messages or []) + list(chat.pending_messages or [])
+    if cid_of(row) == message_cid
+  ]
+  assert len(durable) == 1
+  assert durable[0] in chat.messages
+
+
+def test_stop_wins_steer_race_send_rechecks_idle(
+  client, auth, monkeypatch,
+):
+  from app import chat as chat_mod
+  from app import chat_queue, schemas
+  from app.deps import Principal
+  from app.routes import chats_stream
+
+  chat_id = "stop-wins-steer"
+  message_cid = "stop-wins-steer-cid"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  handle = _make_active_codex_turn(chat_id)
+  registry.register(handle)
+  create_broadcast(chat_id)
+  scheduled = asyncio.Event()
+
+  async def _stop(*_args, **_kwargs):
+    return True
+
+  async def _must_not_steer(*_args):
+    raise AssertionError("the stopped handle must not receive a steer")
+
+  async def _run_chat(*_args, **_kwargs):
+    scheduled.set()
+
+  handle.stop = _stop
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _must_not_steer,
+  )
+  monkeypatch.setattr(chats_stream, "run_chat", _run_chat)
+
+  async def _run():
+    db = SessionLocal()
+    lock = chat_queue.get_lock(chat_id)
+    await lock.acquire()
+    try:
+      stop = asyncio.create_task(chat_mod.stop_chat_for(chat_id))
+      await asyncio.sleep(0)
+      owner = db.query(models.Owner).first()
+      send = asyncio.create_task(chats_stream.send_message(
+        schemas.SendMessage(content="start fresh", cid=message_cid),
+        chat_id,
+        Principal(owner=owner, app_id=None),
+        db,
+      ))
+      await asyncio.sleep(0)
+    finally:
+      lock.release()
+    try:
+      _, response = await asyncio.gather(stop, send)
+      assert response.status_code == 202
+      await asyncio.wait_for(scheduled.wait(), timeout=2)
+    finally:
+      db.close()
+
+  asyncio.run(_run())
+  chat = _read_chat(chat_id)
+  durable = [
+    row for row in list(chat.messages or []) + list(chat.pending_messages or [])
+    if cid_of(row) == message_cid
+  ]
+  assert len(durable) == 1
+  assert durable[0] in chat.messages
