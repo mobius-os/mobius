@@ -73,6 +73,16 @@
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   outline: none;
+  /* The rAF-written hold progress [0..1]; the hold ring reads it via the cascade
+     (builder-mode control below). */
+  --hold-progress: 0;
+  /* Suppress the double-tap zoom on the logo while KEEPING vertical scroll and
+     pinch zoom — only the horizontal swipe is owned here; viewport zoom is never
+     disabled globally. The callout/selection is suppressed so a press-and-hold
+     activates builder mode instead of raising a menu (the JS also preventDefaults
+     contextmenu during a hold). */
+  touch-action: pan-y pinch-zoom;
+  -webkit-touch-callout: none;
 }
 
 /* Keyboard-only focus ring on the brand/drawer toggle. Matches the
@@ -87,6 +97,9 @@
   width: 34px;
   height: 34px;
   border-radius: 6px;
+  /* Slight-spring 180deg twist between modes (~300ms); overshoot cubic makes the
+     flip feel alive. Reduced-motion drops it to instant (below). */
+  transition: transform 300ms cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 
 .shell__wordmark {
@@ -94,6 +107,8 @@
   font-weight: 600;
   letter-spacing: 0;
   color: var(--text); /* CONTRACT: high-contrast text on the opaque --bg of .shell__bar */
+  /* Accent tint in builder mode, as the color cue paired with the logo twist. */
+  transition: color 300ms ease;
 }
 
 
@@ -350,86 +365,84 @@
   to { opacity: 0.35; transform: scale(0.75); }
 }
 
-/* ── View-mode toggle (single-screen <-> split-panes) ─────────────
-   Right-aligned in the top bar, in line with the logo cluster. Quiet by default
-   (muted glyph, no chrome); the active (single) state gets a soft accent tint via
-   aria-pressed — never a loud fill, matching the pane strips' understated active-
-   tab treatment (workspace.css). Sizing follows the bar's icon idiom. */
-.shell__viewmode {
-  flex-shrink: 0;
-  /* Push to the right edge of the bar whether or not the offline pill is present
-     (the offline pill, when shown, keeps its own margin-left:auto and trails just
-     before this control in the right cluster). */
-  margin-left: auto;
-  /* At least a 44px touch target (design) — the glyph stays 18px, the button grows
-     its hit area. */
-  width: 44px;
-  height: 44px;
-  display: flex;
+/* ── Builder-mode control: the logo IS the control (owner placement) ─────────
+   No standalone toggle button. The brand opens the drawer on a single tap
+   (instant, unchanged); a HOLD (~450ms) or a touch swipe-right toggles the view
+   mode. Indicator = the mark itself: the raster logo rotates 180deg in builder
+   mode (swapping which hand is "drawing" — the circular composition reads
+   intentionally in both orientations) and the wordmark takes the accent tint. A
+   hold fills a ring around the mark (--hold-progress → conic-gradient, written by
+   the rAF loop in useLogoModeGesture) and, on completion, an outward accent pulse
+   escapes from under the thumb. CSS only, driven by .shell__brand--builder /
+   .is-holding / .is-pulsing. (The brand's --hold-progress default, touch-action,
+   and callout suppression live on the base .shell__brand rule above.) */
+.shell__logo-wrap {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: 11px;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  transition: color 0.12s, background 0.12s;
-  -webkit-tap-highlight-color: transparent;
-  /* Suppress the double-tap zoom on the target (so a quick double-activation is a
-     builder-enter, not a browser zoom) while KEEPING vertical scroll and pinch
-     zoom — the button owns only the horizontal swipe. Viewport zoom is never
-     disabled globally. */
-  touch-action: pan-y pinch-zoom;
+  flex: none;
 }
-/* The morph: ONE outer frame, a center divider that fades/scales between builder
-   (divider present) and single screen (divider faded). A CSS transition (~200ms,
-   the design's 180-220ms band) carries the state change; the is-morphing flourish
-   is a one-shot pop replayed on a double/swipe even when the mode is unchanged. */
-.shell__viewmode-glyph { overflow: visible; }
-.shell__viewmode-divider {
-  transform-origin: center;
-  transition: opacity 200ms ease, transform 200ms ease;
-}
-.shell__viewmode[aria-pressed="true"] .shell__viewmode-divider {
+/* The hold ring: a thin accent arc that fills clockwise from 12 o'clock as the
+   hold progresses. conic-gradient painted, radial mask punches out the centre to
+   leave an annulus around the mark. Only visible while holding. */
+.shell__logo-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(from -90deg,
+    var(--accent) calc(var(--hold-progress, 0) * 360deg), transparent 0deg);
+  -webkit-mask: radial-gradient(farthest-side, #0000 calc(100% - 2.5px), #000 calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, #0000 calc(100% - 2.5px), #000 calc(100% - 2.5px));
   opacity: 0;
-  transform: scaleY(0.5);
+  transition: opacity 120ms ease;
+  pointer-events: none;
 }
-.shell__viewmode.is-morphing .shell__viewmode-divider {
-  animation: shell-viewmode-morph 200ms ease;
+.shell__brand.is-holding .shell__logo-ring {
+  opacity: 1;
 }
-@keyframes shell-viewmode-morph {
-  0% { transform: scaleY(0.4); opacity: 0; }
-  60% { transform: scaleY(1.18); opacity: 1; }
-  100% { transform: scaleY(1); opacity: 1; }
+/* Completion pulse: an accent ring that expands outward past the fingertip, so
+   the "it turned on" reads even with the thumb over the mark. One ::after,
+   scale 1 -> 2.2 + fade, ~350ms; removed on animationend (JS clears .is-pulsing).
+   Symmetric on enter AND exit — .is-pulsing is set on every completed hold. */
+.shell__brand.is-pulsing .shell__logo-wrap::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  animation: shell-logo-pulse 350ms ease-out forwards;
 }
-/* When the offline pill is present it already claims the auto margin, so keep a
-   small gap before this control rather than a second full push. */
-.shell__offline + .shell__viewmode {
-  margin-left: 8px;
+@keyframes shell-logo-pulse {
+  from { transform: scale(1); opacity: 0.9; }
+  to { transform: scale(2.2); opacity: 0; }
 }
-@media (hover: hover) and (pointer: fine) {
-  .shell__viewmode:hover {
-    color: var(--text);
-    background: var(--surface);
-  }
+.shell__brand--builder .shell__logo {
+  transform: rotate(180deg);
 }
-.shell__viewmode[aria-pressed="true"] {
+.shell__brand--builder .shell__wordmark {
   color: var(--accent);
-  background: var(--accent-dim);
 }
-.shell__viewmode:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* Screen-reader-only mode announcement (standard clip technique). */
+.shell__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 /* Attempted-drag feedback: a brief horizontal shake says "dragging is off in
-   single-screen mode." Fired by the drag controller via the toggle's vibrate ref.
+   single-screen mode." Fired by the drag controller via the logo's vibrate ref.
    Perceivable even during a drawer-row drag: the bar (z-index 100, opaque) paints
-   above the drawer scrim (z 90) / panel (z 95), so the toggle is never covered. */
-.shell__viewmode.is-vibrating {
-  animation: shell-viewmode-shake 0.4s ease;
+   above the drawer scrim (z 90) / panel (z 95), so the logo is never covered. */
+.shell__brand.is-vibrating {
+  animation: shell-brand-shake 0.4s ease;
 }
-@keyframes shell-viewmode-shake {
+@keyframes shell-brand-shake {
   0%, 100% { transform: translateX(0); }
   20% { transform: translateX(-3px); }
   40% { transform: translateX(3px); }
@@ -441,15 +454,19 @@
   .shell__settings-loading-dot { animation: none; }
   /* No transform shake — a non-motion outline pulse instead, so the "dragging is
      off" signal still lands without moving the control. */
-  .shell__viewmode.is-vibrating {
-    animation: shell-viewmode-pulse 0.4s ease;
+  .shell__brand.is-vibrating {
+    animation: shell-brand-pulse 0.4s ease;
     transform: none;
   }
-  /* The morph switches INSTANTLY — no divider transition, no flourish animation. */
-  .shell__viewmode-divider { transition: none; }
-  .shell__viewmode.is-morphing .shell__viewmode-divider { animation: none; }
+  /* The mark flip + tint switch INSTANTLY; the completion pulse is skipped (the
+     JS still fires the haptic — motion is dropped, feedback is not). The hold ring
+     stays: it is direct progress feedback for the user's own press, not autonomous
+     motion. */
+  .shell__logo { transition: none; }
+  .shell__wordmark { transition: none; }
+  .shell__brand.is-pulsing .shell__logo-wrap::after { animation: none; }
 }
-@keyframes shell-viewmode-pulse {
+@keyframes shell-brand-pulse {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50% { box-shadow: 0 0 0 2px var(--accent); }
 }

@@ -58,7 +58,7 @@ import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
-import ViewModeToggle from './ViewModeToggle.jsx'
+import { useLogoModeGesture } from './useLogoModeGesture.js'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
@@ -254,6 +254,10 @@ export default function Shell() {
   // every pane behind a builder Settings tab — the named risk). `settingsOverlayOpen`
   // comes straight from the nav adapter's overlay flag.
   const settingsActive = settingsOverlayOpen
+  // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
+  // exist). It drives the logo's accent-divider morph — the sole mode indicator,
+  // now that there is no standalone toggle button.
+  const builderModeActive = paneModel.WORKSPACE_SPLITS_ENABLED && workspace.viewMode !== 'single'
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -1044,13 +1048,13 @@ export default function Shell() {
   // Filled by the first-use coachmark (§7); the first real drag dismisses it.
   const coachmarkDismissRef = useRef(null)
   const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
-  // The view-mode toggle lives in the shell top bar (in line with the logo).
-  // Toggling is a pure state flip — no navigation, no drawer open/close (the
-  // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus). The
-  // vibrate ref is the bar toggle's imperative "shake" handle: when a drag is
-  // attempted while
-  // dragging is disabled (single-mode + multi-pane tree), the drag hook's
-  // onDragBlocked calls through it so the toggle shakes in place.
+  // The builder-mode control is the TOP-LEFT logo (owner placement) — there is no
+  // standalone toggle button. Toggling is a pure state flip plus the no-history
+  // Settings overlay<->tab conversion; it never opens/closes the drawer and the
+  // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus. The
+  // vibrate ref is the logo's imperative "shake" handle: when a drag is attempted
+  // while dragging is disabled (single-mode + multi-pane tree), the drag hook's
+  // onDragBlocked calls through it so the logo shakes in place.
   const viewModeVibrateRef = useRef(null)
   const handleToggleViewMode = useCallback(() => {
     // Convert the Settings surface across the flip with NO history entry (overlay
@@ -1060,15 +1064,18 @@ export default function Shell() {
     convertSettingsForModeTransition()
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
   }, [convertSettingsForModeTransition, dispatchWorkspace])
-  // The delightful double-activation + touch-swipe destination: idempotently
-  // ENTER builder mode. A no-op (state-wise) when already in builder — the toggle
-  // component still replays its morph flourish. When in single mode it runs the
-  // same overlay->tab conversion the toggle does, then flips to 'panes'.
-  const handleEnterBuilder = useCallback(() => {
-    if (workspaceStateRef.current.ws.viewMode === 'panes') return
-    convertSettingsForModeTransition()
-    dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'panes' })
-  }, [convertSettingsForModeTransition, dispatchWorkspace, workspaceStateRef])
+  // The logo gesture layer: a HOLD (~450ms) or a touch swipe-right toggles the
+  // mode; the single tap keeps opening the drawer INSTANTLY (composed in the brand
+  // button below). Flag-gated so a splits-off build attaches no gesture handlers.
+  // It shares the brand button's ref (brandButtonRef, declared with the desktop
+  // sidebar focus-management above) to write the --hold-progress ring var and take
+  // pointer capture during a hold — ONE ref, both jobs.
+  const logoGesture = useLogoModeGesture({
+    onToggleMode: handleToggleViewMode,
+    vibrateRef: viewModeVibrateRef,
+    brandRef: brandButtonRef,
+    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
+  })
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
@@ -2465,14 +2472,32 @@ export default function Shell() {
           a no-op because React 19 normalizes the known boolean attribute and
           an empty string serializes as falsy, so it never applied. */}
       <header className="shell__bar" inert={modalDrawerOpen}>
-        {/* The brand area (logo + wordmark) is the only drawer trigger. A
-            native button provides pointer, keyboard, and assistive-technology
-            behavior without recreating it with a role and key handler. */}
+        {/* The brand area (logo + wordmark) is the navigation trigger AND — when
+            splits are on — the builder-mode control (owner placement: no standalone
+            toggle button, the logo IS the mode control). SINGLE tap keeps its
+            per-platform meaning EXACTLY as before — instant, never suppressed:
+            toggles the persistent desktop sidebar, or opens/closes the mobile modal
+            drawer. A HOLD (~450ms) or a touch swipe-right toggles the view mode;
+            Shift+Enter is the keyboard path. The mark rotates 180deg (+ the wordmark
+            tints) to indicate the mode; an aria-live region announces the change to
+            assistive tech (the button keeps its nav aria-expanded semantics — one
+            control, two verbs — so mode state rides a live region, not a conflicting
+            aria-pressed). */}
         <button
           ref={brandButtonRef}
           type="button"
-          className="shell__brand"
+          className={`shell__brand${logoGesture.vibrating ? ' is-vibrating' : ''}`
+            + `${logoGesture.holding ? ' is-holding' : ''}`
+            + `${logoGesture.pulsing ? ' is-pulsing' : ''}`
+            + `${builderModeActive ? ' shell__brand--builder' : ''}`}
+          // The accessible NAME stays "Toggle navigation" — the button's primary
+          // job is the drawer, and both assistive tech and the e2e specs key off
+          // that stable name. The mode gesture rides aria-description (a supplement,
+          // not the name) so it is surfaced without renaming the control.
           aria-label="Toggle navigation"
+          aria-description={paneModel.WORKSPACE_SPLITS_ENABLED
+            ? 'Hold or press Shift+Enter for builder mode'
+            : undefined}
           aria-controls="navigation-drawer"
           aria-expanded={navigationOpen}
           /* Android may synthesize a bare click over the logo after an OS Back
@@ -2480,38 +2505,59 @@ export default function Shell() {
              a deliberate new interaction starts with pointerdown/keydown and
              must immediately clear the guard — never make the owner wait out a
              blanket 400ms dead zone before the drawer responds. */
-          onPointerDown={() => { backFiredRef.current = false }}
-          onKeyDown={() => { backFiredRef.current = false }}
+          onPointerDown={(e) => {
+            backFiredRef.current = false
+            if (paneModel.WORKSPACE_SPLITS_ENABLED) logoGesture.onPointerDown(e)
+          }}
+          onPointerMove={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onPointerMove : undefined}
+          onPointerUp={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onPointerUp : undefined}
+          onPointerCancel={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onPointerCancel : undefined}
+          onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onContextMenu : undefined}
+          onKeyDown={(e) => {
+            backFiredRef.current = false
+            // Keyboard path for the mode toggle (hold is pointer-only): Shift+Enter
+            // flips builder mode, preventDefault keeps it from also toggling nav.
+            // Plain Enter/Space stay the nav trigger, unchanged.
+            if (paneModel.WORKSPACE_SPLITS_ENABLED && e.shiftKey && e.key === 'Enter') {
+              e.preventDefault()
+              handleToggleViewMode()
+            }
+          }}
           onClick={() => {
             if (backFiredRef.current) return
-            if (persistentDrawer) {
-              setDesktopSidebarOpen(!desktopSidebarOpen)
-              return
-            }
-            if (drawerOpen) closeDrawer()
-            else openDrawer()
+            // A completed hold, a swipe, or a drag consumed this activation — it must
+            // NOT also toggle navigation.
+            if (logoGesture.consumeSuppressedClick()) return
+            // Single tap — per-platform nav toggle, EXACTLY as before (instant, no
+            // timer): toggle the persistent desktop sidebar, else the modal drawer.
+            if (persistentDrawer) { setDesktopSidebarOpen(!desktopSidebarOpen); return }
+            drawerOpen ? closeDrawer() : openDrawer()
           }}
+          onAnimationEnd={logoGesture.onAnimationEnd}
         >
-          <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
+          {/* The mark IS the indicator. The raster logo (a human hand and a robot
+              hand drawing each other in a circular loop) rotates 180deg in builder
+              mode — swapping which hand is "drawing" — and the wordmark tints accent.
+              A hold fills the ring (--hold-progress → conic-gradient); on completion
+              an outward accent pulse escapes from under the thumb. CSS only;
+              reduced-motion makes the twist instant and skips the pulse. */}
+          <span className="shell__logo-wrap">
+            <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
+            {paneModel.WORKSPACE_SPLITS_ENABLED && (
+              <span className="shell__logo-ring" aria-hidden="true" />
+            )}
+          </span>
           <span className="shell__wordmark">Möbius</span>
         </button>
+        {paneModel.WORKSPACE_SPLITS_ENABLED && (
+          <span className="shell__sr-only" role="status" aria-live="polite">
+            {builderModeActive ? 'Builder mode' : 'Single screen'}
+          </span>
+        )}
         {!online && (
           <span className="shell__offline" role="status" aria-live="polite">
             Offline
           </span>
-        )}
-        {/* View-mode toggle, in line with the logo cluster (owner placement).
-            Right-aligned via margin-left:auto; shown ALWAYS while splits are on
-            (both modes) so it reads as a toggle. Flag-gated because view-mode only
-            matters when panes can exist. A sibling of the brand/drawer button — its
-            click never reaches the drawer control. */}
-        {paneModel.WORKSPACE_SPLITS_ENABLED && (
-          <ViewModeToggle
-            viewMode={workspace.viewMode}
-            onToggle={handleToggleViewMode}
-            onEnterBuilder={handleEnterBuilder}
-            vibrateRef={viewModeVibrateRef}
-          />
         )}
       </header>
 

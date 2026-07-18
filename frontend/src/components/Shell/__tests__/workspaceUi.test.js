@@ -235,9 +235,9 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
   assert.match(css, /\.workspace__strip:has\(\.shell__tab-open:focus-visible\)\s*\{[\s\S]*?outline:/)
 })
 
-// ── View-mode toggle in the shell top bar (design: view-mode toggle) ────────
+// ── Builder-mode control lives on the LOGO (owner placement) ────────────────
 
-const viewModeToggleSrc = readFileSync(new URL('../ViewModeToggle.jsx', import.meta.url), 'utf8')
+const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
@@ -251,70 +251,99 @@ test('the docked sidebar offsets only direct shell layout rows', () => {
   assert.doesNotMatch(shellCss, /\.shell--drawer-docked \.shell__tabstrip/)
 })
 
-test('the view-mode toggle is rendered in the shell top bar, in line with the logo, flag-gated', () => {
-  // It renders inside .shell__bar (the brand/logo cluster), flag-gated on splits.
+test('there is NO standalone view-mode toggle button — the logo is the control', () => {
   assert.match(shell, /<header className="shell__bar"/)
-  assert.match(shell, /\{paneModel\.WORKSPACE_SPLITS_ENABLED && \(\s*<ViewModeToggle/)
-  assert.match(shell, /import ViewModeToggle from '\.\/ViewModeToggle\.jsx'/)
-  // Right-aligned in the bar via margin-left:auto, quiet by default.
-  const rule = shellCss.match(/\.shell__viewmode\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rule, /margin-left:\s*auto/)
+  // The old top-right toggle component and its class are gone entirely.
+  assert.doesNotMatch(shell, /ViewModeToggle/)
+  assert.doesNotMatch(shell, /shell__viewmode/)
+  assert.doesNotMatch(shellCss, /\.shell__viewmode\b/)
 })
 
-test('the toggle exposes aria-pressed + a builder/single aria-label and reads as a toggle', () => {
-  assert.match(viewModeToggleSrc, /aria-pressed=\{single\}/)
-  assert.match(viewModeToggleSrc, /aria-label=\{single \? 'Single screen' : 'Builder mode'\}/)
-  // ONE morphing glyph (a single outer frame + a center divider), not a two-SVG swap.
-  assert.match(viewModeToggleSrc, /<ViewGlyph \/>/)
-  assert.match(viewModeToggleSrc, /className="shell__viewmode-divider"/)
-  assert.doesNotMatch(viewModeToggleSrc, /SingleGlyph|PanesGlyph/)
+test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap path', () => {
+  // The brand button is the drawer trigger; onClick toggles it synchronously after
+  // a suppressed-gesture check, with zero timers.
+  assert.match(shell, /className=\{`shell__brand/)
+  assert.match(shell, /aria-expanded=\{drawerOpen\}/)
+  const onClick = shell.match(/onClick=\{\(\) => \{[\s\S]*?\n {10}\}\}/)?.[0] || ''
+  assert.match(onClick, /if \(logoGesture\.consumeSuppressedClick\(\)\) return/)
+  assert.match(onClick, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
+  assert.doesNotMatch(onClick, /setTimeout\(/, 'the tap path must carry no timer')
 })
 
-test('the toggle activation: instant tap, no-delay double → enter builder, touch swipe', () => {
-  // Single tap flips instantly via onToggle; a SECOND activation inside the window
-  // is swallowed and idempotently enters builder. There is NO delay on the tap.
-  assert.match(viewModeToggleSrc, /const DOUBLE_MS = 300/)
-  assert.match(viewModeToggleSrc, /now - lastActivateRef\.current < DOUBLE_MS/)
-  assert.match(viewModeToggleSrc, /if \(isDouble\) enterBuilder\(\)\s*\n\s*else onToggle\?\.\(\)/)
-  // Touch swipe-right (touch pointers only, dx >= 28, horizontal-dominant) enters builder.
-  assert.match(viewModeToggleSrc, /const SWIPE_DX = 28/)
-  assert.match(viewModeToggleSrc, /e\.pointerType === 'touch'/)
-  assert.match(viewModeToggleSrc, /dx >= SWIPE_DX && Math\.abs\(dx\) > Math\.abs\(dy\)/)
-  // enterBuilder calls the prop + replays the morph.
-  assert.match(viewModeToggleSrc, /onEnterBuilder\?\.\(\)/)
+test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches the drawer', () => {
+  // Thresholds + predicates are the pure machine; the hook composes them.
+  const machineSrc = readFileSync(new URL('../logoHoldMachine.js', import.meta.url), 'utf8')
+  assert.match(machineSrc, /export const HOLD_MS = 450/)
+  assert.match(machineSrc, /export const SWIPE_DX = 28/)
+  // The hook drives completion off the rAF loop (no setTimeout), fires the mode
+  // flip, and marks the click suppressed so the gesture never also opens the drawer.
+  assert.match(logoGestureSrc, /p >= 1\) \{ completeHold\(\); return \}/)
+  assert.doesNotMatch(logoGestureSrc, /setTimeout\(/, 'no timer — the rAF loop owns the hold')
+  assert.match(logoGestureSrc, /decidePointerMove\(dx, dy\)/)
+  assert.match(logoGestureSrc, /decision === 'swipe'/)
+  assert.match(logoGestureSrc, /onToggleMode\?\.\(\)/)
+  assert.match(logoGestureSrc, /endPress\(\{ suppressClick: true \}\)/)
+  // Suppresses the long-press context menu during a hold.
+  assert.match(logoGestureSrc, /if \(pressRef\.current\) e\.preventDefault\(\)/)
+  // The hook itself never opens/closes the drawer — that stays the caller's.
+  assert.doesNotMatch(logoGestureSrc, /openDrawer|closeDrawer/)
 })
 
-test('the bar toggle never opens or closes the drawer (pure state flip)', () => {
-  // The toggle button only flips mode / enters builder — no drawer open/close in
-  // the component (prose is fine; a usage is not).
-  assert.match(viewModeToggleSrc, /onClick=\{handleClick\}/)
-  assert.doesNotMatch(viewModeToggleSrc, /onClose[=(?]/)
-  assert.doesNotMatch(viewModeToggleSrc, /openDrawer|closeDrawer/)
-  // Shell's toggle handler flips the mode + converts the Settings surface (overlay
-  // <-> builder tab); the builder-enter handler is idempotent when already builder.
+test('completion feedback: single haptic (feature-detected) + an outward pulse, symmetric', () => {
+  // navigator.vibrate is feature-detected (iOS has none → graceful no-op).
+  assert.match(logoGestureSrc, /typeof navigator\.vibrate === 'function'/)
+  assert.match(logoGestureSrc, /runHoldCompletion\(\{/)
+  // The pulse class is set on completion and cleared on animationend.
+  assert.match(logoGestureSrc, /startPulse: \(\) => \{ setPulsing\(false\); requestAnimationFrame\(\(\) => setPulsing\(true\)\) \}/)
+  assert.match(logoGestureSrc, /const onAnimationEnd = useCallback\(\(\) => \{[\s\S]*?setPulsing\(false\)/)
+  // The rAF is cancelled on unmount so a hold in flight can't tick a dead component.
+  assert.match(logoGestureSrc, /useEffect\(\(\) => \(\) => \{ stopRaf\(\) \}, \[stopRaf\]\)/)
+})
+
+test('Shell wires the toggle handler, brand ref + vibrate ref, and Shift+Enter', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
-  const enter = shell.match(/const handleEnterBuilder = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.match(enter, /viewMode === 'panes'\) return/)
-  assert.match(enter, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'panes' \}\)/)
+  // The gesture hook receives the toggle + the brand ref (for the ring var) + the
+  // vibrate ref; the drag hook feeds the vibrate ref on a blocked drag.
+  assert.match(shell, /useLogoModeGesture\(\{[\s\S]*?onToggleMode: handleToggleViewMode/)
+  assert.match(shell, /brandRef,/)
+  assert.match(shell, /vibrateRef: viewModeVibrateRef/)
+  assert.match(shell, /onDragBlocked: \(\) => viewModeVibrateRef\.current\?\.\(\)/)
+  // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).
+  assert.match(shell, /e\.shiftKey && e\.key === 'Enter'/)
 })
 
-test('the toggle is a >=44px target with pan-y pinch-zoom and a CSS-only morph', () => {
-  const rule = shellCss.match(/\.shell__viewmode\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rule, /width:\s*44px/)
-  assert.match(rule, /height:\s*44px/)
-  // Suppress double-tap zoom, keep vertical scroll + pinch (never disable viewport zoom).
-  assert.match(rule, /touch-action:\s*pan-y pinch-zoom/)
-  // The divider morphs via a ~200ms transition (design's 180-220ms band) + a keyframe.
-  const divider = shellCss.match(/\.shell__viewmode-divider\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(divider, /transition:\s*opacity 200ms[^;]*, transform 200ms/)
-  assert.match(shellCss, /@keyframes shell-viewmode-morph/)
-  assert.match(shellCss, /\.shell__viewmode\[aria-pressed="true"\] \.shell__viewmode-divider/)
-  // Reduced motion switches instantly (no transition, no flourish animation).
-  assert.match(shellCss, /\.shell__viewmode-divider \{ transition: none; \}/)
-  assert.match(shellCss, /\.shell__viewmode\.is-morphing \.shell__viewmode-divider \{ animation: none; \}/)
+test('the logo mark is the indicator: ring var + 180deg twist + tint + completion pulse', () => {
+  const brand = shellCss.match(/\.shell__brand\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(brand, /touch-action:\s*pan-y pinch-zoom/)
+  assert.match(brand, /-webkit-touch-callout:\s*none/)
+  // The hold ring reads --hold-progress through a conic-gradient.
+  const ring = shellCss.match(/\.shell__logo-ring\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(ring, /conic-gradient\([\s\S]*?var\(--hold-progress/)
+  assert.match(shellCss, /\.shell__brand\.is-holding \.shell__logo-ring/)
+  // Mark twist + wordmark tint in builder mode.
+  const logoRule = shellCss.match(/\.shell__logo\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(logoRule, /transition:\s*transform 300ms cubic-bezier/)
+  assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?transform:\s*rotate\(180deg\)/)
+  assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
+  // The completion pulse (one ::after, scale to ~2.2 + fade).
+  assert.match(shellCss, /\.shell__brand\.is-pulsing \.shell__logo-wrap::after/)
+  assert.match(shellCss, /@keyframes shell-logo-pulse[\s\S]*?scale\(2\.2\)/)
+  // Reduced motion makes the twist instant and skips the pulse (haptic stays in JS).
+  assert.match(shellCss, /\.shell__logo \{ transition: none; \}/)
+  assert.match(shellCss, /\.shell__brand\.is-pulsing \.shell__logo-wrap::after \{ animation: none; \}/)
+})
+
+test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-description + live region', () => {
+  // The accessible NAME stays stable (drawer semantics + e2e selectors depend on
+  // it); the hold/keyboard path is a supplementary aria-description, and mode state
+  // rides a polite live region (not a conflicting aria-pressed).
+  assert.match(shell, /aria-label="Toggle navigation"/)
+  assert.match(shell, /aria-description=\{paneModel\.WORKSPACE_SPLITS_ENABLED\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
+  assert.match(shell, /role="status" aria-live="polite"/)
+  assert.match(shell, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
 test('the Settings surface responds to PANE width via a query container', () => {
@@ -340,10 +369,6 @@ test('Shell threads viewMode into the content derivation and the per-pane chat g
   assert.match(shell, /viewMode: workspace\.viewMode/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
   assert.match(shell, /chatPanesVisible && \(!single \|\| paneId === workspace\.focusedPaneId\)/)
-  // The toggle + vibrate wiring reaches the bar toggle and the drag hook.
-  assert.match(shell, /onDragBlocked: \(\) => viewModeVibrateRef\.current\?\.\(\)/)
-  assert.match(shell, /onToggle=\{handleToggleViewMode\}/)
-  assert.match(shell, /vibrateRef=\{viewModeVibrateRef\}/)
 })
 
 test('the drag binding blocks arming + vibrates in single-mode, and folds a split-drop flip into one gesture', () => {
@@ -356,23 +381,17 @@ test('the drag binding blocks arming + vibrates in single-mode, and folds a spli
   assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
 })
 
-test('the attempted-drag vibrate honors prefers-reduced-motion with a non-motion fallback', () => {
-  const shake = shellCss.match(/\.shell__viewmode\.is-vibrating\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(shake, /animation:\s*shell-viewmode-shake/)
-  assert.match(shellCss, /@keyframes shell-viewmode-shake/)
+test('the attempted-drag vibrate (on the logo) honors prefers-reduced-motion', () => {
+  const shake = shellCss.match(/\.shell__brand\.is-vibrating\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(shake, /animation:\s*shell-brand-shake/)
+  assert.match(shellCss, /@keyframes shell-brand-shake/)
   // Reduced motion swaps the transform shake for a non-motion outline pulse.
   const reduced = shellCss.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /shell-viewmode-pulse/)
+  assert.match(reduced, /shell-brand-pulse/)
   assert.match(reduced, /transform:\s*none/)
   assert.doesNotMatch(
-    shellCss.match(/@keyframes shell-viewmode-pulse\s*\{[\s\S]*?\}/)?.[0] || '',
+    shellCss.match(/@keyframes shell-brand-pulse\s*\{[\s\S]*?\}/)?.[0] || '',
     /transform/,
     'the reduced-motion pulse must not animate transform',
   )
-})
-
-test('the active (single) toggle state is a quiet accent tint, not a loud fill', () => {
-  const rule = shellCss.match(/\.shell__viewmode\[aria-pressed="true"\]\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rule, /color:\s*var\(--accent\)/)
-  assert.match(rule, /background:\s*var\(--accent-dim\)/)
 })

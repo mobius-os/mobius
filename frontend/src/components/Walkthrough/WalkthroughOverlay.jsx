@@ -271,6 +271,13 @@ export default function WalkthroughOverlay({ onDone }) {
                 ? 'Hold a chat or app to pick it up — drop it at the top or bottom to split the screen.'
                 : 'Drag any chat or app from the drawer to the edge of a pane to work side by side. Drop it in the middle to keep it as a tab.'}
             </p>
+            {/* Teach the logo gesture: a tap still opens the menu; a HOLD (watch the
+                ring) enters builder mode — plus swipe on touch, Shift+Enter on desktop. */}
+            <p className="wt__body wt__body--sub">
+              {coarsePointer
+                ? 'Tap the mark for your chats and apps. Hold it — watch the ring — to enter builder mode, or swipe right on it.'
+                : 'Tap the mark for your chats and apps. Hold it — watch the ring — to enter builder mode, or press Shift+Enter.'}
+            </p>
             <div className="wt__actions">
               <button
                 type="button"

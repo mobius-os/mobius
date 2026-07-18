@@ -96,6 +96,14 @@
   margin: 0;
 }
 
+/* A secondary body line (e.g. the logo-gesture hint under the drag copy): quieter
+   and spaced from the primary instruction. */
+.wt__body--sub {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted, #a1a1aa);
+}
+
 .wt__arrow {
   display: flex;
   align-items: center;
