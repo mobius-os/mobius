@@ -677,42 +677,77 @@ test.describe('Workspace view-mode toggle', () => {
     expect(await readWs(page)).toEqual(baseline)
   })
 
-  test('single-mode + multi-pane tree blocks a drawer-row drag (no split) and vibrates the logo', async ({ page }) => {
+  // DRAG IS BUILDING (point 15): a single-mode drag unfolds the parked layout LIVE
+  // and a drop commits builder mode; the former drag-deny is gone.
+  test('single-mode drag → drop commits builder mode; ONE undo reverts tree + mode', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmDragA')
     const b = await createTaggedChat(page, 'vmDragB')
+    const c = await createTaggedChat(page, 'vmDragC') // in the drawer, not open
     await mockApps(page, [])
-    await exposeChatsInDrawer(page, [a.id, b.id])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
     await seedWorkspace(page, paneModel.setViewMode(twoChatPanes(a.id, b.id), 'single'))
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
-
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('single')
     expect(Object.keys(baseline.panes).length).toBe(2)
 
-    // The only in-view drag source in single-mode is a drawer row.
+    // DRAG IS BUILDING (point 15): a single-mode drop commits builder mode — and
+    // this works from BOTH the modal drawer (mobile) and the persistent desktop
+    // sidebar (this WIDE viewport). ensureNavigationOpen covers either; a drawer/
+    // sidebar row dragged onto a pane center commits.
     await ensureNavigationOpen(page)
-    const row = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
+    const content = await page.locator('.shell__content').boundingBox()
+    const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
     await expect(row).toBeVisible()
-    const box = await row.boundingBox()
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    await page.mouse.down()
-    await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2, { steps: 4 })
-    // The blocked arm shakes the LOGO (bar z-index 100 paints above the mobile
-    // scrim / persistent desktop navigation).
-    await expect(page.locator('.shell__brand.is-vibrating')).toHaveCount(1, { timeout: 2000 })
-    await page.mouse.up()
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2)
 
-    // No pane created, no blob rewrite, drawer stayed open behind the attempt.
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible()
-    const after = await readWs(page)
-    expect(Object.keys(after.panes).length).toBe(2)
-    expect(after.layout).toEqual(baseline.layout)
-    expect(after.viewMode).toBe('single')
+    await expect.poll(async () => (await readWs(page)).viewMode, {
+      timeout: 3000, message: 'a single-mode drop commits builder mode',
+    }).toBe('panes')
+    expect(whichPaneHas(await readWs(page), `chat:${c.id}`), 'the dragged chat landed').toBeTruthy()
+
+    // ONE undo reverts BOTH the drop and the mode back to single (restoreViewMode).
+    await page.keyboard.press('Control+z')
+    await expect.poll(async () => (await readWs(page)).viewMode, {
+      timeout: 3000, message: 'undo restores single-screen mode',
+    }).toBe('single')
+    expect(whichPaneHas(await readWs(page), `chat:${c.id}`), 'the drop is undone').toBe(null)
   })
 
-  // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides the mode.
+  test('single-mode drag → Escape cancels: back to single, no mutation, no residue', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'vmCancA')
+    const b = await createTaggedChat(page, 'vmCancB')
+    const c = await createTaggedChat(page, 'vmCancC')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
+    await seedWorkspace(page, paneModel.setViewMode(twoChatPanes(a.id, b.id), 'single'))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    const baseline = await readWs(page)
+
+    await ensureNavigationOpen(page)
+    const content = await page.locator('.shell__content').boundingBox()
+    const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
+    await expect(row).toBeVisible()
+    // Arm + move the drag (builder unfolds), then Escape to cancel before dropping.
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2, { release: false })
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+
+    // The builder world was a preview, not a commitment: mode back to single, tree
+    // untouched, the dragged chat never landed.
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    const after = await readWs(page)
+    expect(after.viewMode).toBe('single')
+    expect(after.layout).toEqual(baseline.layout)
+    expect(whichPaneHas(after, `chat:${c.id}`), 'the cancelled drag left no residue').toBe(null)
+  })
+
+  // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides
+  // split-vs-join, but ANY drop commits builder mode (point 15).
   function singleLeafTwoTabs(a, b) {
     let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: a }, { kind: 'chat', id: b }])
     return paneModel.setViewMode(paneModel.focusPane(ws, 'p0'), 'single')
@@ -739,7 +774,7 @@ test.describe('Workspace view-mode toggle', () => {
     expect(Object.keys((await readWs(page)).panes).length, 'the edge drop split into two panes').toBe(2)
   })
 
-  test('single-leaf: a CENTER (join) drop does NOT flip — stays single', async ({ page }) => {
+  test('single-leaf: a CENTER (join) drop is a JOIN (one pane) but still commits builder', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmJoinA')
     const b = await createTaggedChat(page, 'vmJoinB')
@@ -762,7 +797,8 @@ test.describe('Workspace view-mode toggle', () => {
     ).toBe('p0')
     const after = await readWs(page)
     expect(Object.keys(after.panes).length, 'still one pane (a join, not a split)').toBe(1)
-    expect(after.viewMode, 'a non-splitting drop stays single').toBe('single')
+    // Point 15: a JOIN is not a split, but ANY single-mode drop still commits builder.
+    expect(after.viewMode, 'dragging is building — the drop commits panes').toBe('panes')
   })
 })
 

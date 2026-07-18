@@ -255,9 +255,19 @@ export default function Shell() {
   // comes straight from the nav adapter's overlay flag.
   const settingsActive = settingsOverlayOpen
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
-  // exist). It drives the logo's accent-divider morph — the sole mode indicator,
+  // exist). It drives the logo's 180deg twist — the persistent mode indicator,
   // now that there is no standalone toggle button.
   const builderModeActive = paneModel.WORKSPACE_SPLITS_ENABLED && workspace.viewMode !== 'single'
+  // DRAG IS BUILDING (point 15): a single-mode drag unfolds the builder world as a
+  // RENDER-only preview. The drag hook flips this on arm / off on cleanup; the
+  // reducer viewMode stays 'single' until a committed drop flips it. effectiveViewMode
+  // applies the preview ONLY while genuinely single (inert in builder), so the
+  // projection-consuming render paints the tiled world during the drag while the
+  // undo snapshot at drop-time still reads 'single'.
+  const [dragPreviewBuilder, setDragPreviewBuilder] = useState(false)
+  const effectiveViewMode = (dragPreviewBuilder && workspace.viewMode === 'single')
+    ? 'panes'
+    : workspace.viewMode
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -280,7 +290,7 @@ export default function Shell() {
   // stays a normal pane (this also keeps the bar + exit button, which key off this
   // flag, out of builder). The request (immersiveAppId) is retained, so switching
   // to single mode with the holder focused solos it exactly as landed.
-  const immersiveActive = workspace.viewMode === 'single'
+  const immersiveActive = effectiveViewMode === 'single'
     && isImmersiveActive(immersiveAppId, activeView, activeAppId)
   useLayoutEffect(() => {
     if (!immersiveActive) return
@@ -296,9 +306,9 @@ export default function Shell() {
     () => deriveContentVisibility({
       workspace, projection, settingsOverlayOpen: settingsActive,
       immersiveActive, immersiveAppId,
-      viewMode: workspace.viewMode,
+      viewMode: effectiveViewMode, // 'panes' during a single-mode drag preview
     }),
-    [workspace, projection, settingsActive, immersiveActive, immersiveAppId],
+    [workspace, projection, settingsActive, immersiveActive, immersiveAppId, effectiveViewMode],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   const workspaceChromeActive = contentVisibility.chromeActive
@@ -1058,11 +1068,7 @@ export default function Shell() {
   // The builder-mode control is the TOP-LEFT logo (owner placement) — there is no
   // standalone toggle button. Toggling is a pure state flip plus the no-history
   // Settings overlay<->tab conversion; it never opens/closes the drawer and the
-  // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus. The
-  // vibrate ref is the logo's imperative "shake" handle: when a drag is attempted
-  // while dragging is disabled (single-mode + multi-pane tree), the drag hook's
-  // onDragBlocked calls through it so the logo shakes in place.
-  const viewModeVibrateRef = useRef(null)
+  // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
   const handleToggleViewMode = useCallback(() => {
     // Convert the Settings surface across the flip with NO history entry (overlay
     // <-> builder tab) BEFORE the pure view flip, so a builder session is never
@@ -1079,7 +1085,6 @@ export default function Shell() {
   // pointer capture during a hold — ONE ref, both jobs.
   const logoGesture = useLogoModeGesture({
     onToggleMode: handleToggleViewMode,
-    vibrateRef: viewModeVibrateRef,
     brandRef: brandButtonRef,
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
   })
@@ -1096,7 +1101,7 @@ export default function Shell() {
     openDrawer,
     openTabMenuAtRef,
     onDragStart: onWorkspaceDragStart,
-    onDragBlocked: () => viewModeVibrateRef.current?.(),
+    onPreviewBuilder: setDragPreviewBuilder,
   })
 
   // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
@@ -2493,8 +2498,7 @@ export default function Shell() {
         <button
           ref={brandButtonRef}
           type="button"
-          className={`shell__brand${logoGesture.vibrating ? ' is-vibrating' : ''}`
-            + `${logoGesture.holding ? ' is-holding' : ''}`
+          className={`shell__brand${logoGesture.holding ? ' is-holding' : ''}`
             + `${logoGesture.pulsing ? ' is-pulsing' : ''}`
             + `${builderModeActive ? ' shell__brand--builder' : ''}`}
           // The accessible NAME stays "Toggle navigation" — the button's primary

@@ -1,10 +1,10 @@
 import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
-import { STRIP_H, paneIdsInOrder } from './paneModel.js'
+import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, crossedDrawerExit,
-  rootEdgeAllowed, dragArmingBlocked,
+  rootEdgeAllowed,
 } from './dragController.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
@@ -77,7 +77,10 @@ export default function useWorkspaceDrag({
   openDrawer,
   openTabMenuAtRef, // ref → (clientX, clientY, tab, paneId) => void
   onDragStart, // dismiss the coachmark on the first real drag
-  onDragBlocked, // vibrate the view-mode toggle when a drag is disabled (single-mode, multi-pane tree)
+  onPreviewBuilder, // (active) => void — enter/leave the LIVE builder preview a
+  // single-mode drag unfolds (point 15: dragging IS building). Render-only: the
+  // reducer viewMode stays 'single' until the drop commits 'panes', so ONE undo
+  // reverts both the tree AND the mode.
 }) {
   useEffect(() => {
     if (!enabled) return undefined
@@ -236,23 +239,15 @@ export default function useWorkspaceDrag({
 
       const arm = () => {
         if (cancelled || cleaned) return
-        // Single view-mode with a preserved multi-pane tree disables dragging
-        // (design: view-mode toggle). Both arm paths — the mouse slop check and
-        // the touch hold timer — funnel through here, so blocking at the top
-        // covers both: vibrate the view-mode toggle and abandon the gesture
-        // instead of arming. suppressClick stops the compat click from also
-        // opening the row (the user moved to drag, not tap). The single-leaf case
-        // is NOT blocked — it falls through and arms so its splitting drop can
-        // opt back into panes (see commitDrop).
-        const wsNow = workspaceStateRef.current.ws
-        if (dragArmingBlocked({ viewMode: wsNow.viewMode, leafCount: paneIdsInOrder(wsNow).length })) {
-          onDragBlocked?.()
-          cancelled = true
-          cleanup({ suppressClick: true })
-          return
-        }
         armed = true
         dragActiveRef.current = true // the Drawer's swipe-close handlers stand down
+        // DRAG IS BUILDING (point 15): arming a drag in single-screen mode unfolds
+        // the builder world LIVE — the parked multi-pane layout (or the lone leaf as
+        // one pane) tiles in, and the normal drop zones apply. This is a RENDER-only
+        // preview; the reducer viewMode stays 'single', so a cancel reverts with no
+        // mutation, and a committed drop flips 'panes' via OPEN_TAB_AT (one undo
+        // reverts both). There is no drag-deny anymore — dragging is always allowed.
+        if (workspaceStateRef.current.ws.viewMode === 'single') onPreviewBuilder?.(true)
         onDragStart?.() // dismiss the coachmark
         try { srcEl.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
         if (!isTouch) {
@@ -388,15 +383,15 @@ export default function useWorkspaceDrag({
         // here: OPEN_TAB_AT stamps a `toast` on the slot only when the drop
         // actually mutates, so the toast can never outlive or mis-name its
         // snapshot (design §3.5).
-        // A splitting drop (edge or root split) made while in single view-mode is
-        // an explicit request for panes — the drop's whole intent is a second
-        // visible surface. Fold the 'panes' flip INTO the OPEN_TAB_AT payload so the
-        // split and the flip are ONE undoable gesture (a following SET_VIEW_MODE
-        // would let Undo revert the split while leaving the mode flipped — a half-
-        // undone gesture). Drag is only enabled in single-mode for a single-leaf
-        // tree, so this fires exactly on the 1->2-leaf split; a center/strip join
-        // has no edge, keeps one leaf, and stays single.
-        const flipToPanes = workspaceStateRef.current.ws.viewMode === 'single' && target.edge != null
+        // DRAG IS BUILDING (point 15): ANY drop made from single-screen mode commits
+        // builder mode — you built something, you stay in the build world. Fold the
+        // 'panes' flip INTO the OPEN_TAB_AT payload so the drop and the flip are ONE
+        // undoable gesture (restoreViewMode reverts BOTH the tree and viewMode to
+        // 'single'; a following SET_VIEW_MODE would leave a half-undone gesture). The
+        // reducer viewMode is still 'single' here — the builder unfold was a
+        // render-only preview — so undo.ws captures 'single' correctly. This folds in
+        // the former single-leaf split-drop flip as the no-parked-layout case.
+        const flipToPanes = workspaceStateRef.current.ws.viewMode === 'single'
         dispatchWorkspace({
           type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}`,
           flipViewMode: flipToPanes ? 'panes' : null,
@@ -443,6 +438,11 @@ export default function useWorkspaceDrag({
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
         cleaned = true
+        // Leave the live builder preview. On a COMMITTED drop the reducer is now in
+        // 'panes' (OPEN_TAB_AT flipped it), so dropping the render-only preview shows
+        // the committed builder world seamlessly; on CANCEL the reducer never left
+        // 'single', so this reverts the render to single-screen with no mutation.
+        onPreviewBuilder?.(false)
         clearTimeout(holdTimer)
         if (moveRAF) { cancelAnimationFrame(moveRAF); moveRAF = 0 }
         stopAutoScroll()

@@ -435,29 +435,8 @@
   white-space: nowrap;
   border: 0;
 }
-/* Attempted-drag feedback: a brief horizontal shake says "dragging is off in
-   single-screen mode." Fired by the drag controller via the logo's vibrate ref.
-   Perceivable even during a drawer-row drag: the bar (z-index 100, opaque) paints
-   above the drawer scrim (z 90) / panel (z 95), so the logo is never covered. */
-.shell__brand.is-vibrating {
-  animation: shell-brand-shake 0.4s ease;
-}
-@keyframes shell-brand-shake {
-  0%, 100% { transform: translateX(0); }
-  20% { transform: translateX(-3px); }
-  40% { transform: translateX(3px); }
-  60% { transform: translateX(-2px); }
-  80% { transform: translateX(2px); }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .shell__settings-loading-dot { animation: none; }
-  /* No transform shake — a non-motion outline pulse instead, so the "dragging is
-     off" signal still lands without moving the control. */
-  .shell__brand.is-vibrating {
-    animation: shell-brand-pulse 0.4s ease;
-    transform: none;
-  }
   /* The mark flip + tint switch INSTANTLY; the completion pulse is skipped (the
      JS still fires the haptic — motion is dropped, feedback is not). The hold ring
      stays: it is direct progress feedback for the user's own press, not autonomous
@@ -465,8 +444,4 @@
   .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
   .shell__brand.is-pulsing .shell__logo-wrap::after { animation: none; }
-}
-@keyframes shell-brand-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 transparent; }
-  50% { box-shadow: 0 0 0 2px var(--accent); }
 }

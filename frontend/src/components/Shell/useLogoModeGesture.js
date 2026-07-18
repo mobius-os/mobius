@@ -27,8 +27,7 @@ export function prefersReducedMotion() {
   } catch { return false }
 }
 
-export function useLogoModeGesture({ onToggleMode, vibrateRef, brandRef, enabled = true }) {
-  const [vibrating, setVibrating] = useState(false)
+export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
   const [holding, setHolding] = useState(false)
   const [pulsing, setPulsing] = useState(false)
   // { t, x, y } while a press is active; null between presses.
@@ -37,18 +36,6 @@ export function useLogoModeGesture({ onToggleMode, vibrateRef, brandRef, enabled
   // Set when a gesture (completed hold, swipe, or drag) consumed the activation,
   // so the trailing click does NOT also toggle the drawer.
   const suppressClickRef = useRef(false)
-
-  useEffect(() => {
-    if (!vibrateRef) return undefined
-    // The vibrate-deny (a drag attempted in single mode with a parked multi-pane
-    // tree) shakes the LOGO now. It stays perceivable during a drawer-open drag
-    // because .shell__bar (z-index 100, opaque) paints above the drawer scrim.
-    vibrateRef.current = () => {
-      setVibrating(false)
-      requestAnimationFrame(() => setVibrating(true))
-    }
-    return () => { if (vibrateRef.current) vibrateRef.current = null }
-  }, [vibrateRef])
 
   const writeProgress = useCallback((p) => {
     const el = brandRef?.current
@@ -154,16 +141,14 @@ export function useLogoModeGesture({ onToggleMode, vibrateRef, brandRef, enabled
     return true
   }, [])
 
-  const onAnimationEnd = useCallback(() => {
-    setVibrating(false)
-    setPulsing(false)
-  }, [])
+  // Clears the one-shot completion pulse when its ::after animation ends.
+  const onAnimationEnd = useCallback(() => { setPulsing(false) }, [])
 
   // Cancel a live rAF on unmount so a hold in flight can't tick a dead component.
   useEffect(() => () => { stopRaf() }, [stopRaf])
 
   return {
-    vibrating, holding, pulsing,
+    holding, pulsing,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onContextMenu,
     consumeSuppressedClick, onAnimationEnd,
   }

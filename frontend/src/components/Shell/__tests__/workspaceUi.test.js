@@ -300,17 +300,16 @@ test('completion feedback: single haptic (feature-detected) + an outward pulse, 
   assert.match(logoGestureSrc, /useEffect\(\(\) => \(\) => \{ stopRaf\(\) \}, \[stopRaf\]\)/)
 })
 
-test('Shell wires the toggle handler, brand ref + vibrate ref, and Shift+Enter', () => {
+test('Shell wires the toggle handler, brand ref, and Shift+Enter (no drag-deny vibrate)', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
-  // The gesture hook receives the toggle + the brand ref (for the ring var) + the
-  // vibrate ref; the drag hook feeds the vibrate ref on a blocked drag.
+  // The gesture hook receives the toggle + the brand ref (for the ring var).
   assert.match(shell, /useLogoModeGesture\(\{[\s\S]*?onToggleMode: handleToggleViewMode/)
   assert.match(shell, /brandRef,/)
-  assert.match(shell, /vibrateRef: viewModeVibrateRef/)
-  assert.match(shell, /onDragBlocked: \(\) => viewModeVibrateRef\.current\?\.\(\)/)
+  // The drag-deny vibrate is DEAD (point 15: dragging is building, never denied).
+  assert.doesNotMatch(shell, /viewModeVibrateRef|onDragBlocked/)
   // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).
   assert.match(shell, /e\.shiftKey && e\.key === 'Enter'/)
 })
@@ -365,33 +364,25 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
 })
 
-test('Shell threads viewMode into the content derivation and the per-pane chat gate', () => {
-  assert.match(shell, /viewMode: workspace\.viewMode/)
+test('Shell threads the (drag-preview) viewMode into the content derivation and the per-pane chat gate', () => {
+  // effectiveViewMode is 'panes' during a single-mode drag preview (point 15).
+  assert.match(shell, /viewMode: effectiveViewMode/)
+  assert.match(shell, /dragPreviewBuilder && workspace\.viewMode === 'single'/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
   assert.match(shell, /chatPanesVisible && \(!single \|\| paneId === workspace\.focusedPaneId\)/)
 })
 
-test('the drag binding blocks arming + vibrates in single-mode, and folds a split-drop flip into one gesture', () => {
-  assert.match(dragBinding, /dragArmingBlocked\(\{ viewMode: wsNow\.viewMode, leafCount: paneIdsInOrder\(wsNow\)\.length \}\)/)
-  assert.match(dragBinding, /onDragBlocked\?\.\(\)/)
-  // The single-leaf splitting drop folds the flip into OPEN_TAB_AT (one undo step),
-  // NOT a following SET_VIEW_MODE.
-  assert.match(dragBinding, /flipToPanes = workspaceStateRef\.current\.ws\.viewMode === 'single' && target\.edge != null/)
+test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any drop commits panes', () => {
+  // No drag-deny anymore — arming always proceeds; a single-mode arm turns on the
+  // render-only builder preview (Shell flips it via onPreviewBuilder / effectiveViewMode).
+  assert.doesNotMatch(dragBinding, /dragArmingBlocked|onDragBlocked/)
+  assert.match(dragBinding, /if \(workspaceStateRef\.current\.ws\.viewMode === 'single'\) onPreviewBuilder\?\.\(true\)/)
+  assert.match(dragBinding, /onPreviewBuilder\?\.\(false\)/) // cleared on cleanup (commit AND cancel)
+  // ANY single-mode drop commits builder mode (folds in the former single-leaf flip);
+  // the flip is folded into OPEN_TAB_AT so ONE undo reverts both tree and viewMode.
+  assert.match(dragBinding, /flipToPanes = workspaceStateRef\.current\.ws\.viewMode === 'single'\n/)
   assert.match(dragBinding, /flipViewMode: flipToPanes \? 'panes' : null/)
   assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
-})
-
-test('the attempted-drag vibrate (on the logo) honors prefers-reduced-motion', () => {
-  const shake = shellCss.match(/\.shell__brand\.is-vibrating\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(shake, /animation:\s*shell-brand-shake/)
-  assert.match(shellCss, /@keyframes shell-brand-shake/)
-  // Reduced motion swaps the transform shake for a non-motion outline pulse.
-  const reduced = shellCss.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /shell-brand-pulse/)
-  assert.match(reduced, /transform:\s*none/)
-  assert.doesNotMatch(
-    shellCss.match(/@keyframes shell-brand-pulse\s*\{[\s\S]*?\}/)?.[0] || '',
-    /transform/,
-    'the reduced-motion pulse must not animate transform',
-  )
+  // The drag-deny shake is gone from the CSS too.
+  assert.doesNotMatch(shellCss, /is-vibrating|shell-brand-shake|shell-brand-pulse/)
 })
