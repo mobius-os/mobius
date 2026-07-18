@@ -620,17 +620,19 @@ test.describe('Workspace drag (PR3)', () => {
 })
 
 /**
- * View-mode toggle (design: view-mode toggle). The TOP-BAR toggle (.shell__viewmode,
- * in line with the logo) flips 'panes' <-> 'single'. Single-mode collapses the
- * preserved tree to the focused pane full-bleed WITHOUT rewriting the persisted
- * geometry, so a round-trip restores the identical blob. In single-mode with a
- * multi-pane tree dragging is disabled (attempted drawer-row drag: no split, the
- * bar toggle vibrates — the bar paints above the drawer scrim so it is perceivable).
- * In single-mode with ONE leaf dragging stays on: a SPLITTING (edge) drop opts back
- * into panes, a non-splitting (center-join) drop does not.
+ * View-mode control (design: builder-mode activation). There is NO standalone
+ * toggle button — the top-left LOGO is the control (a hold, a touch swipe-right,
+ * or the Shift+Enter keyboard path flips 'panes' <-> 'single'; builder mode is the
+ * accent .shell__brand--builder state). Single-mode collapses the preserved tree to
+ * the focused pane full-bleed WITHOUT rewriting the persisted geometry, so a
+ * round-trip restores the identical blob. In single-mode with a multi-pane tree
+ * dragging is disabled (attempted drawer-row drag: no split, the LOGO vibrates —
+ * the bar paints above the drawer scrim so it is perceivable). In single-mode with
+ * ONE leaf dragging stays on: a SPLITTING (edge) drop opts back into panes, a
+ * non-splitting (center-join) drop does not.
  */
 test.describe('Workspace view-mode toggle', () => {
-  test('the bar toggle flips to single (geometry preserved, one pane) and back (identical blob)', async ({ page }) => {
+  test('the logo gesture flips to single (geometry preserved, one pane) and back (identical blob)', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmA')
     const b = await createTaggedChat(page, 'vmB')
@@ -642,15 +644,17 @@ test.describe('Workspace view-mode toggle', () => {
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('panes')
 
-    // The toggle is in the top bar — no navigation interaction needed. Flipping
-    // view mode must preserve the responsive navigation's current state.
-    const toggle = page.locator('.shell__viewmode')
-    const navigationToggle = page.getByLabel('Toggle navigation')
-    const navigationWasOpen = await navigationToggle.getAttribute('aria-expanded')
-    await expect(toggle).toBeVisible()
-    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
-    await toggle.click()
-    await expect(navigationToggle).toHaveAttribute('aria-expanded', navigationWasOpen)
+    // The mode control is the logo (no standalone toggle). Flip via its keyboard
+    // path (Shift+Enter) — the deterministic equivalent of a hold. It must NOT
+    // change the navigation state: no modal drawer opens, and the persistent
+    // desktop sidebar (WIDE viewport) keeps its aria-expanded.
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    const navigationWasOpen = await brand.getAttribute('aria-expanded')
+    await expect(brand).toHaveClass(/shell__brand--builder/) // builder is the accent state
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+    await expect(brand).toHaveAttribute('aria-expanded', navigationWasOpen)
 
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     const single = await readWs(page)
@@ -658,21 +662,22 @@ test.describe('Workspace view-mode toggle', () => {
     expect(single.panes).toEqual(baseline.panes)
     expect(single.focusedPaneId).toBe(baseline.focusedPaneId)
     expect(single.nextId).toBe(baseline.nextId)
-    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(brand).not.toHaveClass(/shell__brand--builder/) // the mark drops the accent state
 
     // Render collapsed to one full-bleed pane (the focused chat a), no chrome.
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
     await expect(page.locator(`[data-tab-key="chat:${a.id}"].shell__view--active`)).toHaveCount(1)
 
-    // Toggle back — identical layout restored (the tree was never mutated).
-    await toggle.click()
+    // Flip back — identical layout restored (the tree was never mutated).
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
     await waitTiled(page)
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
     expect(await readWs(page)).toEqual(baseline)
   })
 
-  test('single-mode + multi-pane tree blocks a drawer-row drag (no split) and vibrates the bar toggle', async ({ page }) => {
+  test('single-mode + multi-pane tree blocks a drawer-row drag (no split) and vibrates the logo', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmDragA')
     const b = await createTaggedChat(page, 'vmDragB')
@@ -694,9 +699,9 @@ test.describe('Workspace view-mode toggle', () => {
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2, { steps: 4 })
-    // The blocked arm shakes the bar toggle, which remains visible above either
-    // the mobile scrim or the persistent desktop navigation.
-    await expect(page.locator('.shell__viewmode.is-vibrating')).toHaveCount(1, { timeout: 2000 })
+    // The blocked arm shakes the LOGO (bar z-index 100 paints above the mobile
+    // scrim / persistent desktop navigation).
+    await expect(page.locator('.shell__brand.is-vibrating')).toHaveCount(1, { timeout: 2000 })
     await page.mouse.up()
 
     // No pane created, no blob rewrite, drawer stayed open behind the attempt.
@@ -758,5 +763,97 @@ test.describe('Workspace view-mode toggle', () => {
     const after = await readWs(page)
     expect(Object.keys(after.panes).length, 'still one pane (a join, not a split)').toBe(1)
     expect(after.viewMode, 'a non-splitting drop stays single').toBe('single')
+  })
+})
+
+// ── Builder-mode Settings (Settings-as-tab, design steps 3-4-7) ─────────────
+test.describe('Builder-mode Settings', () => {
+  // Open Settings from the drawer (the drawer's Settings row → navTo('settings')).
+  async function openSettingsFromDrawer(page) {
+    await page.getByRole('button', { name: 'Toggle navigation' }).click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.locator('button[aria-label="Settings"]').click()
+  }
+
+  test('builder mode: Settings opens as a pane TAB and the panes stay visible', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'stTabA')
+    const b = await createTaggedChat(page, 'stTabB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id)) // 'panes' = builder mode, two panes
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    await openSettingsFromDrawer(page)
+
+    // The workspace blob now holds the canonical Settings tab (single-instance).
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), 'settings:settings'),
+      { timeout: 3000, message: 'the blob contains the settings:settings tab' },
+    ).toBeTruthy()
+
+    // The named risk, refuted end-to-end: sibling panes are NOT hidden behind
+    // Settings. The tiled chrome is still up and the sibling chat pane renders.
+    await expect(page.locator('.workspace__chrome')).toHaveCount(1)
+    await expect(page.locator(`[data-tab-key="chat:${b.id}"]`)).toHaveCount(1)
+    // Settings renders as a PANED wrapper (its pane rect), not the full-bleed overlay.
+    await expect(page.locator('[data-tab-key="settings:settings"].shell__view--paned')).toHaveCount(1)
+    await expect(page.locator('.settings')).toBeVisible()
+  })
+
+  test('single mode: Settings is the full-screen takeover — no tab, panes hidden', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'stTakeA')
+    const b = await createTaggedChat(page, 'stTakeB')
+    await mockApps(page, [])
+    await seedWorkspace(page, paneModel.setViewMode(twoChatPanes(a.id, b.id), 'single'))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+
+    await openSettingsFromDrawer(page)
+
+    // Today's takeover overlay: Settings full-bleed, no chrome, and NO settings tab.
+    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(1, { timeout: 3000 })
+    await expect(page.locator('.settings')).toBeVisible()
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    const ws = await readWs(page)
+    expect(whichPaneHas(ws, 'settings:settings'), 'no Settings tab in single mode').toBe(null)
+    // The preserved two-pane tree is untouched behind the overlay.
+    expect(Object.keys(ws.panes).length).toBe(2)
+  })
+
+  test('mode conversion: Settings tab <-> takeover across the mode flip (no history)', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'stConvA')
+    const b = await createTaggedChat(page, 'stConvB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id)) // builder
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    await openSettingsFromDrawer(page)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), 'settings:settings'),
+      { timeout: 3000 },
+    ).toBeTruthy()
+
+    // Flip to single via the keyboard path (Shift+Enter on the focused logo).
+    await page.getByRole('button', { name: 'Toggle navigation' }).focus()
+    await page.keyboard.press('Shift+Enter')
+
+    // Entering single removes the builder-only Settings tab and — since Settings was
+    // the visible surface — keeps it on screen as the takeover overlay.
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    expect(whichPaneHas(await readWs(page), 'settings:settings'), 'tab removed entering single').toBe(null)
+    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(1)
+
+    // Flip back to builder: the overlay converts back to the Settings tab.
+    await page.getByRole('button', { name: 'Toggle navigation' }).focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), 'settings:settings'),
+      { timeout: 3000, message: 'Settings converts back to a tab entering builder' },
+    ).toBeTruthy()
   })
 })
