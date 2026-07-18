@@ -316,6 +316,14 @@
     border: 1px solid color-mix(in srgb, var(--danger, #f87171) 35%, transparent);
     white-space: nowrap;
   }
+/* The ONE Settings wrapper is a solid surface in BOTH geometries: full-bleed as
+   the takeover overlay (single mode / flag off) and paned as a builder tab. The
+   opaque bg is what keeps a tiled Settings pane from letting the chrome or a
+   sibling pane show through the gaps between its cards. */
+.shell__settings-view {
+  background: var(--bg);
+}
+
 .shell__settings-loading {
   height: 100%;
   display: grid;

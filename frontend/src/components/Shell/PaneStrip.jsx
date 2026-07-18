@@ -1,5 +1,6 @@
 import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
+import Settings from 'lucide-react/dist/esm/icons/settings.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import * as tabModel from './tabModel.js'
 import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
@@ -42,7 +43,9 @@ export function stripKeyDown(e, tabs, onClose) {
 export function PaneTab({
   tab, label, active, tabIndex, dragKey, role, onActivate, onClose, onContextMenu,
 }) {
-  const TabIcon = tab.kind === 'chat' ? MessageSquare : AppWindow
+  const TabIcon = tab.kind === 'settings'
+    ? Settings
+    : (tab.kind === 'chat' ? MessageSquare : AppWindow)
   return (
     <div className={`shell__tab${active ? ' shell__tab--active' : ''}`}>
       <button

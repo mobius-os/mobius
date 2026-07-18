@@ -1421,6 +1421,11 @@ export default function useNavigation({
     activeAppId,
     activeChatId,
     drawerOpen,
+    // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
+    // is Settings" (a builder tab is the latter without the overlay). The render
+    // gates pane suppression on THIS, never on activeView, so builder Settings
+    // never hides sibling panes (design: the named risk, made structural).
+    settingsOverlayOpen: settingsOpen,
     openDrawer,
     closeDrawer,
     navTo,

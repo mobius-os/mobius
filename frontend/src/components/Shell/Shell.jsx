@@ -202,7 +202,7 @@ export default function Shell() {
     activeView,
     activeAppId,
     activeChatId,
-    drawerOpen, openDrawer, closeDrawer,
+    drawerOpen, settingsOverlayOpen, openDrawer, closeDrawer,
     navTo, convertSettingsForModeTransition,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -247,9 +247,13 @@ export default function Shell() {
     }
   }, [navigationOpen, persistentDrawer])
 
-  // Settings is a full-workspace overlay (§9) — while it is up we suppress the
-  // chrome and positioned rects (panes stay mounted but hidden).
-  const settingsActive = activeView === 'settings'
+  // The Settings TAKEOVER overlay (single mode / flag off) suppresses the chrome
+  // and positioned rects — panes stay mounted but hidden. In builder mode Settings
+  // is a pane TAB and this is FALSE, so sibling panes keep painting: the render
+  // never uses `activeView === 'settings'` for pane suppression (that would hide
+  // every pane behind a builder Settings tab — the named risk). `settingsOverlayOpen`
+  // comes straight from the nav adapter's overlay flag.
+  const settingsActive = settingsOverlayOpen
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -279,7 +283,8 @@ export default function Shell() {
   // every dependent flag together.
   const contentVisibility = useMemo(
     () => deriveContentVisibility({
-      workspace, projection, settingsActive, immersiveActive, immersiveAppId,
+      workspace, projection, settingsOverlayOpen: settingsActive,
+      immersiveActive, immersiveAppId,
       viewMode: workspace.viewMode,
     }),
     [workspace, projection, settingsActive, immersiveActive, immersiveAppId],
@@ -746,6 +751,29 @@ export default function Shell() {
     }
     return map
   }, [workspaceChromeActive, projection, workspace])
+
+  // ── The ONE Settings wrapper (design §4: overlay-or-pane geometry) ─────────
+  // A single, stable SettingsView mount that is positioned like any chat/app
+  // content when Settings is a visible builder tab, and full-bleed when the
+  // takeover overlay is up. Keeping it ONE element (never two conditional mounts)
+  // preserves component identity across the tab<->overlay mode conversion, so the
+  // scroll position and transient Settings state survive the flip.
+  const SETTINGS_KEY = tabModel.SETTINGS_TAB_KEY
+  // Visible as a builder TAB: the overlay is closed AND some visible pane has the
+  // Settings tab active. (Blind to a BACKGROUND Settings tab — not painted.)
+  const settingsVisibleAsTab = !settingsActive
+    && projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === SETTINGS_KEY)
+  // Mounted whenever Settings is on screen in either form; stays mounted across
+  // the conversion so SettingsView is not torn down mid-flip.
+  const settingsMounted = settingsActive || settingsVisibleAsTab
+  // Positioned into its pane's content rect only in the tiled multi-pane render.
+  const settingsPaned = (workspaceChromeActive && settingsVisibleAsTab)
+    ? visibleTabRects.get(SETTINGS_KEY)
+    : null
+  // Full-bleed for the takeover overlay, and for single-pane builder where the
+  // Settings tab is the sole full-bleed surface (fullBleedKey === settings key).
+  const settingsFullBleed = !settingsPaned
+    && (settingsActive || (settingsVisibleAsTab && SETTINGS_KEY === fullBleedKey))
   // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -903,6 +931,7 @@ export default function Shell() {
     return m
   }, [apps])
   const labelForTab = useCallback((tab) => {
+    if (tab.kind === 'settings') return 'Settings'
     if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
     return appById.get(tab.id)?.name || 'App'
   }, [chatById, appById])
@@ -2698,18 +2727,37 @@ export default function Shell() {
             </div>
           )
         })}
-        {activeView === 'settings' && (
-          <Suspense fallback={(
-            <div className="shell__settings-loading" role="status" aria-label="Loading settings">
-              <span className="shell__settings-loading-dot" aria-hidden="true" />
-            </div>
-          )}>
-            <SettingsView
-              onThemeChange={loadTheme}
-              onOpenChat={selectChat}
-              focusTarget={settingsFocusTarget}
-            />
-          </Suspense>
+        {/* Settings surface — ONE wrapper, positioned like a chat/app content
+            wrapper (paned) when it is a visible builder tab, full-bleed when the
+            takeover overlay is up. Keyed 'settings' so React reconciles it by key
+            regardless of the sibling app/chat arrays' lengths, preserving
+            SettingsView identity across the tab<->overlay conversion. */}
+        {settingsMounted && (
+          <div
+            key="settings"
+            data-tab-key={settingsPaned ? SETTINGS_KEY : undefined}
+            className={settingsPaned
+              ? 'shell__view shell__view--paned shell__settings-view'
+              : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`}
+            style={settingsPaned
+              ? { top: settingsPaned.y, left: settingsPaned.x, width: settingsPaned.w, height: settingsPaned.h }
+              : undefined}
+            onPointerDownCapture={settingsPaned
+              ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })
+              : undefined}
+          >
+            <Suspense fallback={(
+              <div className="shell__settings-loading" role="status" aria-label="Loading settings">
+                <span className="shell__settings-loading-dot" aria-hidden="true" />
+              </div>
+            )}>
+              <SettingsView
+                onThemeChange={loadTheme}
+                onOpenChat={selectChat}
+                focusTarget={settingsFocusTarget}
+              />
+            </Suspense>
+          </div>
         )}
         {/* Chrome layer — sibling AFTER the content wrappers, over the whole
             content box, carrying its own inert. Only at ≥2 visible leaves and
