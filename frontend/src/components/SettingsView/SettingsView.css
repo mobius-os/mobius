@@ -450,13 +450,44 @@
   }
 }
 
-@media (max-width: 620px) {
+/* Narrow-PANE responsiveness (design §6). These read the Settings query
+   container (.shell__settings-view, defined in Shell.css) so they fire on the
+   PANE width — a builder Settings tab in a 280px pane inside a wide screen gets
+   the same compact treatment a phone-width viewport gets. A @container replaces
+   the old viewport @media, which missed the narrow-pane-in-wide-screen case
+   entirely. When Settings is the full-bleed overlay the container width tracks
+   the viewport, so the phone case is unchanged. */
+@container settings (max-width: 620px) {
   .settings-bg-row {
     padding-inline: 0;
   }
 
   .settings-bg-row--reordering {
     grid-template-columns: 44px minmax(0, 1fr);
+  }
+}
+
+/* At the 280px pane minimum the outer/section padding eats too much of the
+   usable width, so trim it and let the space-between rows wrap rather than
+   overflow. Tested against the 280px pane floor. */
+@container settings (max-width: 400px) {
+  .settings {
+    padding: 20px 14px 16px;
+  }
+
+  .settings__section {
+    padding: 16px 14px;
+  }
+
+  .settings__section--compact {
+    padding: 12px 14px;
+  }
+
+  /* A label + trailing action that cannot both fit on one line stacks instead
+     of pushing past the pane edge; the action keeps its own left edge. */
+  .settings__row {
+    flex-wrap: wrap;
+    gap: 8px;
   }
 }
 

@@ -322,6 +322,14 @@
    sibling pane show through the gaps between its cards. */
 .shell__settings-view {
   background: var(--bg);
+  /* Query container for SettingsView's narrow-PANE responsiveness (design §6).
+     Settings must respond to the PANE width, not the viewport, so a narrow
+     builder pane inside a wide screen still gets the compact layout that a
+     phone-width viewport already gets. SettingsView.css reads
+     `@container settings (...)`; this element is the pane-sized ancestor in both
+     geometries (full-bleed overlay AND paned tab). inline-size only — vertical
+     scroll of .settings is unaffected. */
+  container: settings / inline-size;
 }
 
 .shell__settings-loading {

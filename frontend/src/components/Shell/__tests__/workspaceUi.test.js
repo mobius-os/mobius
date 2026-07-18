@@ -305,6 +305,25 @@ test('the toggle is a >=44px target with pan-y pinch-zoom and a CSS-only morph',
   assert.match(shellCss, /\.shell__viewmode\.is-morphing \.shell__viewmode-divider \{ animation: none; \}/)
 })
 
+test('the Settings surface responds to PANE width via a query container', () => {
+  const settingsCss = readFileSync(
+    new URL('../../SettingsView/SettingsView.css', import.meta.url), 'utf8',
+  )
+  const urmCss = readFileSync(
+    new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
+  )
+  // The pane-sized wrapper is the query container.
+  const wrap = shellCss.match(/\.shell__settings-view\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(wrap, /container:\s*settings \/ inline-size/)
+  // SettingsView reads that container, not the viewport, so a narrow builder pane
+  // in a wide screen gets the compact layout (the @media miss the design names).
+  assert.match(settingsCss, /@container settings \(max-width: 620px\)/)
+  assert.match(settingsCss, /@container settings \(max-width: 400px\)/)
+  assert.doesNotMatch(settingsCss, /@media \(max-width: 620px\)/)
+  // The update-review modal stays a FIXED takeover (design: not reclassified to a pane).
+  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+})
+
 test('Shell threads viewMode into the content derivation and the per-pane chat gate', () => {
   assert.match(shell, /viewMode: workspace\.viewMode/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
