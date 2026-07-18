@@ -1292,3 +1292,23 @@ def test_persist_session_id_records_codex_link(db):
   assert link is not None
   assert link.chat_id == "codex-persist"
   assert link.first_seen_at == link.last_seen_at
+
+
+def test_codex_config_overrides_default_pins_agents_namespace(monkeypatch):
+  """Multi-agent is on by default AND pins the 'agents' tool namespace so the
+  reserved 'collaboration' default (Codex #31864) can never brick a turn."""
+  from app import codex_sdk_runner as runner
+  monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
+  ov = runner._codex_config_overrides()
+  assert "features.multi_agent_v2.enabled=true" in ov
+  assert "features.multi_agent_v2.tool_namespace=agents" in ov
+
+
+def test_codex_config_overrides_kill_switch(monkeypatch):
+  """MOEBIUS_CODEX_MULTI_AGENT=off disables multi-agent at runtime (no rebuild),
+  leaving only request_user_input — the reversible rollback."""
+  from app import codex_sdk_runner as runner
+  monkeypatch.setenv("MOEBIUS_CODEX_MULTI_AGENT", "off")
+  ov = runner._codex_config_overrides()
+  assert ov == ["features.default_mode_request_user_input=true"]
+  assert not any("multi_agent_v2" in o for o in ov)

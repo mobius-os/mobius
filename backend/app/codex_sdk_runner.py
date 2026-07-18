@@ -108,6 +108,46 @@ def _codex_thinking_segment_id(payload: Any) -> str | None:
   return f"codex:{item_id}"
 
 
+def _env_flag_on(name: str, *, default: bool) -> bool:
+  """Read a boolean env var: ``off``/``0``/``false``/``no``/empty disable it;
+  anything else enables; unset falls back to ``default``."""
+  raw = os.environ.get(name)
+  if raw is None:
+    return default
+  return raw.strip().lower() not in ("off", "0", "false", "no", "")
+
+
+def _codex_config_overrides() -> list[str]:
+  """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
+
+  ``request_user_input`` (AskUserQuestion parity) is always on. Multi-agent
+  (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
+  ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
+  activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
+  ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
+  uvicorn — a runtime rollback that needs no image rebuild, since the overrides
+  are read fresh per turn.
+
+  When enabled, the tool namespace is PINNED to ``agents``. Codex #31864: the
+  pinned SDK source still DEFAULTS multi_agent_v2's spawn_agent tool to the
+  ``collaboration`` namespace, which gpt-5.6 reserves, so the Responses API can
+  reject the tool schema on EVERY turn (not only spawn turns). A live probe on
+  0.144.5 spawned a sub-agent cleanly under the observed default, but the model
+  rollout is server-side and mutable — so we do not depend on that observation:
+  pinning ``agents`` (the reporter-confirmed bypass in #31864) keeps enablement
+  robust to a rollout change, not just to the binary we probed. Re-run the
+  delegate probe after any @openai/codex bump.
+  """
+  overrides = ["features.default_mode_request_user_input=true"]
+  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
+    overrides += [
+      "features.multi_agent_v2.enabled=true",
+      "features.multi_agent_v2.tool_namespace=agents",
+      "suppress_unstable_features_warning=true",
+    ]
+  return overrides
+
+
 class _BridgeError(Exception):
   """Signals the sync AskUserQuestion handler to return an error response
   to Codex rather than continuing with empty or fabricated answers.
@@ -1183,50 +1223,14 @@ async def run_codex_sdk_turn(
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
 
+  # config_overrides carries the request_user_input (AskUserQuestion parity) and
+  # multi-agent enablement flags — assembled, with the #31864 tool_namespace pin
+  # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
   config = sdk["CodexConfig"](
     codex_bin=shutil.which("codex"),
     cwd=cwd,
     env=env,
-    # Enable the experimental `request_user_input` tool in Default
-    # collaboration mode. Without this override the tool isn't even
-    # in the model's available tool list — the spike (probe3.py)
-    # confirmed it surfaces immediately once the flag is on. The
-    # TOML key is `[features].default_mode_request_user_input` per
-    # codex-rs/features/src/lib.rs. Stage is `UnderDevelopment` so
-    # this flag may rename or move in a future SDK bump; if turns
-    # silently stop emitting `item/tool/requestUserInput` after an
-    # upgrade, check the upstream features list first.
-    #
-    # Multi-agent (collab / spawn_agent) IS enabled — this is the Codex analog of
-    # Claude's Task/Workflow fleet, and the dispatch above translates its
-    # collabAgentToolCall items onto the same subagent lane. Enabling it is a
-    # single `features.multi_agent_v2.enabled=true` override (stage
-    # UnderDevelopment, hence the warning we suppress).
-    #
-    # Why this is safe on gpt-5.6-sol despite the open Codex issue #31864 ("all
-    # GPT-5.6 Sol turns fail because MultiAgentV2 uses the reserved
-    # collaboration.spawn_agent schema"): that brick was VERIFIED NOT to occur on
-    # the codex-cli 0.144.3/0.144.4 binary we actually run. A live probe (enable
-    # the flag, prompt gpt-5.6-sol to delegate a computation to a sub-agent)
-    # spawned a real subagent thread — parent_thread_id linked, thread_source
-    # "subagent", correct result relayed — with zero reserved-schema errors and
-    # WITHOUT the `tool_namespace=agents` workaround the issue proposes. Codex
-    # exec / SDK ThreadStart does not auto-apply the interactive TUI's default
-    # MultiAgentV2 namespace that #31864 is about, so the collision never
-    # materializes here. (Prod Codex chats on gpt-5.6-sol already run clean, which
-    # is the same evidence at the always-on level.)
-    #
-    # Watch on a codex bump: #31864 is still open upstream, so re-run the delegate
-    # probe after any @openai/codex version change — if a future binary starts
-    # submitting the reserved `collaboration.spawn_agent` schema, add
-    # `features.multi_agent_v2.tool_namespace=agents` here (the reporter-confirmed
-    # bypass) and re-verify. The spawn events still surface even when unused, so a
-    # regression is visible as failing turns, not silent loss.
-    config_overrides=[
-      "features.default_mode_request_user_input=true",
-      "features.multi_agent_v2.enabled=true",
-      "suppress_unstable_features_warning=true",
-    ],
+    config_overrides=_codex_config_overrides(),
   )
 
   thread = None
