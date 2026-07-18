@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
+import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled, X } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
@@ -243,6 +243,8 @@ export default function Drawer({
   // drawer opened so we can restore it on close regardless of how the
   // drawer was dismissed (Escape, overlay tap, swipe).
   const previousFocusRef = useRef(null)
+  const drawerRef = useRef(null)
+  const closeButtonRef = useRef(null)
   useEffect(() => {
     if (persistent) {
       previousFocusRef.current = null
@@ -252,9 +254,18 @@ export default function Drawer({
       previousFocusRef.current = document.activeElement
       // Defer to next frame so the drawer's CSS transition has begun
       // and the panel is in the rendered DOM before we focus it.
-      requestAnimationFrame(() => {
-        drawerRef.current?.focus()
+      const focusFrame = requestAnimationFrame(() => {
+        // The close control is the safest first destination in a modal
+        // navigation drawer: it is always present and gives touch, switch,
+        // and keyboard users an immediate, explicit escape path. Fall back
+        // to the panel if the control became unavailable during a responsive
+        // mode change.
+        closeButtonRef.current?.focus()
+        if (document.activeElement !== closeButtonRef.current) {
+          drawerRef.current?.focus()
+        }
       })
+      return () => cancelAnimationFrame(focusFrame)
     } else {
       // Restore focus when the drawer closes so keyboard users land
       // back on the toggle that opened it (or whatever was focused).
@@ -285,7 +296,6 @@ export default function Drawer({
   // dominant) or snaps back. The CSS transition is disabled mid-
   // drag via `drawer--dragging` so the panel tracks the finger
   // without easing.
-  const drawerRef = useRef(null)
   const dragStart = useRef(null) // { x, y } or null
   // True once a touch gesture has become a HORIZONTAL swipe. Vertical movement
   // belongs to the drawer's scroll containers and must never arm click
@@ -505,6 +515,21 @@ export default function Drawer({
         onTransitionEnd={handleDrawerTransitionEnd}
       >
         <div className="drawer__body">
+          {!persistent && (
+            <div className="drawer__mobile-header">
+              <span className="drawer__mobile-title">Navigation</span>
+              <button
+                ref={closeButtonRef}
+                type="button"
+                className="drawer__close"
+                onClick={() => onClose?.()}
+                aria-label="Close navigation"
+                disabled={interactionLocked}
+              >
+                <X width={18} height={18} aria-hidden="true" />
+              </button>
+            </div>
+          )}
 
           {/* Single scroll wrapper around New chat + Chats + Apps.
               Earlier each group held its own scrolling region with

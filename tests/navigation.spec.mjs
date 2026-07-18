@@ -157,11 +157,18 @@ async function navigateToApp(page, index = 0) {
 
 /** Open the drawer via the toggle button (aria-expanded attribute). */
 async function openDrawer(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+  const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+}
+
+/** Close the modal drawer through its in-panel, hit-tested control. */
+async function closeDrawerButton(page) {
+  const close = page.getByRole('button', { name: 'Close navigation' })
+  await expect(close).toBeVisible()
+  await close.click()
+  await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+    .toHaveAttribute('aria-expanded', 'false')
 }
 
 /** Close the drawer via the toggle button (without navigating). */
@@ -240,7 +247,7 @@ test.describe('Navigation basics', () => {
     const start = await getNavState(page)
     await openDrawer(page)
     expect((await getNavState(page)).drawerOpen).toBe(true)
-    await closeDrawerToggle(page)
+    await closeDrawerButton(page)
     const end = await getNavState(page)
     expect(end.drawerOpen).toBe(false)
     expect(end.activeChatId).toBe(start.activeChatId)
@@ -446,7 +453,7 @@ test.describe('Back button edge cases', () => {
 
     for (let i = 0; i < 5; i++) {
       await openDrawer(page)
-      await closeDrawerToggle(page)
+      await closeDrawerButton(page)
     }
     const end = await getNavState(page)
     expect(end.drawerOpen).toBe(false)
@@ -469,11 +476,11 @@ test.describe('Back button edge cases', () => {
     )
     expect(onSettings).toBe(true)
 
-    // Open drawer (sentinel + drawer open) and close via the X button.
+    // Open drawer (sentinel + drawer open) and close via the in-panel button.
     await openDrawer(page)
     expect((await getNavState(page)).drawerOpen).toBe(true)
 
-    await closeDrawerToggle(page)
+    await closeDrawerButton(page)
     const stillOnSettings = await page.evaluate(
       () => !!document.querySelector('.settings')
     )
@@ -1167,15 +1174,15 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
   })
 
-  test('23. X-button (toggle) closes drawer (does not navigate, even from deep view)', async ({ page }) => {
-    // Same regression as test 22 but via the toggle button. test 9
-    // covers the basic case from a non-default view; this test just
-    // makes the close-via-toggle = no-navigate contract explicit.
+  test('23. In-panel close button does not navigate, even from a deep view', async ({ page }) => {
+    // Same regression as test 22 but via the explicit mobile close control.
+    // Test 9 covers the basic case from a non-default view; this test keeps
+    // the close-without-navigation contract explicit.
     await setup(page)
     await openDrawer(page)
     await navigateToSettings(page)
     await openDrawer(page)
-    await closeDrawerToggle(page)
+    await closeDrawerButton(page)
     expect((await getNavState(page)).drawerOpen).toBe(false)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
   })

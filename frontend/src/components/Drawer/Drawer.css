@@ -113,6 +113,62 @@
   min-height: 0;
 }
 
+/* The shell header becomes inert while the mobile drawer is modal, so its
+   menu toggle cannot double as a dependable close affordance. Keep an
+   explicit escape target inside the modal boundary. The 44px square is a
+   comfortable minimum touch target without making the compact toolbar feel
+   oversized. Desktop has its own persistent-sidebar toggle and does not
+   render this row. */
+.drawer__mobile-header {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0 6px 4px;
+}
+
+.drawer__mobile-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.drawer__close {
+  width: 44px;
+  height: 44px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--text-muted);
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__close:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.drawer__close:active {
+  background: var(--surface);
+}
+
+.drawer__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.drawer__close:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 /* Wrapper around New chat + Chats + Apps. Holds the layout for
    the per-section scroll model: New chat stays at the top, Chats
    and Apps share the remaining space proportionally to their
