@@ -9,6 +9,16 @@ cd "$ROOT"
 err() { printf 'land: %s\n' "$*" >&2; }
 info() { printf 'land: %s\n' "$*"; }
 
+# `git push` opens the SSH transport before invoking the local pre-push hook.
+# The backend gate can then leave that transport idle for several minutes, long
+# enough for GitHub or an intermediate NAT to close it after every test passes.
+# Keep the transport alive; this changes no hook, ref, or fast-forward policy.
+git_push() {
+  local ssh_command="${GIT_SSH_COMMAND:-ssh}"
+  GIT_SSH_COMMAND="${ssh_command} -o ServerAliveInterval=30 -o ServerAliveCountMax=30" \
+    git push "$@"
+}
+
 check_private_history() {
   local ref="${1:-HEAD}"
   local commits
@@ -57,7 +67,7 @@ backup_ref="refs/heads/preserve/session-${safe_branch}-${stamp}-${short_sha}"
 backup_name="${backup_ref#refs/heads/}"
 
 info "backing up ${branch} (${short_sha}) to origin/${backup_name}"
-git push origin "${head_sha}:${backup_ref}"
+git_push origin "${head_sha}:${backup_ref}"
 
 info "rebasing ${branch} onto latest origin/main"
 if ! git rebase origin/main; then
@@ -87,7 +97,7 @@ fi
 check_private_history HEAD
 
 info "pushing HEAD to main with normal fast-forward semantics"
-if git push origin HEAD:main; then
+if git_push origin HEAD:main; then
   landed="$(git rev-parse --short HEAD)"
   info "landed ${landed} on origin/main"
   exit 0
