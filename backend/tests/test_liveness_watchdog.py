@@ -147,6 +147,28 @@ def test_watchdog_exempts_registered_pending_question():
   assert handle.stop_calls == 0
 
 
+def test_watchdog_reclaims_provider_wedged_after_question_answered():
+  _bc, _sink, handle = _live_stale("answered-question-1")
+  loop = asyncio.new_event_loop()
+  pending = PendingQuestion(
+    question_id="q1",
+    questions=[],
+    future=loop.create_future(),
+    run_token="rt-answered-question-1",
+  )
+  try:
+    questions.register("answered-question-1", pending)
+    pending.future.set_result({"Choice?": "Done"})
+
+    swept = _sweep()
+  finally:
+    questions.claim("answered-question-1")
+    loop.close()
+
+  assert swept == ["answered-question-1"]
+  assert handle.stop_calls == 1
+
+
 def test_fresh_event_resets_watchdog_clock():
   bc, _sink, handle = _live_stale("fresh-1")
   bc.publish({"type": "tool_start", "name": "build"})
