@@ -42,6 +42,41 @@ import ActivityLineHeader from './ActivityLineHeader.jsx'
 // shimmer plus the running-first activity summary already say what is
 // executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
+// A thought inside a MIXED activity stretch (thinking beside tools) gets its own
+// collapsible line, closed by default: the tools are the step the owner opened
+// the stretch to see, so the reasoning is available on demand rather than forced
+// open around them. A thinking-ONLY stretch skips this — its header already named
+// the thought, so opening the stretch reveals the reasoning directly.
+function TimelineThought({ label, content }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div
+      className={`chat__activity-think chat__activity-think--collapsible${
+        open ? ' chat__activity-think--open' : ''
+      }`}
+    >
+      <button
+        type="button"
+        className="chat__activity-think-toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className="chat__activity-think-chevron" aria-hidden="true">
+          <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M7.5 4.2 13.3 10l-5.8 5.8-1-1L10.6 10 6.5 5.2z" />
+          </svg>
+        </span>
+        <span className="chat__activity-think-label">{label}</span>
+      </button>
+      {open && (
+        <div className="chat__reasoning-body">
+          <StandardMarkdown text={content} />
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ActivityStretch({ entries, chatId, live = false }) {
   const [userOpen, setUserOpen] = useState(false)
   const headerRef = useRef(null)
@@ -136,21 +171,27 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         <div className="chat__activity-timeline">
           {entries.map(({ item, idx }) => {
             if (item.type === 'thinking') {
-              return (
-                <div className="chat__activity-think" key={assistantBlockKey(item, idx)}>
-                  {/* A thinking-only header already carries the duration, so the
-                      expanded row starts with preserved reasoning instead of
-                      repeating the same label. Mixed timelines keep the label
-                      because it separates reasoning from neighboring tools. */}
-                  {!thinkingOnly && (
-                    <span className="chat__activity-think-label">
-                      {thoughtDurationLabel(item.duration_ms)}
-                    </span>
-                  )}
-                  <div className="chat__reasoning-body">
-                    <StandardMarkdown text={thinkingContentForDisplay(item.content)} />
+              const key = assistantBlockKey(item, idx)
+              const reasoning = thinkingContentForDisplay(item.content)
+              // Thinking-only: the collapsed header already named the thought, so
+              // opening the stretch shows the reasoning directly — one disclosure.
+              if (thinkingOnly) {
+                return (
+                  <div className="chat__activity-think" key={key}>
+                    <div className="chat__reasoning-body">
+                      <StandardMarkdown text={reasoning} />
+                    </div>
                   </div>
-                </div>
+                )
+              }
+              // Mixed run: give the thought its own collapsible line (closed by
+              // default) so it doesn't force all the reasoning open beside the tools.
+              return (
+                <TimelineThought
+                  key={key}
+                  label={thoughtDurationLabel(item.duration_ms)}
+                  content={reasoning}
+                />
               )
             }
             // chatId + the block's tool_use_id let ToolBlock lazily fetch a

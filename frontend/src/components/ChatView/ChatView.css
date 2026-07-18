@@ -1127,6 +1127,49 @@
   opacity: 0.8;
 }
 
+/* A mixed stretch's thought is a collapsible line of its own (closed by default):
+   a chevron + "Thought for Ns" toggle, the reasoning revealed on demand so it
+   never forces the whole stretch open around the tools. */
+.chat__activity-think-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted); /* CONTRACT: low-contrast reasoning tone */
+  cursor: pointer;
+  text-align: left;
+}
+.chat__activity-think-toggle .chat__activity-think-label {
+  display: inline;
+  margin-bottom: 0;
+}
+.chat__activity-think-toggle:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat__activity-think-toggle:hover .chat__activity-think-label {
+    color: var(--text); /* CONTRACT: high-contrast lift marks the tappable line */
+  }
+}
+.chat__activity-think-chevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--muted); /* CONTRACT: low-contrast disclosure glyph */
+  transition: transform 0.15s ease;
+}
+.chat__activity-think--open .chat__activity-think-chevron {
+  transform: rotate(90deg);
+}
+.chat__activity-think--collapsible .chat__reasoning-body {
+  margin-top: var(--activity-row-gap, 4px);
+}
+
 /* Reasoning markdown is a deliberately quiet typography lane. Model-authored
    headings and bold lead-ins stay body-sized and moderately weighted, while
    the markdown renderer's reading-measure padding remains intact. */
