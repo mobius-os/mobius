@@ -21,6 +21,31 @@ TOKEN_FILE = DATA_DIR / "service-token.txt"
 MOBIUS_UID = 1000
 MOBIUS_GID = 1000
 
+# Cron discards this supervisor's stdout, so every FAILURE must leave
+# a durable line — a silent early exit (bad path, dead token, missing
+# job-context) is otherwise indistinguishable from a job that never
+# fired. Successes stay silent: every-minute jobs would bury the
+# failures under thousands of ok-lines a day. Self-rotates because
+# cron never restarts the container for us.
+SUPERVISOR_LOG = DATA_DIR / "cron-logs" / "app-jobs.log"
+SUPERVISOR_LOG_CAP = 2 * 1024 * 1024
+
+
+def _log(app_id: object, message: str) -> None:
+  from datetime import datetime, timezone
+  stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+  try:
+    SUPERVISOR_LOG.parent.mkdir(parents=True, exist_ok=True)
+    try:
+      if SUPERVISOR_LOG.stat().st_size > SUPERVISOR_LOG_CAP:
+        SUPERVISOR_LOG.replace(SUPERVISOR_LOG.with_suffix(".log.1"))
+    except OSError:
+      pass
+    with SUPERVISOR_LOG.open("a", encoding="utf-8") as handle:
+      handle.write(f"[{stamp}] app={app_id} {message}\n")
+  except OSError:
+    pass
+
 
 def _start_ticks(pid: int) -> int:
   tail = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
@@ -201,20 +226,24 @@ def _sandboxed_command(
 
 def run() -> int:
   if len(sys.argv) != 3 or not re.fullmatch(r"[0-9]+", sys.argv[1]):
+    _log(sys.argv[1] if len(sys.argv) > 1 else "?", "rejected: bad argv")
     return 2
   app_id = int(sys.argv[1])
   job = Path(sys.argv[2])
   if job.is_symlink():
+    _log(app_id, f"rejected: symlinked job {job}")
     return 2
   try:
     apps_root = (DATA_DIR / "apps").resolve(strict=True)
     resolved = job.resolve(strict=True)
   except (OSError, RuntimeError):
+    _log(app_id, f"rejected: unresolvable job {job}")
     return 2
   if (
     resolved.parent.parent != apps_root
     or not resolved.is_file()
   ):
+    _log(app_id, f"rejected: job outside apps root {resolved}")
     return 2
 
   # API launches already create a session; cron launches do not.
@@ -222,6 +251,7 @@ def run() -> int:
     if os.getsid(0) != os.getpid():
       os.setsid()
   except OSError:
+    _log(app_id, "failed: setsid")
     return 3
   pid = os.getpid()
   lease = (
@@ -237,16 +267,23 @@ def run() -> int:
   try:
     app_token = _mint_app_token(app_id)
     if not app_token:
+      _log(app_id, "failed: could not mint app token (backend down or bad service token)")
       return 4
     # Publication-before-check closes uninstall races: if uninstall already
     # won, this fails; if it follows, it sees and terminates this process group.
     if not _app_is_live(app_id, app_token):
+      # _app_is_live folds timeouts and backend errors into False, so
+      # this line covers outages too — don't read it as proof of
+      # uninstall without checking the backend was up at this stamp.
+      _log(app_id, "skipped: app not live (uninstalled/tombstoned) or backend unreachable")
       return 4
     context = _job_context(app_id, app_token)
     if context is None:
+      _log(app_id, "failed: job-context fetch")
       return 4
     command = _sandboxed_command(app_id, resolved, context)
     if command is None:
+      _log(app_id, "failed: sandbox unavailable for background agent")
       return 5
     child_env = _job_env(app_token)
     job_state = DATA_DIR / "apps" / str(app_id) / "job-state"
@@ -263,7 +300,10 @@ def run() -> int:
       cwd=str(resolved.parent),
       env=child_env,
     )
-    return child.wait()
+    rc = child.wait()
+    if rc != 0:
+      _log(app_id, f"job exited rc={rc}: {resolved}")
+    return rc
   finally:
     lease.unlink(missing_ok=True)
     try:
@@ -273,4 +313,14 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-  raise SystemExit(run())
+  try:
+    raise SystemExit(run())
+  except SystemExit:
+    raise
+  except BaseException as exc:
+    # A crash in the supervisor itself (lease publication, /proc read,
+    # Popen) must not die silently under cron. SIGTERM is deliberately
+    # not trapped: a handler would buy one log line at the cost of
+    # masking the kill semantics uninstall/shutdown rely on.
+    _log(sys.argv[1] if len(sys.argv) > 1 else "?", f"crashed: {exc!r}")
+    raise

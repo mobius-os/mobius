@@ -804,9 +804,28 @@ chown root:mobius "$_fp_file" 2>/dev/null || true
 # leased/sandboxed runner; keeping the daemon stopped until then closes the
 # boot window in which an old direct entry could fire unsupervised.
 
-# Create cron log directory.
+# Create cron log directory. Recursive chown so a file created by a
+# root-run docker exec (the classic /data poisoning trap) can't
+# permanently block mobius appends to an existing log.
 mkdir -p /data/cron-logs
-chown mobius:mobius /data/cron-logs
+chown -R mobius:mobius /data/cron-logs
+
+# Trim runaway cron logs at boot. App job scripts append here forever
+# and rotation can't be imposed on agent-authored scripts, so the
+# substrate reclaims its own volume at the one moment nothing writes.
+# Growth between boots is accepted (MBs/month against a multi-GB
+# volume); the supervisor's own app-jobs.log self-rotates at runtime.
+# mktemp (O_EXCL) + the symlink guard keep this root-run loop from
+# following a planted link in the mobius-writable directory.
+for _log in /data/cron-logs/*.log; do
+  [ -f "$_log" ] && [ ! -L "$_log" ] || continue
+  if [ "$(stat -c%s "$_log" 2>/dev/null || echo 0)" -gt 8388608 ]; then
+    _trim=$(mktemp "${_log}.XXXXXX") || continue
+    tail -c 2097152 "$_log" > "$_trim" && mv -f "$_trim" "$_log"
+    rm -f "$_trim"
+    chown mobius:mobius "$_log" 2>/dev/null || true
+  fi
+done
 
 # Generate (or refresh) a service token for cron scripts and sub-agents.
 # Stored outside /data/shared/ so it's not accessible via the storage API.
