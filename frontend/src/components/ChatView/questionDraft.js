@@ -20,6 +20,24 @@ function browserDraftStorages() {
 }
 
 
+function parsedDraft(storage, key) {
+  try {
+    const parsed = JSON.parse(storage.getItem(key) || 'null')
+    if (!parsed) return null
+    return {
+      answers: parsed.answers && typeof parsed.answers === 'object'
+        ? parsed.answers
+        : {},
+      otherTexts: parsed.otherTexts && typeof parsed.otherTexts === 'object'
+        ? parsed.otherTexts
+        : {},
+    }
+  } catch {
+    return null
+  }
+}
+
+
 function questionFingerprint(questions) {
   const source = JSON.stringify((questions || []).map(q => ({
     header: q?.header || '',
@@ -46,20 +64,21 @@ export function questionDraftKey(chatId, questionId, questions) {
 export function readQuestionDraft(key, storage) {
   if (!key) return { answers: {}, otherTexts: {} }
   const targets = storage ? [storage] : browserDraftStorages()
-  for (const target of targets) {
-    try {
-      const raw = target.getItem(key)
-      if (!raw) continue
-      const parsed = JSON.parse(raw)
-      return {
-        answers: parsed?.answers && typeof parsed.answers === 'object'
-          ? parsed.answers
-          : {},
-        otherTexts: parsed?.otherTexts && typeof parsed.otherTexts === 'object'
-          ? parsed.otherTexts
-          : {},
-      }
-    } catch { /* malformed or blocked store; try the fallback */ }
+  for (let index = 0; index < targets.length; index++) {
+    const draft = parsedDraft(targets[index], key)
+    if (!draft) continue
+
+    // sessionStorage was the original home for question drafts. Migrate a
+    // surviving legacy value into durable storage on first read, then remove
+    // the fallback copy only after the durable write succeeds. Keeping two
+    // writable copies lets a cleared local draft resurrect an old choice.
+    if (!storage && index > 0 && targets[0]) {
+      try {
+        targets[0].setItem(key, JSON.stringify({ version: 1, ...draft }))
+        targets[index].removeItem(key)
+      } catch { /* durable storage unavailable; keep the working fallback */ }
+    }
+    return draft
   }
   return { answers: {}, otherTexts: {} }
 }
@@ -75,12 +94,25 @@ export function writeQuestionDraft(
   const targets = storage ? [storage] : browserDraftStorages()
   const hasAnswers = Object.keys(answers || {}).length > 0
   const hasText = Object.values(otherTexts || {}).some(value => String(value || '').length > 0)
+
+  // Clearing is authoritative across every fallback. Returning after the
+  // first successful remove leaves older session data available to resurrect.
+  if (!hasAnswers && !hasText) {
+    for (const target of targets) {
+      try { target.removeItem(key) } catch { /* blocked store */ }
+    }
+    return
+  }
+
+  const serialized = JSON.stringify({ version: 1, answers, otherTexts })
   for (const target of targets) {
     try {
-      if (!hasAnswers && !hasText) {
-        target.removeItem(key)
-      } else {
-        target.setItem(key, JSON.stringify({ answers, otherTexts }))
+      target.setItem(key, serialized)
+      // Exactly one store owns the current value. Once a preferred write
+      // succeeds, remove any legacy fallback so future reads are unambiguous.
+      for (const fallback of targets) {
+        if (fallback === target) continue
+        try { fallback.removeItem(key) } catch { /* blocked fallback */ }
       }
       return
     } catch {

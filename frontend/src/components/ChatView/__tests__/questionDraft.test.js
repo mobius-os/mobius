@@ -103,3 +103,81 @@ test('durable browser storage falls back when localStorage rejects writes', () =
     else delete globalThis.sessionStorage
   }
 })
+
+
+test('a durable write removes a stale session fallback', () => {
+  const localDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const sessionDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  const local = new MemoryStorage()
+  const session = new MemoryStorage()
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: local })
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: session })
+  try {
+    const key = questionDraftKey('chat-1', 'current', questions)
+    session.setItem(key, JSON.stringify({
+      answers: { 'Which direction?': 'Polish' }, otherTexts: {},
+    }))
+
+    writeQuestionDraft(key, { 'Which direction?': 'Simplify' }, {})
+
+    assert.equal(session.getItem(key), null)
+    assert.equal(readQuestionDraft(key).answers['Which direction?'], 'Simplify')
+  } finally {
+    if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
+    else delete globalThis.localStorage
+    if (sessionDescriptor) Object.defineProperty(globalThis, 'sessionStorage', sessionDescriptor)
+    else delete globalThis.sessionStorage
+  }
+})
+
+
+test('clearing a draft removes every fallback copy', () => {
+  const localDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const sessionDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  const local = new MemoryStorage()
+  const session = new MemoryStorage()
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: local })
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: session })
+  try {
+    const key = questionDraftKey('chat-1', 'clear', questions)
+    const value = JSON.stringify({ answers: { 'Which direction?': 'Polish' }, otherTexts: {} })
+    local.setItem(key, value)
+    session.setItem(key, value)
+
+    writeQuestionDraft(key, {}, {})
+
+    assert.equal(local.getItem(key), null)
+    assert.equal(session.getItem(key), null)
+    assert.deepEqual(readQuestionDraft(key), { answers: {}, otherTexts: {} })
+  } finally {
+    if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
+    else delete globalThis.localStorage
+    if (sessionDescriptor) Object.defineProperty(globalThis, 'sessionStorage', sessionDescriptor)
+    else delete globalThis.sessionStorage
+  }
+})
+
+
+test('legacy session drafts migrate once into durable storage', () => {
+  const localDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const sessionDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  const local = new MemoryStorage()
+  const session = new MemoryStorage()
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: local })
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: session })
+  try {
+    const key = questionDraftKey('chat-1', 'legacy', questions)
+    session.setItem(key, JSON.stringify({
+      answers: { 'Which direction?': 'Polish' }, otherTexts: {},
+    }))
+
+    assert.equal(readQuestionDraft(key).answers['Which direction?'], 'Polish')
+    assert.equal(session.getItem(key), null)
+    assert.equal(JSON.parse(local.getItem(key)).version, 1)
+  } finally {
+    if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
+    else delete globalThis.localStorage
+    if (sessionDescriptor) Object.defineProperty(globalThis, 'sessionStorage', sessionDescriptor)
+    else delete globalThis.sessionStorage
+  }
+})
