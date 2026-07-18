@@ -389,17 +389,17 @@ export default function useWorkspaceDrag({
         // snapshot (design §3.5).
         // A splitting drop (edge or root split) made while in single view-mode is
         // an explicit request for panes — the drop's whole intent is a second
-        // visible surface. Drag is only enabled in single-mode for a single-leaf
-        // tree, so this fires exactly on the 1->2-leaf split; flip the mode after
-        // the split lands so the new pane actually shows (design: view-mode
-        // toggle, single-leaf split path). A center/strip join keeps one leaf and
-        // stays single. Read viewMode BEFORE the split dispatch (the split never
-        // touches viewMode, but capturing first keeps the intent explicit).
-        const wasSingle = workspaceStateRef.current.ws.viewMode === 'single'
-        dispatchWorkspace({ type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}` })
-        if (wasSingle && target.edge != null) {
-          dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'panes' })
-        }
+        // visible surface. Fold the 'panes' flip INTO the OPEN_TAB_AT payload so the
+        // split and the flip are ONE undoable gesture (a following SET_VIEW_MODE
+        // would let Undo revert the split while leaving the mode flipped — a half-
+        // undone gesture). Drag is only enabled in single-mode for a single-leaf
+        // tree, so this fires exactly on the 1->2-leaf split; a center/strip join
+        // has no edge, keeps one leaf, and stays single.
+        const flipToPanes = workspaceStateRef.current.ws.viewMode === 'single' && target.edge != null
+        dispatchWorkspace({
+          type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}`,
+          flipViewMode: flipToPanes ? 'panes' : null,
+        })
       }
 
       const onUp = (ev) => {

@@ -58,6 +58,7 @@ import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
+import ViewModeToggle from './ViewModeToggle.jsx'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
@@ -973,10 +974,11 @@ export default function Shell() {
   // Filled by the first-use coachmark (§7); the first real drag dismisses it.
   const coachmarkDismissRef = useRef(null)
   const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
-  // The view-mode toggle lives in the Drawer (bottom Settings row). Toggling is a
-  // pure state flip — no navigation, no drawer close (the reducer's SET_VIEW_MODE
-  // preserves the undo slot and never touches focus). The vibrate ref is the
-  // Drawer toggle's imperative "shake" handle: when a drag is attempted while
+  // The view-mode toggle lives in the shell top bar (in line with the logo).
+  // Toggling is a pure state flip — no navigation, no drawer open/close (the
+  // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus). The
+  // vibrate ref is the bar toggle's imperative "shake" handle: when a drag is
+  // attempted while
   // dragging is disabled (single-mode + multi-pane tree), the drag hook's
   // onDragBlocked calls through it so the toggle shakes in place.
   const viewModeVibrateRef = useRef(null)
@@ -2401,6 +2403,18 @@ export default function Shell() {
             Offline
           </span>
         )}
+        {/* View-mode toggle, in line with the logo cluster (owner placement).
+            Right-aligned via margin-left:auto; shown ALWAYS while splits are on
+            (both modes) so it reads as a toggle. Flag-gated because view-mode only
+            matters when panes can exist. A sibling of the brand/drawer button — its
+            click never reaches the drawer control. */}
+        {paneModel.WORKSPACE_SPLITS_ENABLED && (
+          <ViewModeToggle
+            viewMode={workspace.viewMode}
+            onToggle={handleToggleViewMode}
+            vibrateRef={viewModeVibrateRef}
+          />
+        )}
       </header>
 
       <Drawer
@@ -2426,9 +2440,6 @@ export default function Shell() {
         newAppIds={newAppIds}
         settingsWarning={providerAuth.anyDisconnected}
         dragActiveRef={dragActiveRef}
-        viewMode={workspace.viewMode}
-        onToggleViewMode={handleToggleViewMode}
-        viewModeVibrateRef={viewModeVibrateRef}
       />
 
       {showWalkthrough && (

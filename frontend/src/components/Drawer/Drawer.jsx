@@ -63,15 +63,6 @@ export default function Drawer({
   // cannot be preventDefault-ed by the controller's pointer capture; the flag is
   // the only way they can yield the gesture. Null when the flag is off.
   dragActiveRef,
-  // View-mode toggle (design: view-mode toggle). `viewMode` is 'panes' | 'single';
-  // `onToggleViewMode` flips it (a pure state flip — it must NOT close the drawer,
-  // which is why the toggle button never calls onClose). `viewModeVibrateRef` is the
-  // imperative shake handle the workspace drag controller pulses when a drag is
-  // attempted while dragging is disabled (single-mode with a preserved multi-pane
-  // tree). All three are only meaningful when WORKSPACE_SPLITS_ENABLED.
-  viewMode,
-  onToggleViewMode,
-  viewModeVibrateRef,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
@@ -605,18 +596,6 @@ export default function Drawer({
 
           </div>{/* /.drawer__scroll-wrap */}
 
-          {/* The drawer has no logo/header row of its own — the Möbius brand
-              lives in the shell top bar, outside this <nav>. So the view-mode
-              toggle takes the spec's fallback home: right-aligned INLINE on the
-              Settings footer row. That row is the drawer's established place for a
-              quiet, right-aligned secondary affordance (the provider-warning dot
-              already sits there), it is persistent (outside the scrolling list, so
-              the toggle is always reachable regardless of list length), and
-              Settings is a utility zone — a better semantic home for a view
-              preference than the prominent New-chat action at the top. The toggle
-              is a SIBLING of the Settings button, never nested inside it (nested
-              <button>s are invalid HTML — same reason .drawer__row splits its two
-              controls). */}
           <div className="drawer__group drawer__group--bottom">
             <button
               className={`drawer__item ${activeView === 'settings' ? 'drawer__item--active' : ''}`}
@@ -637,16 +616,6 @@ export default function Drawer({
                 />
               )}
             </button>
-            {/* Shown ALWAYS while splits are on (both view-modes) so it reads as a
-                toggle, quiet by default. Gated on the splits flag because view-mode
-                only matters when panes can exist. */}
-            {WORKSPACE_SPLITS_ENABLED && (
-              <ViewModeToggle
-                viewMode={viewMode}
-                onToggle={onToggleViewMode}
-                vibrateRef={viewModeVibrateRef}
-              />
-            )}
           </div>
 
         </div>
@@ -994,77 +963,5 @@ function DrawerRow({
         </Menu.Content>
       </Menu>
     </div>
-  )
-}
-
-
-/** Split-panes glyph (two side-by-side panes) for 'panes' view-mode. Authored
- *  inline rather than reusing @openai/apps-sdk-ui's Grid — Grid already means
- *  "Apps" in this drawer, so it would read ambiguously here. Matches the icon
- *  set's 24-viewBox rounded-rect outline vocabulary. */
-function PanesGlyph() {
-  return (
-    <svg
-      width="18" height="18" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true"
-    >
-      <rect x="3" y="4.5" width="7.5" height="15" rx="2" />
-      <rect x="13.5" y="4.5" width="7.5" height="15" rx="2" />
-    </svg>
-  )
-}
-
-/** Single-screen glyph (one pane) for 'single' view-mode — the same outer bounds
- *  as PanesGlyph without the split, so the pair reads as one control's two states. */
-function SingleGlyph() {
-  return (
-    <svg
-      width="18" height="18" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true"
-    >
-      <rect x="3" y="4.5" width="18" height="15" rx="2" />
-    </svg>
-  )
-}
-
-/** The single-screen <-> split-panes toggle. A compact icon button that reads as
- *  a toggle (shown in both modes, aria-pressed marks single active). Quiet by
- *  default; the active (single) state gets a soft accent tint, never a loud fill.
- *
- *  The `vibrateRef` is an imperative shake handle: the workspace drag controller
- *  calls it (via the ref Shell threads through onDragBlocked) when a drag is
- *  attempted while dragging is disabled — single view-mode with a preserved
- *  multi-pane tree. The shake restarts by clearing the class for one frame first,
- *  so a rapid second attempt re-shakes rather than no-op'ing on an already-present
- *  class. prefers-reduced-motion swaps the transform shake for a non-motion
- *  outline pulse in CSS; both use the same `is-vibrating` class and both are
- *  finite animations, so onAnimationEnd is the clear. (If animations are disabled
- *  wholesale the class simply lingers invisibly and self-heals on the next
- *  trigger's clear-then-set, so no timer is needed.) */
-function ViewModeToggle({ viewMode, onToggle, vibrateRef }) {
-  const single = viewMode === 'single'
-  const [vibrating, setVibrating] = useState(false)
-  useEffect(() => {
-    if (!vibrateRef) return undefined
-    vibrateRef.current = () => {
-      setVibrating(false)
-      requestAnimationFrame(() => setVibrating(true))
-    }
-    return () => { if (vibrateRef.current) vibrateRef.current = null }
-  }, [vibrateRef])
-  return (
-    <button
-      type="button"
-      className={`drawer__viewmode${vibrating ? ' is-vibrating' : ''}`}
-      aria-pressed={single}
-      aria-label={single ? 'Single screen' : 'Split panes'}
-      title={single ? 'Single screen' : 'Split panes'}
-      // A pure state flip: no onClose, no navigation — the drawer STAYS OPEN so
-      // the user sees the mode change behind it (design: view-mode toggle).
-      onClick={onToggle}
-      onAnimationEnd={() => setVibrating(false)}
-    >
-      {single ? <SingleGlyph /> : <PanesGlyph />}
-    </button>
   )
 }

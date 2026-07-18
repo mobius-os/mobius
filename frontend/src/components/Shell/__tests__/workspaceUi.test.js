@@ -223,78 +223,76 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
   assert.match(css, /\.workspace__strip:has\(\.shell__tab-open:focus-visible\)\s*\{[\s\S]*?outline:/)
 })
 
-// ── View-mode toggle (design: view-mode toggle) ─────────────────────────────
+// ── View-mode toggle in the shell top bar (design: view-mode toggle) ────────
 
-const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
-const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
-// The ViewModeToggle component body (last function in the file) — sliced so the
-// "no onClose" contract is asserted against the toggle, not the whole drawer.
-const viewModeToggleSrc = drawer.match(/function ViewModeToggle\([\s\S]*$/)?.[0] || ''
+const viewModeToggleSrc = readFileSync(new URL('../ViewModeToggle.jsx', import.meta.url), 'utf8')
+const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 
-test('the view-mode toggle is placed inline on the drawer Settings footer row, flag-gated', () => {
-  // It renders inside the bottom (Settings) group, gated on the splits flag, as a
-  // SIBLING of the Settings button (never nested — nested <button>s are invalid).
-  assert.match(drawer, /drawer__group drawer__group--bottom/)
-  assert.match(drawer, /\{WORKSPACE_SPLITS_ENABLED && \(\s*<ViewModeToggle/)
-  // The footer row is a flex row so Settings + toggle sit inline.
-  const rule = drawerCss.match(/\.drawer__group--bottom\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rule, /display:\s*flex/)
+test('the view-mode toggle is rendered in the shell top bar, in line with the logo, flag-gated', () => {
+  // It renders inside .shell__bar (the brand/logo cluster), flag-gated on splits.
+  assert.match(shell, /<header className="shell__bar"/)
+  assert.match(shell, /\{paneModel\.WORKSPACE_SPLITS_ENABLED && \(\s*<ViewModeToggle/)
+  assert.match(shell, /import ViewModeToggle from '\.\/ViewModeToggle\.jsx'/)
+  // Right-aligned in the bar via margin-left:auto, quiet by default.
+  const rule = shellCss.match(/\.shell__viewmode\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /margin-left:\s*auto/)
 })
 
 test('the toggle exposes aria-pressed + a mode-specific aria-label and reads as a toggle', () => {
   assert.match(viewModeToggleSrc, /aria-pressed=\{single\}/)
   assert.match(viewModeToggleSrc, /aria-label=\{single \? 'Single screen' : 'Split panes'\}/)
-  // Icon reflects the current mode: single square vs split-squares.
   assert.match(viewModeToggleSrc, /single \? <SingleGlyph \/> : <PanesGlyph \/>/)
 })
 
-test('the drawer-stays-open contract: the toggle handler never closes the drawer', () => {
-  // The toggle button only calls onToggle — no onClose CALL/handler anywhere in
-  // the component (prose mentioning onClose is fine; a usage is not).
+test('the bar toggle never opens or closes the drawer (pure state flip)', () => {
+  // The toggle button only calls onToggle — no drawer open/close CALL/handler in
+  // the component (prose is fine; a usage is not).
   assert.match(viewModeToggleSrc, /onClick=\{onToggle\}/)
   assert.doesNotMatch(viewModeToggleSrc, /onClose[=(?]/)
-  // And Shell's toggle handler is a pure dispatch — it must not close the drawer.
+  assert.doesNotMatch(viewModeToggleSrc, /openDrawer|closeDrawer/)
+  // And Shell's toggle handler is a pure dispatch — it must not touch the drawer.
   const handler = shell.match(/const handleToggleViewMode = useCallback\([\s\S]*?\)\n/)?.[0] || ''
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
-  assert.doesNotMatch(handler, /closeDrawer/)
+  assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
 })
 
 test('Shell threads viewMode into the content derivation and the per-pane chat gate', () => {
   assert.match(shell, /viewMode: workspace\.viewMode/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
-  // Single-mode keeps only the focused chat pane doing work.
   assert.match(shell, /chatPanesVisible && \(!single \|\| paneId === workspace\.focusedPaneId\)/)
-  // The toggle + vibrate wiring reaches the Drawer and the drag hook.
+  // The toggle + vibrate wiring reaches the bar toggle and the drag hook.
   assert.match(shell, /onDragBlocked: \(\) => viewModeVibrateRef\.current\?\.\(\)/)
-  assert.match(shell, /onToggleViewMode=\{handleToggleViewMode\}/)
-  assert.match(shell, /viewModeVibrateRef=\{viewModeVibrateRef\}/)
+  assert.match(shell, /onToggle=\{handleToggleViewMode\}/)
+  assert.match(shell, /vibrateRef=\{viewModeVibrateRef\}/)
 })
 
-test('the drag binding blocks arming + vibrates in single-mode, and a split-drop flips to panes', () => {
+test('the drag binding blocks arming + vibrates in single-mode, and folds a split-drop flip into one gesture', () => {
   assert.match(dragBinding, /dragArmingBlocked\(\{ viewMode: wsNow\.viewMode, leafCount: paneIdsInOrder\(wsNow\)\.length \}\)/)
   assert.match(dragBinding, /onDragBlocked\?\.\(\)/)
-  // The single-leaf splitting drop opts back into panes.
-  assert.match(dragBinding, /wasSingle && target\.edge != null/)
-  assert.match(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'panes' \}\)/)
+  // The single-leaf splitting drop folds the flip into OPEN_TAB_AT (one undo step),
+  // NOT a following SET_VIEW_MODE.
+  assert.match(dragBinding, /flipToPanes = workspaceStateRef\.current\.ws\.viewMode === 'single' && target\.edge != null/)
+  assert.match(dragBinding, /flipViewMode: flipToPanes \? 'panes' : null/)
+  assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
 })
 
 test('the attempted-drag vibrate honors prefers-reduced-motion with a non-motion fallback', () => {
-  const shake = drawerCss.match(/\.drawer__viewmode\.is-vibrating\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(shake, /animation:\s*drawer-viewmode-shake/)
-  assert.match(drawerCss, /@keyframes drawer-viewmode-shake/)
+  const shake = shellCss.match(/\.shell__viewmode\.is-vibrating\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(shake, /animation:\s*shell-viewmode-shake/)
+  assert.match(shellCss, /@keyframes shell-viewmode-shake/)
   // Reduced motion swaps the transform shake for a non-motion outline pulse.
-  const reduced = drawerCss.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /drawer-viewmode-pulse/)
+  const reduced = shellCss.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(reduced, /shell-viewmode-pulse/)
   assert.match(reduced, /transform:\s*none/)
   assert.doesNotMatch(
-    drawerCss.match(/@keyframes drawer-viewmode-pulse\s*\{[\s\S]*?\}/)?.[0] || '',
+    shellCss.match(/@keyframes shell-viewmode-pulse\s*\{[\s\S]*?\}/)?.[0] || '',
     /transform/,
     'the reduced-motion pulse must not animate transform',
   )
 })
 
 test('the active (single) toggle state is a quiet accent tint, not a loud fill', () => {
-  const rule = drawerCss.match(/\.drawer__viewmode\[aria-pressed="true"\]\s*\{[\s\S]*?\}/)?.[0] || ''
+  const rule = shellCss.match(/\.shell__viewmode\[aria-pressed="true"\]\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /color:\s*var\(--accent\)/)
   assert.match(rule, /background:\s*var\(--accent-dim\)/)
 })

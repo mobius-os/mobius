@@ -1378,10 +1378,13 @@ export function initialWorkspaceState(ws) {
 //                               with reason:'deleted'.
 //   Preserves the slot:         SET_VIEW_MODE — a pure view flip is ORTHOGONAL to
 //                               the tree, so it neither creates nor clears an undo
-//                               target (a pending tab-move stays undoable). This
-//                               is safe only because UNDO_LAST carries the CURRENT
-//                               view-mode forward: undoing a tree edit made across
-//                               a view flip reverts the edit, never the flip.
+//                               target (a pending tab-move stays undoable).
+//
+// View-mode + undo: UNDO_LAST carries the CURRENT view-mode forward by default, so
+// undoing a tree edit made across a standalone toggle reverts the edit, never the
+// toggle. The ONE exception is a single-leaf split-drop: OPEN_TAB_AT folds the
+// 'panes' flip into itself (action.flipViewMode) and marks the slot
+// `restoreViewMode`, so undoing that one gesture reverts BOTH the split and the flip.
 //
 // PRUNE, RESET_FLAT, and reason:'deleted' close clear even when they change
 // nothing, because the resource is gone and ANY older snapshot could resurrect
@@ -1441,8 +1444,19 @@ export function workspaceReducer(state, action) {
       // from repaired (design §3.5).
       const next = openTabAt(ws, action.tab, action.target)
       if (next === ws) return state
+      // A single-leaf splitting drop made in single view-mode flips to 'panes' as
+      // part of the SAME gesture (the drop's intent is a second visible surface).
+      // Folding the flip into THIS action — rather than a following SET_VIEW_MODE —
+      // keeps it one undo step: the slot is marked `restoreViewMode` so UNDO_LAST
+      // reverts the mode along with the tree, never leaving the toggle reading the
+      // flipped mode over a reverted tree. action.flipViewMode is null for every
+      // ordinary drop, so this is a no-op there.
+      const flipped = action.flipViewMode ? setViewMode(next, action.flipViewMode) : next
       const dropLabel = action.label || 'Moved tab'
-      return { ws: next, undo: { ws, label: dropLabel, toast: dropLabel } }
+      return {
+        ws: flipped,
+        undo: { ws, label: dropLabel, toast: dropLabel, restoreViewMode: !!action.flipViewMode },
+      }
     }
     case 'SET_ACTIVE': {
       const next = setActiveTab(ws, action.paneId, action.tabKey)
@@ -1495,13 +1509,15 @@ export function workspaceReducer(state, action) {
     }
     case 'UNDO_LAST': {
       if (!undo) return state
-      // Restore the tree the slot captured, but KEEP the CURRENT view-mode: a
-      // view flip is not an undoable step, so undoing a tab-move must not also
-      // revert a single/panes toggle the user made afterward. Reuse the snapshot
-      // reference when the mode already matches (no gratuitous new object).
-      const restored = undo.ws.viewMode === ws.viewMode
-        ? undo.ws
-        : { ...undo.ws, viewMode: ws.viewMode }
+      // Restore the captured tree. A slot flagged `restoreViewMode` reverts the
+      // view-mode TOO — its gesture flipped the mode (a single-leaf split-drop), so
+      // undoing the gesture must un-flip it (undo.ws already holds the pre-gesture
+      // mode). Every OTHER slot carries the CURRENT view-mode forward, so undoing a
+      // plain tree edit never yanks a single/panes toggle the user made afterward.
+      // Reuse the snapshot reference when nothing needs rewriting.
+      let restored
+      if (undo.restoreViewMode) restored = undo.ws
+      else restored = undo.ws.viewMode === ws.viewMode ? undo.ws : { ...undo.ws, viewMode: ws.viewMode }
       return { ws: restored, undo: null }
     }
     case 'RESET_FLAT': {

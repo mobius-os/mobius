@@ -318,6 +318,75 @@
   to { opacity: 0.35; transform: scale(0.75); }
 }
 
+/* ── View-mode toggle (single-screen <-> split-panes) ─────────────
+   Right-aligned in the top bar, in line with the logo cluster. Quiet by default
+   (muted glyph, no chrome); the active (single) state gets a soft accent tint via
+   aria-pressed — never a loud fill, matching the pane strips' understated active-
+   tab treatment (workspace.css). Sizing follows the bar's icon idiom. */
+.shell__viewmode {
+  flex-shrink: 0;
+  /* Push to the right edge of the bar whether or not the offline pill is present
+     (the offline pill, when shown, keeps its own margin-left:auto and trails just
+     before this control in the right cluster). */
+  margin-left: auto;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+/* When the offline pill is present it already claims the auto margin, so keep a
+   small gap before this control rather than a second full push. */
+.shell__offline + .shell__viewmode {
+  margin-left: 8px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .shell__viewmode:hover {
+    color: var(--text);
+    background: var(--surface);
+  }
+}
+.shell__viewmode[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.shell__viewmode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Attempted-drag feedback: a brief horizontal shake says "dragging is off in
+   single-screen mode." Fired by the drag controller via the toggle's vibrate ref.
+   Perceivable even during a drawer-row drag: the bar (z-index 100, opaque) paints
+   above the drawer scrim (z 90) / panel (z 95), so the toggle is never covered. */
+.shell__viewmode.is-vibrating {
+  animation: shell-viewmode-shake 0.4s ease;
+}
+@keyframes shell-viewmode-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shell__settings-loading-dot { animation: none; }
+  /* No transform shake — a non-motion outline pulse instead, so the "dragging is
+     off" signal still lands without moving the control. */
+  .shell__viewmode.is-vibrating {
+    animation: shell-viewmode-pulse 0.4s ease;
+    transform: none;
+  }
+}
+@keyframes shell-viewmode-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 2px var(--accent); }
 }

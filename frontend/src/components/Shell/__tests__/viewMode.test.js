@@ -119,10 +119,40 @@ test('SET_VIEW_MODE is a no-op (same state) when the mode is unchanged', () => {
   assert.equal(paneModel.workspaceReducer(state, { type: 'SET_VIEW_MODE', mode: 'panes' }), state)
 })
 
-test('SET_VIEW_MODE accepts an explicit mode (the single-leaf split-drop path)', () => {
+test('SET_VIEW_MODE accepts an explicit mode', () => {
   const state = paneModel.initialWorkspaceState(paneModel.setViewMode(onePane(), 'single'))
   const next = paneModel.workspaceReducer(state, { type: 'SET_VIEW_MODE', mode: 'panes' })
   assert.equal(next.ws.viewMode, 'panes')
+})
+
+test('a single-leaf split-drop folds the panes flip into ONE undoable gesture', () => {
+  // single + one leaf: an edge drop splits (1 -> 2 leaves) AND flips to panes as a
+  // single OPEN_TAB_AT carrying flipViewMode. Undoing that gesture reverts BOTH.
+  const state = paneModel.initialWorkspaceState(paneModel.setViewMode(onePane(), 'single'))
+  const dropped = paneModel.workspaceReducer(state, {
+    type: 'OPEN_TAB_AT', tab: makeTab('app', '9'),
+    target: { paneId: 'p0', edge: 'right' }, flipViewMode: 'panes',
+  })
+  assert.equal(dropped.ws.viewMode, 'panes', 'the drop flipped to panes')
+  assert.equal(Object.keys(dropped.ws.panes).length, 2, 'the drop split into two panes')
+  assert.ok(dropped.undo && dropped.undo.restoreViewMode, 'the slot is marked mode-changing')
+  const undone = paneModel.workspaceReducer(dropped, { type: 'UNDO_LAST' })
+  assert.equal(Object.keys(undone.ws.panes).length, 1, 'the split is reverted')
+  assert.equal(undone.ws.viewMode, 'single', 'the mode flip is reverted TOO (one gesture, fully undone)')
+})
+
+test('undoing a PLAIN drag never yanks a view toggle the user made afterward', () => {
+  // panes-mode move (arms a slot, no flip) -> standalone toggle to single -> undo:
+  // the tree reverts but the mode the user chose stays (the inverse guard).
+  let state = paneModel.initialWorkspaceState(twoPanes()) // panes: p0=[chat5], p1=[app42]
+  state = paneModel.workspaceReducer(state, {
+    type: 'OPEN_TAB_AT', tab: makeTab('app', '42'), target: { paneId: 'p0' },
+  })
+  assert.ok(state.undo && !state.undo.restoreViewMode, 'a plain move arms a non-mode-changing slot')
+  state = paneModel.workspaceReducer(state, { type: 'SET_VIEW_MODE', mode: 'toggle' })
+  assert.equal(state.ws.viewMode, 'single')
+  const undone = paneModel.workspaceReducer(state, { type: 'UNDO_LAST' })
+  assert.equal(undone.ws.viewMode, 'single', 'the standalone view toggle is preserved across the undo')
 })
 
 test('UNDO_LAST restores the captured tree but KEEPS the current view-mode', () => {

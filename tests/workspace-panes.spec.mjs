@@ -589,16 +589,17 @@ test.describe('Workspace drag (PR3)', () => {
 })
 
 /**
- * View-mode toggle (design: view-mode toggle). The drawer's Settings-row toggle
- * flips 'panes' <-> 'single'. Single-mode collapses the preserved tree to the
- * focused pane full-bleed WITHOUT rewriting the persisted geometry, so a
- * round-trip restores the identical blob. In single-mode with a multi-pane tree
- * dragging is disabled — an attempted drawer-row drag makes no split and vibrates
- * the toggle (the toggle-shake is also covered as a pure predicate in
- * dragController.test.js + a source lock in workspaceUi.test.js).
+ * View-mode toggle (design: view-mode toggle). The TOP-BAR toggle (.shell__viewmode,
+ * in line with the logo) flips 'panes' <-> 'single'. Single-mode collapses the
+ * preserved tree to the focused pane full-bleed WITHOUT rewriting the persisted
+ * geometry, so a round-trip restores the identical blob. In single-mode with a
+ * multi-pane tree dragging is disabled (attempted drawer-row drag: no split, the
+ * bar toggle vibrates — the bar paints above the drawer scrim so it is perceivable).
+ * In single-mode with ONE leaf dragging stays on: a SPLITTING (edge) drop opts back
+ * into panes, a non-splitting (center-join) drop does not.
  */
 test.describe('Workspace view-mode toggle', () => {
-  test('toggle to single shows one pane with the geometry preserved; toggle back restores it', async ({ page }) => {
+  test('the bar toggle flips to single (geometry preserved, one pane) and back (identical blob)', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmA')
     const b = await createTaggedChat(page, 'vmB')
@@ -609,81 +610,118 @@ test.describe('Workspace view-mode toggle', () => {
 
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('panes')
-    expect(Object.keys(baseline.panes).length).toBe(2)
 
-    // Flip to single from the drawer; the toggle is a pure state flip — the
-    // drawer must STAY OPEN behind the mode change.
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer__viewmode').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible()
+    // The toggle is in the top bar — no drawer needed. Flipping must not open it.
+    const toggle = page.locator('.shell__viewmode')
+    await expect(toggle).toBeVisible()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await toggle.click()
+    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
 
-    // The persisted geometry is untouched — only viewMode changed.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     const single = await readWs(page)
     expect(single.layout).toEqual(baseline.layout)
     expect(single.panes).toEqual(baseline.panes)
     expect(single.focusedPaneId).toBe(baseline.focusedPaneId)
     expect(single.nextId).toBe(baseline.nextId)
-    // The toggle reads pressed while single is active.
-    await expect(page.locator('.drawer__viewmode')).toHaveAttribute('aria-pressed', 'true')
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
 
-    // Close the drawer and confirm the render collapsed to one full-bleed pane.
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0, { timeout: 3000 })
+    // Render collapsed to one full-bleed pane (the focused chat a), no chrome.
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
-    // The focused chat (a, in p0) is the one painted.
     await expect(page.locator(`[data-tab-key="chat:${a.id}"].shell__view--active`)).toHaveCount(1)
 
-    // Toggle back to panes — the layout is restored EXACTLY (identical blob).
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.locator('.drawer__viewmode').click()
-    await page.getByLabel('Toggle navigation').click()
-    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0, { timeout: 3000 })
+    // Toggle back — identical layout restored (the tree was never mutated).
+    await toggle.click()
     await waitTiled(page)
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
     expect(await readWs(page)).toEqual(baseline)
   })
 
-  test('single-mode with a multi-pane tree blocks a drawer-row drag (no split) and vibrates the toggle', async ({ page }) => {
+  test('single-mode + multi-pane tree blocks a drawer-row drag (no split) and vibrates the bar toggle', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmDragA')
     const b = await createTaggedChat(page, 'vmDragB')
     await mockApps(page, [])
-    // Seed the workspace ALREADY in single view-mode with two panes.
     await seedWorkspace(page, paneModel.setViewMode(twoChatPanes(a.id, b.id), 'single'))
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
-    // No tiled chrome in single-mode; wait for the single full-bleed pane instead.
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
 
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('single')
     expect(Object.keys(baseline.panes).length).toBe(2)
 
-    // Open the drawer (the only in-view drag source in single-mode is a drawer row).
+    // The only in-view drag source in single-mode is a drawer row.
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
     const row = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
     await expect(row).toBeVisible()
     const box = await row.boundingBox()
-
-    // A mouse drag that would arm (past the 5px slop) — but stays inside the
-    // drawer so no glide-close. In single-mode the source refuses to arm.
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2, { steps: 4 })
-    // The blocked arm shakes the toggle (added on the next frame, cleared ~400ms).
-    await expect(page.locator('.drawer__viewmode.is-vibrating')).toHaveCount(1, { timeout: 2000 })
+    // The blocked arm shakes the BAR toggle (bar z-index 100 paints above scrim z 90).
+    await expect(page.locator('.shell__viewmode.is-vibrating')).toHaveCount(1, { timeout: 2000 })
     await page.mouse.up()
 
-    // The core drag-disabled contract: the gesture created NO pane and did not
-    // rewrite the workspace, and the drawer stayed open behind the attempt.
+    // No pane created, no blob rewrite, drawer stayed open behind the attempt.
     await expect(page.locator('.drawer.drawer--open')).toBeVisible()
     const after = await readWs(page)
     expect(Object.keys(after.panes).length).toBe(2)
     expect(after.layout).toEqual(baseline.layout)
     expect(after.viewMode).toBe('single')
+  })
+
+  // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides the mode.
+  function singleLeafTwoTabs(a, b) {
+    let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: a }, { kind: 'chat', id: b }])
+    return paneModel.setViewMode(paneModel.focusPane(ws, 'p0'), 'single')
+  }
+
+  test('single-leaf: an EDGE drop splits AND flips to panes', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'vmFlipA')
+    const b = await createTaggedChat(page, 'vmFlipB')
+    await mockApps(page, [])
+    await seedWorkspace(page, singleLeafTwoTabs(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    // The single-pane strip renders as the drag source (one leaf, two tabs).
+    await expect(page.locator('.shell__tabstrip')).toBeVisible({ timeout: 8000 })
+    expect((await readWs(page)).viewMode).toBe('single')
+
+    const content = await page.locator('.shell__content').boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${b.id}"]`)
+    // Drag the strip tab down into the content's right edge band → split.
+    await mouseDrag(page, src, content.x + content.width - 18, content.y + content.height / 2)
+    await expect.poll(async () => (await readWs(page)).viewMode, {
+      timeout: 3000, message: 'the single-leaf edge drop flipped to panes',
+    }).toBe('panes')
+    expect(Object.keys((await readWs(page)).panes).length, 'the edge drop split into two panes').toBe(2)
+  })
+
+  test('single-leaf: a CENTER (join) drop does NOT flip — stays single', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'vmJoinA')
+    const b = await createTaggedChat(page, 'vmJoinB')
+    const c = await createTaggedChat(page, 'vmJoinC') // sits in the drawer, not open
+    await mockApps(page, [])
+    await seedWorkspace(page, singleLeafTwoTabs(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+
+    // Drag a NOT-yet-open drawer row into the pane CENTER → join p0 as a tab (no split).
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    const content = await page.locator('.shell__content').boundingBox()
+    const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
+    await expect(row).toBeVisible()
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000, message: 'C joined the single pane as a tab' },
+    ).toBe('p0')
+    const after = await readWs(page)
+    expect(Object.keys(after.panes).length, 'still one pane (a join, not a split)').toBe(1)
+    expect(after.viewMode, 'a non-splitting drop stays single').toBe('single')
   })
 })
