@@ -28,6 +28,7 @@ import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
+import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { formatResetTime } from './resetTime.js'
 import {
   resetDeadlineDelay,
@@ -3787,16 +3788,18 @@ export default function ChatView({
 
           {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
             <li className="chat__msg chat__msg--assistant">
-              {/* Pre-first-event placeholder: the same bare shimmering
-                  "Thinking" the activity stretch shows — the extra activity
-                  classes borrow its shimmer rule; .chat__thinking survives
-                  for the e2e presence probe. */}
-              <div className="chat__thinking chat__activity chat__activity--running">
-                <span className="chat__activity-icon chat__activity-icon--spacer" aria-hidden="true" />
-                <span className="chat__activity-label">
-                  <span className="chat__activity-label-text">Thinking</span>
-                  <span className="chat__activity-label-sweep" aria-hidden="true">Thinking</span>
-                </span>
+              {/* The placeholder occupies the same wrapper and shared header as
+                  the first real activity stretch, so event promotion cannot
+                  change its alignment. The hook remains a presence probe only. */}
+              <div className="chat__tools chat__thinking">
+                <div className="chat__activity chat__activity--running">
+                  <ActivityLineHeader
+                    text="Thinking"
+                    displayState="running"
+                    iconKind="reasoning"
+                    ariaLabel="Thinking, in progress"
+                  />
+                </div>
               </div>
             </li>
           )}

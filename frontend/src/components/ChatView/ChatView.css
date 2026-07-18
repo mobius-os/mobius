@@ -353,7 +353,11 @@
 }
 
 .chat__msg--user { align-items: flex-end; }
-.chat__msg--assistant { align-items: flex-start; }
+.chat__msg--assistant {
+  --activity-block-gap: 8px;
+  --activity-row-gap: 4px;
+  align-items: flex-start;
+}
 
 /* Tap-to-show timestamp below user messages. ChatView clears the visible state
    automatically after a short glance, so the row never remains expanded. */
@@ -652,26 +656,6 @@
 }
 .chat__resume:active { transform: scale(0.97); }
 
-/* ── Typing indicator ─────────────────────────────── */
-
-.chat__thinking {
-  /* The pre-first-event placeholder is the same quiet line the activity
-     stretch renders: a bare shimmering "Thinking" (the bouncing-dots trio it
-     replaced was the last triple-dot element — owner ask, 2026-07-17). The
-     class name survives for the e2e presence probe; the shimmer rides the
-     shared .chat__activity--running label rule via the extra classes in
-     ChatView.jsx. */
-  display: flex;
-  align-items: center;
-  /* Land the placeholder label exactly where the first real activity line
-     does: the settled line sits inside .chat__tools (6px left pad) and its
-     header adds a 6px icon->label gap. Mirror both here so the label does
-     not jump ~12px right when the first thinking block replaces this. */
-  gap: 6px;
-  padding-left: 6px;
-  min-height: 32px;
-}
-
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
 .chat__cursor {
@@ -730,9 +714,9 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--activity-row-gap, 4px);
   width: min(100%, 480px);
-  margin: 4px 0;
+  margin: 0;
   padding-left: 6px;
   max-width: min(100%, 480px);
 }
@@ -746,9 +730,11 @@
   }
 }
 
-.chat__text + .chat__tools { margin-top: 10px; }
-.chat__tools + .chat__text { margin-top: 10px; }
-.chat__tools + .chat__tools { margin-top: 2px; }
+.chat__text + .chat__tools,
+.chat__tools + .chat__text,
+.chat__tools + .chat__tools {
+  margin-top: var(--activity-block-gap, 8px);
+}
 .chat__text--assistant + .chat__text--assistant { margin-top: 0.75rem; }
 
 .chat__tool {
@@ -969,7 +955,7 @@
    (spinner / pulse dot / triangle + exit chip) reads WITHOUT expanding. See
    ActivityStretch.jsx + groupBlocks.js. */
 .chat__activity {
-  margin: 2px 0;
+  margin: 0;
 }
 
 .chat__activity-header {
@@ -994,12 +980,16 @@
   border-radius: 6px;
 }
 
+.chat__activity-header--static {
+  cursor: default;
+}
+
 /* With the chevron gone the resting line is deliberately bare, so pointer and
    touch users get their disclosure cue on interaction instead: the label lifts
    to full text color on hover and press, giving discoverability without
    resting chrome. Keyboard users already have the focus ring. */
-.chat__activity-header:hover .chat__activity-label,
-.chat__activity-header:active .chat__activity-label {
+.chat__activity-header:not(.chat__activity-header--static):hover .chat__activity-label,
+.chat__activity-header:not(.chat__activity-header--static):active .chat__activity-label {
   color: var(--text); /* CONTRACT: high-contrast lift marks the tappable line */
 }
 
@@ -1009,13 +999,6 @@
   justify-content: center;
   flex-shrink: 0;
   color: var(--muted); /* CONTRACT: low-contrast status glyph */
-}
-
-/* No-icon lines (thinking / thought) reserve the icon column so their label
-   aligns with the icon-bearing lines instead of jutting ~19px left. Matches
-   the 13px glyph; the header's 6px gap supplies the rest. */
-.chat__activity-icon--spacer {
-  width: 13px;
 }
 
 .chat__activity--error .chat__activity-icon {
@@ -1121,9 +1104,9 @@
 .chat__activity-timeline {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
-  padding: 2px 0 2px 10px;
+  gap: var(--activity-row-gap, 4px);
+  margin-top: var(--activity-row-gap, 4px);
+  padding: 0 0 0 10px;
   border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
@@ -1132,15 +1115,52 @@
    reuses the .chat__reasoning-body lane. For a thinking-only stretch the label
    is suppressed (the collapsed header already said it). */
 .chat__activity-think {
-  padding: 2px 0;
+  padding: var(--activity-row-gap, 4px) 0;
   color: var(--muted); /* CONTRACT: low-contrast reasoning tone */
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .chat__activity-think-label {
   display: block;
+  margin-bottom: var(--activity-row-gap, 4px);
   opacity: 0.8;
+}
+
+/* Reasoning markdown is a deliberately quiet typography lane. Model-authored
+   headings and bold lead-ins stay body-sized and moderately weighted, while
+   the markdown renderer's reading-measure padding remains intact. */
+.chat__reasoning-body .md-blocks {
+  gap: var(--activity-row-gap, 4px);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat__reasoning-body .md-blocks .md-heading {
+  color: inherit;
+  font-size: inherit;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.chat__reasoning-body .md-blocks .md-paragraph,
+.chat__reasoning-body .md-blocks .md-list-item,
+.chat__reasoning-body .md-blocks .md-blockquote,
+.chat__reasoning-body .md-blocks .md-code-block {
+  line-height: 1.45;
+}
+
+.chat__reasoning-body .md-blocks strong {
+  font-weight: 500;
+}
+
+.chat__reasoning-body .md-blocks .md-list-item {
+  margin-bottom: calc(var(--activity-row-gap, 4px) / 2);
+}
+
+.chat__reasoning-body .md-blocks .md-list .md-list {
+  margin-top: var(--activity-row-gap, 4px);
 }
 
 /* Soften the ToolBlock shell inside the timeline: no card border/tint/fill — the
@@ -1156,10 +1176,10 @@
 }
 .chat__activity-timeline .chat__tool-header {
   min-height: 28px;
-  padding: 3px 0;
+  padding: var(--activity-row-gap, 4px) 0;
 }
 .chat__activity-timeline .chat__tool-detail {
-  padding: 0 0 6px;
+  padding: 0 0 var(--activity-row-gap, 4px);
 }
 
 /* ── Marker card (compaction + future system markers) ── */

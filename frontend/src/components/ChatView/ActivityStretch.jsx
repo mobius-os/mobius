@@ -13,6 +13,7 @@ import { toolActivityIcon, effectiveToolName } from './toolActivityLabel.js'
 import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
+import ActivityLineHeader from './ActivityLineHeader.jsx'
 
 // One collapsible activity line standing in for a contiguous stretch of thinking
 // AND tool blocks, so a build turn's pre-prose burst reads as one quiet ~32px
@@ -41,77 +42,6 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 // shimmer plus the running-first activity summary already say what is
 // executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
-// Muted type glyphs for a settled line's first activity (terminal for
-// commands, magnifier for search, …). Deliberately tiny and stroke-light so
-// they read as structure, not badges; 'dot' is the safe fallback for anything
-// unmapped — a new tool degrades to a neutral mark, never a crash.
-function ActivityTypeIcon({ kind }) {
-  const common = {
-    viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none',
-    stroke: 'currentColor', strokeWidth: 1.5,
-    strokeLinecap: 'round', strokeLinejoin: 'round',
-  }
-  if (kind === 'terminal') {
-    return (
-      <svg {...common}>
-        <rect x="1.5" y="3" width="13" height="10" rx="2" />
-        <path d="M4.5 6.5 7 8.5l-2.5 2" /><path d="M8.5 10.5h3" />
-      </svg>
-    )
-  }
-  if (kind === 'files') {
-    return (
-      <svg {...common}>
-        <path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" />
-      </svg>
-    )
-  }
-  if (kind === 'search') {
-    return (
-      <svg {...common}>
-        <circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" />
-      </svg>
-    )
-  }
-  if (kind === 'edit') {
-    return (
-      <svg {...common}>
-        <path d="m11.3 2.2 2.5 2.5L6 12.5l-3.2.7.7-3.2z" />
-      </svg>
-    )
-  }
-  if (kind === 'web') {
-    return (
-      <svg {...common}>
-        <circle cx="8" cy="8" r="5.5" /><path d="M2.5 8h11" />
-        <path d="M8 2.5c2 1.8 2 9.2 0 11-2-1.8-2-9.2 0-11z" />
-      </svg>
-    )
-  }
-  if (kind === 'plan') {
-    return (
-      <svg {...common}>
-        <path d="M3 4.5h10" /><path d="M3 8h10" /><path d="M3 11.5h6" />
-      </svg>
-    )
-  }
-  if (kind === 'image') {
-    // A framed picture with a horizon + sun — the "viewed an image" glyph.
-    return (
-      <svg {...common}>
-        <rect x="2" y="3" width="12" height="10" rx="2" />
-        <circle cx="6" cy="6.5" r="1.1" />
-        <path d="M2.5 11.5 6 8.5l2.5 2 2-1.5 2.5 2.5" />
-      </svg>
-    )
-  }
-  return (
-    <svg {...common}>
-      <circle cx="8" cy="8" r="2.2" fill="currentColor" stroke="none" />
-    </svg>
-  )
-}
-
 export default function ActivityStretch({ entries, chatId, live = false }) {
   const [userOpen, setUserOpen] = useState(false)
   const headerRef = useRef(null)
@@ -178,85 +108,40 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
     : displayState === 'running'
       ? ', in progress'
       : ''
+  const iconKind = thinkingOnly ? 'reasoning' : leadToolIcon
 
   return (
     <div className={
       `chat__activity chat__activity--${displayState}`
       + (open ? ' chat__activity--open' : '')
     }>
-      <button
+      <ActivityLineHeader
         ref={headerRef}
-        type="button"
-        className="chat__activity-header"
+        text={text}
+        displayState={displayState}
+        iconKind={iconKind}
+        exitCode={exitCode}
+        interactive
+        open={open}
+        ariaLabel={`${text}${stepNote}${stateNote}`}
         // Togglable at any time, running or not: with default-collapse there is
         // no forced-open state for a tap to fight, so the user can peek into a
         // live run and close it again.
-        onClick={() => {
+        onToggle={() => {
           preserveTogglePosition(headerRef.current)
           setUserOpen(o => !o)
         }}
-        aria-expanded={open}
-        aria-label={`${text}${stepNote}${stateNote}`}
-      >
-        {displayState === 'error' ? (
-          <span className="chat__activity-icon" aria-hidden="true">
-            {/* triangle — a step failed */}
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
-              stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
-              strokeLinejoin="round">
-              <path d="M8 2 15 14H1z" /><path d="M8 6v4" /><path d="M8 12h.01" />
-            </svg>
-          </span>
-        ) : toolCount > 0 ? (
-          // The muted TYPE glyph — live and settled alike (the Codex idiom:
-          // the icon stays put, only the text shimmers). No spinner, no pulse
-          // dot: liveness is the label shimmer (ChatView.css --running rule).
-          <span
-            className="chat__activity-icon"
-            data-activity-kind={leadToolIcon}
-            aria-hidden="true"
-          >
-            <ActivityTypeIcon kind={leadToolIcon} />
-          </span>
-        ) : (
-          // Thinking-only: no VISIBLE icon (a bare shimmering "Thinking" live,
-          // "Thought for Ns" settled), but reserve the icon column so the
-          // label's left edge aligns with the icon-bearing lines — otherwise
-          // the bare lines sit ~19px further left than every tool line (owner
-          // report, 2026-07-17).
-          <span className="chat__activity-icon chat__activity-icon--spacer" aria-hidden="true" />
-        )}
-        <span className="chat__activity-label">
-          <span className="chat__activity-label-text">{text}</span>
-          {displayState === 'running' && (
-            // The shimmer: a solid-text bright overlay aligned to the base
-            // (position:absolute inset:0, NO transform) with only the MASK
-            // sliding a bright band across it (ChatView.css). The earlier
-            // counter-translate version transformed BOTH the overlay window
-            // and the copy so they'd cancel — but in WebKit they did not,
-            // rendering a doubled/offset "Thinking" (owner report,
-            // 2026-07-17). With nothing transformed, the overlay can only
-            // ever sit exactly over the base, so a drifting ghost is
-            // impossible; the animation is the mask position alone.
-            <span className="chat__activity-label-sweep" aria-hidden="true">{text}</span>
-          )}
-        </span>
-        {displayState === 'error' && exitCode != null && (
-          <span className="chat__activity-chip">exit {exitCode}</span>
-        )}
-        {/* No chevron: the line IS the affordance (owner call, 2026-07-16).
-            aria-expanded still announces the disclosure state, and the open
-            timeline below makes the expanded state visually obvious. */}
-      </button>
+      />
       {open && (
         <div className="chat__activity-timeline">
           {entries.map(({ item, idx }) => {
             if (item.type === 'thinking') {
               return (
                 <div className="chat__activity-think" key={assistantBlockKey(item, idx)}>
-                  {/* For a thinking-ONLY stretch the collapsed header already said
-                      "Thought for Ns", so this redundant row label is suppressed and
-                      the body shows directly — byte-for-byte the old reasoning UX. */}
+                  {/* A thinking-only header already carries the duration, so the
+                      expanded row starts with preserved reasoning instead of
+                      repeating the same label. Mixed timelines keep the label
+                      because it separates reasoning from neighboring tools. */}
                   {!thinkingOnly && (
                     <span className="chat__activity-think-label">
                       {thoughtDurationLabel(item.duration_ms)}

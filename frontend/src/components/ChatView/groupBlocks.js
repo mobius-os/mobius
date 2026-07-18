@@ -283,31 +283,32 @@ export function activityCollapsedLabel(entries, { live = false } = {}) {
   const liveThinkingTail = live && lastItem?.type === 'thinking'
   const toolRunning = tools.some(t => t?.status === 'running')
 
+  if (tools.length === 0) {
+    // Thinking-only stretches keep the live wording stable and retain their
+    // measured duration after settle. This explicit branch is also the label
+    // contract for their reasoning-glyph activity chrome.
+    if (liveThinkingTail) return 'Thinking'
+
+    // Sum only finite durations. With no measurement, `undefined` deliberately
+    // produces a bare "Thought" instead of inventing a one-second duration.
+    const durations = entries
+      .filter(e => e?.item?.type === 'thinking')
+      .map(e => e.item?.duration_ms)
+      .filter(Number.isFinite)
+    const durationMs = durations.length
+      ? durations.reduce((sum, ms) => sum + ms, 0)
+      : undefined
+    return thoughtDurationLabel(durationMs)
+  }
+
   if (liveThinkingTail && !toolRunning) {
-    // Bare "Thinking" — no ticking clock, no ellipsis dots (owner ask,
-    // 2026-07-17, matching the Codex-app idiom): the label shimmer is the
-    // only movement. The measured duration still surfaces at settle as
-    // "Thought for Ns".
+    // A reasoning tail becomes the visible live status between tools; the
+    // measured duration remains available on its expanded timeline row.
     return 'Thinking'
   }
 
-  if (tools.length > 0) {
-    // A real running status keeps progressive copy even outside the trailing
-    // live stretch; otherwise the row could read past-tense while a tool is
-    // visibly running. Only fully settled tools flip to the past sentence.
-    return live || toolRunning ? toolGroupSummary(tools) : toolGroupPastSummary(tools)
-  }
-
-  // Sum only the FINITE thinking durations; if none carry one (a thinking block
-  // promoted without a measured span), pass `undefined` so the label reads a bare
-  // "Thought" — matching the old "> Thought" disclosure exactly, rather than the
-  // sub-second clamp turning a missing duration into "1 second".
-  const durations = entries
-    .filter(e => e?.item?.type === 'thinking')
-    .map(e => e.item?.duration_ms)
-    .filter(Number.isFinite)
-  const durationMs = durations.length
-    ? durations.reduce((sum, ms) => sum + ms, 0)
-    : undefined
-  return thoughtDurationLabel(durationMs)
+  // A real running status keeps progressive copy even outside the trailing
+  // live stretch; otherwise the row could read past-tense while a tool is
+  // visibly running. Only fully settled tools flip to the past sentence.
+  return live || toolRunning ? toolGroupSummary(tools) : toolGroupPastSummary(tools)
 }
