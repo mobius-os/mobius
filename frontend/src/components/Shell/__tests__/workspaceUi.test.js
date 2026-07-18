@@ -7,6 +7,7 @@ const css = readFileSync(
   'utf8',
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
 const paneStrip = readFileSync(new URL('../PaneStrip.jsx', import.meta.url), 'utf8')
@@ -333,6 +334,24 @@ test('the logo mark is the indicator: ring var + 180deg twist + tint + completio
   // Reduced motion makes the twist instant and skips the pulse (haptic stays in JS).
   assert.match(shellCss, /\.shell__logo \{ transition: none; \}/)
   assert.match(shellCss, /\.shell__brand\.is-pulsing \.shell__logo-wrap::after \{ animation: none; \}/)
+})
+
+test('the room flourish draws the dividers in on mount, instant under reduced motion', () => {
+  const bar = css.match(/\.workspace__divider-bar\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(bar, /animation:\s*workspace-divider-draw/)
+  assert.match(css, /@keyframes workspace-divider-draw/)
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(reduced, /\.workspace__divider-bar \{ transition: none; animation: none; \}/)
+})
+
+test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
+  // The flag only enables on the literal '1' (default off), read once at load.
+  assert.match(paneModelSrc, /export const BUILDER_POWER_CHROME = \(\(\) => \{[\s\S]*?localStorage\.getItem\('mobius:builder-power'\) === '1'/)
+  // Shell adds the root class only when the flag is on AND builder mode is active.
+  assert.match(shell, /builderModeActive && paneModel\.BUILDER_POWER_CHROME \? ' shell--builder-power' : ''/)
+  // The gated chrome: a power-rail under the bar + energized dividers.
+  assert.match(shellCss, /\.shell--builder-power \.shell__bar\s*\{[\s\S]*?box-shadow/)
+  assert.match(css, /\.shell--builder-power \.workspace__divider-bar/)
 })
 
 test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-description + live region', () => {

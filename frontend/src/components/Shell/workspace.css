@@ -109,9 +109,27 @@
   background: var(--border-light);
   border-radius: 2px;
   transition: background 120ms ease, width 120ms ease, height 120ms ease;
+  /* Entry/exit ROOM FLOURISH (design item 5): a divider draws in with a brief
+     accent flash whenever the tiled chrome mounts — a hold/keyboard/swipe mode
+     enter, a drop that unfolds panes, or a split — then relaxes to the resting
+     hairline. The rects settle on the existing 180ms .shell__view--paned
+     transitions, so the two read as one "the room assembles" gesture. Orientation
+     -agnostic (opacity + accent flash, no transform). Reduced-motion drops it. */
+  animation: workspace-divider-draw 220ms ease-out;
+}
+@keyframes workspace-divider-draw {
+  0% { opacity: 0.15; background: var(--accent); }
+  55% { opacity: 1; background: var(--accent); }
+  100% { opacity: 1; }
 }
 .workspace__divider--v .workspace__divider-bar { width: 1px; height: 100%; }
 .workspace__divider--h .workspace__divider-bar { height: 1px; width: 100%; }
+
+/* PROPOSED builder power-chrome (design item 6, default OFF — gated by
+   .shell--builder-power on the shell root). Accent-energized resting dividers. */
+.shell--builder-power .workspace__divider-bar {
+  background: color-mix(in srgb, var(--accent) 55%, var(--border-light));
+}
 
 .workspace__divider--v:hover .workspace__divider-bar,
 .workspace__divider--v:focus-visible .workspace__divider-bar { width: 3px; }
@@ -437,7 +455,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .workspace__sheet { animation: none; }
-  .workspace__divider-bar { transition: none; }
+  /* Instant swap — no draw-in flourish (design item 5, reduced-motion). */
+  .workspace__divider-bar { transition: none; animation: none; }
   /* Reduced motion: instant geometry + color, no fade or morph (design §3.3). */
   .workspace__drop-preview { transition: none; }
   .workspace__drop-preglow { transition: none; }

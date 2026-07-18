@@ -2474,7 +2474,9 @@ export default function Shell() {
   }, [chats, activeChatId, activeView, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
-    <div className={`shell${immersiveActive ? ' shell--immersive' : ''}${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`}>
+    <div className={`shell${immersiveActive ? ' shell--immersive' : ''}`
+      + `${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`
+      + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
       {/* inert on the header while the modal drawer is open so keyboard / AT
           focus cannot reach shell-chrome behind the open drawer. The
           drawer itself gains focus on open (Drawer.jsx focus-management

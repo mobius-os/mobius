@@ -77,6 +77,15 @@ export const BUILDER_SETTINGS_ENABLED = (() => {
   try { return localStorage.getItem('mobius:builder-settings') !== '0' } catch { return true }
 })()
 
+// PROPOSED "more power" builder chrome — NOT yet owner-approved (design item 6).
+// An accent power-rail under the top bar + accent-energized dividers while in
+// builder mode. Default OFF: it ships behind this flag so the owner can preview it
+// by flipping 'mobius:builder-power' to '1' (one class toggle, no rebuild). Read
+// once at load, mirroring the other kill switches; only the literal '1' enables it.
+export const BUILDER_POWER_CHROME = (() => {
+  try { return localStorage.getItem('mobius:builder-power') === '1' } catch { return false }
+})()
+
 // The smallest a pane may be. canSplit refuses a split whose either resulting
 // child would fall below this within the pane's current projected rect — the
 // shared feasibility predicate drag/menu/resolver all consult (design §3.2,
