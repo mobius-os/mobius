@@ -2441,16 +2441,27 @@ function makeChat({ appId, getToken, storage }) {
       try {
         await updateChat(chatId, opts)
       } catch (e) {
+        const emsg = String(e && e.message)
         // A persisted chat id can go stale: the empty-chat sweeper purges an
         // app-chat that never got a turn past its grace window, but the
         // persisted id (chat_id.json) still points at it, so the resume PATCH
         // 404s. Self-heal by dropping the dead id and creating a fresh chat —
         // only for a persisted id; an explicit caller-supplied chatId surfaces
         // the error (the caller named a specific chat and should hear it's gone).
-        const dead = fromPersist && /\((?:404|410)\)/.test(String(e && e.message))
-        if (!dead) throw e
-        chatId = await createChat(opts)
-        savePersistedId(chatId)
+        const dead = fromPersist && /\((?:404|410)\)/.test(emsg)
+        if (dead) {
+          chatId = await createChat(opts)
+          savePersistedId(chatId)
+        } else if (/\(409\)/.test(emsg)) {
+          // The chat already had its first turn, so its system prompt/provider
+          // are now immutable ("chat-stable app prompts"). The resume PATCH
+          // re-applies opts.systemPrompt every mount; on a started chat that is
+          // a benign no-op the backend rejects with 409. Swallow it and keep
+          // using the existing chat — surfacing it stranded Web Studio / Workout
+          // on "update failed (409)" the moment their chat had any history.
+        } else {
+          throw e
+        }
       }
     } else {
       chatId = await createChat(opts)
