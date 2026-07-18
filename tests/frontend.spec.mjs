@@ -85,6 +85,54 @@ async function sendMessage(page, text) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Input behavior', () => {
+  test('Voice input holds a screen wake lock until recording stops', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__wakeLockRequests = []
+      window.__wakeLockReleaseCount = 0
+
+      class FakeWakeLockSentinel extends EventTarget {
+        released = false
+
+        async release() {
+          if (this.released) return
+          this.released = true
+          window.__wakeLockReleaseCount += 1
+          this.dispatchEvent(new Event('release'))
+        }
+      }
+
+      Object.defineProperty(navigator, 'wakeLock', {
+        configurable: true,
+        value: {
+          async request(type) {
+            window.__wakeLockRequests.push(type)
+            return new FakeWakeLockSentinel()
+          },
+        },
+      })
+
+      class FakeSpeechRecognition {
+        start() {}
+        abort() { this.onend?.() }
+      }
+      Object.defineProperty(window, 'SpeechRecognition', {
+        configurable: true,
+        value: FakeSpeechRecognition,
+      })
+    })
+
+    await setup(page)
+    await newChat(page)
+
+    await page.getByRole('button', { name: 'Voice input' }).click()
+    await expect(page.getByRole('button', { name: 'Stop recording' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => window.__wakeLockRequests)).toEqual(['screen'])
+
+    await page.getByRole('button', { name: 'Stop recording' }).click()
+    await expect(page.getByRole('button', { name: 'Voice input' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => window.__wakeLockReleaseCount)).toBe(1)
+  })
+
   test('1. Input clears after send', async ({ page }) => {
     await setup(page)
     await newChat(page)
