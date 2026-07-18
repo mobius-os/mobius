@@ -44,7 +44,8 @@ const ALLOWED_GLOBALS = new Set([
   // Window, DOM, and worker globals used by the shell and its dependencies.
   'AbortController', 'AbortSignal', 'atob', 'Blob', 'BroadcastChannel', 'btoa',
   'caches', 'cancelAnimationFrame', 'clearInterval', 'clearTimeout', 'console',
-  'createImageBitmap', 'crypto', 'CSS', 'CustomEvent', 'document', 'DOMParser',
+  'createImageBitmap', 'crypto', 'CSS', 'CustomEvent', 'document',
+  'DOMMatrixReadOnly', 'DOMParser',
   'Element', 'Event', 'EventSource', 'fetch', 'File', 'FileReader', 'FormData',
   'getComputedStyle', 'Headers', 'history', 'HTMLElement', 'HTMLInputElement',
   'indexedDB', 'IntersectionObserver', 'localStorage', 'location', 'matchMedia',
