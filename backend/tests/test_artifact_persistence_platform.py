@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from app import models
+from app.artifact_data import (
+  MAX_ARTIFACT_TOTAL_BYTES,
+  MAX_ARTIFACT_VALUE_BYTES,
+  canonical_json,
+)
 from app.config import get_settings
 from app.publication import read_publication_record, registry_path
 from app.routes import apps as apps_route
@@ -349,6 +354,121 @@ def test_artifact_data_value_total_and_key_caps(client, auth):
   assert _write_value(
     client, auth, app_id, "tip-count", "overflow", True,
   ).status_code == 400
+
+
+def test_artifact_data_total_cap_serializes_competing_puts(client, auth):
+  app_id = _create_app(client, auth)
+  artifact_id = "tip-atomic-cap"
+  payload = "x" * (MAX_ARTIFACT_VALUE_BYTES - 2)
+  assert len(canonical_json(payload)) == MAX_ARTIFACT_VALUE_BYTES
+
+  prefill_count = MAX_ARTIFACT_TOTAL_BYTES // MAX_ARTIFACT_VALUE_BYTES - 1
+  for index in range(prefill_count):
+    response = _write_value(
+      client, auth, app_id, artifact_id, f"prefill-{index}", payload,
+    )
+    assert response.status_code == 204, response.text
+
+  artifact = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "artifact-data" / artifact_id
+  )
+  prefilled_total = sum(path.stat().st_size for path in artifact.iterdir())
+  assert prefilled_total == MAX_ARTIFACT_TOTAL_BYTES - MAX_ARTIFACT_VALUE_BYTES
+
+  winner = _write_value(
+    client, auth, app_id, artifact_id, "contender-a", payload,
+  )
+  loser = _write_value(
+    client, auth, app_id, artifact_id, "contender-b", payload,
+  )
+
+  assert winner.status_code == 204, winner.text
+  assert loser.status_code == 413, loser.text
+  assert (artifact / "contender-a.json").is_file()
+  assert not (artifact / "contender-b.json").exists()
+  assert sum(
+    path.stat().st_size for path in artifact.iterdir()
+  ) == MAX_ARTIFACT_TOTAL_BYTES
+
+
+def test_authed_artifact_data_rejects_traversal_and_symlink_escapes(
+  client, auth,
+):
+  app_id = _create_app(client, auth)
+  data = Path(get_settings().data_dir)
+  app_root = data / "apps" / str(app_id)
+  artifact_data = app_root / "artifact-data"
+  outside = data / "artifact-data-escape-targets"
+  outside.mkdir(parents=True)
+  sentinel = outside / "sentinel.json"
+  sentinel_body = json.dumps({"secret": "must-not-escape"})
+  sentinel.write_text(sentinel_body, encoding="utf-8")
+  protected = [sentinel]
+
+  def assert_rejected_for_every_method(url):
+    for method in ("GET", "PUT", "DELETE"):
+      kwargs = {"json": {"attack": method}} if method == "PUT" else {}
+      response = client.request(method, url, headers=auth, **kwargs)
+      assert response.status_code in (400, 404), response.text
+      assert "must-not-escape" not in response.text
+      assert all(
+        path.read_text(encoding="utf-8") == sentinel_body
+        for path in protected
+      )
+
+  app_root.mkdir(parents=True, exist_ok=True)
+  linked_data_target = outside / "linked-data"
+  linked_data_target.mkdir()
+  linked_data_sentinel = linked_data_target / "linked-aid" / "probe.json"
+  linked_data_sentinel.parent.mkdir()
+  linked_data_sentinel.write_text(sentinel_body, encoding="utf-8")
+  protected.append(linked_data_sentinel)
+  artifact_data.symlink_to(linked_data_target, target_is_directory=True)
+  assert_rejected_for_every_method(
+    f"/api/apps/{app_id}/artifact-data/linked-aid/probe",
+  )
+  assert linked_data_sentinel.read_text(encoding="utf-8") == sentinel_body
+  artifact_data.unlink()
+
+  artifact_data.mkdir()
+  artifact_escape = app_root / "outside-artifact" / "probe.json"
+  artifact_escape.parent.mkdir()
+  artifact_escape.write_text(sentinel_body, encoding="utf-8")
+  key_escape = artifact_data / "outside-key.json"
+  key_escape.write_text(sentinel_body, encoding="utf-8")
+  protected.extend((artifact_escape, key_escape))
+  traversal_urls = (
+    f"/api/apps/{app_id}/artifact-data/../probe",
+    f"/api/apps/{app_id}/artifact-data/%2e%2e/probe",
+    f"/api/apps/{app_id}/artifact-data/..%2foutside-artifact/probe",
+    f"/api/apps/{app_id}/artifact-data/%252e%252e/probe",
+    f"/api/apps/{app_id}/artifact-data/safe/..",
+    f"/api/apps/{app_id}/artifact-data/safe/..%2foutside-key",
+  )
+  for url in traversal_urls:
+    assert_rejected_for_every_method(url)
+
+  linked_artifact_target = outside / "linked-artifact"
+  linked_artifact_target.mkdir()
+  linked_artifact_sentinel = linked_artifact_target / "probe.json"
+  linked_artifact_sentinel.write_text(sentinel_body, encoding="utf-8")
+  protected.append(linked_artifact_sentinel)
+  (artifact_data / "linked-aid").symlink_to(
+    linked_artifact_target, target_is_directory=True,
+  )
+  assert_rejected_for_every_method(
+    f"/api/apps/{app_id}/artifact-data/linked-aid/probe",
+  )
+  assert linked_artifact_sentinel.read_text(encoding="utf-8") == sentinel_body
+
+  safe_artifact = artifact_data / "safe"
+  safe_artifact.mkdir()
+  (safe_artifact / "linked.json").symlink_to(sentinel)
+  assert_rejected_for_every_method(
+    f"/api/apps/{app_id}/artifact-data/safe/linked",
+  )
+  assert sentinel.read_text(encoding="utf-8") == sentinel_body
 
 
 def test_public_data_is_get_only_confined_and_generation_bound(
