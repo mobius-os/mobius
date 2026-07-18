@@ -156,15 +156,15 @@
 /* A docked sidebar reserves real workspace width. The class is applied only by
    Shell's desktop layout state, so there is no duplicate CSS breakpoint to
    drift from the interaction model. */
-.shell--drawer-docked .shell__tabstrip,
-.shell--drawer-docked .shell__content {
+.shell--drawer-docked > .shell__tabstrip,
+.shell--drawer-docked > .shell__content {
   margin-left: var(--desktop-sidebar-width);
 }
 
 /* Immersive apps own the full viewport without overwriting the saved sidebar
    preference; the reserved width returns when immersive mode exits. */
-.shell--immersive.shell--drawer-docked .shell__tabstrip,
-.shell--immersive.shell--drawer-docked .shell__content {
+.shell--immersive.shell--drawer-docked > .shell__tabstrip,
+.shell--immersive.shell--drawer-docked > .shell__content {
   margin-left: 0;
 }
 

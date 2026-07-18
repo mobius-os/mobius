@@ -111,6 +111,28 @@ async function measure(page) {
   })
 }
 
+/** Multi-pane strips and their active content wrappers share one projected
+ *  pane rectangle: their left edges and widths match, and the strip ends where
+ *  pane content begins. Report rounded deltas so the assertion remains about
+ *  layout ownership rather than sub-pixel device-scale noise. */
+async function paneChromeDeltas(page) {
+  return page.locator('.workspace__strip').evaluateAll(strips => strips.map((strip) => {
+    const active = strip.querySelector('.shell__tab--active .shell__tab-open')
+    const key = active?.dataset.dragKey
+    const pane = key
+      ? document.querySelector(`.shell__view--paned[data-tab-key="${CSS.escape(key)}"]`)
+      : null
+    if (!pane) return null
+    const stripRect = strip.getBoundingClientRect()
+    const paneRect = pane.getBoundingClientRect()
+    return {
+      left: Math.round(stripRect.left - paneRect.left),
+      width: Math.round(stripRect.width - paneRect.width),
+      seam: Math.round(stripRect.bottom - paneRect.top),
+    }
+  }))
+}
+
 async function seedTabs(page, tabs) {
   const workspace = paneModel.serializeWorkspace(paneModel.seedFromFlatTabs(tabs))
   await page.addInitScript(([workspaceKey, workspaceRaw, legacyKey, t]) => {
@@ -235,6 +257,23 @@ test.describe('Tabs', () => {
       return rects.every(r => r.w >= 280 && r.h >= 200)
         && Math.abs(rects[0].x - rects[1].x) > 100
     }).toBe(true)
+
+    // The sidebar offsets the outer content container exactly once. Per-pane
+    // strips stay in that container's coordinate system through both toggle
+    // directions instead of inheriting the global 320px margin themselves.
+    const aligned = [
+      { left: 0, width: 0, seam: 0 },
+      { left: 0, width: 0, seam: 0 },
+    ]
+    const navigationToggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await expect(navigationToggle).toHaveAttribute('aria-expanded', 'true')
+    await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
+    await navigationToggle.click()
+    await expect(navigationToggle).toHaveAttribute('aria-expanded', 'false')
+    await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
+    await navigationToggle.click()
+    await expect(navigationToggle).toHaveAttribute('aria-expanded', 'true')
+    await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
 
     // Native chat content focuses its pane through wrapper capture.
     await page.locator('.chat').dispatchEvent('pointerdown')
