@@ -931,7 +931,17 @@ function _safeTarget(raw) {
       const params = new URLSearchParams(search)
       const app = params.get('app')
       const chat = params.get('chat')
-      if (app && /^[A-Za-z0-9_-]+$/.test(app)) return `/shell/?app=${app}`
+      // An app deep-link may carry a one-shot intent naming WHICH item to
+      // open (e.g. `artifact:tip-calculator-7f3a`). Dropping it here landed
+      // the tap on the app's index instead of the item the notification was
+      // about. Same conservative charset as the ids, plus the ':' and '.'
+      // that namespace an intent's target.
+      const intent = params.get('intent')
+      if (app && /^[A-Za-z0-9_-]+$/.test(app)) {
+        return (intent && /^[A-Za-z0-9_.:-]{1,128}$/.test(intent))
+          ? `/shell/?app=${app}&intent=${encodeURIComponent(intent)}`
+          : `/shell/?app=${app}`
+      }
       if (chat && /^[A-Za-z0-9_-]+$/.test(chat)) return `/shell/?chat=${chat}`
     } catch { /* fall through */ }
     return '/shell/'
