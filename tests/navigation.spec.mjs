@@ -164,7 +164,7 @@ async function openDrawer(page) {
 
 /** Close the modal drawer through its in-panel, hit-tested control. */
 async function closeDrawerButton(page) {
-  const close = page.getByRole('button', { name: 'Close navigation' })
+  const close = page.getByRole('button', { name: 'Close navigation', exact: true })
   await expect(close).toBeVisible()
   await close.click()
   await expect(page.getByRole('button', { name: 'Toggle navigation' }))
