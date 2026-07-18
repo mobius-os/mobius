@@ -96,32 +96,33 @@ class ChatBroadcast:
     self.last_event_at: Optional[float] = time.monotonic()
 
   def _coalesce_task_progress(self, event: dict) -> bool:
-    """Replace a prior same-task_id `task_progress` entry in place (card 187).
+    """Move the latest same-task progress state to the log tail (card 187).
 
     A background sub-task emits a `task_progress` tick (usage + last_tool_name)
     repeatedly while it runs. Each tick is cumulative, so only the LATEST per
     task_id is meaningful on reconnect catch-up; appending every tick would grow
-    event_log without bound for a long-running sub-task. Find the existing
-    task_progress for this task_id and overwrite it in place — keeping its
-    position in the stream stable — mirroring the adjacent-text coalescing
-    above. Unlike text, ticks are not adjacent (tool/text events interleave), so
-    scan the log rather than only its tail. `task_start` / `task_done` are
-    discrete lifecycle markers and are never coalesced. Returns True when an
-    existing entry was replaced (caller must not also append), False when this is
-    the first tick for the task (caller appends).
+    event_log without bound for a long-running sub-task. The invariant is that
+    the sole retained tick occupies its true replay chronology: remove every
+    older same-task tick and append the newest at the tail. Unlike text, ticks
+    are not adjacent because tool and text events can interleave, so scan the
+    entire log. `task_start` and `task_done` are discrete lifecycle markers and
+    are never coalesced. Returns True when the newest tick was appended here and
+    False when this is the first tick for the task, which the caller appends.
     """
     task_id = event.get("task_id")
     if task_id is None:
       return False
-    for i in range(len(self.event_log) - 1, -1, -1):
-      prior = self.event_log[i]
-      if (
-        prior.get("type") == "task_progress"
-        and prior.get("task_id") == task_id
-      ):
-        self.event_log[i] = event
-        return True
-    return False
+    matches = [
+      i for i, prior in enumerate(self.event_log)
+      if prior.get("type") == "task_progress"
+      and prior.get("task_id") == task_id
+    ]
+    if not matches:
+      return False
+    for i in reversed(matches):
+      self.event_log.pop(i)
+    self.event_log.append(event)
+    return True
 
   def publish(self, event: dict):
     """Appends event to log and pushes to all subscriber queues.
@@ -162,7 +163,7 @@ class ChatBroadcast:
         prev, content=(prev.get("content") or "") + (event.get("content") or "")
       )
     elif event_type == "task_progress" and self._coalesce_task_progress(event):
-      # Replaced the prior same-task_id tick in place; nothing to append.
+      # The invariant is that the coalescer already appended the newest tick.
       pass
     else:
       self.event_log.append(event)

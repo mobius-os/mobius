@@ -104,8 +104,8 @@ def test_chat_broadcast_fans_out_to_phone_and_web_subscribers():
 
 def test_task_progress_coalesces_by_task_id_in_log():
   """A run of task_progress ticks for one sub-task collapses to ONE log entry
-  (the latest), while task_start / task_done stay discrete and the live push
-  still carries every tick verbatim (card 187)."""
+  at the tail, while lifecycle events stay discrete and live push carries every
+  tick verbatim (card 187)."""
   bc = ChatBroadcast("progress-chat")
   _, sub = bc.subscribe()
 
@@ -113,22 +113,32 @@ def test_task_progress_coalesces_by_task_id_in_log():
   bc.publish({
     "type": "task_progress", "task_id": "t1", "last_tool_name": "Read",
   })
+  bc.publish({"type": "tool_start", "tool": "Bash", "tool_use_id": "u2"})
   bc.publish({
     "type": "task_progress", "task_id": "t1", "last_tool_name": "Bash",
   })
-  bc.publish({
-    "type": "task_progress", "task_id": "t1", "last_tool_name": "Edit",
-  })
+
+  # The invariant is that the newest cumulative state stays newest in replay
+  # chronology, even when unrelated activity separated it from the older tick.
+  assert [e.get("type") for e in bc.event_log] == [
+    "task_start", "tool_start", "task_progress",
+  ]
+  assert bc.event_log[-1]["last_tool_name"] == "Bash"
+  t1_progress = [
+    e for e in bc.event_log
+    if e.get("type") == "task_progress" and e.get("task_id") == "t1"
+  ]
+  assert len(t1_progress) == 1
+
   bc.publish({
     "type": "task_done", "task_id": "t1", "status": "done", "tool_use_id": "u1",
   })
 
-  # The log holds exactly one task_progress — the LATEST tick — in its original
-  # position (right after task_start), plus the discrete start/done markers.
+  # The discrete start and done markers remain in their original chronology.
   types = [e.get("type") for e in bc.event_log]
-  assert types == ["task_start", "task_progress", "task_done"]
+  assert types == ["task_start", "tool_start", "task_progress", "task_done"]
   progress = next(e for e in bc.event_log if e["type"] == "task_progress")
-  assert progress["last_tool_name"] == "Edit"
+  assert progress["last_tool_name"] == "Bash"
 
   # A second concurrent sub-task keeps its own coalesced entry.
   bc.publish({
@@ -139,11 +149,12 @@ def test_task_progress_coalesces_by_task_id_in_log():
   })
   t2 = [e for e in bc.event_log if e.get("task_id") == "t2"]
   assert len(t2) == 1 and t2[0]["last_tool_name"] == "Write"
+  assert bc.event_log[-1] == t2[0]
 
   # The live wire is never coalesced: subscribers saw every raw event.
   live = [sub.get_nowait() for _ in range(7)]
   assert [e.get("type") for e in live] == [
-    "task_start", "task_progress", "task_progress", "task_progress",
+    "task_start", "task_progress", "tool_start", "task_progress",
     "task_done", "task_progress", "task_progress",
   ]
 
