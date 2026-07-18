@@ -35,6 +35,7 @@ export default function QuestionCard({
   )
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  const [submitError, setSubmitError] = useState('')
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
@@ -42,15 +43,17 @@ export default function QuestionCard({
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
   // owner can inspect another chat and return without rebuilding their answer.
-  // A completed or superseded card clears its draft instead of leaving stale
-  // choices attached to transcript history.
+  // Only a committed answer clears its draft. `disabled` is intentionally NOT
+  // a clearing signal: during an offline reconnect the live/persisted render
+  // sources can briefly hand off through a disabled card. Clearing there used
+  // to erase the owner's selection precisely when the network returned.
   useEffect(() => {
-    if (answered || disabled) {
+    if (answered) {
       clearQuestionDraft(draftKey)
       return
     }
     writeQuestionDraft(draftKey, answers, otherTexts)
-  }, [draftKey, answers, otherTexts, answered, disabled])
+  }, [draftKey, answers, otherTexts, answered])
 
   const allAnswered = questions.every(q => {
     const a = answers[q.question]
@@ -109,6 +112,7 @@ export default function QuestionCard({
       resolved[q.question] = val
       return `- ${q.question}: ${val}`
     })
+    setSubmitError('')
     setSubmitting(true)
     try {
       const accepted = await onAnswer?.(lines.join('\n'), resolved, questionId)
@@ -116,8 +120,15 @@ export default function QuestionCard({
       // answer endpoint confirms that the transcript write committed.
       if (accepted !== false) setSubmitted(true)
     } catch {
-      // ChatView presents the transport/stale error. Keep the choices and
-      // custom text intact so a transient failure is immediately retryable.
+      // Keep the choices and custom text intact so a transient failure is
+      // immediately retryable. Keep the notice on the card too: adding an
+      // assistant-looking error row after it makes the question cease to be
+      // the transcript tail and disables the very retry the owner needs.
+      setSubmitError(
+        typeof navigator !== 'undefined' && navigator.onLine === false
+          ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
+          : 'That answer didn’t save. Your choice is still here — please try again.',
+      )
     } finally {
       setSubmitting(false)
     }
@@ -262,14 +273,19 @@ export default function QuestionCard({
         )
       })}
       {(answered || !disabled) && (
-        <button
-          type="button"
-          className="qcard__submit"
-          onClick={handleSubmit}
-          disabled={!allAnswered || disabled || answered || submitting}
-        >
-          {submitting ? 'Submitting…' : (answered ? 'Submitted' : 'Submit')}
-        </button>
+        <>
+          {submitError && !answered && (
+            <div className="qcard__submit-error" role="status">{submitError}</div>
+          )}
+          <button
+            type="button"
+            className="qcard__submit"
+            onClick={handleSubmit}
+            disabled={!allAnswered || disabled || answered || submitting}
+          >
+            {submitting ? 'Submitting…' : (answered ? 'Submitted' : 'Submit')}
+          </button>
+        </>
       )}
     </div>
   )

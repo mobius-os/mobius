@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
+const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
 test('unanswered question cards do not have a stale gray state', () => {
@@ -12,7 +13,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not receive a stale visual class')
   assert.doesNotMatch(component, /This question is no longer active/,
     'unanswered cards should not tell the user the question expired')
-  assert.match(component, /\{\(answered \|\| !disabled\) && \(\s*<button[\s\S]*className="qcard__submit"/,
+  assert.match(component, /\{\(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
   assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : 'Submit'\)/,
     'the retained submit button should explain pending and answered states')
@@ -24,8 +25,12 @@ test('unanswered question cards do not have a stale gray state', () => {
     'a submitted custom answer should keep its input row in place')
   assert.match(component, /writeQuestionDraft\(draftKey, answers, otherTexts\)/,
     'unsubmitted selections and custom text should be cached')
-  assert.match(component, /if \(answered \|\| disabled\) \{\s*clearQuestionDraft\(draftKey\)/,
-    'submitted or superseded questions should clear their cached draft')
+  assert.match(component, /if \(answered\) \{\s*clearQuestionDraft\(draftKey\)/,
+    'committed answers should clear their cached draft')
+  assert.doesNotMatch(component, /if \(answered \|\| disabled\) \{\s*clearQuestionDraft/,
+    'a transient disabled handoff must not erase an offline choice')
+  assert.match(component, /Your choice is saved — submit it when you’re back online/,
+    'an offline submit should explain that the choice is retained')
   assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted !== false\) setSubmitted\(true\)/,
     'a card should settle only after the answer request is accepted')
   assert.match(component, /catch \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
@@ -39,4 +44,19 @@ test('question card css has no stale styling hook', () => {
     'expiration status styling should not come back')
   assert.match(css, /\.qcard__input:disabled\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
+  assert.match(css, /\.qcard__submit-error\s*\{/,
+    'a failed answer should keep its retry notice attached to the card')
+})
+
+test('a failed question submission does not append a transcript row', () => {
+  const start = chatView.indexOf('const doSendSilent = useCallback')
+  const end = chatView.indexOf('function handleSubmit(e)', start)
+  assert.ok(start >= 0 && end > start, 'doSendSilent source should be present')
+  const silentSubmit = chatView.slice(start, end)
+  assert.doesNotMatch(
+    silentSubmit,
+    /content: `Error:/,
+    'a transient answer failure must stay on the card, not supersede it',
+  )
+  assert.match(silentSubmit, /QuestionCard owns this transient failure notice/)
 })

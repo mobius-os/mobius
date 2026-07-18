@@ -73,3 +73,33 @@ test('question drafts clear on submit and with the owning chat', () => {
   assert.equal(storage.getItem(second), null)
   assert.notEqual(storage.getItem(otherChat), null)
 })
+
+
+test('durable browser storage falls back when localStorage rejects writes', () => {
+  const localDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const sessionDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  const session = new MemoryStorage()
+  const blockedLocal = {
+    getItem() { return null },
+    setItem() { throw new Error('blocked') },
+    removeItem() {},
+    get length() { return 0 },
+    key() { return null },
+  }
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true, value: blockedLocal,
+  })
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true, value: session,
+  })
+  try {
+    const key = questionDraftKey('chat-1', 'fallback', questions)
+    writeQuestionDraft(key, { 'Which direction?': 'Simplify' }, {})
+    assert.equal(JSON.parse(session.getItem(key)).answers['Which direction?'], 'Simplify')
+  } finally {
+    if (localDescriptor) Object.defineProperty(globalThis, 'localStorage', localDescriptor)
+    else delete globalThis.localStorage
+    if (sessionDescriptor) Object.defineProperty(globalThis, 'sessionStorage', sessionDescriptor)
+    else delete globalThis.sessionStorage
+  }
+})

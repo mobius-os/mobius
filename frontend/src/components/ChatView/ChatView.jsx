@@ -2560,10 +2560,10 @@ export default function ChatView({
         fetchMessages({ force: true })
         throw err
       }
-      commitMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
-      ])
+      // QuestionCard owns this transient failure notice and retains the
+      // selection for retry. Never append an assistant-looking error row here:
+      // doing so makes the question no longer be the durable tail, disables
+      // its card, and used to erase the saved choice during reconnect.
       throw err
     } finally {
       sendSilentInFlightRef.current = false

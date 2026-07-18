@@ -189,6 +189,21 @@
   opacity: 1;
 }
 
+.qcard__submit-error {
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border-light));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+  color: color-mix(in srgb, var(--danger) 80%, var(--text));
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.qcard__submit-error + .qcard__submit {
+  margin-top: 8px;
+}
+
 .qcard__submit {
   display: block;
   width: 100%;
