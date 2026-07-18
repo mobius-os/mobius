@@ -811,8 +811,8 @@ setCatchHandler(async ({ request, url }) => {
 // see lib/appPrecache.js), so frame + module are already cached before the
 // user's first open — the open is then a pure cache read.
 //
-// Message payload:
-//   { type: 'moebius:precache-app', frameUrl: string, moduleUrl: string }
+// Message payload (at least one URL):
+//   { type: 'moebius:precache-app', frameUrl?: string, moduleUrl?: string }
 //
 // Key-normalization mirrors appCodeHandler exactly (strips token, _,
 // install query params) so the warmed cache entries are found on the next
@@ -827,7 +827,7 @@ self.addEventListener('message', (event) => {
   if (msg.type !== 'moebius:precache-app') return
 
   const { frameUrl, moduleUrl } = msg
-  if (!frameUrl || !moduleUrl) return
+  if (!frameUrl && !moduleUrl) return
 
   // Normalize a URL to its cache key (strip token/_ /install params).
   function normKey(rawUrl) {
@@ -844,7 +844,9 @@ self.addEventListener('message', (event) => {
 
   async function warmOne(rawUrl, cacheName) {
     const key = normKey(rawUrl)
-    if (!key || !isAppCodeRoute(new URL(key).pathname)) return
+    if (!key) return
+    const url = new URL(key)
+    if (url.origin !== self.location.origin || !isAppCodeRoute(url.pathname)) return
     // Already cached? Skip redundant fetch.
     const cache = await caches.open(cacheName)
     const existing = await cache.match(key)
@@ -865,8 +867,8 @@ self.addEventListener('message', (event) => {
   // Tie the warming to the install event lifetime so the SW stays alive.
   // Falls back gracefully if event.waitUntil is unavailable.
   const work = (async () => {
-    await warmOne(frameUrl, OFFLINE_APPS_CACHE)
-    await warmOne(moduleUrl, OFFLINE_APPS_CACHE)
+    if (frameUrl) await warmOne(frameUrl, OFFLINE_APPS_CACHE)
+    if (moduleUrl) await warmOne(moduleUrl, OFFLINE_APPS_CACHE)
   })().catch(() => {})
   if (event && typeof event.waitUntil === 'function') event.waitUntil(work)
 })

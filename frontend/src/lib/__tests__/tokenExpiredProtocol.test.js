@@ -4,13 +4,13 @@
  * Run with:
  *   cd frontend && node --test src/lib/__tests__/tokenExpiredProtocol.test.js
  *
- * The frame-side logic (in app-frame.html) detects auth errors by probing the
- * module URL with fetch() after a failed dynamic import(), then posts
- * {type:'moebius:token-expired'} to the parent if the probe returns 401/403.
- * The parent (AppCanvas) responds by invalidating the app-token query.
+ * The controlled parent-side module broker can observe a 401/403 directly and
+ * returns `{code:'token-expired'}` to the opaque frame. The frame resets its
+ * init latch and posts {type:'moebius:token-expired'}; AppCanvas invalidates
+ * the app-token query.
  *
- * This file tests the detection heuristic (the pure decision logic) and the
- * protocol invariants — NOT the actual fetch/import calls, which need a browser.
+ * This file tests the typed decision and protocol invariants — NOT blob module
+ * evaluation, which needs a browser.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -21,37 +21,18 @@ const frameSource = readFileSync(
   'utf8',
 )
 
-// Pure function that mirrors the frame-side detection logic in app-frame.html:
-// given the probe's HTTP status (or null if the network threw), decide whether
-// this is an auth error that should trigger token renegotiation rather than
-// a permanent error panel.
-function isAuthError(probeStatus) {
-  if (probeStatus === null) return false  // network offline — not auth
-  return probeStatus === 401 || probeStatus === 403
+function shouldRenegotiate(code) {
+  return code === 'token-expired'
 }
 
-test('isAuthError: 401 is an auth error', () => {
-  assert.equal(isAuthError(401), true)
+test('typed module auth failures trigger token renegotiation', () => {
+  assert.equal(shouldRenegotiate('token-expired'), true)
 })
 
-test('isAuthError: 403 is an auth error', () => {
-  assert.equal(isAuthError(403), true)
-})
-
-test('isAuthError: 404 is NOT an auth error (missing module, not expired token)', () => {
-  assert.equal(isAuthError(404), false)
-})
-
-test('isAuthError: 500 is NOT an auth error', () => {
-  assert.equal(isAuthError(500), false)
-})
-
-test('isAuthError: null (network offline, fetch threw) is NOT an auth error', () => {
-  assert.equal(isAuthError(null), false)
-})
-
-test('isAuthError: 200 is NOT an auth error (sanity check)', () => {
-  assert.equal(isAuthError(200), false)
+test('network and ordinary HTTP module failures do not rotate credentials', () => {
+  assert.equal(shouldRenegotiate('network'), false)
+  assert.equal(shouldRenegotiate('http'), false)
+  assert.equal(shouldRenegotiate('module-load-failed'), false)
 })
 
 // The protocol contract:
@@ -70,8 +51,8 @@ test('protocol: frame must reset initialized before posting token-expired', () =
   let messagePosted = null
 
   // Mirror the branch in app-frame.html loadModule:
-  const probeStatus = 401
-  if (isAuthError(probeStatus)) {
+  const code = 'token-expired'
+  if (shouldRenegotiate(code)) {
     initialized = false  // reset so follow-up frame-init is accepted
     messagePosted = { type: 'moebius:token-expired', appId: 'test-app' }
   }
@@ -80,16 +61,16 @@ test('protocol: frame must reset initialized before posting token-expired', () =
   assert.equal(messagePosted?.type, 'moebius:token-expired')
 })
 
-test('protocol: frame must NOT post token-expired when offline (null probe)', () => {
+test('protocol: frame must NOT post token-expired for an offline broker failure', () => {
   let messagePosted = null
 
-  const probeStatus = null  // network threw
-  if (isAuthError(probeStatus)) {
+  const code = 'network'
+  if (shouldRenegotiate(code)) {
     messagePosted = { type: 'moebius:token-expired', appId: 'test-app' }
   }
 
   assert.equal(messagePosted, null,
-    'offline network error must NOT trigger token renegotiation')
+    'offline network errors must NOT trigger token renegotiation')
 })
 
 test('protocol: query key format matches appQueries.token.key', () => {

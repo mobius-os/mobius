@@ -12,6 +12,10 @@
     # to SAMEORIGIN/'self'.
     @chatEmbed path /shell/embed/chat
     @staticEmbed path /app-embeds/by-id/*
+    # App frames execute compiled code transferred by their exact parent as a
+    # short-lived blob module. Keep blob: scoped to this already-opaque frame;
+    # the ordinary shell never needs blob-backed scripts.
+    @appFrame path /api/apps/*/frame
     # Published sites (/sites/<token>/) are public snapshots of the owner's own
     # agent-authored artifacts + Web Studio builds. They must run at an opaque
     # origin (CSP `sandbox`, no allow-same-origin) so their JS cannot read the
@@ -24,7 +28,7 @@
     # X-Frame-Options SAMEORIGIN while replacing the CSP, so the boundary holds
     # identically at both the proxy and the origin.
     @publishedSite path /sites/*
-    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover* /sites/*
+    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /api/apps/*/frame /recover* /sites/*
 
     header {
         # Defer replacements until after reverse_proxy copies the backend
@@ -53,6 +57,8 @@
     # enforced policy.
     header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
     header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
+    header @appFrame >X-Frame-Options "SAMEORIGIN"
+    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     # The embedded chat mounts the full ChatView (upload previews, image
     # lightbox), so its img-src needs blob: for the same object URLs as the
     # shell policy above.

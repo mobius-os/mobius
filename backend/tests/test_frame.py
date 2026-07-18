@@ -81,6 +81,9 @@ def test_frame_returns_etag_and_cache_control(client, owner_token):
   assert r.status_code == 200
   assert r.headers.get("etag", "").startswith('W/"')
   assert "no-cache" in r.headers.get("cache-control", "")
+  sandbox = r.headers.get("content-security-policy", "")
+  assert "sandbox allow-scripts" in sandbox
+  assert "allow-same-origin" not in sandbox
 
 
 def test_frame_304_on_matching_if_none_match(client, owner_token):

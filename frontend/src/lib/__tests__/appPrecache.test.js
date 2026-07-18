@@ -5,10 +5,48 @@ import {
   WARM_APP_LIMIT,
   mergeAppLru,
   parseStoredAppLru,
+  requestAppCodeWarm,
   selectAppsToWarm,
 } from '../appPrecache.js'
 
 const app = (id, pinnedAt = null) => ({ id, pinned_at: pinnedAt })
+
+test('app-code warm requests can target only the opaque frame document', async () => {
+  const messages = []
+  const sent = await requestAppCodeWarm({
+    frameUrl: '/api/apps/7/frame?v=v1-frame',
+    serviceWorker: {
+      controller: { postMessage: message => messages.push(message) },
+    },
+  })
+  assert.equal(sent, true)
+  assert.deepEqual(messages, [{
+    type: 'moebius:precache-app',
+    frameUrl: '/api/apps/7/frame?v=v1-frame',
+  }])
+})
+
+test('app-code warming falls back to the ready active worker', async () => {
+  const messages = []
+  const sent = await requestAppCodeWarm({
+    moduleUrl: '/api/apps/7/module?v=v1&token=scoped',
+    serviceWorker: {
+      controller: null,
+      ready: Promise.resolve({
+        active: { postMessage: message => messages.push(message) },
+      }),
+    },
+  })
+  assert.equal(sent, true)
+  assert.equal(messages[0].moduleUrl, '/api/apps/7/module?v=v1&token=scoped')
+})
+
+test('app-code warming is a safe no-op without a URL or worker', async () => {
+  assert.equal(await requestAppCodeWarm({ serviceWorker: null }), false)
+  assert.equal(await requestAppCodeWarm({
+    frameUrl: '/api/apps/7/frame?v=v1', serviceWorker: null,
+  }), false)
+})
 
 test('warm selection takes recents first, in LRU order', () => {
   const apps = [app(1), app(2), app(3)]

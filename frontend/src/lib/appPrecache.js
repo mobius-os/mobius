@@ -10,10 +10,8 @@
  *     (parseStoredAppLru). That persisted list is the cross-session
  *     "most-recent apps" signal.
  *
- * Kept free of imports so the selection rules unit-test under plain
- * `node --test` (the swCachePolicy.test.js pattern); the impure parts
- * (localStorage, requestIdleCallback, postMessage to the SW) live in
- * Shell.jsx.
+ * Kept free of imports so the selection and worker-targeting rules unit-test
+ * under plain `node --test` (the swCachePolicy.test.js pattern).
  */
 
 export const APP_LRU_STORAGE_KEY = 'mobius-app-lru'
@@ -23,6 +21,30 @@ export const APP_LRU_STORAGE_KEY = 'mobius-app-lru'
 // (frame + module), all idle-scheduled — six keeps the whole pass cheap
 // on a phone while covering pins + everything the user touched lately.
 export const WARM_APP_LIMIT = 6
+
+// Resolve the worker that owns the app-code cache. A first-load page may not
+// be controlled yet even though the newly activated worker is ready, so the
+// active registration is a valid warm-up target too.
+export async function requestAppCodeWarm({
+  frameUrl = null,
+  moduleUrl = null,
+  serviceWorker = globalThis.navigator?.serviceWorker,
+} = {}) {
+  if ((!frameUrl && !moduleUrl) || !serviceWorker) return false
+  try {
+    const target = serviceWorker.controller
+      || (await serviceWorker.ready)?.active
+    if (!target?.postMessage) return false
+    target.postMessage({
+      type: 'moebius:precache-app',
+      ...(frameUrl ? { frameUrl } : {}),
+      ...(moduleUrl ? { moduleUrl } : {}),
+    })
+    return true
+  } catch {
+    return false
+  }
+}
 
 // Tolerant read of the persisted LRU. localStorage survives across
 // releases, so the raw value can be anything an older build (or junk)

@@ -16,11 +16,18 @@ import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
 import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
+import { fetchAppModuleBytes } from '../../lib/appModuleBroker.js'
+import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
 import WifiOff from 'lucide-react/dist/esm/icons/wifi-off.mjs'
 import './AppCanvas.css'
+
+function appFrameRequestUrl(appId, version, frameRev) {
+  return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
+    + (frameRev ? `-${frameRev}` : '')
+}
 
 // =================================================================
 // AppCanvas ↔ iframe postMessage protocol
@@ -43,6 +50,13 @@ import './AppCanvas.css'
 //      reload (DOM reparenting, browser forced reload) resets the
 //      iframe flag but not parent state, and the re-init must fire or
 //      the iframe sits at its 10s loading-timeout.
+//
+//   Module broker: {type:'moebius:module-request', requestId, appId, retry}
+//      frame → parent, answered by `moebius:module-result`. Opaque frames are
+//      not service-worker-controlled, so the controlled shell fetches the
+//      versioned module (including from CacheStorage offline) and transfers
+//      its bytes. Exact source attribution chooses the app + version; neither
+//      is trusted from the frame payload.
 //
 //   Storage RPC: {type:'moebius:storage-rpc', requestId, method, args}
 //      frame → parent, answered by `moebius:storage-rpc-result`. The shell owns
@@ -320,6 +334,9 @@ export default function AppCanvas({
   // exist: the live (visible) frame, plus a hidden incoming frame during a swap.
   // It never touches the DOM — this component maps its state onto iframes below.
   const [swap, dispatchSwap] = useReducer(reduceSwap, version, initSwapState)
+  const frameRev =
+    (typeof document !== 'undefined' &&
+      document.querySelector('meta[name="mobius-frame-rev"]')?.content) || ''
 
   // version -> HTMLIFrameElement for every currently-mounted frame (one, or two
   // during a swap). Message routing and targeted posts look frames up here BY
@@ -510,6 +527,20 @@ export default function AppCanvas({
     dispatchSwap({ type: 'version', version })
   }, [version])
 
+  // A sandboxed iframe navigation has an opaque destination client and does
+  // not reliably seed the shell worker's CacheStorage. Explicitly ask the
+  // active worker to warm this exact, versioned frame whenever an app mounts
+  // or recompiles. This makes a first online open sufficient for the next
+  // offline reload; the module travels separately through the parent broker.
+  useEffect(() => {
+    // `0` is appVersionKey's missing-row sentinel while the app list restores;
+    // warming it could race the real version and evict the correct cache key.
+    if (!appId || version === '0') return
+    void requestAppCodeWarm({
+      frameUrl: appFrameRequestUrl(appId, version, frameRev),
+    })
+  }, [appId, version, frameRev])
+
   // Re-attempt init on every mounted-but-loaded frame when token or theme
   // becomes available. Covers (a) an iframe that finished loading before the
   // token resolved, (b) token resolved before the theme cache populated, and
@@ -557,6 +588,41 @@ export default function AppCanvas({
         if (el?.contentWindow && el.contentWindow === e.source) { srcVersion = v; break }
       }
       if (srcVersion == null) return   // not one of our frames (stale/unknown)
+
+      if (msg.type === 'moebius:module-request') {
+        const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 160
+          ? msg.requestId
+          : ''
+        if (!requestId || String(msg.appId) !== String(appId)) return
+        const source = e.source
+        const retry = msg.retry === 1 ? 1 : 0
+        ;(async () => {
+          try {
+            const bytes = await fetchAppModuleBytes({
+              baseUrl: api.apps.moduleUrl(appId),
+              token: hostTokenRef.current,
+              frameVersion: srcVersion,
+              retry,
+            })
+            source?.postMessage({
+              type: 'moebius:module-result', requestId, appId,
+              ok: true, bytes,
+            }, '*', [bytes])
+          } catch (error) {
+            try {
+              source?.postMessage({
+                type: 'moebius:module-result', requestId, appId, ok: false,
+                error: {
+                  code: error?.code || 'module-load-failed',
+                  message: error?.message || 'The app module could not be loaded.',
+                  status: error?.status ?? null,
+                },
+              }, '*')
+            } catch { /* frame detached while the module request settled */ }
+          }
+        })()
+        return
+      }
 
       if (msg.type === 'moebius:storage-rpc') {
         const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 160
@@ -636,10 +702,11 @@ export default function AppCanvas({
         dispatchSwap({ type: 'frame-error', version: srcVersion })
         return
       }
-      // Token-expiry recovery. The frame detects a 401/403 on the module import
-      // probe and posts this instead of a permanent error panel. We invalidate
-      // the app-token query so React Query refetches a fresh token; sendInit
-      // then fires on the next token change and the frame re-receives frame-init.
+      // Token-expiry recovery. The parent-side module broker can read a 401/403
+      // directly and returns a typed failure to the frame, which posts this
+      // instead of showing a permanent error panel. We invalidate the app-token
+      // query so React Query refetches a fresh token; sendInit then fires on the
+      // next token change and the frame re-receives frame-init.
       // The token is app-scoped (shared by both buffered versions), so a single
       // invalidate serves whichever frame reported the expiry. The frame resets
       // its own `initialized` flag before posting, so it accepts the follow-up.
@@ -1146,13 +1213,6 @@ export default function AppCanvas({
   // the SW's offline cache key (a cold/unknown-connectivity SW could otherwise
   // serve a stale frame after a backend update). frameRev folds in the shared
   // app-frame.html content hash so a frame-only redeploy busts every app's frame.
-  const frameRev =
-    (typeof document !== 'undefined' &&
-      document.querySelector('meta[name="mobius-frame-rev"]')?.content) || ''
-  function frameSrc(v) {
-    return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(v)}${frameRev ? '-' + frameRev : ''}`
-  }
-
   function handleFrameLoad(v) {
     // Per the HTML spec, the iframe's `load` event fires after every
     // <script type="module"> has executed, so the frame's message listener is
@@ -1215,12 +1275,15 @@ export default function AppCanvas({
     <div className="canvas-wrap">
       {frameVersions.map((v) => {
         const isLive = v === swap.liveVersion
+        // The response CSP applies the opaque-origin sandbox. Keeping the
+        // element unsandboxed until navigation lets the shell worker serve
+        // this versioned document from CacheStorage while offline.
         return (
           <iframe
             ref={frameRefCb(v)}
             key={`${appId}-${v}`}
             className={`canvas ${isLive ? 'canvas--live' : 'canvas--incoming'}`}
-            src={frameSrc(v)}
+            src={appFrameRequestUrl(appId, v, frameRev)}
             title={appName || 'Mini-app'}
             // data-app-id marks the app's VISIBLE browsing context. Exactly one
             // frame carries it (the live one) at every observable moment, so
@@ -1229,7 +1292,6 @@ export default function AppCanvas({
             // withholds it.
             data-app-id={isLive ? appId : undefined}
             data-frame-version={v}
-            sandbox="allow-scripts allow-forms allow-popups allow-top-navigation-by-user-activation"
             allow="fullscreen"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}

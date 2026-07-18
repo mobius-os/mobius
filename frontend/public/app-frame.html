@@ -541,20 +541,24 @@
     //      {type:'moebius:frame-init', token, themeCss, bg,
     //       capabilityContract} on
     //      its iframe.onLoad handler.
-    //   3. iframe applies theme, imports module with token, mounts.
-    //   4. iframe posts {type:'moebius:frame-mounted', appId} AFTER the
+    //   3. iframe applies theme and requests its compiled module from the
+    //      parent. The controlled shell can read the versioned service-worker
+    //      cache offline; this opaque frame cannot. The parent transfers only
+    //      the exact source-attributed app/version bytes back.
+    //   4. iframe imports those bytes from a short-lived blob URL and mounts.
+    //   5. iframe posts {type:'moebius:frame-mounted', appId} AFTER the
     //      first render COMMITS (MountSignal's effect, not render()-
     //      returned) — parent hides the loading overlay / promotes the
     //      buffered frame in a version swap.
-    //   4b. on a terminal load failure instead of (4), iframe posts
+    //   5b. on a terminal load failure instead of (5), iframe posts
     //      {type:'moebius:frame-error', appId} so the parent hides the
     //      overlay and this frame's error panel becomes visible.
-    //   5. parent may later post {type:'moebius:frame-theme', ...}
+    //   6. parent may later post {type:'moebius:frame-theme', ...}
     //      to update theme without reloading the iframe.
-    //   6. parent posts {type:'moebius:frame-interactivity', interactive}
+    //   7. parent posts {type:'moebius:frame-interactivity', interactive}
     //      whenever a shell modal (currently the navigation drawer) suspends or
     //      restores direct input without unpainting/reloading the app.
-    //   7. pointer input posts {type:'moebius:frame-focus'} so the shell can focus
+    //   8. pointer input posts {type:'moebius:frame-focus'} so the shell can focus
     //      this app's pane; iframe events do not bubble into the parent wrapper.
     //
     // Origin check: the opaque iframe still sees the parent shell's concrete
@@ -573,12 +577,67 @@
     let mountedRoot = null;
     let mountedComponent = null;
     let suspendedScrollFrame = null;
+    let nextModuleRequest = 0;
+    const pendingModuleRequests = new Map();
     const suspendedScrollOffsets = new Map();
     // Scroll owners involved in the latest direct gesture. Remembering the
     // composed path lets us stop momentum in an app-owned overflow scroller as
     // well as the document scroller, without walking every node when the drawer
     // opens. Nested third-party frames stay covered by the outer iframe guard.
     const gestureScrollers = new Set();
+
+    function requestModuleBytes(retry) {
+      const requestId = `module:${Date.now().toString(36)}:${++nextModuleRequest}`;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingModuleRequests.delete(requestId);
+          const error = new Error('The parent shell did not answer the module request.');
+          error.code = 'network';
+          reject(error);
+        }, 5000);
+        pendingModuleRequests.set(requestId, { resolve, reject, timer });
+        try {
+          window.parent.postMessage({
+            type: 'moebius:module-request', requestId,
+            appId: _FRAME_APP_ID, retry: retry === 1 ? 1 : 0,
+          }, window.location.origin);
+        } catch (error) {
+          clearTimeout(timer);
+          pendingModuleRequests.delete(requestId);
+          reject(error);
+        }
+      });
+    }
+
+    async function importBrokeredModule(retry) {
+      const bytes = await requestModuleBytes(retry);
+      const blob = new Blob([bytes], { type: 'text/javascript' });
+      const blobUrl = URL.createObjectURL(blob);
+      try {
+        return await import(blobUrl);
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    }
+
+    function acceptModuleResult(msg) {
+      const pending = pendingModuleRequests.get(msg.requestId);
+      if (!pending) return;
+      pendingModuleRequests.delete(msg.requestId);
+      clearTimeout(pending.timer);
+      if (msg.ok === true && msg.bytes instanceof ArrayBuffer) {
+        pending.resolve(msg.bytes);
+        return;
+      }
+      const error = new Error(
+        msg.error && typeof msg.error.message === 'string'
+          ? msg.error.message
+          : 'The app module could not be loaded.'
+      );
+      error.code = msg.error && msg.error.code;
+      error.status = msg.error && msg.error.status;
+      pending.reject(error);
+    }
 
     function rememberGestureScrollers(event) {
       gestureScrollers.clear();
@@ -935,68 +994,23 @@
             capabilityContract: currentCapabilityContract,
           });
         } catch (e) {}
-        const frameVersion = new URLSearchParams(window.location.search).get('v') || '0';
-        // &v on the module URL is the SW offline cache-buster: the server /module
-        // route ignores v (its ETag keys on app.updated_at), but the SW offline
-        // handler keeps v in its cache key (it strips token, _ and install but
-        // keeps v), so an app update (updated_at advances) changes the key and
-        // forces a fresh fetch.
+        // Opaque sandboxed frames are intentionally NOT controlled by the
+        // shell's service worker. Loading /module directly from here therefore
+        // misses CacheStorage offline even though the frame document itself was
+        // served from it. Ask the exact source-attributing parent to perform the
+        // authenticated, versioned fetch and transfer the bytes instead.
         //
-        // The frame's own ?v is `<updated_at>-<frameRev>` (frameRev = the shared
-        // app-frame.html content hash, theme.frame_content_rev, exactly 16 hex).
-        // The MODULE must key only on `<updated_at>`: the module bytes don't
-        // change when the shared frame file is redeployed, so folding frameRev
-        // into the module key would bust EVERY installed app's (<=1MB) module
-        // cache on any frame-only edit — the "slow apps after a shell deploy"
-        // regression. Stripping the 16-hex suffix also realigns this key with
-        // the precache path (Shell.jsx warms `?v=<updated_at>` with no frameRev);
-        // before this they mismatched and every precache warm was a miss here.
-        // The canonical rule is moduleVersionKey() in src/lib/appVersion.js (unit
-        // tested); kept inline here because this static template can't import it.
-        // updated_at never ends in `-<16 lowercase hex>` (digit-only microseconds,
-        // space before the time), so the anchored strip can't shorten it.
-        const moduleVersion = frameVersion.replace(/-[0-9a-f]{16}$/, '');
-        const moduleUrl = (retry) => {
-          // `_=<retry>` is the per-attempt cache-buster. A failed dynamic
-          // import() (or a failed module response) is cached by Chromium per
-          // exact URL, so re-importing the SAME url after a transient network
-          // blip resolves to the cached failure with no new fetch — the retry
-          // below would be a no-op. A fresh `_` each attempt makes the URL
-          // distinct so the browser actually re-fetches. The server /module
-          // route reads only `token` from the query (ETag keys on
-          // app.updated_at), so it ignores `_`; and the SW offline handler
-          // already STRIPS `_` from its cache key (appCodeHandler), so the
-          // buster never poisons the offline cache. retry 0 = first attempt
-          // (no buster), so the cold-start URL is unchanged.
-          const base = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(moduleVersion)}`;
-          return retry ? `${base}&_=${retry}` : base;
-        };
-        const url = moduleUrl(0);
-        // Dynamic import() can't set request headers, so the token is a query
-        // param. An expired or revoked token causes the server to 401, which the
-        // browser surfaces as a network-error on import() (CORS/opaque failure),
-        // not as an HTTP status. We detect auth failures by probing the same URL
-        // with fetch() first (can read the status) when import throws. If the
-        // probe says 401/403 we tell the parent to refresh the token rather than
-        // showing a permanent error panel, preserving the app's in-session state.
-        // Long enough for a woken radio to re-associate; short enough that the
-        // parent's loading overlay (still up — we haven't posted frame-mounted
-        // or frame-error yet) reads as a slow load, not a hang.
+        // Blob execution preserves the opaque-origin boundary and the document's
+        // import map. The compiler bundles local modules; declared external
+        // dependencies resolve through that import map, so no relative source
+        // graph is tied to the temporary blob URL. Revoke the URL immediately
+        // after evaluation to avoid retaining compiled source in this realm.
         const IMPORT_RETRY_DELAY_MS = 800;
         let mod;
         try {
-          mod = await import(url);
+          mod = await importBrokeredModule(0);
         } catch (importErr) {
-          // Probe whether the failure is auth-related (401/403). The probe must
-          // be a regular fetch because dynamic import() cannot expose the status.
-          // We fire it only after the import fails so cold-start performance is
-          // unchanged (the common case never probes).
-          let isAuthError = false;
-          try {
-            const probe = await fetch(url, { method: 'HEAD', cache: 'no-store' });
-            isAuthError = probe.status === 401 || probe.status === 403;
-          } catch (_) { /* network offline — not an auth error */ }
-          if (isAuthError) {
+          if (importErr && importErr.code === 'token-expired') {
             // Tell the parent shell the token is expired. AppCanvas listens
             // for this, invalidates the app-token query, waits for a fresh token,
             // and re-sends moebius:frame-init with the new value. The initialized
@@ -1008,25 +1022,30 @@
             );
             return;  // do NOT show the error panel — the re-init will retry
           }
-          // Mobile networks routinely drop the first fetch after device
-          // wake, and without a retry one transient blip becomes a
-          // permanent "Failed to load app" panel for every app. Network-
-          // class import failures surface as TypeError ("Failed to fetch
-          // dynamically imported module"); anything else (SyntaxError in
-          // the module, a throwing module body) is deterministic, so
-          // retrying would only repeat the failure. ONE retry, structurally
-          // bounded (no loop), pre-mount only — `window.__frameMounted`
-          // stays false on every load-failure path, so the guard is
-          // belt-and-braces against a future caller re-running loadModule
-          // on a live app, where a second import would double-render.
-          if (!(importErr instanceof TypeError) || window.__frameMounted) {
+          // Mobile networks routinely drop the first fetch after wake. Retry a
+          // broker network failure or a module-graph TypeError once; syntax and
+          // evaluation failures are deterministic and go straight to the error
+          // surface. The retry marker reaches the parent's versioned fetch and
+          // is stripped from the service-worker cache key.
+          const retryable = Boolean(importErr && importErr.code === 'network')
+            || importErr instanceof TypeError;
+          if (!retryable || window.__frameMounted) {
             throw importErr;
           }
           await new Promise((r) => setTimeout(r, IMPORT_RETRY_DELAY_MS));
-          // Cache-bust the retry (moduleUrl(1)) so Chromium re-fetches rather
-          // than resolving the cached import() failure for the original url.
-          // A second failure falls through to showErr.
-          mod = await import(moduleUrl(1));
+          try {
+            mod = await importBrokeredModule(1);
+          } catch (retryErr) {
+            if (retryErr && retryErr.code === 'token-expired') {
+              initialized = false;
+              window.parent.postMessage(
+                { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
+                window.location.origin
+              );
+              return;
+            }
+            throw retryErr;
+          }
         }
         const Component = mod.default;
         if (!Component) {
@@ -1051,6 +1070,11 @@
       if (e.source !== window.parent || e.origin !== window.location.origin) return;
       const msg = e.data;
       if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'moebius:module-result' &&
+          String(msg.appId) === String(_FRAME_APP_ID)) {
+        acceptModuleResult(msg);
+        return;
+      }
       if (msg.type === 'moebius:frame-theme') {
         applyTheme(msg.themeCss, msg.bg);
         return;

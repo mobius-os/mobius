@@ -87,6 +87,132 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     expect(regOk).toBe('registered')
   })
 
+  test('opaque app frames load their cached module through the parent while offline', async ({ page, request, context }) => {
+    const runtimeErrors = []
+    const sanitize = value => String(value || '')
+      .replace(/([?&]token=)[^&\s"'<>]+/gi, '$1[redacted]')
+    page.on('console', message => {
+      if (['error', 'warning'].includes(message.type())) {
+        runtimeErrors.push(`${message.type()}: ${sanitize(message.text())}`)
+      }
+    })
+    page.on('pageerror', error => runtimeErrors.push(`pageerror: ${sanitize(error.message)}`))
+    const token = await ownerToken(page)
+    const headers = { Authorization: `Bearer ${token}` }
+    const marker = `offline module broker ${Date.now()}`
+    const created = await request.post(`${BASE}/api/apps/`, {
+      headers,
+      data: {
+        name: `Offline broker ${Date.now()}`,
+        description: 'Disposable opaque-frame offline module fixture.',
+        offline_capable: true,
+        jsx_source: `export default function App(){return <main id="offline-module-marker">${marker}</main>}`,
+      },
+    })
+    expect(created.status()).toBe(201)
+    const app = await created.json()
+
+    try {
+      await page.evaluate(async () => {
+        await navigator.serviceWorker.register('/sw.js')
+        await navigator.serviceWorker.ready
+      })
+      if (!await page.evaluate(() => !!navigator.serviceWorker.controller)) {
+        await page.reload({ waitUntil: 'domcontentloaded' })
+      }
+      await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller))
+        .toBe(true)
+
+      const drawerToggle = page.getByRole('button', { name: 'Toggle navigation' })
+      if (await drawerToggle.getAttribute('aria-expanded') !== 'true') {
+        await drawerToggle.click()
+      }
+      await page.getByRole('button', { name: app.name, exact: true }).click()
+      const frameSelector = `iframe[src*="/api/apps/${app.id}/frame"]`
+      await page.waitForSelector(frameSelector)
+      let child
+      await expect.poll(async () => {
+        const element = await page.locator(frameSelector).elementHandle()
+        child = await element?.contentFrame()
+        return !!child
+      }).toBe(true)
+      await expect(child.locator('#offline-module-marker')).toHaveText(marker)
+      expect(await child.evaluate(() => {
+        try {
+          return !('serviceWorker' in navigator) || !navigator.serviceWorker.controller
+        } catch (error) {
+          return error instanceof DOMException && error.name === 'SecurityError'
+        }
+      })).toBe(true)
+
+      const appVersion = String(app.updated_at ?? '0').trim() || '0'
+      const frameRev = await page.locator('meta[name="mobius-frame-rev"]').getAttribute('content')
+      const frameVersion = frameRev ? `${appVersion}-${frameRev}` : appVersion
+      await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion }) => {
+        const cache = await caches.open('mobius-offline-apps-v3')
+        const keys = await cache.keys()
+        const has = (route, version) => keys.some(request => {
+          const url = new URL(request.url)
+          return url.pathname === `/api/apps/${appId}/${route}`
+            && url.searchParams.get('v') === String(version)
+        })
+        return {
+          frame: has('frame', frameVersion),
+          module: has('module', appVersion),
+        }
+      }, { appId: app.id, appVersion, frameVersion })).toEqual({
+        frame: true,
+        module: true,
+      })
+
+      await context.setOffline(true)
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      try {
+        await expect.poll(async () => {
+          child = page.frames().find(
+            frame => frame.url().includes(`/api/apps/${app.id}/frame`),
+          )
+          if (!child) return null
+          return child.locator('#offline-module-marker').textContent().catch(() => null)
+        }, { timeout: 15_000 }).toBe(marker)
+      } catch (error) {
+        const frames = await Promise.all(page.frames().map(async frame => ({
+          url: frame.url(),
+          body: await frame.locator('body').innerText({ timeout: 500 }).catch(() => null),
+          errorPanel: await frame.locator('#error-panel')
+            .getAttribute('class', { timeout: 500 }).catch(() => null),
+          runtime: await frame.evaluate(() => {
+            let serviceWorker = 'unavailable'
+            try {
+              serviceWorker = navigator.serviceWorker?.controller ? 'controlled' : 'uncontrolled'
+            } catch (error) {
+              serviceWorker = error?.name || 'blocked'
+            }
+            return {
+              readyState: document.readyState,
+              locationOrigin: window.location.origin,
+              selfOrigin: window.origin,
+              appId: globalThis._FRAME_APP_ID,
+              rootChildren: document.getElementById('root')?.childElementCount ?? null,
+              scripts: document.scripts.length,
+              serviceWorker,
+            }
+          }).catch(() => null),
+        })))
+        throw new Error(
+          `${error.message}\nOffline frame state: ${JSON.stringify(frames)}`
+          + `\nRuntime errors: ${JSON.stringify(runtimeErrors.slice(-20))}`,
+        )
+      }
+      await expect(child.locator('#error-panel')).not.toHaveClass(/visible/)
+    } finally {
+      await context.setOffline(false)
+      await request.delete(`${BASE}/api/apps/${app.id}`, {
+        headers, failOnStatusCode: false,
+      })
+    }
+  })
+
   test('controlled SW serves sandboxed app-embed documents, never shell HTML', async ({ page, request, context, browser }) => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }

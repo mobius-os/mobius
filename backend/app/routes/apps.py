@@ -2584,7 +2584,18 @@ def get_frame(
   # swaps without a reload. Removing the injection means the served frame
   # bytes are theme-independent (so the ETag no longer folds the theme).
 
-  headers = {"Cache-Control": "no-cache"}
+  # The element remains unsandboxed until navigation so the shell service
+  # worker can intercept and serve a cached frame offline. Apply the equivalent
+  # sandbox on the RESPONSE: the loaded app still receives an opaque origin,
+  # including when this backend is reached without the edge proxy. Caddy adds
+  # the full resource policy while preserving this sandbox contract.
+  headers = {
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy": (
+      "sandbox allow-scripts allow-forms allow-popups "
+      "allow-top-navigation-by-user-activation"
+    ),
+  }
   if etag:
     headers["ETag"] = etag
   # The X-Mobius-Offline header does not gate frame/module caching: the SW

@@ -164,12 +164,13 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
   assert "@chatEmbed path /shell/embed/chat" in lines
   assert "@staticEmbed path /app-embeds/by-id/*" in lines
+  assert "@appFrame path /api/apps/*/frame" in lines
   # /recover* is excluded so recoveryd's stricter X-Frame-Options DENY +
   # frame-ancestors 'none' pass through the proxy instead of being replaced
   # with the shell's weaker SAMEORIGIN/'self' policy.
   assert (
     "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* "
-    "/recover* /sites/*" in lines
+    "/api/apps/*/frame /recover* /sites/*" in lines
   )
   assert 'header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"' in lines
   assert not any(
@@ -195,6 +196,15 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "img-src 'self' data: blob:" in embed_csp
   assert "https://cdn.openai.com" in ordinary_csp
   assert "https://cdn.openai.com" in embed_csp
+  app_frame_csp = next(
+    line for line in lines
+    if line.startswith("header @appFrame >Content-Security-Policy ")
+  )
+  assert "sandbox allow-scripts" in app_frame_csp
+  assert "allow-same-origin" not in app_frame_csp
+  assert "script-src 'self' 'unsafe-inline' blob: https://esm.sh" in app_frame_csp
+  assert "blob:" not in ordinary_csp.split("style-src", 1)[0]
+  assert 'header @appFrame >X-Frame-Options "SAMEORIGIN"' in lines
   static_csp = next(
     line for line in lines
     if line.startswith("header @staticEmbed >Content-Security-Policy ")

@@ -341,6 +341,10 @@ export const api = {
     // app edits naturally become cache misses. The backend still sends ETags
     // for browser-cache revalidation on non-SW/cold paths.
     frameUrl: (appId) => `${BASE}/api/apps/${appId}/frame`,
+    // AppCanvas fetches compiled code from the controlled shell document and
+    // transfers it to the opaque frame. Keep the stable base URL here; the
+    // broker appends the scoped token + versioned service-worker cache key.
+    moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
   services: {
     surface: async (slug) => jsonOrThrow(

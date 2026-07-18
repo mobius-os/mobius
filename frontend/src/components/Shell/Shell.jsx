@@ -23,7 +23,8 @@ import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import {
-  APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
+  APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, requestAppCodeWarm,
+  selectAppsToWarm,
 } from '../../lib/appPrecache.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
@@ -69,21 +70,6 @@ import { deriveContentVisibility } from './workspaceView.js'
 import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
-
-// Resolves the service worker to post warm-up messages to. The page is
-// uncontrolled on its very first load (clientsClaim only takes over once
-// the SW activates), so falling back to `ready.active` lets the first
-// session still prime the cache. `ready` never resolves when no SW is
-// registered (dev server) — the early null return guards that, and the
-// callers treat a hanging promise as a harmless no-op anyway.
-function _warmTargetSw() {
-  if (!navigator.serviceWorker) return Promise.resolve(null)
-  const ctrl = navigator.serviceWorker.controller
-  if (ctrl) return Promise.resolve(ctrl)
-  return navigator.serviceWorker.ready
-    .then(reg => reg.active)
-    .catch(() => null)
-}
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -1353,12 +1339,10 @@ export default function Shell() {
   // next open of the app is a pure cache read. The module endpoint 401s
   // without a token, so one is resolved through the SAME query key the
   // open path uses (priming that cache is a free side benefit); passing
-  // it as a query param mirrors how the iframe itself loads the module.
+  // it as a query param mirrors the controlled AppCanvas module broker.
   // Safe to call speculatively — the SW skips already-cached entries.
   const warmAppCode = useCallback(async (app) => {
     try {
-      const sw = await _warmTargetSw()
-      if (!sw) return
       const token = await queryClient.fetchQuery({
         queryKey: appQueries.token.key(app.id),
         queryFn: () => appQueries.token.fetch(app.id),
@@ -1378,7 +1362,7 @@ export default function Shell() {
       const moduleUrl =
         `${BASE}/api/apps/${app.id}/module?v=${encodeURIComponent(version)}`
         + `&token=${encodeURIComponent(token)}`
-      sw.postMessage({ type: 'moebius:precache-app', frameUrl, moduleUrl })
+      await requestAppCodeWarm({ frameUrl, moduleUrl })
     } catch { /* best-effort — warming must never break the shell */ }
   }, [queryClient])
 

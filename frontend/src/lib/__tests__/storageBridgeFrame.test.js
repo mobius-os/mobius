@@ -11,6 +11,10 @@ const canvas = readFileSync(
   new URL('../../components/AppCanvas/AppCanvas.jsx', import.meta.url),
   'utf8',
 )
+const caddy = readFileSync(
+  new URL('../../../../Caddyfile', import.meta.url),
+  'utf8',
+)
 const bridgeSource = frame.match(
   /<script data-mobius-storage-rpc>([\s\S]*?)<\/script>/,
 )?.[1]
@@ -79,9 +83,12 @@ test('AppCanvas routes storage only after exact frame-source attribution', () =>
   assert.match(canvas, /createAppStorageHost\(/)
   assert.match(canvas, /storageHostRef\.current\.detachSource/)
   const appFrame = canvas.slice(canvas.indexOf('data-frame-version={v}'))
-  const sandbox = appFrame.match(/sandbox="([^"]+)"/)?.[1] || ''
-  assert.match(sandbox, /\ballow-scripts\b/)
-  assert.doesNotMatch(sandbox, /\ballow-same-origin\b/)
+  assert.doesNotMatch(appFrame, /sandbox=/)
+  const frameCsp = caddy.split('\n').find(
+    line => line.includes('header @appFrame >Content-Security-Policy'),
+  ) || ''
+  assert.match(frameCsp, /sandbox allow-scripts/)
+  assert.doesNotMatch(frameCsp, /\ballow-same-origin\b/)
 })
 
 test('frame bridge accepts results and changes only from its exact parent', async () => {
