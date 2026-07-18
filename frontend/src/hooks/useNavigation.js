@@ -683,13 +683,19 @@ export default function useNavigation({
     retireAppHistory(appId, 'reset')
   }, [retireAppHistory])
 
-  // The ONE mode-conditional Settings destination (design: branch in the nav
-  // adapter, not the reducer or the render). Every Settings entry point —
-  // navTo('settings'), Back/Forward restore, and the reload-return boot — routes
-  // through here so the tab-vs-overlay choice lives in exactly one place:
+  // The ONE mode-conditional destination for Settings — and the template for any
+  // future takeover-class surface (design: branch in the nav adapter, not the
+  // reducer or the render). Every Settings entry point — navTo('settings'),
+  // Back/Forward restore, and the reload-return boot — routes through here so the
+  // tab-vs-overlay choice lives in exactly one place.
+  //
+  // ABSOLUTE INVARIANT (owner's words): "we only get single screens when we are in
+  // single screen mode, otherwise everything we click goes into a tab." In builder
+  // mode NOTHING renders full-screen — Settings, and every takeover-class surface,
+  // opens as a TAB in the focused pane (existing dedup ⇒ single-instance). The
+  // full-screen takeover exists ONLY in single-screen mode.
   //   - builder enabled + viewMode 'panes' → close the takeover overlay and open
-  //     the canonical Settings tab in the target pane (dedup focuses an existing
-  //     one, giving single-instance behaviour);
+  //     the canonical Settings tab in the target pane (dedup focuses an existing one);
   //   - single mode / flag off → today's full-screen takeover overlay.
   // Refs advance synchronously alongside the setState so a second nav in the same
   // React batch snapshots the correct overlay flag (mirrors navTo's own pattern).

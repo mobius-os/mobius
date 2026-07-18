@@ -274,7 +274,14 @@ export default function Shell() {
   const handleImmersive = useCallback((appId, value) => {
     dispatchImmersive({ type: 'request', appId, value })
   }, [])
-  const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
+  // Immersive-solo is a full-screen takeover, so per the ABSOLUTE builder
+  // invariant ("no exceptions, no special casing") it applies ONLY in single-screen
+  // mode. In builder mode an immersive request never seizes the workspace — the app
+  // stays a normal pane (this also keeps the bar + exit button, which key off this
+  // flag, out of builder). The request (immersiveAppId) is retained, so switching
+  // to single mode with the holder focused solos it exactly as landed.
+  const immersiveActive = workspace.viewMode === 'single'
+    && isImmersiveActive(immersiveAppId, activeView, activeAppId)
   useLayoutEffect(() => {
     if (!immersiveActive) return
     const drawer = document.getElementById('navigation-drawer')

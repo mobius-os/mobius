@@ -58,6 +58,7 @@ test('multi-pane immersive solos the holder over the whole workspace', () => {
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
     settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
+    viewMode: 'single', // immersive-solo is a takeover — single-screen mode only
   })
   // Chrome hidden: no strips or dividers paint over the solo.
   assert.equal(v.chromeActive, false)
@@ -78,22 +79,45 @@ test('immersive with a NON-holder in the set never leaks the sibling frame', () 
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
     settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 7,
+    viewMode: 'single',
   })
   // Sibling app 3 must NOT be in the visible set (it would keep painting).
   assert.deepEqual([...v.visibleAppIds], ['7'])
   assert.equal(v.fullBleedKey, tabKey(makeTab('app', '7')))
 })
 
-test('Settings overlay hides every pane and frame', () => {
+test('Settings overlay (single mode) hides every pane and frame', () => {
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
     settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'single', // the takeover overlay exists ONLY in single-screen mode
   })
   assert.equal(v.chromeActive, false)
   assert.equal(v.focusedActiveKey, null)
   assert.equal(v.visibleAppIds.size, 0)
   assert.equal(v.chatPanesVisible, false)
+})
+
+// The ABSOLUTE builder invariant, made structural: in builder mode ('panes') NO
+// takeover can seize the workspace — not even if BOTH the overlay flag and an
+// immersive request arrive. deriveContentVisibility is the last line of defense,
+// so it forces them inert in builder and keeps the single tiled path.
+test('builder mode has ZERO takeover branches (overlay + immersive both inert)', () => {
+  const ws = twoPaneChatAndApp() // 2 panes, focused pane holds app 42
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: true, immersiveActive: true, immersiveAppId: 42,
+    viewMode: 'panes', // builder
+  })
+  // Tiled render stands: chrome up, sibling panes painting, no solo, no full-bleed.
+  assert.equal(v.multiPane, true)
+  assert.equal(v.single, false)
+  assert.equal(v.chromeActive, true, 'no takeover hides the panes in builder')
+  assert.equal(v.chatPanesVisible, true)
+  assert.equal(v.fullBleedKey, null, 'tiled — nothing paints over the whole box')
+  // The immersive request does NOT solo: both app panes stay visible.
+  assert.deepEqual([...v.visibleAppIds].sort(), ['42'])
 })
 
 // The named risk, made structural: a builder Settings TAB (overlay closed) must
