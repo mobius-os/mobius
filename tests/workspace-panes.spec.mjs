@@ -893,3 +893,66 @@ test.describe('Builder-mode Settings', () => {
     ).toBeTruthy()
   })
 })
+
+// ── Logo activation gesture + middle-click close (design items 3, 9) ─────────
+test.describe('Logo activation + middle-click', () => {
+  function oneChat(id) {
+    return paneModel.seedFromFlatTabs([{ kind: 'chat', id }])
+  }
+
+  test('a HOLD (~450ms) on the logo flips the mode; the drawer never opens', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'holdA')
+    await mockApps(page, [])
+    await seedWorkspace(page, paneModel.setViewMode(oneChat(a.id), 'single'))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    expect((await readWs(page)).viewMode).toBe('single')
+
+    const box = await page.locator('.shell__brand').boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.waitForTimeout(650) // hold past the ~450ms threshold (rAF completes it)
+    await page.mouse.up()
+
+    await expect.poll(async () => (await readWs(page)).viewMode, {
+      timeout: 3000, message: 'a completed hold flips to builder mode',
+    }).toBe('panes')
+    // The completed hold consumed the click, so the drawer never opened.
+    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+  })
+
+  test('a short TAP on the logo opens the drawer, unchanged, with no mode flip', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'tapA')
+    await mockApps(page, [])
+    await seedWorkspace(page, paneModel.setViewMode(oneChat(a.id), 'single'))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+
+    await page.locator('.shell__brand').click() // a fast tap
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    expect((await readWs(page)).viewMode, 'a tap does not flip the mode').toBe('single')
+  })
+
+  test('middle-click on a strip tab closes it (shared close path)', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'midA')
+    const b = await createTaggedChat(page, 'midB')
+    await mockApps(page, [])
+    // A single-pane workspace with two tabs renders the top strip.
+    await seedWorkspace(page, paneModel.seedFromFlatTabs([
+      { kind: 'chat', id: a.id }, { kind: 'chat', id: b.id },
+    ]))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__tabstrip')).toBeVisible({ timeout: 8000 })
+    expect(whichPaneHas(await readWs(page), `chat:${b.id}`)).toBe('p0')
+
+    // Middle-click tab b's open button → closes it via the SAME path as the ✕.
+    await page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${b.id}"]`)
+      .click({ button: 'middle' })
+    await expect.poll(async () => whichPaneHas(await readWs(page), `chat:${b.id}`), {
+      timeout: 3000, message: 'middle-click closed the tab',
+    }).toBe(null)
+  })
+})
