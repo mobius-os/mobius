@@ -3244,7 +3244,13 @@ def start_writer(session_factory=None) -> None:
   """
   global _writer
   with _writer_lock:
-    if _writer is not None and not _writer._fatal:
+    current_thread = _writer._thread if _writer is not None else None
+    if (
+      _writer is not None
+      and not _writer._fatal
+      and current_thread is not None
+      and current_thread.is_alive()
+    ):
       log.debug("chat writer already started; start_writer is a no-op")
       return
     if session_factory is None:
@@ -3340,16 +3346,7 @@ def is_writer_ready() -> bool:
 
 
 def writer_needs_respawn() -> bool:
-  """True when the writer is dead in a way a fresh `start_writer` repairs.
-
-  The supervisor respawns ONLY the two states a new actor actually fixes: a
-  thread-fatal writer (its session factory raised, or session recreation
-  failed) or a writer whose worker thread exited. The other not-ready states
-  belong to a different owner and must not be fought — a never-started writer
-  is boot's job, a not-yet-`_session_ready` writer is a transient boot window,
-  and a `_stopping` writer is a deliberate shutdown. Respawning any of those
-  would race the owning path.
-  """
+  """True only for fatal or thread-dead writer states."""
   writer = _writer
   if writer is None:
     return False
@@ -3362,27 +3359,11 @@ def writer_needs_respawn() -> bool:
 
 
 def supervise_writer() -> bool:
-  """Respawn the process writer once if it died fatal or its thread exited.
-
-  Returns True when a respawn was attempted this call. The periodic supervisor
-  loop calls this every 60s and the 60s cadence IS the backoff: `start_writer`
-  replaces the dead singleton with a fresh actor whose boot `SELECT 1` probe
-  re-fatals immediately on a genuinely broken DB, so a permanently-broken
-  database yields exactly one bounded respawn attempt per minute rather than a
-  tight spin. On a transient failure the fresh actor opens its session and
-  serves again. Logs at ERROR (the monitored `chat.log` surface) so every
-  respawn — a significant reliability event — is visible whether it recovers
-  or not.
-  """
+  """Respawn one fatal or thread-dead writer per supervisor tick."""
   if not writer_needs_respawn():
     return False
   log.error("chat writer not serving persistence; respawning the actor")
   start_writer()
-  # `start_writer` publishes the fresh actor and spawns its worker thread, but
-  # readiness may still report "session not ready" for the brief window before
-  # the new thread opens its DB session, and a broken DB re-fatals on that
-  # thread's boot SELECT 1 — so re-check only the respawn-recoverable states
-  # here; the next tick handles a writer that came back still-dead.
   if writer_needs_respawn():
     log.error("chat writer respawn did not produce a live actor")
   else:

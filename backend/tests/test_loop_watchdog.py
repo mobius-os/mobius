@@ -8,7 +8,10 @@ stall, not scheduler jitter. It is a pure function so the decision is testable
 without driving a real loop.
 """
 
-from app.main import loop_lateness_warning
+import asyncio
+from unittest.mock import Mock
+
+from app.main import _sleep_with_lag_warning, loop_lateness_warning
 
 
 def test_no_warning_for_on_time_or_jittery_wake():
@@ -37,3 +40,25 @@ def test_threshold_scales_with_the_period_argument():
   """A different scheduled period rescales the threshold, not a hardcoded 60s."""
   assert loop_lateness_warning(10.0, 29.0) is None  # <2 periods late
   assert loop_lateness_warning(10.0, 31.0) is not None  # >2 periods late
+
+
+def test_injected_clock_warns_once_for_one_large_gap():
+  times = iter((10.0, 310.0, 400.0, 460.4))
+  logger = Mock()
+
+  async def _sleep(_period):
+    return None
+
+  async def _run():
+    first = await _sleep_with_lag_warning(
+      _sleep, lambda: next(times), logger,
+    )
+    second = await _sleep_with_lag_warning(
+      _sleep, lambda: next(times), logger,
+    )
+    return first, second
+
+  first, second = asyncio.run(_run())
+  assert first is not None
+  assert second is None
+  logger.warning.assert_called_once()

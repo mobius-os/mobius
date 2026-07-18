@@ -91,10 +91,7 @@ def _assert_provider_defaults(provider_names) -> None:
   )
 
 
-# The periodic sweep loops all sleep 60s on the one event loop, so a starved
-# loop cannot run the task meant to diagnose its own starvation. These bound
-# the self-silence watchdog: warn once when a wake is more than two periods
-# late (multi-cycle event-loop starvation), never on ordinary jitter.
+# A wake warns once only after more than two full periods of lateness.
 _LOOP_PERIOD_SECS = 60.0
 _LOOP_LATE_PERIODS = 2.0
 
@@ -121,6 +118,22 @@ def loop_lateness_warning(
       observed_gap, period, lateness, late_periods,
     )
   )
+
+
+async def _sleep_with_lag_warning(
+  sleep,
+  monotonic,
+  logger,
+  *,
+  period: float = _LOOP_PERIOD_SECS,
+) -> str | None:
+  """Sleep once and report a multi-period event-loop stall."""
+  started_at = monotonic()
+  await sleep(period)
+  warning = loop_lateness_warning(period, monotonic() - started_at)
+  if warning is not None:
+    logger.warning("%s", warning)
+  return warning
 
 
 @asynccontextmanager
@@ -462,19 +475,11 @@ async def lifespan(app):
     async def _stalled_live_loop():
       import time as _time
       while True:
-        # Self-silence watchdog: bracket the sleep with the monotonic clock so
-        # a wake far later than the scheduled 60s (this shared event loop was
-        # starved for multiple periods) is surfaced once as a WARNING. It rides
-        # the stalled-live loop because that loop's whole job is progress
-        # liveness; measuring only the sleep isolates loop responsiveness from
-        # the sweep's own duration.
-        _before = _time.monotonic()
-        await _asyncio.sleep(60)
-        _gap_warning = loop_lateness_warning(
-          _LOOP_PERIOD_SECS, _time.monotonic() - _before,
+        await _sleep_with_lag_warning(
+          _asyncio.sleep,
+          _time.monotonic,
+          _log,
         )
-        if _gap_warning is not None:
-          _log.warning("%s", _gap_warning)
         try:
           _sl_db = _SweepSession()
           try:
@@ -507,14 +512,7 @@ async def lifespan(app):
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
 
-    # Writer-fatal auto-recovery (design §1): the chat-persistence actor is
-    # BUILT to be replaced when fatal (`start_writer` no-ops on a healthy
-    # singleton, constructs a fresh one on a fatal/dead one), but nothing
-    # runtime called it — a thread-fatal writer stayed a zombie until an
-    # external restart. This tick respawns it on the same 60s cadence; the
-    # cadence is the backoff and the fresh actor's boot SELECT 1 re-fatals on a
-    # genuinely broken DB, so a permanent fault is one bounded attempt per
-    # minute, not a tight spin. `/api/ready` semantics are unchanged.
+    # The 60-second loop cadence is the writer respawn backoff.
     async def _writer_supervisor_loop():
       from app.chat_writer import supervise_writer
       while True:

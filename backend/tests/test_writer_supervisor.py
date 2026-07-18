@@ -47,6 +47,19 @@ def test_supervise_writer_is_noop_on_healthy_writer():
   assert get_writer() is writer
 
 
+def test_supervise_writer_respawns_dead_thread():
+  writer = get_writer()
+  writer.stop(timeout=5)
+  writer._stopping = False
+  assert chat_writer.writer_needs_respawn() is True
+
+  assert chat_writer.supervise_writer() is True
+  fresh = get_writer()
+  assert fresh is not writer
+  assert fresh._session_ready.wait(timeout=5)
+  assert chat_writer.is_writer_ready() is True
+
+
 def test_supervise_writer_leaves_stopping_writer_alone():
   """A deliberately-stopping writer is a shutdown, not a fault to respawn."""
   writer = get_writer()
