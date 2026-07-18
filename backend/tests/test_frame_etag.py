@@ -1,9 +1,9 @@
 """The /frame ETag must reflect the shared app-frame.html, not just
 `app.updated_at`.
 
-The frame serves the runtime shell (importmap + bootstrap), which changes
+The frame serves the runtime bootstrap and isolation boundary, which change
 independently of any app row. If the validator ignored the frame file, an
-edit to app-frame.html (e.g. bumping a vendored import path) would never
+edit to app-frame.html (e.g. changing its broker protocol) would never
 reach an already-installed PWA — it would revalidate against an unchanged
 validator, get a 304, and run the stale frame forever. That is the exact
 failure that pinned a client to a dropped `/vendor/three/` path.
@@ -55,10 +55,10 @@ def test_frame_etag_busts_when_frame_content_changes(tmp_path):
   e1 = _frame_etag(app, f)
   assert e1 and e1.startswith('W/"')
 
-  # Editing the frame content (e.g. a new importmap) must change the
+  # Editing the frame content (e.g. a new broker protocol) must change the
   # validator even though app.updated_at is unchanged — content hash,
   # so it doesn't depend on mtime.
-  f.write_text("<html>v2 — new importmap</html>")
+  f.write_text("<html>v2 — new bootstrap</html>")
   e2 = _frame_etag(app, f)
   assert e2 != e1
 

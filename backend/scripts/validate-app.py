@@ -37,6 +37,7 @@ from app.app_source_check import check_manifest_tree  # noqa: E402
 from app.app_compile_contract import (  # noqa: E402
   ESBUILD_TIMEOUT_SECS,
   esbuild_command,
+  esbuild_environment,
   esbuild_metafile_contract_error,
 )
 from app.manifest_contract import (  # noqa: E402
@@ -103,6 +104,7 @@ def _compile(
       result = subprocess.run(
         command, capture_output=True, text=True,
         timeout=ESBUILD_TIMEOUT_SECS, check=False,
+        env=esbuild_environment(),
       )
     except FileNotFoundError:
       return (

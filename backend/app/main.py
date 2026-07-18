@@ -248,11 +248,16 @@ async def lifespan(app):
   # server serves requests. Wrapped + per-app error-isolated so neither a bad
   # source nor a compile failure can brick boot or the recovery surface.
   try:
-    from app.compiler import reconcile_missing_bundles
+    from app.compiler import reconcile_missing_bundles, reconcile_outdated_bundles
     from app.database import SessionLocal as _BundleSession
     _bn_db = _BundleSession()
     try:
       await reconcile_missing_bundles(_bn_db)
+      # Compiler ABI migrations fix forward: every app frame receives one
+      # dependency-complete module, so legacy external-import bundles must be
+      # rebuilt before requests can expose them. The sweep is atomic per app
+      # and resumable across interrupted boots.
+      await reconcile_outdated_bundles(_bn_db)
     finally:
       _bn_db.close()
   except Exception as exc:

@@ -1071,6 +1071,103 @@ async def test_reconcile_missing_bundles_isolates_one_apps_failure(
   assert not os.path.exists(broken)
 
 
+# Startup compiler-ABI reconciler — opaque frames can only cold-load offline
+# when the installed bundle contains its complete runtime/dependency graph.
+# Legacy import-map bundles are rebuilt transactionally from stored source.
+
+
+@pytest.mark.asyncio
+async def test_reconcile_outdated_bundles_recompiles_legacy_bundle(
+  client, owner_token, db,
+):
+  import os
+  import app.models as models
+  from app.app_compile_contract import COMPILED_RUNTIME_BANNER
+  from app.compiler import reconcile_outdated_bundles
+  app_id = _make_app(client, owner_token)
+  live = os.path.join(
+    os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js",
+  )
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.jsx_source = (
+    "export default function App(){ return <div>ABI_MIGRATED</div> }"
+  )
+  db.commit()
+  with open(live, "w", encoding="utf-8") as stream:
+    stream.write("export default function Legacy(){}")
+
+  migrated = await reconcile_outdated_bundles(db)
+
+  rebuilt = open(live, encoding="utf-8").read()
+  assert app_id in migrated
+  assert rebuilt.startswith(COMPILED_RUNTIME_BANNER)
+  assert "ABI_MIGRATED" in rebuilt
+
+
+@pytest.mark.asyncio
+async def test_reconcile_outdated_bundles_skips_current_and_tombstoned(
+  client, owner_token, db,
+):
+  import os
+  import app.models as models
+  from app.compiler import reconcile_outdated_bundles
+  current_id = _make_app(client, owner_token)
+  tombstoned_id = _make_app(client, owner_token)
+  compiled = os.path.join(os.environ["DATA_DIR"], "compiled")
+  current = os.path.join(compiled, f"app-{current_id}.js")
+  tombstoned = os.path.join(compiled, f"app-{tombstoned_id}.js")
+  before = open(current, "rb").read()
+  row = db.query(models.App).filter(models.App.id == tombstoned_id).first()
+  row.deleted_at = __import__(
+    "app.timeutil", fromlist=["now_naive_utc"],
+  ).now_naive_utc()
+  db.commit()
+  with open(tombstoned, "w", encoding="utf-8") as stream:
+    stream.write("export default function Legacy(){}")
+
+  migrated = await reconcile_outdated_bundles(db)
+
+  assert current_id not in migrated
+  assert tombstoned_id not in migrated
+  assert open(current, "rb").read() == before
+  assert open(tombstoned, encoding="utf-8").read() == (
+    "export default function Legacy(){}"
+  )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_outdated_bundles_isolates_compile_failure(
+  client, owner_token, db,
+):
+  import os
+  import app.models as models
+  from app.compiler import reconcile_outdated_bundles
+  broken_id = _make_app(client, owner_token)
+  good_id = _make_app(client, owner_token)
+  compiled = os.path.join(os.environ["DATA_DIR"], "compiled")
+  broken = os.path.join(compiled, f"app-{broken_id}.js")
+  good = os.path.join(compiled, f"app-{good_id}.js")
+  broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
+  good_row = db.query(models.App).filter(models.App.id == good_id).first()
+  broken_row.jsx_source = "export default function App(){ return <div> }"
+  good_row.jsx_source = (
+    "export default function App(){ return <div>ABI_GOOD</div> }"
+  )
+  db.commit()
+  for path in (broken, good):
+    with open(path, "w", encoding="utf-8") as stream:
+      stream.write("export default function Legacy(){}")
+
+  migrated = await reconcile_outdated_bundles(db)
+
+  assert good_id in migrated
+  assert broken_id not in migrated
+  assert "ABI_GOOD" in open(good, encoding="utf-8").read()
+  assert open(broken, encoding="utf-8").read() == (
+    "export default function Legacy(){}"
+  )
+
+
 def test_create_app_compiles_relative_source_import(client, owner_token):
   """A real source_dir compile lets index.jsx import sibling modules."""
   import os

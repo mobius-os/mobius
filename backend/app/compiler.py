@@ -8,8 +8,10 @@ from pathlib import Path
 
 from app import timeutil
 from app.app_compile_contract import (
+  COMPILED_RUNTIME_BANNER,
   ESBUILD_TIMEOUT_SECS,
   esbuild_command,
+  esbuild_environment,
   esbuild_metafile_contract_error,
 )
 from app.config import get_settings
@@ -144,6 +146,7 @@ async def compile_jsx(
     try:
       proc = await asyncio.create_subprocess_exec(
         *esbuild_command(entry_path, out, metafile=metadata_path),
+        env=esbuild_environment(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
       )
@@ -352,3 +355,65 @@ async def reconcile_missing_bundles(db) -> list[int]:
         app.id, exc, exc_info=True,
       )
   return healed
+
+
+def _bundle_uses_current_runtime(bundle: Path) -> bool:
+  """Return whether ``bundle`` starts with the current compiler ABI banner."""
+  try:
+    with bundle.open("rb") as stream:
+      prefix = stream.read(len(COMPILED_RUNTIME_BANNER.encode("ascii")))
+  except OSError:
+    return False
+  return prefix == COMPILED_RUNTIME_BANNER.encode("ascii")
+
+
+async def reconcile_outdated_bundles(db) -> list[int]:
+  """Atomically rebuild live bundles produced by an older compiler ABI.
+
+  Opaque app frames execute one self-contained module: React, the Mobius
+  runtime bridge, and every supported app dependency are part of that artifact.
+  A compiler-runtime change therefore needs a durable migration for already
+  installed apps, not a frame-side compatibility path. ``esbuild_command``
+  stamps its ABI banner at byte zero; this boot sweep recompiles any present,
+  non-empty live bundle without the current banner from the row's stored source.
+
+  The missing/empty sweep runs immediately before this one, so absent bundles
+  are left to that purpose-built recovery path. Recompilation uses the existing
+  staging + commit + atomic-promote transaction, isolates failures per app, and
+  advances the app version only after a successful build. An interrupted boot
+  can safely resume the remaining rows on the next start.
+
+  Returns:
+    The ids of apps successfully migrated to the current compiler ABI.
+  """
+  import logging
+
+  from app import models
+
+  log = logging.getLogger(__name__)
+  compiled = _compiled_dir()
+  rows = (
+    db.query(models.App)
+    .filter(models.App.deleted_at.is_(None))
+    .all()
+  )
+  migrated: list[int] = []
+  for app in rows:
+    bundle = compiled / f"app-{app.id}.js"
+    try:
+      present = bundle.exists() and bundle.stat().st_size > 0
+    except OSError:
+      present = False
+    if not present or _bundle_uses_current_runtime(bundle):
+      continue
+    if not app.jsx_source or not app.jsx_source.strip():
+      continue
+    try:
+      await recompile_app_bundle(db, app, app.jsx_source)
+      migrated.append(app.id)
+    except Exception as exc:
+      log.error(
+        "compiled-runtime reconcile failed for app %s: %s",
+        app.id, exc, exc_info=True,
+      )
+  return migrated

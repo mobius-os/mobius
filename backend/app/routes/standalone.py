@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app import icon_cache, models, runtime_libs
+from app import icon_cache, models
 from app.config import get_settings
 from app.database import get_db
 from app.theme import get_bg_color
@@ -432,13 +432,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     app.capability_contract or {}, separators=(",", ":"), ensure_ascii=True,
   ).replace("</", "<\\/")
   app_bg = _app_background_color(app)
-  # Single source of truth: pull the mini-app importmap from app-frame.html
-  # instead of carrying a hand-synced brace-doubled copy here. Precomputed as a
-  # ready-to-embed <script> string so the f-string interpolates {import_map_html}
-  # with no brace-doubling (the JSON's own braces never reach str.format).
-  import_map_html = (
-    '<script type="importmap">\n' + runtime_libs.importmap_block() + "\n</script>"
-  )
   html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -452,7 +445,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <link rel="manifest" href="/apps/{slug}/manifest.json">
   <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png?v={app_v}">
   <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={app_v}">
-  {import_map_html}
   <style>
     :root {{
       --bg: {app_bg}; --surface: #14181f; --surface2: #1a1f28;
@@ -1107,34 +1099,43 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           }})().finally(function() {{ tokenRefresh = null; }});
           return tokenRefresh;
         }}
-        // Expose window.mobius (offline storage queue + sync on
-        // reconnect, Tier 4b) before rendering so the component sees it
-        // on mount. Precached, so the import resolves offline.
-        try {{
-          const rt = await import('/mobius-runtime.js');
-          rt.init({{
-            appId: APP_ID,
-            appInstanceId: tokenAppInstanceId(appToken),
-            getToken: runtimeToken,
-            capabilityContract: CAPABILITY_CONTRACT,
-          }});
-        }} catch (e) {{}}
+        // The compiled module carries mobius-runtime, React, and every app
+        // dependency. Seed its config before evaluation so app top-level code
+        // sees window.mobius without any separate network import.
+        globalThis.__mobiusRuntimeConfig = {{
+          appId: APP_ID,
+          appInstanceId: tokenAppInstanceId(appToken),
+          getToken: runtimeToken,
+          capabilityContract: CAPABILITY_CONTRACT,
+        }};
         const bust = cacheBust ? '&_=' + Date.now() : '';
         // &v=APP_VERSION is REQUIRED as the SW offline cache-buster: the server
         // /module route ignores v (its ETag keys on app.updated_at), but the SW
         // offline handler keeps v in its cache key (it strips token, _ and install but keeps v), so
         // an app update changes the key and forces a fresh fetch.
-        const module = await import(
-          '/api/apps/' + APP_ID + '/module?token=' +
-          encodeURIComponent(appToken) + '&v=' + encodeURIComponent(APP_VERSION) + bust
-        );
+        let module;
+        try {{
+          module = await import(
+            '/api/apps/' + APP_ID + '/module?token=' +
+            encodeURIComponent(appToken) + '&v=' + encodeURIComponent(APP_VERSION) + bust
+          );
+        }} finally {{
+          delete globalThis.__mobiusRuntimeConfig;
+        }}
         const Component = module.default;
         if (!Component) throw new Error('App module has no default export');
-        const React = await import('react');
-        const {{ createRoot }} = await import('react-dom/client');
-        const root = createRoot(document.getElementById('root'));
+        const compiledRuntime = globalThis.__mobiusCompiledRuntime;
+        if (!compiledRuntime ||
+            compiledRuntime.abi !== 1 ||
+            typeof compiledRuntime.createRoot !== 'function' ||
+            typeof compiledRuntime.createElement !== 'function') {{
+          throw new Error('App bundle is missing the compiled runtime');
+        }}
+        const root = compiledRuntime.createRoot(document.getElementById('root'));
         renderWithToken = function(currentToken) {{
-          root.render(React.createElement(Component, {{ appId: APP_ID, token: currentToken }}));
+          root.render(compiledRuntime.createElement(
+            Component, {{ appId: APP_ID, token: currentToken }}
+          ));
         }};
         renderWithToken(appToken);
         document.getElementById('loading').classList.add('hidden');

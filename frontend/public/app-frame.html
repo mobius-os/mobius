@@ -269,32 +269,6 @@
        next open and purge the stale safe-rect-only frame from the SW cache. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer">
-  <script type="importmap">
-  {
-    "imports": {
-      "react": "/vendor/react@19.2.7/react.mjs",
-      "react/jsx-runtime": "/vendor/react@19.2.7/jsx-runtime.mjs",
-      "react-dom": "/vendor/react@19.2.7/react-dom.mjs",
-      "react-dom/client": "/vendor/react@19.2.7/client.mjs",
-      "recharts": "/vendor/recharts@2.15.4/recharts.mjs",
-      "date-fns": "/vendor/date-fns@4.3.0/date-fns.mjs",
-      "three": "/vendor/three@0.185.1/three.module.js",
-      "three/addons/": "/vendor/three@0.185.1/addons/",
-      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs",
-      "codemirror": "/vendor/codemirror@6/codemirror.mjs",
-      "@codemirror/state": "/vendor/codemirror@6/state.mjs",
-      "@codemirror/view": "/vendor/codemirror@6/view.mjs",
-      "@codemirror/commands": "/vendor/codemirror@6/commands.mjs",
-      "@codemirror/language": "/vendor/codemirror@6/language.mjs",
-      "@codemirror/lang-markdown": "/vendor/codemirror@6/lang-markdown.mjs",
-      "@lezer/highlight": "/vendor/codemirror@6/lezer-highlight.mjs",
-      "katex": "/vendor/katex@0.17.0/katex.mjs",
-      "d3-geo": "/vendor/d3-geo@3.1.1/d3-geo.mjs",
-      "marked": "/vendor/marked@17.0.6/marked.mjs",
-      "dompurify": "/vendor/dompurify@3.4.11/dompurify.mjs"
-    }
-  }
-  </script>
   <style>
     /* Fallback defaults — the frame self-themes via the pre-paint IIFE in
        <head> (which reads the __mobius-theme__ slot + safe virtual storage and
@@ -566,9 +540,6 @@
     // An attacker embedding this frame on their own page can read
     // the ready event but cannot inject a token — their reply has
     // the wrong origin.
-    import { createRoot } from 'react-dom/client';
-    import { createElement, Fragment, useEffect } from 'react';
-
     let initialized = false;
     let currentToken = null;
     let currentCapabilityContract = null;
@@ -576,6 +547,11 @@
     let tokenRefreshResolve = null;
     let mountedRoot = null;
     let mountedComponent = null;
+    let createRoot = null;
+    let createElement = null;
+    let Fragment = null;
+    let useEffect = null;
+    const COMPILED_RUNTIME_ABI = 1;
     let suspendedScrollFrame = null;
     let nextModuleRequest = 0;
     const pendingModuleRequests = new Map();
@@ -977,33 +953,25 @@
         return;
       }
       try {
-        // Expose window.mobius BEFORE importing/rendering the app, so the
-        // component sees it on mount — mirrors the standalone host
-        // (routes/standalone.py). Until this landed the runtime was
-        // standalone-only and in-shell apps fell back to plainFetch
-        // against /api/storage with no offline queue and no
-        // window.mobius.chat(). getToken returns the current frame token
-        // (refreshed when the parent re-inits). The import is best-effort:
-        // a runtime fetch failure must not block the app from rendering.
-        try {
-          const rt = await import('/mobius-runtime.js');
-          rt.init({
-            appId: _FRAME_APP_ID,
-            appInstanceId: tokenAppInstanceId(currentToken),
-            getToken: runtimeToken,
-            capabilityContract: currentCapabilityContract,
-          });
-        } catch (e) {}
+        // The compiler injects React, the mounting bridge, mobius-runtime, and
+        // every library the app imports into ONE self-contained module. Seed
+        // its runtime config before evaluation so even app top-level code sees
+        // window.mobius; the opaque frame performs no network module imports.
+        globalThis.__mobiusRuntimeConfig = {
+          appId: _FRAME_APP_ID,
+          appInstanceId: tokenAppInstanceId(currentToken),
+          getToken: runtimeToken,
+          capabilityContract: currentCapabilityContract,
+        };
         // Opaque sandboxed frames are intentionally NOT controlled by the
         // shell's service worker. Loading /module directly from here therefore
         // misses CacheStorage offline even though the frame document itself was
         // served from it. Ask the exact source-attributing parent to perform the
         // authenticated, versioned fetch and transfer the bytes instead.
         //
-        // Blob execution preserves the opaque-origin boundary and the document's
-        // import map. The compiler bundles local modules; declared external
-        // dependencies resolve through that import map, so no relative source
-        // graph is tied to the temporary blob URL. Revoke the URL immediately
+        // Blob execution preserves the opaque-origin boundary. The compiler
+        // bundles the complete source + runtime graph, so no relative or bare
+        // imports are tied to the temporary blob URL. Revoke it immediately
         // after evaluation to avoid retaining compiled source in this realm.
         const IMPORT_RETRY_DELAY_MS = 800;
         let mod;
@@ -1023,12 +991,12 @@
             return;  // do NOT show the error panel — the re-init will retry
           }
           // Mobile networks routinely drop the first fetch after wake. Retry a
-          // broker network failure or a module-graph TypeError once; syntax and
-          // evaluation failures are deterministic and go straight to the error
-          // surface. The retry marker reaches the parent's versioned fetch and
-          // is stripped from the service-worker cache key.
-          const retryable = Boolean(importErr && importErr.code === 'network')
-            || importErr instanceof TypeError;
+          // broker network failure once; the self-contained blob has no module
+          // graph to fetch, so evaluation errors are deterministic and go
+          // straight to the error surface. The retry marker reaches the
+          // parent's versioned fetch and is stripped from the service-worker
+          // cache key.
+          const retryable = Boolean(importErr && importErr.code === 'network');
           if (!retryable || window.__frameMounted) {
             throw importErr;
           }
@@ -1047,6 +1015,18 @@
             throw retryErr;
           }
         }
+        const compiledRuntime = globalThis.__mobiusCompiledRuntime;
+        if (!compiledRuntime ||
+            compiledRuntime.abi !== COMPILED_RUNTIME_ABI ||
+            typeof compiledRuntime.createRoot !== 'function' ||
+            typeof compiledRuntime.createElement !== 'function' ||
+            typeof compiledRuntime.useEffect !== 'function') {
+          throw new Error('The app bundle is missing the compiled runtime.');
+        }
+        createRoot = compiledRuntime.createRoot;
+        createElement = compiledRuntime.createElement;
+        Fragment = compiledRuntime.Fragment;
+        useEffect = compiledRuntime.useEffect;
         const Component = mod.default;
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
@@ -1063,6 +1043,8 @@
         // would promote a dead frame on that lie. See MountSignal.
       } catch (err) {
         showErr('Failed to load app', err.stack || err.message);
+      } finally {
+        delete globalThis.__mobiusRuntimeConfig;
       }
     }
 

@@ -12,18 +12,31 @@
     "test:hooks": "node --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js')"
   },
   "dependencies": {
+    "@codemirror/commands": "6.10.4",
+    "@codemirror/lang-markdown": "6.5.0",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/state": "6.7.0",
+    "@codemirror/view": "6.43.4",
+    "@lezer/highlight": "1.2.3",
     "@openai/apps-sdk-ui": "0.2.2",
     "@tanstack/query-async-storage-persister": "^5.101.2",
     "@tanstack/react-query": "^5.101.2",
     "@tanstack/react-query-persist-client": "^5.101.2",
+    "codemirror": "6.0.2",
+    "d3-geo": "3.1.1",
+    "date-fns": "4.3.0",
     "dompurify": "^3.4.11",
     "highlight.js": "^11.11.1",
     "idb-keyval": "^6.2.6",
+    "katex": "0.17.0",
     "lucide-react": "^1.23.0",
     "marked": "^17.0.6",
     "marked-katex-extension": "^5.1.10",
+    "pdfjs-dist": "4.10.38",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "recharts": "2.15.4",
+    "three": "0.185.1"
   },
   "overrides": {
     "lodash": "4.18.1"

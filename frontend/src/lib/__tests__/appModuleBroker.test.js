@@ -91,6 +91,11 @@ test('opaque frames request module bytes only after exact parent attribution', (
   assert.match(frame, /new Blob\(\[bytes\], \{ type: 'text\/javascript' \}\)/)
   assert.match(frame, /URL\.revokeObjectURL\(blobUrl\)/)
   assert.doesNotMatch(frame, /await import\(moduleUrl\([01]\)\)/)
+  assert.doesNotMatch(frame, /type="importmap"/)
+  assert.doesNotMatch(frame, /await import\(['"]react['"]\)/)
+  assert.doesNotMatch(frame, /await import\(['"]\/mobius-runtime\.js['"]\)/)
+  assert.match(frame, /globalThis\.__mobiusRuntimeConfig/)
+  assert.match(frame, /compiledRuntime\.abi !== COMPILED_RUNTIME_ABI/)
 })
 
 test('mounting an opaque frame explicitly warms its versioned document', () => {

@@ -1,13 +1,15 @@
-"""Pure mini-app compile contract shared by the compiler and local validator."""
+"""Mini-app compile contract shared by the compiler and local validator."""
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
 ESBUILD_TIMEOUT_SECS = 30
 
-# Bare imports supplied by app-frame.html's import map. The platform compiler
-# must externalize these, and preflight validation must use the exact same list.
-RUNTIME_LIBS: tuple[str, ...] = (
+# Bare imports supported by the platform's self-contained app compiler. These
+# packages are resolved from the frontend runtime installation and bundled into
+# every app that uses them; an opaque frame must never need a network import.
+BUNDLED_RUNTIME_LIBS: tuple[str, ...] = (
   "react",
   "react/jsx-runtime",
   "react-dom",
@@ -29,6 +31,48 @@ RUNTIME_LIBS: tuple[str, ...] = (
   "marked",
   "dompurify",
 )
+
+COMPILED_RUNTIME_ABI = 1
+COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
+COMPILED_RUNTIME_BANNER = (
+  f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI} */"
+)
+
+
+def runtime_inject_path() -> Path:
+  return Path(__file__).with_name("app_runtime_inject.js")
+
+
+def runtime_node_path() -> Path:
+  configured = os.environ.get("MOBIUS_APP_NODE_PATH")
+  if configured:
+    return Path(configured)
+  candidates = [
+    Path("/app/shell-src/node_modules"),
+    Path(__file__).resolve().parents[2] / "frontend" / "node_modules",
+  ]
+  return next((path for path in candidates if path.is_dir()), candidates[-1])
+
+
+def mobius_runtime_path() -> Path:
+  candidates = [
+    Path("/app/shell-src/public/mobius-runtime.js"),
+    Path(__file__).resolve().parents[2] / "frontend" / "public" / "mobius-runtime.js",
+  ]
+  return next((path for path in candidates if path.is_file()), candidates[-1])
+
+
+def esbuild_environment() -> dict[str, str]:
+  """Return a subprocess environment with app dependencies explicitly scoped.
+
+  Esbuild's CLI consumes Node's ``NODE_PATH`` environment variable (its JS API
+  calls the equivalent option ``nodePaths``); there is no ``--node-path`` CLI
+  flag. Replace rather than append any inherited value so app builds resolve
+  bare imports only from the platform's pinned frontend runtime installation.
+  """
+  environment = dict(os.environ)
+  environment["NODE_PATH"] = str(runtime_node_path())
+  return environment
 
 NO_DEFAULT_EXPORT_ERROR = (
   "JSX source has no default export — mini-apps must export a default React "
@@ -56,7 +100,9 @@ def esbuild_command(
     "--format=esm",
     "--jsx=automatic",
     "--platform=browser",
-    *[f"--external:{lib}" for lib in RUNTIME_LIBS],
+    f"--banner:js={COMPILED_RUNTIME_BANNER}",
+    f"--inject:{runtime_inject_path()}",
+    f"--alias:mobius-runtime={mobius_runtime_path()}",
     f"--outfile={output}",
   ]
   if metafile is not None:
