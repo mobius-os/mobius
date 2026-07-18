@@ -182,6 +182,43 @@ def test_task_done_updates_status_and_summary_on_same_block():
   }
 
 
+def test_task_done_completed_normalized_to_done():
+  """The SDK reports success as "completed"; the persisted block stores the
+  canonical "done" so a reloaded chat renders the same dot the live reducer
+  does (SubagentChips maps anything not running/done to the FAILED dot)."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "compute",
+     "output": "", "status": "running", "tool_use_id": "toolu_c"},
+  ]
+  process_event({
+    "type": "task_start", "task_id": "task_C", "tool_use_id": "toolu_c",
+    "description": "Compute 17*23",
+  }, blocks)
+  process_event({
+    "type": "task_done", "task_id": "task_C", "tool_use_id": "toolu_c",
+    "status": "completed", "summary": "391",
+  }, blocks)
+  assert blocks[0]["subagent"]["task_C"]["status"] == "done"
+
+
+def test_task_start_after_done_does_not_downgrade():
+  """A re-delivered task_start (catch-up replay / out-of-order) must not reopen
+  an already-terminal helper as running — mirrors the frontend reducer."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "compute",
+     "output": "", "status": "running", "tool_use_id": "toolu_d"},
+  ]
+  process_event({
+    "type": "task_done", "task_id": "task_D", "tool_use_id": "toolu_d",
+    "status": "completed", "summary": "done",
+  }, blocks)
+  process_event({
+    "type": "task_start", "task_id": "task_D", "tool_use_id": "toolu_d",
+    "description": "late start",
+  }, blocks)
+  assert blocks[0]["subagent"]["task_D"]["status"] == "done"
+
+
 def test_task_done_killed_status_persists():
   """A task stopped via TaskStop reports "killed"; the terminal status persists
   verbatim (not normalized to done)."""

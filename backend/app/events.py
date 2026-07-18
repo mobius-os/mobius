@@ -16,6 +16,22 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
+# The canonical terminal subagent statuses the persisted block stores, matching
+# the frontend reducer's vocabulary so live and reloaded chats render the same
+# dot. The SDK's "completed" is normalized to "done"; "failed"/"killed"/"stopped"
+# pass through. Anything else terminal-ish also collapses to "done" — the chip
+# only distinguishes success from failure, and an unknown non-failure reads as
+# done rather than as the failed (red) dot.
+_TERMINAL_SUBAGENT_STATUSES = frozenset({"done", "failed", "killed", "stopped"})
+
+
+def _normalize_subagent_status(status: str | None) -> str:
+  """Map a raw task_done status onto the canonical chip vocabulary."""
+  if status in ("failed", "killed", "stopped"):
+    return status
+  return "done"
+
+
 # Extra fields an "error" event may carry through onto its persisted block.
 # process_event otherwise reduces an error to {type, message}, which would
 # strip the boot-set `resumable` flag and the pause descriptor. Whitelisted
@@ -486,13 +502,22 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
           "status": "running",
           "summary": None,
         })
+        was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
         if event_type == "task_start":
           if event.get("description"):
             entry["description"] = event["description"]
-          entry["status"] = "running"
-        else:
-          entry["status"] = event.get("status") or "done"
-          entry["summary"] = event.get("summary")
+          # A re-delivered start (catch-up replay, or an out-of-order start
+          # after the done) must NOT downgrade an already-terminal helper back
+          # to running — mirrors the frontend reducer's monotonic guard.
+          if not was_terminal:
+            entry["status"] = "running"
+        elif not was_terminal:
+          # Persist the CANONICAL terminal status so the stored block matches
+          # what the live reducer produces (completed -> done); otherwise a
+          # reloaded chat renders a succeeded helper with the failed dot.
+          entry["status"] = _normalize_subagent_status(event.get("status"))
+          if event.get("summary") is not None:
+            entry["summary"] = event.get("summary")
         return True
     return False
 
