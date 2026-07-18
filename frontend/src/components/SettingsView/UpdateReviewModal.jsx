@@ -25,14 +25,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { decodeGitPath, diffFileByPath, parseUnifiedDiff } from '../../lib/parseUnifiedDiff.js'
+import { parseUnifiedDiff } from '../DiffView/parseUnifiedDiff.js'
 import {
-  fileStatusLabel,
   shortSha,
   summarizePreview,
   isTrivialUpdate,
 } from '../../lib/platformUpdatePreview.js'
-import DiffView from '../DiffView/DiffView.jsx'
+import FileDiffList from '../DiffView/FileDiffList.jsx'
 import './UpdateReviewModal.css'
 
 function fileCountLabel(count) {
@@ -47,7 +46,6 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
-  const [openFiles, setOpenFiles] = useState(() => new Set())
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
 
@@ -58,7 +56,6 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
       const res = await api.platform.updatePreview()
       if (!res.ok) throw new Error(`status ${res.status}`)
       setPreview(await res.json())
-      setOpenFiles(new Set())
     } catch {
       setLoadError(true)
     } finally {
@@ -92,13 +89,10 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   const target = shortSha(preview?.target_sha)
   const commits = Array.isArray(preview?.commits) ? preview.commits : []
   const files = Array.isArray(preview?.files) ? preview.files : []
-  const { diffByPath, finalDiffPath } = useMemo(() => {
-    const parsedDiff = parseUnifiedDiff(preview?.diff)
-    return {
-      diffByPath: diffFileByPath(parsedDiff),
-      finalDiffPath: parsedDiff.at(-1)?.path || null,
-    }
-  }, [preview?.diff])
+  const parsedFiles = useMemo(
+    () => parseUnifiedDiff(preview?.diff),
+    [preview?.diff],
+  )
   // A preview that resolved to "not available" (e.g. the update landed from
   // another surface between status and open) has nothing to apply.
   const notAvailable = preview && preview.available === false && !loadError
@@ -106,15 +100,6 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   const summaryBits = []
   if (summary.commitCount) summaryBits.push(commitCountLabel(summary.commitCount))
   if (summary.fileCount) summaryBits.push(fileCountLabel(summary.fileCount))
-
-  const toggleFile = useCallback((path) => {
-    setOpenFiles((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }, [])
 
   return (
     <div
@@ -197,89 +182,11 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
 
               <section className="urm__section">
                 <h3 className="urm__section-title">{fileCountLabel(files.length)}</h3>
-                <ul className="urm__files">
-                  {files.map((file, idx) => {
-                    // The backend leaves files[].path git-quoted (a non-ASCII name
-                    // stays "caf\303\251.txt"), while the parser's map keys are
-                    // decoded — decode here so the lookup matches and the row shows
-                    // the real path.
-                    const filePath = decodeGitPath(file.path)
-                    const isOpen = openFiles.has(filePath)
-                    const diffEntry = diffByPath.get(filePath)
-                    const hasTextDiff = (diffEntry?.hunks?.length || 0) > 0
-                    const diffEndsHere = !!preview?.diff_truncated
-                      && finalDiffPath === filePath
-                    const diffRegionId = `urm-file-diff-${idx}`
-                    return (
-                      <li
-                        key={filePath}
-                        className={`urm__file${isOpen ? ' urm__file--open' : ''}`}
-                      >
-                        <button
-                          type="button"
-                          className="urm__file-toggle"
-                          onClick={() => toggleFile(filePath)}
-                          aria-expanded={isOpen}
-                          aria-controls={isOpen ? diffRegionId : undefined}
-                        >
-                          <span
-                            className={`urm__file-badge urm__file-badge--${(file.status || 'M').charAt(0).toLowerCase()}`}
-                            title={fileStatusLabel(file.status)}
-                          >
-                            {(file.status || 'M').charAt(0).toUpperCase()}
-                          </span>
-                          <span className="urm__file-path">{filePath}</span>
-                          <span className="urm__file-stat">
-                            {typeof file.insertions === 'number' && file.insertions > 0 && (
-                              <span className="urm__stat-add">+{file.insertions}</span>
-                            )}
-                            {typeof file.deletions === 'number' && file.deletions > 0 && (
-                              <span className="urm__stat-del">−{file.deletions}</span>
-                            )}
-                          </span>
-                          <svg
-                            className={`urm__file-chevron${isOpen ? ' urm__file-chevron--open' : ''}`}
-                            width="10"
-                            height="10"
-                            viewBox="0 0 10 10"
-                            fill="none"
-                            aria-hidden="true"
-                          >
-                            <path
-                              d="M2 4l3 3 3-3"
-                              stroke="currentColor"
-                              strokeWidth="1.5"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </svg>
-                        </button>
-                        {isOpen && (
-                          <div className="urm__file-diff" id={diffRegionId}>
-                            {!diffEntry || (diffEndsHere && !diffEntry.binary && !hasTextDiff) ? (
-                              <p className="urm__file-diff-empty">
-                                Diff not shown — this update is large; the full change applies on Apply.
-                              </p>
-                            ) : (diffEntry.binary || hasTextDiff) ? (
-                              <>
-                                <DiffView file={diffEntry} />
-                                {diffEndsHere && (
-                                  <p className="urm__file-diff-note">
-                                    Diff truncated here — the full change applies on Apply.
-                                  </p>
-                                )}
-                              </>
-                            ) : (
-                              <p className="urm__file-diff-empty">
-                                No textual changes to preview.
-                              </p>
-                            )}
-                          </div>
-                        )}
-                      </li>
-                    )
-                  })}
-                </ul>
+                <FileDiffList
+                  files={parsedFiles}
+                  summaryOverrides={files}
+                  diffTruncated={!!preview?.diff_truncated}
+                />
               </section>
             </>
           )}

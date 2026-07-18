@@ -2,22 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  fileStatusLabel,
   shortSha,
   summarizePreview,
   isTrivialUpdate,
   hasReviewableChanges,
 } from '../platformUpdatePreview.js'
-
-test('fileStatusLabel maps git status letters, falls back gracefully', () => {
-  assert.equal(fileStatusLabel('A'), 'Added')
-  assert.equal(fileStatusLabel('M'), 'Modified')
-  assert.equal(fileStatusLabel('D'), 'Removed')
-  assert.equal(fileStatusLabel('R100'), 'Renamed')
-  assert.equal(fileStatusLabel('x'), 'Changed')
-  assert.equal(fileStatusLabel(''), 'Changed')
-  assert.equal(fileStatusLabel(undefined), 'Changed')
-})
 
 test('shortSha truncates and tolerates junk', () => {
   assert.equal(shortSha('0123456789abcdef'), '01234567')

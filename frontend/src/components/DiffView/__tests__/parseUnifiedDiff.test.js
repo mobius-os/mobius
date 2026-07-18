@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { diffFileByPath, parseUnifiedDiff } from '../parseUnifiedDiff.js'
+import { parseUnifiedDiff } from '../parseUnifiedDiff.js'
 
 const TEXT_DIFF = `diff --git a/src/main.js b/src/main.js
 index 1111111..2222222 100644
@@ -91,15 +91,6 @@ Binary files /dev/null and b/image.png differ`)
   assert.deepEqual(files[3].hunks, [])
 })
 
-test('indexes canonical paths for modal lookups', () => {
-  const parsed = parseUnifiedDiff(TEXT_DIFF)
-  const byPath = diffFileByPath(parsed)
-  assert.equal(byPath.size, 3)
-  assert.equal(byPath.get('gone.txt'), parsed[2])
-  assert.equal(byPath.get('missing.txt'), undefined)
-  assert.equal(diffFileByPath(null).size, 0)
-})
-
 test('empty, null, and truncated-tail input is safe', () => {
   assert.deepEqual(parseUnifiedDiff(''), [])
   assert.deepEqual(parseUnifiedDiff(null), [])
@@ -132,7 +123,7 @@ index 111..222 100644
 -- old comment
 ++ new comment`)
   assert.equal(file.path, 'schema.sql')
-  assert.equal(diffFileByPath([file]).has('schema.sql'), true)
+  assert.equal(file.path, 'schema.sql')
   assert.equal(file.insertions, 1)
   assert.equal(file.deletions, 1)
 })

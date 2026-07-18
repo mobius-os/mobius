@@ -1,7 +1,10 @@
-// Shared presentational diff for platform-update and app-update review. Its API
-// is intentionally just one parsed file entry, with no update-specific state.
+// CANONICAL DIFF VIEWER: copy this entire folder verbatim. It imports only
+// React and its own flat sibling modules. Styles ship as a JavaScript string
+// because the mini-app compiler rejects CSS side-output.
 
-import './DiffView.css'
+import { ensureDiffViewerStyles } from './styles.js'
+
+ensureDiffViewerStyles()
 
 function lineSign(type) {
   if (type === 'add') return '+'
@@ -29,7 +32,13 @@ export default function DiffView({ file }) {
   }
 
   const hunks = Array.isArray(file.hunks) ? file.hunks : []
-  if (hunks.length === 0) return null
+  if (hunks.length === 0) {
+    return (
+      <div className="diff-view diff-view--message">
+        No textual changes to preview.
+      </div>
+    )
+  }
 
   return (
     <div
