@@ -1722,39 +1722,49 @@ function defaultDocumentMerge(base, mine, theirs, identity = defaultIdentity) {
 export function createUseDocument(storage, reactProvider = null) {
   return function useDocument(path, opts = {}) {
     const React = reactProvider || (typeof window !== 'undefined' ? window.React : null)
-    if (!React || !React.useCallback || !React.useEffect || !React.useRef || !React.useState) {
+    if (!React || !React.useCallback || !React.useEffect || !React.useMemo || !React.useRef || !React.useState) {
       throw new Error('useDocument needs React — bind it via window.mobius.createUseDocument(React)')
     }
     const initialOpt = Object.prototype.hasOwnProperty.call(opts, 'initial') ? opts.initial : null
-    // Resolve a lazy initial value once per document path. Calling an initializer
-    // such as `() => []` on every render creates a new reference, which changes
-    // refresh's dependencies; the refresh effect then fetches, sets state,
-    // renders, and fetches again forever. A path change is the only event that
-    // should establish a new document baseline.
-    const initialRef = React.useRef({ path: undefined, initialized: false, value: null })
-    if (!initialRef.current.initialized || initialRef.current.path !== path) {
-      initialRef.current = {
+    // Every path owns an isolated document controller. A hook instance survives
+    // prop changes, so keeping value/base/version refs outside this boundary lets
+    // document B inherit document A while B's refresh is still in flight. Late A
+    // refreshes and subscription callbacks can then overwrite B as well. Besides
+    // painting the wrong value, an immediate update can write A's document to B's
+    // path. The controller is replaced synchronously during the B render; async A
+    // work retains its old controller and may finish, but cannot mutate B.
+    //
+    // Resolving a lazy initial value here also keeps its identity stable for every
+    // rerender of one path. A new path is the only event that establishes a new
+    // initial value and write chain.
+    const controller = React.useMemo(() => {
+      const initialValue = typeof initialOpt === 'function' ? initialOpt() : initialOpt
+      return {
         path,
-        initialized: true,
-        value: typeof initialOpt === 'function' ? initialOpt() : initialOpt,
+        initialValue,
+        value: initialValue,
+        base: null,
+        version: null,
+        chain: Promise.resolve(),
       }
-    }
-    const initialValue = initialRef.current.value
+      // `path` is deliberately the sole dependency. A changing initializer must
+      // not reset a live document, while returning to another path creates a new
+      // isolated controller for that navigation.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [path])
+    const initialValue = controller.initialValue
     const identity = opts.identity || defaultIdentity
     const merge = opts.merge || ((base, mine, theirs) => defaultDocumentMerge(base, mine, theirs, identity))
     const mode = opts.mode || 'cas'
     const maxRetries = opts.maxRetries == null ? 3 : opts.maxRetries
-    const [state, setState] = React.useState(() => ({ value: initialValue, status: 'loading', lastError: null }))
-    const valueRef = React.useRef(initialValue)
-    const baseRef = React.useRef(null)
-    const versionRef = React.useRef(null)
-    const chainRef = React.useRef(Promise.resolve())
-    const optsRef = React.useRef(opts)
-    optsRef.current = opts
+    const onError = opts.onError
+    const [state, setState] = React.useState(() => ({ controller, value: initialValue, status: 'loading', lastError: null }))
 
-    const setValue = React.useCallback((value, status = 'ready', lastError = null) => {
-      valueRef.current = value
-      setState({ value, status, lastError })
+    const setValue = React.useCallback((owner, value, status = 'ready', lastError = null) => {
+      owner.value = value
+      setState((previous) => previous.controller === owner
+        ? { controller: owner, value, status, lastError }
+        : previous)
     }, [])
 
     const refresh = React.useCallback(async () => {
@@ -1763,42 +1773,50 @@ export function createUseDocument(storage, reactProvider = null) {
           ? await storage.getWithVersion(path, 'json')
           : { value: await storage.get(path), version: undefined }
         const next = loaded.value == null ? initialValue : loaded.value
-        const reconciled = reconcileIdentity(valueRef.current, next, identity)
-        baseRef.current = reconciled
-        versionRef.current = loaded.version || null
-        setValue(reconciled, 'ready', null)
+        const reconciled = reconcileIdentity(controller.value, next, identity)
+        controller.base = reconciled
+        controller.version = loaded.version || null
+        setValue(controller, reconciled, 'ready', null)
         return reconciled
       } catch (e) {
-        setState((prev) => ({ ...prev, status: 'error', lastError: e }))
-        if (optsRef.current && typeof optsRef.current.onError === 'function') {
-          optsRef.current.onError(e, { path, phase: 'refresh' })
+        setState((previous) => previous.controller === controller
+          ? { controller, value: controller.value, status: 'error', lastError: e }
+          : previous)
+        if (typeof onError === 'function') {
+          onError(e, { path, phase: 'refresh' })
         }
         throw e
       }
-    }, [path, initialValue, identity, setValue])
+    }, [path, initialValue, identity, controller, onError, setValue])
 
     React.useEffect(() => {
       let alive = true
+      // Commit ownership before any synchronous subscription callback can land.
+      // Until this effect runs, visibleState below already presents the new
+      // controller's initial value rather than the previous path's React state.
+      setState((previous) => previous.controller === controller
+        ? previous
+        : { controller, value: controller.value, status: 'loading', lastError: null })
       refresh().catch(() => {})
       const unsub = storage.subscribe(path, (next) => {
         if (!alive) return
-        const value = next == null ? initialValue : reconcileIdentity(valueRef.current, next, identity)
-        baseRef.current = value
-        setValue(value, 'ready', null)
+        const value = next == null ? initialValue : reconcileIdentity(controller.value, next, identity)
+        controller.base = value
+        setValue(controller, value, 'ready', null)
       })
       return () => { alive = false; if (unsub) unsub() }
-    }, [path, initialValue, identity, refresh, setValue])
+    }, [path, initialValue, identity, controller, refresh, setValue])
 
     const update = React.useCallback((fn) => {
       const run = async () => {
         let attempt = 0
-        const previous = valueRef.current
+        const previous = controller.value
         const mine = fn(previous)
-        setValue(mine, 'saving', null)
+        setValue(controller, mine, 'saving', null)
         for (;;) {
-          const base = baseRef.current
+          const base = controller.base
           let theirs = base
-          let version = versionRef.current
+          let version = controller.version
           if (mode === 'cas' && storage.getWithVersion) {
             const loaded = await storage.getWithVersion(path, 'json')
             theirs = loaded.value == null ? initialValue : loaded.value
@@ -1814,34 +1832,43 @@ export function createUseDocument(storage, reactProvider = null) {
               ...(mode === 'cas' && version ? { ifMatch: version } : {}),
               ...(mode === 'cas' && !version ? { ifNoneMatch: true } : {}),
             })
-            baseRef.current = reconciled
-            versionRef.current = result.version || version || null
-            setValue(reconciled, result.durability === 'queued' ? 'saving' : 'ready', null)
+            controller.base = reconciled
+            controller.version = result.version || version || null
+            setValue(controller, reconciled, result.durability === 'queued' ? 'saving' : 'ready', null)
             return result
           } catch (e) {
             if (e && e.code === 'conflict' && mode === 'cas' && attempt < maxRetries) {
               attempt += 1
               continue
             }
-            setState({ value: valueRef.current, status: 'error', lastError: e })
-            if (optsRef.current && typeof optsRef.current.onError === 'function') {
-              optsRef.current.onError(e, { path, phase: 'update' })
+            setState((previous) => previous.controller === controller
+              ? { controller, value: controller.value, status: 'error', lastError: e }
+              : previous)
+            if (typeof onError === 'function') {
+              onError(e, { path, phase: 'update' })
             }
             throw e
           }
         }
       }
-      const next = chainRef.current.then(run, run)
-      chainRef.current = next.then(() => {}, () => {})
+      const next = controller.chain.then(run, run)
+      controller.chain = next.then(() => {}, () => {})
       return next
-    }, [path, initialValue, identity, merge, mode, maxRetries, setValue])
+    }, [path, initialValue, identity, merge, mode, maxRetries, controller, onError, setValue])
 
     const setDoc = React.useCallback((next) => update(() => next), [update])
 
+    // React state still belongs to the previous path during the first render
+    // after a path change. Never expose that stale value while the new path's
+    // refresh effect is being scheduled.
+    const visibleState = state.controller === controller
+      ? state
+      : { value: controller.value, status: 'loading', lastError: null }
+
     return {
-      value: state.value,
-      status: state.status,
-      lastError: state.lastError,
+      value: visibleState.value,
+      status: visibleState.status,
+      lastError: visibleState.lastError,
       update,
       set: setDoc,
       refresh,

@@ -171,9 +171,11 @@ test('opaque-frame direct storage preserves text, blob, delete, CAS, and subscri
 async function renderUseDocument(storage, path, opts) {
   const stateSlots = []
   const refSlots = []
+  const memoSlots = []
   const effects = []
   let stateIndex = 0
   let refIndex = 0
+  let memoIndex = 0
   const React = {
     useState(init) {
       const i = stateIndex++
@@ -187,6 +189,11 @@ async function renderUseDocument(storage, path, opts) {
       const i = refIndex++
       if (!(i in refSlots)) refSlots[i] = { current: init }
       return refSlots[i]
+    },
+    useMemo(factory) {
+      const i = memoIndex++
+      if (!(i in memoSlots)) memoSlots[i] = factory()
+      return memoSlots[i]
     },
     useCallback(fn) { return fn },
     useEffect(fn) { effects.push(fn) },
@@ -202,9 +209,11 @@ function createRerenderReact() {
   const stateSlots = []
   const refSlots = []
   const callbackSlots = []
+  const memoSlots = []
   let stateIndex = 0
   let refIndex = 0
   let callbackIndex = 0
+  let memoIndex = 0
   const sameDeps = (a, b) => (
     Array.isArray(a) && Array.isArray(b) &&
     a.length === b.length && a.every((value, index) => Object.is(value, b[index]))
@@ -214,6 +223,7 @@ function createRerenderReact() {
       stateIndex = 0
       refIndex = 0
       callbackIndex = 0
+      memoIndex = 0
     },
     useState(init) {
       const i = stateIndex++
@@ -231,6 +241,14 @@ function createRerenderReact() {
       if (previous && sameDeps(previous.deps, deps)) return previous.fn
       callbackSlots[i] = { fn, deps }
       return fn
+    },
+    useMemo(factory, deps) {
+      const i = memoIndex++
+      const previous = memoSlots[i]
+      if (previous && sameDeps(previous.deps, deps)) return previous.value
+      const value = factory()
+      memoSlots[i] = { value, deps }
+      return value
     },
     useEffect() {},
   }
@@ -1061,6 +1079,76 @@ test('useDocument resolves a lazy initial value once so rerenders do not restart
 
   assert.equal(initialCalls, 1)
   assert.equal(second.refresh, first.refresh)
+})
+
+test('useDocument path changes never seed the new document from the previous path', async () => {
+  freshEnv()
+  const { createUseDocument } = await runtimeExports()
+  const React = createRerenderReact()
+  const writes = []
+  const storage = {
+    async get(path) { return { id: path, body: `server:${path}` } },
+    async durableWrite(path, value) {
+      writes.push({ path, value })
+      return { durability: 'synced', path }
+    },
+    subscribe: () => () => {},
+  }
+  const useDocument = createUseDocument(storage, React)
+
+  React.beginRender()
+  useDocument('notes/a.json', { initial: { id: 'a', body: 'initial:a' }, mode: 'lww' })
+  React.beginRender()
+  const noteB = useDocument('notes/b.json', { initial: { id: 'b', body: 'initial:b' }, mode: 'lww' })
+
+  assert.deepEqual(noteB.value, { id: 'b', body: 'initial:b' })
+  assert.equal(noteB.status, 'loading')
+
+  let updateInput
+  await noteB.update((previous) => {
+    updateInput = previous
+    return { ...previous, body: 'edited:b' }
+  })
+
+  assert.deepEqual(updateInput, { id: 'b', body: 'initial:b' })
+  assert.deepEqual(writes, [{
+    path: 'notes/b.json',
+    value: { id: 'b', body: 'edited:b' },
+  }])
+})
+
+test('useDocument ignores a late refresh from the previous path', async () => {
+  freshEnv()
+  const { createUseDocument } = await runtimeExports()
+  const React = createRerenderReact()
+  let resolveA
+  const pendingA = new Promise((resolve) => { resolveA = resolve })
+  const storage = {
+    async getWithVersion(path) {
+      if (path === 'notes/a.json') return pendingA
+      return { value: { id: 'b', body: 'server:b' }, version: 'b-v1' }
+    },
+    async durableWrite(path) { return { durability: 'synced', path, version: 'b-v2' } },
+    subscribe: () => () => {},
+  }
+  const useDocument = createUseDocument(storage, React)
+
+  React.beginRender()
+  const noteA = useDocument('notes/a.json', { initial: { id: 'a', body: 'initial:a' } })
+  const refreshA = noteA.refresh()
+
+  React.beginRender()
+  const noteB = useDocument('notes/b.json', { initial: { id: 'b', body: 'initial:b' } })
+  await noteB.refresh()
+  resolveA({ value: { id: 'a', body: 'late:a' }, version: 'a-v1' })
+  await refreshA
+
+  let updateInput
+  await noteB.update((previous) => {
+    updateInput = previous
+    return { ...previous, body: 'edited:b' }
+  })
+  assert.deepEqual(updateInput, { id: 'b', body: 'server:b' })
 })
 
 test('useDocument serializes updates and reconciles item ids by content identity', async () => {
