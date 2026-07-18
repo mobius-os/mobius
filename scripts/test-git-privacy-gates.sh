@@ -90,6 +90,35 @@ printf '%s\n' "$doc_push_output" \
   | grep -q 'backend seed-skill docs changed' \
   || fail "pre-push did not report its seed-skill documentation fast path"
 
+# land.sh may reuse a backend result only for the exact local object and remote
+# base that the preflight verified. The real push still invokes the hook; an
+# exact receipt avoids re-running the long suite with a remote transport open,
+# while any stale or forged receipt fails closed.
+mkdir -p "$repo/backend"
+printf 'VALUE = 1\n' >"$repo/backend/preflight_fixture.py"
+git -C "$repo" add backend/preflight_fixture.py
+git -C "$repo" commit -qm backend-preflight-fixture
+backend_sha="$(git -C "$repo" rev-parse HEAD)"
+backend_base="$(git -C "$repo" rev-parse HEAD^)"
+backend_push_output="$({
+  printf 'refs/heads/master %s refs/heads/main %s\n' "$backend_sha" "$backend_base"
+} | (cd "$repo" \
+  && MOBIUS_PREPUSH_VERIFIED_SHA="$backend_sha" \
+     MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA="$backend_base" \
+     scripts/githooks/pre-push) 2>&1)" \
+  || fail "pre-push rejected an exact preflight receipt"
+printf '%s\n' "$backend_push_output" \
+  | grep -q 'backend pytest already passed' \
+  || fail "pre-push did not reuse the exact preflight result"
+if {
+  printf 'refs/heads/master %s refs/heads/main %s\n' "$backend_sha" "$backend_base"
+} | (cd "$repo" \
+  && MOBIUS_PREPUSH_VERIFIED_SHA="$backend_sha" \
+     MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA="$doc_base" \
+     scripts/githooks/pre-push >/dev/null 2>&1); then
+  fail "pre-push accepted a stale remote SHA receipt"
+fi
+
 # A committed private path must be rejected by the reusable CI check, the
 # pre-push hook, and land.sh before land.sh attempts any remote backup push.
 git -C "$repo" switch -qc private-fixture

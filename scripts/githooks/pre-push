@@ -61,6 +61,8 @@ ZERO=0000000000000000000000000000000000000000
 PUSH_REFS="$PP_TMP/push-refs"
 HAS_PUSH_REFS=0
 PUSHES_MAIN=0
+MAIN_LOCAL_SHA=""
+MAIN_REMOTE_SHA=""
 if [ -t 0 ]; then
   : >"$PUSH_REFS"
 else
@@ -72,6 +74,8 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
     refs/heads/main)
       PUSHES_MAIN=1
+      MAIN_LOCAL_SHA="$local_sha"
+      MAIN_REMOTE_SHA="$remote_sha"
       if [ "$local_sha" = "$ZERO" ]; then
         err "refusing to delete main"
         err "recover: git fetch origin && git rebase origin/main && scripts/land.sh"
@@ -99,6 +103,25 @@ if [ "$HAS_PUSH_REFS" -eq 0 ] \
     || [ "$PUSHES_MAIN" -eq 1 ] \
     || [ "${MOBIUS_PREPUSH_FULL:-0}" = "1" ]; then
   RUN_FULL_BACKEND=1
+fi
+
+# land.sh runs this same hook against the exact main update before opening the
+# remote transport. The real push then supplies both verified object IDs. Only
+# an exact match may reuse that expensive backend result; a stale or malformed
+# receipt fails closed instead of holding a newly opened connection through a
+# second seven-minute suite. Privacy, history, syntax, and frontend checks below
+# still run on the real push.
+BACKEND_PREFLIGHT_VERIFIED=0
+if [ -n "${MOBIUS_PREPUSH_VERIFIED_SHA:-}" ] \
+    || [ -n "${MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA:-}" ]; then
+  if [ "$PUSHES_MAIN" -ne 1 ] \
+      || [ -z "$MAIN_LOCAL_SHA" ] \
+      || [ "${MOBIUS_PREPUSH_VERIFIED_SHA:-}" != "$MAIN_LOCAL_SHA" ] \
+      || [ "${MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA:-}" != "$MAIN_REMOTE_SHA" ]; then
+    err "preflight receipt does not match the main update; rerun scripts/land.sh"
+    exit 1
+  fi
+  BACKEND_PREFLIGHT_VERIFIED=1
 fi
 
 # Commits being pushed = everything on HEAD not yet on origin/main.
@@ -252,7 +275,9 @@ fi
 
 # 5. Backend pytest — required before main updates, optional on topic/backup
 #    pushes, and only possible when the shared local venv exists.
-if backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
+if backend_needs_pytest && [ "$BACKEND_PREFLIGHT_VERIFIED" -eq 1 ]; then
+  ok "backend pytest already passed for ${MAIN_LOCAL_SHA:0:10} before transport opened"
+elif backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
   warn "backend changed, but this push does not update main —"
   warn "  skipping full pytest (required PR CI runs it)."
   warn "  enable locally: MOBIUS_PREPUSH_FULL=1 git push …"

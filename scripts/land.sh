@@ -9,6 +9,15 @@ cd "$ROOT"
 err() { printf 'land: %s\n' "$*" >&2; }
 info() { printf 'land: %s\n' "$*"; }
 
+# Keep short pushes resilient to transient network idleness. The main push also
+# uses an exact-SHA preflight below, so the remote transport is never held open
+# while the full backend suite runs.
+git_push() {
+  local ssh_command="${GIT_SSH_COMMAND:-ssh}"
+  GIT_SSH_COMMAND="${ssh_command} -o ServerAliveInterval=30 -o ServerAliveCountMax=30" \
+    git push "$@"
+}
+
 check_private_history() {
   local ref="${1:-HEAD}"
   local commits
@@ -20,6 +29,24 @@ check_private_history() {
       docs demo-logs .claude .pm AGENTS.md CLAUDE.md >&2
     err "deleting a path later is insufficient; purge it from reachable history"
     err "this privacy gate must not be bypassed"
+    return 1
+  fi
+}
+
+preflight_main_push() {
+  local local_sha="$1"
+  local remote_sha="$2"
+  local remote_url
+  remote_url="$(git remote get-url origin)"
+
+  info "running the pre-push gate before opening the main transport"
+  printf 'HEAD %s refs/heads/main %s\n' "$local_sha" "$remote_sha" \
+    | env -u MOBIUS_PREPUSH_VERIFIED_SHA \
+          -u MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA \
+          scripts/githooks/pre-push origin "$remote_url"
+
+  if [ "$(git rev-parse HEAD)" != "$local_sha" ]; then
+    err "HEAD changed during preflight; refusing to push an unverified object"
     return 1
   fi
 }
@@ -57,7 +84,7 @@ backup_ref="refs/heads/preserve/session-${safe_branch}-${stamp}-${short_sha}"
 backup_name="${backup_ref#refs/heads/}"
 
 info "backing up ${branch} (${short_sha}) to origin/${backup_name}"
-git push origin "${head_sha}:${backup_ref}"
+git_push origin "${head_sha}:${backup_ref}"
 
 info "rebasing ${branch} onto latest origin/main"
 if ! git rebase origin/main; then
@@ -86,9 +113,15 @@ fi
 # that will be sent to main.
 check_private_history HEAD
 
-info "pushing HEAD to main with normal fast-forward semantics"
-if git push origin HEAD:main; then
-  landed="$(git rev-parse --short HEAD)"
+verified_sha="$(git rev-parse HEAD)"
+verified_remote_sha="$(git rev-parse origin/main)"
+preflight_main_push "$verified_sha" "$verified_remote_sha"
+
+info "pushing verified HEAD to main with normal fast-forward semantics"
+if MOBIUS_PREPUSH_VERIFIED_SHA="$verified_sha" \
+   MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA="$verified_remote_sha" \
+   git_push origin "${verified_sha}:refs/heads/main"; then
+  landed="${verified_sha:0:10}"
   info "landed ${landed} on origin/main"
   exit 0
 fi
