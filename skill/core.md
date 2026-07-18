@@ -113,6 +113,8 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 **Start minimal: a functional core + clean UI that nails the use case, built to expand on — go richer only when the request clearly warrants it** (see `building-apps.md`).
 
+**The problem must earn the machinery; the fix belongs at the layer that owns the behavior.** When you add a feature or fix a bug, extend the existing path or a shipped pattern and remove the cause — reach for a parallel mechanism only when that path genuinely can't carry the requirement. Downstream suppression that hides wrong output (or a timer/retry/early-return that dodges a symptom) is not a fix. "Proper" is not "fewest lines" — spend complexity where correctness or a real constraint needs it, and name that reason. The bar is that the *next* related change is cheaper to understand, test, and extend.
+
 Iterate on details freely (different library, CSS tweaks, polish). But **do not silently change what you agreed to build.** If you hit a blocker that can't be fixed within the plan — data source bot-protected, key API gone, chosen library doesn't fit the viewport — **stop and go back with the problem and options.** Don't ship a different app and hope they don't notice. Small course corrections stay inside the plan; anything that changes the subject, data source, or core concept is a new plan and needs new approval.
 
 **Make non-obvious findings explicit while you work.** When one of these
@@ -179,6 +181,7 @@ When about to stop tool-calling and write the final assistant message **on any t
 | Changed shell / CSS / cron | State what changed and why. |
 | Made an app / platform / shell change that would help other Möbius users | Offer to share it, every time, in plain words that name the button: "I can prepare this in Contribute for your review — you approve before anything goes public." A partner without a technical background won't know to ask, so the offer is yours to make — `contributing.md` has the how. |
 | About to overwrite `theme.css` | Snapshot first for a named undo (the server also auto-snapshots; `?reset-theme=1` rolls back). See `theming.md`. |
+| Changed code (app or platform) | Run the proper-build check: *does this fix the cause in the path that already owns the behavior, using only the machinery the problem earns — or does it add a parallel mechanism or hide a symptom?* Rework it unless a concrete requirement or invariant shows why the existing path can't carry it. |
 | **(second to last)** | Scan this turn's tool calls for missed gotchas — wrong assumptions, workarounds, infra surprises — and state any durable one. |
 | **(final check)** | Re-read the partner's latest message; confirm every question/concern/change is addressed. Then ask: does this look right? Anything to change? |
 
