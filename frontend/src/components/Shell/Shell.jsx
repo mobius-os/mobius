@@ -59,6 +59,7 @@ import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import { useLogoModeGesture } from './useLogoModeGesture.js'
+import useLivingHalo from './useLivingHalo.js'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
@@ -1094,7 +1095,12 @@ export default function Shell() {
     // drawer OR the persistent desktop sidebar toggling open (review §6 + sidebar
     // reconciliation): navigationOpen unifies both.
     drawerOpen: navigationOpen,
+    // Direction of a completed hold (enter → spring+12, exit → snap+8).
+    builderModeActive,
   })
+  // The logo's living halo (its "lit soul") — a drifting glow behind the mark while
+  // builder mode is active; killed instantly on snap back to single.
+  useLivingHalo({ brandRef: brandButtonRef, active: builderModeActive })
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
@@ -2509,7 +2515,7 @@ export default function Shell() {
           ref={brandButtonRef}
           type="button"
           className={`shell__brand${logoGesture.holding ? ' is-holding' : ''}`
-            + `${logoGesture.pulsing ? ' is-pulsing' : ''}`
+            + `${logoGesture.flourish ? ` is-${logoGesture.flourish}` : ''}`
             + `${builderModeActive ? ' shell__brand--builder' : ''}`}
           // The accessible NAME stays "Toggle navigation" — the button's primary
           // job is the drawer, and both assistive tech and the e2e specs key off
@@ -2557,17 +2563,18 @@ export default function Shell() {
           }}
           onAnimationEnd={logoGesture.onAnimationEnd}
         >
-          {/* The mark IS the indicator. The raster logo (a human hand and a robot
-              hand drawing each other in a circular loop) rotates 180deg in builder
-              mode — swapping which hand is "drawing" — and the wordmark tints accent.
-              A hold fills the ring (--hold-progress → conic-gradient); on completion
-              an outward accent pulse escapes from under the thumb. CSS only;
-              reduced-motion makes the twist instant and skips the pulse. */}
+          {/* The mark IS the indicator (CHARGE model). The raster logo (a human hand
+              and a robot hand drawing each other in a circular loop) COMPRESSES as a
+              hold charges (--hold-progress), then springs (enter) / snaps (exit) back
+              and rotates 180deg — swapping which hand is "drawing". In builder mode a
+              living halo drifts behind it (its "lit soul"; useLivingHalo drives the
+              --halo-* vars). CSS-composed; reduced-motion makes the twist instant,
+              skips the spring, and stills the halo. */}
           <span className="shell__logo-wrap">
-            <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
             {paneModel.WORKSPACE_SPLITS_ENABLED && (
-              <span className="shell__logo-ring" aria-hidden="true" />
+              <span className="shell__logo-halo" aria-hidden="true" />
             )}
+            <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           </span>
           <span className="shell__wordmark">Möbius</span>
         </button>

@@ -242,6 +242,7 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
 
 const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+const livingHaloSrc = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
   // Pane strips reuse .shell__tabstrip inside .shell__content. A descendant
@@ -309,13 +310,18 @@ test('the press state machine is pointer-captured, keyed, and classified by time
   assert.match(logoGestureSrc, /if \(detail === 0\) return false/)
 })
 
-test('completion feedback: single haptic (feature-detected) + an outward pulse, symmetric', () => {
+test('completion feedback (CHARGE): ramp-tick haptics + a direction-aware spring/snap', () => {
   // navigator.vibrate is feature-detected (iOS has none → graceful no-op).
   assert.match(logoGestureSrc, /typeof navigator\.vibrate === 'function'/)
   assert.match(logoGestureSrc, /runHoldCompletion\(\{/)
-  // The pulse class is set on completion and cleared on animationend.
-  assert.match(logoGestureSrc, /startPulse: \(\) => \{ setPulsing\(false\); requestAnimationFrame\(\(\) => setPulsing\(true\)\) \}/)
-  assert.match(logoGestureSrc, /const onAnimationEnd = useCallback\(\(\) => \{[\s\S]*?setPulsing\(false\)/)
+  // Direction is read from the CURRENT mode: entering builder springs, exiting snaps.
+  assert.match(logoGestureSrc, /const entering = !builderModeActive/)
+  // Ramp ticks fire ONCE each as the charge crosses 50% and 85%.
+  assert.match(logoGestureSrc, /if \(!ramp\.t1 && p >= RAMP_TICK_1\) \{ ramp\.t1 = true; vibrateFn\?\.\(RAMP_TICK_1_MS\) \}/)
+  assert.match(logoGestureSrc, /if \(!ramp\.t2 && p >= RAMP_TICK_2\) \{ ramp\.t2 = true; vibrateFn\?\.\(RAMP_TICK_2_MS\) \}/)
+  // The spring/snap one-shot is restarted (clear-then-set) and cleared on animationend.
+  assert.match(logoGestureSrc, /setFlourish\(''\)\s*\n\s*requestAnimationFrame\(\(\) => setFlourish\(isEntering \? 'igniting' : 'snapping'\)\)/)
+  assert.match(logoGestureSrc, /const onAnimationEnd = useCallback\(\(\) => \{ setFlourish\(''\) \}, \[\]\)/)
   // The rAF is cancelled on unmount so a hold in flight can't tick a dead component.
   assert.match(logoGestureSrc, /useEffect\(\(\) => \(\) => \{ stopRaf\(\) \}, \[stopRaf\]\)/)
 })
@@ -336,33 +342,76 @@ test('Shell wires the toggle handler, brand ref, and Shift+Enter (no drag-deny v
   assert.match(shell, /e\.shiftKey && e\.key === 'Enter'/)
 })
 
-test('the logo mark is the indicator: ring var + 180deg twist + tint + completion pulse', () => {
+test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 180° twist + tint + living halo', () => {
   const brand = shellCss.match(/\.shell__brand\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(brand, /touch-action:\s*pan-y pinch-zoom/)
   assert.match(brand, /-webkit-touch-callout:\s*none/)
-  // The hold ring reads --hold-progress through a conic-gradient.
-  const ring = shellCss.match(/\.shell__logo-ring\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(ring, /conic-gradient\([\s\S]*?var\(--hold-progress/)
-  assert.match(shellCss, /\.shell__brand\.is-holding \.shell__logo-ring/)
-  // Mark twist + wordmark tint in builder mode.
+  // The conic hold RING is gone — the mark itself is the hold indicator.
+  assert.doesNotMatch(shellCss, /\.shell__logo-ring/)
+  assert.doesNotMatch(shellCss, /conic-gradient/)
+  // Hold COMPRESS: base scale tracks --hold-progress; twist rides an independent
+  // rotate property (so compress and twist compose, never clobber).
   const logoRule = shellCss.match(/\.shell__logo\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(logoRule, /transition:\s*transform 300ms cubic-bezier/)
-  assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?transform:\s*rotate\(180deg\)/)
+  assert.match(logoRule, /scale:\s*calc\(1 - var\(--hold-progress, 0\) \* 0\.16\)/)
+  assert.match(logoRule, /rotate:\s*var\(--logo-twist, 0deg\)/)
+  assert.match(logoRule, /transition:\s*rotate 300ms cubic-bezier/)
+  // The 180° twist is a var flip in builder mode (not a transform override).
+  assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
-  // The completion pulse (one ::after, scale to ~2.2 + fade).
-  assert.match(shellCss, /\.shell__brand\.is-pulsing \.shell__logo-wrap::after/)
-  assert.match(shellCss, /@keyframes shell-logo-pulse[\s\S]*?scale\(2\.2\)/)
-  // Reduced motion makes the twist instant and skips the pulse (haptic stays in JS).
-  assert.match(shellCss, /\.shell__logo \{ transition: none; \}/)
-  assert.match(shellCss, /\.shell__brand\.is-pulsing \.shell__logo-wrap::after \{ animation: none; \}/)
+  // Completion: spring (enter) overshoots 0.84→1 on a springy cubic; snap (exit) settles fast.
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 480ms cubic-bezier\(0\.22, 1\.6, 0\.36, 1\)/)
+  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 150ms ease/)
+  assert.match(shellCss, /@keyframes shell-logo-ignite\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
+  assert.match(shellCss, /@keyframes shell-logo-snap\s*\{[\s\S]*?scale:\s*0\.84/)
+  // The LIVING HALO: a radial-gradient element behind the mark, driven by the rAF
+  // vars, lit only in builder mode, per-theme base alpha via --halo-alpha.
+  const halo = shellCss.match(/\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(halo, /radial-gradient/)
+  assert.match(halo, /var\(--halo-alpha, 0\.5\)/)
+  assert.match(halo, /translate:\s*var\(--halo-x, 0px\) var\(--halo-y, 0px\)/)
+  assert.match(halo, /scale:\s*var\(--halo-scale, 1\)/)
+  assert.match(shellCss, /\.shell__brand--builder \.shell__logo-halo\s*\{[\s\S]*?opacity:\s*var\(--halo-opacity, 0\.85\)/)
+  // Per-theme alpha token: quieter in dark.
+  assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.5; \}/)
+  assert.match(shellCss, /@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?--halo-alpha: 0\.4/)
+  // Reduced motion: twist instant, the compress kept (direct press feedback), the
+  // spring/snap skipped (haptic still fires in JS), halo static (no rAF).
+  assert.match(shellCss, /\.shell__logo \{ transition: rotate 0s, scale 160ms ease; \}/)
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo,\s*\n\s*\.shell__brand\.is-snapping \.shell__logo \{ animation: none; \}/)
 })
 
-test('the room flourish draws the dividers in on mount, instant under reduced motion', () => {
-  const bar = css.match(/\.workspace__divider-bar\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(bar, /animation:\s*workspace-divider-draw/)
-  assert.match(css, /@keyframes workspace-divider-draw/)
+test('the living halo lifecycle: lit only in builder mode, one allocation-free rAF, paused on hidden, static under reduced motion', () => {
+  // Gated on `active` (builder mode) — nothing runs when inactive, and the effect
+  // re-runs on active flip so it turns ON at ignite and OFF (cleanup) at snap.
+  assert.match(livingHaloSrc, /if \(!el \|\| !active\) return undefined/)
+  assert.match(livingHaloSrc, /\}, \[brandRef, active\]\)/)
+  // Reduced motion: settle static CSS vars, NO rAF at all.
+  assert.match(livingHaloSrc, /if \(prefersReducedMotion\(\)\) \{[\s\S]*?setProperty\('--halo-scale', '1'\)[\s\S]*?return undefined/)
+  // One reused frame object → zero per-frame allocation; the drift comes from the
+  // pure haloFrame (tested in logoHoldMachine.test.js).
+  assert.match(livingHaloSrc, /const frame = \{\} \/\/ reused every tick/)
+  assert.match(livingHaloSrc, /haloFrame\(performance\.now\(\), frame\)/)
+  // Pauses on a hidden tab (cancel the rAF), resumes on visible.
+  assert.match(livingHaloSrc, /document\.visibilityState === 'hidden'/)
+  assert.match(livingHaloSrc, /cancelAnimationFrame\(raf\)/)
+  // Cleanup kills the loop instantly (the snap) + drops the visibility listener.
+  assert.match(livingHaloSrc, /return \(\) => \{[\s\S]*?cancelAnimationFrame\(raf\)[\s\S]*?removeEventListener\('visibilitychange'/)
+  // Shell lights the halo only in builder mode, keyed to the SAME brand ref.
+  assert.match(shell, /useLivingHalo\(\{ brandRef: brandButtonRef, active: builderModeActive \}\)/)
+  assert.match(shell, /<span className="shell__logo-halo" aria-hidden/)
+})
+
+test('the room flourish (CHARGE): panes DEAL in on class-apply, suppressed while resizing, instant under reduced motion', () => {
+  // The divider-DRAW is gone; the entry flourish is the card-DEAL on the pane wrapper.
+  assert.doesNotMatch(css, /workspace-divider-draw/)
+  const paned = css.match(/\.shell__view--paned\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(paned, /animation:\s*shell-pane-deal 400ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/)
+  assert.match(css, /@keyframes shell-pane-deal\s*\{[\s\S]*?translateX\(18px\)[\s\S]*?translateX\(0\)/)
+  // A live resize must not re-deal every frame.
+  assert.match(css, /\.workspace--resizing \.shell__view--paned\s*\{\s*\n\s*animation: none;/)
+  // Reduced motion drops the deal (and the layout-commit transition).
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /\.workspace__divider-bar \{ transition: none; animation: none; \}/)
+  assert.match(reduced, /\.shell__view--paned \{ transition: none; animation: none; \}/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {

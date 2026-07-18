@@ -3,13 +3,15 @@ import assert from 'node:assert/strict'
 import {
   HOLD_MS,
   SWIPE_DX,
-  HOLD_HAPTIC_MS,
+  HOLD_HAPTIC_ENTER_MS,
+  HOLD_HAPTIC_EXIT_MS,
   holdComplete,
   releasedAsTap,
   isSwipeRight,
   movedBeyondSlop,
   decidePointerMove,
   runHoldCompletion,
+  haloFrame,
 } from '../logoHoldMachine.js'
 
 // ── Hold threshold ──────────────────────────────────────────────────────────
@@ -44,37 +46,71 @@ test('movedBeyondSlop trips on small drift, and swipe is classified BEFORE cance
   assert.equal(decidePointerMove(4, 4), 'continue')
 })
 
-// ── Completion feedback (haptic + pulse), enter AND exit ────────────────────
+// ── Completion feedback (CHARGE model: haptic + spring/snap), enter AND exit ─
 
-test('runHoldCompletion fires the haptic once and starts the pulse', () => {
+test('runHoldCompletion: entering fires the 12 haptic and starts the spring', () => {
   const calls = []
-  let pulses = 0
+  const flourishes = []
   runHoldCompletion({
     vibrate: (ms) => calls.push(ms),
     reducedMotion: false,
-    startPulse: () => { pulses += 1 },
+    entering: true,
+    startFlourish: (e) => flourishes.push(e),
   })
-  assert.deepEqual(calls, [HOLD_HAPTIC_MS], 'exactly one short haptic pulse')
-  assert.equal(pulses, 1, 'the outward pulse starts once')
+  assert.deepEqual(calls, [HOLD_HAPTIC_ENTER_MS], 'the heavier ENTER haptic (12)')
+  assert.deepEqual(flourishes, [true], 'the spring starts once, entering=true')
 })
 
-test('reduced motion SKIPS the pulse but KEEPS the haptic', () => {
+test('runHoldCompletion: exiting fires the 8 haptic and starts the snap', () => {
   const calls = []
-  let pulses = 0
+  const flourishes = []
+  runHoldCompletion({
+    vibrate: (ms) => calls.push(ms),
+    reducedMotion: false,
+    entering: false,
+    startFlourish: (e) => flourishes.push(e),
+  })
+  assert.deepEqual(calls, [HOLD_HAPTIC_EXIT_MS], 'the lighter EXIT haptic (8)')
+  assert.deepEqual(flourishes, [false], 'the snap starts once, entering=false')
+})
+
+test('reduced motion SKIPS the spring/snap but KEEPS the haptic', () => {
+  const calls = []
+  let flourishes = 0
   runHoldCompletion({
     vibrate: (ms) => calls.push(ms),
     reducedMotion: true,
-    startPulse: () => { pulses += 1 },
+    entering: true,
+    startFlourish: () => { flourishes += 1 },
   })
-  assert.deepEqual(calls, [HOLD_HAPTIC_MS], 'haptic still fires under reduced motion')
-  assert.equal(pulses, 0, 'the motion pulse is skipped')
+  assert.deepEqual(calls, [HOLD_HAPTIC_ENTER_MS], 'haptic still fires under reduced motion')
+  assert.equal(flourishes, 0, 'the spring/snap motion is skipped')
 })
 
 test('runHoldCompletion is a graceful no-op where the Vibration API is absent (iOS)', () => {
-  let pulses = 0
+  let flourishes = 0
   // No `vibrate` provided — feature-detected absent; must not throw.
   assert.doesNotThrow(() => runHoldCompletion({
-    vibrate: undefined, reducedMotion: false, startPulse: () => { pulses += 1 },
+    vibrate: undefined, reducedMotion: false, entering: true, startFlourish: () => { flourishes += 1 },
   }))
-  assert.equal(pulses, 1, 'the visual pulse still plays without haptics')
+  assert.equal(flourishes, 1, 'the spring still plays without haptics')
+})
+
+// ── Living halo drift (pure, allocation-free) ───────────────────────────────
+
+test('haloFrame drifts within bounds, reuses its out object, and never repeats', () => {
+  const out = {}
+  const r = haloFrame(1234, out)
+  assert.equal(r, out, 'writes into the SAME object (no per-frame allocation)')
+  // Sample a spread of times; every field stays in a sane, subtle range.
+  for (const t of [0, 500, 1500, 9000, 123456]) {
+    const f = haloFrame(t, out)
+    assert.ok(f.scale > 0.9 && f.scale < 1.1, `scale in range @${t}`)
+    assert.ok(Math.abs(f.x) <= 4 && Math.abs(f.y) <= 4, `offset small @${t}`)
+    assert.ok(f.opacity > 0.6 && f.opacity <= 1, `opacity in range @${t}`)
+  }
+  // Irrational-ratio sines: two far-apart times are not identical (no loop).
+  const a = haloFrame(1000, {})
+  const b = haloFrame(1000 + 60000, {})
+  assert.notDeepEqual(a, b, 'the glow does not visibly loop')
 })

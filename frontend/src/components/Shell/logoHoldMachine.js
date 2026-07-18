@@ -48,20 +48,45 @@ export function decidePointerMove(dx, dy) {
   return 'continue'
 }
 
-// A single short haptic pulse on completion.
-export const HOLD_HAPTIC_MS = 12
+// CHARGE-model haptics. The hold ramps two light ticks, then completion fires the
+// heavier confirmation (12 entering builder, 8 snapping back to single).
+export const HOLD_HAPTIC_ENTER_MS = 12
+export const HOLD_HAPTIC_EXIT_MS = 8
+// Progress fractions at which the ramp ticks fire (once each per hold), and their
+// short pulse lengths.
+export const RAMP_TICK_1 = 0.5
+export const RAMP_TICK_2 = 0.85
+export const RAMP_TICK_1_MS = 4
+export const RAMP_TICK_2_MS = 5
 
-// Completion feedback for an entered/exited hold, with injected deps so it is DOM-
-// and React-free (and unit-testable). Fired EXACTLY once per completed hold — the
+// Completion feedback for a charged hold, with injected deps so it is DOM- and
+// React-free (and unit-testable). Fired EXACTLY once per completed hold — the
 // caller invokes it only from the completion path, never on a cancel.
-//   - HAPTIC always fires where the Vibration API exists (a single short pulse).
-//     iOS Safari has NO web Vibration API, so `vibrate` is simply absent there and
-//     this is a graceful no-op — feature-detected, no polyfill, no fake fallback.
-//   - the outward accent PULSE is motion, so it is SKIPPED under reduced motion;
-//     the haptic is NOT skipped. The persistent state (twisted logo + tinted
-//     wordmark) and the room flourish are the durable confirmation, so there is
+//   - HAPTIC always fires where the Vibration API exists (12 entering builder, 8
+//     exiting). iOS Safari has NO web Vibration API, so `vibrate` is simply absent
+//     and this is a graceful no-op — feature-detected, no polyfill.
+//   - the logo SPRING/SNAP is motion, SKIPPED under reduced motion (the haptic is
+//     not). The persistent state (180° twisted logo + tinted wordmark + living
+//     halo) plus the card-deal/pane-out are the durable confirmation, so there is
 //     deliberately NO toast or text label.
-export function runHoldCompletion({ vibrate, reducedMotion, startPulse }) {
-  if (typeof vibrate === 'function') vibrate(HOLD_HAPTIC_MS)
-  if (!reducedMotion && typeof startPulse === 'function') startPulse()
+export function runHoldCompletion({ vibrate, reducedMotion, entering, startFlourish }) {
+  if (typeof vibrate === 'function') vibrate(entering ? HOLD_HAPTIC_ENTER_MS : HOLD_HAPTIC_EXIT_MS)
+  if (!reducedMotion && typeof startFlourish === 'function') startFlourish(entering)
+}
+
+// The living halo's drift, as a PURE function of time so its motion is unit-
+// testable and allocation-free at the call site (the rAF loop reuses one object).
+// Two summed sines at IRRATIONAL frequency ratios never repeat, so the glow never
+// looks looped. Returns normalized drift the CSS composes: scale ~[0.94,1.06],
+// offset in px, and an opacity multiplier ~[0.7,1].
+const HALO_F1 = 0.00037 // rad/ms  (~2.7s)
+const HALO_F2 = 0.00061 * Math.SQRT2 // irrational ratio to F1
+export function haloFrame(tMs, out = {}) {
+  const a = Math.sin(tMs * HALO_F1)
+  const b = Math.sin(tMs * HALO_F2 + 1.7)
+  out.scale = 1 + 0.06 * (0.6 * a + 0.4 * b)
+  out.x = 3.2 * b
+  out.y = 3.2 * a
+  out.opacity = 0.85 + 0.15 * (0.5 * a + 0.5 * b)
+  return out
 }

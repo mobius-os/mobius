@@ -19,6 +19,31 @@
      — via the `.workspace--resizing` root class Shell/WorkspaceChrome toggle. */
   transition: top 180ms ease-out, left 180ms ease-out,
     width 180ms ease-out, height 180ms ease-out;
+  /* Entry CARD-DEAL flourish (replaces the divider-draw): whenever a wrapper
+     becomes a tiled pane — a builder-mode enter, a drop that unfolds the parked
+     layout, or a split — it deals in from the right with a brief lift (shadow +
+     radius) and settles flush. The rects settle on the 180ms transition above, so
+     the deal + settle read as one gesture. Plays only on class-apply (a resize
+     keeps --paned, so it never replays). Reduced-motion drops it (below). */
+  animation: shell-pane-deal 400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes shell-pane-deal {
+  from {
+    transform: translateX(18px);
+    opacity: 0.5;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+    border-radius: 10px;
+  }
+  60% { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+    border-radius: 0;
+  }
+}
+.workspace--resizing .shell__view--paned {
+  animation: none; /* a live resize must not re-deal each frame */
 }
 .workspace--resizing .shell__view--paned,
 .workspace--resizing .workspace__strip,
@@ -109,18 +134,6 @@
   background: var(--border-light);
   border-radius: 2px;
   transition: background 120ms ease, width 120ms ease, height 120ms ease;
-  /* Entry/exit ROOM FLOURISH (design item 5): a divider draws in with a brief
-     accent flash whenever the tiled chrome mounts — a hold/keyboard/swipe mode
-     enter, a drop that unfolds panes, or a split — then relaxes to the resting
-     hairline. The rects settle on the existing 180ms .shell__view--paned
-     transitions, so the two read as one "the room assembles" gesture. Orientation
-     -agnostic (opacity + accent flash, no transform). Reduced-motion drops it. */
-  animation: workspace-divider-draw 220ms ease-out;
-}
-@keyframes workspace-divider-draw {
-  0% { opacity: 0.15; background: var(--accent); }
-  55% { opacity: 1; background: var(--accent); }
-  100% { opacity: 1; }
 }
 .workspace__divider--v .workspace__divider-bar { width: 1px; height: 100%; }
 .workspace__divider--h .workspace__divider-bar { height: 1px; width: 100%; }
@@ -461,7 +474,7 @@
   .workspace__drop-preview { transition: none; }
   .workspace__drop-preglow { transition: none; }
   .workspace__coachmark { animation: none; }
-  /* No layout-commit bloom under reduced motion. */
-  .shell__view--paned,
+  /* No layout-commit bloom and no card-deal under reduced motion. */
+  .shell__view--paned { transition: none; animation: none; }
   .workspace__strip { transition: none; }
 }

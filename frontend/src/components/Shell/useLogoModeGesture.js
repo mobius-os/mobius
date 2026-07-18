@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   HOLD_MS, decidePointerMove, isSwipeRight, movedBeyondSlop, holdComplete,
-  runHoldCompletion,
+  runHoldCompletion, RAMP_TICK_1, RAMP_TICK_2, RAMP_TICK_1_MS, RAMP_TICK_2_MS,
 } from './logoHoldMachine.js'
 
 // Builder-mode activation, hosted on the TOP-LEFT logo cluster (owner placement):
@@ -10,11 +10,11 @@ import {
 // (open the drawer) is UNCHANGED — instant, no window, no timer on the tap path.
 // Builder mode is entered/exited by a deliberate second gesture on the same mark:
 //
-//   - HOLD ~450ms (touch OR mouse press-and-hold): a ring fills around the mark
-//     (a --hold-progress CSS var driven by a rAF loop → conic-gradient); on
-//     completion the mode flips with a haptic pulse + an outward accent pulse.
-//     An early release is just a tap → drawer; movement beyond a small slop
-//     cancels cleanly.
+//   - HOLD ~450ms (touch OR mouse press-and-hold): the CHARGE model — the logo
+//     itself COMPRESSES (scale driven by the --hold-progress rAF var), two light
+//     haptic ramp ticks fire at 50% and 85%, and on completion the mode flips with
+//     a heavier haptic + the logo springs (enter) or snaps (exit) back. An early
+//     release is just a tap → drawer; movement beyond a small slop cancels cleanly.
 //   - a touch SWIPE-RIGHT flips the mode too; its slop suppresses the trailing
 //     click so a swipe never also toggles the drawer.
 //
@@ -34,12 +34,18 @@ export function prefersReducedMotion() {
   } catch { return false }
 }
 
-export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true, drawerOpen = false }) {
+export function useLogoModeGesture({
+  onToggleMode, brandRef, enabled = true, drawerOpen = false, builderModeActive = false,
+}) {
   const [holding, setHolding] = useState(false)
-  const [pulsing, setPulsing] = useState(false)
+  // '' | 'igniting' (spring into builder) | 'snapping' (snap back to single) — the
+  // one-shot completion animation class, cleared on animationend.
+  const [flourish, setFlourish] = useState('')
   // { t, x, y, pointerId } while a press is active; null between presses.
   const pressRef = useRef(null)
   const rafRef = useRef(0)
+  // Which ramp ticks (0.5, 0.85) have fired this hold, so each buzzes once.
+  const rampRef = useRef({ t1: false, t2: false })
   // Set when a POINTER gesture (completed hold, swipe, or drag) consumed the
   // activation, so the trailing compatibility click does NOT also toggle the
   // drawer. Only ever read for a pointer click (detail >= 1) — a keyboard click
@@ -73,32 +79,49 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true, dra
     if (suppressClick) suppressClickRef.current = true
   }, [stopRaf, writeProgress, brandRef])
 
+  // Stable feature-detected haptic — a graceful no-op where the Vibration API is
+  // absent (iOS Safari). Stable identity so it doesn't churn the rAF callbacks.
+  const vibrateFn = useCallback((ms) => {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      try { navigator.vibrate(ms) } catch { /* unsupported */ }
+    }
+  }, [])
+
   const completeHold = useCallback(() => {
     if (!pressRef.current) return
     writeProgress(1)
+    // Direction is decided by the CURRENT mode: entering builder springs + buzzes
+    // 12; snapping back to single snaps + buzzes 8. The card-deal / pane-out are
+    // CSS driven by the mode class change, not here.
+    const entering = !builderModeActive
     runHoldCompletion({
-      vibrate: (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function')
-        ? (ms) => navigator.vibrate(ms)
-        : undefined,
+      vibrate: vibrateFn,
       reducedMotion: prefersReducedMotion(),
-      // Restart the outward accent pulse (clear-then-set) so a repeated hold
-      // re-plays it; the class is cleared on its animationend.
-      startPulse: () => { setPulsing(false); requestAnimationFrame(() => setPulsing(true)) },
+      entering,
+      // Restart the one-shot spring/snap (clear-then-set); cleared on animationend.
+      startFlourish: (isEntering) => {
+        setFlourish('')
+        requestAnimationFrame(() => setFlourish(isEntering ? 'igniting' : 'snapping'))
+      },
     })
     onToggleMode?.()
     endPress({ suppressClick: true })
-  }, [writeProgress, onToggleMode, endPress])
+  }, [writeProgress, onToggleMode, endPress, builderModeActive, vibrateFn])
 
-  // The rAF loop drives BOTH the ring fill and completion — no setTimeout anywhere,
-  // so the tap path carries zero latency and the hold cannot leak a timer.
+  // The rAF loop drives the compress + ramp ticks + completion — no setTimeout
+  // anywhere, so the tap path carries zero latency and the hold cannot leak a timer.
   const tick = useCallback(() => {
     const press = pressRef.current
     if (!press) return
     const p = (performance.now() - press.t) / HOLD_MS
+    // Light ramp ticks, once each, as the charge fills.
+    const ramp = rampRef.current
+    if (!ramp.t1 && p >= RAMP_TICK_1) { ramp.t1 = true; vibrateFn?.(RAMP_TICK_1_MS) }
+    if (!ramp.t2 && p >= RAMP_TICK_2) { ramp.t2 = true; vibrateFn?.(RAMP_TICK_2_MS) }
     if (p >= 1) { completeHold(); return }
     writeProgress(p)
     rafRef.current = requestAnimationFrame(tick)
-  }, [completeHold, writeProgress])
+  }, [completeHold, writeProgress, vibrateFn])
 
   const onPointerDown = useCallback((e) => {
     if (!enabled) return
@@ -106,6 +129,7 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true, dra
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
     pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY, pointerId: e.pointerId }
+    rampRef.current = { t1: false, t2: false } // fresh charge → re-arm the ramp ticks
     setHolding(true)
     writeProgress(0)
     stopRaf()
@@ -173,8 +197,8 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true, dra
     return true
   }, [])
 
-  // Clears the one-shot completion pulse when its ::after animation ends.
-  const onAnimationEnd = useCallback(() => { setPulsing(false) }, [])
+  // Clears the one-shot spring/snap class when its animation ends.
+  const onAnimationEnd = useCallback(() => { setFlourish('') }, [])
 
   // A drawer-open from ANY path (plain Enter, a queued open, a sibling) while a
   // hold is live cancels it — otherwise the rAF keeps ticking and later flips the
@@ -188,7 +212,7 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true, dra
   useEffect(() => () => { stopRaf() }, [stopRaf])
 
   return {
-    holding, pulsing,
+    holding, flourish,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onContextMenu,
     consumeSuppressedClick, onAnimationEnd,
   }
