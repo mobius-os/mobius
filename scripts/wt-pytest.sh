@@ -36,7 +36,23 @@ else
 fi
 
 VENV="$MAIN/backend/.venv/bin/python"
-ESB_DIR="$MAIN/frontend/node_modules/.bin"
+WORKTREE_NODE_MODULES="$ROOT/frontend/node_modules"
+SHARED_NODE_MODULES="$MAIN/frontend/node_modules"
+
+if [ -d "$WORKTREE_NODE_MODULES" ] \
+    && (cd "$ROOT/frontend" && npm ls --depth=0 >/dev/null 2>&1); then
+  NODE_MODULES="$WORKTREE_NODE_MODULES"
+elif [ "$ROOT" != "$MAIN" ] \
+    && cmp -s "$ROOT/frontend/package-lock.json" "$MAIN/frontend/package-lock.json" \
+    && [ -d "$SHARED_NODE_MODULES" ] \
+    && (cd "$MAIN/frontend" && npm ls --depth=0 >/dev/null 2>&1); then
+  NODE_MODULES="$SHARED_NODE_MODULES"
+else
+  echo "wt-pytest: no complete frontend dependencies match this worktree" >&2
+  echo "  install them with: (cd \"$ROOT/frontend\" && npm ci)" >&2
+  exit 1
+fi
+ESB_DIR="$NODE_MODULES/.bin"
 
 if [ ! -x "$VENV" ]; then
   echo "wt-pytest: no shared venv at $VENV" >&2
@@ -53,6 +69,9 @@ fi
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
+# NODE_PATH exposes the same shared dependency tree to Node subprocesses whose
+# scripts live in the worktree; PATH alone finds binaries but cannot satisfy a
+# script-level require('acorn') or similar package import.
 # GIT_CEILING_DIRECTORIES="$ROOT" stops git's upward repo discovery at this
 # checkout's root, so an app-git test (.pm/096) can't walk out of its tmpdir
 # and mutate this checkout's .git (flip core.bare / append "Initialize app
@@ -61,5 +80,6 @@ cd "$ROOT/backend" || exit 1
 exec env \
   GIT_CEILING_DIRECTORIES="$ROOT" \
   PATH="$ESB_DIR:${PATH:-}" \
+  NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
   "$VENV" -m pytest -p no:cacheprovider "$@"
