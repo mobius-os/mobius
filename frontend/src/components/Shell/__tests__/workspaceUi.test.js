@@ -261,8 +261,10 @@ test('the bar toggle never opens or closes the drawer (pure state flip)', () => 
   assert.match(viewModeToggleSrc, /onClick=\{onToggle\}/)
   assert.doesNotMatch(viewModeToggleSrc, /onClose[=(?]/)
   assert.doesNotMatch(viewModeToggleSrc, /openDrawer|closeDrawer/)
-  // And Shell's toggle handler is a pure dispatch — it must not touch the drawer.
-  const handler = shell.match(/const handleToggleViewMode = useCallback\([\s\S]*?\)\n/)?.[0] || ''
+  // And Shell's toggle handler flips the mode + converts the Settings surface
+  // (overlay <-> builder tab) — but it must not touch the drawer.
+  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
 })

@@ -203,7 +203,8 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, openDrawer, closeDrawer,
-    navTo, backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
+    navTo, convertSettingsForModeTransition,
+    backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
     appNavPush, appNavPop, appNavReset, appNavForwardResult,
@@ -1022,10 +1023,14 @@ export default function Shell() {
   // dragging is disabled (single-mode + multi-pane tree), the drag hook's
   // onDragBlocked calls through it so the toggle shakes in place.
   const viewModeVibrateRef = useRef(null)
-  const handleToggleViewMode = useCallback(
-    () => dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' }),
-    [dispatchWorkspace],
-  )
+  const handleToggleViewMode = useCallback(() => {
+    // Convert the Settings surface across the flip with NO history entry (overlay
+    // <-> builder tab) BEFORE the pure view flip, so a builder session is never
+    // stranded behind the takeover overlay and single mode never shows a paned
+    // Settings. A no-op when Settings isn't involved (design: mode conversion).
+    convertSettingsForModeTransition()
+    dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
+  }, [convertSettingsForModeTransition, dispatchWorkspace])
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,

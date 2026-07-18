@@ -208,11 +208,21 @@ export default function useNavigation({
     restored,
     storedChatId: safeStoredChatId(),
   }))
-  // Settings is the ONLY view state navigation owns globally (§1). It is a full-
-  // workspace overlay: `activeChatId`/`activeAppId` still describe the focused
-  // pane's active tab behind it, but every visibility consumer gates on
-  // `activeView`.
-  const [settingsOpen, setSettingsOpen] = useState(initialNav.view === 'settings')
+  // Settings is the ONLY view state navigation owns globally (§1). It is the
+  // full-workspace TAKEOVER overlay used in single mode (and when the builder
+  // flag is off); in builder mode Settings is a pane TAB instead, so the overlay
+  // stays closed and the tab drives the surface. `settingsOpen` therefore means
+  // strictly "the takeover overlay is up" — NOT "the focused content is Settings"
+  // (a builder tab is that without the overlay). The render tells the two apart
+  // via this flag alone, never via `activeView` (design: structural separation).
+  //
+  // A reload/return-to-settings opens the overlay ONLY when Settings is NOT a
+  // builder tab; in builder mode the persisted blob restores the Settings tab and
+  // the boot effect re-opens it, so the overlay must start closed.
+  const [settingsOpen, setSettingsOpen] = useState(
+    initialNav.view === 'settings'
+    && !(paneModel.BUILDER_SETTINGS_ENABLED && workspace.viewMode === 'panes'),
+  )
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   // ── Derived legacy triple (the projection, design §1) ────────────────────
@@ -673,6 +683,72 @@ export default function useNavigation({
     retireAppHistory(appId, 'reset')
   }, [retireAppHistory])
 
+  // The ONE mode-conditional Settings destination (design: branch in the nav
+  // adapter, not the reducer or the render). Every Settings entry point —
+  // navTo('settings'), Back/Forward restore, and the reload-return boot — routes
+  // through here so the tab-vs-overlay choice lives in exactly one place:
+  //   - builder enabled + viewMode 'panes' → close the takeover overlay and open
+  //     the canonical Settings tab in the target pane (dedup focuses an existing
+  //     one, giving single-instance behaviour);
+  //   - single mode / flag off → today's full-screen takeover overlay.
+  // Refs advance synchronously alongside the setState so a second nav in the same
+  // React batch snapshots the correct overlay flag (mirrors navTo's own pattern).
+  const applySettingsDestination = useCallback((paneId) => {
+    const ws = workspaceStateRef.current.ws
+    if (paneModel.BUILDER_SETTINGS_ENABLED && ws.viewMode === 'panes') {
+      const targetPaneId = (typeof paneId === 'string' && ws.panes[paneId])
+        ? paneId
+        : ws.focusedPaneId
+      setSettingsOpen(false)
+      settingsOpenRef.current = false
+      dispatchWorkspace({
+        type: 'OPEN_TAB', paneId: targetPaneId, tab: tabModel.settingsTab(), activate: true,
+      })
+    } else {
+      setSettingsOpen(true)
+      settingsOpenRef.current = true
+    }
+  }, [dispatchWorkspace, workspaceStateRef])
+
+  // Convert the Settings surface across a view-mode flip WITHOUT adding a history
+  // entry (design: mode-transition conversion). Called by the shell's toggle just
+  // before it dispatches the pure SET_VIEW_MODE flip, reading the CURRENT mode to
+  // derive the destination:
+  //   - entering builder (→ 'panes') while the takeover overlay is up: convert it
+  //     to the Settings tab in the focused pane (no overlay exists in builder);
+  //   - entering single (→ 'single') while Settings is a tab: remove that
+  //     builder-only tab, and if it was the visible (focused-active) surface keep
+  //     Settings on screen as the takeover overlay.
+  // Otherwise the header toggle could strand a builder session behind the overlay
+  // (or leave a meaningless paned Settings under single mode). Flag-gated: with
+  // the builder flag off there is no Settings tab to convert either way.
+  const convertSettingsForModeTransition = useCallback(() => {
+    if (!paneModel.BUILDER_SETTINGS_ENABLED) return
+    const ws = workspaceStateRef.current.ws
+    const enteringBuilder = ws.viewMode !== 'panes'
+    if (enteringBuilder) {
+      if (settingsOpenRef.current) {
+        setSettingsOpen(false)
+        settingsOpenRef.current = false
+        dispatchWorkspace({
+          type: 'OPEN_TAB', paneId: ws.focusedPaneId, tab: tabModel.settingsTab(), activate: true,
+        })
+      }
+      return
+    }
+    // Entering single mode.
+    if (!paneModel.paneOf(ws, tabModel.SETTINGS_TAB_KEY)) return
+    const wasVisible = ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
+    // reason:'deleted' removes the tab AND clears the undo slot with no toast: the
+    // Settings tab is a regenerable mode artifact (the flip back re-creates it),
+    // not a user-closed tab, so it must not leave a "Closed tab · Undo" behind.
+    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.SETTINGS_TAB_KEY, reason: 'deleted' })
+    if (wasVisible) {
+      setSettingsOpen(true)
+      settingsOpenRef.current = true
+    }
+  }, [dispatchWorkspace, workspaceStateRef])
+
   function navTo(view, opts = {}) {
     // App-sentinels from other apps stay in browser history — each is still a
     // valid back-target for its owner, routed by its tag when consumed. An
@@ -741,9 +817,9 @@ export default function useNavigation({
     // pane must not close Settings, but a chat/canvas nav always does. The refs
     // advance synchronously alongside the state setter so a SECOND navigation in
     // the same React batch snapshots the correct overlay (§1.3.2e, §5.3.2).
+    // Settings routes through the mode-conditional destination (tab or overlay).
     if (view === 'settings') {
-      setSettingsOpen(true)
-      settingsOpenRef.current = true
+      applySettingsDestination(targetPaneId)
     } else {
       setSettingsOpen(false)
       settingsOpenRef.current = false
@@ -760,8 +836,10 @@ export default function useNavigation({
     if (!isRestorableRoute(route)) return
     navigationEpochRef.current += 1
     if (route.view === 'settings') {
-      setSettingsOpen(true)
-      settingsOpenRef.current = true
+      // Same mode-conditional destination as a fresh nav: builder restores the
+      // Settings tab into the route's pane hint (dedup follows a moved tab),
+      // single/flag-off restores the takeover overlay.
+      applySettingsDestination(route.paneId)
       return
     }
     const ws = workspaceStateRef.current.ws
@@ -807,7 +885,7 @@ export default function useNavigation({
     }
     setSettingsOpen(false)
     settingsOpenRef.current = false
-  }, [dispatchWorkspace, workspaceStateRef])
+  }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
   useEffect(() => {
     let bootPaneId = workspaceStateRef.current.ws.focusedPaneId
@@ -841,6 +919,19 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('app', initialNav.appId))
       } else if (!blobValid && initialNav.chatId != null) {
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
+      } else if (
+        initialNav.view === 'settings'
+        && paneModel.BUILDER_SETTINGS_ENABLED
+        && workspaceStateRef.current.ws.viewMode === 'panes'
+      ) {
+        // Reload/return-to-settings in builder mode: make the Settings tab the
+        // focused surface. Idempotent when a valid blob already restored it
+        // (OPEN_TAB dedups); NECESSARY when the blob was absent/invalid, where the
+        // flat seed carries no Settings tab and the overlay flag started closed —
+        // without this, builder return-to-settings would show nothing. Single /
+        // flag-off return keeps the initial overlay flag instead.
+        applySettingsDestination(bootPaneId)
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
 
       // Reset URL to /shell/ once on mount (must match the manifest scope). The
@@ -1333,6 +1424,7 @@ export default function useNavigation({
     openDrawer,
     closeDrawer,
     navTo,
+    convertSettingsForModeTransition,
     backFiredRef,
     drawerPushedRef,
     drawerOpenRef,
