@@ -228,6 +228,17 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
 const viewModeToggleSrc = readFileSync(new URL('../ViewModeToggle.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 
+test('the docked sidebar offsets only direct shell layout rows', () => {
+  // Pane strips reuse .shell__tabstrip inside .shell__content. A descendant
+  // selector would apply the 320px sidebar margin twice and detach every strip
+  // from the pane rectangle that owns it.
+  assert.match(shellCss, /\.shell--drawer-docked > \.shell__tabstrip,/)
+  assert.match(shellCss, /\.shell--drawer-docked > \.shell__content/)
+  assert.match(shellCss, /\.shell--immersive\.shell--drawer-docked > \.shell__tabstrip,/)
+  assert.match(shellCss, /\.shell--immersive\.shell--drawer-docked > \.shell__content/)
+  assert.doesNotMatch(shellCss, /\.shell--drawer-docked \.shell__tabstrip/)
+})
+
 test('the view-mode toggle is rendered in the shell top bar, in line with the logo, flag-gated', () => {
   // It renders inside .shell__bar (the brand/logo cluster), flag-gated on splits.
   assert.match(shell, /<header className="shell__bar"/)
