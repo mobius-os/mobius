@@ -48,6 +48,11 @@ def parse_json(raw: bytes):
     return json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
   except (UnicodeDecodeError, ValueError) as exc:
     raise ArtifactDataError("Value must be valid JSON.") from exc
+  except RecursionError as exc:
+    # Deeply nested input exhausts the decoder's stack. RecursionError is a
+    # RuntimeError, so without this it escapes as an unhandled 500 instead of
+    # the 400 every other malformed body gets.
+    raise ArtifactDataError("Value is nested too deeply.") from exc
 
 
 def artifact_file_path(

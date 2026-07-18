@@ -607,3 +607,58 @@ def test_public_data_rejects_symlink_and_oversized_file(client, auth):
   assert client.get(
     f"/api/published-sites/{token}/data/huge",
   ).status_code == 404
+
+
+def test_deeply_nested_value_is_rejected_not_a_server_error(client, auth):
+  """A nested body must 400 like other malformed JSON, never 500.
+
+  json.loads raises RecursionError (a RuntimeError, not a ValueError) on deep
+  nesting, so it would otherwise escape the decoder's except clause.
+  """
+  app_id = _create_app(client, auth)
+  payload = "[" * 20000 + "]" * 20000
+  response = client.put(
+    f"/api/apps/{app_id}/artifact-data/deep/nested",
+    headers={**auth, "Content-Type": "application/json"},
+    content=payload,
+  )
+  assert response.status_code == 400, response.text
+
+
+def test_artifact_data_write_respects_the_per_app_storage_backstop(
+  client, auth, monkeypatch,
+):
+  """artifact_id is caller-chosen, so per-artifact caps alone bound nothing.
+
+  Inventing namespaces multiplies the 1 MB/100-key caps; the per-app limit
+  every other storage write honors is what actually bounds the tree.
+  """
+  from app import storage_io
+
+  app_id = _create_app(client, auth)
+  assert _write_value(
+    client, auth, app_id, "ns-one", "seed", {"v": "x" * 500},
+  ).status_code == 204
+
+  monkeypatch.setattr(storage_io, "MAX_APP_STORAGE_BYTES", 256)
+  response = _write_value(
+    client, auth, app_id, "ns-two", "overflow", {"v": "y" * 500},
+  )
+  assert response.status_code == 413, response.text
+  assert "per-app limit" in response.text
+
+
+def test_public_data_limiter_buckets_per_client_not_per_url():
+  """slowapi's default key_style='url' folds {key} into the bucket.
+
+  That would hand an unauthenticated caller a fresh 60/minute budget for every
+  key it invents, so this route pins the scope to the view and keys on the
+  client address like the app's other public limiters.
+  """
+  from slowapi.util import get_remote_address
+
+  from app.routes import published as published_mod
+
+  limiter = published_mod._public_data_limiter
+  assert limiter._key_style == "endpoint"
+  assert limiter._key_func is get_remote_address

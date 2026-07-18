@@ -79,9 +79,17 @@ def test_bundled_caddy_mirrors_published_site_sandbox():
     line for line in lines
     if line.startswith("header @publishedSite >Content-Security-Policy ")
   )
-  assert "sandbox allow-scripts" in pub_csp
-  assert "allow-same-origin" not in pub_csp
-  assert "default-src" not in pub_csp  # external-asset sites must keep loading
+  # Assert EQUALITY with the origin policy, not just substrings: the whole
+  # point of this pair is that the proxy and the origin send the same thing,
+  # and a substring check would pass while they silently diverged.
+  assert pub_csp == (
+    'header @publishedSite >Content-Security-Policy "'
+    f'{_PUBLISHED_SITE_CSP}"'
+  )
+  assert "sandbox allow-scripts" in _PUBLISHED_SITE_CSP
+  assert "allow-same-origin" not in _PUBLISHED_SITE_CSP
+  # external-asset sites must keep loading
+  assert "default-src" not in _PUBLISHED_SITE_CSP
 
 
 def test_standard_security_headers_present():

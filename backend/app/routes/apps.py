@@ -54,7 +54,13 @@ from app.publication import (
   registry_root,
   replace_publication_record,
 )
-from app.storage_io import atomic_write, delete_content_type_tree, read_capped_body
+from app import storage_io
+from app.storage_io import (
+  app_dir_usage,
+  atomic_write,
+  delete_content_type_tree,
+  read_capped_body,
+)
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
@@ -2987,6 +2993,20 @@ async def artifact_data_value(
     projected = total - old_size + len(value_bytes)
     if projected > MAX_ARTIFACT_TOTAL_BYTES:
       raise HTTPException(413, "Artifact data exceeds the 1 MB quota.")
+    # The per-artifact caps above bound ONE namespace, and artifact_id is
+    # caller-chosen — inventing namespaces would otherwise multiply them
+    # without limit. The per-app backstop every other storage write already
+    # honors is what actually bounds the tree, so charge this write against it
+    # too. Read the cap from the module so a test can shrink it.
+    app_dir = Path(settings.data_dir) / "apps" / str(app_id)
+    app_projected = app_dir_usage(app_dir) - old_size + len(value_bytes)
+    if app_projected > storage_io.MAX_APP_STORAGE_BYTES:
+      raise HTTPException(
+        413,
+        "App storage quota exceeded — this write would bring the app to "
+        f"{app_projected} bytes, over the "
+        f"{storage_io.MAX_APP_STORAGE_BYTES}-byte per-app limit.",
+      )
     atomic_write(file_path, value_bytes)
   return Response(status_code=204)
 

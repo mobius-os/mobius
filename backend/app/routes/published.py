@@ -16,11 +16,12 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import fs_locks
 from app.artifact_data import (
-  ArtifactDataError, artifact_file_path, read_json_file,
+  ArtifactDataError, artifact_file_path, read_json_file, validate_artifact_key,
 )
 from app.config import get_settings
 from app.database import SessionLocal, get_db
@@ -38,11 +39,15 @@ log = logging.getLogger("mobius.published")
 _legacy_warned_tokens: set[str] = set()
 
 
-def _public_token_key(request: Request) -> str:
-  return request.path_params.get("token", "invalid")
-
-
-_public_data_limiter = Limiter(key_func=_public_token_key)
+# Keyed by client address, like every other public limiter in the app, and
+# scoped by VIEW rather than URL. slowapi's default key_style="url" folds the
+# request path into the bucket, so a caller could mint a fresh 60/minute
+# budget just by varying the {key} segment; "endpoint" keeps one bucket per
+# caller across the whole surface. Keying on the token instead would also make
+# every visitor of a shared site fight over a single budget.
+_public_data_limiter = Limiter(
+  key_func=get_remote_address, key_style="endpoint",
+)
 
 
 def _published_root() -> Path:
@@ -119,7 +124,9 @@ async def read_published_artifact_data(
   db: Session = Depends(get_db),
 ):
   """Return one JSON value through a generation-bound public capability."""
-  if not _TOKEN_RE.fullmatch(token or ""):
+  # Reject malformed input before the DB lookups and the per-app storage lock;
+  # this route is unauthenticated, so cheap rejects stay off the hot path.
+  if not _TOKEN_RE.fullmatch(token or "") or not validate_artifact_key(key):
     raise _not_found()
   settings = get_settings()
   record = resolve_active_publication(db, settings, token)
