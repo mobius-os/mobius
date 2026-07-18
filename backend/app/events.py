@@ -44,6 +44,9 @@ EventType = Literal[
   "tool_sources",
   "tool_end",
   "skill_loaded",
+  "task_start",
+  "task_progress",
+  "task_done",
   "question",
   "queued_turn_starting",
   "catch_up_done",
@@ -449,6 +452,47 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     for blk in reversed(assistant_blocks):
       if blk.get("type") == "tool" and blk.get("tool") == "Skill":
         blk["skill"] = skill
+        return True
+    return False
+
+  if event_type in ("task_start", "task_done"):
+    # Subagent observability (card 247): a background Task/Agent sub-task reports
+    # its lifecycle as task_start / task_done, each carrying the tool_use_id of
+    # the parent turn's Task tool call that spawned it. Enrich that block in
+    # place so the persisted transcript carries the chip data for historical
+    # chats (ToolBlock.jsx / SubagentChips read block["subagent"]); the same
+    # events also drive the LIVE chip on the wire. Route-through-the-actor is
+    # implicit: process_event mutates assistant_blocks and returns True, so the
+    # sink's normal PersistTranscript/Finalize path persists it — this never
+    # writes Chat.messages directly (the single-writer guardrail).
+    #
+    # Frozen shape: block["subagent"] = {"<task_id>": {description, status,
+    # summary}} — status is "running" until task_done, then the terminal status
+    # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
+    # per-tick usage/last_tool_name is not worth persisting (it falls through to
+    # `return False` below). Codex has no host Task tool block, so this enriches
+    # Claude turns only. A missing id, or a tool_use_id with no matching block
+    # (unknown), no-ops so a stray event can never append a phantom block.
+    tool_use_id = event.get("tool_use_id")
+    task_id = event.get("task_id")
+    if not tool_use_id or task_id is None:
+      return False
+    for blk in reversed(assistant_blocks):
+      if (blk.get("type") == "tool"
+          and blk.get("tool_use_id") == tool_use_id):
+        subagent = blk.setdefault("subagent", {})
+        entry = subagent.setdefault(str(task_id), {
+          "description": "",
+          "status": "running",
+          "summary": None,
+        })
+        if event_type == "task_start":
+          if event.get("description"):
+            entry["description"] = event["description"]
+          entry["status"] = "running"
+        else:
+          entry["status"] = event.get("status") or "done"
+          entry["summary"] = event.get("summary")
         return True
     return False
 

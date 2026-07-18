@@ -137,6 +137,120 @@ def test_skill_loaded_empty_name_is_noop():
   assert "skill" not in blocks[0]
 
 
+def test_task_start_enriches_matching_task_block():
+  """task_start stamps a running subagent entry on the Task tool block matched
+  by tool_use_id, in the frozen {task_id: {description, status, summary}} shape
+  (card 247)."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "review the diff",
+     "output": "", "status": "running", "tool_use_id": "toolu_1"},
+  ]
+  changed = process_event({
+    "type": "task_start", "task_id": "task_A", "tool_use_id": "toolu_1",
+    "description": "Review the diff for races", "task_type": "general",
+  }, blocks)
+  assert changed
+  assert blocks[0]["subagent"] == {
+    "task_A": {
+      "description": "Review the diff for races",
+      "status": "running",
+      "summary": None,
+    },
+  }
+
+
+def test_task_done_updates_status_and_summary_on_same_block():
+  """task_done flips the entry to its terminal status and lands the summary,
+  keeping the description task_start set."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "review the diff",
+     "output": "", "status": "running", "tool_use_id": "toolu_1"},
+  ]
+  process_event({
+    "type": "task_start", "task_id": "task_A", "tool_use_id": "toolu_1",
+    "description": "Review the diff for races",
+  }, blocks)
+  changed = process_event({
+    "type": "task_done", "task_id": "task_A", "tool_use_id": "toolu_1",
+    "status": "done", "summary": "Found one race in the queue drain.",
+  }, blocks)
+  assert changed
+  assert blocks[0]["subagent"]["task_A"] == {
+    "description": "Review the diff for races",
+    "status": "done",
+    "summary": "Found one race in the queue drain.",
+  }
+
+
+def test_task_done_killed_status_persists():
+  """A task stopped via TaskStop reports "killed"; the terminal status persists
+  verbatim (not normalized to done)."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "long job",
+     "output": "", "status": "running", "tool_use_id": "toolu_9"},
+  ]
+  process_event({
+    "type": "task_start", "task_id": "task_K", "tool_use_id": "toolu_9",
+    "description": "Long job",
+  }, blocks)
+  changed = process_event({
+    "type": "task_done", "task_id": "task_K", "tool_use_id": "toolu_9",
+    "status": "killed", "summary": None,
+  }, blocks)
+  assert changed
+  assert blocks[0]["subagent"]["task_K"]["status"] == "killed"
+  assert blocks[0]["subagent"]["task_K"]["summary"] is None
+
+
+def test_task_done_without_prior_start_still_records_terminal_entry():
+  """task_done arriving with no matching task_start (start dropped) still
+  materializes a full frozen-shape entry so the chip is not left half-built."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "job",
+     "output": "", "status": "running", "tool_use_id": "toolu_5"},
+  ]
+  changed = process_event({
+    "type": "task_done", "task_id": "task_B", "tool_use_id": "toolu_5",
+    "status": "failed", "summary": "boom",
+  }, blocks)
+  assert changed
+  assert blocks[0]["subagent"]["task_B"] == {
+    "description": "",
+    "status": "failed",
+    "summary": "boom",
+  }
+
+
+def test_task_event_unknown_tool_use_id_is_noop():
+  """No tool block matches the tool_use_id → no enrichment, no phantom block."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "job",
+     "output": "", "status": "running", "tool_use_id": "toolu_1"},
+  ]
+  changed = process_event({
+    "type": "task_start", "task_id": "task_X", "tool_use_id": "toolu_MISSING",
+    "description": "orphan",
+  }, blocks)
+  assert changed is False
+  assert "subagent" not in blocks[0]
+  assert len(blocks) == 1
+
+
+def test_task_progress_is_live_only_no_persist():
+  """task_progress never persists — it returns False so no transcript save is
+  triggered and it stamps nothing on the block."""
+  blocks = [
+    {"type": "tool", "tool": "Task", "input": "job",
+     "output": "", "status": "running", "tool_use_id": "toolu_1"},
+  ]
+  changed = process_event({
+    "type": "task_progress", "task_id": "task_A", "tool_use_id": "toolu_1",
+    "last_tool_name": "Read", "usage": {"input_tokens": 10},
+  }, blocks)
+  assert changed is False
+  assert "subagent" not in blocks[0]
+
+
 def test_tool_output_fills_last_running():
   blocks = [
     {"type": "tool", "tool": "Bash", "input": "ls",
