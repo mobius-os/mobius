@@ -79,6 +79,19 @@ def get(chat_id: str) -> "PendingQuestion | None":
   return _pending.get(chat_id)
 
 
+def is_waiting(chat_id: str) -> bool:
+  """Whether a question is still genuinely waiting for an owner answer.
+
+  A resolved or cancelled future can remain in the registry briefly while the
+  provider callback unwinds. That entry is useful to its owning runner, but it
+  must not classify the whole SDK turn as an unbounded human wait: if the
+  provider wedges after receiving the answer, the liveness watchdog still
+  needs to reclaim the turn and its child processes.
+  """
+  pending = _pending.get(chat_id)
+  return pending is not None and not pending.future.done()
+
+
 def claim(chat_id: str) -> "PendingQuestion | None":
   """Atomically removes and returns the pending question for a chat.
 
