@@ -124,8 +124,14 @@ def _make_engine():
     @event.listens_for(eng, "connect")
     def _set_sqlite_pragmas(dbapi_conn, _record):
       cur = dbapi_conn.cursor()
-      cur.execute("PRAGMA journal_mode=WAL")
+      # busy_timeout must come first: journal_mode=WAL takes locks and,
+      # with no busy handler yet installed, fails immediately instead of
+      # waiting when another connection holds them. NullPool opens a
+      # fresh connection per session, so this pragma sequence runs under
+      # load constantly. (True disk exhaustion still fails here — that
+      # cause is owned by the disk-headroom work, not this ordering.)
       cur.execute("PRAGMA busy_timeout=5000")
+      cur.execute("PRAGMA journal_mode=WAL")
       cur.execute("PRAGMA synchronous=FULL")
       cur.close()
   return eng
