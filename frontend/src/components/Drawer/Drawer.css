@@ -76,6 +76,30 @@
   box-shadow: 8px 0 48px rgba(0, 0, 0, 0.5);
 }
 
+/* Semantic desktop mode: Shell owns the breakpoint and only applies this class
+   after any mobile history sentinel has been consumed. Keeping CSS free of a
+   second breakpoint authority prevents a one-frame modal/non-modal mismatch. */
+.drawer--persistent {
+  width: var(--desktop-sidebar-width, 320px);
+  transition: none;
+  will-change: auto;
+  touch-action: auto;
+}
+
+.drawer--persistent.drawer--open {
+  box-shadow: none;
+}
+
+/* A responsive mode switch that is consuming the mobile history sentinel keeps
+   the modal visible but temporarily prevents a second navigation gesture. */
+.drawer--locked {
+  pointer-events: none;
+}
+
+.shell--immersive .drawer--persistent {
+  display: none;
+}
+
 /* Disable the transition while the user is mid-drag so the panel
    follows the finger 1:1; restored on touchend regardless of close. */
 .drawer--dragging { transition: none; }
@@ -286,6 +310,13 @@
    the composer pill's focus halo so the platform reads as a
    single design system. */
 .drawer__item:focus-visible,
+.drawer__more:focus-visible,
+.drawer__menu-item:focus-visible,
+.drawer__menu-confirm-btn:focus-visible,
+.drawer__rename-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .drawer__item-icon {
   flex-shrink: 0;
@@ -586,6 +617,8 @@
    the pulse becomes a steady dot rather than a flashing one. The
    information ("streaming") still surfaces via aria-label + presence. */
 @media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .drawer-overlay { transition: none; }
   .drawer__streaming-dot { animation: none; }
   .drawer__more:active { transform: none; }
 }

@@ -267,6 +267,141 @@ test.describe('Navigation basics', () => {
   })
 })
 
+test.describe('Desktop sidebar navigation', () => {
+  async function setupDesktop(page, open = true) {
+    await page.addInitScript(({ key, value }) => {
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, value)
+    }, {
+      key: 'mobius:desktop-sidebar-open:v1',
+      value: String(open),
+    })
+    await setup(page, { width: 1280, height: 800 })
+  }
+
+  test('28. desktop sidebar reserves workspace width and persists its toggle', async ({ page }) => {
+    await setupDesktop(page)
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    const sidebar = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(sidebar).toBeVisible()
+    await expect(page.locator('.drawer-overlay')).toHaveCount(0)
+    await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
+
+    const geometry = await page.evaluate(() => {
+      const drawer = document.querySelector('#navigation-drawer').getBoundingClientRect()
+      const content = document.querySelector('.shell__content').getBoundingClientRect()
+      return { drawerRight: drawer.right, contentLeft: content.left }
+    })
+    expect(geometry.drawerRight).toBe(320)
+    expect(geometry.contentLeft).toBe(geometry.drawerRight)
+
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect.poll(() => page.evaluate(() => (
+      localStorage.getItem('mobius:desktop-sidebar-open:v1')
+    ))).toBe('false')
+    await expect.poll(() => page.locator('.shell__content').evaluate(
+      element => element.getBoundingClientRect().left,
+    )).toBe(0)
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('29. desktop destinations keep the sidebar open without no-op history edges', async ({ page }) => {
+    await setupDesktop(page)
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const alpha = navigation.getByRole('button', { name: 'Navigation Alpha', exact: true })
+    const beta = navigation.getByRole('button', { name: 'Navigation Beta', exact: true })
+
+    await expect(alpha).toHaveAttribute('aria-current', 'page')
+    await alpha.focus()
+    await expect(alpha).toBeFocused()
+    await expect(alpha).toHaveCSS('outline-style', 'solid')
+    await expect(alpha).toHaveCSS('outline-width', '2px')
+    const initialLength = await page.evaluate(() => history.length)
+    await alpha.click()
+    expect(await page.evaluate(() => history.length)).toBe(initialLength)
+
+    await beta.click()
+    await expect(beta).toHaveAttribute('aria-current', 'page')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const afterBeta = await page.evaluate(() => history.length)
+    expect(afterBeta).toBe(initialLength + 1)
+
+    await beta.click()
+    expect(await page.evaluate(() => history.length)).toBe(afterBeta)
+
+    await page.evaluate(() => history.back())
+    await expect(alpha).toHaveAttribute('aria-current', 'page')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    const settings = navigation.getByRole('button', { name: 'Settings', exact: true })
+    await settings.click()
+    await expect(settings)
+      .toHaveAttribute('aria-current', 'page')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  test('30. widening restores the saved desktop preference, not the mobile modal state', async ({ page }) => {
+    await setupDesktop(page, false)
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await page.setViewportSize({ width: 412, height: 915 })
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.locator('.drawer-overlay')).toBeVisible()
+
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('.drawer-overlay')).toHaveCount(0)
+    await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
+  })
+
+  test('31. breakpoint cleanup stays modal and seeks through phantom history', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('mobius:desktop-sidebar-open:v1', 'true')
+    })
+    await setup(page)
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+
+    await page.evaluate(() => history.pushState(null, ''))
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    await page.evaluate(() => {
+      const originalBack = history.back.bind(history)
+      history.back = () => {
+        window.__releaseBreakpointBack = () => {
+          history.back = originalBack
+          originalBack()
+        }
+      }
+    })
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.waitForFunction(() => typeof window.__releaseBreakpointBack === 'function')
+
+    // Desktop mode is requested, but the still-open mobile sentinel retains its
+    // complete modal boundary until the traversal is allowed to finish.
+    await expect(page.locator('.drawer-overlay')).toBeVisible()
+    await expect(page.locator('.shell__content')).toHaveAttribute('inert', '')
+
+    await page.evaluate(() => window.__releaseBreakpointBack())
+    await expect(page.locator('.drawer.drawer--persistent')).toBeVisible()
+    await expect(page.locator('.drawer-overlay')).toHaveCount(0)
+    await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
+    await expect.poll(() => page.evaluate(() => history.state?.__mobiusNav)).toBe(true)
+
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Settings', exact: true }))
+      .toHaveAttribute('aria-current', 'page')
+  })
+})
+
 test.describe('Back button edge cases', () => {
   test('5. Multiple navigations — back pops in LIFO order', async ({ page }) => {
     await setup(page)
@@ -760,6 +895,29 @@ test.describe('Drawer close paths converge through handleBack', () => {
   // (`if (drawerOpenRef && drawerPushedRef) close drawer; return`)
   // prevents the navStack pop. These tests lock in that contract for
   // each close path independently.
+
+  test('concurrent close requests issue one history traversal', async ({ page }) => {
+    await setup(page)
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    const calls = await page.evaluate(() => {
+      let count = 0
+      history.back = () => { count += 1 }
+      const overlay = document.querySelector('.drawer-overlay')
+      const event = () => new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        isPrimary: true,
+        pointerId: 1,
+      })
+      overlay.dispatchEvent(event())
+      overlay.dispatchEvent(event())
+      return count
+    })
+    expect(calls).toBe(1)
+  })
 
   test('22. Pointer-down on overlay closes drawer (does not navigate)', async ({ page }) => {
     await setup(page)

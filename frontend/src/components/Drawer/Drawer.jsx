@@ -23,6 +23,8 @@ const EMPTY_SET = new Set()
 
 export default function Drawer({
   open,
+  persistent = false,
+  interactionLocked = false,
   onClose,
   apps,
   activeView,
@@ -242,6 +244,10 @@ export default function Drawer({
   // drawer was dismissed (Escape, overlay tap, swipe).
   const previousFocusRef = useRef(null)
   useEffect(() => {
+    if (persistent) {
+      previousFocusRef.current = null
+      return
+    }
     if (open) {
       previousFocusRef.current = document.activeElement
       // Defer to next frame so the drawer's CSS transition has begun
@@ -257,11 +263,11 @@ export default function Drawer({
         previousFocusRef.current = null
       }
     }
-  }, [open])
+  }, [open, persistent])
 
   // Escape key closes the drawer while it is open.
   useEffect(() => {
-    if (!open) return
+    if (!open || persistent || interactionLocked) return
     function onKeyDown(e) {
       if (e.key === 'Escape') {
         e.stopPropagation()
@@ -270,7 +276,7 @@ export default function Drawer({
     }
     document.addEventListener('keydown', onKeyDown, { capture: true })
     return () => document.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [open, onClose])
+  }, [open, persistent, interactionLocked, onClose])
 
   // Swipe-left-to-close. Mirror of the mobius-design-iter pattern:
   // touchstart captures origin, touchmove drags the panel 1:1 with
@@ -319,6 +325,11 @@ export default function Drawer({
   }
 
   function onDrawerClickCapture(e) {
+    if (interactionLocked) {
+      e.stopPropagation()
+      e.preventDefault()
+      return
+    }
     if (!suppressGeneratedClickRef.current) return
     const generatedByTouch = isGeneratedTouchClick(e)
     clearClickSuppression()
@@ -333,22 +344,23 @@ export default function Drawer({
   // a layout effect (before paint). Otherwise the inline translateX can keep a
   // now-inert drawer visibly stranded over the live app forever.
   useLayoutEffect(() => {
-    if (open) return
+    if (open && !persistent) return
     clearClickSuppression()
     clearDrawerGestureStyles(drawerRef.current)
     dragStart.current = null
     swipingRef.current = false
-  }, [open])
+  }, [open, persistent])
 
   // Keep the scrim hit-testable while the panel is sliding away. `open` flips
   // false at the START of the 250ms close transition; dropping pointer-events
   // in that same render exposes the chat/app while drawer pixels are still on
   // screen. transitionend is the normal release, with a timeout fallback for
   // reduced-motion or an interrupted compositor transition.
-  const [scrimBlocking, setScrimBlocking] = useState(open)
+  const [scrimBlocking, setScrimBlocking] = useState(open && !persistent)
   useLayoutEffect(() => {
-    if (open) setScrimBlocking(true)
-  }, [open])
+    if (open && !persistent) setScrimBlocking(true)
+    if (persistent) setScrimBlocking(false)
+  }, [open, persistent])
   useEffect(() => {
     if (open || !scrimBlocking) return undefined
     const timer = setTimeout(
@@ -367,7 +379,7 @@ export default function Drawer({
     // Usually pointerdown already cleared this. Keep the touch-level clear for
     // WebKit and for touch-only browser regression sequences.
     clearClickSuppression()
-    if (!open || e.touches.length !== 1) return
+    if (!open || persistent || interactionLocked || e.touches.length !== 1) return
     // A row is being lifted out of the drawer — the drag controller owns this
     // gesture; swipe-to-close stands down (design §3.1).
     if (dragActiveRef?.current) { dragStart.current = null; return }
@@ -463,10 +475,12 @@ export default function Drawer({
 
   return (
     <>
-      <div
-        className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
-        onPointerDown={handleOverlayPointerDown}
-      />
+      {!persistent && (
+        <div
+          className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
+          onPointerDown={handleOverlayPointerDown}
+        />
+      )}
       {/* React 19 reflects the boolean `inert` prop to the boolean
           attribute (present when true, absent when false), so a closed
           drawer is genuinely inert. The old `!open ? '' : undefined` form
@@ -476,7 +490,8 @@ export default function Drawer({
       <nav
         ref={drawerRef}
         id="navigation-drawer"
-        className={`drawer ${open ? 'drawer--open' : ''}`}
+        className={`drawer${persistent ? ' drawer--persistent' : ''}${interactionLocked ? ' drawer--locked' : ''}${open ? ' drawer--open' : ''}`}
+        aria-label="Primary navigation"
         aria-hidden={!open}
         inert={!open}
         tabIndex={-1}
@@ -600,6 +615,7 @@ export default function Drawer({
             <button
               className={`drawer__item ${activeView === 'settings' ? 'drawer__item--active' : ''}`}
               aria-label="Settings"
+              aria-current={activeView === 'settings' ? 'page' : undefined}
               onClick={onSettings}
             >
               <SettingsCog width={16} height={16} aria-hidden="true" style={{ flexShrink: 0 }} />
@@ -766,6 +782,7 @@ function DrawerRow({
       <button
         type="button"
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
+        aria-current={active ? 'page' : undefined}
         // Drag source for the workspace controller (design §3.1): a delegated
         // pointerdown reads this to lift the row out of the drawer and into a
         // pane. Only present when the splits flag is on; a plain tap still opens

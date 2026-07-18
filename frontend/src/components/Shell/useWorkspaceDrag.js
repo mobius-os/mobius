@@ -357,7 +357,8 @@ export default function useWorkspaceDrag({
         // Drawer drag-out glide-close must fire SYNCHRONOUSLY (it dispatches
         // closeDrawer and stands the OS gesture down); the heavy hit-test/preview
         // work is deferred to the coalesced rAF pass above (design §3.1).
-        if (sourceKind === 'drawer' && drawerEdgeX != null && !glided
+        if (sourceKind === 'drawer' && drawerOpenRef.current
+            && drawerEdgeX != null && !glided
             && crossedDrawerExit(ev.clientX, drawerEdgeX)) {
           glided = true
           closeDrawer?.()

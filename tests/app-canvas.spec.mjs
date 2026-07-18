@@ -473,6 +473,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
 
   test('a concurrent drawer close and app nav-pop perform exactly two traversals', async ({ page }) => {
     const appId = 99
+    await page.setViewportSize({ width: 412, height: 915 })
     await setupAppRoutes(page, appId, mockFrameHTML(appId))
     await page.addInitScript((id) => {
       localStorage.setItem('moebius_active_view', 'canvas')
@@ -522,6 +523,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
 
   test('a drawer opened after app nav-pop starts waits for that traversal', async ({ page }) => {
     const appId = 99
+    await page.setViewportSize({ width: 412, height: 915 })
     await setupAppRoutes(page, appId, mockFrameHTML(appId))
     await page.addInitScript((id) => {
       localStorage.setItem('moebius_active_view', 'canvas')
