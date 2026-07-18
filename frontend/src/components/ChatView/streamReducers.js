@@ -338,6 +338,151 @@ export function closeAllToolLifecycles(prev) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Live subagent helpers — task_start / task_progress / task_done ENRICH the
+// existing Task/Agent tool block; they are metadata about a tool call that
+// already exists and owns its own output/expand/lifecycle. This mirrors the
+// skill_loaded enrichment (a `skill` field stamped onto the Skill tool block),
+// NOT the question card (which is a second wire shape of one UI object). There
+// is no standalone subagent stream item and no tool-twin suppression: the Task
+// ToolBlock stays intact and its helper metadata rides catch-up reconcile (tool
+// blocks reconcile by tool_use_id) and promotion (streamItemToBlock spreads all
+// tool fields) for free. Backend card 247 persists the identical shape, so the
+// live, promoted, and reloaded views are the same rendering.
+//
+// Shape stamped onto the block:
+//   tool.subagent = { "<task_id>": {description, task_type, status,
+//                                   last_tool_name, usage, summary,
+//                                   startedAt, lastAt} }
+// status ∈ 'running' | 'done' | 'failed' | 'killed' | 'stopped'.
+
+// The tool blocks a helper attaches to. A Set so lookups never walk the
+// prototype chain.
+const SUBAGENT_TOOLS = new Set(['Task', 'Agent'])
+
+// A helper is terminal once it reaches any of these; a late or replayed
+// task_start / task_progress must never move it back to 'running'.
+const TERMINAL_TASK_STATUSES = new Set(['done', 'failed', 'killed', 'stopped'])
+
+// task_done carries status ∈ done/completed/failed/killed/stopped. Normalize the
+// SDK's 'completed' to 'done'; every other terminal value renders as-is. An
+// unrecognised terminal reads as a plain completion.
+function normalizeTaskStatus(status) {
+  if (status === 'completed') return 'done'
+  if (TERMINAL_TASK_STATUSES.has(status)) return status
+  return 'done'
+}
+
+function helperShallowEqual(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  if (ka.length !== kb.length) return false
+  for (const k of ka) {
+    if (a[k] !== b[k]) return false
+  }
+  return true
+}
+
+// Merge one task_* event into a helper record, returning the SAME reference when
+// nothing changed (the idempotent-replay no-op). Enforces the invariants: a
+// terminal helper never downgrades to running; description/summary already
+// present are never wiped by a later event that carries null.
+function mergeSubagentHelper(existing, event, now) {
+  const base = existing || {}
+  const wasTerminal = !!existing && TERMINAL_TASK_STATUSES.has(existing.status)
+  let next
+  if (event.type === 'task_start') {
+    next = {
+      ...base,
+      description: event.description || base.description || '',
+      task_type: event.task_type || base.task_type || '',
+      // A re-delivered start on an already-finished helper keeps the terminal
+      // status; a genuine first start opens it as running.
+      status: wasTerminal ? existing.status : 'running',
+      startedAt: Number.isFinite(base.startedAt) ? base.startedAt : now,
+    }
+  } else if (event.type === 'task_progress') {
+    // A tick only annotates a live helper; one replayed after task_done must not
+    // revive the timer or reopen the terminal state.
+    if (wasTerminal) return existing
+    next = {
+      ...base,
+      status: base.status || 'running',
+      last_tool_name: event.last_tool_name != null
+        ? event.last_tool_name : (base.last_tool_name ?? null),
+      usage: event.usage != null ? event.usage : (base.usage ?? null),
+      startedAt: Number.isFinite(base.startedAt) ? base.startedAt : now,
+      lastAt: now,
+    }
+  } else if (event.type === 'task_done') {
+    next = {
+      ...base,
+      status: normalizeTaskStatus(event.status),
+      summary: event.summary != null ? event.summary : (base.summary ?? null),
+      startedAt: Number.isFinite(base.startedAt) ? base.startedAt : now,
+      lastAt: now,
+    }
+  } else {
+    return existing
+  }
+  return helperShallowEqual(base, next) ? existing : next
+}
+
+/**
+ * Applies a task_start / task_progress / task_done event by ENRICHING the
+ * matching Task/Agent tool block's `subagent` map. One reducer for all three
+ * (mirrors the skill_loaded stamp). Pure and idempotent — replaying a whole
+ * lifecycle burst leaves exactly one helper on the block.
+ *
+ * Target resolution, in order:
+ *   1. by task_id — the tool block already carrying this helper. MANDATORY
+ *      first: Claude's terminal TaskUpdatedMessage emits tool_use_id:null
+ *      (claude_sdk_runner.py), so a task_done may have no tool_use_id and can
+ *      only be routed through the helper it already created.
+ *   2. by tool_use_id — the parent Task/Agent tool block. This is how a
+ *      task_start finds its block, and how a task_done materializes a helper
+ *      whose task_start was missed.
+ * No host tool block for either key → a no-op (nothing to annotate).
+ *
+ * @param {Array<object>} items  current stream items
+ * @param {object} event  a task_start/task_progress/task_done event
+ * @param {number} now  client clock, stamped onto startedAt/lastAt
+ * @returns {Array<object>} next items (new array when changed, else `items`)
+ */
+export function applyTaskEvent(items, event, now = Date.now()) {
+  if (!event || event.task_id == null) return items
+  const taskId = event.task_id
+  const toolUseId = event.tool_use_id ?? null
+
+  let idx = items.findIndex(
+    it => it.type === 'tool'
+      && it.subagent
+      && Object.prototype.hasOwnProperty.call(it.subagent, taskId)
+  )
+  if (idx === -1 && toolUseId != null) {
+    idx = items.findIndex(
+      it => it.type === 'tool'
+        && SUBAGENT_TOOLS.has(it.tool)
+        && it.tool_use_id === toolUseId
+    )
+  }
+  if (idx === -1) return items
+
+  const tool = items[idx]
+  const existing = (tool.subagent && tool.subagent[taskId]) || null
+  const merged = mergeSubagentHelper(existing, event, now)
+  if (merged === existing) return items
+
+  const updated = [...items]
+  updated[idx] = {
+    ...tool,
+    subagent: { ...(tool.subagent || {}), [taskId]: merged },
+  }
+  return updated
+}
+
 /**
  * True when two stream items carry identical own-enumerable fields by ===.
  * Nested values (a tool's `sources` array, a question's `answers`/`questions`)

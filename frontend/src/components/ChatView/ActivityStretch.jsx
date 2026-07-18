@@ -14,6 +14,7 @@ import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
+import SubagentChips from './SubagentChips.jsx'
 
 // One collapsible activity line standing in for a contiguous stretch of thinking
 // AND tool blocks, so a build turn's pre-prose burst reads as one quiet ~32px
@@ -90,6 +91,28 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
     .find(e => e?.item?.type === 'tool' && e.item.status === 'running')?.item
     || entries.find(e => e?.item?.type === 'tool')?.item
   const leadToolIcon = toolActivityIcon(effectiveToolName(leadTool))
+
+  // A delegating turn's Task/Agent tool blocks carry a `.subagent` map of live
+  // (streamReducers.applyTaskEvent) or persisted (backend 247) helper metadata.
+  // Render those helpers as rows in this stretch and surface a running/done
+  // count on the header — the header's activity word already reads "Working in
+  // the background", so the count is the only addition. The Task ToolBlock is
+  // NOT hidden: its output/expand stays reachable in the expanded timeline.
+  const subagentTools = entries
+    .map(e => e?.item)
+    .filter(it => it?.type === 'tool'
+      && it.subagent
+      && typeof it.subagent === 'object'
+      && Object.keys(it.subagent).length > 0)
+  const subagentHelpers = subagentTools.flatMap(it => Object.values(it.subagent))
+  const runningHelpers = subagentHelpers.filter(h => h?.status === 'running').length
+  const settledHelpers = subagentHelpers.length - runningHelpers
+  const subagentCount = subagentHelpers.length > 0
+    ? [
+        runningHelpers > 0 ? `${runningHelpers} running` : null,
+        settledHelpers > 0 ? `${settledHelpers} done` : null,
+      ].filter(Boolean).join(' · ')
+    : null
   // Deriving the state parses each tool's output for its exit code, so memoize
   // on a cheap signature (see activityMemoSig for the exact staleness contract:
   // head+tail output slices catch an equal-length exit-code flip; thinking
@@ -166,7 +189,20 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           preserveTogglePosition(headerRef.current)
           setUserOpen(o => !o)
         }}
+        // A delegating turn's helper rollup ("2 running · 1 done"); the header
+        // owns it so it reads without expanding the line.
+        count={subagentCount}
       />
+      {/* Helper rows for a delegating turn, ALWAYS visible (not gated on the
+          disclosure) so live subagent progress reads without expanding. The
+          raw Task ToolBlock — its output + inspection — stays in the timeline
+          below. One SubagentChips per Task/Agent tool block that has helpers. */}
+      {subagentTools.map((tool, i) => (
+        <SubagentChips
+          key={tool.tool_use_id ?? `subagent-${i}`}
+          subagent={tool.subagent}
+        />
+      ))}
       {open && (
         <div className="chat__activity-timeline">
           {entries.map(({ item, idx }) => {

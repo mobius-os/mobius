@@ -14,6 +14,7 @@ import {
   anchorReplayedThinking,
   attachToolSources,
   reconcileStreamItems,
+  applyTaskEvent,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -109,6 +110,13 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   skill_loaded          Agent loaded a skill { skill }. Stamps the
  *                         name onto the matching Skill tool block so
  *                         ToolBlock renders a chip.
+ *   task_start            A delegating turn spawned a background helper
+ *                         { task_id, description, task_type, tool_use_id }.
+ *                         Upserts a live subagent chip (SubagentChips).
+ *   task_progress         Helper tick { task_id, usage, last_tool_name,
+ *                         tool_use_id }. Refreshes the chip's activity line.
+ *   task_done             Helper finished { task_id, status, summary,
+ *                         tool_use_id }. Freezes the chip's terminal state.
  *   question              AskUserQuestion fired
  *                         { question_id, questions: [...] }. Renders a
  *                         card, absorbing the call's own tool_start
@@ -879,6 +887,19 @@ export default function useStreamConnection(chatId, {
               }
               return updated
             })
+          } else if (
+            event.type === 'task_start'
+            || event.type === 'task_progress'
+            || event.type === 'task_done'
+          ) {
+            // A delegating turn's background-helper lifecycle. These ENRICH the
+            // existing Task/Agent tool block's `.subagent` map (joined by
+            // tool_use_id, task_id-first) — the same pattern as skill_loaded.
+            // The Task ToolBlock is left intact; its helper metadata rides
+            // catch-up reconcile + promotion for free, so live/promoted/reloaded
+            // (backend 247) render identically. Idempotent, so a replayed burst
+            // can't duplicate a helper.
+            applyStreamItems(prev => applyTaskEvent(prev, event, Date.now()))
           } else if (event.type === 'question') {
             const questions = event.questions || []
             if (questions.length > 0 && questions[0]?.question) {
