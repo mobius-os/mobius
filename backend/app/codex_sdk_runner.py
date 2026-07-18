@@ -1323,11 +1323,7 @@ async def run_codex_sdk_turn(
 
       current_session_id = thread.id
       if abort_requested():
-        log.info("Codex turn aborted before session persistence chat_id=%s", chat_id)
-        return aborted_result()
-      await _persist_session_id(db, chat_id, current_session_id)
-      if abort_requested():
-        log.info("Codex turn aborted after session persistence chat_id=%s", chat_id)
+        log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
         return aborted_result()
       if session_id is not None and current_session_id != session_id:
         error_text = (
@@ -1372,6 +1368,14 @@ async def run_codex_sdk_turn(
         return aborted_result()
       active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
       registry.register(active_turn)
+
+      # Persist the session id AFTER registering the live turn: this is a
+      # best-effort write (the actor persist + the append-only session-link
+      # record), and Stop/steer reachability must never wait on it — mirrors the
+      # Claude runner, which also registers before persisting. It runs after the
+      # stale-resume check above so a rejected (mismatched) session is never
+      # recorded.
+      await _persist_session_id(db, chat_id, current_session_id)
 
       async for notification in turn.stream():
         payload = notification.payload
