@@ -26,7 +26,35 @@ from app import (
   models, providers, schemas,
   source_dirs, theme,
 )
-from app.storage_io import delete_content_type_tree, read_capped_body
+from app.artifact_data import (
+  ArtifactDataError,
+  MAX_ARTIFACT_KEYS,
+  MAX_ARTIFACT_TOTAL_BYTES,
+  MAX_ARTIFACT_VALUE_BYTES,
+  artifact_file_path,
+  artifact_usage,
+  canonical_json,
+  parse_json,
+  read_json_file,
+  validate_artifact_id,
+  validate_artifact_key,
+)
+from app.publication import (
+  InvalidPublicationRegistry,
+  PublicationRecord,
+  PublicationReservationConflict,
+  _PUBLISH_PROJECT_RE,
+  _TOKEN_RE,
+  atomic_promote_directory,
+  create_publication_record,
+  new_publication_record,
+  published_root,
+  read_publication_record,
+  registry_path,
+  registry_root,
+  replace_publication_record,
+)
+from app.storage_io import atomic_write, delete_content_type_tree, read_capped_body
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
@@ -39,6 +67,7 @@ from app.deps import (
 from app.http_caching import strip_range
 from app.manifest_contract import ManifestContractError, validate_cron_expr
 from app.resource_access import live_app, live_app_or_404
+from app.routes.storage import _recheck_app_identity
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -315,6 +344,12 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   app_name = app.name
   app_source_dir = app.source_dir
   deleted_app_id = app.id
+  settings = get_settings()
+
+  # Registry state is the revocation boundary; physical cleanup may fail.
+  await _revoke_app_publish_tokens(
+    settings, deleted_app_id, app.token_nonce,
+  )
 
   # Delete the row first so a partial filesystem cleanup leaves the registry
   # coherent — stale files are harmless orphans, a row pointing at missing
@@ -333,7 +368,6 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     except OSError:
       pass  # best effort — a stale compiled file is harmless
 
-  settings = get_settings()
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
   if resolved_source is not None:
@@ -1961,6 +1995,8 @@ async def delete_app(
   revives the SAME id + data instead of orphaning it under a freed integer id.
   The destructive filesystem cleanup is deferred to the TTL purge in list_apps.
   Mirrors chat soft-delete; recovery is agent-driven (feature 110).
+  Published URL reservations are permanently revoked first; a recovered app
+  must publish again and receives a fresh public token.
 
   Still async + lock-held: holding install_uninstall_lock serializes the
   tombstone against a concurrent install of the same app, and the per-app
@@ -1977,6 +2013,10 @@ async def delete_app(
     )
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
+
+    await _revoke_app_publish_tokens(
+      settings=get_settings(), app_id=app_id, app_gen=app.token_nonce,
+    )
 
     # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
     # list_apps / recover_app (same contract chats.py documents). Avoids a
@@ -2064,6 +2104,9 @@ async def delete_app_data(
     # preserves /data/apps/<id>, so a stale live row must not authorize this wipe.
     db.expire_all()
     app = live_app_or_404(db, app_id)
+    await _revoke_app_publish_tokens(
+      settings, app.id, app.token_nonce,
+    )
     storage_dir = apps_root / str(app.id)
     # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
     # Leaving the dir absent is fine — routes/storage.py recreates it on the
@@ -2715,9 +2758,231 @@ async def validate_app(
 
 
 
-# ---- Publish a project's built static site (feature 136) ----------------
-_PUBLISH_PROJECT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_PUBLISH_TOKEN_RE = re.compile(r"^[a-f0-9]{16,64}$")
+# ---- Artifact persistence + published site ownership ------------------
+
+
+def _read_publish_token_hint(token_file: Path) -> str | None:
+  """Read the app-writable token hint without following its symlink."""
+  if token_file.is_symlink():
+    return None
+  try:
+    info = token_file.stat()
+  except OSError:
+    return None
+  if not info.st_size or info.st_size > 128 or not token_file.is_file():
+    return None
+  flags = os.O_RDONLY
+  if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+  try:
+    fd = os.open(token_file, flags)
+  except OSError:
+    return None
+  try:
+    raw = os.read(fd, 129)
+  finally:
+    os.close(fd)
+  try:
+    token = raw.decode("utf-8").strip()
+  except UnicodeDecodeError:
+    return None
+  return token if _TOKEN_RE.fullmatch(token) else None
+
+
+def _registry_records_for_app(settings, app_id: int) -> list[PublicationRecord]:
+  root = registry_root(settings)
+  if root.is_symlink() or not root.is_dir():
+    return []
+  records = []
+  for path in root.glob("*.json"):
+    token = path.stem
+    if not _TOKEN_RE.fullmatch(token):
+      continue
+    try:
+      record = read_publication_record(settings, token)
+    except InvalidPublicationRegistry as exc:
+      log.warning("publish registry %s is invalid: %s", token, exc)
+      continue
+    if record is not None and record.app_id == app_id:
+      records.append(record)
+  return records
+
+
+def _legacy_project_hint(storage: Path, token_file: Path) -> str | None:
+  try:
+    rel = token_file.relative_to(storage)
+  except ValueError:
+    return None
+  if rel.parts == ("build", "publish-token.txt"):
+    return None
+  if (
+    len(rel.parts) == 4
+    and rel.parts[0] == "projects"
+    and rel.parts[2:] == ("build", "publish-token.txt")
+    and _PUBLISH_PROJECT_RE.fullmatch(rel.parts[1])
+  ):
+    return rel.parts[1]
+  return None
+
+
+async def _revoke_publish_token(
+  settings,
+  app_id: int,
+  app_gen: str | None,
+  token: str,
+  project_id: str | None,
+) -> None:
+  """Permanently revoke one owned/legacy token before physical cleanup."""
+  if not _TOKEN_RE.fullmatch(token or ""):
+    return
+  try:
+    record = read_publication_record(settings, token)
+  except InvalidPublicationRegistry as exc:
+    # A corrupt reservation already fails closed.  Do not let an app-writable
+    # hint authorize deleting the unknown reservation's snapshot.
+    log.warning("cannot revoke invalid publication %s: %s", token, exc)
+    return
+  if record is not None and record.app_id != app_id:
+    log.warning(
+      "ignoring publish-token hint %s owned by app %s while revoking app %s",
+      token, record.app_id, app_id,
+    )
+    return
+  try:
+    if record is None:
+      safe_gen = app_gen if isinstance(app_gen, str) and re.fullmatch(
+        r"[a-f0-9]{32}", app_gen,
+      ) else "0" * 32
+      record = new_publication_record(
+        token, app_id, safe_gen, project_id, state="revoked",
+      )
+      create_publication_record(settings, record)
+    elif record.state != "revoked":
+      record = replace_publication_record(settings, record, "revoked")
+  except (OSError, InvalidPublicationRegistry,
+          PublicationReservationConflict) as exc:
+    log.error("failed to persist revocation for token %s: %s", token, exc)
+    return
+
+  # The durable revoked state is written before either best-effort rmtree.
+  for root_name in ("published", "published-data"):
+    root = Path(settings.data_dir) / root_name
+    target = root / token
+    if root.is_symlink() or target.is_symlink():
+      log.error("refusing symlink publication cleanup: %s", target)
+      continue
+    if not target.exists():
+      continue
+    try:
+      await asyncio.to_thread(shutil.rmtree, target)
+    except OSError as exc:
+      log.warning("revoked token %s cleanup failed for %s: %s",
+                  token, target, exc)
+
+
+async def _revoke_app_publish_tokens(
+  settings,
+  app_id: int,
+  app_gen: str | None,
+) -> None:
+  """Revoke registry-owned and legacy tokens while app storage still exists.
+
+  The caller holds ``app_storage_lock(app_id)``.  Each token is independent so
+  one corrupt record or failed rmtree cannot prevent revoking the rest.
+  """
+  tokens: dict[str, str | None] = {
+    record.token: record.project_id
+    for record in _registry_records_for_app(settings, app_id)
+  }
+  storage = Path(settings.data_dir) / "apps" / str(app_id)
+  if not storage.is_symlink() and storage.is_dir():
+    try:
+      token_files = list(storage.rglob("build/publish-token.txt"))
+    except OSError as exc:
+      log.warning("legacy publish-token scan failed for app %s: %s", app_id, exc)
+      token_files = []
+    for token_file in token_files:
+      token = _read_publish_token_hint(token_file)
+      if token is not None:
+        tokens.setdefault(token, _legacy_project_hint(storage, token_file))
+  for token, project_id in tokens.items():
+    try:
+      await _revoke_publish_token(
+        settings, app_id, app_gen, token, project_id,
+      )
+    except Exception as exc:  # best-effort batch boundary
+      log.exception("unexpected publication revoke failure for %s: %s",
+                    token, exc)
+
+
+@router.api_route(
+  "/{app_id}/artifact-data/{artifact_id}/{key}",
+  methods=["GET", "PUT", "DELETE"],
+  dependencies=[Depends(reject_cross_site)],
+)
+async def artifact_data_value(
+  app_id: int,
+  artifact_id: str,
+  key: str,
+  request: Request,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read or mutate one server-validated, quota-bound artifact JSON key."""
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(403, "An app may only access its own artifact data.")
+  if not validate_artifact_id(artifact_id) or not validate_artifact_key(key):
+    raise HTTPException(400, "Invalid artifact_id or key.")
+  app = live_app_or_404(db, app_id)
+  expected_nonce = app.token_nonce
+  value_bytes = None
+  if request.method == "PUT":
+    raw = await read_capped_body(request, cap=MAX_ARTIFACT_VALUE_BYTES)
+    try:
+      value_bytes = canonical_json(parse_json(raw))
+    except ArtifactDataError as exc:
+      raise HTTPException(400, str(exc)) from exc
+    if len(value_bytes) > MAX_ARTIFACT_VALUE_BYTES:
+      raise HTTPException(413, "Artifact value exceeds 64 KB.")
+
+  settings = get_settings()
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_app_identity(db, app_id, expected_nonce)
+    try:
+      artifact_root, file_path = artifact_file_path(
+        settings, app_id, artifact_id, key,
+      )
+    except ArtifactDataError as exc:
+      raise HTTPException(400, str(exc)) from exc
+
+    if request.method == "GET":
+      try:
+        return read_json_file(file_path)
+      except ArtifactDataError as exc:
+        raise HTTPException(404, "Artifact value not found.") from exc
+
+    if request.method == "DELETE":
+      if file_path.is_symlink() or not file_path.is_file():
+        raise HTTPException(404, "Artifact value not found.")
+      file_path.unlink()
+      return Response(status_code=204)
+
+    try:
+      total, key_count = artifact_usage(artifact_root)
+    except ArtifactDataError as exc:
+      raise HTTPException(400, str(exc)) from exc
+    try:
+      old_size = file_path.stat().st_size if file_path.is_file() else 0
+    except OSError:
+      old_size = 0
+    is_new_key = not file_path.is_file()
+    if is_new_key and key_count >= MAX_ARTIFACT_KEYS:
+      raise HTTPException(400, "Artifact data is limited to 100 keys.")
+    projected = total - old_size + len(value_bytes)
+    if projected > MAX_ARTIFACT_TOTAL_BYTES:
+      raise HTTPException(413, "Artifact data exceeds the 1 MB quota.")
+    atomic_write(file_path, value_bytes)
+  return Response(status_code=204)
 
 
 class PublishRequest(BaseModel):
@@ -2728,6 +2993,38 @@ def _publish_paths(settings, app, project_id: str | None):
   storage = Path(settings.data_dir) / "apps" / str(app.id)
   base = storage / "projects" / project_id if project_id else storage
   return base / "build" / "site", base / "build" / "publish-token.txt"
+
+
+def _validate_publish_paths(settings, app, project_id: str | None) -> None:
+  storage = Path(settings.data_dir) / "apps" / str(app.id)
+  site_dir, token_file = _publish_paths(settings, app, project_id)
+  components = [storage]
+  if project_id is not None:
+    components.extend((storage / "projects", storage / "projects" / project_id))
+  components.extend((site_dir.parent, site_dir, token_file))
+  if any(path.is_symlink() for path in components):
+    raise HTTPException(400, "Symlinks are not allowed in publish paths.")
+  storage_resolved = storage.resolve()
+  site_resolved = site_dir.resolve()
+  if storage_resolved not in site_resolved.parents:
+    raise HTTPException(400, "Publish path escaped app storage.")
+
+
+def _mint_publish_record(settings, app, project_id: str | None):
+  while True:
+    token = uuid.uuid4().hex
+    if os.path.lexists(registry_path(settings, token)):
+      continue
+    if os.path.lexists(published_root(settings) / token):
+      continue
+    record = new_publication_record(
+      token, app.id, app.token_nonce, project_id, state="staged",
+    )
+    try:
+      create_publication_record(settings, record)
+    except PublicationReservationConflict:
+      continue
+    return token, record
 
 
 @router.post("/{app_id}/publish", dependencies=[Depends(reject_cross_site)])
@@ -2750,37 +3047,95 @@ async def publish_app_site(
   if project_id is not None and not _PUBLISH_PROJECT_RE.match(project_id):
     raise HTTPException(422, "invalid project_id")
   app = live_app_or_404(db, app_id)
+  expected_nonce = app.token_nonce
   settings = get_settings()
-  site_dir, token_file = _publish_paths(settings, app, project_id)
-  if not site_dir.is_dir() or not any(site_dir.iterdir()):
-    raise HTTPException(400, "No built site to publish — build the project first.")
-  token = None
-  try:
-    existing = token_file.read_text(encoding="utf-8").strip()
-    if _PUBLISH_TOKEN_RE.match(existing):
-      token = existing
-  except OSError:
-    pass
-  if not token:
-    token = uuid.uuid4().hex
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(token, encoding="utf-8")
-  dest = Path(settings.data_dir) / "published" / token
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_app_identity(db, app_id, expected_nonce)
+    _validate_publish_paths(settings, app, project_id)
+    site_dir, token_file = _publish_paths(settings, app, project_id)
+    try:
+      site_ready = site_dir.is_dir() and any(site_dir.iterdir())
+    except OSError:
+      site_ready = False
+    if not site_ready:
+      raise HTTPException(
+        400, "No built site to publish — build the project first.",
+      )
 
-  def _snapshot():
-    # Fail closed on symlinks: copytree would otherwise follow a symlink in the
-    # (app-controlled) build output and copy its TARGET into the PUBLIC snapshot,
-    # exposing arbitrary files at /sites/<token>/. Reject any symlink, and copy
-    # with symlinks=True as defense in depth (the serve route's resolve() then
-    # confines anything that slips through).
-    if site_dir.is_symlink() or any(p.is_symlink() for p in site_dir.rglob("*")):
-      raise HTTPException(400, "Built site contains symlinks; refusing to publish.")
-    if dest.exists():
-      shutil.rmtree(dest, ignore_errors=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(site_dir, dest, symlinks=True)
+    token = _read_publish_token_hint(token_file)
+    record = None
+    legacy_backfill = False
+    if token is not None:
+      try:
+        hinted = read_publication_record(settings, token)
+      except InvalidPublicationRegistry:
+        hinted = False
+      if (
+        isinstance(hinted, PublicationRecord)
+        and hinted.binding() == (app.id, app.token_nonce, project_id)
+        and hinted.state == "active"
+      ):
+        record = hinted
+      elif hinted is None:
+        legacy_dest = published_root(settings) / token
+        if legacy_dest.is_dir() and not legacy_dest.is_symlink():
+          candidate = new_publication_record(
+            token, app.id, app.token_nonce, project_id, state="staged",
+          )
+          try:
+            create_publication_record(settings, candidate)
+          except PublicationReservationConflict:
+            pass
+          else:
+            record = candidate
+            legacy_backfill = True
+    if record is None:
+      token, record = _mint_publish_record(settings, app, project_id)
 
-  await asyncio.to_thread(_snapshot)
+    root = published_root(settings)
+    staging_root = root / ".staging"
+    if root.is_symlink() or staging_root.is_symlink():
+      raise HTTPException(400, "Invalid published staging directory.")
+    staging_root.mkdir(parents=True, exist_ok=True)
+    stage = staging_root / uuid.uuid4().hex
+    destination = root / token
+
+    def _snapshot():
+      if any(path.is_symlink() for path in site_dir.rglob("*")):
+        raise HTTPException(
+          400, "Built site contains symlinks; refusing to publish.",
+        )
+      shutil.copytree(site_dir, stage, symlinks=True)
+
+    promoted = False
+    try:
+      await asyncio.to_thread(_snapshot)
+      await asyncio.to_thread(atomic_promote_directory, stage, destination)
+      promoted = True
+      atomic_write(token_file, token)
+      record = replace_publication_record(settings, record, "active")
+    except BaseException:
+      if record.state == "staged":
+        try:
+          if legacy_backfill and destination.is_dir():
+            replace_publication_record(settings, record, "active")
+          else:
+            replace_publication_record(settings, record, "revoked")
+        except (OSError, InvalidPublicationRegistry,
+                PublicationReservationConflict):
+          pass
+      if promoted and not legacy_backfill and record.state == "staged":
+        try:
+          await asyncio.to_thread(shutil.rmtree, destination)
+        except OSError:
+          pass
+      raise
+    finally:
+      if stage.exists() and not stage.is_symlink():
+        try:
+          await asyncio.to_thread(shutil.rmtree, stage)
+        except OSError:
+          pass
   return {"token": token, "url": f"/sites/{token}/"}
 
 
@@ -2791,23 +3146,34 @@ async def unpublish_app_site(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Take a published site down: remove its snapshot + the stored token."""
+  """Revoke a published URL permanently, then remove its snapshot and hint."""
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(403, "An app may only unpublish its own site.")
   if project_id and not _PUBLISH_PROJECT_RE.match(project_id):
     raise HTTPException(422, "invalid project_id")
   app = live_app_or_404(db, app_id)
+  expected_nonce = app.token_nonce
+  project_id = project_id or None
   settings = get_settings()
-  _site, token_file = _publish_paths(settings, app, project_id or None)
-  try:
-    token = token_file.read_text(encoding="utf-8").strip()
-  except OSError:
-    return {"ok": True}
-  if _PUBLISH_TOKEN_RE.match(token or ""):
-    dest = Path(settings.data_dir) / "published" / token
-    await asyncio.to_thread(shutil.rmtree, dest, ignore_errors=True)
-  try:
-    token_file.unlink()
-  except OSError:
-    pass
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_app_identity(db, app_id, expected_nonce)
+    _validate_publish_paths(settings, app, project_id)
+    _site, token_file = _publish_paths(settings, app, project_id)
+    hint = _read_publish_token_hint(token_file)
+    records = [
+      record for record in _registry_records_for_app(settings, app_id)
+      if record.app_gen == app.token_nonce and record.project_id == project_id
+    ]
+    tokens = {record.token for record in records}
+    if hint is not None:
+      tokens.add(hint)
+    for token in tokens:
+      await _revoke_publish_token(
+        settings, app_id, app.token_nonce, token, project_id,
+      )
+    if not token_file.is_symlink():
+      try:
+        token_file.unlink()
+      except OSError:
+        pass
   return {"ok": True}
