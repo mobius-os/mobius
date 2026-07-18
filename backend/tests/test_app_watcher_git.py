@@ -254,3 +254,231 @@ async def test_resolved_conflict_keeps_old_live_state_until_full_replay(
   assert not (src / ".git" / "MERGE_HEAD").exists()
   assert not (src / ".git" / install._PENDING_UPDATE_DIR).exists()
   assert (src / "static" / "runtime.js").read_bytes().endswith(b"'v2'\n")
+
+
+
+@pytest.mark.asyncio
+async def test_watcher_gate_blocks_replay_until_whole_tree_resolved(
+  client, owner_token, monkeypatch, caplog,
+):
+  """A multi-file conflict must not replay the installer until EVERY tracked
+  file is marker-free.
+
+  When the agent has resolved the entry (index.jsx) but a sibling (fetch.sh)
+  still carries `<<<<<<<` markers, the watcher event fired on the entry save
+  must NOT re-enter install_from_manifest (no premature replay) and must log no
+  error. Once the sibling is also resolved, the next event replays and promotes.
+  """
+  import asyncio
+  import logging
+  import app.models as models
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "watch-multi-conflict"
+  src.mkdir(parents=True, exist_ok=True)
+  base_jsx = "export default function App(){ return <div>V0</div> }"
+  app_id = client.post("/api/apps/", json={
+    "name": "watchmulti",
+    "description": "x",
+    "jsx_source": base_jsx,
+    "source_dir": str(src),
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+
+  app_git.ensure_repo(src)
+  app_git.record_upstream(
+    src,
+    {"index.jsx": base_jsx.encode(), "fetch.sh": b"base\n"},
+    "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(src)
+  local_jsx = "export default function App(){ return <div>LOCAL</div> }"
+  (src / "index.jsx").write_text(local_jsx)
+  (src / "fetch.sh").write_text("local\n")
+  app_git.commit_local(src, "local edits")
+  upstream_jsx = "export default function App(){ return <div>UPSTREAM</div> }"
+  upstream = app_git.record_upstream(
+    src,
+    {"index.jsx": upstream_jsx.encode(), "fetch.sh": b"upstream\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    row.upstream_commit = upstream
+    db.commit()
+  finally:
+    db.close()
+  install.stage_pending_conflict_update(
+    src,
+    app_id=app_id,
+    upstream_commit=upstream,
+    manifest={"id": "watchmulti", "version": "2.0.0"},
+    raw_base="https://example.invalid/app/",
+    capability_digest="a" * 64,
+    candidate_digest="b" * 64,
+  )
+  conflicts = app_git.start_conflict_merge(src)
+  assert set(conflicts) == {"index.jsx", "fetch.sh"}
+  assert (src / ".git" / "MERGE_HEAD").exists()
+  assert app_git.has_conflict_markers(src)
+
+  replays = []
+
+  async def fake_reapply(db, **kwargs):
+    replays.append(kwargs)
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    install.clear_pending_conflict_update(src)
+    return row, "update", [], kwargs["manifest"], [], "clean_merge"
+
+  monkeypatch.setattr(install, "install_from_manifest", fake_reapply)
+
+  # Part A: resolve ONLY the entry; the sibling still carries markers.
+  resolved_jsx = "export default function App(){ return <div>MERGED</div> }"
+  (src / "index.jsx").write_text(resolved_jsx)
+  assert app_git.has_conflict_markers(src)  # fetch.sh still unresolved
+
+  caplog.clear()
+  with caplog.at_level(logging.INFO, logger="app.app_watcher"):
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(src / "index.jsx"), force_rebuild=True,
+    )
+  # No replay while a sibling is unresolved; nothing logged at error.
+  assert replays == []
+  assert (src / ".git" / "MERGE_HEAD").exists()
+  assert (src / ".git" / install._PENDING_UPDATE_DIR).exists()
+  assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+  # Part B: resolve the sibling too — the next event replays and promotes.
+  (src / "fetch.sh").write_text("merged\n")
+  assert not app_git.has_conflict_markers(src)
+  caplog.clear()
+  with caplog.at_level(logging.INFO, logger="app.app_watcher"):
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(src / "fetch.sh"), force_rebuild=True,
+    )
+  assert len(replays) == 1
+  assert not (src / ".git" / "MERGE_HEAD").exists()
+  assert not (src / ".git" / install._PENDING_UPDATE_DIR).exists()
+  assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_watcher_replay_conflict_mode_is_info_waitstate_not_error(
+  client, owner_token, monkeypatch, caplog,
+):
+  """When the installer's fresh merge re-detects a conflict during replay
+  (mode != "update"), the watcher treats it as a 'resolution not yet complete'
+  wait-state: log at info, no rollback-as-error, no exception, no promote.
+
+  This is the mid-flight case the old conflated post-condition raised on and the
+  outer handler logged as `log.exception`. A later replay returning "update"
+  promotes normally.
+  """
+  import asyncio
+  import logging
+  import app.models as models
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "watch-replay-conflict"
+  src.mkdir(parents=True, exist_ok=True)
+  base_jsx = "export default function App(){ return <div>V0</div> }"
+  app_id = client.post("/api/apps/", json={
+    "name": "watchreplayconflict",
+    "description": "x",
+    "jsx_source": base_jsx,
+    "source_dir": str(src),
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+
+  app_git.ensure_repo(src)
+  app_git.record_upstream(
+    src,
+    {"index.jsx": base_jsx.encode(), "fetch.sh": b"base\n"},
+    "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(src)
+  (src / "fetch.sh").write_text("local\n")
+  app_git.commit_local(src, "local edit")
+  upstream = app_git.record_upstream(
+    src,
+    {"index.jsx": base_jsx.encode(), "fetch.sh": b"upstream\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    row.upstream_commit = upstream
+    db.commit()
+    bundle_before = row.compiled_path
+  finally:
+    db.close()
+  install.stage_pending_conflict_update(
+    src,
+    app_id=app_id,
+    upstream_commit=upstream,
+    manifest={"id": "watchreplayconflict", "version": "2.0.0"},
+    raw_base="https://example.invalid/app/",
+    capability_digest="a" * 64,
+    candidate_digest="b" * 64,
+  )
+  app_git.start_conflict_merge(src)
+  # Agent resolves the whole tree marker-free so the pre-replay gate passes and
+  # the installer replay is reached.
+  (src / "fetch.sh").write_text("merged\n")
+  assert not app_git.has_conflict_markers(src)
+
+  calls = []
+
+  async def fake_conflict(db, **kwargs):
+    # The installer's own fresh three-way merge still conflicts: it commits the
+    # conflict provenance, re-stages the receipt, and returns mode="conflict".
+    calls.append("conflict")
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    return row, "conflict", [], kwargs["manifest"], ["fetch.sh"], "conflict"
+
+  monkeypatch.setattr(install, "install_from_manifest", fake_conflict)
+  caplog.clear()
+  with caplog.at_level(logging.INFO, logger="app.app_watcher"):
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(src / "fetch.sh"), force_rebuild=True,
+    )
+  # Wait-state: replay was attempted once, no error/exception logged, an info
+  # note explains the incomplete resolution, and the bundle is NOT promoted.
+  assert calls == ["conflict"]
+  assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+  assert any(
+    r.levelno == logging.INFO and "not yet complete" in r.getMessage()
+    for r in caplog.records
+  )
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    assert row.compiled_path == bundle_before
+  finally:
+    db.close()
+
+  # A later replay that resolves cleanly promotes (the designed self-heal). The
+  # receipt is still staged and MERGE_HEAD was cleared by the first commit_local,
+  # so the next event reaches the replay without an active merge.
+  async def fake_update(db, **kwargs):
+    calls.append("update")
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    install.clear_pending_conflict_update(src)
+    return row, "update", [], kwargs["manifest"], [], "clean_merge"
+
+  monkeypatch.setattr(install, "install_from_manifest", fake_update)
+  caplog.clear()
+  with caplog.at_level(logging.INFO, logger="app.app_watcher"):
+    # Fire on the entry: after the first commit_local cleared MERGE_HEAD,
+    # a non-source save (fetch.sh) no longer resolves to a rebuild, but the
+    # entry always does and re-drives the still-pending install receipt.
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(src / "index.jsx"), force_rebuild=True,
+    )
+  assert calls == ["conflict", "update"]
+  assert not (src / ".git" / install._PENDING_UPDATE_DIR).exists()
+  assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+

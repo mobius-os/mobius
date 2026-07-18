@@ -518,8 +518,31 @@ class _JsxHandler(FileSystemEventHandler):
               summary=_summarize_app_build_failure(exc),
             )
             return
-          if reapplied.id != replay_app_id or reapplied_mode != "update":
-            raise RuntimeError("resolved update replay targeted the wrong app")
+          if reapplied.id != replay_app_id:
+            # install_from_manifest's expected_app_id guard (install.py) rejects
+            # any candidate whose row id differs, so a mismatch here is a broken
+            # invariant, not a runtime condition — fail loudly.
+            raise RuntimeError(
+              "resolved update replay promoted app id=%s, expected id=%s"
+              % (reapplied.id, replay_app_id)
+            )
+          if reapplied_mode != "update":
+            # The installer re-detected an unresolved conflict (its mode fell
+            # back to "conflict") because this watcher event observed a
+            # MULTI-FILE resolution mid-flight: the entry is marker-free but a
+            # sibling is not yet reconciled, so the installer's fresh three-way
+            # merge still conflicts. This is a legitimate "resolution not yet
+            # complete" wait-state, NOT a failure — install_from_manifest already
+            # committed the conflict provenance and re-staged the pending-update
+            # receipt, leaving the prior bundle live. The next complete-resolution
+            # watcher event replays and promotes cleanly (the designed self-heal).
+            # Do not roll back as an error, raise, or toast a build failure.
+            log.info(
+              "resolved update replay for app %s not yet complete (mode=%s); "
+              "awaiting full conflict resolution",
+              replay_app_id, reapplied_mode,
+            )
+            return
           for warning in reapply_warnings:
             log.warning("resolved update %s: %s", replay_app_id, warning)
           app = reapplied
