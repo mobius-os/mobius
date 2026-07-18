@@ -1090,7 +1090,10 @@ export default function Shell() {
     onToggleMode: handleToggleViewMode,
     brandRef: brandButtonRef,
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
-    drawerOpen, // cancel a live hold if the drawer opens by any other path
+    // Cancel a live hold if navigation opens by ANY other path — the mobile modal
+    // drawer OR the persistent desktop sidebar toggling open (review §6 + sidebar
+    // reconciliation): navigationOpen unifies both.
+    drawerOpen: navigationOpen,
   })
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,

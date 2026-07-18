@@ -266,7 +266,7 @@ test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap 
   // The brand button is the drawer trigger; onClick toggles it synchronously after
   // a suppressed-gesture check, with zero timers.
   assert.match(shell, /className=\{`shell__brand/)
-  assert.match(shell, /aria-expanded=\{drawerOpen\}/)
+  assert.match(shell, /aria-expanded=\{navigationOpen\}/)
   const onClick = shell.match(/onClick=\{\(e\) => \{[\s\S]*?\n {10}\}\}/)?.[0] || ''
   assert.match(onClick, /if \(logoGesture\.consumeSuppressedClick\(e\.detail\)\) return/)
   assert.match(onClick, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
@@ -325,9 +325,11 @@ test('Shell wires the toggle handler, brand ref, and Shift+Enter (no drag-deny v
   assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
-  // The gesture hook receives the toggle + the brand ref (for the ring var).
+  // The gesture hook receives the toggle + the brand ref (for the ring var). The
+  // ref is UNIFIED with the desktop-sidebar focus ref (one ref, both jobs) after
+  // the sidebar rebase.
   assert.match(shell, /useLogoModeGesture\(\{[\s\S]*?onToggleMode: handleToggleViewMode/)
-  assert.match(shell, /brandRef,/)
+  assert.match(shell, /brandRef: brandButtonRef,/)
   // The drag-deny vibrate is DEAD (point 15: dragging is building, never denied).
   assert.doesNotMatch(shell, /viewModeVibrateRef|onDragBlocked/)
   // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).

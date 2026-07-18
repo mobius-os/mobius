@@ -804,10 +804,11 @@ test.describe('Workspace view-mode toggle', () => {
 
 // ── Builder-mode Settings (Settings-as-tab, design steps 3-4-7) ─────────────
 test.describe('Builder-mode Settings', () => {
-  // Open Settings from the drawer (the drawer's Settings row → navTo('settings')).
+  // Open Settings from the navigation (the Settings row → navTo('settings')).
+  // ensureNavigationOpen covers BOTH the mobile modal drawer and the persistent
+  // desktop sidebar (WIDE viewport), so the Settings row is reachable either way.
   async function openSettingsFromDrawer(page) {
-    await page.getByRole('button', { name: 'Toggle navigation' }).click()
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await ensureNavigationOpen(page)
     await page.locator('button[aria-label="Settings"]').click()
   }
 
@@ -900,7 +901,7 @@ test.describe('Logo activation + middle-click', () => {
     return paneModel.seedFromFlatTabs([{ kind: 'chat', id }])
   }
 
-  test('a HOLD (~450ms) on the logo flips the mode; the drawer never opens', async ({ page }) => {
+  test('a HOLD (~450ms) on the logo flips the mode; navigation is untouched', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'holdA')
     await mockApps(page, [])
@@ -909,6 +910,8 @@ test.describe('Logo activation + middle-click', () => {
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
     expect((await readWs(page)).viewMode).toBe('single')
 
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    const navBefore = await brand.getAttribute('aria-expanded')
     const box = await page.locator('.shell__brand').boundingBox()
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
@@ -918,11 +921,12 @@ test.describe('Logo activation + middle-click', () => {
     await expect.poll(async () => (await readWs(page)).viewMode, {
       timeout: 3000, message: 'a completed hold flips to builder mode',
     }).toBe('panes')
-    // The completed hold consumed the click, so the drawer never opened.
-    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+    // The completed hold consumed the click — navigation state is unchanged (no
+    // modal drawer opened, no persistent sidebar toggled).
+    await expect(brand).toHaveAttribute('aria-expanded', navBefore ?? 'false')
   })
 
-  test('a short TAP on the logo opens the drawer, unchanged, with no mode flip', async ({ page }) => {
+  test('a short TAP on the logo does the nav action (not a mode flip)', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'tapA')
     await mockApps(page, [])
@@ -930,8 +934,12 @@ test.describe('Logo activation + middle-click', () => {
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
 
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    const navBefore = await brand.getAttribute('aria-expanded')
     await page.locator('.shell__brand').click() // a fast tap
-    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    // The tap does its per-platform nav action (toggle the desktop sidebar / open
+    // the mobile drawer) — nav state flips — but NEVER flips the view mode.
+    await expect(brand).not.toHaveAttribute('aria-expanded', navBefore ?? 'false')
     expect((await readWs(page)).viewMode, 'a tap does not flip the mode').toBe('single')
   })
 
