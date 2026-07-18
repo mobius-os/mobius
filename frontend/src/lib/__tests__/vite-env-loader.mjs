@@ -12,6 +12,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { transformWithEsbuild } from 'vite'
 
 const REACT_SHIM = new URL(
   '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs',
@@ -30,7 +31,11 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   // Only intercept project sources — leave node_modules alone.
-  if (url.startsWith('file://') && url.includes('/src/') && url.endsWith('.js')) {
+  if (
+    url.startsWith('file://')
+    && url.includes('/src/')
+    && (url.endsWith('.js') || url.endsWith('.jsx'))
+  ) {
     const path = fileURLToPath(url)
     const raw = await readFile(path, 'utf8')
     const patched = raw
@@ -38,6 +43,18 @@ export async function load(url, context, nextLoad) {
       .replace(/import\.meta\.env\.MODE/g, "'test'")
       .replace(/import\.meta\.env\.DEV/g, 'false')
       .replace(/import\.meta\.env\.PROD/g, 'false')
+    if (url.endsWith('.jsx')) {
+      const transformed = await transformWithEsbuild(patched, path, {
+        loader: 'jsx',
+        format: 'esm',
+        jsx: 'automatic',
+      })
+      return {
+        format: 'module',
+        source: transformed.code,
+        shortCircuit: true,
+      }
+    }
     return {
       format: 'module',
       source: patched,

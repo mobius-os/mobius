@@ -1,5 +1,6 @@
-// Shared by platform-update review and the app-update review surface: keep this
-// parser side-effect-free so either UI can consume the same per-file shape.
+// CANONICAL DIFF VIEWER: copy this entire folder verbatim. It imports only
+// React and its own flat sibling modules. Styles ship as a JavaScript string
+// because the mini-app compiler rejects CSS side-output.
 
 const DIFF_HEADER_PREFIX = 'diff --git '
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
@@ -245,14 +246,4 @@ export function parseUnifiedDiff(diffText) {
 
   if (entry) parsed.push(finishEntry(entry))
   return parsed
-}
-
-/** Index parsed entries by the path the current tree uses. */
-export function diffFileByPath(parsed) {
-  const byPath = new Map()
-  if (!Array.isArray(parsed)) return byPath
-  for (const entry of parsed) {
-    if (entry?.path) byPath.set(entry.path, entry)
-  }
-  return byPath
 }

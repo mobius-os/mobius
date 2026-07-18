@@ -3,20 +3,6 @@
 // vs reviewable, the compact totals, the short sha — are unit-testable in
 // isolation, mirroring restartReadiness.js / streamPromotion.js.
 
-// A single-letter git status → a short human label for the file badge.
-const STATUS_LABELS = {
-  A: 'Added',
-  M: 'Modified',
-  D: 'Removed',
-  R: 'Renamed',
-  C: 'Copied',
-  T: 'Type changed',
-}
-
-export function fileStatusLabel(status) {
-  return STATUS_LABELS[(status || '').charAt(0).toUpperCase()] || 'Changed'
-}
-
 // Abbreviate a commit sha for display. The backend already sends short shas, so
 // this only guards against a full sha slipping through.
 export function shortSha(sha) {
