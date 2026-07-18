@@ -219,6 +219,26 @@ def test_task_start_after_done_does_not_downgrade():
   assert blocks[0]["subagent"]["task_D"]["status"] == "done"
 
 
+def test_task_done_null_tool_use_id_routes_by_task_id():
+  """A task stopped via TaskStop reports "killed" as a task_done with
+  tool_use_id null; persistence must still flip the helper (found by task_id)
+  from running to killed, not leave it running forever."""
+  blocks = [
+    {"type": "tool", "tool": "Agent", "input": "job",
+     "output": "", "status": "running", "tool_use_id": "toolu_k"},
+  ]
+  process_event({
+    "type": "task_start", "task_id": "task_K", "tool_use_id": "toolu_k",
+    "description": "long job",
+  }, blocks)
+  changed = process_event({
+    "type": "task_done", "task_id": "task_K", "tool_use_id": None,
+    "status": "killed", "summary": None,
+  }, blocks)
+  assert changed
+  assert blocks[0]["subagent"]["task_K"]["status"] == "killed"
+
+
 def test_task_done_killed_status_persists():
   """A task stopped via TaskStop reports "killed"; the terminal status persists
   verbatim (not normalized to done)."""

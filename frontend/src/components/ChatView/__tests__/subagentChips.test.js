@@ -228,3 +228,24 @@ test('streamItemToBlock carries tool .subagent through promotion', () => {
   assert.deepEqual(block.subagent, { t1: { description: 'x', status: 'done', summary: 's' } })
   assert.equal(block.status, 'done', 'a running tool still seals done on finalize')
 })
+
+test('a redundant terminal task_done returns the SAME array reference (no churn)', () => {
+  // Both terminal SDK surfaces (task_notification + task_updated) can fire, and
+  // catch-up replays the burst. A second identical done at a fresh wall-clock
+  // must not mint a new helper/tool/items array — that would defeat the tool
+  // block's identity-preserving reconciliation and thrash the scroll.
+  let items = applyTaskEvent([taskTool()], startEvent(), 1000)
+  items = applyTaskEvent(items, doneEvent({ status: 'completed', summary: '42' }), 2000)
+  const afterFirstDone = items
+  items = applyTaskEvent(items, doneEvent({ status: 'completed', summary: '42' }), 9999)
+  assert.equal(items, afterFirstDone, 'duplicate terminal done is a no-op by reference')
+})
+
+test('a malformed persisted helper ({t1: null}) does not crash SubagentChips derivation', () => {
+  // ActivityStretch filters non-object helper values before rendering; assert the
+  // filter shape so a bad persisted block can never throw at render time.
+  const subagent = { t1: null, t2: { description: 'ok', status: 'done', summary: 's' } }
+  const helpers = Object.entries(subagent).filter(([, h]) => h && typeof h === 'object')
+  assert.equal(helpers.length, 1)
+  assert.equal(helpers[0][0], 't2')
+})

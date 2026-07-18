@@ -417,10 +417,22 @@ function mergeSubagentHelper(existing, event, now) {
       lastAt: now,
     }
   } else if (event.type === 'task_done') {
+    const nextStatus = normalizeTaskStatus(event.status)
+    const nextSummary = event.summary != null ? event.summary : (base.summary ?? null)
+    // A redundant terminal done — same status and summary, re-delivered at a
+    // fresh wall-clock (both terminal SDK surfaces firing, or a catch-up replay)
+    // — must return the SAME reference. Rewriting lastAt to a new now would mint
+    // a new helper/tool/items array on every replay and defeat the tool block's
+    // identity-preserving reconciliation.
+    if (wasTerminal
+        && existing.status === nextStatus
+        && (existing.summary ?? null) === nextSummary) {
+      return existing
+    }
     next = {
       ...base,
-      status: normalizeTaskStatus(event.status),
-      summary: event.summary != null ? event.summary : (base.summary ?? null),
+      status: nextStatus,
+      summary: nextSummary,
       startedAt: Number.isFinite(base.startedAt) ? base.startedAt : now,
       lastAt: now,
     }

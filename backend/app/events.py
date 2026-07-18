@@ -489,37 +489,56 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # `return False` below). Codex has no host Task tool block, so this enriches
     # Claude turns only. A missing id, or a tool_use_id with no matching block
     # (unknown), no-ops so a stray event can never append a phantom block.
-    tool_use_id = event.get("tool_use_id")
     task_id = event.get("task_id")
-    if not tool_use_id or task_id is None:
+    if task_id is None:
       return False
+    tool_use_id = event.get("tool_use_id")
+    task_key = str(task_id)
+    # Locate the helper by task_id FIRST, then fall back to the parent tool by
+    # tool_use_id — mirroring the frontend reducer. This ordering is load-bearing
+    # for the terminal task_updated path: a task stopped via TaskStop reports
+    # "killed" as a task_done carrying tool_use_id null (claude_sdk_runner drops
+    # it), so requiring a tool_use_id would leave the helper persisted as
+    # "running" forever. A tool_use_id is required only to MATERIALIZE a
+    # previously-unseen helper (a first sighting must know its parent block).
+    target = None
     for blk in reversed(assistant_blocks):
       if (blk.get("type") == "tool"
-          and blk.get("tool_use_id") == tool_use_id):
-        subagent = blk.setdefault("subagent", {})
-        entry = subagent.setdefault(str(task_id), {
-          "description": "",
-          "status": "running",
-          "summary": None,
-        })
-        was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
-        if event_type == "task_start":
-          if event.get("description"):
-            entry["description"] = event["description"]
-          # A re-delivered start (catch-up replay, or an out-of-order start
-          # after the done) must NOT downgrade an already-terminal helper back
-          # to running — mirrors the frontend reducer's monotonic guard.
-          if not was_terminal:
-            entry["status"] = "running"
-        elif not was_terminal:
-          # Persist the CANONICAL terminal status so the stored block matches
-          # what the live reducer produces (completed -> done); otherwise a
-          # reloaded chat renders a succeeded helper with the failed dot.
-          entry["status"] = _normalize_subagent_status(event.get("status"))
-          if event.get("summary") is not None:
-            entry["summary"] = event.get("summary")
-        return True
-    return False
+          and isinstance(blk.get("subagent"), dict)
+          and task_key in blk["subagent"]):
+        target = blk
+        break
+    if target is None and tool_use_id:
+      for blk in reversed(assistant_blocks):
+        if (blk.get("type") == "tool"
+            and blk.get("tool_use_id") == tool_use_id):
+          target = blk
+          break
+    if target is None:
+      return False
+    subagent = target.setdefault("subagent", {})
+    entry = subagent.setdefault(task_key, {
+      "description": "",
+      "status": "running",
+      "summary": None,
+    })
+    was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
+    if event_type == "task_start":
+      if event.get("description"):
+        entry["description"] = event["description"]
+      # A re-delivered start (catch-up replay, or an out-of-order start after
+      # the done) must NOT downgrade an already-terminal helper back to running
+      # — mirrors the frontend reducer's monotonic guard.
+      if not was_terminal:
+        entry["status"] = "running"
+    elif not was_terminal:
+      # Persist the CANONICAL terminal status so the stored block matches what
+      # the live reducer produces (completed -> done); otherwise a reloaded chat
+      # renders a succeeded helper with the failed dot.
+      entry["status"] = _normalize_subagent_status(event.get("status"))
+      if event.get("summary") is not None:
+        entry["summary"] = event.get("summary")
+    return True
 
   if event_type == "error":
     # Persist the error into the assistant transcript so users see

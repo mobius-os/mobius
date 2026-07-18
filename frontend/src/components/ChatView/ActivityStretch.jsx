@@ -104,13 +104,21 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
       && it.subagent
       && typeof it.subagent === 'object'
       && Object.keys(it.subagent).length > 0)
-  const subagentHelpers = subagentTools.flatMap(it => Object.values(it.subagent))
-  const runningHelpers = subagentHelpers.filter(h => h?.status === 'running').length
-  const settledHelpers = subagentHelpers.length - runningHelpers
+  const subagentHelpers = subagentTools
+    .flatMap(it => Object.values(it.subagent))
+    .filter(h => h && typeof h === 'object')
+  const runningHelpers = subagentHelpers.filter(h => h.status === 'running').length
+  const failedHelpers = subagentHelpers.filter(
+    h => h.status === 'failed' || h.status === 'killed' || h.status === 'stopped'
+  ).length
+  const doneHelpers = subagentHelpers.length - runningHelpers - failedHelpers
+  // Count successes and failures separately: a failed/killed helper is not
+  // "done", and the header must not label a red-dotted row as done.
   const subagentCount = subagentHelpers.length > 0
     ? [
         runningHelpers > 0 ? `${runningHelpers} running` : null,
-        settledHelpers > 0 ? `${settledHelpers} done` : null,
+        doneHelpers > 0 ? `${doneHelpers} done` : null,
+        failedHelpers > 0 ? `${failedHelpers} failed` : null,
       ].filter(Boolean).join(' · ')
     : null
   // Deriving the state parses each tool's output for its exit code, so memoize

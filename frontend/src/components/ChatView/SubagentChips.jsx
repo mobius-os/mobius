@@ -71,10 +71,12 @@ function StatusDot({ status }) {
 }
 
 export default function SubagentChips({ subagent }) {
+  // Guard each helper value: a malformed persisted block (e.g. {t1: null}) must
+  // not crash the whole chat render when a row dereferences helper.description.
   const helpers = subagent && typeof subagent === 'object'
-    ? Object.entries(subagent)
+    ? Object.entries(subagent).filter(([, h]) => h && typeof h === 'object')
     : []
-  const anyRunning = helpers.some(([, h]) => h?.status === 'running')
+  const anyRunning = helpers.some(([, h]) => h.status === 'running')
 
   // One 1s ticker advances the elapsed labels while anything runs, stopping the
   // moment every helper settles. Rows are fixed-height and their text single-
