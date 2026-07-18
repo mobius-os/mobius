@@ -717,8 +717,11 @@ export default function Shell() {
     // In the single-pane parity path, closing the sole strip item means
     // "unpin this surface", not "remove the content currently on screen". The
     // workspace keeps its implicit authority tab while the legacy projection is
-    // cleared, exactly matching the pre-workspace shell.
-    if (openTabs.length === 1) {
+    // cleared, exactly matching the pre-workspace shell. The SOLE Settings tab is
+    // the exception (review §11): it has no authority content to keep, so the
+    // "unpin" shortcut would leave it active + persisted and UNCLOSABLE — it must
+    // genuinely close so the pane reverts to the empty chat surface.
+    if (openTabs.length === 1 && kind !== 'settings') {
       setTabStripEngaged(false)
       tabModel.writeOpenTabs([])
       return
@@ -1087,6 +1090,7 @@ export default function Shell() {
     onToggleMode: handleToggleViewMode,
     brandRef: brandButtonRef,
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
+    drawerOpen, // cancel a live hold if the drawer opens by any other path
   })
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
@@ -1102,6 +1106,7 @@ export default function Shell() {
     openTabMenuAtRef,
     onDragStart: onWorkspaceDragStart,
     onPreviewBuilder: setDragPreviewBuilder,
+    convertSettingsForModeTransition,
   })
 
   // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
@@ -2536,11 +2541,12 @@ export default function Shell() {
               handleToggleViewMode()
             }
           }}
-          onClick={() => {
+          onClick={(e) => {
             if (backFiredRef.current) return
             // A completed hold, a swipe, or a drag consumed this activation — it must
-            // NOT also toggle navigation.
-            if (logoGesture.consumeSuppressedClick()) return
+            // NOT also toggle navigation. A keyboard click (detail 0) is never the
+            // compat click, so it always toggles nav (review §13).
+            if (logoGesture.consumeSuppressedClick(e.detail)) return
             // Single tap — per-platform nav toggle, EXACTLY as before (instant, no
             // timer): toggle the persistent desktop sidebar, else the modal drawer.
             if (persistentDrawer) { setDesktopSidebarOpen(!desktopSidebarOpen); return }

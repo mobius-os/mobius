@@ -694,6 +694,14 @@ export default function useNavigation({
   // mode NOTHING renders full-screen — Settings, and every takeover-class surface,
   // opens as a TAB in the focused pane (existing dedup ⇒ single-instance). The
   // full-screen takeover exists ONLY in single-screen mode.
+  //
+  // SCOPE: DESTINATIONS, NOT DIALOGS (adjudicated, review §2). The invariant governs
+  // navigable DESTINATIONS — screens you go TO (Settings, future takeover views,
+  // immersive-solo). It does NOT govern transient, dismissible DIALOGS layered over
+  // the workspace — the walkthrough overlay, the update-review modal (the design doc
+  // keeps it fixed), chat dialogs — which are gates/modals, not screens, and each
+  // carries its own dismiss. Reclassifying one of those as a destination is an
+  // explicit owner call, not this invariant's job.
   //   - builder enabled + viewMode 'panes' → close the takeover overlay and open
   //     the canonical Settings tab in the target pane (dedup focuses an existing one);
   //   - single mode / flag off → today's full-screen takeover overlay.
@@ -745,10 +753,11 @@ export default function useNavigation({
     // Entering single mode.
     if (!paneModel.paneOf(ws, tabModel.SETTINGS_TAB_KEY)) return
     const wasVisible = ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
-    // reason:'deleted' removes the tab AND clears the undo slot with no toast: the
-    // Settings tab is a regenerable mode artifact (the flip back re-creates it),
-    // not a user-closed tab, so it must not leave a "Closed tab · Undo" behind.
-    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.SETTINGS_TAB_KEY, reason: 'deleted' })
+    // reason:'mode-convert' removes the tab, no toast, and PRESERVES the existing
+    // undo slot (review §10): the Settings tab is a regenerable mode artifact (the
+    // flip back re-creates it), orthogonal to any pending tab-move the user may
+    // still want to undo — so unlike reason:'deleted' it must not clear the slot.
+    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.SETTINGS_TAB_KEY, reason: 'mode-convert' })
     if (wasVisible) {
       setSettingsOpen(true)
       settingsOpenRef.current = true

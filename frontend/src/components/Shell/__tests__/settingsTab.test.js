@@ -139,6 +139,55 @@ test('flag OFF scrubs a persisted Settings tab before first render (rollback saf
   }
 })
 
+test('workspace-splits OFF also disables the Settings tab and scrubs it (review §3)', async () => {
+  // The Settings tab only makes sense where builder mode can exist. With splits off
+  // there is no builder mode, so BUILDER_SETTINGS_ENABLED must be false even though
+  // the builder-settings key is unset — a persisted settings:settings is scrubbed
+  // and can never leak into the legacy single-pane strip.
+  const onWs = paneModel.openTab(onePane('9'), settingsTab(), { paneId: 'p0', activate: true })
+  const blob = paneModel.serializeWorkspace(onWs)
+
+  const prevLS = globalThis.localStorage
+  // splits off; the builder-settings key is UNSET (its own default would be "on").
+  globalThis.localStorage = { getItem: (k) => (k === 'mobius:workspace-splits' ? '0' : null) }
+  try {
+    const pmOff = await import('../paneModel.js?workspace-splits-off')
+    assert.equal(pmOff.WORKSPACE_SPLITS_ENABLED, false)
+    assert.equal(pmOff.BUILDER_SETTINGS_ENABLED, false, 'gated on splits, not just its own key')
+    const parsed = pmOff.parseWorkspace(blob)
+    assert.ok(!pmOff.flatten(parsed).some(t => t.kind === 'settings'), 'settings scrubbed')
+    assert.ok(pmOff.flatten(parsed).some(t => t.kind === 'chat' && t.id === '9'), 'chat kept')
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = prevLS
+  }
+})
+
+test('CLOSE_TAB mode-convert removes Settings but PRESERVES a pending undo (review §10)', () => {
+  // Two panes so a MOVE_TAB can set an undo slot; then Settings enters p1.
+  let state = paneModel.initialWorkspaceState(twoPanes())
+  state = paneModel.workspaceReducer(state, {
+    type: 'OPEN_TAB', paneId: 'p1', tab: settingsTab(), activate: true,
+  })
+  // An undoable move (chat 'c' from p0 → p1's strip) sets the undo slot.
+  state = paneModel.workspaceReducer(state, {
+    type: 'MOVE_TAB', tabKey: 'chat:c', target: { paneId: 'p1' },
+  })
+  const pendingUndo = state.undo
+  assert.ok(pendingUndo, 'the move is undoable')
+
+  // Entering single mode removes the builder-only Settings tab via mode-convert.
+  state = paneModel.workspaceReducer(state, {
+    type: 'CLOSE_TAB', tabKey: SETTINGS_TAB_KEY, reason: 'mode-convert',
+  })
+  assert.equal(paneModel.paneOf(state.ws, SETTINGS_TAB_KEY), null, 'settings removed')
+  assert.equal(state.undo, pendingUndo, 'the pending move undo is PRESERVED, not clobbered')
+
+  // And the preserved slot still undoes the move (not the settings removal).
+  state = paneModel.workspaceReducer(state, { type: 'UNDO_LAST' })
+  assert.equal(paneModel.paneOf(state.ws, 'chat:c').id, 'p0', 'undo reverted the move')
+})
+
 test('reopening Settings focuses the existing tab (single instance, no duplicate)', () => {
   let state = paneModel.initialWorkspaceState(twoPanes())
   // Open Settings into p0.

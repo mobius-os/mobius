@@ -72,8 +72,13 @@ export const WORKSPACE_SPLITS_ENABLED = (() => {
 // tab exactly like an unknown kind — so a rolled-back client (feature shipped,
 // then flag turned off) SCRUBS any persisted Settings tab before first render
 // and reverts to today's overlay everywhere (design: flag-off sanitization).
-// Read once at module load, mirroring WORKSPACE_SPLITS_ENABLED. '0' disables.
-export const BUILDER_SETTINGS_ENABLED = (() => {
+//
+// It is GATED on WORKSPACE_SPLITS_ENABLED (review §3): the Settings tab only makes
+// sense where builder mode (panes) can exist. With splits off there is no builder
+// mode, so a persisted `settings:settings` is scrubbed on parse AND new Settings
+// navigation routes to the takeover overlay — the tab can never leak into the
+// legacy single-pane strip. Read once at module load; '0' also disables.
+export const BUILDER_SETTINGS_ENABLED = WORKSPACE_SPLITS_ENABLED && (() => {
   try { return localStorage.getItem('mobius:builder-settings') !== '0' } catch { return true }
 })()
 
@@ -1422,7 +1427,11 @@ export function initialWorkspaceState(ws) {
 //                               with reason:'deleted'.
 //   Preserves the slot:         SET_VIEW_MODE — a pure view flip is ORTHOGONAL to
 //                               the tree, so it neither creates nor clears an undo
-//                               target (a pending tab-move stays undoable).
+//                               target (a pending tab-move stays undoable); and a
+//                               CLOSE_TAB with reason:'mode-convert' (the builder-
+//                               only Settings tab being removed as single mode is
+//                               entered) — a mode artifact, equally orthogonal, so
+//                               it must not clobber a pending undo (review §10).
 //
 // View-mode + undo: UNDO_LAST carries the CURRENT view-mode forward by default, so
 // undoing a tree edit made across a standalone toggle reverts the edit, never the
@@ -1462,6 +1471,13 @@ export function workspaceReducer(state, action) {
         // would resurrect the tab without going through backend recovery. Clear.
         if (next === ws && undo == null) return state
         return { ws: next, undo: null }
+      }
+      if (action.reason === 'mode-convert') {
+        // Removing the builder-only Settings tab as single mode is entered — a mode
+        // artifact, ORTHOGONAL to the undo slot like SET_VIEW_MODE. Preserve the
+        // existing slot (a pending tab-move stays undoable); the flip back re-creates
+        // the tab, so this removal is not itself undoable (review §10).
+        return next === ws ? state : { ws: next, undo }
       }
       // User close (the strip ✕): reversible.
       if (next === ws) return state

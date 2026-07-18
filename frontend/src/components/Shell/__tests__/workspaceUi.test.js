@@ -46,7 +46,9 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
   assert.match(shell, /const tabStripVisible = tabStripEngaged && openTabs\.length >= 1/)
   assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
-  assert.match(shell, /if \(openTabs\.length === 1\) \{[\s\S]*?setTabStripEngaged\(false\)[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
+  // The sole-tab "unpin" shortcut, EXCEPT for a sole Settings tab which must
+  // genuinely close (review §11).
+  assert.match(shell, /if \(openTabs\.length === 1 && kind !== 'settings'\) \{[\s\S]*?setTabStripEngaged\(false\)[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
 })
 
 test('the pane switcher uses the shared modal focus and dismissal contract', () => {
@@ -265,8 +267,8 @@ test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap 
   // a suppressed-gesture check, with zero timers.
   assert.match(shell, /className=\{`shell__brand/)
   assert.match(shell, /aria-expanded=\{drawerOpen\}/)
-  const onClick = shell.match(/onClick=\{\(\) => \{[\s\S]*?\n {10}\}\}/)?.[0] || ''
-  assert.match(onClick, /if \(logoGesture\.consumeSuppressedClick\(\)\) return/)
+  const onClick = shell.match(/onClick=\{\(e\) => \{[\s\S]*?\n {10}\}\}/)?.[0] || ''
+  assert.match(onClick, /if \(logoGesture\.consumeSuppressedClick\(e\.detail\)\) return/)
   assert.match(onClick, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
   assert.doesNotMatch(onClick, /setTimeout\(/, 'the tap path must carry no timer')
 })
@@ -288,6 +290,23 @@ test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches 
   assert.match(logoGestureSrc, /if \(pressRef\.current\) e\.preventDefault\(\)/)
   // The hook itself never opens/closes the drawer — that stays the caller's.
   assert.doesNotMatch(logoGestureSrc, /openDrawer|closeDrawer/)
+})
+
+test('the press state machine is pointer-captured, keyed, and classified by time+displacement', () => {
+  // §5: pointerId stored + pointer capture taken; move/up/cancel ignore other pointers.
+  assert.match(logoGestureSrc, /pointerId: e\.pointerId/)
+  assert.match(logoGestureSrc, /setPointerCapture\?\.\(e\.pointerId\)/)
+  assert.match(logoGestureSrc, /releasePointerCapture\?\.\(press\.pointerId\)/)
+  assert.match(logoGestureSrc, /e\.pointerId !== press\.pointerId\) return/)
+  assert.match(logoGestureSrc, /if \(pressRef\.current\) return \/\/ a press is already live/)
+  // §4: pointerup classifies by elapsed + displacement, not liveness.
+  assert.match(logoGestureSrc, /if \(isSwipeRight\(dx, dy\)\) \{ onToggleMode\?\.\(\); endPress\(\{ suppressClick: true \}\); return \}/)
+  assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: true \}\); return \}/)
+  assert.match(logoGestureSrc, /if \(holdComplete\(elapsed\)\) \{ completeHold\(\); return \}/)
+  // §6: a drawer-open from any path cancels a live hold.
+  assert.match(logoGestureSrc, /if \(drawerOpen && pressRef\.current\) endPress/)
+  // §13: a keyboard click (detail 0) is never suppressed.
+  assert.match(logoGestureSrc, /if \(detail === 0\) return false/)
 })
 
 test('completion feedback: single haptic (feature-detected) + an outward pulse, symmetric', () => {
@@ -383,6 +402,25 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
 })
 
+test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
+  // The invariant governs navigable destinations (Settings, takeover views,
+  // immersive), NOT dismissible dialogs layered over the workspace. Those stay
+  // fixed modals with their own dismiss and are out of the invariant's scope.
+  const navSrc = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
+  assert.match(navSrc, /DESTINATIONS, NOT DIALOGS/)
+  const walkthrough = readFileSync(
+    new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
+  )
+  const urmCss = readFileSync(
+    new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
+  )
+  // The walkthrough is a dismissible dialog (skip + onClose:skip) — reloading it
+  // over a builder workspace can never trap; and the update-review modal stays fixed.
+  assert.match(walkthrough, /const skip = useCallback/)
+  assert.match(walkthrough, /onClose: skip/)
+  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+})
+
 test('Shell threads the (drag-preview) viewMode into the content derivation and the per-pane chat gate', () => {
   // effectiveViewMode is 'panes' during a single-mode drag preview (point 15).
   assert.match(shell, /viewMode: effectiveViewMode/)
@@ -399,9 +437,14 @@ test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any dro
   assert.match(dragBinding, /onPreviewBuilder\?\.\(false\)/) // cleared on cleanup (commit AND cancel)
   // ANY single-mode drop commits builder mode (folds in the former single-leaf flip);
   // the flip is folded into OPEN_TAB_AT so ONE undo reverts both tree and viewMode.
-  assert.match(dragBinding, /flipToPanes = workspaceStateRef\.current\.ws\.viewMode === 'single'\n/)
+  assert.match(dragBinding, /const flipToPanes = before\.viewMode === 'single'/)
   assert.match(dragBinding, /flipViewMode: flipToPanes \? 'panes' : null/)
   assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
+  // BLOCKER §1: the drag-commit flip routes through the SAME centralized conversion.
+  assert.match(dragBinding, /if \(flipToPanes\) \{[\s\S]*?convertSettingsForModeTransition\?\.\(\)/)
+  // §8: "committed" is the ACTUAL workspace change, not a stale lit-zone flag.
+  assert.match(dragBinding, /return workspaceStateRef\.current\.ws !== before/)
+  assert.match(dragBinding, /const didCommit = curZone \? commitDrop\(\) : false/)
   // The drag-deny shake is gone from the CSS too.
   assert.doesNotMatch(shellCss, /is-vibrating|shell-brand-shake|shell-brand-pulse/)
 })

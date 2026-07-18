@@ -81,6 +81,11 @@ export default function useWorkspaceDrag({
   // single-mode drag unfolds (point 15: dragging IS building). Render-only: the
   // reducer viewMode stays 'single' until the drop commits 'panes', so ONE undo
   // reverts both the tree AND the mode.
+  convertSettingsForModeTransition, // () => void — the ONE centralized overlay<->tab
+  // conversion every mode transition uses (review BLOCKER §1). A drop that commits
+  // 'panes' runs it so a Settings TAKEOVER open at commit time converts to a tab
+  // instead of lingering full-bleed over the committed builder workspace. A no-op
+  // when no overlay is open, preserving the one-undo fold for the common drop.
 }) {
   useEffect(() => {
     if (!enabled) return undefined
@@ -119,10 +124,24 @@ export default function useWorkspaceDrag({
         contentElRef.current?.appendChild(previewEl)
       }
     }
+    // Pre-glow nodes are appended separately from the shield/chip/preview and
+    // self-remove ~840ms later; a cancelled drag must take them down NOW too, else
+    // they linger (review §12). Their scheduled timers are cleared so the delayed
+    // remove() can't fire on an already-detached node.
+    const preGlowNodes = []
+    function clearPreGlow() {
+      for (const { node, timers } of preGlowNodes) {
+        for (const id of timers) clearTimeout(id)
+        node.remove()
+      }
+      preGlowNodes.length = 0
+    }
+
     function removeOverlays() {
       shieldEl?.remove(); shieldEl = null
       chipEl?.remove(); chipEl = null
       previewEl?.remove(); previewEl = null
+      clearPreGlow()
     }
 
     function positionChip(clientX, clientY, isTouch, key) {
@@ -165,7 +184,13 @@ export default function useWorkspaceDrag({
         g.style.height = `${pane.rect.h}px`
         host.appendChild(g)
         requestAnimationFrame(() => g.classList.add('is-on'))
-        setTimeout(() => { g.classList.remove('is-on'); setTimeout(() => g.remove(), 420) }, 420)
+        const t1 = setTimeout(() => {
+          g.classList.remove('is-on')
+          const t2 = setTimeout(() => g.remove(), 420)
+          entry.timers.push(t2)
+        }, 420)
+        const entry = { node: g, timers: [t1] }
+        preGlowNodes.push(entry)
       }
     }
 
@@ -375,9 +400,9 @@ export default function useWorkspaceDrag({
         // release cancels rather than silently committing a different mutation.
         const zone = releaseZone(hitTest(toLocal(lastPoint.x, lastPoint.y), fresh, curZone), curZone)
         const target = zoneTarget(zone)
-        if (!target) return
+        if (!target) return false
         const tab = tabFromKey(key)
-        if (!tab) return
+        if (!tab) return false
         const label = labelForTabRef.current ? labelForTabRef.current(tab) : 'tab'
         // The undo toast is driven by the reducer's undo slot (Shell), not raised
         // here: OPEN_TAB_AT stamps a `toast` on the slot only when the drop
@@ -391,11 +416,23 @@ export default function useWorkspaceDrag({
         // reducer viewMode is still 'single' here — the builder unfold was a
         // render-only preview — so undo.ws captures 'single' correctly. This folds in
         // the former single-leaf split-drop flip as the no-parked-layout case.
-        const flipToPanes = workspaceStateRef.current.ws.viewMode === 'single'
+        const before = workspaceStateRef.current.ws
+        const flipToPanes = before.viewMode === 'single'
+        if (flipToPanes) {
+          // BLOCKER §1: route the mode transition through the SAME centralized
+          // conversion every toggle uses, BEFORE the drop, so a Settings takeover
+          // open at commit time converts to a tab (it reads viewMode 'single' here
+          // → "entering builder"). A no-op when no overlay is open.
+          convertSettingsForModeTransition?.()
+        }
         dispatchWorkspace({
           type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}`,
           flipViewMode: flipToPanes ? 'panes' : null,
         })
+        // §8: "committed" is whether the workspace ACTUALLY changed (a same-slot
+        // no-op leaves it untouched), not merely that a zone was lit — the caller
+        // uses this to decide drawer restoration.
+        return workspaceStateRef.current.ws !== before
       }
 
       const onUp = (ev) => {
@@ -422,18 +459,23 @@ export default function useWorkspaceDrag({
           // Released back over the drawer = cancel; cleanup reopens it if glided.
           cleanup({ suppressClick: true })
         } else {
-          if (curZone) commitDrop()
-          // A release over a live zone is a commit (drawer stays closed); a
-          // release over NO zone is a cancel (cleanup reopens a glided drawer).
-          cleanup({ suppressClick: true, committed: !!curZone })
+          // "committed" is the ACTUAL dispatch outcome (§8) — a fresh-validation
+          // cancel or a same-slot no-op leaves the workspace untouched and is treated
+          // as a cancel (glided drawer restored). A live zone that really mutates
+          // keeps the drawer closed.
+          const didCommit = curZone ? commitDrop() : false
+          cleanup({ suppressClick: true, committed: didCommit })
         }
       }
 
-      const onCancel = (ev) => { if (ev.pointerId === pointerId) cleanup() }
-      const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup() } }
-      const onLostCapture = (ev) => { if (ev.pointerId === pointerId) cleanup() }
-      const onWinBlur = () => cleanup()
-      const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup() }
+      // Every cancel path suppresses the trailing source click when a drag had
+      // ARMED (§9): otherwise the compat click after an Escape / lost-capture /
+      // blur / visibility cancel can still navigate to the source row.
+      const onCancel = (ev) => { if (ev.pointerId === pointerId) cleanup({ suppressClick: armed }) }
+      const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup({ suppressClick: true }) } }
+      const onLostCapture = (ev) => { if (ev.pointerId === pointerId) cleanup({ suppressClick: armed }) }
+      const onWinBlur = () => cleanup({ suppressClick: armed })
+      const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed }) }
 
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
@@ -468,8 +510,20 @@ export default function useWorkspaceDrag({
         // A session that ends WITHOUT a committed drop — Escape, pointercancel,
         // window blur, visibility loss, lost capture, a release over no zone, or a
         // release back over the drawer — must restore the drawer it glided shut.
-        if (glided && !committed && sourceKind === 'drawer' && !drawerOpenRef.current) {
-          openDrawer?.()
+        // §7: glide-close used an async history.back(); its handleBack flips
+        // drawerOpenRef false only when the traversal SETTLES, which can land AFTER
+        // this cleanup. Reopening against a stale "still open" snapshot would be
+        // clobbered by that pending close. So RECONCILE: wait (bounded) for the
+        // pending close to settle, then reopen — never gate on the stale snapshot.
+        if (glided && !committed && sourceKind === 'drawer') {
+          const reopen = (attempts) => {
+            if (drawerOpenRef.current) {
+              if (attempts < 20) requestAnimationFrame(() => reopen(attempts + 1))
+              return // the pending glide-close hasn't landed yet — wait a frame
+            }
+            openDrawer?.()
+          }
+          reopen(0)
         }
         removeOverlays()
         // The compat click fires after the shield is already gone; swallow it so

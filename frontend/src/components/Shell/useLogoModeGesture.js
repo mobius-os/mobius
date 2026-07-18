@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOLD_MS, decidePointerMove, runHoldCompletion } from './logoHoldMachine.js'
+import {
+  HOLD_MS, decidePointerMove, isSwipeRight, movedBeyondSlop, holdComplete,
+  runHoldCompletion,
+} from './logoHoldMachine.js'
 
 // Builder-mode activation, hosted on the TOP-LEFT logo cluster (owner placement):
 // there is NO standalone toggle button — the Möbius mark itself is the control and
@@ -19,6 +22,10 @@ import { HOLD_MS, decidePointerMove, runHoldCompletion } from './logoHoldMachine
 //
 // The pure thresholds/predicates and the completion feedback live in
 // logoHoldMachine.js so the contract is unit-testable without React/DOM.
+//
+// The press is POINTER-CAPTURED and keyed by pointerId (adversarial review §5/§6):
+// events for a press that leaves the brand, or a second finger, cannot mis-drive
+// the state machine, and any drawer-open from another path cancels a live hold.
 
 export function prefersReducedMotion() {
   try {
@@ -27,14 +34,17 @@ export function prefersReducedMotion() {
   } catch { return false }
 }
 
-export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
+export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true, drawerOpen = false }) {
   const [holding, setHolding] = useState(false)
   const [pulsing, setPulsing] = useState(false)
-  // { t, x, y } while a press is active; null between presses.
+  // { t, x, y, pointerId } while a press is active; null between presses.
   const pressRef = useRef(null)
   const rafRef = useRef(0)
-  // Set when a gesture (completed hold, swipe, or drag) consumed the activation,
-  // so the trailing click does NOT also toggle the drawer.
+  // Set when a POINTER gesture (completed hold, swipe, or drag) consumed the
+  // activation, so the trailing compatibility click does NOT also toggle the
+  // drawer. Only ever read for a pointer click (detail >= 1) — a keyboard click
+  // (detail 0) is never the compat click, so a stale flag can't eat the next Enter
+  // (review §13).
   const suppressClickRef = useRef(false)
 
   const writeProgress = useCallback((p) => {
@@ -47,16 +57,21 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
   }, [])
 
   // End the active press. suppressClick=true means the gesture consumed the
-  // activation (a completed hold, a swipe, or a drag), so the trailing click must
-  // NOT also toggle the drawer; false means it was a plain TAP → let the native
-  // click open the drawer, UNCHANGED and with zero latency.
+  // activation (a completed hold, a swipe, or a drag), so the trailing pointer
+  // click must NOT also toggle the drawer; false means it was a plain TAP → let
+  // the native click open the drawer, UNCHANGED and with zero latency. Releases
+  // the pointer capture taken at press start.
   const endPress = useCallback(({ suppressClick }) => {
     stopRaf()
     writeProgress(0)
+    const press = pressRef.current
     pressRef.current = null
     setHolding(false)
+    if (press && brandRef?.current) {
+      try { brandRef.current.releasePointerCapture?.(press.pointerId) } catch { /* released */ }
+    }
     if (suppressClick) suppressClickRef.current = true
-  }, [stopRaf, writeProgress])
+  }, [stopRaf, writeProgress, brandRef])
 
   const completeHold = useCallback(() => {
     if (!pressRef.current) return
@@ -88,17 +103,21 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
   const onPointerDown = useCallback((e) => {
     if (!enabled) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
+    if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
-    pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY }
+    pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY, pointerId: e.pointerId }
     setHolding(true)
     writeProgress(0)
     stopRaf()
+    // Capture so a press that leaves the brand still delivers move/up here and the
+    // machine ends deterministically (review §5).
+    try { brandRef?.current?.setPointerCapture?.(e.pointerId) } catch { /* capture optional */ }
     rafRef.current = requestAnimationFrame(tick)
-  }, [enabled, tick, stopRaf, writeProgress])
+  }, [enabled, tick, stopRaf, writeProgress, brandRef])
 
   const onPointerMove = useCallback((e) => {
     const press = pressRef.current
-    if (!press) return
+    if (!press || e.pointerId !== press.pointerId) return
     const dx = e.clientX - press.x
     const dy = e.clientY - press.y
     const decision = decidePointerMove(dx, dy)
@@ -113,16 +132,26 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
     // 'continue' → keep holding; the rAF loop keeps filling the ring.
   }, [onToggleMode, endPress])
 
-  const onPointerUp = useCallback(() => {
-    // Nothing active means the hold already completed/cancelled (click already
-    // suppressed). Otherwise this is a release BEFORE completion — a plain TAP, so
-    // do NOT suppress: the native click opens the drawer, exactly as before.
-    if (!pressRef.current) return
+  const onPointerUp = useCallback((e) => {
+    const press = pressRef.current
+    if (!press || e.pointerId !== press.pointerId) return
+    // Classify the release by ELAPSED TIME + DISPLACEMENT, never by liveness
+    // (review §4): a delayed final rAF must not let a ≥450ms release fall through
+    // as a tap, and a fast flick whose only movement lands on this event is still
+    // a swipe.
+    const dx = e.clientX - press.x
+    const dy = e.clientY - press.y
+    const elapsed = performance.now() - press.t
+    if (isSwipeRight(dx, dy)) { onToggleMode?.(); endPress({ suppressClick: true }); return }
+    if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: true }); return } // a drag → cancel
+    if (holdComplete(elapsed)) { completeHold(); return } // held long enough → flip
+    // A genuine short tap → let the native click open the drawer, unchanged.
     endPress({ suppressClick: false })
-  }, [endPress])
+  }, [onToggleMode, endPress, completeHold])
 
-  const onPointerCancel = useCallback(() => {
-    if (!pressRef.current) return
+  const onPointerCancel = useCallback((e) => {
+    const press = pressRef.current
+    if (!press || (e && e.pointerId !== press.pointerId)) return
     endPress({ suppressClick: true })
   }, [endPress])
 
@@ -133,9 +162,12 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
     if (pressRef.current) e.preventDefault()
   }, [])
 
-  // Read + reset the "this click was consumed by the gesture" flag; the caller
-  // opens the drawer only when this returns false.
-  const consumeSuppressedClick = useCallback(() => {
+  // Read + reset the pointer-click suppression. `detail` is the click event's
+  // detail: 0 means a keyboard-generated click, which is NEVER the compat click a
+  // pointer gesture leaves behind, so it is never suppressed (review §13). The
+  // caller opens the drawer only when this returns false.
+  const consumeSuppressedClick = useCallback((detail) => {
+    if (detail === 0) return false
     if (!suppressClickRef.current) return false
     suppressClickRef.current = false
     return true
@@ -143,6 +175,14 @@ export function useLogoModeGesture({ onToggleMode, brandRef, enabled = true }) {
 
   // Clears the one-shot completion pulse when its ::after animation ends.
   const onAnimationEnd = useCallback(() => { setPulsing(false) }, [])
+
+  // A drawer-open from ANY path (plain Enter, a queued open, a sibling) while a
+  // hold is live cancels it — otherwise the rAF keeps ticking and later flips the
+  // mode behind the open drawer (review §6). suppressClick so the eventual pointer
+  // release can't close the drawer the user just opened.
+  useEffect(() => {
+    if (drawerOpen && pressRef.current) endPress({ suppressClick: true })
+  }, [drawerOpen, endPress])
 
   // Cancel a live rAF on unmount so a hold in flight can't tick a dead component.
   useEffect(() => () => { stopRaf() }, [stopRaf])
