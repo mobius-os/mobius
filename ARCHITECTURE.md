@@ -227,6 +227,16 @@ provider contract, lifecycle rules, and trust-tier escape hatches.
 | Owner-trusted full web service | Shared service-gateway origin distinct from the shell, shell-owned direct adapter, path-scoped host-only cookies and exact shell+gateway ancestor policy; never nested below the opaque wrapper | Lowest-friction path for existing full web apps. The gateway isolates the trust group from Möbius, but services on it share an origin and can reach one another |
 | Independent or mutually untrusted service/PWA | Dedicated distinct origin (prefer a same-site subdomain), host-only cookies and exact shell+service ancestor policy | Strong service-to-service isolation plus independent manifest/SW/storage identity; costs one managed origin per isolated service |
 
+For an ordinary mini-app, `window.mobius.storage` is implemented by a narrow
+RPC bridge to a runtime in the shell realm. The shell runtime owns IndexedDB,
+the read-through cache, and the durable outbox that the opaque child cannot
+open. Every request is attributed to an exact mounted `contentWindow`; the host
+runtime is keyed by both app id and immutable installation nonce, and token
+rotation cannot reuse an old ready or in-flight runtime. Subscriptions are host
+desired state, so writes from a buffered sibling frame and refreshes observed by
+that host runtime repaint every subscribed frame while detached documents are
+removed synchronously.
+
 Opacity simplifies permissions: no ambient owner JWT, shell storage bleed, DOM
 reach or cross-app authority. It does **not** by itself improve installability,
 offline outboxes, cookies, media APIs or other origin-bound capabilities.

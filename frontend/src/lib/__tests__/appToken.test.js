@@ -17,6 +17,7 @@ import {
   latchedAppToken,
   resolveLatchedToken,
   appTokenRefreshInterval,
+  appTokenIdentity,
   _resetLatchStore,
 } from '../appToken.js'
 
@@ -29,6 +30,24 @@ function tokenWithExpiry(exp) {
   const payload = Buffer.from(JSON.stringify({ exp })).toString('base64url')
   return `header.${payload}.signature`
 }
+
+function appIdentityToken(claims) {
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url')
+  return `header.${payload}.signature`
+}
+
+test('appTokenIdentity binds storage to the app id and installation nonce', () => {
+  assert.deepEqual(appTokenIdentity(appIdentityToken({
+    scope: 'app', app_id: 7, app_nonce: 'install-a',
+  })), {
+    appId: '7', appInstanceId: 'install-a',
+  })
+  assert.deepEqual(appTokenIdentity(appIdentityToken({ scope: 'app', app_id: '8' })), {
+    appId: '8', appInstanceId: null,
+  })
+  assert.equal(appTokenIdentity(appIdentityToken({ scope: 'owner', app_id: 7 })), null)
+  assert.equal(appTokenIdentity('not-a-token'), null)
+})
 
 test('app token refresh follows JWT expiry with a five-minute safety window', () => {
   const now = Date.UTC(2026, 6, 13, 12, 0, 0)

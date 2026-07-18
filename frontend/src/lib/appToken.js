@@ -39,6 +39,22 @@ const APP_TOKEN_REFRESH_SKEW_MS = 5 * 60_000
 const APP_TOKEN_MIN_REFRESH_MS = 30_000
 const APP_TOKEN_FALLBACK_REFRESH_MS = 5 * 60_000
 
+export function appTokenIdentity(token) {
+  try {
+    const encoded = String(token || '').split('.')[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+    if (payload?.scope !== 'app' || payload.app_id == null) return null
+    return {
+      appId: String(payload.app_id),
+      appInstanceId: typeof payload.app_nonce === 'string' && payload.app_nonce
+        ? payload.app_nonce
+        : null,
+    }
+  } catch { return null }
+}
+
 // React Query calls this after every successful mint. Refresh shortly before
 // the JWT's actual expiry instead of relying on a fixed cache lifetime; hidden
 // AppCanvas siblings can remain mounted for days in the shell LRU.

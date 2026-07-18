@@ -73,6 +73,81 @@ test('an opaque sandbox without IndexedDB still reads and writes online', async 
   await assert.rejects(s.set('offline.json', { no: 'phantom queue' }), /offline saving is unavailable/)
 })
 
+test('an opaque frame delegates offline durability and subscriptions to the shell bridge', async () => {
+  freshEnv()
+  globalThis.indexedDB = {
+    open() { throw new DOMException('denied', 'SecurityError') },
+  }
+  const values = new Map([['cached.txt', 'last-known']])
+  const calls = []
+  let hostCallback = null
+  let detached = 0
+  globalThis.window.__mobiusStorageBridgeCall = async (method, args) => {
+    calls.push([method, ...args])
+    const [path, value] = args
+    if (method === 'getText') return values.get(path) ?? null
+    if (method === 'durableWrite') {
+      values.set(path, value)
+      return { durability: 'queued', path, writeId: 'host-write-1' }
+    }
+    if (method === 'pendingCount') return 1
+    if (method === 'list') return [{ name: 'cached.txt', path: 'cached.txt', type: 'file' }]
+    if (method === 'remove') {
+      values.delete(path)
+      return { queued: true }
+    }
+    throw new Error(`unexpected bridge method ${method}`)
+  }
+  globalThis.window.__mobiusStorageBridgeSubscribe = (kind, path, cb) => {
+    assert.equal(kind, 'text')
+    assert.equal(path, 'cached.txt')
+    hostCallback = cb
+    return () => { detached += 1 }
+  }
+  try {
+    const s = await newStorage()
+    assert.equal(await s.getText('cached.txt'), 'last-known')
+    assert.deepEqual(await s.setText('draft.txt', 'tube edit'), { queued: true })
+    assert.equal(values.get('draft.txt'), 'tube edit')
+    assert.equal(await s.pendingCount(), 1)
+    assert.deepEqual(await s.list(''), [{ name: 'cached.txt', path: 'cached.txt', type: 'file' }])
+    assert.deepEqual(await s.remove('draft.txt'), { queued: true })
+    assert.equal(values.has('draft.txt'), false)
+
+    const observed = []
+    const unsubscribe = s.subscribeText('cached.txt', (value) => observed.push(value))
+    hostCallback('from-another-frame')
+    assert.deepEqual(observed, ['from-another-frame'])
+    unsubscribe()
+    assert.equal(detached, 1)
+    assert.equal(calls.some(([method]) => method === 'durableWrite'), true)
+  } finally {
+    delete globalThis.window.__mobiusStorageBridgeCall
+    delete globalThis.window.__mobiusStorageBridgeSubscribe
+  }
+})
+
+test('the shell host uses verified reachability instead of stale navigator state', async () => {
+  const { server } = freshEnv()
+  let online = false
+  const { makeStorage } = await runtimeExports()
+  const s = makeStorage({
+    appId: '7',
+    appInstanceId: 'install-one',
+    getToken: async () => appToken('7', 'install-one'),
+    isOnline: () => online,
+  })
+
+  assert.deepEqual(await s.set('queued.json', { safe: true }), { queued: true })
+  assert.equal(server.serverHas('queued.json'), false)
+  assert.equal(await s.pendingCount(), 1)
+
+  online = true
+  await s._drain()
+  assert.deepEqual(server.serverValue('queued.json'), { safe: true })
+  assert.equal(await s.pendingCount(), 0)
+})
+
 test('list can batch JSON content in one bounded server request', async () => {
   const { server } = freshEnv()
   globalThis.indexedDB = {
@@ -936,6 +1011,29 @@ test('getWithVersion returns the value AND its server version (ETag)', async () 
   // server echo the ETag) — a plain get() must NOT, so it stays a cheap read.
   const vget = server.log.filter((e) => e.method === 'GET' && e.url.includes('index.json')).pop()
   assert.equal(vget.headers['X-Mobius-Version'], '1')
+})
+
+test('getWithVersion retains its ETag for an offline CAS write and reconnect drain', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('session.json', { sets: 3 })
+  const online = await s.getWithVersion('session.json')
+  assert.ok(online.version)
+
+  server.setOnline(false)
+  const cached = await s.getWithVersion('session.json')
+  assert.deepEqual(cached.value, { sets: 3 })
+  assert.equal(cached.version, online.version)
+  assert.equal(cached.offline, true)
+  const queued = await s.durableWrite('session.json', { sets: 4 }, {
+    kind: 'json', ifMatch: cached.version,
+  })
+  assert.equal(queued.durability, 'queued')
+
+  server.setOnline(true)
+  await s._drain()
+  assert.deepEqual(server.serverValue('session.json'), { sets: 4 })
+  assert.equal(await s.pendingCount(), 0)
 })
 
 test('durableWrite({ifMatch}) sends If-Match and succeeds when the version matches', async () => {

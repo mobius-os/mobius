@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
-import { liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
+import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
+import { appTokenIdentity, liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
+import { createAppStorageHost } from '../../lib/appStorageHost.js'
 import {
   cacheAppToken, clearAppFrameStorage, readAppFrameStorage,
   readCachedAppToken, removeAppFrameStorage, setAppFrameStorage,
@@ -41,6 +43,11 @@ import './AppCanvas.css'
 //      reload (DOM reparenting, browser forced reload) resets the
 //      iframe flag but not parent state, and the re-init must fire or
 //      the iframe sits at its 10s loading-timeout.
+//
+//   Storage RPC: {type:'moebius:storage-rpc', requestId, method, args}
+//      frame → parent, answered by `moebius:storage-rpc-result`. The shell owns
+//      IndexedDB/cache/outbox because an opaque frame cannot open it. Exact
+//      source attribution and the app id + installation nonce bind every call.
 //
 //   2. {type: 'moebius:frame-mounted', appId}              frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
@@ -295,6 +302,8 @@ export default function AppCanvas({
   // for two versions in one render, the two live frames can never fight over the
   // latch. See lib/appToken.js.
   const token = resolveLatchedToken(appId, version, liveToken, appToken)
+  const hostTokenRef = useRef(token)
+  hostTokenRef.current = token
 
   // AppCanvas was passive (enabled: false) — relied on Shell's
   // useTheme to write the cache. After ticket 047, AppCanvas owns
@@ -317,6 +326,40 @@ export default function AppCanvas({
   // VERSION — a Map, not a single ref, because two iframes are alive during the
   // swap window and each must be addressable independently.
   const framesRef = useRef(new Map())
+  const storageHost = useMemo(() => createAppStorageHost({
+    appId,
+    getCurrentToken: () => hostTokenRef.current,
+    getToken: async ({ forceRefresh = false } = {}) => {
+      if (!forceRefresh) return hostTokenRef.current
+      return queryClient.fetchQuery({
+        queryKey: appQueries.token.key(appId),
+        queryFn: () => appQueries.token.fetch(appId),
+        staleTime: 0,
+      })
+    },
+    tokenIdentity: appTokenIdentity,
+    async createStorage(options) {
+      const runtimeUrl = `${import.meta.env.BASE_URL || '/'}mobius-runtime.js`
+      const runtime = await import(/* @vite-ignore */ runtimeUrl)
+      return runtime.makeStorage({ ...options, isOnline: getOnlineSnapshot })
+    },
+    send(source, message) {
+      if (!source?.postMessage) return false
+      source.postMessage(message, '*')
+      return true
+    },
+    onDeadLetter(payload) {
+      for (const frame of framesRef.current.values()) {
+        try {
+          frame?.contentWindow?.postMessage({
+            type: 'moebius:storage-dead-letter', payload,
+          }, '*')
+        } catch { /* frame disappeared during delivery */ }
+      }
+    },
+  }), [appId, queryClient])
+  const storageHostRef = useRef(storageHost)
+  storageHostRef.current = storageHost
   // Versions whose iframe has fired its document `load` event — i.e. its message
   // listener is live and it can receive frame-init/theme/insets. Per frame,
   // because the two buffered frames finish loading independently.
@@ -346,6 +389,7 @@ export default function AppCanvas({
           capabilityHostRef.current?.detachSource?.(
             framesRef.current.get(v)?.contentWindow,
           )
+          storageHostRef.current.detachSource(framesRef.current.get(v)?.contentWindow)
           // A service-surface takeover can remove the live iframe without
           // unmounting AppCanvas or advancing the buffered version. Retire its
           // host sentinels at this exhaustive document-removal boundary too.
@@ -399,6 +443,16 @@ export default function AppCanvas({
   useEffect(() => {
     capabilityHostRef.current.reconcile()
   }, [capabilityContract])
+
+  useEffect(() => {
+    void storageHost.reconcile().catch(() => {})
+  }, [storageHost, token])
+
+  useEffect(() => () => { storageHost.destroy() }, [storageHost])
+
+  useEffect(() => {
+    if (online) void storageHost.drain().catch(() => {})
+  }, [online, storageHost])
 
   function postToFrame(v, message) {
     // A sandboxed frame without allow-same-origin has an opaque origin, so the
@@ -503,6 +557,42 @@ export default function AppCanvas({
         if (el?.contentWindow && el.contentWindow === e.source) { srcVersion = v; break }
       }
       if (srcVersion == null) return   // not one of our frames (stale/unknown)
+
+      if (msg.type === 'moebius:storage-rpc') {
+        const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 160
+          ? msg.requestId
+          : ''
+        const method = typeof msg.method === 'string' ? msg.method : ''
+        const args = Array.isArray(msg.args) ? msg.args : []
+        if (!requestId) return
+        const source = e.source
+        const host = storageHostRef.current
+        ;(async () => {
+          try {
+            const result = await host.handleRpc(source, method, args)
+            source?.postMessage({
+              type: 'moebius:storage-rpc-result', requestId, ok: true, result,
+            }, '*')
+          } catch (error) {
+            try {
+              source?.postMessage({
+                type: 'moebius:storage-rpc-result', requestId, ok: false,
+                error: {
+                  name: error?.name || 'Error',
+                  message: error?.message || String(error),
+                  code: error?.code,
+                  status: error?.status,
+                  path: error?.path,
+                  writeId: error?.writeId,
+                  retryable: error?.retryable === true,
+                  refusedValue: error?.refusedValue,
+                },
+              }, '*')
+            } catch { /* frame detached while the host request settled */ }
+          }
+        })()
+        return
+      }
 
       // Opaque frames get a synchronous in-memory localStorage facade. Persist
       // mutations into an app-private namespace only; never write arbitrary
@@ -1081,6 +1171,9 @@ export default function AppCanvas({
     // why the parent never dedups frame-init).
     if (loadedDocsRef.current.has(v)) {
       capabilityHostRef.current.detachSource(
+        framesRef.current.get(v)?.contentWindow,
+      )
+      storageHostRef.current.detachSource(
         framesRef.current.get(v)?.contentWindow,
       )
       dispatchSwap({ type: 'live-reload', version: v })

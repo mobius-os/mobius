@@ -281,7 +281,7 @@ async function withStores(storeNames, mode, fn) {
 // fake-indexeddb + a mocked fetch/navigator under node:test
 // (mobiusRuntimeStore.test.js), the same way overlayPending exposes the
 // PURE read-your-writes logic. `init()` is the only production caller.
-export function makeStorage({ appId, appInstanceId = null, getToken }) {
+export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null }) {
   const hostGetToken = getToken
   getToken = async (options) => {
     const token = await hostGetToken(options)
@@ -289,11 +289,27 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   }
   const deadLetterListeners = new Set()
   const instanceKey = appInstanceId || 'legacy'
+  const onlineNow = () => {
+    try {
+      if (typeof isOnline === 'function') return isOnline() !== false
+      return typeof navigator === 'undefined' ? true : navigator.onLine !== false
+    } catch { return true }
+  }
+  const bridgeCall = (typeof window !== 'undefined'
+    && typeof window.__mobiusStorageBridgeCall === 'function')
+    ? window.__mobiusStorageBridgeCall
+    : null
+  const bridgeSubscribe = (typeof window !== 'undefined'
+    && typeof window.__mobiusStorageBridgeSubscribe === 'function')
+    ? window.__mobiusStorageBridgeSubscribe
+    : null
+  const bridgeUnsubscribers = new Set()
   // App frames deliberately run without `allow-same-origin`, which makes their
   // origin opaque. Chromium correctly denies IndexedDB in that context. The
-  // offline mirror/outbox is an enhancement, not a prerequisite for online
-  // storage: detect that capability once and fall back to direct scoped API
-  // reads/writes below. Never loosen the iframe sandbox merely to regain IDB.
+  // shell hosts this same cache/outbox and exposes a narrow RPC bridge; a
+  // standalone/degraded host with neither IDB nor that bridge falls back to
+  // direct online-only scoped requests. Never loosen the iframe sandbox merely
+  // to regain origin-bound storage.
   let indexedDbAvailable = null
   async function hasIndexedDb() {
     if (indexedDbAvailable !== null) return indexedDbAvailable
@@ -518,9 +534,37 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   // SELF-DESCRIBES from storage (one server path = one typed value), plus a `ver`
   // write-nonce for the reconcile CAS. `data` holds the JSON value, the string,
   // or a native Blob (IndexedDB stores Blobs via structured clone).
-  function cachePut(path, data, kind = 'json', contentType = null, ver = nextVer()) {
+  function cachePut(
+    path, data, kind = 'json', contentType = null, ver = nextVer(),
+    serverVersion = undefined,
+  ) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, appInstanceId, data, kind, contentType, present: data !== null, ver, ts: Date.now() })
+      const put = (prior) => store.put({
+        key: cacheKey(path), path, appId, appInstanceId, data, kind, contentType,
+        present: data !== null,
+        ver,
+        serverVersion: serverVersion === undefined
+          ? (prior?.serverVersion || null)
+          : (serverVersion || null),
+        ts: Date.now(),
+      })
+      if (serverVersion !== undefined) { put(null); return }
+      const existing = store.get(cacheKey(path))
+      existing.onsuccess = () => put(existing.result || null)
+    })
+  }
+
+  function cacheConfirmVersion(path, expectedVer, serverVersion) {
+    if (!serverVersion || expectedVer == null) return Promise.resolve(false)
+    return withStore(CACHE_STORE, 'readwrite', (store, box) => {
+      box.value = false
+      const get = store.get(cacheKey(path))
+      get.onsuccess = () => {
+        const current = get.result
+        if (!current || current.ver !== expectedVer) return
+        store.put({ ...current, serverVersion, ts: Date.now() })
+        box.value = true
+      }
     })
   }
 
@@ -750,12 +794,13 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   }
 
   async function drainInner() {
-    if (!navigator.onLine) return
+    if (!onlineNow()) return
     const ops = await listOps()           // FIFO by seq
     for (const op of ops) {
       try {
         const sent = await send(op)
         await recordWriteOutcome(outcomeFromOp(op, 'confirmed', { version: sent && sent.version }))
+        await cacheConfirmVersion(op.path, op.ver, sent && sent.version)
         await deleteOp(op.seq)
       } catch (e) {
         if (e && e.conflict) {
@@ -781,7 +826,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
           // LOCK-FREE (a path-locked get() here would re-enter the lock a writer
           // may hold across this drain → the deadlock this whole restructure
           // avoids). Best-effort; offline → skip, the next online read re-syncs.
-          if (navigator.onLine) {
+          if (onlineNow()) {
             try {
               const fresh = await fetchValue(op.path, op.kind || 'json')
               const ct = fresh instanceof Blob ? fresh.type : null
@@ -895,11 +940,12 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   function set(path, data) {
     return withPathLock(path, async () => {
       if (!await hasIndexedDb()) {
-        await writeDirect(path, data, 'json', null)
-        return null
+        return { directResult: await writeDirect(path, data, 'json', null) }
       }
       return writeLocal(path, data, 'json', null)
-    }).then((op) => op ? settle(path, op.writeId, true) : { synced: true })
+    }).then((op) => op?.directResult
+      ? (op.directResult.durability === 'queued' ? { queued: true } : { synced: true })
+      : (op ? settle(path, op.writeId, true) : { synced: true }))
   }
   async function setText(path, text, opts) {
     if (typeof text !== 'string') {
@@ -908,11 +954,13 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
     const ct = (opts && opts.contentType) || 'text/plain;charset=utf-8'
     const op = await withPathLock(path, async () => {
       if (!await hasIndexedDb()) {
-        await writeDirect(path, text, 'text', ct)
-        return null
+        return { directResult: await writeDirect(path, text, 'text', ct) }
       }
       return writeLocal(path, text, 'text', ct)
     })
+    if (op?.directResult) {
+      return op.directResult.durability === 'queued' ? { queued: true } : { synced: true }
+    }
     return op ? settle(path, op.writeId, true) : { synced: true }
   }
   // setBlob guards BEFORE any lock/IDB/network: reject a non-Blob, an over-cap
@@ -935,21 +983,26 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
     const ct = (opts && opts.contentType) || blob.type || 'application/octet-stream'
     const op = await withPathLock(path, async () => {
       if (!hasIdb) {
-        await writeDirect(path, blob, 'blob', ct)
-        return null
+        return { directResult: await writeDirect(path, blob, 'blob', ct) }
       }
       return writeLocal(path, blob, 'blob', ct)
     })
+    if (op?.directResult) {
+      return op.directResult.durability === 'queued' ? { queued: true } : { synced: true }
+    }
     return op ? settle(path, op.writeId, true) : { synced: true }
   }
   function remove(path) {
     return withPathLock(path, async () => {
       if (!await hasIndexedDb()) {
-        await removeDirect(path)
-        return null
+        return { directResult: await removeDirect(path) }
       }
       return removeLocal(path)
-    }).then((op) => op ? settle(path, op.writeId, true) : { synced: true })
+    }).then((op) => op?.directResult
+      ? (op.directResult.durability === 'queued' || op.directResult.queued
+          ? { queued: true }
+          : { synced: true })
+      : (op ? settle(path, op.writeId, true) : { synced: true }))
   }
 
   function listSignals() {
@@ -1043,7 +1096,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   }
 
   async function drainSignalsInner() {
-    if (!navigator.onLine) return
+    if (!onlineNow()) return
     for (;;) {
       const records = (await listSignals()).slice(0, SIGNAL_SEND_BATCH)
       if (!records.length) return
@@ -1314,12 +1367,18 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   function scheduleRevalidate(path, kind = 'json') {
     withPathLock(path, async () => {
       if ((await listOps()).some((op) => op.path === path)) return
-      let data
-      try { data = await fetchValue(path, kind) } catch (e) { return }
+      let refreshed
+      try { refreshed = await fetchValueWithVersion(path, kind, true) } catch (e) { return }
+      const { value: data, version } = refreshed
       if ((await listOps()).some((op) => op.path === path)) return
       const prev = await cacheGet(path)
-      if (prev && sameJson(prev.data, data)) return
-      await cachePut(path, data, kind, prev ? prev.contentType : null)
+      if (prev && sameJson(prev.data, data)) {
+        await cacheConfirmVersion(path, prev.ver, version)
+        return
+      }
+      await cachePut(
+        path, data, kind, prev ? prev.contentType : null, nextVer(), version,
+      )
       notify(path, data)   // no pending op → effective value === server value
     }).catch(() => {})
   }
@@ -1342,16 +1401,16 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
     // below re-fetch it; a PRESENT blob still serves from cache (no wasteful
     // re-download of a large binary).
     const staleBlobTombstone =
-      cached && cached.present === false && kind === 'blob' && navigator.onLine
+      cached && cached.present === false && kind === 'blob' && onlineNow()
     if (cached && !staleBlobTombstone) {
       // Present value: the stored kind is authoritative — a wrong-typed read
       // throws (loud) instead of handing back a string-as-Blob. A tombstone
       // (present:false) has no value to type-check; it resolves null below.
       if (cached.present !== false) assertReadKind(path, cached.kind, kind)
-      if (kind !== 'blob' && navigator.onLine) scheduleRevalidate(path, kind)
+      if (kind !== 'blob' && onlineNow()) scheduleRevalidate(path, kind)
       return finalizeRead(await effectiveValue(path, cached.data), kind, cached.contentType, path)
     }
-    if (navigator.onLine) {
+    if (onlineNow()) {
       try {
         const data = await fetchValue(path, kind)
         const ct = kind === 'blob'
@@ -1367,11 +1426,15 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   }
 
   // Opaque sandbox frames cannot persist the offline cache/outbox in IndexedDB.
-  // Keep their online behavior fully functional through the scoped server API;
-  // offline reads honestly return null and writes reject rather than pretending
-  // a queued save survived when there is nowhere safe to keep it.
+  // In the normal shell they delegate to the parent-hosted makeStorage runtime;
+  // only a degraded host without that bridge takes the honest online-only
+  // direct path below.
   async function getDirect(path, kind = 'json') {
-    if (!navigator.onLine) return null
+    if (bridgeCall) {
+      const method = kind === 'text' ? 'getText' : (kind === 'blob' ? 'getBlob' : 'get')
+      return bridgeCall(method, [path])
+    }
+    if (!onlineNow()) return null
     try {
       return finalizeRead(await fetchValue(path, kind), kind, null, path)
     } catch (e) {
@@ -1380,7 +1443,15 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   }
 
   async function writeDirect(path, data, kind, contentType, opts = {}) {
-    if (!navigator.onLine) {
+    if (bridgeCall) {
+      return bridgeCall('durableWrite', [path, data, {
+        kind,
+        contentType,
+        ...(opts.ifMatch ? { ifMatch: opts.ifMatch } : {}),
+        ...(opts.ifNoneMatch === true ? { ifNoneMatch: true } : {}),
+      }])
+    }
+    if (!onlineNow()) {
       throw new Error('mobius.storage: offline saving is unavailable in this sandbox')
     }
     const sent = await send({
@@ -1393,7 +1464,8 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   }
 
   async function removeDirect(path) {
-    if (!navigator.onLine) {
+    if (bridgeCall) return bridgeCall('remove', [path])
+    if (!onlineNow()) {
       throw new Error('mobius.storage: offline saving is unavailable in this sandbox')
     }
     const sent = await send({ method: 'DELETE', path, kind: 'json' })
@@ -1534,6 +1606,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
     })
     throwIfAborted(opts.signal)
     if (op.direct) {
+      if (op.sent?.durability) return op.sent
       return {
         durability: 'synced', path, writeId: null,
         ...(op.sent?.version ? { version: op.sent.version } : {}),
@@ -1570,14 +1643,33 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
 
   async function getWithVersion(path, kind = 'json') {
     return withPathLock(path, async () => {
+      const hasIdb = await hasIndexedDb()
+      if (!hasIdb && bridgeCall) {
+        return bridgeCall('getWithVersion', [path, kind])
+      }
+      if (!onlineNow()) {
+        if (!hasIdb) return { value: null, version: null, offline: true }
+        const cached = await cacheGet(path)
+        if (cached && cached.present !== false) assertReadKind(path, cached.kind, kind)
+        return {
+          value: finalizeRead(
+            await effectiveValue(path, cached ? cached.data : null),
+            kind,
+            cached?.contentType || null,
+            path,
+          ),
+          version: cached?.serverVersion || null,
+          offline: true,
+        }
+      }
       const { value, version } = await fetchValueWithVersion(path, kind, true)
-      if (!await hasIndexedDb()) {
+      if (!hasIdb) {
         return { value: finalizeRead(value, kind, null, path), version }
       }
       const ct = kind === 'blob'
         ? (value instanceof Blob ? value.type : null)
         : (kind === 'text' ? 'text/plain;charset=utf-8' : null)
-      await cachePut(path, value, kind, ct)
+      await cachePut(path, value, kind, ct, nextVer(), version)
       return {
         value: finalizeRead(await effectiveValue(path, value), kind, ct, path),
         version,
@@ -1592,7 +1684,19 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
   // without changing it.) NOTE for subscribeBlob: each fire delivers a fresh
   // Blob; the APP owns object-URL lifetime (revoke the previous URL on the next
   // fire / on unmount).
-  function subscribeWith(path, cb, getter) {
+  function subscribeWith(path, cb, getter, kind = 'json') {
+    if (bridgeSubscribe) {
+      const detachBridge = bridgeSubscribe(kind, path, cb)
+      let active = true
+      const unsubscribe = () => {
+        if (!active) return
+        active = false
+        bridgeUnsubscribers.delete(unsubscribe)
+        try { detachBridge?.() } catch {}
+      }
+      bridgeUnsubscribers.add(unsubscribe)
+      return unsubscribe
+    }
     let set = subscribers.get(path)
     if (!set) { set = new Set(); subscribers.set(path, set) }
     // Fire the initial value once, but never let a slow initial get() resolve
@@ -1619,22 +1723,32 @@ export function makeStorage({ appId, appInstanceId = null, getToken }) {
     remove,
     async list(prefix, options = {}) {
       if (await hasIndexedDb()) return listInner(prefix, options)
+      if (bridgeCall) return bridgeCall('list', [prefix, options])
       const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
       return (await listServer(norm, options)) || []
     },
-    subscribe(path, cb) { return subscribeWith(path, cb, get) },
-    subscribeText(path, cb) { return subscribeWith(path, cb, getText) },
-    subscribeBlob(path, cb) { return subscribeWith(path, cb, getBlob) },
+    subscribe(path, cb) { return subscribeWith(path, cb, get, 'json') },
+    subscribeText(path, cb) { return subscribeWith(path, cb, getText, 'text') },
+    subscribeBlob(path, cb) { return subscribeWith(path, cb, getBlob, 'blob') },
     async pendingCount() {
-      return await hasIndexedDb() ? (await listOps()).length : 0
+      if (await hasIndexedDb()) return (await listOps()).length
+      return bridgeCall ? bridgeCall('pendingCount', []) : 0
     },
     getWithVersion,
-    _queueSignals: queueSignals,
-    _pendingSignalCount: async () => (await listSignals()).length,
-    _drainSignals: drainSignals,
-    _drain: drain,
+    _queueSignals: bridgeCall
+      ? (records) => bridgeCall('queueSignals', [records])
+      : queueSignals,
+    _pendingSignalCount: bridgeCall
+      ? () => bridgeCall('pendingSignalCount', [])
+      : async () => (await listSignals()).length,
+    _drainSignals: bridgeCall
+      ? () => bridgeCall('drainSignals', [])
+      : drainSignals,
+    _drain: bridgeCall ? () => bridgeCall('drain', []) : drain,
     _notify: notify,
+    _receiveDeadLetter: dispatchDeadLetter,
     _destroy() {
+      for (const unsubscribe of [...bridgeUnsubscribers]) unsubscribe()
       for (const ev of ['online', 'focus', 'pageshow']) {
         window.removeEventListener(ev, drainOnWake)
       }
@@ -3830,7 +3944,12 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     const token = await tokenRef.current(options)
     return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null
   }
-  const storage = makeStorage({ appId, appInstanceId, getToken: scopedToken })
+  const storage = makeStorage({
+    appId,
+    appInstanceId,
+    getToken: scopedToken,
+    isOnline: () => _online,
+  })
   const signal = makeSignal(appId, storage, appInstanceId)
   const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
   const api = {

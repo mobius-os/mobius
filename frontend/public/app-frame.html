@@ -73,6 +73,85 @@
     }
   };
 })();</script>
+      <script data-mobius-storage-rpc>(function () {
+  var pending = new Map();
+  var subscriptions = new Map();
+  var seq = 0;
+  function nextId(prefix) {
+    return prefix + '-' + Date.now() + '-' + (++seq);
+  }
+  function call(method, args) {
+    return new Promise(function (resolve, reject) {
+      var requestId = nextId('storage');
+      var timer = setTimeout(function () {
+        pending.delete(requestId);
+        reject(new Error('mobius.storage: shell storage request timed out'));
+      }, 60000);
+      pending.set(requestId, { resolve: resolve, reject: reject, timer: timer });
+      try {
+        window.parent.postMessage({
+          type: 'moebius:storage-rpc', requestId: requestId,
+          method: method, args: Array.isArray(args) ? args : []
+        }, window.location.origin);
+      } catch (error) {
+        pending.delete(requestId);
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
+  }
+  window.__mobiusStorageBridgeCall = call;
+  window.__mobiusStorageBridgeSubscribe = function (kind, path, callback) {
+    if (typeof callback !== 'function') return function () {};
+    var subscriptionId = nextId('subscription');
+    var active = true;
+    subscriptions.set(subscriptionId, callback);
+    call('subscribe', [subscriptionId, path, kind]).catch(function () {
+      if (!active) return;
+      active = false;
+      subscriptions.delete(subscriptionId);
+    });
+    return function () {
+      if (!active) return;
+      active = false;
+      subscriptions.delete(subscriptionId);
+      call('unsubscribe', [subscriptionId]).catch(function () {});
+    };
+  };
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    var msg = event.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'moebius:storage-change') {
+      var callback = subscriptions.get(msg.subscriptionId);
+      if (callback) {
+        try { callback(msg.value); } catch (error) {}
+      }
+      return;
+    }
+    if (msg.type !== 'moebius:storage-rpc-result') return;
+    var entry = pending.get(msg.requestId);
+    if (!entry) return;
+    pending.delete(msg.requestId);
+    clearTimeout(entry.timer);
+    if (msg.ok) { entry.resolve(msg.result); return; }
+    var info = msg.error || {};
+    var error = new Error(info.message || 'mobius.storage: shell storage request failed');
+    error.name = info.name || 'Error';
+    ['code', 'status', 'path', 'writeId', 'retryable', 'refusedValue'].forEach(function (key) {
+      if (info[key] !== undefined) error[key] = info[key];
+    });
+    entry.reject(error);
+  });
+  window.addEventListener('pagehide', function () {
+    pending.forEach(function (entry) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error('mobius.storage: app frame was detached'));
+    });
+    pending.clear();
+    subscriptions.clear();
+  }, { once: true });
+})();</script>
       <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
            src/lib/applyTheme.js). The frame reads its injected theme slot and
            may read the safe compatibility storage snapshot when available;
@@ -969,7 +1048,7 @@
     }
 
     window.addEventListener('message', (e) => {
-      if (e.origin !== window.location.origin) return;
+      if (e.source !== window.parent || e.origin !== window.location.origin) return;
       const msg = e.data;
       if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'moebius:frame-theme') {
@@ -988,6 +1067,13 @@
         if (typeof window.__mobiusSyncLocalStorage === 'function') {
           window.__mobiusSyncLocalStorage(msg.key, msg.value);
         }
+        return;
+      }
+      if (msg.type === 'moebius:storage-dead-letter') {
+        try {
+          window.mobius && window.mobius.storage &&
+            window.mobius.storage._receiveDeadLetter(msg.payload);
+        } catch (e) {}
         return;
       }
       if (msg.type === 'moebius:frame-init') {
