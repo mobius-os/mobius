@@ -91,6 +91,38 @@ def _assert_provider_defaults(provider_names) -> None:
   )
 
 
+# The periodic sweep loops all sleep 60s on the one event loop, so a starved
+# loop cannot run the task meant to diagnose its own starvation. These bound
+# the self-silence watchdog: warn once when a wake is more than two periods
+# late (multi-cycle event-loop starvation), never on ordinary jitter.
+_LOOP_PERIOD_SECS = 60.0
+_LOOP_LATE_PERIODS = 2.0
+
+
+def loop_lateness_warning(
+  period: float, observed_gap: float, *, late_periods: float = _LOOP_LATE_PERIODS,
+) -> str | None:
+  """Return a WARNING string when a periodic loop woke far later than scheduled.
+
+  Compares the actual wake gap to the scheduled period: a lateness (observed
+  minus scheduled) beyond `late_periods` periods means the loop was blocked for
+  multiple cycles — event-loop starvation from a long synchronous call, GC
+  pause, or disk stall — not scheduler jitter. Returns None for a healthy or
+  merely-jittery wake. Pure so the watchdog decision is unit-testable without
+  driving a real loop; the log is necessarily retrospective (a loop that never
+  recovers cannot warn — only an external HTTP monitor can).
+  """
+  lateness = observed_gap - period
+  if lateness <= period * late_periods:
+    return None
+  return (
+    "periodic loop woke %.1fs after a %.0fs sleep (%.1fs late, >%.0f periods)"
+    " — the event loop may be starved" % (
+      observed_gap, period, lateness, late_periods,
+    )
+  )
+
+
 @asynccontextmanager
 async def lifespan(app):
   import asyncio as _asyncio
@@ -400,6 +432,7 @@ async def lifespan(app):
   _stalled_live_task = None
   _reset_park_task = None
   _browser_profile_task = None
+  _writer_supervisor_task = None
   try:
     from app.chat import (
       sweep_reset_parks,
@@ -425,8 +458,21 @@ async def lifespan(app):
     _wedged_sweep_task = _asyncio.create_task(_wedged_marker_loop())
 
     async def _stalled_live_loop():
+      import time as _time
       while True:
+        # Self-silence watchdog: bracket the sleep with the monotonic clock so
+        # a wake far later than the scheduled 60s (this shared event loop was
+        # starved for multiple periods) is surfaced once as a WARNING. It rides
+        # the stalled-live loop because that loop's whole job is progress
+        # liveness; measuring only the sleep isolates loop responsiveness from
+        # the sweep's own duration.
+        _before = _time.monotonic()
         await _asyncio.sleep(60)
+        _gap_warning = loop_lateness_warning(
+          _LOOP_PERIOD_SECS, _time.monotonic() - _before,
+        )
+        if _gap_warning is not None:
+          _log.warning("%s", _gap_warning)
         try:
           _sl_db = _SweepSession()
           try:
@@ -458,6 +504,27 @@ async def lifespan(app):
           _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
+
+    # Writer-fatal auto-recovery (design §1): the chat-persistence actor is
+    # BUILT to be replaced when fatal (`start_writer` no-ops on a healthy
+    # singleton, constructs a fresh one on a fatal/dead one), but nothing
+    # runtime called it — a thread-fatal writer stayed a zombie until an
+    # external restart. This tick respawns it on the same 60s cadence; the
+    # cadence is the backoff and the fresh actor's boot SELECT 1 re-fatals on a
+    # genuinely broken DB, so a permanent fault is one bounded attempt per
+    # minute, not a tight spin. `/api/ready` semantics are unchanged.
+    async def _writer_supervisor_loop():
+      from app.chat_writer import supervise_writer
+      while True:
+        await _asyncio.sleep(60)
+        try:
+          supervise_writer()
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error("writer supervisor tick failed: %s", _exc, exc_info=True)
+
+    _writer_supervisor_task = _asyncio.create_task(_writer_supervisor_loop())
 
     async def _browser_profile_loop():
       # Keep boot latency predictable; the first quota scan is low-priority.
@@ -511,6 +578,8 @@ async def lifespan(app):
       _reset_park_task.cancel()
     if _browser_profile_task is not None:
       _browser_profile_task.cancel()
+    if _writer_supervisor_task is not None:
+      _writer_supervisor_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
