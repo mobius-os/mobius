@@ -316,6 +316,38 @@ they revealed something non-obvious.
 
 ---
 
+## Extending the agent — skills and system-prompt fragments
+
+An installable app can teach or reshape the agent two ways through its
+manifest, layered by how always-on they are:
+
+- **A skill (read-on-demand).** `"skills": ["<name>.md"]` — the named file
+  (also a root-level entry in `source_files`) is copied to
+  `/data/shared/skills/<name>.md` on install and deactivated on uninstall. It
+  is a *reference the agent Reads when a matching task comes up*, not always in
+  context — use it for how-to detail: build steps, workflows, gotchas. Artifacts
+  ships `artifacts.md`; Contribute ships `contributing.md`. Max 5 per app,
+  ≤ 256 KB each; basenames are a global namespace, so pick a distinctive one so
+  two apps can't collide.
+- **A system-prompt fragment (always-on, while installed).** `"system_app":
+  true` + `"system_prompt": "<name>.md"` (also a root-level `source_files`
+  entry) — the file is appended to the base constitution (`core.md`) for EVERY
+  chat's system prompt, but ONLY while the app is installed; uninstall removes it
+  and the prompt returns to exactly `core.md`
+  (`backend/app/system_prompts.py` → `compose_system_prompt`). Use it for a
+  short, always-relevant default the agent should carry without being asked, and
+  keep it tight — it costs tokens on every session. Memory ships `memory-core.md`;
+  Artifacts ships `artifacts-core.md` (its proactive-visual default). Max 256 KB.
+
+**Why the split matters — `core.md` stays app-agnostic.** The base constitution
+describes only what is true with no apps installed. Anything that depends on a
+specific app being present belongs in that app's `system_prompt` fragment (the
+always-on default) and/or its `skills` file (the how-to) — never in `core.md`.
+A not-installed app then contributes nothing, and the owner can see which
+installed apps extend the prompt in the Skills app.
+
+---
+
 ## Storage — `window.mobius.storage` is the default
 
 Persist app data through `window.mobius.storage` — injected into EVERY mini-app before your module loads, so make it your DEFAULT (not raw `fetch`). It's a read-through wrapper over the storage API: reads are instant (local cache, revalidated in the background) and keep working offline (last-known value overlaid with pending writes — read-your-writes); writes made offline queue and auto-sync on reconnect. Raw `fetch('/api/storage/...')` inside an app has no offline queue/cache and silently drops offline writes.
