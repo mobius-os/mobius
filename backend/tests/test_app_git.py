@@ -22,6 +22,22 @@ def _write(repo: Path, text: str) -> None:
   (repo / "index.jsx").write_text(text, encoding="utf-8")
 
 
+def test_git_env_disables_every_interactive_credential_prompt(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+  monkeypatch.setenv("GCM_INTERACTIVE", "Always")
+  monkeypatch.setenv("GIT_ASKPASS", "/tmp/inherited-git-askpass")
+  monkeypatch.setenv("SSH_ASKPASS", "/tmp/inherited-ssh-askpass")
+
+  env = app_git._git_env(tmp_path / "app")
+
+  assert env["GIT_TERMINAL_PROMPT"] == "0"
+  assert env["GCM_INTERACTIVE"] == "Never"
+  assert env["GIT_ASKPASS"] == "/bin/false"
+  assert env["SSH_ASKPASS"] == "/bin/false"
+
+
 def _commit_all(repo: Path, msg: str) -> str:
   subprocess.run(
     [

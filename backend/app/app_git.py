@@ -197,6 +197,15 @@ def _git_env(repo: Path | str) -> dict:
   ):
     env.pop(var, None)
   env["GIT_CEILING_DIRECTORIES"] = str(Path(repo).resolve().parent)
+  # App installs, updates, watcher commits, and cron work are unattended. A
+  # missing/private origin must fail within the subprocess timeout and fall back
+  # through the caller's normal error path; it must never wait on an inherited
+  # terminal or desktop credential prompt. Configured credential helpers and
+  # SSH agents remain usable without interaction.
+  env["GIT_TERMINAL_PROMPT"] = "0"
+  env["GCM_INTERACTIVE"] = "Never"
+  env["GIT_ASKPASS"] = "/bin/false"
+  env["SSH_ASKPASS"] = "/bin/false"
   return env
 
 
