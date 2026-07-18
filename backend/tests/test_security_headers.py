@@ -63,12 +63,18 @@ def test_published_site_sandbox_survives_a_404_and_a_500(monkeypatch):
 def test_bundled_caddy_mirrors_published_site_sandbox():
   caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
   lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
-  # /sites/ stays inside @notFrameableEmbed so it keeps X-Frame-Options
-  # SAMEORIGIN; its shell CSP is then overridden with the sandbox policy.
+  # /sites/ is a DISJOINT matcher, excluded from @notFrameableEmbed, with its
+  # own X-Frame-Options + CSP — Caddy does not guarantee a later `header >Set`
+  # wins over an earlier one on the same field, so two overlapping matchers on
+  # Content-Security-Policy are unreliable. It mirrors how /app-embeds and
+  # /recover are excluded and self-header their own policy.
   assert "@publishedSite path /sites/*" in lines
-  assert "/sites/*" not in (
-    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover*"
-  ), "published sites must keep the SAMEORIGIN frame boundary"
+  assert (
+    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* "
+    "/recover* /sites/*" in lines
+  ), "published sites must be excluded from the shell CSP matcher"
+  # Its own frame boundary, set directly on the disjoint matcher.
+  assert 'header @publishedSite >X-Frame-Options "SAMEORIGIN"' in lines
   pub_csp = next(
     line for line in lines
     if line.startswith("header @publishedSite >Content-Security-Policy ")
@@ -76,16 +82,6 @@ def test_bundled_caddy_mirrors_published_site_sandbox():
   assert "sandbox allow-scripts" in pub_csp
   assert "allow-same-origin" not in pub_csp
   assert "default-src" not in pub_csp  # external-asset sites must keep loading
-  # The override must appear AFTER the shell-CSP line so it wins for /sites/.
-  shell_idx = next(
-    i for i, line in enumerate(lines)
-    if line.startswith("header @notFrameableEmbed >Content-Security-Policy ")
-  )
-  pub_idx = next(
-    i for i, line in enumerate(lines)
-    if line.startswith("header @publishedSite >Content-Security-Policy ")
-  )
-  assert pub_idx > shell_idx
 
 
 def test_standard_security_headers_present():
@@ -164,8 +160,8 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   # frame-ancestors 'none' pass through the proxy instead of being replaced
   # with the shell's weaker SAMEORIGIN/'self' policy.
   assert (
-    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover*"
-    in lines
+    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* "
+    "/recover* /sites/*" in lines
   )
   assert 'header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"' in lines
   assert not any(

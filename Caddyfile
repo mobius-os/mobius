@@ -15,12 +15,16 @@
     # Published sites (/sites/<token>/) are public snapshots of the owner's own
     # agent-authored artifacts + Web Studio builds. They must run at an opaque
     # origin (CSP `sandbox`, no allow-same-origin) so their JS cannot read the
-    # shell origin's localStorage/JWT — kept in @notFrameableEmbed for the
-    # SAMEORIGIN frame boundary, but their shell CSP is overridden below with a
-    # sandbox policy. Mirrors the app middleware (_PUBLISHED_SITE_CSP) so the
-    # boundary holds at both the proxy and the origin.
+    # shell origin's localStorage/JWT. Like /app-embeds and /recover, /sites is
+    # EXCLUDED from @notFrameableEmbed and given its own X-Frame-Options + CSP
+    # block below — Caddy does not guarantee that a later `header >Set` on the
+    # same field wins over an earlier one, so overlapping matchers on the same
+    # header are unreliable; a disjoint matcher is the only deterministic form.
+    # Mirrors the app middleware (_PUBLISHED_SITE_CSP), which likewise keeps
+    # X-Frame-Options SAMEORIGIN while replacing the CSP, so the boundary holds
+    # identically at both the proxy and the origin.
     @publishedSite path /sites/*
-    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover*
+    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /recover* /sites/*
 
     header {
         # Defer replacements until after reverse_proxy copies the backend
@@ -54,11 +58,13 @@
     # shell policy above.
     header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'"
     header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:"
-    # Override the shell CSP for /sites/ (this line runs after the
-    # @notFrameableEmbed one, so it wins for the /sites/ subset). Sandbox-only:
-    # the opaque origin is the credential boundary; resource loading is left
-    # unrestricted because /sites/ also serves multi-file Web Studio sites that
-    # may pull external assets. Keep in sync with _PUBLISHED_SITE_CSP in main.py.
+    # /sites/ headers (disjoint matcher — see the @publishedSite note above).
+    # X-Frame-Options SAMEORIGIN keeps the page top-level-only; the CSP is
+    # sandbox-only: the opaque origin is the credential boundary, and resource
+    # loading is left unrestricted because /sites/ also serves multi-file Web
+    # Studio sites that pull external assets. Keep in sync with
+    # _PUBLISHED_SITE_CSP in main.py.
+    header @publishedSite >X-Frame-Options "SAMEORIGIN"
     header @publishedSite >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
 
     # Recovery floor lives in the separate recoveryd container (its own
