@@ -235,6 +235,7 @@ export default function Shell() {
   }, [desktopSidebarMode, drawerOpen])
 
   const brandButtonRef = useRef(null)
+  const brandKeyboardModeClickRef = useRef(false)
   const immersiveExitRef = useRef(null)
   const previousPersistentDrawerRef = useRef(persistentDrawer)
   useLayoutEffect(() => {
@@ -2547,11 +2548,17 @@ export default function Shell() {
             // Plain Enter/Space stay the nav trigger, unchanged.
             if (paneModel.WORKSPACE_SPLITS_ENABLED && e.shiftKey && e.key === 'Enter') {
               e.preventDefault()
+              brandKeyboardModeClickRef.current = true
               handleToggleViewMode()
             }
           }}
           onClick={(e) => {
             if (backFiredRef.current) return
+            if (brandKeyboardModeClickRef.current && e.detail === 0) {
+              brandKeyboardModeClickRef.current = false
+              return
+            }
+            brandKeyboardModeClickRef.current = false
             // A completed hold, a swipe, or a drag consumed this activation — it must
             // NOT also toggle navigation. A keyboard click (detail 0) is never the
             // compat click, so it always toggles nav (review §13).

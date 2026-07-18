@@ -24,3 +24,9 @@ test('the mobile drawer close control keeps a 44px touch target', () => {
   assert.match(rule, /height:\s*44px/)
   assert.match(rule, /touch-action:\s*manipulation/)
 })
+
+test('close-phase scrim blocking releases only after the drawer is offscreen', () => {
+  assert.match(drawer, /new DOMMatrixReadOnly\(getComputedStyle\(e\.currentTarget\)\.transform\)\.m41/)
+  assert.match(drawer, /if \(x > -width \+ 1\) return/)
+  assert.match(drawer, /setScrimBlocking\(false\)/)
+})

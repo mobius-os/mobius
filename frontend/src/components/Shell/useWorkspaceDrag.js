@@ -438,6 +438,10 @@ export default function useWorkspaceDrag({
       const onUp = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
         if (!armed) { cleanup(); return }
+        if (moveRAF) {
+          cancelAnimationFrame(moveRAF)
+          doMoveWork()
+        }
         const dx = ev.clientX - start.x
         const dy = ev.clientY - start.y
         // Releasing over the drawer's original region cancels — and, if the drag
