@@ -1149,24 +1149,22 @@ class _FakeCollabItem:
     self.receiver_thread_ids = receivers or []
 
 
-def test_tool_start_event_collab_wait_op_is_partner_language():
+def test_tool_start_event_collab_wait_is_ordinary_background_activity():
   # VERIFIED live reality on codex 0.144.5: a delegation turn streams the collab
-  # tool ONLY as the `wait` op, which carries no prompt. The chip must show the
-  # partner-language "Working in the background", never the wire op string
-  # ("wait:"), so the owner sees a helper is running without leaking internals.
+  # tool ONLY as the `wait` op, which carries no helper identity. The invariant
+  # is that this remains ordinary Task activity and never opens task lifecycle.
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(item_id="c-0", tool="wait", prompt=None)
   event = codex_sdk_runner._tool_start_event(item, sdk)
   assert event == {
-    "type": "task_start",
-    "task_id": "c-0",
-    "description": "Working in the background",
-    "task_type": "codex-collab",
-    "tool_use_id": "c-0",
+    "type": "tool_start",
+    "tool": "Task",
+    "input": "Working in the background",
   }
+  assert not event["type"].startswith("task_")
 
 
-def test_tool_start_event_builds_collab_task_start():
+def test_tool_start_event_collab_prompt_remains_ordinary_activity():
   # Prompt-present path (a future SDK that surfaces the spawn op with a prompt,
   # or this test fake): keep the "<op>: <prompt>" form so the chip names the
   # delegated work. Not what fires today — the live wait op has no prompt.
@@ -1176,11 +1174,9 @@ def test_tool_start_event_builds_collab_task_start():
   )
   event = codex_sdk_runner._tool_start_event(item, sdk)
   assert event == {
-    "type": "task_start",
-    "task_id": "c-1",
-    "description": "spawnAgent: review the diff for races",
-    "task_type": "codex-collab",
-    "tool_use_id": "c-1",
+    "type": "tool_start",
+    "tool": "Task",
+    "input": "spawnAgent: review the diff for races",
   }
 
 
@@ -1188,39 +1184,32 @@ def test_tool_start_event_collab_description_truncates_long_prompt():
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(tool="spawnAgent", prompt="x" * 500)
   event = codex_sdk_runner._tool_start_event(item, sdk)
-  assert len(event["description"]) == 120
-  assert event["description"].startswith("spawnAgent: xxx")
+  assert len(event["input"]) == 120
+  assert event["input"].startswith("spawnAgent: xxx")
 
 
-def test_tool_completed_events_builds_collab_task_done_completed():
+def test_tool_completed_events_collab_summary_is_ordinary_tool_output():
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(
     item_id="c-2", status="completed",
     messages=["found a bug", "wrote a test"],
   )
   events = codex_sdk_runner._tool_completed_events(item, sdk)
-  assert events == [{
-    "type": "task_done",
-    "task_id": "c-2",
-    "status": "done",
-    "summary": "found a bug; wrote a test",
-    "tool_use_id": "c-2",
-  }]
+  assert events == [
+    {"type": "tool_output", "content": "found a bug; wrote a test"},
+    {"type": "tool_end"},
+  ]
+  assert all(not event["type"].startswith("task_") for event in events)
 
 
-def test_tool_completed_events_collab_task_done_failed_empty_summary():
-  # failed -> "failed"; a still-silent fleet (no messages) yields summary None,
-  # never an empty string.
+def test_tool_completed_events_collab_wait_is_ordinary_tool_end():
+  # The invariant is that an empty runtime wait emits only the ordinary tool_end
+  # and never manufactures a task_done with a per-helper status.
   sdk = {"CollabAgentToolCallThreadItem": _FakeCollabItem}
   item = _FakeCollabItem(item_id="c-3", status="failed", messages=[])
   events = codex_sdk_runner._tool_completed_events(item, sdk)
-  assert events == [{
-    "type": "task_done",
-    "task_id": "c-3",
-    "status": "failed",
-    "summary": None,
-    "tool_use_id": "c-3",
-  }]
+  assert events == [{"type": "tool_end"}]
+  assert all(not event["type"].startswith("task_") for event in events)
 
 
 def test_collab_branch_skipped_when_sdk_lacks_type():

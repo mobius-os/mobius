@@ -493,13 +493,13 @@ def _stamp_notification_item_id(event: dict[str, Any], payload: Any) -> None:
     event["tool_use_id"] = item_id
 
 
-# A collab task_start description is a short human label. VERIFIED on codex
-# 0.144.5: a delegation turn streams the collab tool ONLY as the `wait` op,
-# which carries no prompt, so the label is the partner-language "Working in the
-# background" rather than a wire op string. A future SDK that surfaces the spawn
-# op WITH a prompt would render "<op>: <prompt>". The summary joins the
-# sub-agents' last-known messages (dead at runtime — see _collab_summary); both
-# are bounded so an oversized prompt or a chatty fleet can't bloat the wire event.
+# A collab tool input is a short human label. VERIFIED on codex 0.144.5: a
+# delegation turn streams the collab tool ONLY as the `wait` op, which carries
+# no prompt, so the label is the partner-language "Working in the background"
+# rather than a wire op string. A future SDK that surfaces the spawn op WITH a
+# prompt would render "<op>: <prompt>". The summary joins the sub-agents'
+# last-known messages (dead at runtime — see _collab_summary); both are bounded
+# so an oversized prompt or a chatty fleet cannot bloat the wire event.
 _COLLAB_DESCRIPTION_MAX = 120
 _COLLAB_SUMMARY_MAX = 500
 
@@ -519,12 +519,12 @@ def _collab_op(item: Any) -> str:
 
 
 def _collab_description(item: Any) -> str:
-  """Partner-language label for a collab task_start.
+  """Build the partner-language input for an ordinary collab tool activity.
 
   VERIFIED on codex 0.144.5: the only collab item that streams on the parent
   turn is the `wait` op, which carries no prompt. With no prompt there is
   nothing task-specific to name, so return a generic owner-facing label rather
-  than leaking the wire op string ("wait:") into the chip. When a prompt IS
+  than leaking the wire op string ("wait:") into the activity. When a prompt IS
   present (a future SDK that surfaces the spawn op, or a test fake) keep the
   "<op>: <prompt>" form so the chip names the delegated work. Bounded either way.
   """
@@ -600,28 +600,22 @@ async def _record_collab_child_links(
 
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
-  # Collab items surface as subagent observability (a task_start on the same lane
-  # Claude's Task tool uses). RUNTIME REALITY (verified live on codex 0.144.5,
-  # gpt-5.6-sol delegating a sub-task): the SDK streams the collab tool ONLY as
-  # the `wait` op (a CollabAgentToolCallThreadItem, unwrapped at
-  # payload.item.root), whose ``receiver_thread_ids`` and ``agents_states`` are
-  # both EMPTY — the parent stream never surfaces the spawned child's id, label,
-  # or status. So this branch DOES fire, but only for that wait op:
-  # _collab_description returns the generic "Working in the background" (a wait
-  # carries no prompt) so the chip shows SOMETHING live. The NAMED child + its
-  # result are surfaced HISTORICALLY by the Workflows app parser via the forked
-  # child rollout's parent_thread_id → this chat's session-link; do NOT read the
-  # live Codex chip as named. The spawn op that would carry a prompt (and would
-  # let _record_collab_child_links attribute the child live) is kept for a future
-  # SDK that emits it — it is not what fires today.
+  # The invariant is that Codex collab items are ordinary tool activity because
+  # the parent stream exposes no per-helper identity. RUNTIME REALITY (verified
+  # live on codex 0.144.5, gpt-5.6-sol delegating a sub-task): the SDK streams
+  # the collab tool ONLY as the `wait` op (a
+  # CollabAgentToolCallThreadItem, unwrapped at payload.item.root), whose
+  # ``receiver_thread_ids`` and ``agents_states`` are both EMPTY. The `Task`
+  # vocabulary folds this generic wait into ActivityStretch as "Working in the
+  # background" without falsely opening Claude's task lifecycle contract. The
+  # named child and its result remain the Workflows app parser's job via the
+  # forked child rollout's parent_thread_id.
   collab_cls = sdk.get("CollabAgentToolCallThreadItem")
   if collab_cls is not None and isinstance(item, collab_cls):
     return {
-      "type": "task_start",
-      "task_id": item.id,
-      "description": _collab_description(item),
-      "task_type": "codex-collab",
-      "tool_use_id": item.id,
+      "type": "tool_start",
+      "tool": "Task",
+      "input": _collab_description(item),
     }
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     return {
@@ -664,25 +658,18 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
 
 def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any]]:
   """Builds Möbius tool-end events from a completed typed item."""
-  # Collab item completes the subagent lane opened by its task_start (see
-  # _tool_start_event): a completed op becomes task_done. Guarded on non-None so
-  # an SDK without the type / a test fake omitting the key falls through to the
-  # tool branches below. Status maps completed->done, failed->failed; ItemCompleted
-  # only fires on a terminal item so any non-failed residual is reported as done.
-  # summary is _collab_summary(item), which is always None at runtime on codex
-  # 0.144.5 (empty agents_states — see _collab_summary); the named result is the
-  # Workflows parser's job, so a live Codex task_done closes the generic chip
-  # without a summary.
+  # The invariant is that a Codex collab completion closes the ordinary tool
+  # activity opened by _tool_start_event and never manufactures task_done. The
+  # optional summary remains defensive for a future SDK that populates
+  # agents_states; it is always absent at runtime on codex 0.144.5.
   collab_cls = sdk.get("CollabAgentToolCallThreadItem")
   if collab_cls is not None and isinstance(item, collab_cls):
-    status = getattr(getattr(item, "status", None), "value", None)
-    return [{
-      "type": "task_done",
-      "task_id": item.id,
-      "status": "failed" if status == "failed" else "done",
-      "summary": _collab_summary(item),
-      "tool_use_id": item.id,
-    }]
+    events: list[dict[str, Any]] = []
+    summary = _collab_summary(item)
+    if summary:
+      events.append({"type": "tool_output", "content": summary})
+    events.append({"type": "tool_end"})
+    return events
 
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
     output = (item.aggregated_output or "").strip()
@@ -1487,12 +1474,11 @@ async def run_codex_sdk_turn(
           payload, sdk["ThreadStartedNotification"]
         ):
           # A spawned sub-agent announces its own thread on the parent turn's
-          # stream. We deliberately swallow it: the parent turn owns the Möbius
-          # wire, the child's work is surfaced through the collab task_start /
-          # task_done events, and its rollout is attributed to this chat via the
-          # session-link recorded on the spawn. Emitting a session_init here
-          # would repoint the chat at the child thread. Swallow, don't let it
-          # reach the fall-through as unknown-event noise.
+          # stream. The invariant is that this notification stays silent because
+          # emitting session_init would repoint the chat at the child thread.
+          # Generic live work is already represented by the ordinary collab tool
+          # activity, while the Workflows parser attributes the named child via
+          # parent_thread_id.
           continue
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):
