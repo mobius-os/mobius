@@ -703,9 +703,11 @@ def detect_available() -> list[str]:
 #     OAuth access token from /data/cli-auth/claude/.credentials.json.
 #     We don't import the `anthropic` SDK to keep dependency surface
 #     flat; one httpx GET is simpler than a transitive dep pull.
-#   - Codex `AsyncCodex.models()` — wraps the JSON-RPC `model/list`
-#     call. Works under the same ChatGPT-account auth the rest of the
-#     Codex bridge uses; no API key needed.
+#   - Codex `codex debug models` — the CLI prints the raw model catalog
+#     JSON under the same ChatGPT-account auth the rest of the Codex
+#     bridge uses; no API key needed. (The SDK's `AsyncCodex.models()`
+#     was dropped: its pinned enum rejects the current CLI's catalog on
+#     every fetch — see `_fetch_codex_models`.)
 #
 # Cache: 5 minutes per provider. The load-bearing scenario is "Claude
 # just released a new model" — a 5-minute TTL means the user sees it
@@ -1013,10 +1015,10 @@ def _codex_model_slugs_from_payload(payload: Any) -> list[str]:
 async def _fetch_codex_models_from_cli(data_dir: str) -> list[str]:
   """Fetch raw Codex model catalog JSON from `codex debug models`.
 
-  This is the compatibility fallback for catalog schema drift in the Python
-  SDK. New model metadata can add enum values before the SDK types are updated;
-  the CLI debug command prints the raw catalog, so model discovery can keep
-  working while chat execution still uses the SDK path.
+  This is the model-registry source (`_fetch_codex_models` delegates here). New
+  model metadata can add enum values before the SDK types are updated; the CLI
+  debug command prints the raw catalog, so model discovery tolerates that drift
+  while chat execution still uses the SDK path.
   """
   codex_home = Path(data_dir) / "cli-auth" / "codex"
   codex_bin = shutil.which("codex")
@@ -1052,46 +1054,25 @@ async def _fetch_codex_models_from_cli(data_dir: str) -> list[str]:
 
 
 async def _fetch_codex_models(data_dir: str) -> list[str]:
-  """Calls the Codex SDK's `AsyncCodex.models()`.
+  """Reads the Codex model registry from `codex debug models`.
 
-  Codex auth happens transparently inside the SDK — it reads the
-  same `CODEX_HOME` directory the chat path uses, so once the user
-  has connected Codex in Settings the call works. If the SDK cannot
-  parse a newer model-catalog shape, fall back to `codex debug models`
-  and extract only the slugs.
+  The Codex SDK's `AsyncCodex.models()` was the former primary source, but the
+  pinned SDK's reasoning-effort enum rejects catalog entries the current CLI
+  advertises ('max'/'ultra'), so the strict parse raised on every fetch and
+  always fell through to this CLI catalog anyway. The CLI `debug models`
+  command prints the raw catalog, is the only result ever consumed, and never
+  trips on enum drift, so it is now the sole registry source — dropping a
+  guaranteed-failing SDK call, its per-fetch warning, and a wasted app-server
+  subprocess. Chat execution still runs through the SDK (codex_sdk_runner);
+  only model discovery reads the CLI catalog.
+
+  The credential check gates the fetch so an unconnected Codex fails fast
+  (no subprocess) and `list_models` serves KNOWN_MODELS.
   """
-  from openai_codex import AsyncCodex
-  from openai_codex.client import CodexConfig
-
   codex_home = Path(data_dir) / "cli-auth" / "codex"
   if not (codex_home / "auth.json").exists():
     raise RuntimeError("codex credentials missing")
-  # Match codex_sdk_runner.py's binary/env resolution: pass the resolved
-  # path explicitly and set CODEX_HOME in the app-server environment.
-  # Recent SDKs no longer accept `codex_home=` on CodexConfig.
-  config = CodexConfig(
-    codex_bin=shutil.which("codex"),
-    env={"CODEX_HOME": str(codex_home)},
-  )
-  try:
-    async with AsyncCodex(config=config) as codex:
-      response = await codex.models()
-  except Exception as exc:  # noqa: BLE001 - CLI raw catalog is the fallback
-    log.warning(
-      "codex SDK model registry fetch failed: %s; trying codex debug models",
-      exc,
-    )
-    return await _fetch_codex_models_from_cli(data_dir)
-  # The SDK returns a ModelListResponse with `.models` list. Each
-  # entry exposes a `.slug` (the model ID). Defensive: tolerate
-  # bare strings too in case the upstream shape drifts.
-  raw_models = getattr(response, "models", None) or []
-  ids: list[str] = []
-  for entry in raw_models:
-    slug = _codex_model_slug(entry)
-    if slug:
-      ids.append(slug)
-  return ids
+  return await _fetch_codex_models_from_cli(data_dir)
 
 
 async def _fetch_provider_models(

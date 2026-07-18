@@ -1,9 +1,11 @@
 import asyncio
+import json
 import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from pydantic import ValidationError
 
 from app.schemas import SettingsUpdate
@@ -699,106 +701,71 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   assert all(m["available"] for m in body["providers"]["claude"])
 
 
-def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
-  """The installed Codex SDK no longer accepts CodexConfig(codex_home=).
+def test_fetch_codex_models_reads_cli_catalog_not_sdk(tmp_path, monkeypatch):
+  """Model discovery reads `codex debug models` (the CLI catalog) and never
+  constructs the Codex SDK.
 
-  The chat path sets CODEX_HOME in the app-server env; the model registry
-  should do the same.
+  The pinned SDK's reasoning-effort enum rejects the current catalog on every
+  fetch, so the strict `AsyncCodex.models()` call was dropped and the CLI is the
+  sole registry source. The subprocess must carry CODEX_HOME so it reads the
+  connected credentials.
   """
   from app import providers
 
   codex_home = tmp_path / "cli-auth" / "codex"
   codex_home.mkdir(parents=True)
   (codex_home / "auth.json").write_text("{}")
+
+  # Any attempt to use the Codex SDK for model discovery is a regression.
+  class ForbiddenCodex:
+    def __init__(self, *a, **k):
+      raise AssertionError("model discovery must not construct the Codex SDK")
+
+  monkeypatch.setitem(
+    sys.modules, "openai_codex", SimpleNamespace(AsyncCodex=ForbiddenCodex),
+  )
 
   captured = {}
+  catalog = json.dumps({"models": [
+    {"slug": "gpt-5.6-sol"}, {"slug": "gpt-5.6-terra"},
+  ]}).encode()
 
-  class FakeCodexConfig:
-    def __init__(self, **kwargs):
-      captured.update(kwargs)
+  class FakeProc:
+    returncode = 0
 
-  class FakeModel:
-    slug = "gpt-test"
+    async def communicate(self):
+      return catalog, b""
 
-  class FakeCodex:
-    def __init__(self, config):
-      self.config = config
+  async def fake_exec(*args, **kwargs):
+    captured["args"] = args
+    captured["env"] = kwargs.get("env")
+    return FakeProc()
 
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *args):
-      return None
-
-    async def models(self):
-      return SimpleNamespace(models=[FakeModel()])
-
-  monkeypatch.setitem(
-    sys.modules, "openai_codex", SimpleNamespace(AsyncCodex=FakeCodex),
-  )
-  monkeypatch.setitem(
-    sys.modules, "openai_codex.client",
-    SimpleNamespace(CodexConfig=FakeCodexConfig),
-  )
   monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
-
-  ids = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
-
-  assert ids == ["gpt-test"]
-  assert "codex_home" not in captured
-  assert captured["codex_bin"] == "/usr/bin/codex"
-  assert captured["env"]["CODEX_HOME"] == str(codex_home)
-
-
-def test_fetch_codex_models_falls_back_to_cli_debug_catalog(
-  tmp_path, monkeypatch
-):
-  """New Codex catalog metadata can outrun the SDK's generated enums.
-
-  When `AsyncCodex.models()` rejects the catalog shape, the registry should
-  still read slugs from `codex debug models` rather than falling all the way
-  back to the static KNOWN_MODELS list.
-  """
-  from app import providers
-
-  codex_home = tmp_path / "cli-auth" / "codex"
-  codex_home.mkdir(parents=True)
-  (codex_home / "auth.json").write_text("{}")
-
-  class FakeCodexConfig:
-    def __init__(self, **_kwargs):
-      pass
-
-  class FakeCodex:
-    def __init__(self, config):
-      self.config = config
-
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *args):
-      return None
-
-    async def models(self):
-      raise ValueError("unsupported enum value: max")
-
-  async def fake_cli_fetch(data_dir):
-    assert data_dir == str(tmp_path)
-    return ["gpt-5.6-sol", "gpt-5.6-terra"]
-
-  monkeypatch.setitem(
-    sys.modules, "openai_codex", SimpleNamespace(AsyncCodex=FakeCodex),
-  )
-  monkeypatch.setitem(
-    sys.modules, "openai_codex.client",
-    SimpleNamespace(CodexConfig=FakeCodexConfig),
-  )
-  monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
-  monkeypatch.setattr(providers, "_fetch_codex_models_from_cli", fake_cli_fetch)
+  monkeypatch.setattr(providers.asyncio, "create_subprocess_exec", fake_exec)
 
   ids = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
 
   assert ids == ["gpt-5.6-sol", "gpt-5.6-terra"]
+  assert captured["args"][1:3] == ("debug", "models")
+  assert captured["env"]["CODEX_HOME"] == str(codex_home)
+
+
+def test_fetch_codex_models_requires_credentials(tmp_path, monkeypatch):
+  """Without connected Codex credentials the registry fails fast — it raises
+  before spawning any `codex debug models` subprocess, so `list_models` serves
+  KNOWN_MODELS cleanly.
+  """
+  from app import providers
+
+  # No cli-auth/codex/auth.json under tmp_path.
+  def forbidden_exec(*a, **k):
+    raise AssertionError("must not spawn codex when credentials are missing")
+
+  monkeypatch.setattr(providers.asyncio, "create_subprocess_exec", forbidden_exec)
+
+  with pytest.raises(RuntimeError, match="codex credentials missing"):
+    asyncio.run(providers._fetch_codex_models(str(tmp_path)))
 
 
 def test_model_prefs_default_empty(client, auth):
