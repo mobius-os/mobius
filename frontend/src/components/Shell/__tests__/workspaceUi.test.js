@@ -256,7 +256,6 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
 const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const livingHaloSrc = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
-const beatsSrc = readFileSync(new URL('../useModeTransitionBeats.js', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
   // Pane strips reuse .shell__tabstrip inside .shell__content. A descendant
@@ -467,15 +466,18 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
 })
 
-test('the room flourish (CHARGE): panes DEAL once on class-apply and resize guards never restart it', () => {
+test('the room flourish (CHARGE): panes DEAL in on the KEYED beat class, suppressed while resizing, instant under reduced motion', () => {
   // The divider-DRAW is gone; the entry flourish is the card-DEAL on the pane wrapper.
   assert.doesNotMatch(css, /workspace-divider-draw/)
-  const paned = css.match(/\.shell__view--paned\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(paned, /animation:\s*shell-pane-deal 400ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/)
+  // INV 11: the deal is owned by the transient .shell--builder-entering beat
+  // class, NOT the permanent .shell__view--paned (which used to replay it on every
+  // resize). The base paned block carries the geometry transition but no animation.
+  const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.doesNotMatch(panedBase, /animation:\s*shell-pane-deal/)
+  assert.match(css, /\.shell--builder-entering \.shell__view--paned \{[\s\S]*?animation:\s*shell-pane-deal 400ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/)
   assert.match(css, /@keyframes shell-pane-deal\s*\{[\s\S]*?translateX\(18px\)[\s\S]*?translateX\(0\)/)
-  // Live geometry suppresses only the layout transition. Overriding animation
-  // here and restoring it afterward restarts shell-pane-deal on a permanent pane.
-  assert.doesNotMatch(css, /workspace--(?:container-resizing|divider-dragging)[^{]*\{[^}]*animation:/)
+  // A live resize during the enter beat must not re-deal every frame.
+  assert.match(css, /\.workspace--resizing \.shell--builder-entering \.shell__view--paned \{ animation: none; \}/)
   // Reduced motion drops the deal (and the layout-commit transition).
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell__view--paned \{ transition: none; animation: none; \}/)
@@ -484,25 +486,26 @@ test('the room flourish (CHARGE): panes DEAL once on class-apply and resize guar
 test('builder single-leaf shows the strip, and entering it has its deal moment (item 3)', () => {
   // The strip is the builder surface: forced visible in builder even at one leaf.
   assert.match(shell, /const tabStripVisible = \(tabStripEngaged \|\| builderModeActive\) && openTabs\.length >= 1/)
-  // Entering builder arms a transient beat (single -> panes), reduced-motion skips
-  // it (null), and it batches in the SAME handler as the flip (no un-dealt first
-  // frame). ONE armBeat call resolves the beat; the timer lives in the hook.
+  // Entering builder routes through the ONE mode controller (INV 2), batched in
+  // the SAME handler as the durable flip (INV 7) so no un-dealt frame paints. The
+  // beat + reduced-motion collapse live in the machine now, not a Shell timer.
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.match(handler, /prefersReducedMotion\(\)\s*\n?\s*\? null/)
-  // Entering (single -> panes) is the else arm of the enter/exit split.
-  assert.match(handler, /: 'enter'/)
-  assert.match(handler, /armBeat\(beat\)/)
-  // The enter duration is wired into the beat hook, which self-clears on the
-  // deadline (single timer, mutual-exclusive with the exit beat).
-  assert.match(shell, /useModeTransitionBeats\(\{ enterMs: BUILDER_ENTER_MS, exitMs: BUILDER_EXIT_MS \}\)/)
-  assert.match(beatsSrc, /kind === 'exit' \? exitMs : enterMs/)
-  // The transient root class drives the CSS.
-  assert.match(shell, /builderEntering \? ' shell--builder-entering' : ''/)
-  // CSS: the single-pane strip DEALS in and the single full-bleed pane LIFT-SETTLES.
+  assert.match(handler, /mode\.toggle\(\{ focusedPaneId, leavingPaneIds, multiPane: dealMultiPane \}\)/)
+  assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
+  // The transient root class comes from the descriptor (exactly one beat class).
+  assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
+  // CSS: the single-pane strip DEALS in and the single full-bleed pane LIFT-SETTLES;
+  // the multi-pane enter deal is now keyed to the transient class (INV 11), never
+  // the permanent .shell__view--paned.
   assert.match(css, /\.shell--builder-entering \.shell__tabstrip \{[\s\S]*?animation:\s*shell-strip-deal-in 320ms/)
   assert.match(css, /@keyframes shell-strip-deal-in\s*\{[\s\S]*?translateY\(-100%\)[\s\S]*?translateY\(0\)/)
   assert.match(css, /\.shell--builder-entering \.shell__view--active \{[\s\S]*?animation:\s*shell-pane-settle 320ms/)
+  assert.match(css, /\.shell--builder-entering \.shell__view--paned \{[\s\S]*?animation:\s*shell-pane-deal 400ms/)
   assert.match(css, /@keyframes shell-pane-settle\s*\{[\s\S]*?translateY\(8px\) scale\(0\.992\)[\s\S]*?scale\(1\)/)
+  // INV 11 (P1 fix): the PERMANENT .shell__view--paned carries NO one-shot deal —
+  // it used to replay the 400ms entrance after every resize / dock / divider drag.
+  const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.doesNotMatch(panedBase, /animation:\s*shell-pane-deal/)
   // Reduced motion drops the entry deal.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell--builder-entering \.shell__tabstrip,\s*\n\s*\.shell--builder-entering \.shell__view--active \{ animation: none; \}/)
@@ -510,32 +513,30 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
 
 test('leaving builder plays the INVERSE card-deal: deal-out + settle, decisive (item 1)', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  // Armed only on a genuine MULTI-PANE exit, never with a focused Settings tab; a
-  // single leaf (or Settings) passes null and collapses instantly.
+  // The exit deal is earned only for a genuine MULTI-PANE exit with a non-Settings
+  // focused surface; multiPane=false makes the machine collapse instantly (the
+  // beat + duration + Zippo asymmetry live in modeMachine.js: MODE_EXIT_MS < MODE_ENTER_MS).
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
-  assert.match(handler, /\(multiPaneRef\.current && !settingsFocused\) \? 'exit' : null/)
-  assert.match(handler, /armBeat\(beat\)/)
-  // The two beats are MUTUALLY EXCLUSIVE in the hook — arming one clears the other
-  // (state + timer) so a rapid re-enter can never leave the exit deal stranded and
-  // wedge effectiveViewMode 'panes'. This is the regression fix (see the hook test).
-  assert.match(beatsSrc, /setEntering\(kind === 'enter'\)/)
-  assert.match(beatsSrc, /setExiting\(kind === 'exit'\)/)
-  assert.match(beatsSrc, /clear\(timerRef\.current\)/)
-  // Faster than the 400ms entry (the Zippo asymmetry survives, deal vocabulary).
-  assert.match(shell, /const BUILDER_EXIT_MS = 250/)
-  // Held tiled while the beat runs (viewMode already single, effectiveViewMode panes).
-  assert.match(shell, /\(\(dragPreviewBuilder \|\| builderExiting\)[\s\S]*?&& workspace\.viewMode === 'single'\)/)
+  assert.match(handler, /multiPaneRef\.current && !settingsFocused/)
+  // The leaving panes are LATCHED into the descriptor (INV 9): a mid-beat focus
+  // change cannot re-target which pane deals out.
+  assert.match(handler, /const leavingPaneIds = leavingBuilder/)
+  assert.match(handler, /visibleLeavesRef\.current\.filter\(id => id !== focusedPaneId\)/)
+  // Held tiled while the beat runs — from the ONE descriptor (INV 4), not a boolean pair.
+  assert.match(shell, /const effectiveViewMode = modeMachine\.effectiveViewMode\(modeState/)
   // The remaining (focused) pane settles to the FULL content box during the beat.
-  assert.match(shell, /if \(!builderExiting\) return visibleTabRects/)
+  assert.match(shell, /if \(!exitGeometryActive\) return visibleTabRects/)
   assert.match(shell, /next\.set\(focusedKey, \{ \.\.\.rect, x: 0, y: 0, w: contentRect\.w, h: contentRect\.h \}\)/)
-  // Wrappers carry data-pane-role so CSS tells the settling vs leaving pane apart.
-  assert.match(shell, /data-pane-role=\{paned[\s\S]*?paned\.paneId === workspace\.focusedPaneId \? 'focused' : 'leaving'/)
-  // The transient root class drives the CSS.
-  assert.match(shell, /builderExiting \? ' shell--builder-exiting' : ''/)
-  // CSS: leaving pane DEALS out to the right + fades; chrome fades out.
+  // Wrappers carry the LATCHED data-pane-role so CSS tells settling from leaving.
+  assert.match(shell, /data-pane-role=\{paneRoleFor\(/)
+  // The transient root class comes from the descriptor (exactly one beat class, INV 1).
+  assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
+  // CSS: leaving pane DEALS out to the right + fades; chrome fades AND — INV 9 —
+  // the leaving surfaces + chrome children go POINTER-INERT (not merely invisible).
   assert.match(css, /\.shell--builder-exiting \.shell__view--paned\[data-pane-role="leaving"\] \{[\s\S]*?animation:\s*shell-pane-deal-out 240ms[\s\S]*?forwards/)
   assert.match(css, /@keyframes shell-pane-deal-out\s*\{[\s\S]*?translateX\(0\)[\s\S]*?translateX\(44px\)[\s\S]*?opacity: 0/)
   assert.match(css, /\.shell--builder-exiting \.workspace__chrome \{[\s\S]*?opacity: 0/)
+  assert.match(css, /\.shell--builder-exiting[\s\S]*?\.workspace__strip,[\s\S]*?pointer-events: none/)
   // Reduced motion drops the exit deal.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell--builder-exiting \.shell__view--paned\[data-pane-role="leaving"\] \{ animation: none; \}/)
@@ -618,10 +619,15 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
 })
 
 test('Shell threads the (drag-preview) viewMode into the content derivation and the per-pane chat gate', () => {
-  // effectiveViewMode is 'panes' during a single-mode drag preview (point 15).
+  // effectiveViewMode is the ONE descriptor derivation (INV 4): 'panes' during a
+  // single-mode drag preview OR the builder EXIT beat, committed mode otherwise.
+  assert.match(shell, /const effectiveViewMode = modeMachine\.effectiveViewMode\(modeState/)
   assert.match(shell, /viewMode: effectiveViewMode/)
-  // effectiveViewMode also holds tiled during the builder EXIT beat (item 1).
-  assert.match(shell, /\(dragPreviewBuilder \|\| builderExiting\)[\s\S]*?workspace\.viewMode === 'single'/)
+  // The single-mode drag arms the 'drag-preview' phase through the controller by id
+  // (INV 5), and the drop's committed 'panes' is picked up by the committedMode
+  // reconcile — no separate SET_VIEW_MODE on commit.
+  assert.match(shell, /dragPreviewIdRef\.current = mode\.dragArm\(/)
+  assert.match(shell, /mode\.dragCancel\(dragPreviewIdRef\.current\)/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
   assert.match(shell, /chatPanesVisible && \(!single \|\| paneId === workspace\.focusedPaneId\)/)
 })

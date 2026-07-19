@@ -60,8 +60,8 @@ import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
-import { prefersReducedMotion } from './useLogoModeGesture.js'
-import { useModeTransitionBeats } from './useModeTransitionBeats.js'
+import useModeController from './useModeController.js'
+import * as modeMachine from './modeMachine.js'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
@@ -74,17 +74,10 @@ import useDesktopSidebar from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
-// How long the transient builder mode-ENTER treatment holds its root class
-// (.shell--builder-entering) — the single-leaf entry deal (strip deals in, single
-// pane lift-settles). Must comfortably exceed the CSS animation duration so the
-// class isn't pulled before the keyframe finishes (item 3). Reduced motion never
-// engages it. The multi-pane entry is carried by the pane card-deal, not this.
-const BUILDER_ENTER_MS = 380
-// How long the transient builder mode-EXIT reverse card-deal holds the tiled
-// render before collapsing to single (item 1) — decisive and FASTER than the
-// 400ms entry (the "Zippo asymmetry" survives, in the deal vocabulary). Must
-// exceed the exit keyframe duration so the collapse lands after the deal-out.
-const BUILDER_EXIT_MS = 250
+// The builder mode-ENTER / mode-EXIT beat durations now live in modeMachine.js
+// (MODE_ENTER_MS / MODE_EXIT_MS) as the reconcile clock, and completion is keyed
+// to the beat's animationend, not a bare timer — so the old BUILDER_ENTER_MS /
+// BUILDER_EXIT_MS Shell constants are gone (review §3, INV 12/14).
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
@@ -264,34 +257,49 @@ export default function Shell() {
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
   // exist). It drives the logo's 180deg twist — the persistent mode indicator,
   // now that there is no standalone toggle button.
-  const builderModeActive = paneModel.WORKSPACE_SPLITS_ENABLED && workspace.viewMode !== 'single'
-  // DRAG IS BUILDING (point 15): a single-mode drag unfolds the builder world as a
-  // RENDER-only preview. The drag hook flips this on arm / off on cleanup; the
-  // reducer viewMode stays 'single' until a committed drop flips it. effectiveViewMode
-  // applies the preview ONLY while genuinely single (inert in builder), so the
-  // projection-consuming render paints the tiled world during the drag while the
-  // undo snapshot at drop-time still reads 'single'.
-  const [dragPreviewBuilder, setDragPreviewBuilder] = useState(false)
-  // The two transient builder mode-transition beats, owned as ONE mutually-
-  // exclusive state machine (useModeTransitionBeats):
-  //   - builderExiting (item 1) holds the tiled render for ONE reverse card-deal
-  //     on a genuine multi-pane exit: effectiveViewMode stays 'panes' while the
-  //     reducer viewMode is already 'single', so every mounted pane keeps painting
-  //     and the collapse is only DEFERRED, never re-orchestrated (nothing blanks).
-  //   - builderEntering (item 3) drives the single-leaf ENTER deal (strip deals
-  //     in, the single pane lift-settles) via the .shell--builder-entering class.
-  // The machine's invariant — at most ONE beat active, and a beat NEVER survives
-  // the next toggle — is why a rapid re-ENTER within the exit beat cancels it
-  // cleanly (armBeat('enter') drops the pending exit deal) instead of leaving both
-  // beats fighting. The old two-independent-latch shape left builderExiting true
-  // (timer still pending) through a re-enter, so the deal-out fought the deal-in
-  // AND renderTabRects wrongly widened the focused pane to full width mid-entry.
-  const { builderEntering, builderExiting, armBeat } =
-    useModeTransitionBeats({ enterMs: BUILDER_ENTER_MS, exitMs: BUILDER_EXIT_MS })
-  const effectiveViewMode = ((dragPreviewBuilder || builderExiting)
-    && workspace.viewMode === 'single')
-    ? 'panes'
-    : workspace.viewMode
+  // ── Mode transition machine (modeMachine.js / useModeController) ───────────
+  // The ONE descriptor { committedMode, transition } that replaces the old
+  // dragPreviewBuilder / builderExiting / builderEntering booleans, their two
+  // bare timers, and the ad-hoc effectiveViewMode expression. workspace.viewMode
+  // stays the persisted authority; the controller mirrors it and owns only the
+  // transient beat, driving completion by epoch (INV 12/15) rather than a timer.
+  // Codex review §3: EVERY mode-dependent render fact below derives from
+  // mode.state (INV 4), so the reducer and the render can never disagree past one
+  // beat — the P0 wedge the review opened with.
+  const SPLITS = paneModel.WORKSPACE_SPLITS_ENABLED
+  const shellRootRef = useRef(null)
+  const mode = useModeController({
+    committedMode: workspace.viewMode,
+    splitsEnabled: SPLITS,
+    rootRef: shellRootRef,
+  })
+  const modeState = mode.state
+  // Builder mode = the committed 'panes' world (logo twist + living halo + power
+  // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
+  // with the toggle, matching the gesture's own spring/snap.
+  const builderModeActive = modeMachine.builderModeActive(modeState, { splitsEnabled: SPLITS })
+  // The mode the render paints: 'panes' while an exit beat OR a single-mode drag
+  // preview holds the tiled world; the committed mode otherwise. The single source
+  // (INV 4) — no scattered override.
+  const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
+  // The exit beat is holding the tiled geometry (drives renderTabRects widening
+  // the settling pane to the full box). INV 9.
+  const exitGeometryActive = modeMachine.exitGeometryActive(modeState, { splitsEnabled: SPLITS })
+  // A pane's latched exit role for data-pane-role / interactivity (INV 9): a focus
+  // change mid-beat cannot re-target which pane deals out.
+  const paneRoleFor = useCallback((paneId, isPaned) => {
+    if (!isPaned) return undefined
+    if (exitGeometryActive) {
+      return modeMachine.paneExitRole(modeState, paneId) === 'leaving' ? 'leaving' : 'focused'
+    }
+    return paneId === workspace.focusedPaneId ? 'focused' : 'leaving'
+  }, [exitGeometryActive, modeState, workspace.focusedPaneId])
+  // A leaving pane during the exit beat is made INERT (pointer + keyboard) so a tap
+  // on the nearly-invisible surface cannot dispatch FOCUS and swap the settling
+  // role mid-animation (INV 9 — the P1 "invisible, not inert" finding).
+  const isInertLeaving = useCallback((paneId) => (
+    exitGeometryActive && modeMachine.paneExitRole(modeState, paneId) === 'leaving'
+  ), [exitGeometryActive, modeState])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -341,6 +349,10 @@ export default function Shell() {
   // has no pane to deal out, so it collapses instantly.
   const multiPaneRef = useRef(multiPane)
   multiPaneRef.current = multiPane
+  // The current visible tiled leaves, read (stale-closure-free) by the toggle
+  // handler to latch the exit beat's leaving panes (INV 9).
+  const visibleLeavesRef = useRef(projection.visibleLeaves)
+  visibleLeavesRef.current = projection.visibleLeaves
   const chatPanesVisible = contentVisibility.chatPanesVisible
   // navTo is a per-render function; stable callbacks (handleAppError, passed to
   // AppCanvas's []-dep message listener) reach the latest one through this ref
@@ -820,14 +832,14 @@ export default function Shell() {
   // animates the grow. Render off THIS map; visibleTabRects stays the pure tiled
   // geometry (a no-op passthrough whenever the exit beat is not held).
   const renderTabRects = useMemo(() => {
-    if (!builderExiting) return visibleTabRects
+    if (!exitGeometryActive) return visibleTabRects
     const focusedKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey
     const rect = focusedKey && visibleTabRects.get(focusedKey)
     if (!rect || !contentRect.w || !contentRect.h) return visibleTabRects
     const next = new Map(visibleTabRects)
     next.set(focusedKey, { ...rect, x: 0, y: 0, w: contentRect.w, h: contentRect.h })
     return next
-  }, [builderExiting, visibleTabRects, workspace, contentRect])
+  }, [exitGeometryActive, visibleTabRects, workspace, contentRect])
 
   // ── The ONE Settings wrapper (design §4: overlay-or-pane geometry) ─────────
   // A single, stable SettingsView mount that is positioned like any chat/app
@@ -1121,39 +1133,62 @@ export default function Shell() {
   // Filled by the first-use coachmark (§7); the first real drag dismisses it.
   const coachmarkDismissRef = useRef(null)
   const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
+  // A single-mode drag previews the builder world through the ONE descriptor
+  // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
+  // matching cancel so a stale cancel from a superseded drag is ignored. The
+  // COMMIT path needs no separate descriptor event — the drop's OPEN_TAB_AT
+  // flips viewMode to 'panes' and the controller's committedMode reconcile picks
+  // that up; a rejected/no-op drop calls cancel (below) and mutates nothing.
+  const dragPreviewIdRef = useRef(null)
+  const onModeDragPreview = useCallback((active) => {
+    if (active) {
+      dragPreviewIdRef.current = mode.dragArm(workspaceStateRef.current.ws.focusedPaneId)
+    } else {
+      mode.dragCancel(dragPreviewIdRef.current)
+      dragPreviewIdRef.current = null
+    }
+  }, [mode, workspaceStateRef])
   // The builder-mode control is the TOP-LEFT logo (owner placement) — there is no
   // standalone toggle button. Toggling is a pure state flip plus the no-history
   // Settings overlay<->tab conversion; it never opens/closes the drawer and the
   // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
   const handleToggleViewMode = useCallback(() => {
-    // Decide the transition-deal beat off the PRE-conversion state (a focused
-    // Settings tab must sit out the exit deal — its overlay conversion owns that
-    // transition). The beat is armed in the SAME event as the flip so they batch:
-    // the render never paints an un-dealt / already-collapsed frame first.
-    //   - reduced motion → null (instant flip, both beats cleared),
-    //   - EXIT (item 1) → 'exit' only for a genuine MULTI-PANE exit; a single leaf
-    //     has no pane to deal out, so it passes null and collapses instantly,
-    //   - ENTER (item 3) → 'enter' (the single-leaf entry deal).
-    // ONE armBeat call always resolves the beat state (mutual exclusion + no stale
-    // beat live in useModeTransitionBeats), so a rapid re-enter cancels the pending
-    // exit deal cleanly instead of leaving both beats fighting.
+    // Read the beat facts off the PRE-conversion state (a focused Settings tab
+    // must sit out the exit deal — its overlay conversion owns that transition).
+    // Everything is dispatched in the SAME event so the descriptor beat, the
+    // Settings conversion, and the durable flip batch as ONE transaction (INV 7)
+    // — the render never paints an un-dealt / already-collapsed frame first.
     const ws = workspaceStateRef.current.ws
     const leavingBuilder = ws.viewMode !== 'single'
     const settingsFocused =
       ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
-    const beat = prefersReducedMotion()
-      ? null
-      : leavingBuilder
-        ? ((multiPaneRef.current && !settingsFocused) ? 'exit' : null)
-        : 'enter'
-    armBeat(beat)
+    const focusedPaneId = ws.focusedPaneId
+    // The leaving panes = the visible tiled leaves except the settling (focused)
+    // one; latched into the descriptor so a mid-beat focus change can't re-target
+    // the deal (INV 9). Empty for an enter.
+    const leavingPaneIds = leavingBuilder
+      ? visibleLeavesRef.current.filter(id => id !== focusedPaneId)
+      : []
+    // The exit deal is earned only for a genuine multi-pane exit with a non-Settings
+    // focused surface; multiPane=false makes the exit an instant collapse (the beat
+    // logic + reduced motion both live in the machine now — no timer here).
+    const dealMultiPane = leavingBuilder
+      ? (multiPaneRef.current && !settingsFocused)
+      : true
     // Convert the Settings surface across the flip with NO history entry (overlay
     // <-> builder tab), so a builder session is never stranded behind the takeover
-    // overlay and single mode never shows a paned Settings. A no-op when Settings
-    // isn't involved (design: mode conversion).
+    // overlay and single mode never shows a paned Settings (INV 6 — presentation,
+    // not destructive close/reopen once the two-worlds Settings work lands). A
+    // no-op when Settings isn't involved.
     convertSettingsForModeTransition()
+    // The controller owns the beat + supersession; the workspace owns the durable
+    // flip + the seed-once slot. Both dispatch here so they batch (INV 2/7).
+    mode.toggle({ focusedPaneId, leavingPaneIds, multiPane: dealMultiPane })
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
-  }, [armBeat, convertSettingsForModeTransition, dispatchWorkspace])
+  }, [convertSettingsForModeTransition, dispatchWorkspace, mode])
+  // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
+  // gesture + living halo). The HOLD / swipe / Shift+Enter mode toggle is
+  // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
   const handleToggleNavigation = useCallback(() => {
     if (persistentDrawer) {
       setDesktopSidebarOpen(!desktopSidebarOpen)
@@ -1174,7 +1209,7 @@ export default function Shell() {
     openDrawer,
     openTabMenuAtRef,
     onDragStart: onWorkspaceDragStart,
-    onPreviewBuilder: setDragPreviewBuilder,
+    onPreviewBuilder: onModeDragPreview,
     convertSettingsForModeTransition,
   })
 
@@ -2570,10 +2605,16 @@ export default function Shell() {
   }, [chats, activeChatId, activeView, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
-    <div className={`shell${immersiveActive ? ' shell--immersive' : ''}`
+    <div
+      ref={shellRootRef}
+      // The ONE transient beat class comes from the descriptor (INV 1/4): exactly
+      // one of entering/exiting is ever present, and the keyed animationend on
+      // this root completes the beat (the controller's listener). No separate
+      // entering/exiting booleans emit here anymore.
+      className={`shell${immersiveActive ? ' shell--immersive' : ''}`
       + `${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`
-      + `${builderEntering ? ' shell--builder-entering' : ''}`
-      + `${builderExiting ? ' shell--builder-exiting' : ''}`
+      + `${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })
+        ? ` ${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })}` : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
       {/* The existing brand toggle remains the visible close affordance while the
           mobile drawer is modal. Keep the workspace inert below, but do not inert
@@ -2708,22 +2749,25 @@ export default function Shell() {
           <div
             key={id}
             data-tab-key={multiPane ? tabKey : undefined}
-            // The EXIT reverse-deal (item 1) reads this to tell the settling
-            // (focused) pane from the leaving pane(s) that deal back out.
-            data-pane-role={paned
-              ? (paned.paneId === workspace.focusedPaneId ? 'focused' : 'leaving')
-              : undefined}
+            // The EXIT reverse-deal reads this to tell the settling (focused) pane
+            // from the leaving pane(s) that deal back out. LATCHED at exit start
+            // (INV 9) — a focus change mid-beat cannot re-assign roles.
+            data-pane-role={paneRoleFor(paned?.paneId, !!paned)}
             className={paned
               ? 'shell__view shell__view--paned'
               : `shell__view ${fullBleed ? 'shell__view--active' : ''}`}
             style={paned
               ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h }
               : undefined}
+            // A leaving pane during the exit beat is INERT (INV 9): a tap on the
+            // nearly-invisible dealing-out surface must not dispatch FOCUS.
+            inert={paned ? isInertLeaving(paned.paneId) : undefined}
             // Clicking a visible pane focuses it (chat panes are not opaque; app
             // iframes swallow interior clicks, so this catches wrapper padding —
             // interior app focus rides the runtime bridge later). Only in the
-            // tiled path (finding D-i).
-            onPointerDownCapture={paned ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
+            // tiled path (finding D-i), and never on an inert leaving pane.
+            onPointerDownCapture={paned && !isInertLeaving(paned.paneId)
+              ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
             <ErrorBoundary key={`ab-${id}`} variant="inline" label="app">
             <AppCanvas
@@ -2777,20 +2821,20 @@ export default function Shell() {
             <div
               key={chatId}
               data-tab-key={multiPane && role !== 'held' ? tabKey : undefined}
-              // See the app wrapper: marks the EXIT reverse-deal's settling vs
-              // leaving pane (item 1).
-              data-pane-role={paned
-                ? (paneId === workspace.focusedPaneId ? 'focused' : 'leaving')
-                : undefined}
+              // See the app wrapper: the settling vs leaving pane role, LATCHED at
+              // exit start (INV 9).
+              data-pane-role={paneRoleFor(paned ? paneId : undefined, !!paned)}
               className={paned
                 ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
                 : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`}
               style={paned
                 ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h }
                 : undefined}
-              inert={settingsActive || role !== 'active'}
+              // Inert while covered/handing-off OR while dealing out as a leaving
+              // pane during the exit beat (INV 9).
+              inert={settingsActive || role !== 'active' || (paned ? isInertLeaving(paneId) : false)}
               aria-hidden={settingsActive || role !== 'active' ? 'true' : undefined}
-              onPointerDownCapture={paned && role === 'active'
+              onPointerDownCapture={paned && role === 'active' && !isInertLeaving(paneId)
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}
             >
@@ -2836,9 +2880,7 @@ export default function Shell() {
           <div
             key="settings"
             data-tab-key={settingsPaned ? SETTINGS_KEY : undefined}
-            data-pane-role={settingsPaned
-              ? (settingsPaned.paneId === workspace.focusedPaneId ? 'focused' : 'leaving')
-              : undefined}
+            data-pane-role={paneRoleFor(settingsPaned?.paneId, !!settingsPaned)}
             className={settingsPaned
               ? 'shell__view shell__view--paned shell__settings-view'
               : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`}

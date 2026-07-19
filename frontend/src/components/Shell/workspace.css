@@ -21,15 +21,16 @@
      must never clear the divider drag's transition guard (or vice versa). */
   transition: top 180ms ease-out, left 180ms ease-out,
     width 180ms ease-out, height 180ms ease-out;
-  /* Entry CARD-DEAL flourish (replaces the divider-draw): whenever a wrapper
-     becomes a tiled pane — a builder-mode enter, a drop that unfolds the parked
-     layout, or a split — it deals in from the right with a brief lift (shadow +
-     radius) and settles flush. The rects settle on the 180ms transition above, so
-     the deal + settle read as one gesture. Plays only on class-apply: live geometry
-     operations never override `animation`, because restoring an overridden
-     animation restarts the deal on an already-mounted pane. Reduced-motion drops
-     it (below). */
-  animation: shell-pane-deal 400ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* INV 11 (review §3): NO one-shot `animation` on this PERMANENT class. The P1
+     finding was that `.shell__view--paned` permanently declared the 400ms deal, so
+     removing `.workspace--resizing` (which set `animation:none`) recomputed the
+     name back to `shell-pane-deal` and REPLAYED the entrance after every resize,
+     dock/undock, and divider-drag release — a deal with no semantic entry. A
+     sibling crispness fix addressed the same P1 by no longer OVERRIDING the
+     animation during live geometry ops; this rebuild instead moves the deal off
+     the permanent class entirely (the review's prescription), so the entry deal
+     lives ONLY on the transient `.shell--builder-entering` beat class below and
+     plays exactly once per genuine mode-enter, never on a resize. */
 }
 @keyframes shell-pane-deal {
   from {
@@ -88,6 +89,22 @@
   }
 }
 
+/* Multi-pane builder ENTER card-deal — keyed to the transient beat class (INV
+   11), NOT the permanent .shell__view--paned. Each pane deals in from the right
+   with a brief lift and settles flush; the rects settle on the 180ms transition
+   so deal + settle read as one gesture. Because it lives on the transient class,
+   it plays exactly once per genuine mode-enter and never on a resize / dock /
+   divider-drag release. The keyed animationend on the shell root (useModeController)
+   completes the beat (INV 12). Reduced motion drops it (below). */
+.shell--builder-entering .shell__view--paned {
+  animation: shell-pane-deal 400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* A live resize DURING the enter beat must not re-deal each frame. Higher
+   specificity than the entering rule above so it wins regardless of source order
+   (the base .workspace--resizing rule earlier equals the entering rule's
+   specificity, so it alone would lose to it). */
+.workspace--resizing .shell--builder-entering .shell__view--paned { animation: none; }
+
 /* --- Builder mode-EXIT reverse card-deal (design: inverse deal on close) -----
    Leaving builder with a TILED workspace holds the tiled render for one decisive
    beat (~240ms, FASTER than the 400ms entry -- the Zippo asymmetry, in the deal
@@ -102,6 +119,19 @@
 .shell--builder-exiting .workspace__chrome {
   opacity: 0;
   transition: opacity 160ms ease-out;
+}
+/* INV 9 (review §3, P1 "chrome invisible, not inert"): the exit beat makes the
+   leaving surfaces + all chrome children POINTER-INERT, not merely transparent.
+   The old CSS only set opacity:0, so a tap on a nearly-invisible leaving pane
+   could still dispatch FOCUS and swap the settling role mid-animation, or an
+   invisible strip/divider could still navigate/resize. Shell also sets the `inert`
+   attribute on leaving wrappers; this is the pointer/keyboard half for the chrome
+   the attribute doesn't cover. */
+.shell--builder-exiting .workspace__strip,
+.shell--builder-exiting .workspace__divider,
+.shell--builder-exiting .workspace__pane-chip,
+.shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] {
+  pointer-events: none;
 }
 .shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] {
   z-index: 4; /* deal OUT over the settling pane growing beneath it */
