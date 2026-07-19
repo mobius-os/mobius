@@ -231,33 +231,45 @@ async def lifespan(app):
     # tests can detect it without tailing logs. The never-crash-boot
     # contract is preserved: we only set a flag, never raise.
     app.state.reconciliation_failed = True
-  # Discard any `*.js.staging` bundle left by a crash between a recompile's
-  # commit and its atomic promote (see compiler.recompile_app_bundle). A leaked
-  # staging file is never served; reaping it just keeps the compiled dir clean.
+  # Discard any `*.js.staging` bundle left by an interrupted compile. Staging
+  # paths are never stored on App rows or served.
   try:
     from app.compiler import reap_staging_bundles
     reap_staging_bundles()
   except Exception as exc:
     _log.error("staging-bundle reap failed: %s", exc, exc_info=True)
-  # Recompile any live App row whose compiled bundle is missing/empty. A crash
-  # between the install's db.commit() and its post-commit os.replace leaves a
-  # durable row pointing at a bundle that was never written (the staging copy
-  # reaped just above), so the app 404s forever with no self-heal — this heals
-  # it from the stored jsx_source. Runs AFTER the reap (so a half-promoted
-  # staging file is gone before we decide a bundle is missing) and before the
-  # server serves requests. Wrapped + per-app error-isolated so neither a bad
-  # source nor a compile failure can brick boot or the recovery surface.
+  # Recompile any live App row whose compiled bundle is missing/empty. New
+  # content-addressed writes cannot commit a missing path, but this still heals
+  # legacy interrupted rows, manual deletion, and incomplete volume restores.
+  # Runs after staging reap and before serving. Wrapped + per-app error-isolated
+  # so neither bad source nor a compiler failure can brick recovery.
   try:
-    from app.compiler import reconcile_missing_bundles, reconcile_outdated_bundles
+    from app.compiler import (
+      reap_orphaned_bundles,
+      reconcile_missing_bundles,
+      reconcile_outdated_bundles,
+    )
     from app.database import SessionLocal as _BundleSession
     _bn_db = _BundleSession()
     try:
-      await reconcile_missing_bundles(_bn_db)
+      healed_bundle_ids = await reconcile_missing_bundles(_bn_db)
       # Compiler ABI migrations fix forward: every app frame receives one
       # dependency-complete module, so legacy external-import bundles must be
       # rebuilt before requests can expose them. The sweep is atomic per app
       # and resumable across interrupted boots.
-      await reconcile_outdated_bundles(_bn_db)
+      migrated_bundle_ids = await reconcile_outdated_bundles(_bn_db)
+      # Both crash boundaries are now coherent but may leak one immutable file:
+      # before commit it is the unpublished candidate, after commit it is the
+      # superseded prior bundle. Reap only after reconciliation has established
+      # every live row's final path; tombstoned rows remain referenced/recoverable.
+      removed_bundle_paths = reap_orphaned_bundles(_bn_db)
+      if healed_bundle_ids or migrated_bundle_ids or removed_bundle_paths:
+        _log.info(
+          "compiled-bundle reconciliation: healed=%d migrated=%d reaped=%d",
+          len(healed_bundle_ids),
+          len(migrated_bundle_ids),
+          len(removed_bundle_paths),
+        )
     finally:
       _bn_db.close()
   except Exception as exc:

@@ -20,6 +20,15 @@ def _make_app(client, owner_token):
   return r.json()["id"]
 
 
+def _bundle_path(db, app_id: int) -> Path:
+  row = (
+    db.query(models.App).populate_existing()
+    .filter(models.App.id == app_id).first()
+  )
+  assert row is not None and row.compiled_path
+  return Path(row.compiled_path)
+
+
 def test_put_json_inner_object(client, auth, owner_token):
   """PUT body is the inner object; server stringifies + writes."""
   app_id = _make_app(client, owner_token)
@@ -821,14 +830,19 @@ def test_patch_conflicting_source_dir_keeps_bundle(client, auth, owner_token):
   b = client.post("/api/apps/", json={
     "name": "pb", "description": "x", "jsx_source": jsx, "source_dir": db_dir,
   }, headers=auth).json()["id"]
-  bundle = os.path.join(data_dir, "compiled", f"app-{b}.js")
-  before = open(bundle, "rb").read()
+  from app.database import SessionLocal
+  session = SessionLocal()
+  try:
+    bundle = _bundle_path(session, b)
+  finally:
+    session.close()
+  before = bundle.read_bytes()
   r = client.patch(f"/api/apps/{b}", json={
     "jsx_source": "export default function App(){ return <div>NEW</div> }",
     "source_dir": da,   # already claimed by app pa -> 409 before compile
   }, headers=auth)
   assert r.status_code == 409
-  assert open(bundle, "rb").read() == before   # bundle untouched
+  assert bundle.read_bytes() == before   # bundle untouched
 
 
 def test_uninstall_skips_numeric_source_dir(client, auth, owner_token, db):
@@ -884,43 +898,93 @@ def test_uninstall_skips_nested_and_shared_source_dir(client, auth, owner_token,
   assert os.path.isdir(shared)  # a3 still references it
 
 
-# Transactional bundle recompile — both PATCH and the file watcher route their
-# recompiles through compiler.recompile_app_bundle, which compiles out-of-place
-# and swaps the live bundle in only after the DB commit succeeds.
+# Transactional bundle recompile — PATCH and the watcher compile out-of-place,
+# publish an immutable content path, then commit the row that selects it.
 
 
 @pytest.mark.asyncio
 async def test_recompile_app_bundle_promotes_after_commit(client, owner_token, db):
-  """The new bundle goes live only after a successful commit, and the staging
-  file is consumed by the atomic swap (not left behind)."""
+  """Commit switches to an existing immutable bundle and consumes staging."""
   import os
+  import hashlib
   import app.models as models
   from app.compiler import recompile_app_bundle
   app_id = _make_app(client, owner_token)
   data_dir = os.environ["DATA_DIR"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  previous = Path(row.compiled_path)
   new_jsx = "export default function App(){ return <div>PROMOTED</div> }"
   await recompile_app_bundle(db, row, new_jsx)
-  assert "PROMOTED" in open(live, encoding="utf-8").read()
-  assert not os.path.exists(live + ".staging")
+  current = Path(row.compiled_path)
+  assert current != previous
+  assert current.is_file()
+  assert "PROMOTED" in current.read_text(encoding="utf-8")
+  assert not previous.exists()
+  assert not Path(data_dir, "compiled", f"app-{app_id}.js.staging").exists()
+  digest = hashlib.sha256(current.read_bytes()).hexdigest()
+  assert current.name == f"app-{app_id}-{digest}.js"
   assert row.jsx_source == new_jsx
+
+
+@pytest.mark.asyncio
+async def test_recompile_publishes_before_commit_without_replacing_previous(
+  client, owner_token, db, monkeypatch,
+):
+  """At commit, the durable new generation and coherent old one both exist."""
+  import app.models as models
+  import app.compiler as compiler
+  app_id = _make_app(client, owner_token)
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  previous = Path(row.compiled_path)
+  observed = {}
+  real_sync = compiler._sync_published_bundle
+
+  def _record_sync(path):
+    real_sync(path)
+    observed["synced"] = Path(path)
+
+  monkeypatch.setattr(compiler, "_sync_published_bundle", _record_sync)
+
+  class _InspectCommit:
+    def commit(self):
+      published = Path(row.compiled_path)
+      observed.update({
+        "published": published,
+        "published_exists": published.is_file(),
+        "previous_exists": previous.is_file(),
+      })
+      assert observed["synced"] == published
+      db.commit()
+
+    def rollback(self):
+      db.rollback()
+
+  await compiler.recompile_app_bundle(
+    _InspectCommit(), row,
+    "export default function App(){ return <div>BOUNDARY</div> }",
+  )
+
+  assert observed["published"] != previous
+  assert observed["published_exists"] is True
+  assert observed["previous_exists"] is True
+  assert Path(row.compiled_path) == observed["published"]
+  assert Path(row.compiled_path).is_file()
+  assert not previous.exists()
 
 
 @pytest.mark.asyncio
 async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
   client, owner_token, db,
 ):
-  """A commit failure discards the staging file and leaves the live bundle
-  exactly as it was — never a half-applied / uncommitted bundle."""
+  """A commit failure removes the new orphan and preserves the committed path."""
   import os
   import app.models as models
   from app.compiler import recompile_app_bundle
   app_id = _make_app(client, owner_token)
   data_dir = os.environ["DATA_DIR"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  before = open(live, "rb").read()
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  live = Path(row.compiled_path)
+  before = live.read_bytes()
 
   class _FailCommit:
     def commit(self):
@@ -932,39 +996,37 @@ async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
   new_jsx = "export default function App(){ return <div>CHANGED</div> }"
   with pytest.raises(RuntimeError):
     await recompile_app_bundle(_FailCommit(), row, new_jsx)
-  assert open(live, "rb").read() == before
-  assert not os.path.exists(live + ".staging")
+  assert Path(row.compiled_path) == live
+  assert live.read_bytes() == before
+  assert not Path(data_dir, "compiled", f"app-{app_id}.js.staging").exists()
+  assert list(Path(data_dir, "compiled").glob(f"app-{app_id}-*.js")) == [live]
 
 
 @pytest.mark.asyncio
 async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   client, owner_token, db,
 ):
-  """An esbuild failure leaves the live bundle untouched (esbuild writes its
-  outfile only on success) and raises so the caller can roll back."""
+  """An esbuild failure leaves the committed bundle untouched."""
   import os
   import app.models as models
   from app.compiler import recompile_app_bundle
   app_id = _make_app(client, owner_token)
-  data_dir = os.environ["DATA_DIR"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  before = open(live, "rb").read()
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  live = Path(row.compiled_path)
+  before = live.read_bytes()
   # Has `export default` (passes the cheap guard) but the JSX is unclosed, so
   # esbuild itself fails.
   with pytest.raises(RuntimeError):
     await recompile_app_bundle(
       db, row, "export default function App(){ return <div> }",
     )
-  assert open(live, "rb").read() == before
+  assert Path(row.compiled_path) == live
+  assert live.read_bytes() == before
 
 
-# Startup missing-bundle reconciler — a crash between the install's db.commit()
-# and the post-commit os.replace() that promotes the staging bundle leaves an
-# App row whose compiled_path was never written (and reap_staging_bundles then
-# deletes the only staging copy). The boot reconciler recompiles any live App
-# with non-empty jsx_source whose bundle is missing/empty, so the app self-heals
-# on the next restart instead of 404ing forever. See feature 109.
+# Startup missing-bundle reconciler — content-addressed writes cannot create a
+# new missing-path row, but legacy crash remnants, deletion, and partial volume
+# restores still self-heal from committed source instead of 404ing forever.
 
 
 @pytest.mark.asyncio
@@ -977,20 +1039,20 @@ async def test_reconcile_missing_bundles_recompiles_missing_file(
   import app.models as models
   from app.compiler import reconcile_missing_bundles
   app_id = _make_app(client, owner_token)
-  data_dir = os.environ["DATA_DIR"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  # Simulate the crash window: the row exists with jsx_source + compiled_path,
-  # but the bundle file the post-commit os.replace would have written is absent.
+  live = _bundle_path(db, app_id)
+  # Simulate a legacy interrupted row or incomplete compiled-volume restore.
   row = db.query(models.App).filter(models.App.id == app_id).first()
   row.jsx_source = "export default function App(){ return <div>HEALED</div> }"
   db.commit()
-  os.remove(live)
-  assert not os.path.exists(live)
+  live.unlink()
+  assert not live.exists()
 
   healed = await reconcile_missing_bundles(db)
 
   assert app_id in healed
-  assert "HEALED" in open(live, encoding="utf-8").read()
+  rebuilt = _bundle_path(db, app_id)
+  assert rebuilt.is_file()
+  assert "HEALED" in rebuilt.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -1003,14 +1065,14 @@ async def test_reconcile_missing_bundles_recompiles_empty_file(
   import app.models as models
   from app.compiler import reconcile_missing_bundles
   app_id = _make_app(client, owner_token)
-  data_dir = os.environ["DATA_DIR"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  open(live, "w").close()
-  assert os.path.getsize(live) == 0
+  live = _bundle_path(db, app_id)
+  live.write_bytes(b"")
+  assert live.stat().st_size == 0
 
   await reconcile_missing_bundles(db)
 
-  assert os.path.getsize(live) > 0
+  rebuilt = _bundle_path(db, app_id)
+  assert rebuilt.stat().st_size > 0
 
 
 @pytest.mark.asyncio
@@ -1024,23 +1086,22 @@ async def test_reconcile_missing_bundles_skips_healthy_and_tombstoned(
   from app.compiler import reconcile_missing_bundles
   healthy_id = _make_app(client, owner_token)
   tombstoned_id = _make_app(client, owner_token)
-  data_dir = os.environ["DATA_DIR"]
-  healthy = os.path.join(data_dir, "compiled", f"app-{healthy_id}.js")
-  tombstoned = os.path.join(data_dir, "compiled", f"app-{tombstoned_id}.js")
-  before = open(healthy, "rb").read()
+  healthy = _bundle_path(db, healthy_id)
+  tombstoned = _bundle_path(db, tombstoned_id)
+  before = healthy.read_bytes()
   # Tombstone the second app and delete its bundle — a uninstalled row must not
   # be recompiled back to life.
   row = db.query(models.App).filter(models.App.id == tombstoned_id).first()
   row.deleted_at = __import__("app.timeutil", fromlist=["now_naive_utc"]).now_naive_utc()
   db.commit()
-  os.remove(tombstoned)
+  tombstoned.unlink()
 
   healed = await reconcile_missing_bundles(db)
 
   assert healthy_id not in healed
   assert tombstoned_id not in healed
-  assert open(healthy, "rb").read() == before
-  assert not os.path.exists(tombstoned)
+  assert healthy.read_bytes() == before
+  assert not tombstoned.exists()
 
 
 @pytest.mark.asyncio
@@ -1054,21 +1115,20 @@ async def test_reconcile_missing_bundles_isolates_one_apps_failure(
   from app.compiler import reconcile_missing_bundles
   broken_id = _make_app(client, owner_token)
   good_id = _make_app(client, owner_token)
-  data_dir = os.environ["DATA_DIR"]
-  broken = os.path.join(data_dir, "compiled", f"app-{broken_id}.js")
-  good = os.path.join(data_dir, "compiled", f"app-{good_id}.js")
+  broken = _bundle_path(db, broken_id)
+  good = _bundle_path(db, good_id)
   broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
   broken_row.jsx_source = "export default function App(){ return <div> }"
   db.commit()
-  os.remove(broken)
-  os.remove(good)
+  broken.unlink()
+  good.unlink()
 
   healed = await reconcile_missing_bundles(db)
 
   assert good_id in healed
   assert broken_id not in healed
-  assert os.path.getsize(good) > 0
-  assert not os.path.exists(broken)
+  assert _bundle_path(db, good_id).stat().st_size > 0
+  assert not broken.exists()
 
 
 # Startup compiler-ABI reconciler — opaque frames can only cold-load offline
@@ -1085,23 +1145,30 @@ async def test_reconcile_outdated_bundles_recompiles_legacy_bundle(
   from app.app_compile_contract import COMPILED_RUNTIME_BANNER
   from app.compiler import reconcile_outdated_bundles
   app_id = _make_app(client, owner_token)
-  live = os.path.join(
-    os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js",
-  )
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  Path(row.compiled_path).unlink()
+  legacy = Path(os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js")
+  row.compiled_path = str(legacy)
   row.jsx_source = (
     "export default function App(){ return <div>ABI_MIGRATED</div> }"
   )
   db.commit()
-  with open(live, "w", encoding="utf-8") as stream:
-    stream.write("export default function Legacy(){}")
+  # Current ABI but mutable legacy name: this is the old same-ABI crash gap,
+  # so path shape alone must force a rebuild from committed source.
+  legacy.write_text(
+    COMPILED_RUNTIME_BANNER + "\nexport default function Legacy(){}",
+    encoding="utf-8",
+  )
 
   migrated = await reconcile_outdated_bundles(db)
 
-  rebuilt = open(live, encoding="utf-8").read()
+  rebuilt_path = _bundle_path(db, app_id)
+  rebuilt = rebuilt_path.read_text(encoding="utf-8")
   assert app_id in migrated
   assert rebuilt.startswith(COMPILED_RUNTIME_BANNER)
   assert "ABI_MIGRATED" in rebuilt
+  assert rebuilt_path != legacy
+  assert not legacy.exists()
 
 
 @pytest.mark.asyncio
@@ -1113,24 +1180,22 @@ async def test_reconcile_outdated_bundles_skips_current_and_tombstoned(
   from app.compiler import reconcile_outdated_bundles
   current_id = _make_app(client, owner_token)
   tombstoned_id = _make_app(client, owner_token)
-  compiled = os.path.join(os.environ["DATA_DIR"], "compiled")
-  current = os.path.join(compiled, f"app-{current_id}.js")
-  tombstoned = os.path.join(compiled, f"app-{tombstoned_id}.js")
-  before = open(current, "rb").read()
+  current = _bundle_path(db, current_id)
+  tombstoned = _bundle_path(db, tombstoned_id)
+  before = current.read_bytes()
   row = db.query(models.App).filter(models.App.id == tombstoned_id).first()
   row.deleted_at = __import__(
     "app.timeutil", fromlist=["now_naive_utc"],
   ).now_naive_utc()
   db.commit()
-  with open(tombstoned, "w", encoding="utf-8") as stream:
-    stream.write("export default function Legacy(){}")
+  tombstoned.write_text("export default function Legacy(){}", encoding="utf-8")
 
   migrated = await reconcile_outdated_bundles(db)
 
   assert current_id not in migrated
   assert tombstoned_id not in migrated
-  assert open(current, "rb").read() == before
-  assert open(tombstoned, encoding="utf-8").read() == (
+  assert current.read_bytes() == before
+  assert tombstoned.read_text(encoding="utf-8") == (
     "export default function Legacy(){}"
   )
 
@@ -1144,28 +1209,153 @@ async def test_reconcile_outdated_bundles_isolates_compile_failure(
   from app.compiler import reconcile_outdated_bundles
   broken_id = _make_app(client, owner_token)
   good_id = _make_app(client, owner_token)
-  compiled = os.path.join(os.environ["DATA_DIR"], "compiled")
-  broken = os.path.join(compiled, f"app-{broken_id}.js")
-  good = os.path.join(compiled, f"app-{good_id}.js")
   broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
   good_row = db.query(models.App).filter(models.App.id == good_id).first()
+  Path(broken_row.compiled_path).unlink()
+  Path(good_row.compiled_path).unlink()
+  compiled = Path(os.environ["DATA_DIR"], "compiled")
+  broken = compiled / f"app-{broken_id}.js"
+  good = compiled / f"app-{good_id}.js"
+  broken_row.compiled_path = str(broken)
+  good_row.compiled_path = str(good)
   broken_row.jsx_source = "export default function App(){ return <div> }"
   good_row.jsx_source = (
     "export default function App(){ return <div>ABI_GOOD</div> }"
   )
   db.commit()
   for path in (broken, good):
-    with open(path, "w", encoding="utf-8") as stream:
-      stream.write("export default function Legacy(){}")
+    path.write_text("export default function Legacy(){}", encoding="utf-8")
 
   migrated = await reconcile_outdated_bundles(db)
 
   assert good_id in migrated
   assert broken_id not in migrated
-  assert "ABI_GOOD" in open(good, encoding="utf-8").read()
-  assert open(broken, encoding="utf-8").read() == (
+  assert "ABI_GOOD" in _bundle_path(db, good_id).read_text(encoding="utf-8")
+  assert broken.read_text(encoding="utf-8") == (
     "export default function Legacy(){}"
   )
+
+
+def test_reap_orphaned_bundles_keeps_live_and_tombstoned_rows(
+  client, owner_token, db,
+):
+  """Startup cleanup removes crash leftovers, never recoverable app bundles."""
+  from app.compiler import reap_orphaned_bundles
+  live_id = _make_app(client, owner_token)
+  tombstoned_id = _make_app(client, owner_token)
+  live = _bundle_path(db, live_id)
+  tombstoned = _bundle_path(db, tombstoned_id)
+  row = db.query(models.App).filter(models.App.id == tombstoned_id).first()
+  row.deleted_at = __import__(
+    "app.timeutil", fromlist=["now_naive_utc"],
+  ).now_naive_utc()
+  db.commit()
+  compiled = live.parent
+  orphan_legacy = compiled / "app-999.js"
+  orphan_content = compiled / ("app-999-" + "a" * 64 + ".js")
+  unrelated = compiled / "app-helper.js"
+  orphan_legacy.write_text("legacy", encoding="utf-8")
+  orphan_content.write_text("orphan", encoding="utf-8")
+  unrelated.write_text("not an app bundle", encoding="utf-8")
+
+  removed = set(reap_orphaned_bundles(db))
+
+  assert live.is_file()
+  assert tombstoned.is_file()
+  assert str(orphan_legacy) in removed
+  assert str(orphan_content) in removed
+  assert not orphan_legacy.exists()
+  assert not orphan_content.exists()
+  assert unrelated.is_file()
+
+
+def test_purge_app_bundles_is_scoped_to_exact_numeric_id(
+  client, owner_token, db,
+):
+  """Hard-delete cleanup removes every generation without matching id prefixes."""
+  from app.compiler import purge_app_bundles
+  first_id = _make_app(client, owner_token)
+  second_id = _make_app(client, owner_token)
+  first = _bundle_path(db, first_id)
+  second = _bundle_path(db, second_id)
+  legacy = first.parent / f"app-{first_id}.js"
+  extra = first.parent / f"app-{first_id}-{'b' * 64}.js"
+  legacy.write_text("legacy", encoding="utf-8")
+  extra.write_text("orphan", encoding="utf-8")
+
+  purge_app_bundles(first_id)
+
+  assert not first.exists()
+  assert not legacy.exists()
+  assert not extra.exists()
+  assert second.is_file()
+
+
+def test_owned_bundle_path_canonicalizes_equivalent_stored_path(
+  client, owner_token, db,
+):
+  """Equivalent path spellings compare equal and cannot delete the live file."""
+  from app.compiler import owned_bundle_path
+  app_id = _make_app(client, owner_token)
+  current = _bundle_path(db, app_id)
+  aliased = current.parent / "unused" / ".." / current.name
+
+  assert owned_bundle_path(app_id, aliased) == current
+  assert owned_bundle_path(app_id + 1, aliased) is None
+
+
+def test_install_publication_reuses_canonical_equivalent_without_cleanup(
+  client, owner_token, db,
+):
+  """An equivalent stored spelling cannot schedule the live file for removal."""
+  from app.install import _publish_install_bundle
+  app_id = _make_app(client, owner_token)
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  current = Path(row.compiled_path)
+  row.compiled_path = str(current.parent / "unused" / ".." / current.name)
+  staged = current.parent / f"app-{app_id}.js.staging"
+  staged.write_bytes(current.read_bytes())
+  rollback_actions = []
+  commit_actions = []
+
+  published = _publish_install_bundle(
+    row, staged, rollback_actions, commit_actions,
+  )
+
+  assert published == current
+  assert current.is_file()
+  assert not staged.exists()
+  assert rollback_actions == []
+  assert commit_actions == []
+
+
+def test_publish_staged_bundle_rejects_another_apps_staging_file():
+  """A caller cannot publish or consume a staging file owned by another id."""
+  from app.compiler import _compiled_dir, publish_staged_bundle
+  foreign = _compiled_dir() / "app-42.js.staging"
+  foreign.write_text("foreign", encoding="utf-8")
+
+  with pytest.raises(ValueError, match="does not match the app id"):
+    publish_staged_bundle(41, foreign)
+
+  assert foreign.read_text(encoding="utf-8") == "foreign"
+
+
+def test_entry_source_path_honors_safe_manifest_entry_and_blocks_escape(
+  tmp_path,
+):
+  from types import SimpleNamespace
+  from app.compiler import _entry_source_path
+  source = tmp_path / "custom-entry"
+  source.mkdir()
+  manifest = source / "mobius.json"
+  manifest.write_text('{"entry":"app.jsx"}', encoding="utf-8")
+  app = SimpleNamespace(source_dir=str(source))
+
+  assert _entry_source_path(app) == source / "app.jsx"
+
+  manifest.write_text('{"entry":"../escape.jsx"}', encoding="utf-8")
+  assert _entry_source_path(app) == source / "index.jsx"
 
 
 def test_create_app_compiles_relative_source_import(client, owner_token):
@@ -1188,8 +1378,13 @@ def test_create_app_compiles_relative_source_import(client, owner_token):
   }, headers={"Authorization": f"Bearer {owner_token}"})
   assert r.status_code == 201, r.text
   app_id = r.json()["id"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  assert "MODULAR_WIDGET" in open(live, encoding="utf-8").read()
+  from app.database import SessionLocal
+  session = SessionLocal()
+  try:
+    live = _bundle_path(session, app_id)
+  finally:
+    session.close()
+  assert "MODULAR_WIDGET" in live.read_text(encoding="utf-8")
   assert open(os.path.join(src, "index.jsx"), encoding="utf-8").read() == jsx
 
 
@@ -1221,8 +1416,12 @@ async def test_watcher_recompiles_registered_app(client, owner_token):
     assert row.jsx_source == new_jsx
   finally:
     s.close()
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  assert "V1" in open(live, encoding="utf-8").read()
+  session = SessionLocal()
+  try:
+    live = _bundle_path(session, app_id)
+  finally:
+    session.close()
+  assert "V1" in live.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -1292,8 +1491,12 @@ async def test_watcher_recompiles_when_imported_module_changes(
     "jsx_source": jsx,
     "source_dir": src,
   }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
-  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
-  assert "MODULE_V0" in open(live, encoding="utf-8").read()
+  initial_session = SessionLocal()
+  try:
+    live_v0 = _bundle_path(initial_session, app_id)
+  finally:
+    initial_session.close()
+  assert "MODULE_V0" in live_v0.read_text(encoding="utf-8")
 
   with open(component, "w", encoding="utf-8") as f:
     f.write("export function Widget(){ return <span>MODULE_V1</span> }")
@@ -1303,9 +1506,12 @@ async def test_watcher_recompiles_when_imported_module_changes(
   try:
     row = s.query(models.App).filter(models.App.id == app_id).first()
     assert row.jsx_source == jsx
+    live_v1 = Path(row.compiled_path)
   finally:
     s.close()
-  compiled = open(live, encoding="utf-8").read()
+  assert live_v1 != live_v0
+  assert not live_v0.exists()
+  compiled = live_v1.read_text(encoding="utf-8")
   assert "MODULE_V1" in compiled
   assert "MODULE_V0" not in compiled
 
@@ -1458,14 +1664,18 @@ async def test_watcher_skips_unclaimed_source_dir():
   await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
 
 
-def test_create_app_leaves_no_staging_bundle(client, owner_token):
-  """create_app compiles through the same staging swap — the live bundle exists
-  and no .staging artifact is left behind once the swap completes."""
+def test_create_app_publishes_content_bundle_without_staging(
+  client, owner_token, db,
+):
+  """Fresh create commits only after its immutable artifact exists."""
   import os
   app_id = _make_app(client, owner_token)
-  live = os.path.join(os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js")
-  assert os.path.exists(live)
-  assert not os.path.exists(live + ".staging")
+  live = _bundle_path(db, app_id)
+  assert live.is_file()
+  assert live.name.startswith(f"app-{app_id}-")
+  assert not Path(
+    os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js.staging",
+  ).exists()
 
 
 # -- move (rename) route -------------------------------------------------

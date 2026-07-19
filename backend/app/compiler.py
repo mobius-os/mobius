@@ -1,8 +1,10 @@
 """Compiles JSX source strings to ES modules using esbuild."""
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -32,6 +34,10 @@ class CompileError(RuntimeError):
     self.source_path = Path(source_path) if source_path is not None else None
 
 
+_CONTENT_BUNDLE_RE = re.compile(r"^app-(?P<app_id>[0-9]+)-(?P<digest>[0-9a-f]{64})\.js$")
+_LEGACY_BUNDLE_RE = re.compile(r"^app-(?P<app_id>[0-9]+)\.js$")
+
+
 def _compiled_dir() -> Path:
   """Returns (and creates) the directory for compiled mini-app modules."""
   path = Path(get_settings().data_dir) / "compiled"
@@ -39,11 +45,153 @@ def _compiled_dir() -> Path:
   return path
 
 
+def _file_sha256(path: Path) -> str:
+  digest = hashlib.sha256()
+  with path.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+      digest.update(chunk)
+  return digest.hexdigest()
+
+
+def _sync_published_bundle(path: Path) -> None:
+  """Make a published artifact and its directory entry durable.
+
+  ``os.replace`` gives readers an atomic name switch, but it does not by itself
+  guarantee that the file or directory metadata survives a sudden power loss.
+  The database must not commit ``compiled_path`` until both are on stable
+  storage, otherwise a durable row could still outlive its freshly renamed
+  bundle.
+  """
+  file_fd = os.open(path, os.O_RDONLY)
+  try:
+    os.fsync(file_fd)
+  finally:
+    os.close(file_fd)
+  dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+    os.fsync(dir_fd)
+  finally:
+    os.close(dir_fd)
+
+
+def owned_bundle_path(app_id: int, path: str | Path | None) -> Path | None:
+  """Return a validated bundle path owned by ``app_id``.
+
+  ``compiled_path`` is durable state, so cleanup must not trust it as an
+  arbitrary unlink target. Both the legacy fixed name and the new immutable
+  content-addressed names are accepted, but only directly under /compiled.
+  """
+  if not path:
+    return None
+  candidate = Path(path)
+  try:
+    if candidate.parent.resolve() != _compiled_dir().resolve():
+      return None
+  except OSError:
+    return None
+  canonical = _compiled_dir() / candidate.name
+  legacy_match = _LEGACY_BUNDLE_RE.fullmatch(candidate.name)
+  if legacy_match and int(legacy_match.group("app_id")) == app_id:
+    return canonical
+  match = _CONTENT_BUNDLE_RE.fullmatch(candidate.name)
+  if match and int(match.group("app_id")) == app_id:
+    return canonical
+  return None
+
+
+def publish_staged_bundle(app_id: int, staged: str | Path) -> Path:
+  """Promote a compiled staging file to an immutable content path.
+
+  Publication happens *before* the database row switches ``compiled_path``.
+  The old row therefore keeps serving its old immutable file until commit,
+  while a committed row can only point at a file that already exists. A crash
+  on either side of commit is coherent; an uncommitted content file is merely
+  an orphan for the startup reaper.
+  """
+  staged_path = Path(staged)
+  compiled = _compiled_dir()
+  try:
+    valid_staging_parent = staged_path.parent.resolve() == compiled.resolve()
+  except OSError as exc:
+    raise ValueError("Invalid compiled-bundle staging path.") from exc
+  if (
+    not valid_staging_parent
+    or staged_path.name != f"app-{app_id}.js.staging"
+  ):
+    raise ValueError("Compiled-bundle staging path does not match the app id.")
+  staged_path = compiled / staged_path.name
+  digest = _file_sha256(staged_path)
+  final = compiled / f"app-{app_id}-{digest}.js"
+  if final.exists():
+    # Reuse an already-published identical artifact (for example after a crash
+    # before commit). If the digest-named file was corrupted, atomically repair
+    # it from the freshly compiled staging bytes.
+    try:
+      identical = _file_sha256(final) == digest
+    except OSError:
+      identical = False
+    if identical:
+      staged_path.unlink(missing_ok=True)
+      _sync_published_bundle(final)
+      return final
+  os.replace(staged_path, final)
+  _sync_published_bundle(final)
+  return final
+
+
+def unlink_app_bundle(app_id: int, path: str | Path | None) -> bool:
+  """Best-effort unlink of one validated bundle owned by ``app_id``."""
+  owned = owned_bundle_path(app_id, path)
+  if owned is None:
+    return False
+  try:
+    owned.unlink(missing_ok=True)
+    return True
+  except OSError:
+    return False
+
+
+def purge_app_bundles(app_id: int) -> None:
+  """Best-effort removal of every legacy/content bundle for a hard-deleted app."""
+  compiled = _compiled_dir()
+  candidates = [
+    compiled / f"app-{app_id}.js",
+    compiled / f"app-{app_id}.js.staging",
+    *compiled.glob(f"app-{app_id}-*.js"),
+  ]
+  for candidate in candidates:
+    if candidate.name.endswith(".staging"):
+      try:
+        candidate.unlink(missing_ok=True)
+      except OSError:
+        pass
+      continue
+    unlink_app_bundle(app_id, candidate)
+
+
 def _entry_source_path(app) -> Path | None:
   source_dir = getattr(app, "source_dir", None)
   if not source_dir:
     return None
-  return Path(source_dir) / "index.jsx"
+  source_root = Path(source_dir)
+  entry = "index.jsx"
+  manifest_path = source_root / "mobius.json"
+  try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    declared = manifest.get("entry") if isinstance(manifest, dict) else None
+    if isinstance(declared, str) and declared.strip():
+      entry = declared.strip()
+  except (FileNotFoundError, OSError, json.JSONDecodeError):
+    pass
+  candidate = source_root / entry
+  try:
+    candidate.resolve().relative_to(source_root.resolve())
+  except (OSError, ValueError):
+    # A malformed local manifest must never redirect a compile write outside
+    # its source tree. The manifest validator will report the declaration; the
+    # compiler safely falls back to the canonical local entry.
+    return source_root / "index.jsx"
+  return candidate
 
 
 def _atomic_write(path: Path, data: str) -> None:
@@ -93,7 +241,7 @@ async def compile_jsx(
   app_id: int,
   jsx_source: str,
   *,
-  out_path: str | Path | None = None,
+  out_path: str | Path,
   source_path: str | Path | None = None,
 ) -> str:
   """Compiles JSX source to an ES module and returns the output path.
@@ -101,10 +249,10 @@ async def compile_jsx(
   Args:
     app_id: The numeric ID of the mini-app being compiled.
     jsx_source: The JSX source code string.
-    out_path: Where esbuild writes the bundle. Defaults to the live
-      bundle path ``app-<id>.js``. Pass a staging path to compile
-      out-of-place so the live bundle is only swapped in after the
-      DB commit succeeds (see ``recompile_app_bundle``).
+    out_path: Where esbuild writes the bundle. Production callers pass the
+      app's staging path, then publish the output by content hash (see
+      ``recompile_app_bundle``). It is required so a new caller cannot silently
+      bypass immutable publication through the retired fixed live filename.
     source_path: Optional real filesystem entrypoint. When present,
       esbuild compiles that path directly, allowing relative imports from
       sibling files in the app source tree. When omitted, the legacy
@@ -125,7 +273,7 @@ async def compile_jsx(
       "apps/<name>/index.jsx before registering."
     )
     raise CompileError(message, stderr=message, source_path=source_path)
-  out = Path(out_path) if out_path is not None else _compiled_dir() / f"app-{app_id}.js"
+  out = Path(out_path)
 
   entry_path = Path(source_path) if source_path is not None else None
   tmp_path = None
@@ -202,36 +350,39 @@ async def compile_jsx(
 
 
 async def recompile_app_bundle(db, app, jsx_source: str) -> None:
-  """Recompiles ``app``'s JSX into its live bundle as one transaction.
+  """Recompiles ``app``'s JSX into an immutable bundle as one transaction.
 
-  The live bundle ``app-<id>.js`` is never left half-written or orphaned:
-  the new code compiles to a ``.staging`` sibling, the DB transaction
-  commits, and only a durable commit promotes the staging file into the
-  live path via an atomic rename. When the app has a ``source_dir``,
-  ``index.jsx`` is synced before compile so esbuild can resolve relative
-  imports from that real source tree; compile or commit failure restores the
-  previous entry file. The live bundle stays untouched on compile failure, and
-  a commit failure discards the staging file and rolls back, so there is no
-  window where the live bundle is the new code while the DB still holds the old.
+  The new code compiles to a staging file, is atomically published under a
+  content-addressed name, and only then does the DB transaction switch
+  ``compiled_path`` to that immutable file. The previous row keeps pointing at
+  its previous bundle until commit. Thus a crash before commit leaves the old
+  row/bundle coherent, while a crash after commit cannot expose a row whose
+  bundle was not promoted. When the app has a ``source_dir``,
+  the declared entry source is synced before compile so esbuild can resolve
+  relative imports from that real source tree; compile or commit failure
+  restores the previous entry file. A commit failure removes the newly
+  published orphan and rolls back, so there is no window where an old DB row
+  serves new code.
 
   ``db.commit()`` here also flushes any other changes the caller staged on
   the session (e.g. a PATCH's name/description), so the whole update lands
   or rolls back together.
 
   The caller MUST ensure the app's bundle path (keyed by app id) can't be
-  concurrently reused while this runs, or the post-commit swap could clobber a
-  different app's bundle. PATCH and the watcher satisfy this by holding the
+  concurrently reused while this runs, or publication/cleanup could touch a
+  different app's artifacts. PATCH and the watcher satisfy this by holding the
   lifecycle + per-app lock with ``app`` loaded fresh under it; ``create_app``
   satisfies it trivially because the id is brand-new and uncommitted, so no
   other operation can reference it yet.
 
   Raises:
-    RuntimeError: from ``compile_jsx`` on invalid JSX (live bundle untouched).
-    Exception: re-raised after rollback if the commit fails (staging
-      discarded, live bundle untouched).
+    RuntimeError: from ``compile_jsx`` on invalid JSX (committed path untouched).
+    Exception: re-raised after rollback if publication or commit fails.
   """
-  live = _compiled_dir() / f"app-{app.id}.js"
   staged = _compiled_dir() / f"app-{app.id}.js.staging"
+  previous_bundle = owned_bundle_path(
+    app.id, getattr(app, "compiled_path", None),
+  )
   source_path = _entry_source_path(app)
   previous_source = None
   source_existed = False
@@ -243,6 +394,7 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
       pass
     if previous_source != jsx_source:
       _atomic_write(source_path, jsx_source)
+  published = None
   try:
     await compile_jsx(
       app.id,
@@ -254,8 +406,15 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     if source_path is not None and previous_source != jsx_source:
       _restore_entry_source(source_path, previous_source, source_existed)
     raise
+  try:
+    published = publish_staged_bundle(app.id, staged)
+  except Exception:
+    staged.unlink(missing_ok=True)
+    if source_path is not None and previous_source != jsx_source:
+      _restore_entry_source(source_path, previous_source, source_existed)
+    raise
   app.jsx_source = jsx_source
-  app.compiled_path = str(live)
+  app.compiled_path = str(published)
   # Advance updated_at so the /module and /frame ETags (derived from it) change.
   # Without this a warm browser that already holds the module sends the old
   # If-None-Match, the ETag is unchanged, the server 304s, and it serves the
@@ -267,27 +426,21 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   except Exception:
     db.rollback()
     staged.unlink(missing_ok=True)
+    if published != previous_bundle:
+      unlink_app_bundle(app.id, published)
     if source_path is not None and previous_source != jsx_source:
       _restore_entry_source(source_path, previous_source, source_existed)
     raise
-  os.replace(staged, live)
+  if previous_bundle != published:
+    unlink_app_bundle(app.id, previous_bundle)
 
 
 def reap_staging_bundles() -> None:
   """Removes leftover ``*.js.staging`` files at startup.
 
-  ``recompile_app_bundle`` (and the installer) compile to a staging file and
-  promote it with an atomic rename only after the DB commit. A process death in
-  the tiny window between commit and rename would leave a staging file behind.
-
-  Discarding the staging file is always safe to do, but it only self-heals the
-  UPDATE path: there the prior live bundle survives the crash, so dropping the
-  orphaned staging file leaves the app serving its previous (committed) code and
-  the next edit recompiles. On a FRESH install there is no prior live bundle, so
-  the same crash leaves the row pointing at a bundle that was never written and
-  reaping the staging file destroys the only compiled copy — that case is healed
-  by ``reconcile_missing_bundles`` (run right after this), not here. A staging
-  file is never served, so reaping it can never serve wrong code.
+  Staging files are never referenced by ``compiled_path``. Content-addressed
+  publication consumes them before commit, so any survivor is necessarily from
+  an interrupted compile and can be discarded without consulting the DB.
   """
   for f in _compiled_dir().glob("*.js.staging"):
     try:
@@ -296,18 +449,60 @@ def reap_staging_bundles() -> None:
       pass
 
 
+def reap_orphaned_bundles(db) -> list[str]:
+  """Remove compiled artifacts no App row references.
+
+  Run after boot reconciliation. Tombstoned rows remain references because
+  they are recoverable during the soft-delete window; hard-deleted rows do not.
+  A crash before the DB commit may leave a published content bundle behind,
+  while a crash after commit may leave the previous bundle behind. Both are
+  unreferenced at the next boot and safe to reap.
+  """
+  from app import models
+
+  referenced: set[Path] = set()
+  for (stored_path,) in db.query(models.App.compiled_path).all():
+    if not stored_path:
+      continue
+    try:
+      referenced.add(Path(stored_path).resolve())
+    except OSError:
+      continue
+  removed: list[str] = []
+  for candidate in _compiled_dir().glob("app-*.js"):
+    if not (
+      _LEGACY_BUNDLE_RE.fullmatch(candidate.name)
+      or _CONTENT_BUNDLE_RE.fullmatch(candidate.name)
+    ):
+      continue
+    try:
+      resolved = candidate.resolve()
+    except OSError:
+      continue
+    if resolved in referenced:
+      continue
+    try:
+      candidate.unlink()
+      removed.append(str(candidate))
+    except OSError:
+      pass
+  return removed
+
+
+def _bundle_path_for_app(app) -> Path:
+  stored = owned_bundle_path(app.id, getattr(app, "compiled_path", None))
+  return stored or (_compiled_dir() / f"app-{app.id}.js")
+
+
 async def reconcile_missing_bundles(db) -> list[int]:
   """Recompiles live App rows whose compiled bundle is missing or empty.
 
-  A crash (OOM/SIGKILL — a recurring failure mode on this 7.6 GB host) between
-  the install's ``db.commit()`` and the post-commit ``os.replace`` that promotes
-  the staging bundle leaves a durable App row whose ``compiled_path`` file was
-  never written; ``reap_staging_bundles`` then deletes the only staging copy, so
-  every open of that app 404s forever with no self-heal. This boot reconciler
-  closes that gap (and the whole missing-bundle class — a manually-deleted
-  bundle, a volume restore that missed ``/data/compiled``) by recompiling each
-  affected row from its stored ``jsx_source`` under the same out-of-place
-  compile + atomic promote ``recompile_app_bundle`` uses.
+  Content-addressed publication makes new writes crash-consistent, but this
+  reconciler still covers legacy rows interrupted under the old post-commit
+  promotion protocol plus the whole missing-bundle class: manual deletion,
+  corruption to zero bytes, or a volume restore that missed ``/data/compiled``.
+  Each affected row is rebuilt from its stored ``jsx_source`` using the normal
+  immutable publication transition.
 
   Only rows that need healing are recompiled: tombstoned (uninstalled) apps are
   skipped so the sweep never resurrects a deleted app, and a row with empty
@@ -325,7 +520,6 @@ async def reconcile_missing_bundles(db) -> list[int]:
   from app import models
 
   log = logging.getLogger(__name__)
-  compiled = _compiled_dir()
   rows = (
     db.query(models.App)
     .filter(models.App.deleted_at.is_(None))
@@ -333,7 +527,7 @@ async def reconcile_missing_bundles(db) -> list[int]:
   )
   healed: list[int] = []
   for app in rows:
-    bundle = compiled / f"app-{app.id}.js"
+    bundle = _bundle_path_for_app(app)
     # An empty (zero-byte) bundle is an aborted/partial write and is as
     # unservable as a missing file, so treat both the same.
     try:
@@ -367,31 +561,47 @@ def _bundle_uses_current_runtime(bundle: Path) -> bool:
   return prefix == COMPILED_RUNTIME_BANNER.encode("ascii")
 
 
+def _bundle_is_content_addressed(app_id: int, bundle: Path) -> bool:
+  """Return whether the path and bytes form this app's immutable artifact."""
+  owned = owned_bundle_path(app_id, bundle)
+  if owned is None:
+    return False
+  match = _CONTENT_BUNDLE_RE.fullmatch(owned.name)
+  if match is None or int(match.group("app_id")) != app_id:
+    return False
+  try:
+    return _file_sha256(owned) == match.group("digest")
+  except OSError:
+    return False
+
+
 async def reconcile_outdated_bundles(db) -> list[int]:
-  """Atomically rebuild live bundles produced by an older compiler ABI.
+  """Rebuild legacy, corrupt, or older-ABI bundles into immutable artifacts.
 
   Opaque app frames execute one self-contained module: React, the Mobius
   runtime bridge, and every supported app dependency are part of that artifact.
   A compiler-runtime change therefore needs a durable migration for already
   installed apps, not a frame-side compatibility path. ``esbuild_command``
-  stamps its ABI banner at byte zero; this boot sweep recompiles any present,
-  non-empty live bundle without the current banner from the row's stored source.
+  stamps its ABI banner at byte zero, while publication names the output by its
+  SHA-256. This boot sweep recompiles any present, non-empty bundle without the
+  current banner or a valid content address. The latter condition migrates
+  every legacy fixed-name bundle once and repairs the pre-migration same-ABI
+  crash gap by rebuilding from the committed row source.
 
   The missing/empty sweep runs immediately before this one, so absent bundles
   are left to that purpose-built recovery path. Recompilation uses the existing
-  staging + commit + atomic-promote transaction, isolates failures per app, and
-  advances the app version only after a successful build. An interrupted boot
-  can safely resume the remaining rows on the next start.
+  staging + content-publication + commit transaction, isolates failures per
+  app, and advances the app version only after a successful build. An
+  interrupted boot can safely resume the remaining rows on the next start.
 
   Returns:
-    The ids of apps successfully migrated to the current compiler ABI.
+    The ids of apps successfully migrated to the current immutable contract.
   """
   import logging
 
   from app import models
 
   log = logging.getLogger(__name__)
-  compiled = _compiled_dir()
   rows = (
     db.query(models.App)
     .filter(models.App.deleted_at.is_(None))
@@ -399,12 +609,15 @@ async def reconcile_outdated_bundles(db) -> list[int]:
   )
   migrated: list[int] = []
   for app in rows:
-    bundle = compiled / f"app-{app.id}.js"
+    bundle = _bundle_path_for_app(app)
     try:
       present = bundle.exists() and bundle.stat().st_size > 0
     except OSError:
       present = False
-    if not present or _bundle_uses_current_runtime(bundle):
+    if not present or (
+      _bundle_uses_current_runtime(bundle)
+      and _bundle_is_content_addressed(app.id, bundle)
+    ):
       continue
     if not app.jsx_source or not app.jsx_source.strip():
       continue

@@ -30,8 +30,9 @@ upstream. So `main` is a straight-line descendant of `upstream`
 exact — never the 2-parent merge a `git merge` would leave.
 
 Only SOURCE is tracked — `index.jsx`, job scripts (`*.sh`), prompts,
-seed templates. The compiled bundle (`/data/compiled/app-<id>.js`) is a
-gitignored build artifact, and the integer-id storage tree
+seed templates. The compiled bundle
+(`/data/compiled/app-<id>-<sha256>.js`) is a gitignored build artifact, and the
+integer-id storage tree
 (`/data/apps/<id>/`) is a SEPARATE directory the mini-app writes at
 runtime, not under this source dir at all. A committed `.gitignore`
 keeps both out even if a future caller drops them here.
@@ -71,7 +72,7 @@ UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
 
 # Files we never want in app source history regardless of who drops them
-# in the source dir. The live compiled bundle is /data/compiled/app-<id>.js
+# in the source dir. The live compiled bundle path is stored on the App row
 # (outside this tree), so it never appears here. We must NOT blanket-ignore
 # `*.js`: building-apps.md tells the agent to split larger apps into sibling
 # `.js`/`.jsx`/`.ts`/`.tsx` modules (e.g. `cards.js`) imported from index.jsx,

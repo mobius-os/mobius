@@ -304,7 +304,7 @@ class _JsxHandler(FileSystemEventHandler):
     # Recompile under the same lifecycle -> app -> source locks that PATCH and
     # uninstall hold, so this awaited compile can't race a concurrent uninstall
     # + SQLite id reuse and overwrite a replacement app's bundle, and the bundle
-    # stays transactional (compile out-of-place, swap only after commit). The
+    # stays transactional (compile, immutable publish, then row commit). The
     # lifecycle lock blocks delete/install for the whole sequence; the app +
     # source locks serialize against a concurrent PATCH recompiling the same app.
     async with fs_locks.install_uninstall_lock():

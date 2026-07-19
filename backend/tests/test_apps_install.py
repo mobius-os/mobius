@@ -366,11 +366,7 @@ def test_install_bundles_static_module_from_logical_destination(
     })
 
   assert result.status_code == 201, result.text
-  bundle = (
-    Path(get_settings().data_dir)
-    / "compiled"
-    / f"app-{result.json()['id']}.js"
-  )
+  bundle = Path(result.json()["compiled_path"])
   assert "STATIC_MODULE_OK" in bundle.read_text()
 
 
@@ -1763,7 +1759,7 @@ def test_update_compile_failure_preserves_old_bundle(client, auth, bypass_url_va
   app_id = r1.json()["id"]
 
   data_dir = Path(get_settings().data_dir)
-  compiled_path = data_dir / "compiled" / f"app-{app_id}.js"
+  compiled_path = Path(r1.json()["compiled_path"])
   assert compiled_path.exists(), "v1 bundle should be on disk"
   v1_bytes = compiled_path.read_bytes()
   assert len(v1_bytes) > 0
@@ -1794,8 +1790,11 @@ def test_update_compile_failure_preserves_old_bundle(client, auth, bypass_url_va
     "v1 bundle on disk was clobbered by failed v2 compile — "
     "rollback didn't restore the snapshot"
   )
-  # The .bak file should be gone (either restored or never created).
-  assert not compiled_path.with_suffix(".js.bak").exists()
+  # No staging artifact or second content bundle may leak from the failed v2.
+  assert not (data_dir / "compiled" / f"app-{app_id}.js.staging").exists()
+  assert list((data_dir / "compiled").glob(f"app-{app_id}-*.js")) == [
+    compiled_path,
+  ]
 
 
 # --- manifest_url is the new identity key (slug is routing only) ----
@@ -2742,7 +2741,7 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   jsx_file.write_text(resolved)
   pending = app_dir / ".git" / "mobius-pending-update" / "receipt.json"
-  bundle = data_dir / "compiled" / f"app-{app_id}.js"
+  bundle = Path(installed.json()["compiled_path"])
   old_bundle = bundle.read_bytes()
 
   # Only a seed byte moved at the same URL/version. The replay must reject the
@@ -4437,7 +4436,7 @@ def test_multifile_install_writes_siblings_and_bundles(
   assert (src / "index.jsx").read_text() == JSX_IMPORTS_CARDS
   assert (src / "cards.js").read_text() == CARDS_V1
 
-  bundle = data_dir / "compiled" / f"app-{app_id}.js"
+  bundle = Path(payload["compiled_path"])
   assert bundle.exists()
   bundle_text = bundle.read_text()
   assert len(bundle_text) > 0
@@ -4497,6 +4496,8 @@ def test_multifile_update_delivers_new_sibling_bytes(
   )
   assert r1.status_code == 201, r1.text
   app_id = r1.json()["id"]
+  bundle_v1 = Path(r1.json()["compiled_path"])
+  assert bundle_v1.is_file()
   data_dir = Path(get_settings().data_dir)
   src = data_dir / "apps" / "multi-app"
 
@@ -4511,8 +4512,11 @@ def test_multifile_update_delivers_new_sibling_bytes(
   # No local edits → upstream wins outright, not a three-way merge conflict.
   assert payload["divergence"] == "fast_forward"
   assert (src / "cards.js").read_text() == cards_v2
-  bundle = (data_dir / "compiled" / f"app-{app_id}.js").read_text()
-  assert "CARDS_V2" in bundle
+  bundle_v2 = Path(payload["compiled_path"])
+  assert bundle_v2 != bundle_v1
+  assert bundle_v2.is_file()
+  assert not bundle_v1.exists()
+  assert "CARDS_V2" in bundle_v2.read_text()
 
 
 def test_multifile_update_merges_local_sibling_edit(
@@ -4583,7 +4587,7 @@ def test_singlefile_install_unchanged_without_source_files(
     if p.is_file() and p.suffix in (".js", ".jsx") and p.name != "index.jsx"
   ]
   assert jsx_siblings == []
-  bundle = data_dir / "compiled" / f"app-{app_id}.js"
+  bundle = Path(r.json()["compiled_path"])
   assert bundle.exists() and bundle.stat().st_size > 0
 
 

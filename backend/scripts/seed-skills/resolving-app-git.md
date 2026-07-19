@@ -128,7 +128,7 @@ what advances the base so the next update won't re-conflict — a 2-parent merge
 here would mean something finalized it with a plain `git merge`, which is *not*
 what the platform wants.
 
-Optional eyeball that the app rebuilt: `stat -c '%y' /data/compiled/app-<id>.js`
+Optional eyeball that the app rebuilt: read `compiled_path` from `GET /api/apps/<id>`, then `stat` that exact content-addressed path.
 should be fresh and the file a real bundle, not the compile-failed stub (`<id>`
 from `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/"
 | python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).

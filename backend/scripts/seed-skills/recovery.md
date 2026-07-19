@@ -127,7 +127,7 @@ their mind.
 - **Per-app storage (numeric id):** `/data/apps/{app_id}/<path>` — what `PUT /api/storage/apps/{app_id}/...` writes to, keyed by the numeric DB id.
 - **Per-app source (slug):** `/data/apps/{slug}/` — where app source lives, keyed by slug. `index.jsx` is the entrypoint and can import sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules. NOT the same dir as storage; the slug tree and the numeric-id tree are separate.
 - **Shared storage (cross-app):** `/data/shared/<path>` — what `PUT /api/storage/shared/...` writes to; used for theme.css, agent-settings.json, chat summaries, and app-owned shared data.
-- **Compiled bundles:** `/data/compiled/app-{app_id}.js`.
+- **Compiled bundles:** the App row's `compiled_path`, normally `/data/compiled/app-{app_id}-{sha256}.js`. Read the exact path from `GET /api/apps/{app_id}` instead of guessing a mutable filename.
 - **Cron logs:** `/data/cron-logs/`. **Service token:** `/data/service-token.txt` (chmod 600).
 
 Chat files are purged when the chat is permanently deleted (after 7 days). For data that should outlive a chat, use per-app or shared storage.
