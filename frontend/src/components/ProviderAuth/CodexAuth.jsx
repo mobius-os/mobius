@@ -37,6 +37,19 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   // blank tab. Holding the handle here is what lets those later paths reach it.
   const authWindowRef = useRef(null)
 
+  // Three callers can be checking status at once: the interval poll, a pageshow
+  // after the sign-in tab hands control back, and a visibilitychange. Comparing
+  // the generation is not enough on its own -- concurrent checks all captured
+  // the SAME generation, so all of them pass that guard and each would run the
+  // terminal transition, firing onConnected more than once. Whoever reaches a
+  // terminal answer first claims it by advancing the generation, which turns
+  // every other in-flight check stale.
+  const claimTerminal = useCallback((pollGen) => {
+    if (pollGen !== pollGenRef.current) return false
+    pollGenRef.current += 1
+    return true
+  }, [])
+
   const releaseAuthWindow = useCallback(() => {
     closeAuthWindow(authWindowRef.current)
     authWindowRef.current = null
@@ -88,6 +101,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     const r = await api.auth.provider.codex.status()
     if (pollGen !== pollGenRef.current) return 'stale'
     if (!r.ok) {
+      if (!claimTerminal(pollGen)) return 'stale'
       stopPolling()
       setStatus('failed')
       setError('Sign-in check failed. Please try again.')
@@ -96,6 +110,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     const s = await r.json()
     if (pollGen !== pollGenRef.current) return 'stale'
     if (s.status === 'complete') {
+      if (!claimTerminal(pollGen)) return 'stale'
       stopPolling()
       setStatus('complete')
       setUrl('')
@@ -105,6 +120,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       return 'complete'
     }
     if (s.status === 'failed') {
+      if (!claimTerminal(pollGen)) return 'stale'
       stopPolling()
       setStatus('failed')
       setError('Login failed. Please try again.')
