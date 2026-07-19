@@ -174,7 +174,10 @@ def fresh_db():
   # file trees so the filesystem matches the freshly-recreated DB.
   import shutil as _shutil
   _data_dir = _os.environ.get("DATA_DIR", "/tmp")
-  for _sub in ("apps", "app-secrets", "shared"):
+  # Content-addressed app bundles no longer overwrite app-<id>.js between
+  # tests. Clear compiled too, otherwise the per-test id reset leaves the next
+  # test seeing an earlier test's immutable artifact for the same numeric id.
+  for _sub in ("apps", "app-secrets", "shared", "compiled"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
   yield

@@ -144,7 +144,15 @@ def _source_dir(slug: str) -> Path:
 
 
 def _bundle(app_id: int) -> Path:
-  return _data_dir() / "compiled" / f"app-{app_id}.js"
+  from app.database import SessionLocal
+  from app.models import App
+  db = SessionLocal()
+  try:
+    row = db.query(App).filter(App.id == app_id).first()
+    assert row is not None and row.compiled_path
+    return Path(row.compiled_path)
+  finally:
+    db.close()
 
 
 def _tracked_files(repo: Path) -> list[str]:

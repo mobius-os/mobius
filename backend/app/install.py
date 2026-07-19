@@ -49,7 +49,13 @@ from sqlalchemy.orm import Session
 from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
-from app.compiler import CompileError, compile_jsx
+from app.compiler import (
+  CompileError,
+  compile_jsx,
+  owned_bundle_path,
+  publish_staged_bundle,
+  unlink_app_bundle,
+)
 from app.config import get_settings
 from app.manifest_contract import (
   ENTRY_MAX_BYTES as _CONTRACT_ENTRY_MAX_BYTES,
@@ -91,6 +97,36 @@ _PILImage.MAX_IMAGE_PIXELS = 32_000_000
 _ICON_MAX_DIM = 4096
 
 log = logging.getLogger("mobius.install")
+
+
+def _publish_install_bundle(
+  app,
+  staged_bundle: Path,
+  rollback_actions: list[Callable[[], None]],
+  commit_actions: list[Callable[[], None]],
+) -> Path:
+  """Publish an install artifact before commit and wire symmetric cleanup.
+
+  The DB row continues to reference ``previous`` until its transaction commits,
+  so publishing the immutable content path cannot expose uncommitted code. A
+  rollback removes the new orphan; a successful commit removes the superseded
+  bundle. A process crash on either side is cleaned by the startup orphan reaper.
+  """
+  previous = owned_bundle_path(app.id, app.compiled_path)
+  try:
+    published = publish_staged_bundle(app.id, staged_bundle)
+  except Exception:
+    staged_bundle.unlink(missing_ok=True)
+    raise
+  app.compiled_path = str(published)
+  if previous != published:
+    rollback_actions.append(
+      lambda a=app.id, p=published: unlink_app_bundle(a, p)
+    )
+    commit_actions.append(
+      lambda a=app.id, p=previous: unlink_app_bundle(a, p)
+    )
+  return published
 
 # Manifest fetch cap. A legitimate manifest is < 4 KB. The cap is
 # the safety net against malicious URLs streaming GB of data.
@@ -2785,19 +2821,18 @@ async def install_from_manifest(
           app.system_app = bool(manifest.get("system_app", False))
           app.capability_contract = capability_contract
 
-        # The compiled bundle is written OUT OF PLACE to a staging file and
-        # promoted into the live bundle only AFTER the DB commit (commit_actions
-        # run post-commit). So a concurrent module read never observes a missing
-        # or half-written live bundle mid-update, and a rollback or crash
-        # discards the staging file, leaving the prior bundle intact (a leaked
-        # staging file is reaped at startup and is never served). The actual
-        # compile happens below, AFTER the source files are on disk, so esbuild
-        # can bundle a multi-file app's sibling imports from the real source tree
-        # — a syntax error there raises and the outer except rolls everything
-        # back. Same transactional shape the recompile PATCH and the watcher use.
-        live_bundle = data_dir / "compiled" / f"app-{app.id}.js"
+        # The compiled bundle is written OUT OF PLACE to a staging file, then
+        # atomically published under its SHA-256 name BEFORE the DB commit. The
+        # row keeps referencing its prior immutable bundle until commit, so a
+        # concurrent module read can observe neither a half-write nor
+        # uncommitted code; after commit, the new path necessarily exists. A
+        # rollback removes the new orphan and a successful commit removes the
+        # superseded path. Startup reaps either artifact after a process crash.
+        # The actual compile happens below, AFTER the source files are on disk,
+        # so esbuild can bundle a multi-file app's sibling imports from the real
+        # source tree — a syntax error there raises and the outer except rolls
+        # everything back. Same transition the PATCH and watcher use.
         staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-        app.compiled_path = str(live_bundle)
 
         # Guard on the raw string, not the Path: Path("") is PosixPath('.'),
         # which is truthy — a legacy sourceless app (source_dir NULL/"") would
@@ -2883,9 +2918,9 @@ async def install_from_manifest(
           )
           # Compile now that the whole source tree is on disk. Passing the real
           # entry path makes esbuild resolve `./cards.js`-style sibling imports
-          # from the files just written; promotion of the staged bundle into the
-          # live path is a post-commit commit_action, and a compile failure here
-          # raises into the outer except which runs the source rollback actions
+          # from the files just written; publication of the staged bundle is
+          # content-addressed and precedes the row commit. A compile failure
+          # raises into the outer except, which runs the source rollback actions
           # appended above (restoring every .bak). `entry_key` is the entry's
           # on-disk name on every path that reaches here: synthetic trees
           # write it as the root index.jsx, cloned trees keep the repo's own
@@ -2894,11 +2929,8 @@ async def install_from_manifest(
             app.id, entry_source,
             out_path=staged_bundle, source_path=source_dir_path / entry_key,
           )
-          rollback_actions.append(
-            lambda s=staged_bundle: s.unlink() if s.exists() else None
-          )
-          commit_actions.append(
-            lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
+          _publish_install_bundle(
+            app, staged_bundle, rollback_actions, commit_actions,
           )
           # On the git path, commit the working-tree source onto the local
           # `main` branch so the watcher's future commits build on a known base.
@@ -2927,13 +2959,10 @@ async def install_from_manifest(
           # No source_dir (legacy app): there is no sibling tree on disk, so
           # compile the bare entry string with no source_path — esbuild writes it
           # to a temp file and bundles that. The staged bundle still promotes
-          # into the live path post-commit.
+          # into its immutable content path before commit.
           await compile_jsx(app.id, entry_source, out_path=staged_bundle)
-          rollback_actions.append(
-            lambda s=staged_bundle: s.unlink() if s.exists() else None
-          )
-          commit_actions.append(
-            lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
+          _publish_install_bundle(
+            app, staged_bundle, rollback_actions, commit_actions,
           )
     finally:
       # Release the per-source-dir lock (held across the merge + write for the
@@ -2978,6 +3007,12 @@ async def install_from_manifest(
     # could leave a crontab entry firing for a row that rolled back
     # (orphaned cron, mysterious 'app not found' errors at runtime).
     db.commit()
+    # The transaction is now irreversible. Never let a later refresh, activity
+    # write, or cleanup error run the failure actions and remove files selected
+    # by the durable row. Superseded artifacts can safely remain for the startup
+    # orphan reaper if post-commit cleanup is interrupted.
+    rollback_actions.clear()
+    created_paths.clear()
     db.refresh(app)
 
     # app_install: log only after the row is durable so the timestamp

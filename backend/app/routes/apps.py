@@ -346,7 +346,6 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   replacement app can't reuse the freed integer id and then have its storage
   deleted by this cleanup.
   """
-  compiled_path = app.compiled_path
   app_name = app.name
   app_source_dir = app.source_dir
   deleted_app_id = app.id
@@ -368,11 +367,12 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   from app.install import purge_app_skills
   await purge_app_skills(deleted_app_id)
 
-  if compiled_path:
-    try:
-      Path(compiled_path).unlink(missing_ok=True)
-    except OSError:
-      pass  # best effort — a stale compiled file is harmless
+  # Remove the row's current content-addressed artifact plus any legacy/orphan
+  # files for this id. The helper validates every target under /compiled, so a
+  # corrupted compiled_path value can never turn hard-delete into an arbitrary
+  # filesystem unlink.
+  from app.compiler import purge_app_bundles
+  purge_app_bundles(deleted_app_id)
 
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
@@ -1651,11 +1651,11 @@ async def create_app(
       raise HTTPException(status_code=422, detail=str(exc))
     db.add(app)
     db.flush()  # assigns app.id without committing
-    # Compile transactionally like every other recompile path: out-of-place to a
-    # staging file, swapped into the live bundle only after the commit succeeds,
-    # so a commit failure can't leave an orphan live bundle. The app id is
-    # brand-new and uncommitted, so no concurrent op can reference it — the
-    # lifecycle+app lock recompile_app_bundle normally relies on (to stop an id
+    # Compile transactionally like every other recompile path: out-of-place,
+    # published under its content hash, then selected by the committed row. A
+    # commit failure removes the unpublished orphan and leaves no live row. The
+    # app id is brand-new and uncommitted, so no concurrent op can reference it.
+    # The lifecycle+app lock recompile_app_bundle normally relies on (to stop an id
     # being reused mid-swap) is moot here, and taking app_storage_lock under the
     # source lock we already hold would invert the documented lock order.
     try:
@@ -1707,9 +1707,9 @@ async def update_app(
   uninstall + SQLite id reuse and recompile into a REPLACEMENT app's bundle. ALL
   validation (source_dir shape + uniqueness) happens BEFORE the recompile, so a
   conflicting field can't overwrite the live bundle and then fail. The recompile
-  goes through ``recompile_app_bundle``, which compiles out-of-place and only
-  swaps the live bundle in after the commit succeeds — so a commit failure can
-  never leave the new (uncommitted) bundle live.
+  goes through ``recompile_app_bundle``, which publishes a new immutable path
+  before atomically switching the row — so a commit failure can never leave the
+  new (uncommitted) bundle live.
   """
   data_dir = get_settings().data_dir
   # Validate the source_dir SHAPE up front (cheap, no side effects). The

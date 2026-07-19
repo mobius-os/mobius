@@ -371,7 +371,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 ```
 /data/
 ├── db/ultimate.db          SQLite database
-├── compiled/app-*.js       esbuild output (one per app, keyed by numeric id)
+├── compiled/app-*-<sha256>.js  immutable esbuild output selected by each App row
 ├── apps/<slug>/index.jsx   agent-editable JSX source (keyed by app slug)
 ├── apps/<slug>/...          per-app runtime data + per-app git repo
 ├── app-secrets/<id>/       encrypted app-scoped credentials (outside app repos)
