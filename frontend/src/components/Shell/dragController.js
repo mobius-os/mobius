@@ -51,6 +51,11 @@ export const EDGE_BAND_MIN = 40
 export const EDGE_BAND_CAP_W = 110
 export const EDGE_BAND_CAP_H = 96
 export const EDGE_BAND_FRACTION = 0.22
+// A thumb on a phone cannot comfortably reach a 96px edge band on a tall
+// pane (the owner had to "drag too far"), so coarse phone panes use a
+// proportional third per edge — upper third splits up, lower third splits
+// down, the middle joins — with no pixel cap.
+export const PHONE_EDGE_BAND_FRACTION = 0.34
 // The owning zone keeps ownership until the pointer travels this far past its
 // boundary — kills band-boundary flicker without a time debounce.
 export const HYSTERESIS_PX = 10
@@ -152,7 +157,13 @@ function insetRect(rect, m) {
 
 // The band widths for a pane (design §3.2). Horizontal and vertical bands clamp
 // against different caps.
-export function edgeBands(rect) {
+export function edgeBands(rect, mode) {
+  if (mode === 'phone') {
+    return {
+      w: Math.max(rect.w * PHONE_EDGE_BAND_FRACTION, EDGE_BAND_MIN),
+      h: Math.max(rect.h * PHONE_EDGE_BAND_FRACTION, EDGE_BAND_MIN),
+    }
+  }
   return {
     w: clamp(rect.w * EDGE_BAND_FRACTION, EDGE_BAND_MIN, EDGE_BAND_CAP_W),
     h: clamp(rect.h * EDGE_BAND_FRACTION, EDGE_BAND_MIN, EDGE_BAND_CAP_H),
@@ -241,7 +252,7 @@ function overStrip(point, pane) {
 // center).
 export function edgeZone(point, pane, scene, prevZone) {
   const { rect } = pane
-  const bands = edgeBands(rect)
+  const bands = edgeBands(rect, scene.mode)
   const source = scene.source
   const isSource = source && source.paneId === pane.paneId
   // Dropping a pane's only tab back onto its own edge is a no-op — never light.

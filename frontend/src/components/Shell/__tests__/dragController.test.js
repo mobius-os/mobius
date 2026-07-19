@@ -475,3 +475,11 @@ test('buildScene records each single-tab pane sole key', () => {
   const s = buildScene(ws, proj, 'wide', content, null, true, () => [])
   assert.equal(s.panes[0].soleTabKey, 'chat:5')
 })
+
+test('phone edge bands are proportional thirds with no cap', () => {
+  const b = edgeBands({ x: 0, y: 0, w: 400, h: 800 }, 'phone')
+  assert.equal(b.h, 800 * 0.34)
+  assert.equal(b.w, 400 * 0.34)
+  const desktop = edgeBands({ x: 0, y: 0, w: 400, h: 800 })
+  assert.equal(desktop.h, 96)
+})
