@@ -312,3 +312,64 @@ test('single-leaf single-screen matches builder content flags (strip difference 
   assert.equal(single.fullBleedKey, builder.fullBleedKey)
   assert.deepEqual([...single.visibleAppIds], [...builder.visibleAppIds])
 })
+
+// ── Two-worlds: single mode paints the SLOT, not the focused pane ────────────
+
+function singleView(ws) {
+  return deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'single',
+  })
+}
+
+test('single mode with an APP slot paints that app full-bleed, even when the focused pane is a chat', () => {
+  // Builder tree: chat 5 (focused), app 42 in a sibling pane. The single slot is a
+  // DIFFERENT app (99) not in the tree at all.
+  let ws = twoPaneChatAndApp()
+  const chatPane = paneModel.paneOf(ws, 'chat:5')
+  ws = paneModel.focusPane(ws, chatPane.id) // focus the chat pane
+  ws = { ...ws, singleScreen: { kind: 'app', id: '99' } }
+  const v = singleView(ws)
+  assert.equal(v.single, true)
+  assert.equal(v.fullBleedKey, 'app:99', 'the slot app, not the focused chat')
+  assert.deepEqual([...v.visibleAppIds], ['99'], 'only the slot app paints')
+  assert.equal(v.chromeActive, false)
+})
+
+test('single mode with a CHAT slot paints no app frame', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '7' } }
+  const v = singleView(ws)
+  assert.equal(v.fullBleedKey, 'chat:7')
+  assert.deepEqual([...v.visibleAppIds], [], 'a chat slot paints no app')
+  assert.equal(v.chatPanesVisible, true)
+})
+
+test('single mode with a NULL slot is the empty/home screen', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: null }
+  const v = singleView(ws)
+  assert.equal(v.fullBleedKey, null, 'nothing painted full-bleed')
+  assert.deepEqual([...v.visibleAppIds], [])
+})
+
+test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
+  // No singleScreen property → uninitialized → the pre-two-worlds collapse.
+  let ws = twoPaneChatAndApp() // app 42 focused
+  assert.equal('singleScreen' in ws, false)
+  const v = singleView(ws)
+  assert.equal(v.fullBleedKey, 'app:42', 'falls back to the focused pane app')
+  assert.deepEqual([...v.visibleAppIds], ['42'])
+})
+
+test('builder mode ignores the slot entirely (tree drives the render)', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '99' } }
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'panes',
+  })
+  assert.equal(v.single, false)
+  assert.equal(v.chromeActive, true, 'tiled builder chrome')
+  assert.equal(v.visibleAppIds.has('99'), false, 'the slot app does not leak into builder')
+  assert.equal(v.visibleAppIds.has('42'), true, 'the tree app is what paints')
+})

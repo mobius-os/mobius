@@ -52,14 +52,27 @@ export function deriveContentVisibility({
   const immersive = !builder && !!immersiveActive && immersiveAppId != null
   // Single view-mode collapse is active only when no takeover already owns the box.
   const single = !builder && !settingsOverlay && !immersive
-  // The focused pane's active tab key (null under the Settings overlay — the
-  // panes are hidden behind it). In builder mode the overlay is inert, so this is
-  // the focused active tab EVEN WHEN that tab is Settings — the Settings wrapper
-  // is then the paned (or single-pane full-bleed) surface, driven off this key.
-  // In single-mode immersive it is the holder app's key.
+  // TWO-WORLDS (codex-modecontext-design.md): in SINGLE mode the active content is
+  // the persisted single-screen SLOT — the last item opened IN single mode — NOT
+  // the focused builder pane. The slot may be absent from the pane tree entirely;
+  // Shell pins its iframe / chat mount regardless. A null slot is the empty/home
+  // screen. BACKWARD-COMPAT: a blob whose slot property is ABSENT is legacy/
+  // uninitialized (the reducer seeds it on the first builder→single switch, using
+  // absence as the migration marker), so single mode falls back to the focused
+  // pane's active tab until the slot is seeded — an older blob still collapses to
+  // the focused surface exactly as before. In BUILDER mode all of this is null and
+  // the focused-pane path runs unchanged.
+  const hasSlot = ('singleScreen' in workspace)
+  const focusedPaneKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null
+  const slotKey = single ? (hasSlot ? paneModel.singleScreenKey(workspace) : focusedPaneKey) : null
+  // The active tab key that drives the full-bleed surface + AppCanvas `active`
+  // prop. Under the Settings overlay it is null (panes hidden behind it). In single
+  // mode it is the slot key (or the focused-pane fallback); otherwise the focused
+  // pane's active tab — EVEN WHEN that is Settings (a builder Settings tab is the
+  // paned/full-bleed surface, driven off this key). Immersive uses the holder key.
   const focusedActiveKey = settingsOverlay
     ? null
-    : (workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null)
+    : (single ? slotKey : focusedPaneKey)
   // Pane chrome (strips + dividers) whenever the box is TILED: ≥2 visible leaves
   // and no takeover. In builder this is simply `multiPane` (no takeover can trip
   // here); single-mode / a takeover paints one surface over the whole box.
@@ -75,8 +88,18 @@ export function deriveContentVisibility({
   let visibleAppIds
   if (settingsOverlay) visibleAppIds = new Set()
   else if (immersive) visibleAppIds = new Set([String(immersiveAppId)])
-  else if (single) visibleAppIds = paneModel.visibleAppIds(workspace, [workspace.focusedPaneId])
-  else visibleAppIds = paneModel.visibleAppIds(workspace, projection.visibleLeaves)
+  else if (single) {
+    // The single world paints ONLY the slot; if the slot is an app, that one app
+    // is visible (two-worlds design). A chat/empty slot paints no app. The slot may
+    // be tree-absent, so read it directly. Legacy (absent-slot) blobs fall back to
+    // the focused pane, matching the pre-two-worlds single-mode collapse.
+    if (hasSlot) {
+      const slot = workspace.singleScreen
+      visibleAppIds = (slot && slot.kind === 'app') ? new Set([String(slot.id)]) : new Set()
+    } else {
+      visibleAppIds = paneModel.visibleAppIds(workspace, [workspace.focusedPaneId])
+    }
+  } else visibleAppIds = paneModel.visibleAppIds(workspace, projection.visibleLeaves)
   // Chat panes stay MOUNTED (no remount on overlay/view toggle) but hidden while a
   // takeover owns the box. In builder (never a takeover) and single-mode they
   // paint; the renderer additionally gates each NON-focused single-mode chat pane

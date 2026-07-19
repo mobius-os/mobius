@@ -226,7 +226,12 @@ export default function useNavigation({
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   // ── Derived legacy triple (the projection, design §1) ────────────────────
-  const contentRoute = paneModel.focusedContentRoute(workspace)
+  // World-aware (two-worlds design): the single world's slot in single mode, the
+  // focused pane's active tab in builder. So the legacy triple — and everything
+  // downstream (reload snapshot, deep-link resolution, immersive) — reflects what
+  // the CURRENT world actually shows, and a single-world reload restores the slot,
+  // not the builder focus.
+  const contentRoute = paneModel.activeContentRoute(workspace)
   const activeView = settingsOpen ? 'settings' : contentRoute.view
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
@@ -724,6 +729,43 @@ export default function useNavigation({
     }
   }, [dispatchWorkspace, workspaceStateRef])
 
+  // ── The ONE navigation decision point (two-worlds design) ──────────────────
+  // applySettingsDestination generalized to ALL destinations. Every path that
+  // APPLIES a chat/app/settings destination — navTo, restoreRoute, boot/deep-link,
+  // no-history opens, app-history restoration — funnels here, so the single-vs-
+  // builder branch lives in EXACTLY ONE place and no caller can accidentally
+  // OPEN_TAB into the pane tree while in single mode (design risk 4: nav bypasses).
+  // It only APPLIES the destination; history construction stays in navTo/restoreRoute.
+  //   Settings → applySettingsDestination (single/off = takeover overlay, builder = tab).
+  //   Chat/app:
+  //     single  → SET_SINGLE_SCREEN (the pane tree is NEVER touched; slot only).
+  //     builder → OPEN_TAB in the hinted/focused pane (today's behavior).
+  // `item` null/absent in single mode sets the empty/home screen. Returns nothing.
+  const applyModeDestination = useCallback((route) => {
+    if (!route || route.view === 'settings') {
+      applySettingsDestination(route?.paneId)
+      return
+    }
+    const ws = workspaceStateRef.current.ws
+    // A chat/app destination always leaves any Settings takeover overlay.
+    setSettingsOpen(false)
+    settingsOpenRef.current = false
+    if (ws.viewMode === 'single') {
+      const item = route.view === 'canvas'
+        ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
+        : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null)
+      dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item })
+      return
+    }
+    const targetPaneId = (typeof route.paneId === 'string' && ws.panes[route.paneId])
+      ? route.paneId
+      : ws.focusedPaneId
+    const tab = route.view === 'canvas'
+      ? tabModel.makeTab('app', route.appId)
+      : tabModel.makeTab('chat', route.chatId)
+    dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
+  }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
+
   // Convert the Settings surface across a view-mode flip WITHOUT adding a history
   // entry (design: mode-transition conversion). Called by the shell's toggle just
   // before it dispatches the pure SET_VIEW_MODE flip, reading the CURRENT mode to
@@ -828,18 +870,14 @@ export default function useNavigation({
     drawerOpenRef.current = false
     setDrawerOpen(false)
 
-    // One reducer action makes payload+view atomic (§1.3.2). Focusing/switching a
-    // pane must not close Settings, but a chat/canvas nav always does. The refs
-    // advance synchronously alongside the state setter so a SECOND navigation in
-    // the same React batch snapshots the correct overlay (§1.3.2e, §5.3.2).
-    // Settings routes through the mode-conditional destination (tab or overlay).
-    if (view === 'settings') {
-      applySettingsDestination(targetPaneId)
-    } else {
-      setSettingsOpen(false)
-      settingsOpenRef.current = false
-      dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab: openTab, activate: true })
-    }
+    // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
+    // point applies the destination to the correct world: a chat/app nav in single
+    // mode sets the slot (tree untouched), in builder opens the pane tab; Settings
+    // routes to tab-or-overlay. This is what stops a single-mode nav from mutating
+    // the pane tree (two-worlds design). openTab is no longer needed — the route
+    // carries the payload — but is still built above for the early malformed guard.
+    void openTab
+    applyModeDestination(nextRoute)
   }
 
   // Restore a route on Back/Forward. Hoisted (not defined in the mount effect)
@@ -859,37 +897,47 @@ export default function useNavigation({
     }
     const ws = workspaceStateRef.current.ws
     const paneId = ws.panes[route.paneId] ? route.paneId : ws.focusedPaneId
+    const single = ws.viewMode === 'single'
     // Last-guard against a Back/Forward that lands on a physical route for a
     // resource deleted this session: never recreate it (§5.1.1). homeSeed chat
-    // routes carry no concrete id, so they are exempt.
+    // routes carry no concrete id, so they are exempt. In single mode the deleted
+    // item already cleared the slot (reducer reconciliation), so degrade to the
+    // empty/home screen; in builder just refocus.
     const tombstoneKey = route.view === 'canvas'
       ? (route.appId != null ? `app:${route.appId}` : null)
       : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null)
     if (tombstoneKey && tombstonedRouteRef.current.has(tombstoneKey)) {
-      dispatchWorkspace({ type: 'FOCUS', paneId })
+      if (single) dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
+      else dispatchWorkspace({ type: 'FOCUS', paneId })
       setSettingsOpen(false)
       settingsOpenRef.current = false
       return
     }
-    let tab = null
+    // Resolve the concrete destination (homeSeed → freshest active chat at
+    // Back-time; a still-null semantic home stays empty). Then route through the
+    // ONE decision point so single restores the slot and builder the pane tab —
+    // restoreRoute no longer dispatches OPEN_TAB directly (design risk 4).
+    let itemRoute = null
     if (route.view === 'canvas') {
-      if (route.appId != null) tab = tabModel.makeTab('app', route.appId)
+      if (route.appId != null) itemRoute = { view: 'canvas', appId: route.appId, chatId: null, paneId: route.paneId }
     } else {
-      // A homeSeed entry is the SEMANTIC chat home, not a specific chat: resolve
-      // it to the freshest active chat at Back-time. A still-null semantic home
-      // leaves the empty chat surface rather than fabricating an id.
       const chatId = route.homeSeed ? lastChatIdRef.current : route.chatId
-      if (chatId != null) tab = tabModel.makeTab('chat', chatId)
+      if (chatId != null) itemRoute = { view: 'chat', chatId, appId: null, paneId: route.paneId }
     }
-    if (tab) {
-      dispatchWorkspace({ type: 'OPEN_TAB', paneId, tab, activate: true })
+    if (itemRoute) {
+      applyModeDestination(itemRoute)
+      return
+    }
+    // Empty semantic home (a zero-chat install) or a stray no-app canvas route.
+    if (single) {
+      // The single world's home is an explicit-null slot.
+      dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
     } else {
-      // Empty semantic home (a zero-chat install) or a stray no-app canvas route.
-      // FOCUS alone would leave an app active in the pane, so focusedContentRoute
-      // keeps projecting canvas and Back is a no-op — the "can't get out of the
-      // restored app" trap. Close the active APP tab so the pane projects the
-      // empty CHAT surface; the chat bootstrap then creates the first chat
-      // (§2.3.3). A pane already showing chat/empty just gets focus.
+      // Builder: FOCUS alone would leave an app active in the pane, so
+      // focusedContentRoute keeps projecting canvas and Back is a no-op — the
+      // "can't get out of the restored app" trap. Close the active APP tab so the
+      // pane projects the empty CHAT surface; the chat bootstrap then creates the
+      // first chat (§2.3.3). A pane already showing chat/empty just gets focus.
       const pane = ws.panes[paneId]
       const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
       if (active && active.kind === 'app') {
@@ -900,7 +948,7 @@ export default function useNavigation({
     }
     setSettingsOpen(false)
     settingsOpenRef.current = false
-  }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
+  }, [applyModeDestination, applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
   useEffect(() => {
     let bootPaneId = workspaceStateRef.current.ws.focusedPaneId

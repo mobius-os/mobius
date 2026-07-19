@@ -579,6 +579,34 @@ export function focusedContentRoute(ws) {
   return { view: 'chat', chatId: null, appId: null, paneId }
 }
 
+// The legacy `{view, chatId, appId, paneId}` route describing the SINGLE world's
+// slot (two-worlds design). Numeric app conversion matches focusedContentRoute
+// (tabModel posture: a finite number). An empty/null slot resolves to the empty
+// chat surface — the single world's home screen (design: a deleted/absent slot is
+// explicit empty, never builder focus). The paneId rides the focused pane only as
+// a placement HINT for a later builder open; single-world nav never reads it.
+export function singleScreenRoute(ws) {
+  const slot = ws.singleScreen
+  const paneId = ws.focusedPaneId
+  if (slot && slot.kind === 'app') {
+    const appId = Number(slot.id)
+    if (Number.isFinite(appId)) return { view: 'canvas', chatId: null, appId, paneId }
+  }
+  if (slot && slot.kind === 'chat') {
+    return { view: 'chat', chatId: slot.id, appId: null, paneId }
+  }
+  return { view: 'chat', chatId: null, appId: null, paneId }
+}
+
+// The legacy triple describing what the CURRENT WORLD shows: the single-screen
+// slot in single mode, the focused pane's active tab in builder. This is the ONE
+// place the two worlds' "active content" diverge for the nav adapter's projection
+// and the reload snapshot — so a single-world reload restores the slot, not the
+// builder focus (design: derive activeView from the current world).
+export function activeContentRoute(ws) {
+  return ws.viewMode === 'single' ? singleScreenRoute(ws) : focusedContentRoute(ws)
+}
+
 // The string app ids that are the active tab of one of `visibleLeaves` (or every
 // leaf when omitted). This is the pinned set the synchronous iframe-cache
 // derivation unions with the warm LRU (design §2/§4) and the set the app

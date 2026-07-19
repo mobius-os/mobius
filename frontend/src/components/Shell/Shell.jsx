@@ -74,6 +74,12 @@ import useDesktopSidebar from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
+// The stable synthetic pane id the single-screen SLOT chat mounts under when the
+// slot item is ABSENT from the builder pane tree (two-worlds design: a stable
+// single-world owner rather than assuming paneOf() succeeds). Chosen so it can
+// never collide with a generated `pN` pane id — a FOCUS dispatch on it is a
+// harmless no-op (single mode has no pane focus).
+const SINGLE_SLOT_PANE = '__single__'
 // The builder mode-ENTER / mode-EXIT beat durations now live in modeMachine.js
 // (MODE_ENTER_MS / MODE_EXIT_MS) as the reconcile clock, and completion is keyed
 // to the beat's animationend, not a bare timer — so the old BUILDER_ENTER_MS /
@@ -892,13 +898,46 @@ export default function Shell() {
   // (hidden) behind the Settings overlay, exactly like the app iframes.
   const visibleChatPanes = useMemo(() => {
     const out = []
+    const mountedChatIds = new Set()
     for (const paneId of projection.visibleLeaves) {
       const pane = workspace.panes[paneId]
       const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-      if (active && active.kind === 'chat') out.push({ paneId, chatId: active.id })
+      if (active && active.kind === 'chat') {
+        out.push({ paneId, chatId: active.id })
+        mountedChatIds.add(String(active.id))
+      }
+    }
+    // TWO-WORLDS mount identity: union the single-screen SLOT chat, mounted under a
+    // stable synthetic single-world owner even while builder shows, so a world
+    // switch changes VISIBILITY not mounts (no ChatView remount, no stream flush,
+    // no scroll loss). Deduped against the tree-visible chats — never two ChatViews
+    // for one chat (design: no duplicate mounts). When the slot chat is already a
+    // visible tree pane, that pane's mount covers it and no synthetic mount is added.
+    const slot = workspace.singleScreen
+    if (slot && slot.kind === 'chat' && !mountedChatIds.has(String(slot.id))) {
+      out.push({ paneId: SINGLE_SLOT_PANE, chatId: slot.id })
     }
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
   }, [projection, workspace])
+  // The chat keys that actually PAINT (as opposed to merely being mounted): in
+  // single mode ONLY the slot's chat (fullBleedKey), in builder every visible
+  // pane's active chat. Separating painting from mounting is what lets the slot
+  // chat sit mounted-but-hidden in builder and become visible on a world switch
+  // without a remount (two-worlds design).
+  const visibleChatKeys = useMemo(() => {
+    const set = new Set()
+    if (settingsActive) return set
+    if (single) {
+      if (fullBleedKey && fullBleedKey.startsWith('chat:')) set.add(fullBleedKey)
+      return set
+    }
+    for (const paneId of projection.visibleLeaves) {
+      const pane = workspace.panes[paneId]
+      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
+      if (active && active.kind === 'chat') set.add(`chat:${active.id}`)
+    }
+    return set
+  }, [single, settingsActive, fullBleedKey, projection, workspace])
 
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
@@ -981,12 +1020,19 @@ export default function Shell() {
   const renderedAppIds = useMemo(() => {
     const result = new Set()
     for (const id of visibleAppIds) result.add(String(id))
+    // TWO-WORLDS mount identity (design risk 1): PIN the single-screen slot app
+    // even while builder shows, so a world switch never LRU-evicts its iframe or
+    // retires its history. Added BEFORE the warm cap, so with four visible builder
+    // apps the earned maximum becomes five pinned frames (visible + 1); the warm
+    // LRU then fills only the remaining capacity.
+    const slot = workspace.singleScreen
+    if (slot && slot.kind === 'app') result.add(String(slot.id))
     for (const id of warmLruRef.current) {
       if (result.size >= APP_CACHE_MAX) break
       result.add(String(id))
     }
     return [...result].sort((a, b) => Number(a) - Number(b))
-  }, [visibleAppIds, warmVersion])
+  }, [visibleAppIds, warmVersion, workspace.singleScreen])
 
   // Maintain the warm LRU as the visible set changes: currently-visible apps are
   // the most-recent entries, and a just-hidden app slides into the warm remainder
@@ -2846,7 +2892,7 @@ export default function Shell() {
               // NON-focused chat pane stops doing work (streaming/scroll) — the
               // chat analogue of visibleAppIds soloing the focused app. Panes mode
               // keeps every visible chat pane doing work.
-              visible={chatPanesVisible && (!single || paneId === workspace.focusedPaneId) && role !== 'held'}
+              visible={chatPanesVisible && role !== 'held' && visibleChatKeys.has(`chat:${chatId}`)}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
                 composerFocusRequest={role === 'active' ? composerFocusRequest : null}

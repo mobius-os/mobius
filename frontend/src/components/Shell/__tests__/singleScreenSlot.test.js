@@ -188,3 +188,30 @@ test('RESET_FLAT reseeds the tree but preserves viewMode + slot', () => {
   assert.deepEqual(s.ws.singleScreen, { kind: 'app', id: '42' }, 'nor the single screen')
   assert.ok(paneModel.paneOf(s.ws, 'chat:7'), 'but the tree was reseeded')
 })
+
+// ── World-aware active-content route (the nav adapter's projection) ──────────
+
+test('activeContentRoute reflects the SLOT in single mode, the focused pane in builder', () => {
+  const builderWs = tiledBuilder() // focused chat 5, viewMode panes
+  assert.deepEqual(paneModel.activeContentRoute(builderWs), {
+    view: 'chat', chatId: '5', appId: null, paneId: builderWs.focusedPaneId,
+  }, 'builder → focused pane')
+  const singleWs = { ...builderWs, viewMode: 'single', singleScreen: { kind: 'app', id: '42' } }
+  const r = paneModel.activeContentRoute(singleWs)
+  assert.equal(r.view, 'canvas')
+  assert.equal(r.appId, 42, 'app id is numeric for the legacy triple')
+  assert.equal(r.chatId, null)
+})
+
+test('singleScreenRoute: chat slot, app slot, and empty/home', () => {
+  const base = paneModel.seedFromFlatTabs([])
+  assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'chat', id: '9' } }), {
+    view: 'chat', chatId: '9', appId: null, paneId: base.focusedPaneId,
+  })
+  const appR = paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'app', id: '42' } })
+  assert.equal(appR.view, 'canvas'); assert.equal(appR.appId, 42)
+  // Null/empty slot → the empty chat home surface, never a fabricated id.
+  assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: null }), {
+    view: 'chat', chatId: null, appId: null, paneId: base.focusedPaneId,
+  })
+})

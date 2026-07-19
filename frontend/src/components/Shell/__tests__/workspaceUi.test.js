@@ -629,7 +629,9 @@ test('Shell threads the (drag-preview) viewMode into the content derivation and 
   assert.match(shell, /dragPreviewIdRef\.current = mode\.dragArm\(/)
   assert.match(shell, /mode\.dragCancel\(dragPreviewIdRef\.current\)/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
-  assert.match(shell, /chatPanesVisible && \(!single \|\| paneId === workspace\.focusedPaneId\)/)
+  // Chat PAINTING is gated on the two-worlds painting set (single mode paints only
+  // the slot chat; builder paints each visible pane's chat), separate from MOUNTING.
+  assert.match(shell, /visible=\{chatPanesVisible && role !== 'held' && visibleChatKeys\.has\(`chat:\$\{chatId\}`\)\}/)
 })
 
 test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any drop commits panes', () => {
