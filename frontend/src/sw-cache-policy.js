@@ -216,14 +216,15 @@ export function isCacheableOpaqueEmbedDocument(response) {
   return type.includes('text/html')
 }
 
-// PURE: should appCodeHandler serve the CACHED copy first (instant) vs go
-// to network? If the route is cached, serve it immediately and refresh in the
-// background. Freshness comes from the versioned frame/module URL (`?v=` is part
-// of the cache key): an app update changes the key and naturally becomes a cache
-// miss, so the updated app still goes to the network on its first open. No
-// cached copy → always network (cold path, nothing to serve).
-export function shouldServeCacheFirst(hasCached) {
-  return !!hasCached
+// PURE: should appCodeHandler serve the CACHED copy first (instant) vs go to
+// network? Only frame/module routes are versioned by app.updated_at, so their
+// cached key proves it is the requested app revision. A standalone navigation
+// keeps the stable `/apps/<slug>/` URL across app updates; serving that cache
+// first can boot an obsolete module on the first reopen and miss the update SSE
+// that fired while the page was closed. Standalone therefore goes network-first
+// and uses its cached document only on a network rejection/5xx.
+export function shouldServeCacheFirst(hasCached, gated) {
+  return !!hasCached && !gated
 }
 
 // PURE: the per-app code routes the SW serves cache-first — the iframe runtime

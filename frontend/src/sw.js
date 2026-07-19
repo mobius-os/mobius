@@ -374,7 +374,9 @@ registerRoute(
 //   - standalone navigations (gated=true): only stores responses the server
 //     marks offline-capable (X-Mobius-Offline header, set by routes/apps.py +
 //     standalone.py for offline_capable apps), so non-capable apps keep their
-//     network-only standalone behavior exactly.
+//     network-only standalone behavior exactly. Their stable URL is
+//     network-first so an update applied while the page was closed is visible
+//     on the first reopen; the cached document is the offline/5xx fallback.
 //
 // Why a hand-written handler instead of NetworkFirst + a cacheWillUpdate
 // gate: these routes carry an ETag and `Cache-Control: no-cache`. Once the
@@ -407,9 +409,9 @@ registerRoute(
 //
 // NET_TIMEOUT_MS bounds the network attempt — it is a HANG-GUARD for the
 // pathological Android "fetch stays pending forever" case, NOT a latency lever.
-// Kept at 3000: the foreground path only uses it on a cache miss, where there
-// is nothing useful to serve yet. Cache hits return immediately; the timed
-// network attempt only refreshes the stored copy in the background.
+// Kept at 3000: frame/module cache hits return immediately, while a standalone
+// navigation must wait for the authoritative document when online and falls
+// back to its cached offline-capable page after this bound when unreachable.
 const NET_TIMEOUT_MS = 3000
 
 // Run ONE fetch, bounded by NET_TIMEOUT_MS, aborting the underlying request on
@@ -530,10 +532,11 @@ function appCodeHandler(cacheName, { gated }) {
 
     const cached = await cache.match(cacheKey)
 
-    // Cache-first whenever we have a versioned cached copy. A background
-    // revalidate keeps the same version fresh, while an app update changes the
-    // `?v=` cache key and naturally falls through to the network path below.
-    if (shouldServeCacheFirst(!!cached)) {
+    // Only versioned frame/module entries are safe cache-first. Standalone
+    // documents keep one stable URL across revisions and must reach the network
+    // first, otherwise reopening after an update boots the previous module and
+    // misses the app_updated event that fired while the page was closed.
+    if (shouldServeCacheFirst(!!cached, gated)) {
       // Background-refresh, but tie the FETCH + STORE to the fetch event's
       // lifetime so the browser keeps the SW alive until both finish — a bare
       // detached promise can be cut off when the worker is terminated right
@@ -547,14 +550,13 @@ function appCodeHandler(cacheName, { gated }) {
       return cached
     }
 
-    // No cached copy yet: network. On success the body is served on THIS open +
-    // cached for the next open. The store runs as its own event-bound promise
-    // so a QuotaExceeded put can't discard this live response. A transient
-    // SERVER error (5xx) must not blank a cached app if one appeared while we
-    // were fetching — fall back to that copy for those (but NOT 4xx, which are
+    // Network path: used on a frame/module cache miss and on every standalone
+    // navigation. On success the body is served on THIS open + cached for the
+    // next offline open. The store runs as its own event-bound promise so a
+    // QuotaExceeded put can't discard this live response. A transient SERVER
+    // error (5xx) falls back to a known cached app (but NOT 4xx, which are
     // authoritative: a 404 means the app is gone, a 401/403 is real auth). On a
-    // network REJECTION (offline / abort / DNS), the catch serves any late
-    // cache fill too.
+    // network REJECTION (offline / abort / DNS), the catch serves the cache too.
     try {
       const { resp, store } = await revalidate()
       keepStoreAlive(store)
@@ -704,13 +706,13 @@ registerRoute(new NavigationRoute(
   },
 ))
 
-// Standalone mini-app navigations: stored for offline-capable apps ONLY
-// (gated) via the same reload-bypass handler — the standalone page carries
-// the same ETag + `Cache-Control: no-cache`, so it had the identical 304-
-// never-cached defect as the frame/module route. A non-capable app caches
-// nothing → handler rethrows offline → catch handler serves the branded
-// offline page. This gate is the offline-OPEN guarantee the manifest flag
-// still owns; only the in-shell frame/module read path above is ungated.
+// Standalone mini-app navigations: network-first, then stored for
+// offline-capable apps ONLY (gated). The stable `/apps/<slug>/` URL has no
+// revision discriminator, so cache-first would serve an obsolete document on
+// the first reopen after an app update. The reload-bypass fetch still prevents
+// the 304-never-cached defect; on rejection/5xx the cached standalone document
+// is the fallback. A non-capable app caches nothing and reaches the branded
+// offline page through the catch handler.
 registerRoute(
   ({ request, url }) =>
     request.mode === 'navigate' && url.pathname.startsWith('/apps/'),

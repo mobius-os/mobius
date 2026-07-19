@@ -19,6 +19,7 @@ import {
   isOpaqueFramePublicAssetPath,
   packagedAppAssetCacheKey,
   isStaleRuntimeCache,
+  shouldServeCacheFirst,
   supersededVersionKeys,
   withOpaqueFramePublicAssetCors,
 } from '../../sw-cache-policy.js'
@@ -193,6 +194,15 @@ test('gated standalone navigations keep the offline_capable contract', () => {
   // A 200 WITHOUT the header purges: the app was toggled
   // offline_capable off and the stale entry must self-heal away.
   assert.equal(appCodeStoreAction(200, null, true), 'purge')
+})
+
+test('only versioned frame and module routes serve cache-first', () => {
+  assert.equal(shouldServeCacheFirst(true, false), true)
+  assert.equal(shouldServeCacheFirst(false, false), false)
+  // A standalone document keeps a stable URL across app revisions, so its
+  // cached response is only a network-failure fallback.
+  assert.equal(shouldServeCacheFirst(true, true), false)
+  assert.equal(shouldServeCacheFirst(false, true), false)
 })
 
 test('non-200 responses are never stored or purged', () => {

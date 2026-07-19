@@ -132,6 +132,74 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     }
   })
 
+  test('standalone first reopen serves an update applied while the app was closed', async ({ page, request, context }) => {
+    const token = await ownerToken(page)
+    const headers = { Authorization: `Bearer ${token}` }
+    const stamp = Date.now()
+    const firstMarker = `standalone revision one ${stamp}`
+    const secondMarker = `standalone revision two ${stamp}`
+    const source = marker => (
+      `export default function App(){return <main id="standalone-revision">${marker}</main>}`
+    )
+    const created = await request.post(`${BASE}/api/apps/`, {
+      headers,
+      data: {
+        name: `Standalone freshness ${stamp}`,
+        description: 'Disposable standalone update-cache fixture.',
+        offline_capable: true,
+        jsx_source: source(firstMarker),
+      },
+    })
+    expect(created.status()).toBe(201)
+    const app = await created.json()
+    const standaloneUrl = `${BASE}/apps/${app.slug}/`
+
+    try {
+      await page.evaluate(async () => {
+        await navigator.serviceWorker.register('/sw.js')
+        await navigator.serviceWorker.ready
+      })
+      if (!await page.evaluate(() => !!navigator.serviceWorker.controller)) {
+        await page.reload({ waitUntil: 'domcontentloaded' })
+      }
+      await expect.poll(() => page.evaluate(
+        () => !!navigator.serviceWorker.controller,
+      )).toBe(true)
+
+      await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
+      await expect(page.locator('#standalone-revision')).toHaveText(firstMarker)
+      await expect.poll(() => page.evaluate(async url => {
+        const cache = await caches.open('mobius-standalone-v2')
+        return !!await cache.match(url)
+      }, standaloneUrl)).toBe(true)
+
+      // Close the standalone page before applying the edit, so its SSE cannot
+      // observe app_updated and mask a stale-navigation-cache regression.
+      await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
+      const updated = await request.patch(`${BASE}/api/apps/${app.id}`, {
+        headers,
+        data: { jsx_source: source(secondMarker) },
+      })
+      expect(updated.ok()).toBeTruthy()
+
+      // This FIRST navigation after the edit must be authoritative. A
+      // cache-first standalone route serves revision one here and only refreshes
+      // the cache in the background, forcing a second reload to see the update.
+      await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
+      await expect(page.locator('#standalone-revision')).toHaveText(secondMarker)
+
+      // The same authoritative response is now the offline fallback.
+      await context.setOffline(true)
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await expect(page.locator('#standalone-revision')).toHaveText(secondMarker)
+    } finally {
+      await context.setOffline(false)
+      await request.delete(`${BASE}/api/apps/${app.id}`, {
+        headers, failOnStatusCode: false,
+      })
+    }
+  })
+
   test('opaque app frames load their cached module through the parent while offline', async ({ page, request, context }) => {
     const runtimeErrors = []
     const sanitize = value => String(value || '')
