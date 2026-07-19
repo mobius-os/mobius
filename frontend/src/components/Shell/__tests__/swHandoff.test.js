@@ -4,8 +4,140 @@ import assert from 'node:assert/strict'
 import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
+  watchForShellUpdateOnForeground,
   SW_TAKEOVER_TIMEOUT_MS,
 } from '../swHandoff.js'
+
+// Deterministic drain of the pending microtask queue (getRegistration/update are
+// awaited inside the watch). Two awaits cover getRegistration → update → decide.
+const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
+
+function makeDoc(visibilityState = 'visible') {
+  const listeners = {}
+  return {
+    visibilityState,
+    addEventListener(t, fn) { (listeners[t] ||= []).push(fn) },
+    removeEventListener(t, fn) { listeners[t] = (listeners[t] || []).filter(f => f !== fn) },
+    emit(t) { (listeners[t] || []).slice().forEach(fn => fn()) },
+    count(t) { return (listeners[t] || []).length },
+  }
+}
+function makeInstalling(state = 'installing') {
+  const listeners = {}
+  return {
+    state,
+    addEventListener(t, fn) { (listeners[t] ||= []).push(fn) },
+    removeEventListener(t, fn) { listeners[t] = (listeners[t] || []).filter(f => f !== fn) },
+    become(next) { this.state = next; (listeners.statechange || []).slice().forEach(fn => fn()) },
+    count(t) { return (listeners[t] || []).length },
+  }
+}
+// A serviceWorker fake whose getRegistration resolves to `reg` and whose reg.update
+// runs an optional side effect (e.g. populate reg.installing / reg.waiting).
+function makeSwWith(reg, { controller = null, onUpdate } = {}) {
+  return {
+    controller,
+    async getRegistration() { return reg },
+    _reg: reg,
+    _onUpdate: onUpdate,
+  }
+}
+function makeReg({ waiting = null, active = null, installing = null, onUpdate } = {}) {
+  const reg = { waiting, active, installing }
+  reg.update = async () => { if (onUpdate) onUpdate(reg) }
+  return reg
+}
+
+test('watchForShellUpdateOnForeground: a WAITING worker on return-to-visible re-arms once', async () => {
+  const active = { id: 'a' }
+  const reg = makeReg({ waiting: { id: 'w' }, active })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({
+    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+  doc.emit('visibilitychange')
+  await flush()
+  assert.equal(rearms, 1, 'a waiting worker applies on the first foreground return')
+  dispose()
+})
+
+test('watchForShellUpdateOnForeground: no new generation is a NO-OP (no spurious reload)', async () => {
+  const controller = { id: 'a' }
+  // active === controller, nothing waiting, no stale flag → current generation.
+  const reg = makeReg({ waiting: null, active: controller })
+  const sw = makeSwWith(reg, { controller })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({
+    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+  doc.emit('visibilitychange')
+  await flush()
+  assert.equal(rearms, 0, 'a return with no new generation never reloads')
+  dispose()
+})
+
+test('watchForShellUpdateOnForeground: a worker discovered by update() re-arms when it reaches installed', async () => {
+  const active = { id: 'a' }
+  const installing = makeInstalling('installing')
+  // update() populates reg.installing (the just-discovered worker), still installing.
+  const reg = makeReg({ waiting: null, active, onUpdate: (r) => { r.installing = installing } })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({
+    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+  doc.emit('visibilitychange')
+  await flush()
+  assert.equal(rearms, 0, 'still installing → not yet applied')
+  // Simulate the install completing: the worker is now waiting (leashed).
+  reg.waiting = { id: 'w' }
+  installing.become('installed')
+  assert.equal(rearms, 1, 'reaching installed applies on the first return')
+  installing.become('redundant') // a later transition must not re-fire
+  assert.equal(rearms, 1)
+  dispose()
+})
+
+test('watchForShellUpdateOnForeground: the stale-precache flag re-arms; dispose removes listeners', async () => {
+  const controller = { id: 'a' }
+  const reg = makeReg({ waiting: null, active: controller })
+  const sw = makeSwWith(reg, { controller })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({
+    doc, win: null, serviceWorker: sw, readStaleFlag: () => true, rearm: () => { rearms += 1 },
+  })
+  doc.emit('visibilitychange')
+  await flush()
+  assert.equal(rearms, 1, 'a stale-precache flag alone re-arms')
+  assert.equal(doc.count('visibilitychange'), 1)
+  dispose()
+  assert.equal(doc.count('visibilitychange'), 0, 'dispose unwires the visibility listener')
+})
+
+test('watchForShellUpdateOnForeground: a HIDDEN visibilitychange does nothing', async () => {
+  const reg = makeReg({ waiting: { id: 'w' } })
+  const sw = makeSwWith(reg)
+  const doc = makeDoc('hidden')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({
+    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+  doc.emit('visibilitychange') // going hidden — must not check/apply
+  await flush()
+  assert.equal(rearms, 0)
+  dispose()
+})
+
+test('watchForShellUpdateOnForeground: no serviceWorker support → inert dispose', () => {
+  const dispose = watchForShellUpdateOnForeground({ doc: makeDoc(), serviceWorker: null, rearm: () => {} })
+  assert.equal(typeof dispose, 'function')
+  dispose() // must not throw
+})
 
 // Minimal event-emitter fakes so the SW handoff wiring is testable without a
 // live service worker.

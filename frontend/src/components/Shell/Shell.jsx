@@ -50,6 +50,7 @@ import {
 import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
+  watchForShellUpdateOnForeground,
 } from './swHandoff.js'
 import {
   awaitCacheFlushBeforeReload,
@@ -1928,6 +1929,30 @@ export default function Shell() {
       if (!shellUpdatePickupRef.current) shellUpdatePickupCheckStartedRef.current = false
     }
   }, [chatsQuery.isSuccess, queryClient])
+
+  // Foreground-return shell-update pickup. The boot re-arm net above runs once per
+  // MOUNT, and a live `shell_rebuilt` reaches only a page with a live EventSource.
+  // An installed PWA BACKGROUNDED across a deploy hits neither: it misses the
+  // transient broadcast (its stream was suspended and the event is not replayed on
+  // reconnect) and never re-mounts, so it keeps running the OLD bundle until a cold
+  // start — the "still broken after the deploy" report from a warm install. This
+  // watch is the missing apply trigger: on every return to visible (and on
+  // regaining connectivity) it forces a fresh sw.js fetch and, once a newer
+  // generation is waiting/mismatched, routes it through the SAME apply-on-idle
+  // reload as a live shell_rebuilt — silent, and deferred while a turn streams or
+  // the owner is typing (requestShellReload reads streaming/view state from refs,
+  // so this closure staying out of the deps is correct). Gated by
+  // shouldRearmShellApply inside the watch, so a return with no new generation is a
+  // no-op — no toast, no spurious reload.
+  useEffect(() => watchForShellUpdateOnForeground({
+    doc: typeof document !== 'undefined' ? document : null,
+    win: typeof window !== 'undefined' ? window : null,
+    serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
+    readStaleFlag: () => {
+      try { return sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { return false }
+    },
+    rearm: () => requestShellReload({ passive: true }),
+  }), [])
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {

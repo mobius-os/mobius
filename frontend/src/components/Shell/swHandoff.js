@@ -104,3 +104,93 @@ export function shouldRearmShellApply({
   if (active && controller && controller !== active) return true
   return false
 }
+
+// Foreground/online shell-update watch — the APPLY trigger that lets a deploy
+// reach an ALREADY-INSTALLED PWA promptly, closing the "still broken after the
+// deploy" gap for a warm install.
+//
+// The gap: deploy-prod.sh broadcasts a `shell_rebuilt` system event, but that is
+// a TRANSIENT push to currently-connected clients. A PWA that was BACKGROUNDED
+// across the deploy has its EventSource suspended and the event is never replayed
+// on reconnect, so it never learns a new bundle shipped. It also does not
+// re-mount, so the boot re-arm net (shouldRearmShellApply at mount) cannot
+// re-fire. index.html DOES call reg.update() on visibility, which installs the new
+// worker — but under the SW update leash that worker INSTALLS AND WAITS, and
+// index.html's watchdog only reloads on 'activated', which a leashed worker never
+// reaches on its own. So the update is discovered but nothing applies it, and the
+// page keeps serving the OLD bundle until a true cold start.
+//
+// This wires the missing apply at the owning layer (the apply-on-idle machine):
+// on every return to visible (and on regaining connectivity) it forces a fresh
+// sw.js fetch and, once a newer generation is waiting/mismatched, calls `rearm()`.
+// The caller routes `rearm` to requestShellReload, which posts SKIP_WAITING to the
+// waiting worker and reloads at the next IDLE boundary — silent (no toast), and
+// deferred while a turn streams or the owner is typing, so the sacred stream is
+// never cut. Gated by shouldRearmShellApply, so a return with no new generation is
+// a no-op (never a spurious reload → no reload loop: after the apply the page runs
+// the new generation, active === controller, nothing waits, decide() is false).
+//
+// Deps are injected (doc/win/serviceWorker/readStaleFlag/rearm) so the wiring is
+// unit-testable without a live service worker. Returns a dispose function.
+export function watchForShellUpdateOnForeground({
+  doc,
+  win,
+  serviceWorker,
+  readStaleFlag = () => false,
+  rearm,
+} = {}) {
+  if (!doc || !serviceWorker || typeof serviceWorker.getRegistration !== 'function') {
+    return () => {}
+  }
+  let disposed = false
+
+  const decide = (reg) => {
+    if (disposed || !reg) return
+    if (shouldRearmShellApply({
+      stalePrecacheFlagged: readStaleFlag(),
+      waiting: reg.waiting || null,
+      active: reg.active || null,
+      controller: serviceWorker.controller || null,
+    })) {
+      rearm()
+    }
+  }
+
+  const check = async () => {
+    if (disposed) return
+    let reg
+    try { reg = await serviceWorker.getRegistration() } catch { return }
+    if (disposed || !reg) return
+    // Force a fresh sw.js fetch so a deploy that shipped while we were backgrounded
+    // is discovered now (a cheap conditional GET; the server 304s when unchanged).
+    // update() resolving does NOT mean the new worker finished installing, so we
+    // decide TWICE: once now for a worker that is already waiting (installed while
+    // we were away), and again when an in-flight install reaches 'installed' (the
+    // worker discovered by THIS update() call), so the apply lands on the first
+    // foreground return rather than the second.
+    try { await reg.update() } catch { /* offline / transient — decide on what we have */ }
+    if (disposed) return
+    decide(reg)
+    const installing = reg.installing
+    if (installing && typeof installing.addEventListener === 'function') {
+      const onState = () => {
+        if (installing.state === 'installed') {
+          installing.removeEventListener('statechange', onState)
+          decide(reg)
+        } else if (installing.state === 'redundant') {
+          installing.removeEventListener('statechange', onState)
+        }
+      }
+      installing.addEventListener('statechange', onState)
+    }
+  }
+
+  const onVisible = () => { if (doc.visibilityState === 'visible') check() }
+  doc.addEventListener('visibilitychange', onVisible)
+  win?.addEventListener?.('online', check)
+  return () => {
+    disposed = true
+    doc.removeEventListener('visibilitychange', onVisible)
+    win?.removeEventListener?.('online', check)
+  }
+}
