@@ -44,7 +44,9 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
-  assert.match(shell, /const tabStripVisible = tabStripEngaged && openTabs\.length >= 1/)
+  // Builder mode forces the single-pane strip visible (the builder surface); a
+  // fresh single-screen home still shows nothing until 2+ tabs engage it.
+  assert.match(shell, /const tabStripVisible = \(tabStripEngaged \|\| builderModeActive\) && openTabs\.length >= 1/)
   assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
   // The sole-tab "unpin" shortcut, EXCEPT for a sole Settings tab which must
   // genuinely close (review §11).
@@ -430,6 +432,27 @@ test('the room flourish (CHARGE): panes DEAL in on class-apply, suppressed while
   // Reduced motion drops the deal (and the layout-commit transition).
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell__view--paned \{ transition: none; animation: none; \}/)
+})
+
+test('builder single-leaf shows the strip, and entering it has its deal moment (item 3)', () => {
+  // The strip is the builder surface: forced visible in builder even at one leaf.
+  assert.match(shell, /const tabStripVisible = \(tabStripEngaged \|\| builderModeActive\) && openTabs\.length >= 1/)
+  // Entering builder arms a transient beat (single -> panes), reduced-motion skips
+  // it, and it batches in the SAME handler as the flip (no un-dealt first frame).
+  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  assert.match(handler, /if \(!prefersReducedMotion\(\)\s*\n?\s*&& workspaceStateRef\.current\.ws\.viewMode === 'single'\) \{/)
+  assert.match(handler, /setBuilderEntering\(true\)/)
+  assert.match(handler, /setTimeout\(\(\) => setBuilderEntering\(false\), BUILDER_ENTER_MS\)/)
+  // The transient root class drives the CSS.
+  assert.match(shell, /builderEntering \? ' shell--builder-entering' : ''/)
+  // CSS: the single-pane strip DEALS in and the single full-bleed pane LIFT-SETTLES.
+  assert.match(css, /\.shell--builder-entering \.shell__tabstrip \{[\s\S]*?animation:\s*shell-strip-deal-in 320ms/)
+  assert.match(css, /@keyframes shell-strip-deal-in\s*\{[\s\S]*?translateY\(-100%\)[\s\S]*?translateY\(0\)/)
+  assert.match(css, /\.shell--builder-entering \.shell__view--active \{[\s\S]*?animation:\s*shell-pane-settle 320ms/)
+  assert.match(css, /@keyframes shell-pane-settle\s*\{[\s\S]*?translateY\(8px\) scale\(0\.992\)[\s\S]*?scale\(1\)/)
+  // Reduced motion drops the entry deal.
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(reduced, /\.shell--builder-entering \.shell__tabstrip,\s*\n\s*\.shell--builder-entering \.shell__view--active \{ animation: none; \}/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {

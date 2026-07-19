@@ -272,3 +272,43 @@ test('viewMode defaults to panes when omitted (back-compat with the pre-toggle s
   assert.equal(v.single, false)
   assert.equal(v.chromeActive, true, 'absent viewMode tiles as before')
 })
+
+// ── Builder mode strip visibility (item 3: builder invisible with one item) ──
+//
+// The owner's phone bug: entering builder with a SINGLE leaf changed nothing but
+// the logo, because the tiled WorkspaceChrome needs multiPane. The strip is the
+// builder SURFACE and Shell now shows the single-pane .shell__tabstrip whenever
+// builderModeActive (see workspaceUi source-lock). The DERIVATION's job here is
+// only to NOT block it: builder single-leaf must not seize a full-screen takeover
+// and must not claim tiled chrome (that is multi-pane only) — it leaves the leaf
+// full-bleed beneath the Shell-drawn strip.
+test('single-leaf builder: not single, no tiled chrome, the leaf is full-bleed (strip is Shell-level)', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'panes', // builder
+  })
+  assert.equal(v.multiPane, false)
+  assert.equal(v.single, false, 'builder is not the single-mode collapse')
+  assert.equal(v.chromeActive, false, 'WorkspaceChrome is multi-pane only; the single-pane strip is Shell-level')
+  assert.equal(v.fullBleedKey, tabKey(makeTab('chat', '5')), 'the sole leaf paints full-bleed beneath the strip')
+})
+
+// The single-SCREEN single-leaf case stays a plain full-bleed with NO strip
+// forcing (byte-identical to before): same content flags as builder, the only
+// difference (the strip) lives in Shell's builderModeActive gate, not here.
+test('single-leaf single-screen matches builder content flags (strip difference is Shell-only)', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  const builder = deriveContentVisibility({
+    workspace: ws, projection: project(ws), settingsOverlayOpen: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
+  })
+  const single = deriveContentVisibility({
+    workspace: ws, projection: project(ws), settingsOverlayOpen: false,
+    immersiveActive: false, immersiveAppId: null, viewMode: 'single',
+  })
+  assert.equal(single.chromeActive, builder.chromeActive)
+  assert.equal(single.fullBleedKey, builder.fullBleedKey)
+  assert.deepEqual([...single.visibleAppIds], [...builder.visibleAppIds])
+})

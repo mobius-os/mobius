@@ -59,7 +59,7 @@ import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
-import { useLogoModeGesture } from './useLogoModeGesture.js'
+import { useLogoModeGesture, prefersReducedMotion } from './useLogoModeGesture.js'
 import useLivingHalo from './useLivingHalo.js'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
@@ -72,6 +72,12 @@ import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
+// How long the transient builder mode-ENTER treatment holds its root class
+// (.shell--builder-entering) — the single-leaf entry deal (strip deals in, single
+// pane lift-settles). Must comfortably exceed the CSS animation duration so the
+// class isn't pulled before the keyframe finishes (item 3). Reduced motion never
+// engages it. The multi-pane entry is carried by the pane card-deal, not this.
+const BUILDER_ENTER_MS = 380
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
@@ -256,6 +262,14 @@ export default function Shell() {
   const effectiveViewMode = (dragPreviewBuilder && workspace.viewMode === 'single')
     ? 'panes'
     : workspace.viewMode
+  // Transient "entering builder" beat (item 3): held for one deal on a genuine
+  // logo/keyboard ENTER so the single-leaf entry has its moment (the strip deals
+  // in, the single full-bleed pane lift-settles) — CSS-only, scoped to the
+  // .shell--builder-entering root class. Never engaged under reduced motion or on
+  // load/chat-switch; the multi-pane entry is carried by the pane card-deal.
+  const [builderEntering, setBuilderEntering] = useState(false)
+  const builderEnterTimerRef = useRef(0)
+  useEffect(() => () => clearTimeout(builderEnterTimerRef.current), [])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -743,7 +757,16 @@ export default function Shell() {
       resolve: (ws) => resolveWorkspaceRequests(ws, requests, { mode, contentRect, liveApps }),
     })
   }, [dispatchWorkspace])
-  const tabStripVisible = tabStripEngaged && openTabs.length >= 1
+  // The tab strip is the BUILDER SURFACE: in builder mode it is ALWAYS present
+  // (even at a single leaf, where this single-pane .shell__tabstrip stands in for
+  // the tiled WorkspaceChrome strips), giving phone users the drag source and
+  // making "enter builder → tabs and panes" true even without a second pane
+  // (owner phone report: "the logo changes but the pane doesn't get added").
+  // Single-SCREEN mode keeps today's rule (engaged only after 2+ tabs), so its
+  // no-strip single-pane look is byte-identical; builderModeActive is flag-gated
+  // (WORKSPACE_SPLITS_ENABLED) so the kill switch reverts to that too. Either way
+  // an empty workspace (no tabs) shows nothing — the >= 1 gate stays.
+  const tabStripVisible = (tabStripEngaged || builderModeActive) && openTabs.length >= 1
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
   // tab of each visible pane. A content wrapper matching a key is positioned +
@@ -1066,6 +1089,15 @@ export default function Shell() {
     // stranded behind the takeover overlay and single mode never shows a paned
     // Settings. A no-op when Settings isn't involved (design: mode conversion).
     convertSettingsForModeTransition()
+    // Entering builder (single -> panes) arms the entry-deal beat (item 3), set in
+    // the SAME event so it batches with the flip and the single-leaf render never
+    // paints an un-dealt frame first. Skipped under reduced motion (instant).
+    if (!prefersReducedMotion()
+        && workspaceStateRef.current.ws.viewMode === 'single') {
+      setBuilderEntering(true)
+      clearTimeout(builderEnterTimerRef.current)
+      builderEnterTimerRef.current = setTimeout(() => setBuilderEntering(false), BUILDER_ENTER_MS)
+    }
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
   }, [convertSettingsForModeTransition, dispatchWorkspace])
   // The logo gesture layer: a HOLD (~450ms) or a touch swipe-right toggles the
@@ -2475,6 +2507,7 @@ export default function Shell() {
   return (
     <div className={`shell${immersiveActive ? ' shell--immersive' : ''}`
       + `${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`
+      + `${builderEntering ? ' shell--builder-entering' : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
       {/* inert on the header while the modal drawer is open so keyboard / AT
           focus cannot reach shell-chrome behind the open drawer. The

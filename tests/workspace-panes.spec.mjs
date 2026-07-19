@@ -148,6 +148,23 @@ async function seedWorkspace(page, ws) {
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
 }
 
+/** Single leaf, single tab, SINGLE view-mode, with an EMPTY legacy open-tabs
+ *  mirror so tabStripEngaged starts false — the owner's real "one chat, never
+ *  engaged the strip" state, where single mode shows NO strip. Entering builder
+ *  must then reveal the single-pane strip (item 3). */
+async function seedSingleLeafSingleMode(page, chatId) {
+  const ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]), 'single')
+  const blob = paneModel.serializeWorkspace(ws)
+  await page.addInitScript(([flagKey, wsKey, wsBlob]) => {
+    try {
+      localStorage.setItem(flagKey, '1')
+      sessionStorage.setItem(wsKey, wsBlob)
+      sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
+    } catch { /* private mode */ }
+  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+}
+
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
 function twoChatPanes(chatA, chatB) {
   let ws = paneModel.seedFromFlatTabs([
@@ -806,6 +823,41 @@ test.describe('Workspace view-mode toggle', () => {
     expect(Object.keys(after.panes).length, 'still one pane (a join, not a split)').toBe(1)
     // Point 15: a JOIN is not a split, but ANY single-mode drop still commits builder.
     expect(after.viewMode, 'dragging is building — the drop commits panes').toBe('panes')
+  })
+
+  // Item 3: the owner's phone bug — entering builder with ONE leaf changed nothing
+  // but the logo (the tiled chrome needs 2 panes). The single-pane strip is the
+  // builder SURFACE (and the phone drag source), so it must appear on entry even
+  // at a single leaf. Reproduced on a PHONE viewport with the real "one chat, strip
+  // never engaged" state (empty legacy open-tabs).
+  test('phone: entering builder with ONE leaf reveals the strip (the builder surface)', async ({ page }) => {
+    await boot(page, PHONE)
+    const a = await createTaggedChat(page, 'vmPhoneStrip')
+    await mockApps(page, [])
+    await seedSingleLeafSingleMode(page, a.id)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    expect((await readWs(page)).viewMode).toBe('single')
+    // Single-screen single-leaf keeps today's no-strip look.
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
+
+    // Enter builder via the logo's keyboard path (the deterministic hold equivalent).
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
+
+    // The fix: the strip is now visible even with a single leaf, and it is the drag
+    // source (its sole tab tagged with the pane id). Poll past the entry-deal beat.
+    await expect(brand).toHaveClass(/shell__brand--builder/)
+    await expect(page.locator('.shell__tabstrip')).toBeVisible({ timeout: 4000 })
+    await expect(page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${a.id}"]`)).toHaveCount(1)
+
+    // Leaving builder returns to today's no-strip single-leaf look.
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0, { timeout: 4000 })
   })
 })
 

@@ -51,6 +51,39 @@
   transition: none;
 }
 
+/* --- Builder mode-ENTER deal, single-leaf (design: entry always has its moment) -
+   Entering builder with ONE leaf has no second pane to card-deal in, so the
+   moment is carried here: the single-pane .shell__tabstrip DEALS in from the top
+   while the single full-bleed pane LIFT-SETTLES beneath it. Scoped to the
+   transient .shell--builder-entering root class (Shell holds it one beat on a
+   logo/keyboard ENTER), so it fires only on a genuine mode-enter -- never on load,
+   a chat switch, or the multi-pane path (whose panes deal via .shell__view--paned
+   above). Reduced motion drops it (below). */
+.shell--builder-entering .shell__tabstrip {
+  animation: shell-strip-deal-in 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes shell-strip-deal-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  60% { opacity: 1; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.shell--builder-entering .shell__view--active {
+  animation: shell-pane-settle 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes shell-pane-settle {
+  from {
+    transform: translateY(8px) scale(0.992);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.18);
+    border-radius: 10px;
+  }
+  60% { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1); }
+  to {
+    transform: translateY(0) scale(1);
+    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+    border-radius: 0;
+  }
+}
+
 /* The chrome layer — sibling after the content wrappers, over the whole content
    box, transparent to pointers except its own interactive children. */
 .workspace__chrome {
@@ -477,4 +510,8 @@
   /* No layout-commit bloom and no card-deal under reduced motion. */
   .shell__view--paned { transition: none; animation: none; }
   .workspace__strip { transition: none; }
+  /* The builder mode-enter deal is instant too (the transient class also never
+     engages under reduced motion, but keep the guard for parity). */
+  .shell--builder-entering .shell__tabstrip,
+  .shell--builder-entering .shell__view--active { animation: none; }
 }
