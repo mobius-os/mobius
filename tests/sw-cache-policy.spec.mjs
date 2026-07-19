@@ -122,8 +122,8 @@ test.describe('sw cache policy — shouldServeCacheFirst (versioned app-code str
   test('cached + NOT known-online → cache-first (instant offline / cold-restart)', () => {
     expect(shouldServeCacheFirst(true, false)).toBe(true)
   })
-  test('cached + known-online → cache-first (versioned URL keeps app edits fresh)', () => {
-    expect(shouldServeCacheFirst(true, true)).toBe(true)
+  test('cached + known-online → refresh first (closed-app updates land on reopen)', () => {
+    expect(shouldServeCacheFirst(true, true)).toBe(false)
   })
   test('no cache + NOT known-online → network (cold path, nothing to serve)', () => {
     expect(shouldServeCacheFirst(false, false)).toBe(false)

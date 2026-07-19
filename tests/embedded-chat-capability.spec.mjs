@@ -110,12 +110,19 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
   const appToken = (await appTokenResponse.json()).token
 
   const embedResponses = []
+  const appFrameResponses = []
   const childChatRequests = []
   let sendBody = null
   page.on('response', async response => {
     const url = new URL(response.url())
     if (url.pathname === '/shell/embed/chat') {
       embedResponses.push({ url: response.url(), headers: await response.allHeaders() })
+    }
+    if (url.pathname === `/api/apps/${app.id}/frame`) {
+      appFrameResponses.push({
+        url: response.url(),
+        headers: await response.allHeaders(),
+      })
     }
   })
   page.on('request', requestEvent => {
@@ -152,9 +159,15 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
       pathnameOf(frame.url()) === `/api/apps/${app.id}/frame`
     )
 
-    const outerSandbox = await page.locator(`iframe[src*="/api/apps/${app.id}/frame"]`)
-      .getAttribute('sandbox')
-    expect(outerSandbox).not.toContain('allow-same-origin')
+    // The element intentionally remains unsandboxed so the shell service
+    // worker can intercept this navigation offline. Isolation is enforced by
+    // the frame response's CSP sandbox, which must keep the origin opaque.
+    await expect.poll(() => appFrameResponses.length).toBeGreaterThan(0)
+    const outerFrame = page.locator(`iframe[src*="/api/apps/${app.id}/frame"]`)
+    await expect(outerFrame).not.toHaveAttribute('sandbox', /.+/)
+    const frameCsp = appFrameResponses.at(-1).headers['content-security-policy']
+    expect(frameCsp).toContain('sandbox')
+    expect(frameCsp).not.toContain('allow-same-origin')
 
     const status = appFrame.locator('#embed-e2e-status')
     await expect.poll(async () => ({
