@@ -3,64 +3,68 @@
 backup-data.py.
 
 This overwrites owner data on /data, so it is deliberately hard to fire
-by accident and refuses to run until it has proven the backup is intact.
+by accident, refuses until it has proven the backup intact, and is
+transactional: it either fully restores or leaves the original tree
+exactly as it found it — never a half-restored mix.
 
 Order of operations (each gate blocks the next)
 -----------------------------------------------
- 1. --i-understand-this-overwrites is REQUIRED. Without it the script
-    prints what it WOULD do and exits non-zero. There is no default that
-    mutates /data.
- 2. Every artifact named in the manifest is hash- and size-verified
-    BEFORE anything on /data is touched. A single mismatch aborts — a
-    corrupt backup must never half-overwrite a live instance.
- 3. Staleness guard: if the live DB was written AFTER this backup was
-    taken, the target holds newer data than the backup and the restore
-    refuses unless --force. This is what stops a stale nightly backup
-    from silently clobbering a day's work. A fresh-but-initialised
-    instance trips this too (its boot wrote a new DB), which is exactly
-    when a DR operator wants --force — the fresh DB is not user data.
- 4. Secrets: if the backup's secrets archive is age-encrypted, an
-    --age-identity-file is required to decrypt it. Secrets are extracted
-    with 600/700 perms restored.
+ 1. Every artifact named in the manifest is hash- and size-verified
+    BEFORE anything on /data is touched. A single mismatch aborts.
+ 2. Server must be stopped. --server-stopped is a REQUIRED acknowledgement
+    (the SQLite pool must not keep writing through old fds), and the
+    backend health URL is PROBED — if it answers, the restore refuses
+    regardless of the flag. The probe repeats immediately before the swap
+    to catch a server that came back.
+ 3. Overwrite guard: any non-empty target requires --force. The old
+    mtime comparison is unreliable (integer-second mtimes, clock skew,
+    restore-then-rebackup), so it is now only an advisory line in the
+    refusal message — the gate is "the target already holds data".
+ 4. --i-understand-this-overwrites is REQUIRED. A dry-run or an un-acked
+    call stops here having mutated nothing.
+ 5. Encrypted secrets need --age-identity-file (fails fast).
+ 6. Capacity is preflighted (statvfs) before extraction.
 
-Extraction is staged: archives unpack into /data/.restore-staging.* and
-each top-level entry is then swapped into place with an atomic rename
-(new inode), so a process still holding the old DB inode cannot corrupt
-the restored one. Run with the app STOPPED (or immediately restart it):
-uvicorn keeps the pre-restore DB inode open until it reconnects.
+Extraction is staged (.restore-staging.*) then each top-level entry is
+swapped in with an atomic rename via backup_lib.swap_entries_transactional:
+displaced originals are RENAMED into .restore-rollback.* (never deleted),
+and ANY failure rolls every completed swap back before exiting. Same
+filesystem, so each rename is atomic and yields a new inode — a process
+holding an old DB fd cannot corrupt the restored file. Run with the app
+STOPPED and start it after; the restored DB is opened fresh.
 
 Recovery floor
 --------------
-recoveryd can drive this: it runs as mobius, needs only python3 + tar +
-(for encrypted secrets) age + the identity file, and writes solely under
-/data. No HTTP route runs it — the operator or recovery agent invokes it
-directly.
+recoveryd can drive this: mobius user, python3 + tar + (for encrypted
+secrets) age + the identity file, writes only under /data, no HTTP route.
 
 The rehearsed restore drill (proven end to end, per-slug throwaway
 container)
 ----------------------------------------------------------------------
-  1. Fresh isolated container (all three of -p / MOBIUS_CONTAINER /
-     MOBIUS_IMAGE per CLAUDE.md), owner admin/admin, CLI creds copied so
-     cli-auth holds a real secret.
-  2. Seed data: create an app + write apps/<slug>/data, send a chat
-     (writes the DB).
-  3. age-keygen -> recipients.txt; backup-data.py --age-recipients-file
-     recipients.txt  => encrypted secrets.tar.gz.age + data.tar.gz +
-     manifest.json. Also run with no recipient to confirm secrets are
-     SKIPPED (refused), not silently written plaintext.
-  4. Copy the backup dir OFF the volume (docker cp to host = "offsite").
-  5. docker compose down -v  => destroy the volume (only the per-slug
-     project's volume; siblings untouched).
-  6. Fresh container on a clean volume. Copy the backup back in.
-  7. restore-data.py <backup> --age-identity-file key.txt
-     --i-understand-this-overwrites  => refuses (staleness guard: the
-     fresh boot wrote a newer DB). Re-run with --force => restores.
-  8. docker restart; confirm owner logs in (admin/admin -> 200 token,
-     proving .secret-key + DB users survived) and the seeded app + its
-     runtime data are present.
+Because the restore refuses a running server, the drill drives it from a
+MAINTENANCE container that mounts the volume WITHOUT running uvicorn — the
+realistic DR shape ("bring the app down, restore, bring it back").
 
-Exit codes: 0 ok, 2 usage/config error, 3 verification failed,
-4 refused (guard tripped, needs --force or the ack flag).
+  1. Real container up: owner admin/admin, seed apps/<slug>/data + a
+     cli-auth secret, then `docker stop` (server down).
+  2. Maintenance container (mounts the volume, no server): cold backup
+     with --age-recipients-file => encrypted secrets.tar.gz.age +
+     data.tar.gz + manifest. Also confirm no-recipient => secrets
+     SKIPPED, and that a backup INSIDE the running server REFUSES (cold
+     gate). Copy the backup OFF the volume (docker cp = "offsite"), keep
+     the age identity off-box, then destroy the volume.
+  3. Fresh volume + real container (writes a fresh DB), confirm admin
+     login 401, then `docker stop`.
+  4. Maintenance container restore: WITHOUT --force => refused
+     (non-empty target); WITH --force --server-stopped + identity =>
+     restores transactionally. Exercise the rollback once via an injected
+     swap failure (a bind-mount over one target entry -> EBUSY) and
+     confirm the earlier-swapped entries roll back.
+  5. `docker start`; confirm admin/admin login 200 (DB + .secret-key
+     survived) and the seeded app data + secret survived.
+
+Exit codes: 0 ok, 2 usage/config error, 3 verification/capacity failed,
+4 refused (a guard tripped: needs --force / --server-stopped / the ack).
 """
 
 from __future__ import annotations
@@ -69,8 +73,6 @@ import argparse
 import json
 import os
 import shutil
-import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -88,10 +90,12 @@ SECRET_FILES = ("service-token.txt", ".secret-key", ".recovery-secret",
                 ".recovery-owner.json")
 SECRET_DIRS = ("cli-auth", "app-secrets", "push")
 
-# Trees whose mtime signals "the owner did something after the backup".
-# Kept small and DB-first: the DB is the always-written authoritative
-# store, so its mtime is the primary freshness signal.
-FRESHNESS_TREES = ("apps", "chats", "shared")
+# Trees whose presence means "the target already holds data" (the
+# overwrite guard) and whose newest mtime feeds the advisory message.
+DATA_TREES = ("apps", "chats", "shared")
+# Rough gz -> uncompressed expansion for the capacity preflight.
+EXPAND_FACTOR = 4
+DISK_HEADROOM = 64 * 1024 * 1024
 
 
 def log(msg):
@@ -124,10 +128,25 @@ def resolve_backup_dir(args):
   die("give a backup dir or --latest [--from-dir DIR]", code=2)
 
 
+def target_has_data(data_dir):
+  """True when /data already holds owner data (any *.db or a non-empty
+  apps/chats/shared tree) — the overwrite guard's signal."""
+  db_dir = os.path.join(data_dir, "db")
+  if os.path.isdir(db_dir):
+    if any(n.endswith(".db") for n in os.listdir(db_dir)):
+      return True
+  for tree in DATA_TREES:
+    root = os.path.join(data_dir, tree)
+    if os.path.isdir(root):
+      for _dp, _dirs, files in os.walk(root):
+        if files:
+          return True
+  return False
+
+
 def live_newest_mtime(data_dir):
-  """Newest mtime across the live DB and the freshness trees, or 0 when
-  the instance is empty. This is what the staleness guard compares
-  against the backup's capture time."""
+  """Newest mtime across the live DB + data trees, for the advisory
+  freshness line only (NOT a gate)."""
   newest = 0.0
   db_dir = os.path.join(data_dir, "db")
   if os.path.isdir(db_dir):
@@ -137,14 +156,14 @@ def live_newest_mtime(data_dir):
           newest = max(newest, os.path.getmtime(os.path.join(db_dir, n)))
         except OSError:
           pass
-  for tree in FRESHNESS_TREES:
+  for tree in DATA_TREES:
     root = os.path.join(data_dir, tree)
     if not os.path.isdir(root):
       continue
-    for dirpath, _dirs, files in os.walk(root):
+    for dp, _dirs, files in os.walk(root):
       for f in files:
         try:
-          newest = max(newest, os.path.getmtime(os.path.join(dirpath, f)))
+          newest = max(newest, os.path.getmtime(os.path.join(dp, f)))
         except OSError:
           pass
   return newest
@@ -152,6 +171,7 @@ def live_newest_mtime(data_dir):
 
 def run_age_decrypt(in_path, out_path, identity_files):
   """Decrypts an age file to out_path using the given identity files."""
+  import subprocess
   if shutil.which("age") is None:
     die("age not found on PATH but the backup's secrets are encrypted; "
         "install it (apt-get install -y age)", code=2)
@@ -171,8 +191,9 @@ def run_age_decrypt(in_path, out_path, identity_files):
 
 def safe_extract(tar_path, dest):
   """Extracts a tar into dest with the 'data' filter, which blocks path
-  traversal and absolute paths (Python 3.12). The archive stores paths
-  relative to /data, so the tree lands directly under dest."""
+  traversal and absolute/escaping links (Python 3.12). The archive
+  stores paths relative to /data, so the tree lands directly under
+  dest."""
   with tarfile.open(tar_path, "r:*") as tar:
     tar.extractall(dest, filter="data")
 
@@ -195,22 +216,12 @@ def harden_secret_perms(data_dir):
         os.chmod(os.path.join(dirpath, f), SECRET_FILE_MODE)
 
 
-def swap_into_place(staging, data_dir):
-  """Moves each top-level entry from staging into data_dir with an atomic
-  rename, replacing any existing entry. Same filesystem, so the rename is
-  atomic and yields a NEW inode — a process still holding the old DB inode
-  cannot corrupt the restored file."""
-  moved = []
-  for name in sorted(os.listdir(staging)):
-    src = os.path.join(staging, name)
-    dst = os.path.join(data_dir, name)
-    if os.path.islink(dst) or os.path.isfile(dst):
-      os.unlink(dst)
-    elif os.path.isdir(dst):
-      shutil.rmtree(dst)
-    os.replace(src, dst)
-    moved.append(name)
-  return moved
+def refuse_if_server_up(health_url, phase):
+  """Refuses when a server answers at health_url — restoring under a live
+  SQLite pool risks lost writes through stale fds."""
+  if lib.server_responding(health_url):
+    die(f"backend is responding at {health_url} ({phase}); stop the app "
+        "before restoring (and pass --server-stopped).", code=4)
 
 
 def main():
@@ -226,14 +237,19 @@ def main():
                   help="where --latest looks (default /data/backups)")
   ap.add_argument("--data-dir",
                   default=os.environ.get("DATA_DIR", "/data"))
+  ap.add_argument("--health-url",
+                  default=os.environ.get("MOBIUS_BACKUP_HEALTH_URL", ""),
+                  help="backend health URL (default "
+                       "http://127.0.0.1:$PORT/api/health)")
   ap.add_argument("--age-identity-file", action="append",
                   help="age identity (private key) file to decrypt "
                        "secrets (repeatable)")
+  ap.add_argument("--server-stopped", action="store_true",
+                  help="required: acknowledge the app is stopped")
   ap.add_argument("--i-understand-this-overwrites", action="store_true",
                   help="required: acknowledge this overwrites /data")
   ap.add_argument("--force", action="store_true",
-                  help="override the staleness guard (target has newer "
-                       "data than the backup)")
+                  help="required when the target already holds data")
   ap.add_argument("--dry-run", action="store_true",
                   help="verify + report, never touch /data")
   args = ap.parse_args()
@@ -244,12 +260,15 @@ def main():
   backup_dir = resolve_backup_dir(args)
   log(f"restoring from {backup_dir}")
 
+  health_url = args.health_url or \
+      f"http://127.0.0.1:{os.environ.get('PORT', '8000')}/api/health"
+
   manifest_path = os.path.join(backup_dir, "manifest.json")
   if not os.path.isfile(manifest_path):
     die(f"no manifest.json in {backup_dir}", code=2)
   manifest = json.load(open(manifest_path))
 
-  # GATE 2: verify every artifact before touching anything.
+  # GATE 1: verify every artifact before touching anything.
   problems = lib.verify_manifest_hashes(manifest, backup_dir)
   if problems:
     for p in problems:
@@ -259,42 +278,60 @@ def main():
   log(f"verified {len(manifest.get('artifacts', []))} artifact(s) "
       "(sha256 + size)")
 
-  # GATE 3: staleness guard.
-  created_unix = manifest.get("created_unix", 0)
-  live_newest = int(live_newest_mtime(data_dir))
-  if lib.target_is_newer(live_newest, created_unix):
-    when_live = datetime.fromtimestamp(live_newest, timezone.utc)
-    when_bak = datetime.fromtimestamp(created_unix, timezone.utc)
-    msg = (f"target has newer data ({when_live.isoformat()}) than the "
-           f"backup ({when_bak.isoformat()})")
-    if not args.force:
-      die(msg + "; refusing without --force", code=4)
-    log(f"WARNING: {msg} — overriding (--force)")
-
   secrets_state = manifest.get("encryption", {}).get("secrets", "skipped")
   art_names = [a["name"] for a in manifest.get("artifacts", [])]
+  created_unix = manifest.get("created_unix", 0)
+  nonempty = target_has_data(data_dir)
+  live_newest = int(live_newest_mtime(data_dir))
 
-  # GATE 1: the acknowledgement flag. Everything above is read-only, so a
-  # dry-run or an un-acked call stops here having mutated nothing.
+  # GATE 4 (plan / ack): everything above is read-only, so a dry-run or
+  # an un-acked call stops here having mutated nothing.
   if args.dry_run or not args.i_understand_this_overwrites:
     log("PLAN (nothing written):")
-    log(f"  data_dir     = {data_dir}")
-    log(f"  artifacts    = {art_names}")
-    log(f"  secrets      = {secrets_state}")
-    log(f"  live_newest  = {live_newest}  backup_created = {created_unix}")
+    log(f"  data_dir      = {data_dir}")
+    log(f"  consistency   = {manifest.get('consistency', 'unknown')}")
+    log(f"  artifacts     = {art_names}")
+    log(f"  secrets       = {secrets_state}")
+    log(f"  target_has_data = {nonempty}")
+    log(f"  live_newest   = {live_newest}  backup_created = {created_unix}")
     if not args.i_understand_this_overwrites:
       die("refusing to overwrite without "
           "--i-understand-this-overwrites", code=4)
     return
 
-  # Fail fast, before extracting anything, if the secrets are encrypted
-  # but we were given no key to decrypt them.
+  # GATE 2: server must be stopped (explicit ack + live probe).
+  if not args.server_stopped:
+    die("refusing without --server-stopped; stop the app first (a live "
+        "SQLite pool would lose writes through stale fds)", code=4)
+  refuse_if_server_up(health_url, "before restore")
+
+  # GATE 3: overwrite guard — any non-empty target needs --force.
+  if nonempty and not args.force:
+    hint = ""
+    if lib.target_is_newer(live_newest, created_unix):
+      hint = (" (advisory: the live data's newest mtime is LATER than this "
+              "backup's capture time — it may hold newer work)")
+    die(f"target /data already holds data; restoring OVERWRITES it. Re-run "
+        f"with --force to proceed.{hint}", code=4)
+
+  # GATE 5: encrypted secrets need a key — fail fast before extraction.
   if secrets_state == "encrypted" and not (args.age_identity_file or []):
     die("secrets are age-encrypted; pass --age-identity-file <key>", code=2)
 
-  # Stage: unpack every archive into a scratch dir on the same
-  # filesystem, then swap top-level entries into place atomically.
+  # GATE 6: capacity preflight. Staging holds the decompressed archives;
+  # the transactional swap and rollback are renames (no extra space).
+  artifact_bytes = sum(a.get("bytes", 0)
+                       for a in manifest.get("artifacts", []))
+  need = artifact_bytes * EXPAND_FACTOR + DISK_HEADROOM
+  s = os.statvfs(data_dir)
+  free = s.f_bavail * s.f_frsize
+  if free < need:
+    die(f"insufficient space to stage restore: need ~{need}, have {free}",
+        code=3)
+
+  ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
+  rollback_dir = os.path.join(data_dir, f".restore-rollback.{ts}")
   try:
     if "data.tar.gz" in art_names:
       safe_extract(os.path.join(backup_dir, "data.tar.gz"), staging)
@@ -315,15 +352,32 @@ def main():
           ".secret-key + provider auth will NOT be restored — the owner "
           "may need to re-authenticate and JWTs will be re-signed")
 
-    moved = swap_into_place(staging, data_dir)
+    # Re-probe just before the swap: a server that came back between the
+    # early check and now must not have the DB swapped underneath it.
+    refuse_if_server_up(health_url, "just before swap")
+
+    try:
+      moved = lib.swap_entries_transactional(staging, data_dir, rollback_dir)
+    except Exception as exc:  # noqa: BLE001
+      # swap_entries_transactional already rolled every completed swap
+      # back before re-raising, so /data is the exact original tree.
+      die(f"restore failed mid-swap and was rolled back; /data unchanged: "
+          f"{exc}", code=3)
     log(f"restored top-level entries: {moved}")
+    # Success: the displaced originals in rollback_dir are no longer
+    # needed.
+    shutil.rmtree(rollback_dir, ignore_errors=True)
   finally:
     shutil.rmtree(staging, ignore_errors=True)
+    # If the swap failed it already restored the originals AND left
+    # rollback_dir holding what it moved back out of; clean the empty
+    # shell either way.
+    shutil.rmtree(rollback_dir, ignore_errors=True)
 
   harden_secret_perms(data_dir)
   log("hardened secret perms (600/700)")
-  log("restore complete. Restart uvicorn / the container now so it "
-      "reopens the restored DB.")
+  log("restore complete. Start uvicorn / the container now so it opens "
+      "the restored DB fresh.")
 
 
 if __name__ == "__main__":
