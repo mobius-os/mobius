@@ -342,6 +342,34 @@ def test_tool_sources_attach_to_most_recent_websearch_tool():
   assert blocks[1]["sources"] == sources
 
 
+def test_tool_input_backfill_matches_by_id_across_batched_searches():
+  """Codex backfills a WebSearch query at completion, when several searches
+  can be in flight. Matching by tool_use_id targets the right block; the
+  legacy id-less path keeps the earliest-input-less fallback."""
+  blocks = [
+    {"type": "tool", "tool": "WebSearch", "input": "", "tool_use_id": "s1"},
+    {"type": "tool", "tool": "WebSearch", "input": "", "tool_use_id": "s2"},
+  ]
+  assert process_event(
+    {"type": "tool_input", "input": "query two", "tool_use_id": "s2"}, blocks)
+  assert process_event(
+    {"type": "tool_input", "input": "query one", "tool_use_id": "s1"}, blocks)
+  assert blocks[0]["input"] == "query one"
+  assert blocks[1]["input"] == "query two"
+
+
+def test_tool_input_without_id_uses_earliest_inputless_block():
+  """The Claude assistant-event path carries no id and lists tools in
+  creation order, so the earliest input-less block wins."""
+  blocks = [
+    {"type": "tool", "tool": "Bash", "input": "ls"},
+    {"type": "tool", "tool": "Read", "input": ""},
+  ]
+  assert process_event({"type": "tool_input", "input": "path.py"}, blocks)
+  assert blocks[0]["input"] == "ls"
+  assert blocks[1]["input"] == "path.py"
+
+
 def test_batched_websearch_keeps_each_search_own_sources():
   """A turn can run several WebSearch calls in ONE batch, so every
   tool_sources event arrives while the LAST search block is trailing.
