@@ -536,6 +536,26 @@ export function seedSingleScreenIfAbsent(ws) {
   return { ...ws, singleScreen: focusedSlotSeed(ws) }
 }
 
+// True when the whole workspace holds no tabs — every pane is empty. After a close
+// this is the "last tab in builder just closed" signal (owner semantic: an empty
+// builder auto-returns to single).
+export function isEmptyTree(ws) {
+  return Object.values(ws.panes).every(pane => pane.tabs.length === 0)
+}
+
+// Auto-return an EMPTIED builder to single (owner semantic: closing the last tab
+// with no panes left in builder returns to single). Applied by the close reducer
+// cases when a close in 'panes' mode empties the tree. Flips viewMode to single
+// and seeds the slot if it was never initialized (an empty builder seeds an empty
+// single screen — focusedSlotSeed is null on an empty pane). The caller marks the
+// undo `restoreViewMode` so undo restores the closed tab AND builder mode as ONE
+// gesture. Returns { ws, autoReturned } so the caller knows whether to flag the undo.
+function autoReturnIfEmptied(prevWs, nextWs) {
+  if (prevWs.viewMode !== 'panes') return { ws: nextWs, autoReturned: false }
+  if (isEmptyTree(prevWs) || !isEmptyTree(nextWs)) return { ws: nextWs, autoReturned: false }
+  return { ws: seedSingleScreenIfAbsent(setViewMode(nextWs, 'single')), autoReturned: true }
+}
+
 // Every live leaf pane id in in-order (left-to-right) sequence. The resolver
 // walks this to find the first companion pane and to protect visible tabs; it is
 // the public projection of the private leaf-walk the renderer already uses.
@@ -1630,18 +1650,23 @@ export function workspaceReducer(state, action) {
         // the tab, so this removal is not itself undoable (review §10).
         return next === ws ? state : { ws: next, undo }
       }
-      // User close (the strip ✕): reversible.
+      // User close (the strip ✕): reversible. If this close empties the builder,
+      // AUTO-RETURN to single (owner semantic) and mark the undo restoreViewMode so
+      // undo restores the closed tab AND builder mode as ONE gesture.
       if (next === ws) return state
       const closeLabel = action.label || 'Closed tab'
-      return { ws: next, undo: { ws, label: closeLabel, toast: closeLabel } }
+      const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
+      return { ws: closed, undo: { ws, label: closeLabel, toast: closeLabel, restoreViewMode: autoReturned } }
     }
     case 'CLOSE_PANE': {
       // Closing a pane closes all its tabs at once (a keyboard/menu affordance —
-      // no per-tab clicks). Reversible: the snapshot restores the whole pane.
+      // no per-tab clicks). Reversible: the snapshot restores the whole pane. An
+      // auto-return applies here too (closing the sole/last pane empties builder).
       const next = closePane(ws, action.paneId)
       if (next === ws) return state
       const paneLabel = action.label || 'Closed pane'
-      return { ws: next, undo: { ws, label: paneLabel, toast: paneLabel } }
+      const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
+      return { ws: closed, undo: { ws, label: paneLabel, toast: paneLabel, restoreViewMode: autoReturned } }
     }
     case 'MOVE_TAB': {
       const next = moveTab(ws, action.tabKey, action.target)

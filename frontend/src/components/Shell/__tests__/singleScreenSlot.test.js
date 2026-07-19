@@ -203,6 +203,45 @@ test('activeContentRoute reflects the SLOT in single mode, the focused pane in b
   assert.equal(r.chatId, null)
 })
 
+// ── Empty-builder auto-return + one-gesture undo (owner semantic) ────────────
+
+test('closing the LAST builder tab auto-returns to single', () => {
+  // Single-pane builder with one chat; close it → the tree empties → auto-return.
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')]) // viewMode panes
+  const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  assert.equal(s.ws.viewMode, 'single', 'empty builder auto-returns to single')
+  assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
+})
+
+test('undo of the last-tab close restores the tab AND builder mode as one gesture', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  state = reduce(state, { type: 'UNDO_LAST' })
+  assert.equal(state.ws.viewMode, 'panes', 'builder mode restored')
+  assert.ok(paneModel.paneOf(state.ws, 'chat:5'), 'and the closed tab restored')
+})
+
+test('closing a tab that leaves others does NOT auto-return', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('chat', '6')])
+  const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  assert.equal(s.ws.viewMode, 'panes', 'still builder — other tabs remain')
+  assert.equal(s.undo.restoreViewMode, false)
+})
+
+test('closing the last tab in SINGLE mode does not auto-return (already single)', () => {
+  const ws = { ...paneModel.seedFromFlatTabs([makeTab('chat', '5')]), viewMode: 'single', singleScreen: { kind: 'chat', id: '5' } }
+  const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  assert.equal(s.ws.viewMode, 'single')
+  assert.equal(s.undo.restoreViewMode, false)
+})
+
+test('CLOSE_PANE that empties the builder auto-returns to single', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  const s = reduce(init(ws), { type: 'CLOSE_PANE', paneId: ws.focusedPaneId })
+  assert.equal(s.ws.viewMode, 'single')
+  assert.equal(s.undo.restoreViewMode, true)
+})
+
 test('singleScreenRoute: chat slot, app slot, and empty/home', () => {
   const base = paneModel.seedFromFlatTabs([])
   assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'chat', id: '9' } }), {
