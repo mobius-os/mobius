@@ -1746,7 +1746,14 @@ export function workspaceReducer(state, action) {
       // world last left it — builder work never rewrites the single screen.
       const next = flipped.viewMode === 'single' ? seedSingleScreenIfAbsent(flipped) : flipped
       if (next === ws) return state
-      return { ws: next, undo }
+      // INV 8 (review §3, P1): an explicit later mode intent REBASES a mode-COUPLED
+      // undo to tree-only. A coupled undo (restoreViewMode: a single-leaf drop flip
+      // or an empty-builder auto-return) would otherwise, when applied after the
+      // owner has since toggled the mode, unconditionally restore the OLD mode and
+      // override the owner's later choice. Dropping the flag here keeps the undo's
+      // TREE restoration while leaving the mode as the owner last set it.
+      const rebasedUndo = (undo && undo.restoreViewMode) ? { ...undo, restoreViewMode: false } : undo
+      return { ws: next, undo: rebasedUndo }
     }
     case 'SET_SINGLE_SCREEN': {
       // The single world's ONE navigation write (two-worlds design): opening a

@@ -242,6 +242,19 @@ test('CLOSE_PANE that empties the builder auto-returns to single', () => {
   assert.equal(s.undo.restoreViewMode, true)
 })
 
+test('INV 8: an explicit later toggle rebases a coupled undo to tree-only', () => {
+  // Auto-return arms a mode-coupled undo (restoreViewMode). The owner then toggles
+  // the mode explicitly; undo must restore the TREE but not yank the mode back.
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')]) // panes
+  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' }) // → single, coupled undo
+  assert.equal(state.undo.restoreViewMode, true)
+  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // explicit later intent
+  assert.equal(state.undo.restoreViewMode, false, 'coupled undo rebased to tree-only')
+  state = reduce(state, { type: 'UNDO_LAST' })
+  assert.ok(paneModel.paneOf(state.ws, 'chat:5'), 'tab restored')
+  assert.equal(state.ws.viewMode, 'panes', 'the owner\'s later mode choice is preserved')
+})
+
 test('singleScreenRoute: chat slot, app slot, and empty/home', () => {
   const base = paneModel.seedFromFlatTabs([])
   assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'chat', id: '9' } }), {
