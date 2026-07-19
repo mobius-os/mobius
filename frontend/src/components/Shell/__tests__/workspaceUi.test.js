@@ -599,3 +599,28 @@ test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any dro
   // The drag-deny shake is gone from the CSS too.
   assert.doesNotMatch(shellCss, /is-vibrating|shell-brand-shake|shell-brand-pulse/)
 })
+
+test('the builder preview cannot outlive its drag session past one visibility boundary', () => {
+  // The render-only builder preview (dragPreviewBuilder) is a SHARED effectiveViewMode
+  // override; a session that strands it true wedges the workspace tiled forever. Two
+  // guards keep it bounded:
+  // (1) SOURCE — pagehide joins the per-session teardown, so a BFCache freeze that
+  //     fires no pointercancel/blur/visibilitychange still cancels the drag.
+  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \}\)/)
+  assert.match(dragBinding, /window\.addEventListener\('pagehide', onPageHide\)/)
+  assert.match(dragBinding, /window\.removeEventListener\('pagehide', onPageHide\)/)
+  // (2) BACKSTOP — a persistent foreground reconcile force-cleans any session still
+  //     standing at a visible/pageshow edge (its going-out teardown was skipped) and
+  //     asserts the override is off. It acts on the OPPOSITE edge from the teardown,
+  //     so the two never double-handle, and it never cancels a genuinely live drag
+  //     (a live drag never receives these edges).
+  assert.match(dragBinding, /function reconcileStaleSession\(\) \{[\s\S]*?activeCleanup\?\.\(\)[\s\S]*?onPreviewBuilder\?\.\(false\)/)
+  assert.match(dragBinding, /if \(document\.visibilityState === 'visible'\) reconcileStaleSession\(\)/)
+  assert.match(dragBinding, /window\.addEventListener\('pageshow', reconcileStaleSession\)/)
+  assert.match(dragBinding, /document\.addEventListener\('visibilitychange', onForegroundVisible\)/)
+  // Both foreground listeners are torn down with the effect.
+  assert.match(dragBinding, /window\.removeEventListener\('pageshow', reconcileStaleSession\)/)
+  assert.match(dragBinding, /document\.removeEventListener\('visibilitychange', onForegroundVisible\)/)
+  // The invariant is stated where it is enforced.
+  assert.match(dragBinding, /may outlive its session by at most\s*\n?\s*\/\/ ONE visibility\/foreground boundary/)
+})

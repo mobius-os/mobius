@@ -833,6 +833,49 @@ test.describe('Workspace view-mode toggle', () => {
     expect(whichPaneHas(after, `chat:${c.id}`), 'the cancelled drag left no residue').toBe(null)
   })
 
+  // Regression (item 0): the render-only builder preview must reconcile on a
+  // foreground return so an interrupted drag can't wedge the workspace tiled forever
+  // (the owner's "permanent stuck-tiled after an interrupted touch drag"). The
+  // preview leaves the reducer viewMode 'single', so it is asserted via the RENDER
+  // (tiled chrome), not readWs.viewMode.
+  test('(item 0) an interrupted drag preview reconciles on foreground return, never wedging tiled', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'strandA')
+    const b = await createTaggedChat(page, 'strandB')
+    const c = await createTaggedChat(page, 'strandC')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
+    await seedWorkspace(page, paneModel.setViewMode(twoChatPanes(a.id, b.id), 'single'))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    expect((await readWs(page)).viewMode).toBe('single')
+
+    await ensureNavigationOpen(page)
+    const content = await page.locator('.shell__content').boundingBox()
+    const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
+    await expect(row).toBeVisible()
+    // Arm the single-mode drag → the builder preview unfolds (render-only, tiled).
+    // Leave the pointer DOWN (no drop): the dragPreviewBuilder override is live.
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2, { release: false })
+    await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 3000 })
+
+    // Negative: with NO foreground event, the live-drag preview persists (the
+    // reconcile is edge-triggered, not a poll — it must not cancel an in-progress drag).
+    await expect(page.locator('.workspace__chrome')).toHaveCount(1)
+
+    // Now the tab returns to the foreground with the session still standing (its
+    // going-out teardown was skipped — the strand). The foreground reconcile must
+    // force it down so the preview cannot wedge the workspace tiled.
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow')))
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0, { timeout: 3000 })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
+    // The reducer never left single and nothing committed — no residue.
+    expect((await readWs(page)).viewMode).toBe('single')
+    // Release the (now-orphaned) pointer so the test ends clean; the session was
+    // already torn down, so this is a no-op.
+    await page.mouse.up()
+  })
+
   // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides
   // split-vs-join, but ANY drop commits builder mode (point 15).
   function singleLeafTwoTabs(a, b) {

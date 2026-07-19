@@ -480,6 +480,12 @@ export default function useWorkspaceDrag({
       const onLostCapture = (ev) => { if (ev.pointerId === pointerId) cleanup({ suppressClick: armed }) }
       const onWinBlur = () => cleanup({ suppressClick: armed })
       const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed }) }
+      // BFCache freeze / bfcache navigation can be the ONLY interruption event some
+      // browsers fire — no pointercancel, no blur, and (on older Safari) no
+      // visibilitychange-hidden first. Without this, a drag frozen mid-flight and
+      // then restored would keep its render-only builder preview, wedging the
+      // workspace tiled. pagehide cancels the drag as the page is frozen/unloaded.
+      const onPageHide = () => cleanup({ suppressClick: armed })
 
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
@@ -498,6 +504,7 @@ export default function useWorkspaceDrag({
         window.removeEventListener('keydown', onKey, true)
         window.removeEventListener('lostpointercapture', onLostCapture, true)
         window.removeEventListener('blur', onWinBlur)
+        window.removeEventListener('pagehide', onPageHide)
         document.removeEventListener('visibilitychange', onVisibility)
         if (ctxListener) window.removeEventListener('contextmenu', ctxListener, true)
         if (touchMovePreventer) document.removeEventListener('touchmove', touchMovePreventer)
@@ -543,6 +550,7 @@ export default function useWorkspaceDrag({
       window.addEventListener('keydown', onKey, true)
       window.addEventListener('lostpointercapture', onLostCapture, true)
       window.addEventListener('blur', onWinBlur)
+      window.addEventListener('pagehide', onPageHide)
       document.addEventListener('visibilitychange', onVisibility)
     }
 
@@ -568,8 +576,36 @@ export default function useWorkspaceDrag({
     }
 
     document.addEventListener('pointerdown', onPointerDown, true)
+
+    // Foreground reconcile (defensive — same class as the sleep/wake stream
+    // reconcile, not a band-aid). A drag session cannot legitimately span a
+    // visibility/foreground boundary: the per-session teardown above already
+    // cancels a live drag as the tab LEAVES (visibilitychange->hidden, blur,
+    // pagehide). So any session still standing at a visible/pageshow edge had its
+    // going-out teardown SKIPPED (an exotic pointer-steal that fired none of those),
+    // and its render-only builder PREVIEW (dragPreviewBuilder) would otherwise stay
+    // true forever — the workspace stuck tiled after every later exit, matching the
+    // "permanent stuck-tiled after an interrupted touch drag" report. Force it down,
+    // then assert the override is off. A genuinely in-progress drag never receives
+    // these edges (reaching `visible` requires a prior `hidden`, which already
+    // cancelled it), so this never cancels a live drag — it only reconciles a stale
+    // one, on the opposite edge from the teardown, so the two never double-handle.
+    // INVARIANT: the dragPreviewBuilder override may outlive its session by at most
+    // ONE visibility/foreground boundary.
+    function reconcileStaleSession() {
+      activeCleanup?.() // full teardown of a stranded session (also clears the preview)
+      onPreviewBuilder?.(false) // and assert the override is off whenever no session is live
+    }
+    const onForegroundVisible = () => {
+      if (document.visibilityState === 'visible') reconcileStaleSession()
+    }
+    window.addEventListener('pageshow', reconcileStaleSession)
+    document.addEventListener('visibilitychange', onForegroundVisible)
+
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('pageshow', reconcileStaleSession)
+      document.removeEventListener('visibilitychange', onForegroundVisible)
       activeCleanup?.() // tear down an in-flight drag
       removeOverlays()
     }
