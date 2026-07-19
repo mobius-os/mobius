@@ -2565,7 +2565,21 @@ export default function Shell() {
             {paneModel.WORKSPACE_SPLITS_ENABLED && (
               <span className="shell__logo-halo" aria-hidden="true" />
             )}
-            <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
+            {/* Decorative (alt="") — the BUTTON owns every pointer event. The img
+                is pointer-inert (CSS pointer-events:none + draggable=false) so the
+                browser never sees a long-pressable image and can't raise its native
+                image callout/preview sheet on a builder-mode hold (owner phone
+                report: "sometimes holding the logo opens up the image"). The hold
+                gesture targets the button, so making the child inert only IMPROVES
+                pointerdown reliability. */}
+            <img
+              className="shell__logo"
+              src={`${BASE}/moebius.png`}
+              alt=""
+              width="30"
+              height="30"
+              draggable={false}
+            />
           </span>
           <span className="shell__wordmark">Möbius</span>
         </button>

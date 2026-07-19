@@ -382,6 +382,22 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo,\s*\n\s*\.shell__brand\.is-snapping \.shell__logo \{ animation: none; \}/)
 })
 
+test('the brand logo img is pointer-inert so a hold never raises the native image preview', () => {
+  // Owner phone report: "sometimes holding the logo opens up the image" - the
+  // native long-press image callout/preview. Structural fix: the decorative img
+  // (alt="") is pointer-inert so the BUTTON owns every pointer event and the
+  // browser never sees a long-pressable image.
+  const logoRule = shellCss.match(/\.shell__logo\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(logoRule, /pointer-events:\s*none/)
+  assert.match(logoRule, /-webkit-touch-callout:\s*none/)
+  assert.match(logoRule, /user-select:\s*none/)
+  assert.match(logoRule, /-webkit-user-select:\s*none/)
+  // The element itself is not draggable (kills the drag-image path).
+  assert.match(shell, /<img\s+className="shell__logo"[\s\S]*?draggable=\{false\}[\s\S]*?\/>/)
+  // The button keeps its contextmenu suppression during a hold (unchanged).
+  assert.match(logoGestureSrc, /if \(pressRef\.current\) e\.preventDefault\(\)/)
+})
+
 test('the living halo lifecycle: lit only in builder mode, one allocation-free rAF, paused on hidden, static under reduced motion', () => {
   // Gated on `active` (builder mode) — nothing runs when inactive, and the effect
   // re-runs on active flip so it turns ON at ignite and OFF (cleanup) at snap.

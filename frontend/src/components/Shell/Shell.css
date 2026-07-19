@@ -106,6 +106,17 @@
   rotate: var(--logo-twist, 0deg);
   scale: calc(1 - var(--hold-progress, 0) * 0.16);
   transition: rotate 300ms cubic-bezier(0.34, 1.4, 0.64, 1), scale 160ms ease;
+  /* The mark is decorative — the BUTTON owns every pointer event. Making the img
+     pointer-inert stops the browser from treating it as a long-pressable image, so
+     a builder-mode hold can never raise the native image callout / preview sheet
+     (iOS -webkit-touch-callout, Android image context). draggable=false on the
+     element kills the drag-image path too. Pointer-events:none here means the hold
+     gesture's pointerdown lands on the button, not the img — improving, not
+     harming, hold reliability. */
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .shell__wordmark {
