@@ -698,6 +698,13 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
 
   if isinstance(item, sdk["WebSearchThreadItem"]):
     events: list[dict[str, Any]] = []
+    # The real query (or the opened page's URL) only lands on completion —
+    # ItemStarted carried an empty one, so the row showed a bare "WebSearch".
+    # Backfill it now; the caller stamps tool_use_id so it targets this exact
+    # search rather than the first input-less block.
+    query = getattr(item, "query", "")
+    if query:
+      events.append({"type": "tool_input", "input": query})
     sources = _web_search_sources(item)
     if sources:
       events.append({"type": "tool_sources", "sources": sources})

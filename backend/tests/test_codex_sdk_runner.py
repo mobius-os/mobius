@@ -252,7 +252,35 @@ def test_websearch_completed_events_noop_when_sdk_exposes_no_sources():
     WebSearchThreadItem(), sdk,
   )
 
-  assert events == [{"type": "tool_end"}]
+  # The real query lands on completion, so it is backfilled as tool_input even
+  # when the SDK exposed no result sources.
+  assert events == [
+    {"type": "tool_input", "input": "latest news"},
+    {"type": "tool_end"},
+  ]
+
+
+def test_websearch_completed_events_backfill_query_and_sources():
+  class WebSearchThreadItem:
+    query = "site:nodejs.org Node.js 24 LTS"
+    results = [{"title": "Node", "url": "https://nodejs.org/x"}]
+
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": WebSearchThreadItem,
+  }
+
+  events = codex_sdk_runner._tool_completed_events(WebSearchThreadItem(), sdk)
+
+  # Query backfill comes first, then sources, then end.
+  assert events[0] == {
+    "type": "tool_input", "input": "site:nodejs.org Node.js 24 LTS"}
+  assert events[-1] == {"type": "tool_end"}
+  assert {"type": "tool_sources", "sources": [
+    {"title": "Node", "url": "https://nodejs.org/x"}]} in events
 
 
 def test_steer_into_active_turn_cleans_dead_handle(monkeypatch):
