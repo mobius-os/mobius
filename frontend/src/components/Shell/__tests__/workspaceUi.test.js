@@ -519,14 +519,16 @@ test('leaving builder plays the INVERSE card-deal: deal-out + settle, decisive (
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
   assert.match(handler, /multiPaneRef\.current && !settingsFocused/)
   // The leaving panes are LATCHED into the descriptor (INV 9): a mid-beat focus
-  // change cannot re-target which pane deals out.
+  // change cannot re-target which pane deals out. The SETTLING pane is the slot's
+  // pane (animation honesty), not necessarily the focused one.
   assert.match(handler, /const leavingPaneIds = leavingBuilder/)
-  assert.match(handler, /visibleLeavesRef\.current\.filter\(id => id !== focusedPaneId\)/)
+  assert.match(handler, /visibleLeavesRef\.current\.filter\(id => id !== settlePaneId\)/)
+  assert.match(handler, /const settlePaneId = \(slotPane && visibleLeavesRef\.current\.includes\(slotPane\.id\)\)/)
   // Held tiled while the beat runs — from the ONE descriptor (INV 4), not a boolean pair.
   assert.match(shell, /const effectiveViewMode = modeMachine\.effectiveViewMode\(modeState/)
-  // The remaining (focused) pane settles to the FULL content box during the beat.
+  // The settling pane grows to the FULL content box during the beat.
   assert.match(shell, /if \(!exitGeometryActive\) return visibleTabRects/)
-  assert.match(shell, /next\.set\(focusedKey, \{ \.\.\.rect, x: 0, y: 0, w: contentRect\.w, h: contentRect\.h \}\)/)
+  assert.match(shell, /next\.set\(settleKey, \{ \.\.\.rect, x: 0, y: 0, w: contentRect\.w, h: contentRect\.h \}\)/)
   // Wrappers carry the LATCHED data-pane-role so CSS tells settling from leaving.
   assert.match(shell, /data-pane-role=\{paneRoleFor\(/)
   // The transient root class comes from the descriptor (exactly one beat class, INV 1).

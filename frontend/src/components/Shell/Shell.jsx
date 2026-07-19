@@ -839,13 +839,16 @@ export default function Shell() {
   // geometry (a no-op passthrough whenever the exit beat is not held).
   const renderTabRects = useMemo(() => {
     if (!exitGeometryActive) return visibleTabRects
-    const focusedKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey
-    const rect = focusedKey && visibleTabRects.get(focusedKey)
+    // Settle the LATCHED settling pane (the slot's pane — animation honesty), not
+    // whatever is focused now; a mid-beat focus change must not re-target the grow.
+    const settlePaneId = modeState.transition?.focusedPaneId ?? workspace.focusedPaneId
+    const settleKey = workspace.panes[settlePaneId]?.activeTabKey
+    const rect = settleKey && visibleTabRects.get(settleKey)
     if (!rect || !contentRect.w || !contentRect.h) return visibleTabRects
     const next = new Map(visibleTabRects)
-    next.set(focusedKey, { ...rect, x: 0, y: 0, w: contentRect.w, h: contentRect.h })
+    next.set(settleKey, { ...rect, x: 0, y: 0, w: contentRect.w, h: contentRect.h })
     return next
-  }, [exitGeometryActive, visibleTabRects, workspace, contentRect])
+  }, [exitGeometryActive, modeState, visibleTabRects, workspace, contentRect])
 
   // ── The ONE Settings wrapper (design §4: overlay-or-pane geometry) ─────────
   // A single, stable SettingsView mount that is positioned like any chat/app
@@ -1208,12 +1211,24 @@ export default function Shell() {
     const leavingBuilder = ws.viewMode !== 'single'
     const settingsFocused =
       ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
-    const focusedPaneId = ws.focusedPaneId
-    // The leaving panes = the visible tiled leaves except the settling (focused)
-    // one; latched into the descriptor so a mid-beat focus change can't re-target
-    // the deal (INV 9). Empty for an enter.
+    // ANIMATION HONESTY (two-worlds design): the exit deal settles to the pane
+    // that shows what SINGLE mode will paint — the slot's real pane rect when the
+    // slot exists in a visible tile, NOT necessarily the focused pane. On a first
+    // exit the slot seeds from focus so they coincide; on a later exit the slot may
+    // differ, and settling the wrong pane would deal to content single won't show.
+    // A tree-absent slot has no pane to deal to → fall back to the focused pane and
+    // the world simply reveals (no false correspondence).
+    const slotKey = paneModel.singleScreenKey(ws)
+    const slotPane = slotKey ? paneModel.paneOf(ws, slotKey) : null
+    const settlePaneId = (slotPane && visibleLeavesRef.current.includes(slotPane.id))
+      ? slotPane.id
+      : ws.focusedPaneId
+    const focusedPaneId = settlePaneId
+    // The leaving panes = the visible tiled leaves except the SETTLING one; latched
+    // into the descriptor so a mid-beat focus change can't re-target the deal
+    // (INV 9). Empty for an enter.
     const leavingPaneIds = leavingBuilder
-      ? visibleLeavesRef.current.filter(id => id !== focusedPaneId)
+      ? visibleLeavesRef.current.filter(id => id !== settlePaneId)
       : []
     // The exit deal is earned only for a genuine multi-pane exit with a non-Settings
     // focused surface; multiPane=false makes the exit an instant collapse (the beat
