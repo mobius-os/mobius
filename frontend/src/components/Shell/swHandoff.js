@@ -143,46 +143,71 @@ export function watchForShellUpdateOnForeground({
     return () => {}
   }
   let disposed = false
+  // Performing guard (review finding 1): rearm() hands off to requestShellReload,
+  // which posts SKIP_WAITING + reloads. It is applied AT MOST ONCE per watch
+  // lifetime — a near-simultaneous visibilitychange + online (or a waiting +
+  // installed decision) must not fire two cache flushes / SW handoffs / reloads on
+  // an immediately-applicable surface. Once requested, the page reloads; a second
+  // request is only redundant/harmful.
+  let applied = false
 
   const decide = (reg) => {
-    if (disposed || !reg) return
+    if (disposed || applied || !reg) return
     if (shouldRearmShellApply({
       stalePrecacheFlagged: readStaleFlag(),
       waiting: reg.waiting || null,
       active: reg.active || null,
       controller: serviceWorker.controller || null,
     })) {
+      applied = true
       rearm()
     }
   }
 
-  const check = async () => {
-    if (disposed) return
+  const runCheck = async () => {
     let reg
     try { reg = await serviceWorker.getRegistration() } catch { return }
     if (disposed || !reg) return
     // Force a fresh sw.js fetch so a deploy that shipped while we were backgrounded
     // is discovered now (a cheap conditional GET; the server 304s when unchanged).
-    // update() resolving does NOT mean the new worker finished installing, so we
-    // decide TWICE: once now for a worker that is already waiting (installed while
-    // we were away), and again when an in-flight install reaches 'installed' (the
-    // worker discovered by THIS update() call), so the apply lands on the first
-    // foreground return rather than the second.
     try { await reg.update() } catch { /* offline / transient — decide on what we have */ }
     if (disposed) return
-    decide(reg)
+    // Settle on the NEWEST generation (review finding 2): update() resolves BEFORE
+    // the newly-discovered worker finishes installing. If a newer generation is
+    // still INSTALLING, defer the decision until it reaches installed/redundant so
+    // we never apply reg.waiting (an OLDER generation) first and then reload again
+    // into the newer one — one reload, into the newest. With nothing installing
+    // (the common case: a worker installed while we were away and is already
+    // waiting), decide now so the apply lands on this first foreground return.
     const installing = reg.installing
-    if (installing && typeof installing.addEventListener === 'function') {
+    const stillInstalling = installing
+      && installing.state !== 'installed'
+      && installing.state !== 'redundant'
+      && typeof installing.addEventListener === 'function'
+    if (stillInstalling) {
       const onState = () => {
-        if (installing.state === 'installed') {
+        if (installing.state === 'installed' || installing.state === 'redundant') {
           installing.removeEventListener('statechange', onState)
           decide(reg)
-        } else if (installing.state === 'redundant') {
-          installing.removeEventListener('statechange', onState)
         }
       }
       installing.addEventListener('statechange', onState)
+    } else {
+      decide(reg)
     }
+  }
+
+  // Coalesce concurrent triggers (review finding 1): a near-simultaneous
+  // visibilitychange + online must run ONE check, not two — otherwise each attaches
+  // its own installing-statechange listener and both fire rearm. One shared promise
+  // dedups overlapping runs; sequential returns after it clears run fresh (the
+  // `applied` latch still bounds the eventual rearm to once).
+  let inFlight = null
+  const check = () => {
+    if (disposed || applied) return inFlight
+    if (inFlight) return inFlight
+    inFlight = runCheck().finally(() => { inFlight = null })
+    return inFlight
   }
 
   const onVisible = () => { if (doc.visibilityState === 'visible') check() }

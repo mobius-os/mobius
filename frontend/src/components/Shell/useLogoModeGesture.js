@@ -4,6 +4,12 @@ import {
   runHoldCompletion,
 } from './logoHoldMachine.js'
 
+// How long a touch/pen pointerdown's provenance justifies suppressing a native
+// contextmenu on the brand. The browser's long-press contextmenu fires at its own
+// ~500ms threshold — comfortably inside this — so a genuine long-press is still
+// suppressed; a keyboard contextmenu arriving later inherits no stale pointer type.
+const POINTER_PROVENANCE_MS = 1500
+
 // Builder-mode activation, hosted on the TOP-LEFT logo cluster (owner placement):
 // there is NO standalone toggle button — the Möbius mark itself is the control and
 // the mode indicator (a 180deg twist + wordmark tint). The logo's single-tap job
@@ -54,6 +60,13 @@ export function useLogoModeGesture({
   // right-click (keep its native menu). Persists past press-end so a late-firing
   // long-press contextmenu is still recognized as touch. See onContextMenu.
   const lastPointerTypeRef = useRef('')
+  // When that provenance was stamped. It EXPIRES (finding 5): a touch/pen menu is
+  // suppressed only within a short window of the pointer that set it — otherwise a
+  // KEYBOARD context menu (Menu key / Shift+F10) on the focused brand, which has no
+  // pointer event, would inherit a stale 'touch'/'pen' and be wrongly suppressed,
+  // regressing keyboard/AT access to the native menu. A keydown on the brand also
+  // clears it (onKeyDown below) so the keyboard path never inherits pointer state.
+  const lastPointerTypeAtRef = useRef(0)
   // Set when a POINTER gesture (completed hold, swipe, or drag) consumed the
   // activation, so the trailing compatibility click does NOT also toggle the
   // drawer. Only ever read for a pointer click (detail >= 1) — a keyboard click
@@ -132,10 +145,11 @@ export function useLogoModeGesture({
 
   const onPointerDown = useCallback((e) => {
     if (!enabled) return
-    // Record the pointer type of the LATEST interaction before the mouse-button
-    // guard below can bail — onContextMenu reads it to suppress the touch/pen
-    // long-press menu even for a right-click-style contextmenu (review: item C).
+    // Record the pointer type + when, before the mouse-button guard below can bail
+    // — onContextMenu reads it to suppress the touch/pen long-press menu even for a
+    // right-click-style contextmenu (review: item C), but only while FRESH (finding 5).
     lastPointerTypeRef.current = e.pointerType
+    lastPointerTypeAtRef.current = performance.now()
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
@@ -201,11 +215,25 @@ export function useLogoModeGesture({
     // and lets the native menu through. That timing race is the owner's "sometimes
     // holding the logo opens the image [with a download option]" report. Keying off
     // the LAST pointer type (set on every pointerdown, right-click included)
-    // suppresses touch/pen unconditionally while leaving a desktop MOUSE right-click
-    // its native menu. INVARIANT: contextmenu on the brand is prevented for every
+    // suppresses touch/pen while leaving a desktop MOUSE right-click its native
+    // menu. The touch/pen provenance EXPIRES (finding 5): it justifies suppression
+    // only within POINTER_PROVENANCE_MS of the pointerdown that set it, so a later
+    // KEYBOARD contextmenu (Menu key / Shift+F10, no pointer event) on the focused
+    // brand is NOT suppressed and keyboard/AT users still reach the native menu. A
+    // still-live press is always suppressed (its long-press menu is definitionally
+    // fresh). INVARIANT: contextmenu on the brand is prevented for every FRESH
     // touch/pen interaction, whether or not a press is still live.
     const pt = lastPointerTypeRef.current
-    if (pt === 'touch' || pt === 'pen' || pressRef.current) e.preventDefault()
+    const fresh = (performance.now() - lastPointerTypeAtRef.current) < POINTER_PROVENANCE_MS
+    if (((pt === 'touch' || pt === 'pen') && fresh) || pressRef.current) e.preventDefault()
+  }, [])
+
+  // A keyboard interaction on the brand clears pointer provenance (finding 5): the
+  // very next contextmenu is then keyboard-invoked and must reach the native menu.
+  // Wired into the brand's onKeyDown alongside the mode-toggle key handling.
+  const onKeyDown = useCallback(() => {
+    lastPointerTypeRef.current = ''
+    lastPointerTypeAtRef.current = 0
   }, [])
 
   // Read + reset the pointer-click suppression. `detail` is the click event's
@@ -236,6 +264,6 @@ export function useLogoModeGesture({
   return {
     holding, flourish,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onContextMenu,
-    consumeSuppressedClick, onAnimationEnd,
+    onKeyDown, consumeSuppressedClick, onAnimationEnd,
   }
 }

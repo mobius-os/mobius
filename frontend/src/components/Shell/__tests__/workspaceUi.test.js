@@ -301,9 +301,9 @@ test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches 
   assert.match(logoGestureSrc, /decision === 'swipe'/)
   assert.match(logoGestureSrc, /onToggleMode\?\.\(\)/)
   assert.match(logoGestureSrc, /endPress\(\{ suppressClick: true \}\)/)
-  // Suppresses the native long-press context menu for touch/pen (and any live
-  // press) so a hold activates builder mode instead of raising a menu.
-  assert.match(logoGestureSrc, /pt === 'touch' \|\| pt === 'pen' \|\| pressRef\.current\) e\.preventDefault\(\)/)
+  // Suppresses the native long-press context menu for a FRESH touch/pen (or any
+  // live press) so a hold activates builder mode instead of raising a menu.
+  assert.match(logoGestureSrc, /\(\(pt === 'touch' \|\| pt === 'pen'\) && fresh\) \|\| pressRef\.current\) e\.preventDefault\(\)/)
   // The hook itself never opens/closes the drawer — that stays the caller's.
   assert.doesNotMatch(logoGestureSrc, /openDrawer|closeDrawer/)
 })
@@ -418,13 +418,31 @@ test('the brand logo img is pointer-inert so a hold never raises the native imag
   assert.match(logoRule, /-webkit-user-select:\s*none/)
   // The element itself is not draggable (kills the drag-image path).
   assert.match(shellBrand, /<img\s+className="shell__logo"[\s\S]*?draggable=\{false\}[\s\S]*?\/>/)
-  // The button suppresses the native contextmenu for touch/pen UNCONDITIONALLY —
-  // not only while a press is live — which closes the timing race that leaked the
-  // menu: the browser's long-press contextmenu can fire just AFTER the ~450ms hold
-  // completes and nulls pressRef, so a press-only guard let the native image menu
-  // through (the "sometimes" in "sometimes holding the logo opens up the image").
+  // The button suppresses the native contextmenu for a FRESH touch/pen press —
+  // recent pointer provenance, not merely a live press — closing the timing race
+  // that leaked the native image menu just after a completed hold, while letting
+  // a keyboard-invoked contextmenu on the focused brand reach the native menu
+  // (provenance expires; keydown clears it).
+  // while a press is live — which closes the timing race that leaked the menu: the
+  // browser's long-press contextmenu can fire just AFTER the ~450ms hold completes
+  // and nulls pressRef, so a press-only guard let the native image menu through.
   assert.match(logoGestureSrc, /const pt = lastPointerTypeRef\.current/)
-  assert.match(logoGestureSrc, /pt === 'touch' \|\| pt === 'pen' \|\| pressRef\.current\) e\.preventDefault\(\)/)
+  assert.match(logoGestureSrc, /\(\(pt === 'touch' \|\| pt === 'pen'\) && fresh\) \|\| pressRef\.current\) e\.preventDefault\(\)/)
+})
+
+test('logo pointer provenance EXPIRES so a keyboard context menu reaches the native menu (finding 5)', () => {
+  // The touch/pen provenance justifies suppression only within a short window of the
+  // pointerdown that stamped it (POINTER_PROVENANCE_MS) — otherwise a keyboard
+  // contextmenu (Menu key / Shift+F10) on the focused brand, which has no pointer
+  // event, inherits a stale 'touch'/'pen' and is wrongly suppressed (a11y regression).
+  assert.match(logoGestureSrc, /const POINTER_PROVENANCE_MS = \d+/)
+  assert.match(logoGestureSrc, /lastPointerTypeAtRef\.current = performance\.now\(\)/)
+  assert.match(logoGestureSrc, /const fresh = \(performance\.now\(\) - lastPointerTypeAtRef\.current\) < POINTER_PROVENANCE_MS/)
+  // A keydown on the brand also clears provenance so the next contextmenu is treated
+  // as keyboard-invoked; Shell wires it into the brand's onKeyDown.
+  assert.match(logoGestureSrc, /const onKeyDown = useCallback\(\(\) => \{\s*\n?\s*lastPointerTypeRef\.current = ''\s*\n?\s*lastPointerTypeAtRef\.current = 0/)
+  assert.match(logoGestureSrc, /onPointerCancel, onContextMenu,\s*\n?\s*onKeyDown, consumeSuppressedClick/)
+  assert.match(shell, /if \(paneModel\.WORKSPACE_SPLITS_ENABLED\) logoGesture\.onKeyDown\(\)/)
 })
 
 test('the living halo lifecycle: lit only in builder mode, one allocation-free rAF, paused on hidden, static under reduced motion', () => {
@@ -640,16 +658,23 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   assert.match(dragBinding, /window\.removeEventListener\('pagehide', onPageHide\)/)
   // (2) BACKSTOP — a persistent foreground reconcile force-cleans any session still
   //     standing at a visible/pageshow edge (its going-out teardown was skipped) and
-  //     asserts the override is off. It acts on the OPPOSITE edge from the teardown,
-  //     so the two never double-handle, and it never cancels a genuinely live drag
-  //     (a live drag never receives these edges).
-  assert.match(dragBinding, /function reconcileStaleSession\(\) \{[\s\S]*?activeCleanup\?\.\(\)[\s\S]*?onPreviewBuilder\?\.\(false\)/)
+  //     asserts the override is off. suppressClick:true so a late click after the
+  //     force-clean cannot activate the source (finding 4). It acts on the OPPOSITE
+  //     edge from the teardown, so the two never double-handle, and it never cancels
+  //     a genuinely live drag (a live drag never receives these edges).
+  assert.match(dragBinding, /function reconcileStaleSession\(\) \{[\s\S]*?activeCleanup\?\.\(\{ suppressClick: true \}\)[\s\S]*?onPreviewBuilder\?\.\(false\)/)
   assert.match(dragBinding, /if \(document\.visibilityState === 'visible'\) reconcileStaleSession\(\)/)
   assert.match(dragBinding, /window\.addEventListener\('pageshow', reconcileStaleSession\)/)
   assert.match(dragBinding, /document\.addEventListener\('visibilitychange', onForegroundVisible\)/)
   // Both foreground listeners are torn down with the effect.
   assert.match(dragBinding, /window\.removeEventListener\('pageshow', reconcileStaleSession\)/)
   assert.match(dragBinding, /document\.removeEventListener\('visibilitychange', onForegroundVisible\)/)
-  // The invariant is stated where it is enforced.
-  assert.match(dragBinding, /may outlive its session by at most\s*\n?\s*\/\/ ONE visibility\/foreground boundary/)
+  // (3) NEXT-INTERACTION — a visible->visible steal (partial occlusion / split-screen)
+  //     fires NEITHER edge; the next pointerdown reconciles a standing session whose
+  //     pointer is dead (different pointerId + no live capture), then proceeds. A live
+  //     drag keeps its capture, so this never cancels one.
+  assert.match(dragBinding, /function standingSessionPointerIsLive\(\) \{[\s\S]*?hasPointerCapture\?\.\(activePointerId\)/)
+  assert.match(dragBinding, /if \(e\.pointerId !== activePointerId && !standingSessionPointerIsLive\(\)\) \{[\s\S]*?activeCleanup\(\{ suppressClick: true \}\)/)
+  // The invariant now spans one boundary OR one subsequent interaction.
+  assert.match(dragBinding, /may outlive its session by at most ONE visibility\/foreground boundary,\s*\n?\s*\/\/ or at most one subsequent user interaction/)
 })

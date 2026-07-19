@@ -102,6 +102,86 @@ test('watchForShellUpdateOnForeground: a worker discovered by update() re-arms w
   dispose()
 })
 
+function makeWin() {
+  const listeners = {}
+  return {
+    addEventListener(t, fn) { (listeners[t] ||= []).push(fn) },
+    removeEventListener(t, fn) { listeners[t] = (listeners[t] || []).filter(f => f !== fn) },
+    emit(t) { (listeners[t] || []).slice().forEach(fn => fn()) },
+    count(t) { return (listeners[t] || []).length },
+  }
+}
+
+test('finding 1: near-simultaneous visibilitychange + online coalesce to ONE listener + ONE rearm', async () => {
+  const active = { id: 'a' }
+  const installing = makeInstalling('installing')
+  const reg = makeReg({ waiting: null, active, onUpdate: (r) => { r.installing = installing } })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  const win = makeWin()
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({ doc, win, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  // Both triggers fire synchronously, before the first check's await resolves.
+  doc.emit('visibilitychange')
+  win.emit('online')
+  await flush()
+  // Coalesced: exactly ONE installing-statechange listener, not two.
+  assert.equal(installing.count('statechange'), 1, 'one check ran, one listener attached')
+  reg.waiting = { id: 'w' }
+  installing.become('installed')
+  assert.equal(rearms, 1, 'exactly one rearm despite two concurrent triggers')
+  dispose()
+})
+
+test('finding 1: sequential returns never double-rearm (performing/applied latch)', async () => {
+  const active = { id: 'a' }
+  const reg = makeReg({ waiting: { id: 'w' }, active })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  doc.emit('visibilitychange'); await flush()
+  assert.equal(rearms, 1)
+  doc.emit('visibilitychange'); await flush() // a second return after the apply was requested
+  assert.equal(rearms, 1, 'applied latch: no second rearm/reload')
+  dispose()
+})
+
+test('finding 2: waiting A + installing B settles on the NEWEST (no reload into A first)', async () => {
+  const active = { id: 'a' }
+  const workerA = { id: 'A' }              // older generation, already WAITING (leashed)
+  const installingB = makeInstalling('installing') // newer generation still INSTALLING
+  const reg = makeReg({ waiting: workerA, active, onUpdate: (r) => { r.installing = installingB } })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  doc.emit('visibilitychange')
+  await flush()
+  assert.equal(rearms, 0, 'must NOT apply the older waiting A while a newer B is installing')
+  // B finishes installing → it is now the waiting generation, A superseded.
+  reg.waiting = { id: 'B' }
+  installingB.become('installed')
+  assert.equal(rearms, 1, 'applies exactly once, on the newest generation (B)')
+  dispose()
+})
+
+test('finding 2: a redundant install falls back to the still-waiting generation', async () => {
+  const active = { id: 'a' }
+  const workerA = { id: 'A' }
+  const installingB = makeInstalling('installing')
+  const reg = makeReg({ waiting: workerA, active, onUpdate: (r) => { r.installing = installingB } })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  doc.emit('visibilitychange'); await flush()
+  assert.equal(rearms, 0)
+  installingB.become('redundant') // B failed; A is still the newest good generation
+  assert.equal(rearms, 1, 'apply the surviving waiting A when the newer install fails')
+  dispose()
+})
+
 test('watchForShellUpdateOnForeground: the stale-precache flag re-arms; dispose removes listeners', async () => {
   const controller = { id: 'a' }
   const reg = makeReg({ waiting: null, active: controller })

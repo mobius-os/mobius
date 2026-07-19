@@ -95,8 +95,12 @@ export default function useWorkspaceDrag({
     let chipEl = null
     let previewEl = null
     // The one in-flight session's teardown, so an unmount / disable can tear a
-    // live drag down cleanly — no orphaned shield.
+    // live drag down cleanly — no orphaned shield. activePointerId / activeSrcEl
+    // travel with it so the next-interaction reconcile (below) can tell whether the
+    // standing session's pointer is still LIVE (holds capture) or dead.
     let activeCleanup = null
+    let activePointerId = null
+    let activeSrcEl = null
 
     function contentBox() {
       return contentElRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
@@ -540,9 +544,15 @@ export default function useWorkspaceDrag({
         // The compat click fires after the shield is already gone; swallow it so
         // a committed drop is exactly one action, not a drop + a tab/row click.
         if (suppressClick) suppressNextSourceClick(srcEl)
-        if (activeCleanup === cleanup) activeCleanup = null
+        if (activeCleanup === cleanup) {
+          activeCleanup = null
+          activePointerId = null
+          activeSrcEl = null
+        }
       }
       activeCleanup = cleanup
+      activePointerId = pointerId
+      activeSrcEl = srcEl
 
       window.addEventListener('pointermove', onMove, { passive: false, capture: true })
       window.addEventListener('pointerup', onUp, true)
@@ -554,9 +564,33 @@ export default function useWorkspaceDrag({
       document.addEventListener('visibilitychange', onVisibility)
     }
 
+    // Whether the standing session's pointer is still LIVE — it holds capture for
+    // its own pointerId. A visible->visible interruption (partial notification-shade
+    // occlusion, split-screen) can steal the pointer WITHOUT firing pointercancel /
+    // blur / visibilitychange / pageshow, so neither the per-session teardown nor
+    // the foreground reconcile fires and the session (with its dragPreviewBuilder
+    // override) strands with no boundary to catch it. The one edge that always
+    // follows is the user's NEXT interaction — a fresh pointerdown. If a session
+    // stands but its pointer is dead, reconcile it before the new interaction
+    // proceeds (still edge-triggered — no polling, no timers).
+    function standingSessionPointerIsLive() {
+      try { return !!(activeSrcEl && activeSrcEl.hasPointerCapture?.(activePointerId)) }
+      catch { return false }
+    }
+
     // ── Source detection (capture-phase, never preventDefault here) ───────────
     function onPointerDown(e) {
-      if (activeCleanup) return // one session at a time
+      if (activeCleanup) {
+        // A session already stands. If THIS is a different pointer and the standing
+        // session's pointer is dead (capture lost — a visible->visible steal), the
+        // session is stale: force-clean it, then fall through to start the new one.
+        // A genuinely live drag keeps its capture, so this never cancels one.
+        if (e.pointerId !== activePointerId && !standingSessionPointerIsLive()) {
+          activeCleanup({ suppressClick: true })
+        } else {
+          return // one session at a time
+        }
+      }
       // Primary-button-only: a non-primary mouse button never arms a drag. This
       // is also what lets middle-click-to-close a tab (PaneStrip's auxclick) be
       // safe — a middle press (button 1) returns here, so it can never start a
@@ -590,10 +624,14 @@ export default function useWorkspaceDrag({
     // these edges (reaching `visible` requires a prior `hidden`, which already
     // cancelled it), so this never cancels a live drag — it only reconciles a stale
     // one, on the opposite edge from the teardown, so the two never double-handle.
-    // INVARIANT: the dragPreviewBuilder override may outlive its session by at most
-    // ONE visibility/foreground boundary.
+    // A visible->visible steal that fires NEITHER edge is caught by the
+    // next-interaction reconcile in onPointerDown. INVARIANT: the dragPreviewBuilder
+    // override may outlive its session by at most ONE visibility/foreground boundary,
+    // or at most one subsequent user interaction.
     function reconcileStaleSession() {
-      activeCleanup?.() // full teardown of a stranded session (also clears the preview)
+      // suppressClick so a late pointer-up / high-level click after the force-clean
+      // cannot activate the original tab or drawer row (finding 4).
+      activeCleanup?.({ suppressClick: true }) // full teardown (also clears the preview)
       onPreviewBuilder?.(false) // and assert the override is off whenever no session is live
     }
     const onForegroundVisible = () => {
