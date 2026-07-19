@@ -596,6 +596,18 @@ export default function AppCanvas({
         if (!requestId || String(msg.appId) !== String(appId)) return
         const source = e.source
         const retry = msg.retry === 1 ? 1 : 0
+        // Ack BEFORE the fetch. The frame's short deadline exists to catch a
+        // request this listener never took — an unattributable source, a
+        // detached frame — not to cap a multi-megabyte download it cannot
+        // predict. Taking ownership here lets the frame switch to a transfer
+        // budget, so a cold-cache open on a slow network stops reporting an
+        // unresponsive parent. Must stay synchronous: an await before this
+        // reintroduces the race on a congested main thread.
+        try {
+          source?.postMessage(
+            { type: 'moebius:module-ack', requestId, appId }, '*',
+          )
+        } catch { /* frame detached before the fetch began */ }
         ;(async () => {
           try {
             const bytes = await fetchAppModuleBytes({

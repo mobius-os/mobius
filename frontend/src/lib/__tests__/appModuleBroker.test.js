@@ -98,6 +98,32 @@ test('opaque frames request module bytes only after exact parent attribution', (
   assert.match(frame, /compiledRuntime\.abi !== COMPILED_RUNTIME_ABI/)
 })
 
+test('the frame separates parent liveness from module transfer time', () => {
+  // A single deadline over both charged a slow multi-megabyte download with
+  // "the parent shell did not answer", breaking cold-cache opens on phone
+  // networks. The ack must gate the switch between the two budgets.
+  assert.match(frame, /const MODULE_ACK_TIMEOUT_MS = \d+/)
+  assert.match(frame, /const MODULE_TRANSFER_TIMEOUT_MS = \d+/)
+  const ack = Number(frame.match(/const MODULE_ACK_TIMEOUT_MS = (\d+)/)[1])
+  const transfer = Number(frame.match(/const MODULE_TRANSFER_TIMEOUT_MS = (\d+)/)[1])
+  assert.ok(transfer > ack, 'the transfer budget must outlast the liveness probe')
+  // The liveness message keeps its wording; the transfer failure must NOT
+  // blame the parent, which by then has demonstrably taken the request.
+  assert.match(frame, /did not answer the module request/)
+  assert.match(frame, /The app module download timed out/)
+  // Both stay code:'network' so loadModule's single retry still covers them.
+  assert.doesNotMatch(frame, /error\.code = 'timeout'/)
+  assert.match(frame, /type === 'moebius:module-ack'/)
+
+  // The parent must ack synchronously on receipt — before awaiting the fetch,
+  // otherwise the frame's liveness deadline still races the download.
+  const took = canvas.indexOf("type: 'moebius:module-ack'")
+  const fetched = canvas.indexOf('await fetchAppModuleBytes(')
+  assert.ok(took >= 0 && fetched > took, 'ack must precede the module fetch')
+  const attributed = canvas.indexOf('if (srcVersion == null) return')
+  assert.ok(attributed >= 0 && took > attributed, 'ack only after attribution')
+})
+
 test('mounting an opaque frame explicitly warms its versioned document', () => {
   assert.match(canvas, /requestAppCodeWarm\(\{\s*frameUrl:/)
   assert.match(worker, /if \(!frameUrl && !moduleUrl\) return/)

@@ -562,23 +562,55 @@
     // opens. Nested third-party frames stay covered by the outer iframe guard.
     const gestureScrollers = new Set();
 
+    // A module request has two independent failure modes, and one deadline
+    // cannot measure both. LIVENESS: the parent never takes the request at all
+    // — it could not attribute this frame to a mounted version (AppCanvas
+    // returns silently on `srcVersion == null`), or the frame is detached. That
+    // resolves in milliseconds or never. TRANSFER: the parent took the request
+    // and is streaming a multi-megabyte authenticated bundle back, whose
+    // duration belongs to the network, not the shell.
+    //
+    // A single 5s budget over both charged slow downloads with the parent's
+    // crime: a cold-cache open of a 1-4MB module on a phone routinely passes 5s
+    // and surfaced as "the parent shell did not answer" while the parent was
+    // answering fine. Worse, the abandoned fetch keeps consuming bandwidth, so
+    // the 800ms retry raced the download it was meant to replace. The parent
+    // now acks on receipt: the liveness deadline covers only the ack, and the
+    // bytes get a transfer-sized budget once we know someone is working on it.
+    const MODULE_ACK_TIMEOUT_MS = 5000;
+    const MODULE_TRANSFER_TIMEOUT_MS = 60000;
+
     function requestModuleBytes(retry) {
       const requestId = `module:${Date.now().toString(36)}:${++nextModuleRequest}`;
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
+        const pending = { resolve, reject, timer: null, acked: false };
+        const failWith = (message) => {
           pendingModuleRequests.delete(requestId);
-          const error = new Error('The parent shell did not answer the module request.');
+          const error = new Error(message);
           error.code = 'network';
           reject(error);
-        }, 5000);
-        pendingModuleRequests.set(requestId, { resolve, reject, timer });
+        };
+        pending.timer = setTimeout(
+          () => failWith('The parent shell did not answer the module request.'),
+          MODULE_ACK_TIMEOUT_MS,
+        );
+        pending.onAck = () => {
+          if (pending.acked) return;
+          pending.acked = true;
+          clearTimeout(pending.timer);
+          pending.timer = setTimeout(
+            () => failWith('The app module download timed out.'),
+            MODULE_TRANSFER_TIMEOUT_MS,
+          );
+        };
+        pendingModuleRequests.set(requestId, pending);
         try {
           window.parent.postMessage({
             type: 'moebius:module-request', requestId,
             appId: _FRAME_APP_ID, retry: retry === 1 ? 1 : 0,
           }, window.location.origin);
         } catch (error) {
-          clearTimeout(timer);
+          clearTimeout(pending.timer);
           pendingModuleRequests.delete(requestId);
           reject(error);
         }
@@ -594,6 +626,12 @@
       } finally {
         URL.revokeObjectURL(blobUrl);
       }
+    }
+
+    function acceptModuleAck(msg) {
+      const pending = pendingModuleRequests.get(msg.requestId);
+      if (!pending) return;
+      pending.onAck();
     }
 
     function acceptModuleResult(msg) {
@@ -1052,6 +1090,11 @@
       if (e.source !== window.parent || e.origin !== window.location.origin) return;
       const msg = e.data;
       if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'moebius:module-ack' &&
+          String(msg.appId) === String(_FRAME_APP_ID)) {
+        acceptModuleAck(msg);
+        return;
+      }
       if (msg.type === 'moebius:module-result' &&
           String(msg.appId) === String(_FRAME_APP_ID)) {
         acceptModuleResult(msg);
