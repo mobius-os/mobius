@@ -78,6 +78,11 @@ const SHELL_RELOAD_RECHECK_MS = 6000
 // class isn't pulled before the keyframe finishes (item 3). Reduced motion never
 // engages it. The multi-pane entry is carried by the pane card-deal, not this.
 const BUILDER_ENTER_MS = 380
+// How long the transient builder mode-EXIT reverse card-deal holds the tiled
+// render before collapsing to single (item 1) — decisive and FASTER than the
+// 400ms entry (the "Zippo asymmetry" survives, in the deal vocabulary). Must
+// exceed the exit keyframe duration so the collapse lands after the deal-out.
+const BUILDER_EXIT_MS = 250
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
 export default function Shell() {
@@ -259,7 +264,19 @@ export default function Shell() {
   // projection-consuming render paints the tiled world during the drag while the
   // undo snapshot at drop-time still reads 'single'.
   const [dragPreviewBuilder, setDragPreviewBuilder] = useState(false)
-  const effectiveViewMode = (dragPreviewBuilder && workspace.viewMode === 'single')
+  // Transient "exiting builder" beat (item 1): on a genuine builder -> single exit
+  // of a TILED (multi-pane) workspace, hold the tiled render for ONE reverse
+  // card-deal (the leaving pane lifts + deals back out to the right while the
+  // remaining pane settles to full width) BEFORE collapsing to single. Keeping
+  // effectiveViewMode 'panes' while it is held preserves the tiled render and every
+  // mounted pane's content untouched — the collapse is only DEFERRED, never
+  // re-orchestrated, so nothing can blank. The `&& viewMode === 'single'` guard
+  // means a rapid re-ENTER (viewMode back to 'panes') drops the beat immediately.
+  const [builderExiting, setBuilderExiting] = useState(false)
+  const builderExitTimerRef = useRef(0)
+  useEffect(() => () => clearTimeout(builderExitTimerRef.current), [])
+  const effectiveViewMode = ((dragPreviewBuilder || builderExiting)
+    && workspace.viewMode === 'single')
     ? 'panes'
     : workspace.viewMode
   // Transient "entering builder" beat (item 3): held for one deal on a genuine
@@ -314,6 +331,11 @@ export default function Shell() {
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   const workspaceChromeActive = contentVisibility.chromeActive
+  // Current multiPane, read in the toggle handler (a stable callback) to decide
+  // whether a builder exit earns the reverse card-deal (item 1) — a single leaf
+  // has no pane to deal out, so it collapses instantly.
+  const multiPaneRef = useRef(multiPane)
+  multiPaneRef.current = multiPane
   const chatPanesVisible = contentVisibility.chatPanesVisible
   // navTo is a per-render function; stable callbacks (handleAppError, passed to
   // AppCanvas's []-dep message listener) reach the latest one through this ref
@@ -787,6 +809,21 @@ export default function Shell() {
     return map
   }, [workspaceChromeActive, projection, workspace])
 
+  // During the builder EXIT beat (item 1) the remaining (focused) pane settles to
+  // the FULL content box while the leaving pane(s) hold their rect and deal out —
+  // the wrapper's inline rect widens and the existing 180ms rect transition
+  // animates the grow. Render off THIS map; visibleTabRects stays the pure tiled
+  // geometry (a no-op passthrough whenever the exit beat is not held).
+  const renderTabRects = useMemo(() => {
+    if (!builderExiting) return visibleTabRects
+    const focusedKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey
+    const rect = focusedKey && visibleTabRects.get(focusedKey)
+    if (!rect || !contentRect.w || !contentRect.h) return visibleTabRects
+    const next = new Map(visibleTabRects)
+    next.set(focusedKey, { ...rect, x: 0, y: 0, w: contentRect.w, h: contentRect.h })
+    return next
+  }, [builderExiting, visibleTabRects, workspace, contentRect])
+
   // ── The ONE Settings wrapper (design §4: overlay-or-pane geometry) ─────────
   // A single, stable SettingsView mount that is positioned like any chat/app
   // content when Settings is a visible builder tab, and full-bleed when the
@@ -803,7 +840,7 @@ export default function Shell() {
   const settingsMounted = settingsActive || settingsVisibleAsTab
   // Positioned into its pane's content rect only in the tiled multi-pane render.
   const settingsPaned = (workspaceChromeActive && settingsVisibleAsTab)
-    ? visibleTabRects.get(SETTINGS_KEY)
+    ? renderTabRects.get(SETTINGS_KEY)
     : null
   // Full-bleed for the takeover overlay, and for single-pane builder where the
   // Settings tab is the sole full-bleed surface (fullBleedKey === settings key).
@@ -1084,20 +1121,37 @@ export default function Shell() {
   // Settings overlay<->tab conversion; it never opens/closes the drawer and the
   // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
   const handleToggleViewMode = useCallback(() => {
-    // Convert the Settings surface across the flip with NO history entry (overlay
-    // <-> builder tab) BEFORE the pure view flip, so a builder session is never
-    // stranded behind the takeover overlay and single mode never shows a paned
-    // Settings. A no-op when Settings isn't involved (design: mode conversion).
-    convertSettingsForModeTransition()
-    // Entering builder (single -> panes) arms the entry-deal beat (item 3), set in
-    // the SAME event so it batches with the flip and the single-leaf render never
-    // paints an un-dealt frame first. Skipped under reduced motion (instant).
-    if (!prefersReducedMotion()
-        && workspaceStateRef.current.ws.viewMode === 'single') {
-      setBuilderEntering(true)
-      clearTimeout(builderEnterTimerRef.current)
-      builderEnterTimerRef.current = setTimeout(() => setBuilderEntering(false), BUILDER_ENTER_MS)
+    // Decide the transition-deal beat off the PRE-conversion state (a focused
+    // Settings tab must sit out the exit deal — its overlay conversion owns that
+    // transition). Both beats are armed in the SAME event as the flip so they
+    // batch: the render never paints an un-dealt / already-collapsed frame first.
+    // Reduced motion skips both (instant flip).
+    const ws = workspaceStateRef.current.ws
+    const leavingBuilder = ws.viewMode !== 'single'
+    const settingsFocused =
+      ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
+    if (!prefersReducedMotion()) {
+      if (leavingBuilder) {
+        // Exit (item 1): hold the tiled render one beat for the reverse card-deal,
+        // but only for a genuine MULTI-PANE exit — a single leaf has no pane to
+        // deal out, so it collapses instantly (today's behavior).
+        if (multiPaneRef.current && !settingsFocused) {
+          setBuilderExiting(true)
+          clearTimeout(builderExitTimerRef.current)
+          builderExitTimerRef.current = setTimeout(() => setBuilderExiting(false), BUILDER_EXIT_MS)
+        }
+      } else {
+        // Enter (item 3): the single-leaf entry deal (strip deals in, pane settles).
+        setBuilderEntering(true)
+        clearTimeout(builderEnterTimerRef.current)
+        builderEnterTimerRef.current = setTimeout(() => setBuilderEntering(false), BUILDER_ENTER_MS)
+      }
     }
+    // Convert the Settings surface across the flip with NO history entry (overlay
+    // <-> builder tab), so a builder session is never stranded behind the takeover
+    // overlay and single mode never shows a paned Settings. A no-op when Settings
+    // isn't involved (design: mode conversion).
+    convertSettingsForModeTransition()
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
   }, [convertSettingsForModeTransition, dispatchWorkspace])
   // The logo gesture layer: a HOLD (~450ms) or a touch swipe-right toggles the
@@ -2508,6 +2562,7 @@ export default function Shell() {
     <div className={`shell${immersiveActive ? ' shell--immersive' : ''}`
       + `${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`
       + `${builderEntering ? ' shell--builder-entering' : ''}`
+      + `${builderExiting ? ' shell--builder-exiting' : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
       {/* inert on the header while the modal drawer is open so keyboard / AT
           focus cannot reach shell-chrome behind the open drawer. The
@@ -2734,13 +2789,18 @@ export default function Shell() {
             reload). */}
         {renderedAppIds.map(id => {
           const tabKey = `app:${id}`
-          const paned = workspaceChromeActive ? visibleTabRects.get(tabKey) : null
+          const paned = workspaceChromeActive ? renderTabRects.get(tabKey) : null
           const fullBleed = !paned && tabKey === fullBleedKey
           const app = apps.find(a => String(a.id) === String(id))
           return (
           <div
             key={id}
             data-tab-key={multiPane ? tabKey : undefined}
+            // The EXIT reverse-deal (item 1) reads this to tell the settling
+            // (focused) pane from the leaving pane(s) that deal back out.
+            data-pane-role={paned
+              ? (paned.paneId === workspace.focusedPaneId ? 'focused' : 'leaving')
+              : undefined}
             className={paned
               ? 'shell__view shell__view--paned'
               : `shell__view ${fullBleed ? 'shell__view--active' : ''}`}
@@ -2796,7 +2856,7 @@ export default function Shell() {
         {chatPaneLayers.map(({ paneId, chatId, role }) => {
           const tabKey = `chat:${chatId}`
           const paneActiveKey = workspace.panes[paneId]?.activeTabKey || tabKey
-          const paned = workspaceChromeActive ? visibleTabRects.get(paneActiveKey) : null
+          const paned = workspaceChromeActive ? renderTabRects.get(paneActiveKey) : null
           const fullBleed = !paned && paneActiveKey === fullBleedKey
           const handoffClass = !settingsActive && role !== 'active'
             ? ` shell__chat-view--${role}`
@@ -2805,6 +2865,11 @@ export default function Shell() {
             <div
               key={chatId}
               data-tab-key={multiPane && role !== 'held' ? tabKey : undefined}
+              // See the app wrapper: marks the EXIT reverse-deal's settling vs
+              // leaving pane (item 1).
+              data-pane-role={paned
+                ? (paneId === workspace.focusedPaneId ? 'focused' : 'leaving')
+                : undefined}
               className={paned
                 ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
                 : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`}
@@ -2859,6 +2924,9 @@ export default function Shell() {
           <div
             key="settings"
             data-tab-key={settingsPaned ? SETTINGS_KEY : undefined}
+            data-pane-role={settingsPaned
+              ? (settingsPaned.paneId === workspace.focusedPaneId ? 'focused' : 'leaving')
+              : undefined}
             className={settingsPaned
               ? 'shell__view shell__view--paned shell__settings-view'
               : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`}

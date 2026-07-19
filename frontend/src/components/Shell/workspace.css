@@ -84,6 +84,44 @@
   }
 }
 
+/* --- Builder mode-EXIT reverse card-deal (design: inverse deal on close) -----
+   Leaving builder with a TILED workspace holds the tiled render for one decisive
+   beat (~240ms, FASTER than the 400ms entry -- the Zippo asymmetry, in the deal
+   vocabulary): the LEAVING pane(s) lift (radius + shadow) and DEAL back out to the
+   right + fade, while the REMAINING (focused) pane SETTLES to full width via the
+   180ms rect transition above (Shell widens its wrapper rect to the full box while
+   the beat is held). The chrome fades so its 2-pane strips/dividers don't linger
+   over the settling pane. Then Shell collapses to single -- the pixels already
+   match, so there is no jump. data-pane-role (set by Shell) tells the two apart.
+   Reduced motion skips the whole beat (Shell never arms it; the guard below is
+   parity). */
+.shell--builder-exiting .workspace__chrome {
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+.shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] {
+  z-index: 4; /* deal OUT over the settling pane growing beneath it */
+  animation: shell-pane-deal-out 240ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+@keyframes shell-pane-deal-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+    border-radius: 0;
+  }
+  30% {
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+    border-radius: 10px;
+  }
+  to {
+    transform: translateX(44px);
+    opacity: 0;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+    border-radius: 10px;
+  }
+}
+
 /* The chrome layer — sibling after the content wrappers, over the whole content
    box, transparent to pointers except its own interactive children. */
 .workspace__chrome {
@@ -514,4 +552,7 @@
      engages under reduced motion, but keep the guard for parity). */
   .shell--builder-entering .shell__tabstrip,
   .shell--builder-entering .shell__view--active { animation: none; }
+  /* Same for the mode-exit reverse deal. */
+  .shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] { animation: none; }
+  .shell--builder-exiting .workspace__chrome { transition: none; }
 }

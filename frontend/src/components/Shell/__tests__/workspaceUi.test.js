@@ -440,8 +440,9 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
   // Entering builder arms a transient beat (single -> panes), reduced-motion skips
   // it, and it batches in the SAME handler as the flip (no un-dealt first frame).
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.match(handler, /if \(!prefersReducedMotion\(\)\s*\n?\s*&& workspaceStateRef\.current\.ws\.viewMode === 'single'\) \{/)
-  assert.match(handler, /setBuilderEntering\(true\)/)
+  assert.match(handler, /if \(!prefersReducedMotion\(\)\) \{/)
+  // Entering (single -> panes) is the else branch of the enter/exit split.
+  assert.match(handler, /\} else \{[\s\S]*?setBuilderEntering\(true\)/)
   assert.match(handler, /setTimeout\(\(\) => setBuilderEntering\(false\), BUILDER_ENTER_MS\)/)
   // The transient root class drives the CSS.
   assert.match(shell, /builderEntering \? ' shell--builder-entering' : ''/)
@@ -453,6 +454,33 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
   // Reduced motion drops the entry deal.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell--builder-entering \.shell__tabstrip,\s*\n\s*\.shell--builder-entering \.shell__view--active \{ animation: none; \}/)
+})
+
+test('leaving builder plays the INVERSE card-deal: deal-out + settle, decisive (item 1)', () => {
+  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  // Armed only on a genuine MULTI-PANE exit, never with a focused Settings tab.
+  assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
+  assert.match(handler, /if \(multiPaneRef\.current && !settingsFocused\) \{/)
+  assert.match(handler, /setBuilderExiting\(true\)/)
+  assert.match(handler, /setTimeout\(\(\) => setBuilderExiting\(false\), BUILDER_EXIT_MS\)/)
+  // Faster than the 400ms entry (the Zippo asymmetry survives, deal vocabulary).
+  assert.match(shell, /const BUILDER_EXIT_MS = 250/)
+  // Held tiled while the beat runs (viewMode already single, effectiveViewMode panes).
+  assert.match(shell, /\(\(dragPreviewBuilder \|\| builderExiting\)[\s\S]*?&& workspace\.viewMode === 'single'\)/)
+  // The remaining (focused) pane settles to the FULL content box during the beat.
+  assert.match(shell, /if \(!builderExiting\) return visibleTabRects/)
+  assert.match(shell, /next\.set\(focusedKey, \{ \.\.\.rect, x: 0, y: 0, w: contentRect\.w, h: contentRect\.h \}\)/)
+  // Wrappers carry data-pane-role so CSS tells the settling vs leaving pane apart.
+  assert.match(shell, /data-pane-role=\{paned[\s\S]*?paned\.paneId === workspace\.focusedPaneId \? 'focused' : 'leaving'/)
+  // The transient root class drives the CSS.
+  assert.match(shell, /builderExiting \? ' shell--builder-exiting' : ''/)
+  // CSS: leaving pane DEALS out to the right + fades; chrome fades out.
+  assert.match(css, /\.shell--builder-exiting \.shell__view--paned\[data-pane-role="leaving"\] \{[\s\S]*?animation:\s*shell-pane-deal-out 240ms[\s\S]*?forwards/)
+  assert.match(css, /@keyframes shell-pane-deal-out\s*\{[\s\S]*?translateX\(0\)[\s\S]*?translateX\(44px\)[\s\S]*?opacity: 0/)
+  assert.match(css, /\.shell--builder-exiting \.workspace__chrome \{[\s\S]*?opacity: 0/)
+  // Reduced motion drops the exit deal.
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(reduced, /\.shell--builder-exiting \.shell__view--paned\[data-pane-role="leaving"\] \{ animation: none; \}/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
@@ -516,7 +544,8 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
 test('Shell threads the (drag-preview) viewMode into the content derivation and the per-pane chat gate', () => {
   // effectiveViewMode is 'panes' during a single-mode drag preview (point 15).
   assert.match(shell, /viewMode: effectiveViewMode/)
-  assert.match(shell, /dragPreviewBuilder && workspace\.viewMode === 'single'/)
+  // effectiveViewMode also holds tiled during the builder EXIT beat (item 1).
+  assert.match(shell, /\(dragPreviewBuilder \|\| builderExiting\)[\s\S]*?workspace\.viewMode === 'single'/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
   assert.match(shell, /chatPanesVisible && \(!single \|\| paneId === workspace\.focusedPaneId\)/)
 })

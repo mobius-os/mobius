@@ -684,6 +684,10 @@ test.describe('Workspace view-mode toggle', () => {
     expect(single.nextId).toBe(baseline.nextId)
     await expect(brand).not.toHaveClass(/shell__brand--builder/) // the mark drops the accent state
 
+    // Leaving builder from a TILED workspace now holds the tiled render for one
+    // reverse card-deal beat (~250ms, BUILDER_EXIT_MS) before collapsing (item 1),
+    // so the post-exit state settles AFTER that beat — these locator assertions
+    // auto-retry (default timeout) and therefore poll past the new duration.
     // Render collapsed to one full-bleed pane (the focused chat a), no chrome.
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
