@@ -16,15 +16,19 @@
   /* 180ms geometry bloom on a layout commit (drop / auto-split / pane close),
      design §3.4 / §6.2. Suppressed during a CONTINUOUS operation — a live
      divider drag or a window resize write rects every frame and must stay crisp
-     — via the `.workspace--resizing` root class Shell/WorkspaceChrome toggle. */
+     — via the operation-specific root classes owned by Shell and
+     WorkspaceChrome. Separate ownership matters: a debounced container resize
+     must never clear the divider drag's transition guard (or vice versa). */
   transition: top 180ms ease-out, left 180ms ease-out,
     width 180ms ease-out, height 180ms ease-out;
   /* Entry CARD-DEAL flourish (replaces the divider-draw): whenever a wrapper
      becomes a tiled pane — a builder-mode enter, a drop that unfolds the parked
      layout, or a split — it deals in from the right with a brief lift (shadow +
      radius) and settles flush. The rects settle on the 180ms transition above, so
-     the deal + settle read as one gesture. Plays only on class-apply (a resize
-     keeps --paned, so it never replays). Reduced-motion drops it (below). */
+     the deal + settle read as one gesture. Plays only on class-apply: live geometry
+     operations never override `animation`, because restoring an overridden
+     animation restarts the deal on an already-mounted pane. Reduced-motion drops
+     it (below). */
   animation: shell-pane-deal 400ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes shell-pane-deal {
@@ -42,12 +46,12 @@
     border-radius: 0;
   }
 }
-.workspace--resizing .shell__view--paned {
-  animation: none; /* a live resize must not re-deal each frame */
-}
-.workspace--resizing .shell__view--paned,
-.workspace--resizing .workspace__strip,
-.workspace--resizing .workspace__divider {
+.workspace--container-resizing .shell__view--paned,
+.workspace--container-resizing .workspace__strip,
+.workspace--container-resizing .workspace__divider,
+.workspace--divider-dragging .shell__view--paned,
+.workspace--divider-dragging .workspace__strip,
+.workspace--divider-dragging .workspace__divider {
   transition: none;
 }
 
@@ -140,7 +144,7 @@
   border-radius: 8px 8px 0 0;
   /* Match the paned wrappers' 180ms geometry bloom on a layout commit, so a
      strip glides with its pane. Suppressed during a continuous resize via
-     `.workspace--resizing` above. */
+     the live-geometry guards above. */
   transition: top 180ms ease-out, left 180ms ease-out,
     width 180ms ease-out, height 180ms ease-out;
   /* Strips sit ABOVE dividers (z:4): a horizontal divider's 44px hit target

@@ -60,9 +60,8 @@ import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
-import { useLogoModeGesture, prefersReducedMotion } from './useLogoModeGesture.js'
+import { prefersReducedMotion } from './useLogoModeGesture.js'
 import { useModeTransitionBeats } from './useModeTransitionBeats.js'
-import useLivingHalo from './useLivingHalo.js'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
 } from './workspaceOnboarding.js'
@@ -72,6 +71,7 @@ import { deriveContentVisibility } from './workspaceView.js'
 import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
+import ShellBrand from './ShellBrand.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 // How long the transient builder mode-ENTER treatment holds its root class
@@ -176,9 +176,9 @@ export default function Shell() {
       // layout-bloom transition while it is in flight and restore it 200ms after
       // the last resize, so a subsequent discrete commit (drop/split) still
       // blooms but a continuous resize stays crisp.
-      el.classList.add('workspace--resizing')
+      el.classList.add('workspace--container-resizing')
       clearTimeout(resizeClassTimer)
-      resizeClassTimer = setTimeout(() => el.classList.remove('workspace--resizing'), 200)
+      resizeClassTimer = setTimeout(() => el.classList.remove('workspace--container-resizing'), 200)
       setContentRect(prev => {
         if (prev.w === w && prev.h === h) return prev
         // Flag-off single-pane never tiles, so a content-size change would
@@ -190,7 +190,11 @@ export default function Shell() {
       })
     })
     ro.observe(el)
-    return () => { ro.disconnect(); clearTimeout(resizeClassTimer) }
+    return () => {
+      ro.disconnect()
+      clearTimeout(resizeClassTimer)
+      el.classList.remove('workspace--container-resizing')
+    }
   }, [])
   const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
   const projection = useMemo(
@@ -237,7 +241,6 @@ export default function Shell() {
   }, [desktopSidebarMode, drawerOpen])
 
   const brandButtonRef = useRef(null)
-  const brandKeyboardModeClickRef = useRef(false)
   const immersiveExitRef = useRef(null)
   const previousPersistentDrawerRef = useRef(persistentDrawer)
   useLayoutEffect(() => {
@@ -1151,26 +1154,13 @@ export default function Shell() {
     convertSettingsForModeTransition()
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
   }, [armBeat, convertSettingsForModeTransition, dispatchWorkspace])
-  // The logo gesture layer: a HOLD (~450ms) or a touch swipe-right toggles the
-  // mode; the single tap keeps opening the drawer INSTANTLY (composed in the brand
-  // button below). Flag-gated so a splits-off build attaches no gesture handlers.
-  // It shares the brand button's ref (brandButtonRef, declared with the desktop
-  // sidebar focus-management above) to write the --hold-progress ring var and take
-  // pointer capture during a hold — ONE ref, both jobs.
-  const logoGesture = useLogoModeGesture({
-    onToggleMode: handleToggleViewMode,
-    brandRef: brandButtonRef,
-    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
-    // Cancel a live hold if navigation opens by ANY other path — the mobile modal
-    // drawer OR the persistent desktop sidebar toggling open (review §6 + sidebar
-    // reconciliation): navigationOpen unifies both.
-    drawerOpen: navigationOpen,
-    // Direction of a completed hold (enter → spring+12, exit → snap+8).
-    builderModeActive,
-  })
-  // The logo's living halo (its "lit soul") — a drifting glow behind the mark while
-  // builder mode is active; killed instantly on snap back to single.
-  useLivingHalo({ brandRef: brandButtonRef, active: builderModeActive })
+  const handleToggleNavigation = useCallback(() => {
+    if (persistentDrawer) {
+      setDesktopSidebarOpen(!desktopSidebarOpen)
+      return
+    }
+    drawerOpen ? closeDrawer() : openDrawer()
+  }, [persistentDrawer, desktopSidebarOpen, setDesktopSidebarOpen, drawerOpen, closeDrawer, openDrawer])
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
@@ -2585,118 +2575,20 @@ export default function Shell() {
       + `${builderEntering ? ' shell--builder-entering' : ''}`
       + `${builderExiting ? ' shell--builder-exiting' : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
-      {/* inert on the header while the modal drawer is open so keyboard / AT
-          focus cannot reach shell-chrome behind the open drawer. The
-          drawer itself gains focus on open (Drawer.jsx focus-management
-          effect) and restores it here on close. React 19 reflects the
-          boolean `inert` prop to the boolean attribute (present when true,
-          absent when false); the old `drawerOpen ? '' : undefined` form was
-          a no-op because React 19 normalizes the known boolean attribute and
-          an empty string serializes as falsy, so it never applied. */}
-      <header className="shell__bar" inert={modalDrawerOpen}>
-        {/* The brand area (logo + wordmark) is the navigation trigger AND — when
-            splits are on — the builder-mode control (owner placement: no standalone
-            toggle button, the logo IS the mode control). SINGLE tap keeps its
-            per-platform meaning EXACTLY as before — instant, never suppressed:
-            toggles the persistent desktop sidebar, or opens/closes the mobile modal
-            drawer. A HOLD (~450ms) or a touch swipe-right toggles the view mode;
-            Shift+Enter is the keyboard path. The mark rotates 180deg (+ the wordmark
-            tints) to indicate the mode; an aria-live region announces the change to
-            assistive tech (the button keeps its nav aria-expanded semantics — one
-            control, two verbs — so mode state rides a live region, not a conflicting
-            aria-pressed). */}
-        <button
-          ref={brandButtonRef}
-          type="button"
-          className={`shell__brand${logoGesture.holding ? ' is-holding' : ''}`
-            + `${logoGesture.flourish ? ` is-${logoGesture.flourish}` : ''}`
-            + `${builderModeActive ? ' shell__brand--builder' : ''}`}
-          // The accessible NAME stays "Toggle navigation" — the button's primary
-          // job is the drawer, and both assistive tech and the e2e specs key off
-          // that stable name. The mode gesture rides aria-description (a supplement,
-          // not the name) so it is surfaced without renaming the control.
-          aria-label="Toggle navigation"
-          aria-description={paneModel.WORKSPACE_SPLITS_ENABLED
-            ? 'Hold or press Shift+Enter for builder mode'
-            : undefined}
-          aria-controls="navigation-drawer"
-          aria-expanded={navigationOpen}
-          /* Android may synthesize a bare click over the logo after an OS Back
-             gesture. backFiredRef still filters that compatibility click, but
-             a deliberate new interaction starts with pointerdown/keydown and
-             must immediately clear the guard — never make the owner wait out a
-             blanket 400ms dead zone before the drawer responds. */
-          onPointerDown={(e) => {
-            backFiredRef.current = false
-            if (paneModel.WORKSPACE_SPLITS_ENABLED) logoGesture.onPointerDown(e)
-          }}
-          onPointerMove={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onPointerMove : undefined}
-          onPointerUp={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onPointerUp : undefined}
-          onPointerCancel={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onPointerCancel : undefined}
-          onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED ? logoGesture.onContextMenu : undefined}
-          onKeyDown={(e) => {
-            backFiredRef.current = false
-            // Keyboard path for the mode toggle (hold is pointer-only): Shift+Enter
-            // flips builder mode, preventDefault keeps it from also toggling nav.
-            // Plain Enter/Space stay the nav trigger, unchanged.
-            if (paneModel.WORKSPACE_SPLITS_ENABLED && e.shiftKey && e.key === 'Enter') {
-              e.preventDefault()
-              brandKeyboardModeClickRef.current = true
-              handleToggleViewMode()
-            }
-          }}
-          onClick={(e) => {
-            if (backFiredRef.current) return
-            if (brandKeyboardModeClickRef.current && e.detail === 0) {
-              brandKeyboardModeClickRef.current = false
-              return
-            }
-            brandKeyboardModeClickRef.current = false
-            // A completed hold, a swipe, or a drag consumed this activation — it must
-            // NOT also toggle navigation. A keyboard click (detail 0) is never the
-            // compat click, so it always toggles nav (review §13).
-            if (logoGesture.consumeSuppressedClick(e.detail)) return
-            // Single tap — per-platform nav toggle, EXACTLY as before (instant, no
-            // timer): toggle the persistent desktop sidebar, else the modal drawer.
-            if (persistentDrawer) { setDesktopSidebarOpen(!desktopSidebarOpen); return }
-            drawerOpen ? closeDrawer() : openDrawer()
-          }}
-          onAnimationEnd={logoGesture.onAnimationEnd}
-        >
-          {/* The mark IS the indicator (CHARGE model). The raster logo (a human hand
-              and a robot hand drawing each other in a circular loop) COMPRESSES as a
-              hold charges (--hold-progress), then springs (enter) / snaps (exit) back
-              and rotates 180deg — swapping which hand is "drawing". In builder mode a
-              living halo drifts behind it (its "lit soul"; useLivingHalo drives the
-              --halo-* vars). CSS-composed; reduced-motion makes the twist instant,
-              skips the spring, and stills the halo. */}
-          <span className="shell__logo-wrap">
-            {paneModel.WORKSPACE_SPLITS_ENABLED && (
-              <span className="shell__logo-halo" aria-hidden="true" />
-            )}
-            {/* Decorative (alt="") — the BUTTON owns every pointer event. The img
-                is pointer-inert (CSS pointer-events:none + draggable=false) so the
-                browser never sees a long-pressable image and can't raise its native
-                image callout/preview sheet on a builder-mode hold (owner phone
-                report: "sometimes holding the logo opens up the image"). The hold
-                gesture targets the button, so making the child inert only IMPROVES
-                pointerdown reliability. */}
-            <img
-              className="shell__logo"
-              src={`${BASE}/moebius.png`}
-              alt=""
-              width="30"
-              height="30"
-              draggable={false}
-            />
-          </span>
-          <span className="shell__wordmark">Möbius</span>
-        </button>
-        {paneModel.WORKSPACE_SPLITS_ENABLED && (
-          <span className="shell__sr-only" role="status" aria-live="polite">
-            {builderModeActive ? 'Builder mode' : 'Single screen'}
-          </span>
-        )}
+      {/* The existing brand toggle remains the visible close affordance while the
+          mobile drawer is modal. Keep the workspace inert below, but do not inert
+          the header: doing so lets the scrim intercept the toggle and strands the
+          drawer without the close path its label and aria-expanded state promise. */}
+      <header className="shell__bar">
+        <ShellBrand
+          brandRef={brandButtonRef}
+          splitsEnabled={paneModel.WORKSPACE_SPLITS_ENABLED}
+          navigationOpen={navigationOpen}
+          builderModeActive={builderModeActive}
+          backFiredRef={backFiredRef}
+          onToggleMode={handleToggleViewMode}
+          onToggleNavigation={handleToggleNavigation}
+        />
         {!online && (
           <span className="shell__offline" role="status" aria-live="polite">
             Offline
@@ -2744,9 +2636,8 @@ export default function Shell() {
       {/* inert on the main content while the modal drawer is open — mirrors
           the drawer's own inert-when-closed contract, but inverted.
           Prevents pointer / keyboard events from reaching the chat or
-          app canvas while the drawer is overlaid in front of it. Boolean
-          prop form — see the header's inert note for why the old
-          `? '' : undefined` form was a React 19 no-op. */}
+          app canvas while the drawer is overlaid in front of it. React 19's
+          boolean prop form emits the attribute only while this is true. */}
       {/* Tab strip: pinned chats/apps to swap between with one tap.
           Switching a tab is ordinary navTo, so back works through the
           existing navStack. The strip shrinks .shell__content by one row;

@@ -113,12 +113,6 @@
   min-height: 0;
 }
 
-/* The shell header becomes inert while the mobile drawer is modal, so its
-   menu toggle cannot double as a dependable close affordance. Keep an
-   explicit escape target inside the modal boundary. The 44px square is a
-   comfortable minimum touch target without making the compact toolbar feel
-   oversized. Desktop has its own persistent-sidebar toggle and does not
-   render this row. */
 /* Wrapper around New chat + Chats + Apps. Holds the layout for
    the per-section scroll model: New chat stays at the top, Chats
    and Apps share the remaining space proportionally to their
@@ -372,15 +366,6 @@
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;
-}
-
-
-
-
-@media (hover: hover) and (pointer: fine) {
-}
-
-@media (hover: none) {
 }
 
 /* The ⋮ button matches the row height so its hit area aligns

@@ -157,7 +157,7 @@ export default function WorkspaceChrome({
     document.body.style.userSelect = 'none'
     // Suppress the layout-bloom transition while the divider is dragged: rects are
     // written imperatively per frame and a transition would lag them.
-    contentEl.classList.add('workspace--resizing')
+    contentEl.classList.add('workspace--divider-dragging')
     const box = contentEl.getBoundingClientRect()
     const { dir, splitId } = divider
 
@@ -233,7 +233,7 @@ export default function WorkspaceChrome({
       window.removeEventListener('blur', end)
       try { handle.releasePointerCapture(e.pointerId) } catch { /* released */ }
       document.body.style.userSelect = prevUserSelect
-      contentEl.classList.remove('workspace--resizing')
+      contentEl.classList.remove('workspace--divider-dragging')
       dispatchWorkspace({ type: 'SET_RATIO', splitId, ratio: committed })
     }
     window.addEventListener('pointermove', onMove)

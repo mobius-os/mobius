@@ -133,6 +133,53 @@ async function paneChromeDeltas(page) {
   }))
 }
 
+/** Sample pane/strip alignment on every animation frame while the navigation
+ *  toggle changes the desktop content width. A settled-only assertion misses
+ *  transient animation restarts, which is exactly when the pane can drift away
+ *  from its strip. */
+async function toggleAndSamplePaneChrome(page) {
+  return page.evaluate(async () => {
+    const maximum = { left: 0, width: 0, seam: 0 }
+    let frames = 0
+    let comparisons = 0
+    const sample = () => {
+      for (const strip of document.querySelectorAll('.workspace__strip')) {
+        const active = strip.querySelector('.shell__tab--active .shell__tab-open')
+        const key = active?.dataset.dragKey
+        const pane = key
+          ? document.querySelector(`.shell__view--paned[data-tab-key="${CSS.escape(key)}"]`)
+          : null
+        if (!pane) continue
+        const stripRect = strip.getBoundingClientRect()
+        const paneRect = pane.getBoundingClientRect()
+        maximum.left = Math.max(maximum.left, Math.abs(stripRect.left - paneRect.left))
+        maximum.width = Math.max(maximum.width, Math.abs(stripRect.width - paneRect.width))
+        maximum.seam = Math.max(maximum.seam, Math.abs(stripRect.bottom - paneRect.top))
+        comparisons += 1
+      }
+      frames += 1
+    }
+
+    const toggle = document.querySelector('button[aria-label="Toggle navigation"]')
+    if (!toggle) throw new Error('navigation toggle not found')
+    await new Promise(resolve => {
+      let startedAt = null
+      const tick = (now) => {
+        if (startedAt === null) {
+          startedAt = now
+          sample()
+          toggle.click()
+        }
+        sample()
+        if (now - startedAt >= 650) resolve()
+        else requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { maximum, frames, comparisons, expanded: toggle.getAttribute('aria-expanded') }
+  })
+}
+
 async function seedTabs(page, tabs, { viewMode } = {}) {
   // Builder mode ('panes', the default) now ALWAYS shows the strip, so the
   // single-pane strip's pinning/unpinning contract (pin engages, unpin to zero
@@ -301,11 +348,17 @@ test.describe('Tabs', () => {
     const navigationToggle = page.getByRole('button', { name: 'Toggle navigation' })
     await expect(navigationToggle).toHaveAttribute('aria-expanded', 'true')
     await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
-    await navigationToggle.click()
-    await expect(navigationToggle).toHaveAttribute('aria-expanded', 'false')
+    const closingMotion = await toggleAndSamplePaneChrome(page)
+    expect(closingMotion.expanded).toBe('false')
+    expect(closingMotion.frames).toBeGreaterThan(5)
+    expect(closingMotion.comparisons).toBeGreaterThan(10)
+    expect(Math.max(...Object.values(closingMotion.maximum))).toBeLessThanOrEqual(1)
     await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
-    await navigationToggle.click()
-    await expect(navigationToggle).toHaveAttribute('aria-expanded', 'true')
+    const openingMotion = await toggleAndSamplePaneChrome(page)
+    expect(openingMotion.expanded).toBe('true')
+    expect(openingMotion.frames).toBeGreaterThan(5)
+    expect(openingMotion.comparisons).toBeGreaterThan(10)
+    expect(Math.max(...Object.values(openingMotion.maximum))).toBeLessThanOrEqual(1)
     await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
 
     // Native chat content focuses its pane through wrapper capture.
