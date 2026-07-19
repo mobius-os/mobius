@@ -54,7 +54,11 @@ export default function DiffView({ file }) {
               <span className="diff-view__hunk-gutter" aria-hidden="true" />
               <code>{hunk.header}</code>
             </div>
-            {hunk.lines.map((line, lineIndex) => (
+            {/* Guarded like file.hunks above. The canonical parser always emits
+                lines, so the platform suite can never catch a producer that does
+                not — and in a mini-app frame an exception here is a frame-error
+                and a blank app, not one degraded row. */}
+            {(Array.isArray(hunk.lines) ? hunk.lines : []).map((line, lineIndex) => (
               <div
                 className={`diff-view__line diff-view__line--${line.type}`}
                 key={`${hunkIndex}-${lineIndex}`}
