@@ -2454,9 +2454,9 @@ def _frame_etag(
   active theme.
 
   Unlike the per-app module, the frame serves `app-frame.html` — the
-  importmap + runtime shell — which changes INDEPENDENTLY of any app
+  isolation boundary + runtime bootstrap — which changes INDEPENDENTLY of any app
   row. Keying only on `app.updated_at` (as `_etag_for_app` does) means
-  an edit to the frame (e.g. bumping a vendored import path) never
+  an edit to the frame (e.g. changing the broker protocol) never
   invalidates an already-installed PWA: it keeps revalidating against
   an unchanged validator, gets a 304, and runs the stale frame forever.
   That is exactly how a dropped `/vendor/three/` path pinned clients to
@@ -2519,7 +2519,7 @@ def get_frame(
   endpoint never reads it.
 
   Frame is intentionally public — it's just the runtime shell
-  (importmap, error UI, postMessage init script). Actual app
+  (error UI, postMessage broker/bootstrap). Actual app
   modules at `/api/apps/{id}/module` still require a token. An
   attacker embedding this frame in their own page would receive
   the iframe's `moebius:frame-mounted` postMessage on their parent window,

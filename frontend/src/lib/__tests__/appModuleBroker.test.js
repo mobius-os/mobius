@@ -105,6 +105,19 @@ test('mounting an opaque frame explicitly warms its versioned document', () => {
   assert.match(worker, /if \(frameUrl\) await warmOne\(frameUrl, OFFLINE_APPS_CACHE\)/)
 })
 
+test('bundled app packages are not duplicated in the shell install precache', () => {
+  for (const stale of [
+    'VENDORED_REACT',
+    'VENDORED_CODEMIRROR',
+    'VENDORED_RECHARTS',
+    'VENDORED_DATE_FNS',
+    'VENDORED_ATLAS_NOTES',
+  ]) {
+    assert.doesNotMatch(worker, new RegExp(stale))
+  }
+  assert.match(worker, /VENDORED_MEMORY_GRAPH/)
+})
+
 test('only app-frame responses admit brokered blob modules at the edge', () => {
   assert.match(caddy, /@appFrame path \/api\/apps\/\*\/frame/)
   const frameCsp = caddy.split('\n').find(

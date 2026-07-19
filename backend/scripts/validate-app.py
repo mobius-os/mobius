@@ -8,8 +8,8 @@ Runs the same checks the install path runs (``app.app_source_check``):
       exists. A miss ships an app that installs from a git clone but breaks on
       every synthetic-fetch install path. This is a hard ERROR (exit 1).
   (b) exact production compilation — bundle the declared entry with the same
-      JSX mode, browser target, format, and external runtime libraries used by
-      the installer. A compile failure is a hard ERROR (exit 1).
+      JSX mode, browser target, format, injected runtime, and pinned dependency
+      graph used by the installer. A compile failure is a hard ERROR (exit 1).
   (c) external-host references — any off-origin http(s) URL in code, which the
       prod ``connect-src 'self'`` CSP blocks silently at runtime. Reported as a
       WARNING; does not fail the run.

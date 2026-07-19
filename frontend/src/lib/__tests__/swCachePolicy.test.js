@@ -46,7 +46,7 @@ test('runtime cache cleanup evicts old offline app caches', () => {
 })
 
 test('only public executable assets cross the opaque app-frame origin', () => {
-  assert.equal(isOpaqueFramePublicAssetPath('/vendor/react@19.2.7/react.mjs'), true)
+  assert.equal(isOpaqueFramePublicAssetPath('/vendor/pdfjs/pdf.worker.mjs'), true)
   assert.equal(isOpaqueFramePublicAssetPath('/mobius-runtime.js'), true)
   assert.equal(isOpaqueFramePublicAssetPath('/assets/index-abc.js'), true)
   assert.equal(isOpaqueFramePublicAssetPath('/assets/index-abc.css'), true)

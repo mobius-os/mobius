@@ -9,13 +9,6 @@ files=(
   backend/requirements.txt
   frontend/package.json
   frontend/package-lock.json
-  backend/scripts/build-react-vendor.mjs
-  backend/scripts/build-codemirror-vendor.mjs
-  backend/scripts/build-recharts-vendor.mjs
-  backend/scripts/build-date-fns-vendor.mjs
-  backend/scripts/build-d3-geo-vendor.mjs
-  backend/scripts/build-marked-vendor.mjs
-  backend/scripts/build-dompurify-vendor.mjs
 )
 
 for file in "${files[@]}"; do

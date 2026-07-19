@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FRAME = REPO_ROOT / "frontend" / "public" / "app-frame.html"
 STANDALONE = REPO_ROOT / "backend" / "app" / "routes" / "standalone.py"
 INJECT = REPO_ROOT / "backend" / "app" / "app_runtime_inject.js"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
 def _package_name(specifier: str) -> str:
@@ -77,6 +78,22 @@ def test_app_hosts_have_no_runtime_import_map_or_static_module_imports():
     assert 'await import("/mobius-runtime.js")' not in source
     assert "__mobiusRuntimeConfig" in source
     assert "__mobiusCompiledRuntime" in source
+
+
+def test_image_does_not_build_obsolete_package_facades():
+  dockerfile = DOCKERFILE.read_text()
+  for builder in (
+    "build-react-vendor",
+    "build-codemirror-vendor",
+    "build-recharts-vendor",
+    "build-date-fns-vendor",
+    "build-d3-geo-vendor",
+    "build-marked-vendor",
+    "build-dompurify-vendor",
+  ):
+    assert builder not in dockerfile
+  assert "pdf.worker.mjs" in dockerfile
+  assert "katex.min.css" in dockerfile
 
 
 def test_compiler_and_both_hosts_agree_on_runtime_abi():

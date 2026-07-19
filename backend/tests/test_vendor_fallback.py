@@ -41,7 +41,7 @@ def test_app_routes_and_images_are_not_static():
 
 def test_opaque_frame_public_assets_are_intrinsically_cors_readable():
   """Service-worker-cached executable assets must load in Origin:null."""
-  assert _public_static_headers("vendor/react@19.2.7/react.mjs") == {
+  assert _public_static_headers("vendor/pdfjs/pdf.worker.mjs") == {
     "Access-Control-Allow-Origin": "*",
   }
   assert _public_static_headers("vendor") == {

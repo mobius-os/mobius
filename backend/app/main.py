@@ -1673,10 +1673,10 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       return FileResponse(str(file), headers=headers or None)
     # When the live build is being served, a file that lives ONLY in the baked
     # build (/app/static) would otherwise fall through to the HTML response.
-    # /vendor/three/* is the canonical example: the npm-install vendor copy
-    # lands in /app/static at image build time, but Vite doesn't emit vendor
+    # /vendor/pdfjs/* is the canonical example: the npm-install asset copy
+    # lands in /app/static at image build time, but Vite doesn't emit it
     # into /data/platform/frontend/dist. Falling back to the baked dir for
-    # files-not-in-live keeps mini-app imports working without forcing the
+    # files-not-in-live keeps app-authored asset URLs working without forcing the
     # rebuild to mirror the entire vendor tree.
     if static_dir != _baked_dir and path != "index.html":
       baked = _baked_dir / path

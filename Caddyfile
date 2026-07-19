@@ -45,11 +45,9 @@
         #   blocks (error handlers, postMessage init, BIP capture, factory-
         #   reset localStorage wipe). Replacing them with nonce/hash-based CSP
         #   requires server-side rendering changes across all four surfaces.
-        #   https://esm.sh — cannot be removed: mini-app importmaps point
-        #   recharts, date-fns, and katex at esm.sh. Those dynamic import()
-        #   calls are governed by script-src; removing the origin would break
-        #   every mini-app that uses those libraries at runtime. Removing it
-        #   requires vendoring all three libraries under /vendor (like three.js).
+        #   https://esm.sh — remains for apps that deliberately use an absolute
+        #   dynamic import while online. Supported bare imports are bundled by
+        #   the app compiler and do not depend on this origin.
     }
     # img-src includes blob: — the shell creates object URLs for upload
     # previews (useFileUpload), the image lightbox, and install-sheet icon

@@ -6,7 +6,7 @@
 # mini-app sits on the loading spinner forever (proven with a trivial
 # hello-world app). The standalone route (`GET /apps/<slug>/`,
 # backend/app/routes/standalone.py) renders the app module DIRECTLY into
-# #root via an importmap + dynamic import, with NO sandboxed iframe — so it
+# #root via the same self-contained compiled module, with NO sandboxed iframe — so it
 # DOES render headless. This wraps that path: mint an owner JWT, inject it
 # into localStorage on the app origin (the standalone shell reads
 # localStorage['token'] and otherwise redirects to /login), suppress the

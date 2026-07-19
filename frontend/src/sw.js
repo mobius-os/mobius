@@ -132,82 +132,9 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting()
 })
 
-// Self-hosted React for the mini-app import map. These live in
-// /app/static/vendor (copied by the Dockerfile AFTER the Vite build, so
-// Vite's manifest can't glob them) and are referenced by the import maps
-// in app-frame.html (in-shell iframe) and standalone.py (installed PWA).
-// They MUST be PRECACHED, not left to the runtime CacheFirst /vendor route
-// below: that route only fills lazily after a successful ONLINE fetch of
-// each exact URL, so on an installed PWA the React URLs were never warmed
-// and the iframe's STATIC `import 'react-dom/client'` failed offline —
-// aborting the whole module before any error UI, a silent blank screen.
-// Precaching makes React install-time guaranteed offline, the same tier as
-// the shell bundle. The version in the path is the cache-bust (revision:
-// null); bumping React here means bumping it in app-frame.html + the
-// standalone.py import map + the Dockerfile vendor step in lockstep.
-// Registered in the SAME precacheAndRoute as the shell so its precache
-// route takes precedence over the runtime /vendor CacheFirst route below
-// (first-registered route wins) — the precached copy shadows any stale
-// runtime-cached vendor entry from before this fix.
-const REACT_VENDOR = '/vendor/react@19.2.7'
-const VENDORED_REACT = [
-  `${REACT_VENDOR}/core.mjs`,
-  `${REACT_VENDOR}/react.mjs`,
-  `${REACT_VENDOR}/react-dom.mjs`,
-  `${REACT_VENDOR}/client.mjs`,
-  `${REACT_VENDOR}/jsx-runtime.mjs`,
-].map(url => ({ url, revision: null }))
-
-// Self-hosted recharts + date-fns — same precache rationale as React above.
-// Mini-apps that render charts / format dates import these from the importmap.
-// Left to the runtime CacheFirst /vendor route they would only warm on the
-// first ONLINE open of a chart/date app; an installed PWA that opens a chart
-// app offline for the first time would import-fail. Precaching makes them
-// install-time guaranteed offline. Version in the path is the cache-bust.
-const VENDORED_RECHARTS = [
-  { url: '/vendor/recharts@2.15.4/recharts.mjs', revision: null },
-]
-const VENDORED_DATE_FNS = [
-  { url: '/vendor/date-fns@4.3.0/date-fns.mjs', revision: null },
-]
-
-// Self-hosted d3-geo (Atlas globe) + marked & DOMPurify (Notes markdown
-// preview) — same precache rationale as React above. These were the last three
-// libs Atlas/Notes still pulled from esm.sh; left to the runtime CacheFirst
-// /vendor route they'd only warm on the first ONLINE open, so an installed PWA
-// opening Atlas/Notes offline the first time would import-fail (the globe or the
-// note-card previews). Precaching makes them install-time offline-guaranteed.
-// Bumping a version here means bumping it in app-frame.html's import map + the
-// Dockerfile vendor step in lockstep.
-const VENDORED_ATLAS_NOTES = [
-  { url: '/vendor/d3-geo@3.1.1/d3-geo.mjs', revision: null },
-  { url: '/vendor/marked@17.0.6/marked.mjs', revision: null },
-  { url: '/vendor/dompurify@3.4.11/dompurify.mjs', revision: null },
-]
-
-// Self-hosted CodeMirror 6 — same precache rationale as React above. The
-// Notes / LaTeX / Editor / Web Studio apps STATICALLY import @codemirror/* +
-// @lezer/highlight + the `codemirror` meta-package at module top via the
-// import maps; left to the runtime CacheFirst /vendor route they were never
-// warmed on an installed PWA, so offline the import rejected and took the
-// whole app (incl. the LaTeX PDF viewer) down. Precaching makes them
-// install-time offline-guaranteed. Bumping the version here means bumping it
-// in app-frame.html's import map + the Dockerfile vendor step in lockstep
-// (standalone.py derives its import map from app-frame.html via importmap_block).
-const CODEMIRROR_VENDOR = '/vendor/codemirror@6'
-const VENDORED_CODEMIRROR = [
-  `${CODEMIRROR_VENDOR}/core.mjs`,
-  `${CODEMIRROR_VENDOR}/codemirror.mjs`,
-  `${CODEMIRROR_VENDOR}/state.mjs`,
-  `${CODEMIRROR_VENDOR}/view.mjs`,
-  `${CODEMIRROR_VENDOR}/commands.mjs`,
-  `${CODEMIRROR_VENDOR}/language.mjs`,
-  `${CODEMIRROR_VENDOR}/lang-markdown.mjs`,
-  `${CODEMIRROR_VENDOR}/lezer-highlight.mjs`,
-].map(url => ({ url, revision: null }))
-
-// Self-hosted d3 + PixiJS for the Memory graph — same precache rationale as
-// React above. Unlike the importmap libs these are CLASSIC script-tag loads
+// Self-hosted d3 + PixiJS for the Memory graph. Unlike packages imported by
+// app source (which the compiler now embeds in the app's single module), these
+// are CLASSIC script-tag loads
 // (the app's loadScriptOnce expects window.d3 / window.PIXI globals); they
 // were previously fetched from cdn.jsdelivr.net, which the prod CSP
 // (script-src 'self' ... https://esm.sh) blocks — the graph silently
@@ -229,11 +156,6 @@ const VENDORED_MEMORY_GRAPH = [
 addPlugins([opaqueFramePublicAssetCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
-  ...VENDORED_REACT,
-  ...VENDORED_CODEMIRROR,
-  ...VENDORED_RECHARTS,
-  ...VENDORED_DATE_FNS,
-  ...VENDORED_ATLAS_NOTES,
   ...VENDORED_MEMORY_GRAPH,
 ])
 cleanupOutdatedCaches()

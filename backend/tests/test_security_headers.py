@@ -71,7 +71,7 @@ def test_bundled_caddy_mirrors_published_site_sandbox():
   assert "@publishedSite path /sites/*" in lines
   assert (
     "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* "
-    "/recover* /sites/*" in lines
+    "/api/apps/*/frame /recover* /sites/*" in lines
   ), "published sites must be excluded from the shell CSP matcher"
   # Its own frame boundary, set directly on the disjoint matcher.
   assert 'header @publishedSite >X-Frame-Options "SAMEORIGIN"' in lines

@@ -808,7 +808,7 @@
 
     // applyTheme mirrors the shell's src/lib/applyTheme.js so the iframe and
     // the shell paint a live theme swap identically. The frame can't import
-    // the library (it's a raw HTML module that only loads /vendor), so the
+    // the library (it's a raw inline bootstrap with no static imports), so the
     // logic is inlined; the pre-paint IIFE in <head> (PREPAINT_SRC) is the
     // shared first-paint half, and this is the postMessage live-swap half.
     //

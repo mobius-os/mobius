@@ -153,7 +153,7 @@ The wrapper is a thin Möbius app around someone else's build. The gotchas, lear
 
 2. **Relative asset paths are mandatory.** Build with a relative public base — CRA `homepage: "."` (`PUBLIC_URL=.`), Vite `base: './'`. Absolute references like `/static/js/main.js` 404 under the nested serve path (browser requests remain under `/app-embeds/by-id/<id>/`, not site root), so the build loads blank. The document never navigates the protected `/app-assets` lane. Because its effective origin is opaque, its own subresources are not controlled by the shell service worker and rely on network/browser HTTP caching; keep `offline_capable: false` unless the platform gains and the package uses an explicit manifest-driven warm contract. Rebuild with the relative base and re-check emitted HTML/CSS references.
 
-3. **No external CDNs.** `/app-embeds` is stricter than the ordinary mini-app importmap: its script/style/font/connect/img/media/worker policy names only the enumerated self/data/blob sources and does **not** allow `esm.sh`. Package every runtime dependency, font, wasm/decoder, model and media file in `static_assets`. **Grep the build for `https://`** before mounting; disable unused CDN defaults rather than leaving a silent CSP failure. A packaged document cannot attach the wrapper's app bearer to `/api/proxy`, so do not treat that owner-authenticated route as a general asset fallback.
+3. **No external CDNs.** `/app-embeds` is stricter than an ordinary compiled mini-app: its script/style/font/connect/img/media/worker policy names only the enumerated self/data/blob sources and does **not** allow `esm.sh`. Package every runtime dependency, font, wasm/decoder, model and media file in `static_assets`. **Grep the build for `https://`** before mounting; disable unused CDN defaults rather than leaving a silent CSP failure. A packaged document cannot attach the wrapper's app bearer to `/api/proxy`, so do not treat that owner-authenticated route as a general asset fallback.
 
 4. **Heartbeat, never `load` or a wrapper prefetch.** Mount the nested iframe immediately behind branded coverage. Its response sandbox makes the document origin `null`; a wrapper `fetch('/app-embeds/...')` is therefore a null-origin CORS request, duplicates the download, and previously enabled cache-poisoning probes. Keep the child hidden until an exact `event.source === iframe.contentWindow`, `event.origin === 'null'`, app-specific ready heartbeat sent after the child UI's first successful commit. Chromium fires iframe `load` for XFO/CSP/error documents too. On timeout, retain branded error/Retry UI; never reveal native browser error chrome.
 
@@ -819,32 +819,26 @@ export default function MyApp({ appId, token }) {
 
 ## Libraries
 
-The canonical bare-specifier runtime-lib manifest lives at `backend/app/runtime_libs.py`. The `app-frame.html` import map provides those libraries so they load fast and cache across apps.
+The canonical supported-import list lives in `backend/app/app_compile_contract.py`, with exact production versions pinned in `frontend/package.json`. Esbuild embeds React, `mobius-runtime`, and every package the app actually imports into one module. This is load-bearing: the in-shell frame has an opaque origin and cannot make service-worker-controlled dependency requests.
 
-**`three` is self-hosted via the import map — use the bare specifier:**
+**Use bare package specifiers:**
 
 ```jsx
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 ```
 
-Never hardcode `/vendor/three@<version>/…` — a three bump then 404s the build → SPA HTML fallback → "failed to load dynamic module". The bare `'three'` specifier is version-proof; the import map points at the pinned version.
+Never hardcode `/vendor/three@<version>/…`. The bare `'three'` specifier is compiled against the platform's pinned version, bundled with the app, and works from the opaque frame offline.
 
-**Any other library is fair game via runtime dynamic import from esm.sh** (no install, no build step):
+Do not make an offline-capable app depend on an absolute CDN import. A dynamic `https://esm.sh/...` import bypasses the app bundle, fails cold offline, and can strand the entire render path. If a package is not in the supported list, add it deliberately to the platform compiler (`frontend/package.json` plus `BUNDLED_RUNTIME_LIBS`) and validate the resulting bundle size. Keep the browser-level module under the parent broker's 8 MiB transfer cap.
 
-```jsx
-const { DndContext } = await import('https://esm.sh/@dnd-kit/core')   // drag-and-drop
-const L = (await import('https://esm.sh/leaflet')).default            // maps
-const { motion } = await import('https://esm.sh/framer-motion')       // animations
-```
-
-**To add a library to the import map permanently** (faster, no per-load dynamic import), edit `/data/platform/frontend/public/app-frame.html` — the backend prefers this copy over the baked fallback, so changes take effect on the next app load with no frontend rebuild. Add an entry like `"@dnd-kit/core": "https://esm.sh/@dnd-kit/core@6",`.
+Online-only apps may still use an explicit `https://esm.sh/...` dynamic import when the tradeoff is intentional, but it is never part of the offline guarantee and must have a visible failure state.
 
 ---
 
 ## Offline-capable apps (opt-in)
 
-Storage already works offline via `window.mobius.storage` (above) for every app. `offline_capable: true` is a SEPARATE flag that ADDS caching of the app's own CODE — the service worker caches the frame + module so the app loads and renders with no network. Set it in the create or PATCH body for any app that genuinely works offline (notes, a tracker, a game).
+Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in the create or PATCH body for apps such as notes, trackers, or games only after testing a cold offline reload.
 
 Separately, and automatically for EVERY app (no flag), the shell's service worker keeps an installed PWA out of the browser's native "no internet" page: a non-offline-capable app shows a branded offline screen when opened offline, never browser chrome. So the flag is the difference between "the real app runs offline" (set it) and "a branded you're-offline screen" (the automatic default) — neither ever drops to the browser error page.
 

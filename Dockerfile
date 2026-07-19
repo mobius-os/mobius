@@ -151,65 +151,12 @@ fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
 console.log('cli-release-dates.json:',JSON.stringify(out));" \
     || echo '{}' > /app/cli-release-dates.json
 
-# Install the runtime shell dependency tree from manifests alone. Application
-# source is copied after the self-hosted vendor layers below, so an ordinary
-# frontend edit rebuilds the bundle without also repeating this npm install or
-# the unrelated React/Recharts/date-fns vendor builds.
+# Install the shell and mini-app compiler dependency tree from manifests alone.
+# Application source is copied later, so ordinary frontend edits reuse this
+# pinned npm layer. The production compiler resolves app bare imports only from
+# this directory and embeds the complete graph into each app module.
 COPY frontend/package.json frontend/package-lock.json* ./shell-src/
 RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
-
-# Self-hosted vendor libs for mini-app import maps. Pinned via npm
-# install at image build time, served same-origin under /vendor/ with
-# a long cache. Eliminates the cold-load esm.sh waterfall for three.js
-# (cold-load saves 1-3s on any 3D app). Pinned to match the version
-# we previously served via CDN.
-# Copy the WHOLE build/ dir, not just three.module.js: since 0.163 the
-# library is split (three.module.js does `export * from './three.core.js'`),
-# so a single-file copy leaves three.core.js missing. Requests for it then
-# fall through to the SPA HTML fallback (200 text/html), and strict module
-# MIME checking rejects it as "failed to load dynamic module".
-# The bare `/vendor/three/` is a maintained compat alias (relative
-# symlink) — the seed documents that path, and PWAs that cached an older
-# app-frame whose importmap pointed at the unversioned URL still request
-# it. Without the alias those requests 404 → SPA HTML → spinner-forever.
-RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent three@0.185.1 \
-    && mkdir -p /app/static/vendor/three@0.185.1/addons \
-    && cp -r node_modules/three/build/. /app/static/vendor/three@0.185.1/ \
-    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three@0.185.1/addons/ \
-    && ln -s three@0.185.1 /app/static/vendor/three \
-    && cd / && rm -rf /tmp/vendor-install
-
-# Self-hosted React for the mini-app import map — same rationale as
-# three.js above, but load-bearing for OFFLINE rather than just cold-load
-# speed. Mini-apps import react/react-dom via app-frame.html's (and
-# standalone.py's) import map. Serving these from esm.sh meant offline-
-# capable apps depended on a third-party CDN whose React entry is a
-# multi-hop re-export chain (react@19.2.7 -> /react@19.2.7/es2022/
-# react.bundle.mjs → …; react-dom pulls scheduler + sub-chunks as separate
-# URLs). The service worker cache-firsts esm.sh, but only opportunistically
-# per URL, so a single uncached hop (or a version bump invalidating the
-# prior cache) left an offline app blank on its top-level
-# `import 'react-dom/client'`. Serving React same-origin under /vendor
-# removes the third-party dependency entirely and makes offline
-# deterministic.
-#
-# The build (backend/scripts/build-react-vendor.mjs) bundles all four
-# import-map entries into ONE core.mjs (so React is included exactly once)
-# and emits tiny facades that re-export it — every specifier resolves to a
-# single shared React instance. Bundling each entry separately with
-# `--external:react` does NOT work: react/react-dom are CommonJS, so
-# esbuild emits a throwing `__require("react")` shim that breaks every
-# mini-app in the browser. See the script header for the full rationale.
-COPY backend/scripts/build-react-vendor.mjs /tmp/build-react-vendor.mjs
-RUN mkdir -p /tmp/react-install && cd /tmp/react-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent react@19.2.7 react-dom@19.2.7 \
-    && mkdir -p /app/static/vendor/react@19.2.7 \
-    && node /tmp/build-react-vendor.mjs /tmp/react-install \
-         /app/static/vendor/react@19.2.7 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/react-install /tmp/build-react-vendor.mjs
 
 # pdf.js (Mozilla's engine — what Firefox's built-in PDF viewer uses),
 # vendored same-origin so the LaTeX app renders a compiled PDF as a real
@@ -228,43 +175,15 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
     && cd / && rm -rf /tmp/pdfjs-install
 
-# Self-hosted CodeMirror 6 for the mini-app import map — same OFFLINE
-# rationale as React above. The Notes / LaTeX / Editor / Web Studio apps
-# import @codemirror/* + @lezer/highlight + the `codemirror` meta-package
-# via the import map. Served from esm.sh, those were static top-level
-# imports an offline (or flaky-network) app had to fetch from a third-party
-# CDN before any app code ran — a single uncached hop took the WHOLE app
-# down (this is the "LaTeX PDF won't load / struggling" report: CodeMirror's
-# failed fetch rejected the app's dynamic import and the PDF viewer never
-# mounted). The build (build-codemirror-vendor.mjs) bundles every import-map
-# specifier into ONE core.mjs so the shared cores (@codemirror/state,
-# @lezer/common) exist exactly once — CodeMirror requires a single instance —
-# then emits facades that re-export it. See the script header for rationale.
-COPY backend/scripts/build-codemirror-vendor.mjs /tmp/build-codemirror-vendor.mjs
-RUN mkdir -p /tmp/cm-install && cd /tmp/cm-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent \
-         codemirror@6.0.2 @codemirror/state@6.7.0 @codemirror/view@6.43.4 \
-         @codemirror/commands@6.10.4 @codemirror/language@6.12.4 \
-         @codemirror/lang-markdown@6.5.0 @lezer/highlight@1.2.3 \
-    && mkdir -p /app/static/vendor/codemirror@6 \
-    && node /tmp/build-codemirror-vendor.mjs /tmp/cm-install \
-         /app/static/vendor/codemirror@6 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/cm-install /tmp/build-codemirror-vendor.mjs
-
-# KaTeX — self-hosted for both the shell (window.katex via <script> in
-# index.html) and mini-apps (ES module import via the app-frame.html
-# importmap). Eliminates the last two third-party CDN dependencies
-# (cdn.jsdelivr.net for the shell, esm.sh for mini-apps).
+# KaTeX browser assets — the package's JavaScript is bundled when an app imports
+# it, while the shell and app-authored stylesheets still use these public files.
 #
-# JS: katex.min.js (UMD global, loaded as window.katex by the shell) +
-#     katex.mjs (ESM, imported by mini-apps via importmap).
+# JS: katex.min.js (UMD global, loaded as window.katex by the shell) plus a
+#     public ESM file for explicit asset consumers.
 # CSS: katex.min.css with @font-face rules that reference ./fonts/*.
 # Fonts: woff2 only (all modern browsers support woff2; skipping ttf/woff
 #        shrinks the layer by ~1.5 MB).
-# A bare /vendor/katex/ symlink acts as a stable unversioned alias so
-# any cached standalone PWA app-frame that referenced the old
-# esm.sh-backed katex still resolves after the upgrade.
+# The stable /vendor/katex/ alias is used by installed app stylesheets.
 RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent katex@0.17.0 \
@@ -275,71 +194,6 @@ RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.17.0/fonts/ \
     && ln -s katex@0.17.0 /app/static/vendor/katex \
     && cd / && rm -rf /tmp/katex-install
-
-# recharts — self-hosted for the mini-app import map (P1-C). Mini-apps that
-# render charts import recharts; serving from esm.sh meant an offline-capable
-# chart app depended on a third-party CDN fetch. We self-host same-origin so
-# offline is deterministic. recharts externalises react/react-dom and maps them
-# to the already-vendored /vendor/react entries in the importmap.
-# The build (build-recharts-vendor.mjs) bundles only the exported components
-# listed in the old esm.sh ?exports= filter so the bundle is not inflated.
-COPY backend/scripts/build-recharts-vendor.mjs /tmp/build-recharts-vendor.mjs
-RUN mkdir -p /tmp/recharts-install && cd /tmp/recharts-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent recharts@2.15.4 react@19.2.7 react-dom@19.2.7 \
-    && mkdir -p /app/static/vendor/recharts@2.15.4 \
-    && node /tmp/build-recharts-vendor.mjs /tmp/recharts-install \
-         /app/static/vendor/recharts@2.15.4 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/recharts-install /tmp/build-recharts-vendor.mjs
-
-# date-fns — self-hosted for the mini-app import map (P1-C). date-fns is a
-# pure-JS date utility library with no peer deps; a simple bundle suffices.
-COPY backend/scripts/build-date-fns-vendor.mjs /tmp/build-date-fns-vendor.mjs
-RUN mkdir -p /tmp/datefns-install && cd /tmp/datefns-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent date-fns@4.3.0 \
-    && mkdir -p /app/static/vendor/date-fns@4.3.0 \
-    && node /tmp/build-date-fns-vendor.mjs /tmp/datefns-install \
-         /app/static/vendor/date-fns@4.3.0 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/datefns-install /tmp/build-date-fns-vendor.mjs
-
-# d3-geo — self-hosted for the mini-app import map. The Atlas globe imports
-# d3-geo; serving from esm.sh meant an offline-capable globe app depended on a
-# third-party CDN fetch before the projection could render. Pure-JS, no peer
-# deps; a simple bundle suffices (same shape as date-fns).
-COPY backend/scripts/build-d3-geo-vendor.mjs /tmp/build-d3-geo-vendor.mjs
-RUN mkdir -p /tmp/d3geo-install && cd /tmp/d3geo-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent d3-geo@3.1.1 \
-    && mkdir -p /app/static/vendor/d3-geo@3.1.1 \
-    && node /tmp/build-d3-geo-vendor.mjs /tmp/d3geo-install \
-         /app/static/vendor/d3-geo@3.1.1 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/d3geo-install /tmp/build-d3-geo-vendor.mjs
-
-# marked — self-hosted for the mini-app import map. The Notes app imports marked
-# to render markdown note-card previews; serving from esm.sh meant offline
-# previews depended on a third-party CDN. Pure-JS, no peer deps.
-COPY backend/scripts/build-marked-vendor.mjs /tmp/build-marked-vendor.mjs
-RUN mkdir -p /tmp/marked-install && cd /tmp/marked-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent marked@17.0.6 \
-    && mkdir -p /app/static/vendor/marked@17.0.6 \
-    && node /tmp/build-marked-vendor.mjs /tmp/marked-install \
-         /app/static/vendor/marked@17.0.6 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/marked-install /tmp/build-marked-vendor.mjs
-
-# DOMPurify — self-hosted for the mini-app import map. The Notes preview
-# sanitizes markdown-derived HTML with DOMPurify before injecting it; serving
-# from esm.sh meant sanitization (on the render path) depended on a third-party
-# CDN. Pure-JS, no peer deps; binds to the DOM at runtime in the browser frame.
-COPY backend/scripts/build-dompurify-vendor.mjs /tmp/build-dompurify-vendor.mjs
-RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent dompurify@3.4.11 \
-    && mkdir -p /app/static/vendor/dompurify@3.4.11 \
-    && node /tmp/build-dompurify-vendor.mjs /tmp/dompurify-install \
-         /app/static/vendor/dompurify@3.4.11 "$(command -v esbuild)" \
-    && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
 
 # Frontend static files + app-frame served by FastAPI, plus the full source
 # tree retained for /data/platform/frontend/node_modules to link at runtime.
@@ -354,14 +208,6 @@ COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image
 COPY Dockerfile /tmp/test-image-inputs/Dockerfile
 COPY backend/requirements.txt /tmp/test-image-inputs/backend/requirements.txt
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
-COPY backend/scripts/build-react-vendor.mjs \
-     backend/scripts/build-codemirror-vendor.mjs \
-     backend/scripts/build-recharts-vendor.mjs \
-     backend/scripts/build-date-fns-vendor.mjs \
-     backend/scripts/build-d3-geo-vendor.mjs \
-     backend/scripts/build-marked-vendor.mjs \
-     backend/scripts/build-dompurify-vendor.mjs \
-     /tmp/test-image-inputs/backend/scripts/
 RUN MOBIUS_TEST_IMAGE_INPUT_ROOT=/tmp/test-image-inputs \
       /tmp/test-image-inputs/scripts/test-image-fingerprint.sh \
       > /app/test-image-fingerprint \
