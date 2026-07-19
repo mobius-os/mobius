@@ -130,6 +130,48 @@ def _close_trailing_thinking(assistant_blocks: list) -> None:
     assistant_blocks[-1]["_thinking_closed"] = True
 
 
+def _tool_block_for_sources(assistant_blocks: list, tool_use_id) -> dict | None:
+  """The tool block a `tool_sources` event belongs to.
+
+  Prefer an exact `tool_use_id` match so batched searches each keep their own
+  results. Events with no id (a provider that does not stamp one, or a
+  transcript recorded before the id was carried) fall back to the historical
+  last-WebSearch behaviour rather than dropping the sources.
+  """
+  if tool_use_id:
+    for blk in reversed(assistant_blocks):
+      if (blk.get("type") == "tool"
+          and blk.get("tool_use_id") == tool_use_id):
+        return blk
+  for blk in reversed(assistant_blocks):
+    if blk.get("type") == "tool" and blk.get("tool") == "WebSearch":
+      return blk
+  return None
+
+
+def _merge_sources(existing, incoming) -> list:
+  """Union of a block's sources, first occurrence winning, deduped by url.
+
+  Merging (rather than replacing) keeps a block correct when one search
+  reports its results across more than one event, and stays idempotent under
+  the catch-up burst, which replays every event from the start of the turn.
+  """
+  merged = list(existing or [])
+  seen = {
+    src.get("url") for src in merged
+    if isinstance(src, dict) and src.get("url")
+  }
+  for src in incoming:
+    if not isinstance(src, dict):
+      continue
+    url = src.get("url")
+    if not url or url in seen:
+      continue
+    seen.add(url)
+    merged.append(src)
+  return merged
+
+
 def _persisted_block(block: dict) -> dict:
   """Drop live-only reducer metadata from a block before storage."""
   if block.get("type") != "thinking":
@@ -441,11 +483,15 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     sources = event.get("sources") or []
     if not isinstance(sources, list) or not sources:
       return False
-    for blk in reversed(assistant_blocks):
-      if blk.get("type") == "tool" and blk.get("tool") == "WebSearch":
-        blk["sources"] = sources
-        return True
-    return False
+    # Bind the result to the search that produced it, by id. A turn can run
+    # several WebSearch calls in ONE batch, and their results then arrive back
+    # to back while the LAST search block is the trailing one — so matching by
+    # position alone drops every batch member's sources but the final one.
+    target = _tool_block_for_sources(assistant_blocks, event.get("tool_use_id"))
+    if target is None:
+      return False
+    target["sources"] = _merge_sources(target.get("sources"), sources)
+    return True
 
   if event_type == "tool_end":
     for blk in reversed(assistant_blocks):

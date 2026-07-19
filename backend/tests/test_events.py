@@ -342,6 +342,65 @@ def test_tool_sources_attach_to_most_recent_websearch_tool():
   assert blocks[1]["sources"] == sources
 
 
+def test_batched_websearch_keeps_each_search_own_sources():
+  """A turn can run several WebSearch calls in ONE batch, so every
+  tool_sources event arrives while the LAST search block is trailing.
+  Matching by position alone landed them all on that one block, each
+  overwriting the previous, and only the final search's sources survived."""
+  blocks = [
+    {"type": "tool", "tool": "WebSearch", "input": "query A",
+     "output": "", "status": "done", "tool_use_id": "toolu_a"},
+    {"type": "tool", "tool": "WebSearch", "input": "query B",
+     "output": "", "status": "done", "tool_use_id": "toolu_b"},
+  ]
+  sources_a = [{"title": "A", "url": "https://a.example/1"}]
+  sources_b = [{"title": "B", "url": "https://b.example/2"}]
+
+  assert process_event(
+    {"type": "tool_sources", "sources": sources_a, "tool_use_id": "toolu_a"},
+    blocks,
+  )
+  assert process_event(
+    {"type": "tool_sources", "sources": sources_b, "tool_use_id": "toolu_b"},
+    blocks,
+  )
+
+  assert blocks[0]["sources"] == sources_a
+  assert blocks[1]["sources"] == sources_b
+
+
+def test_tool_sources_merges_and_dedupes_on_replay():
+  """The catch-up burst replays every event from the start of the turn, so
+  applying the same event twice must not duplicate a source."""
+  blocks = [{"type": "tool", "tool": "WebSearch", "input": "q",
+             "output": "", "status": "done", "tool_use_id": "toolu_a"}]
+  event = {
+    "type": "tool_sources",
+    "tool_use_id": "toolu_a",
+    "sources": [{"title": "A", "url": "https://a.example/1"}],
+  }
+
+  process_event(event, blocks)
+  process_event(event, blocks)
+
+  assert blocks[0]["sources"] == [{"title": "A", "url": "https://a.example/1"}]
+
+
+def test_tool_sources_without_id_keeps_last_websearch_fallback():
+  """Transcripts recorded before the id was carried must still render."""
+  blocks = [
+    {"type": "tool", "tool": "WebSearch", "input": "old",
+     "output": "", "status": "done"},
+    {"type": "tool", "tool": "WebSearch", "input": "new",
+     "output": "", "status": "running"},
+  ]
+  sources = [{"title": "E", "url": "https://example.com/page"}]
+
+  assert process_event({"type": "tool_sources", "sources": sources}, blocks)
+  assert "sources" not in blocks[0]
+  assert blocks[1]["sources"] == sources
+
+
 def test_tool_sources_noop_without_matching_block_or_sources():
   blocks = [{"type": "tool", "tool": "Bash", "input": "ls",
              "output": "", "status": "running"}]

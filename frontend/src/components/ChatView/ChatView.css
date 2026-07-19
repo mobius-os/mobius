@@ -860,12 +860,6 @@
   word-break: break-all;
 }
 
-.chat__tool-sources {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
 .chat__tool-source-chip {
   display: inline-flex;
   align-items: center;
@@ -888,6 +882,39 @@
 .chat__tool-source-host {
   flex-shrink: 0;
   color: var(--muted); /* CONTRACT: lower emphasis source domain */
+}
+
+/* The turn's sources, after the answer (MessageSources). Shares the chip
+   styling with the tool-level markup above so a source reads the same
+   wherever it appears; only the surrounding row is message-level. */
+.chat__sources {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 2px 32px 2px 8px;
+}
+
+.chat__sources-label {
+  padding-top: 3px;
+  color: var(--muted); /* CONTRACT: lower emphasis section label */
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.chat__sources-chips {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 240px;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+/* Narrow viewports stack the label above the chips so a long source title
+   keeps its width instead of being squeezed into a sliver. */
+@media (max-width: 480px) {
+  .chat__sources { display: block; }
+  .chat__sources-label { display: block; padding: 0 0 6px; }
 }
 
 .chat__tool-output-more {
