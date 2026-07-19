@@ -162,13 +162,12 @@ async function openDrawer(page) {
   await expect(toggle).toHaveAttribute('aria-expanded', 'true')
 }
 
-/** Close the modal drawer through its in-panel, hit-tested control. */
+/** Close the modal drawer via the brand toggle (the drawer has no dedicated
+ *  close control by owner decision — toggle, scrim, and Back are the exits). */
 async function closeDrawerButton(page) {
-  const close = page.getByRole('button', { name: 'Close navigation', exact: true })
-  await expect(close).toBeVisible()
-  await close.click()
-  await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-    .toHaveAttribute('aria-expanded', 'false')
+  const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 }
 
 /** Close the drawer via the toggle button (without navigating). */

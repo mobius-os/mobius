@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled, X } from '@openai/apps-sdk-ui/components/Icon'
+import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
@@ -244,7 +244,6 @@ export default function Drawer({
   // drawer was dismissed (Escape, overlay tap, swipe).
   const previousFocusRef = useRef(null)
   const drawerRef = useRef(null)
-  const closeButtonRef = useRef(null)
   useEffect(() => {
     if (persistent) {
       previousFocusRef.current = null
@@ -255,15 +254,11 @@ export default function Drawer({
       // Defer to next frame so the drawer's CSS transition has begun
       // and the panel is in the rendered DOM before we focus it.
       const focusFrame = requestAnimationFrame(() => {
-        // The close control is the safest first destination in a modal
-        // navigation drawer: it is always present and gives touch, switch,
-        // and keyboard users an immediate, explicit escape path. Fall back
-        // to the panel if the control became unavailable during a responsive
-        // mode change.
-        closeButtonRef.current?.focus()
-        if (document.activeElement !== closeButtonRef.current) {
-          drawerRef.current?.focus()
-        }
+        // Focus the panel itself (tabIndex=-1): the drawer keeps no dedicated
+        // close control by owner decision — the scrim tap, the brand toggle,
+        // and Back all close it, and focus restore on close (below) returns
+        // keyboard users to wherever they came from.
+        drawerRef.current?.focus()
       })
       return () => cancelAnimationFrame(focusFrame)
     } else {
@@ -518,22 +513,6 @@ export default function Drawer({
         onTransitionEnd={handleDrawerTransitionEnd}
       >
         <div className="drawer__body">
-          {!persistent && (
-            <div className="drawer__mobile-header">
-              <span className="drawer__mobile-title">Navigation</span>
-              <button
-                ref={closeButtonRef}
-                type="button"
-                className="drawer__close"
-                onClick={() => onClose?.()}
-                aria-label="Close navigation"
-                disabled={interactionLocked}
-              >
-                <X width={18} height={18} aria-hidden="true" />
-              </button>
-            </div>
-          )}
-
           {/* Single scroll wrapper around New chat + Chats + Apps.
               Earlier each group held its own scrolling region with
               flex:1, which split the drawer height evenly even when
