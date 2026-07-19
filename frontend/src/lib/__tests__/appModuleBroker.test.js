@@ -116,6 +116,7 @@ test('bundled app packages are not duplicated in the shell install precache', ()
     assert.doesNotMatch(worker, new RegExp(stale))
   }
   assert.match(worker, /VENDORED_MEMORY_GRAPH/)
+  assert.match(worker, /RETAINED_RUNTIME_ASSETS/)
 })
 
 test('only app-frame responses admit brokered blob modules at the edge', () => {

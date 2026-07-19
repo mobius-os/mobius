@@ -87,6 +87,51 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     expect(regOk).toBe('registered')
   })
 
+  test('retained PDF and KaTeX assets work before their first online use', async ({ page, context }) => {
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.evaluate(async () => {
+      await navigator.serviceWorker.register('/sw.js')
+      await navigator.serviceWorker.ready
+    })
+    await expect.poll(() => page.evaluate(
+      () => !!navigator.serviceWorker.controller,
+    )).toBe(true)
+
+    const paths = [
+      '/vendor/pdfjs/pdf.worker.mjs',
+      '/vendor/katex/katex.min.css',
+      '/vendor/katex/fonts/KaTeX_Main-Regular.woff2',
+      '/vendor/katex@0.17.0/katex.min.css',
+      '/vendor/katex@0.17.0/fonts/KaTeX_Main-Regular.woff2',
+    ]
+
+    await context.setOffline(true)
+    try {
+      const results = await page.evaluate(async (urls) => Promise.all(
+        urls.map(async (url) => {
+          try {
+            const response = await fetch(url)
+            return {
+              url,
+              status: response.status,
+              bytes: (await response.arrayBuffer()).byteLength,
+            }
+          } catch (error) {
+            return { url, error: error?.name || String(error) }
+          }
+        }),
+      ), paths)
+      expect(results).toEqual(paths.map(url => expect.objectContaining({
+        url,
+        status: 200,
+        bytes: expect.any(Number),
+      })))
+      for (const result of results) expect(result.bytes).toBeGreaterThan(1_000)
+    } finally {
+      await context.setOffline(false)
+    }
+  })
+
   test('opaque app frames load their cached module through the parent while offline', async ({ page, request, context }) => {
     const runtimeErrors = []
     const sanitize = value => String(value || '')

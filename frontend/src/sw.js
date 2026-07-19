@@ -75,6 +75,7 @@ import {
   supersededVersionKeys,
   entriesToTrim,
 } from './sw-cache-policy.js'
+import { RETAINED_RUNTIME_ASSETS } from './sw-precache-assets.js'
 
 const isOpaqueFramePublicAssetRequest = request => {
   try {
@@ -148,6 +149,14 @@ const VENDORED_MEMORY_GRAPH = [
   '/vendor/pixi.js@8.19.0/pixi.min.js',
 ].map(url => ({ url, revision: null }))
 
+// PDF.js's worker plus KaTeX's stylesheet/fonts are the other deliberate URL
+// assets left after the compiler began embedding app dependency graphs. Runtime
+// CacheFirst alone only helps after each URL has been requested online, which
+// makes a first offline open render an empty PDF or unstyled math. Install them
+// with the shell SW so every offline-capable app can use the complete retained
+// runtime on its first open. Stable aliases have revisions; versioned URLs are
+// immutable. See sw-precache-assets.js for the single versioned inventory.
+
 // Inject point — Workbox replaces `self.__WB_MANIFEST` with the precache
 // manifest derived from the Vite build's content-hashed assets. The result
 // is that every release's shell precache lives under a unique
@@ -157,6 +166,7 @@ addPlugins([opaqueFramePublicAssetCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
   ...VENDORED_MEMORY_GRAPH,
+  ...RETAINED_RUNTIME_ASSETS,
 ])
 cleanupOutdatedCaches()
 
