@@ -73,6 +73,17 @@ async function ensureNavigationOpen(page) {
   await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
 }
 
+/** Press-and-HOLD the logo past HOLD_MS (450ms) so the rAF completion fires — the
+ *  real pointer path (not the deterministic Shift+Enter). The completed hold
+ *  suppresses the trailing click, so it never also toggles the drawer. */
+async function holdLogo(page, brand) {
+  const box = await brand.boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.waitForTimeout(650) // comfortably past the 450ms hold threshold
+  await page.mouse.up()
+}
+
 /** Drawer rows intentionally exclude chats with no messages. These workspace
  *  drag tests create API-only chats so they can avoid agent runs; make only the
  *  requested fixtures satisfy the drawer-list contract while preserving the
@@ -696,6 +707,57 @@ test.describe('Workspace view-mode toggle', () => {
     await waitTiled(page)
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
     expect(await readWs(page)).toEqual(baseline)
+  })
+
+  // Regression (item 0): a genuine MULTI-PANE exit via the real POINTER-HOLD
+  // completion path — the path the single-leaf keyboard verification missed — must
+  // collapse the tiled workspace and STAY collapsed, and a rapid re-enter within
+  // the exit beat must never strand the beat (the old two-latch shape could leave
+  // builderExiting true forever → tiled after the mode flipped). Runs with motion
+  // ON so the exit reverse-deal beat actually engages (the bug lived in the beat).
+  test('(item 0) multi-pane POINTER-HOLD exit collapses and stays; rapid re-enter never wedges', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'holdExitA')
+    const b = await createTaggedChat(page, 'holdExitB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+    expect((await readWs(page)).viewMode).toBe('panes')
+
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    // The pointer-hold completion arms the multi-pane exit beat; the collapse must
+    // LAND, not stall tiled.
+    await holdLogo(page, brand)
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    // The regression symptom was "panes never collapse" — assert the tiled chrome
+    // is gone and STAYS gone across the beat window + settle.
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0, { timeout: 3000 })
+    await expect(page.locator('.shell__view--paned')).toHaveCount(0)
+    await page.waitForTimeout(400) // past BUILDER_EXIT_MS (250) + margin
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
+
+    // Wedge sequence: re-enter, then exit -> re-enter -> exit with sub-beat gaps.
+    // At no sampled moment may the two deal classes co-exist (mutual exclusion),
+    // and it must always settle collapsed.
+    await brand.focus(); await page.keyboard.press('Shift+Enter') // enter builder
+    await waitTiled(page)
+    let sawBothClasses = false
+    const sampleBoth = async () => {
+      if (await page.locator('.shell--builder-exiting.shell--builder-entering').count() > 0) sawBothClasses = true
+    }
+    await brand.focus(); await page.keyboard.press('Shift+Enter') // exit1
+    await page.waitForTimeout(90); await sampleBoth()
+    await brand.focus(); await page.keyboard.press('Shift+Enter') // re-enter within the exit beat
+    await page.waitForTimeout(20); await sampleBoth()
+    await page.waitForTimeout(60); await sampleBoth()
+    await brand.focus(); await page.keyboard.press('Shift+Enter') // exit2
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    await expect(page.locator('.shell__view--paned')).toHaveCount(0)
+    expect(sawBothClasses, 'the exit and enter deal classes are mutually exclusive').toBe(false)
   })
 
   // DRAG IS BUILDING (point 15): a single-mode drag unfolds the parked layout LIVE

@@ -249,6 +249,7 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
 const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const livingHaloSrc = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
+const beatsSrc = readFileSync(new URL('../useModeTransitionBeats.js', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
   // Pane strips reuse .shell__tabstrip inside .shell__content. A descendant
@@ -455,12 +456,17 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
   // The strip is the builder surface: forced visible in builder even at one leaf.
   assert.match(shell, /const tabStripVisible = \(tabStripEngaged \|\| builderModeActive\) && openTabs\.length >= 1/)
   // Entering builder arms a transient beat (single -> panes), reduced-motion skips
-  // it, and it batches in the SAME handler as the flip (no un-dealt first frame).
+  // it (null), and it batches in the SAME handler as the flip (no un-dealt first
+  // frame). ONE armBeat call resolves the beat; the timer lives in the hook.
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.match(handler, /if \(!prefersReducedMotion\(\)\) \{/)
-  // Entering (single -> panes) is the else branch of the enter/exit split.
-  assert.match(handler, /\} else \{[\s\S]*?setBuilderEntering\(true\)/)
-  assert.match(handler, /setTimeout\(\(\) => setBuilderEntering\(false\), BUILDER_ENTER_MS\)/)
+  assert.match(handler, /prefersReducedMotion\(\)\s*\n?\s*\? null/)
+  // Entering (single -> panes) is the else arm of the enter/exit split.
+  assert.match(handler, /: 'enter'/)
+  assert.match(handler, /armBeat\(beat\)/)
+  // The enter duration is wired into the beat hook, which self-clears on the
+  // deadline (single timer, mutual-exclusive with the exit beat).
+  assert.match(shell, /useModeTransitionBeats\(\{ enterMs: BUILDER_ENTER_MS, exitMs: BUILDER_EXIT_MS \}\)/)
+  assert.match(beatsSrc, /kind === 'exit' \? exitMs : enterMs/)
   // The transient root class drives the CSS.
   assert.match(shell, /builderEntering \? ' shell--builder-entering' : ''/)
   // CSS: the single-pane strip DEALS in and the single full-bleed pane LIFT-SETTLES.
@@ -475,11 +481,17 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
 
 test('leaving builder plays the INVERSE card-deal: deal-out + settle, decisive (item 1)', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  // Armed only on a genuine MULTI-PANE exit, never with a focused Settings tab.
+  // Armed only on a genuine MULTI-PANE exit, never with a focused Settings tab; a
+  // single leaf (or Settings) passes null and collapses instantly.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
-  assert.match(handler, /if \(multiPaneRef\.current && !settingsFocused\) \{/)
-  assert.match(handler, /setBuilderExiting\(true\)/)
-  assert.match(handler, /setTimeout\(\(\) => setBuilderExiting\(false\), BUILDER_EXIT_MS\)/)
+  assert.match(handler, /\(multiPaneRef\.current && !settingsFocused\) \? 'exit' : null/)
+  assert.match(handler, /armBeat\(beat\)/)
+  // The two beats are MUTUALLY EXCLUSIVE in the hook — arming one clears the other
+  // (state + timer) so a rapid re-enter can never leave the exit deal stranded and
+  // wedge effectiveViewMode 'panes'. This is the regression fix (see the hook test).
+  assert.match(beatsSrc, /setEntering\(kind === 'enter'\)/)
+  assert.match(beatsSrc, /setExiting\(kind === 'exit'\)/)
+  assert.match(beatsSrc, /clear\(timerRef\.current\)/)
   // Faster than the 400ms entry (the Zippo asymmetry survives, deal vocabulary).
   assert.match(shell, /const BUILDER_EXIT_MS = 250/)
   // Held tiled while the beat runs (viewMode already single, effectiveViewMode panes).

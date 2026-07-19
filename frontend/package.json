@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "test": "npm run test:lib && npm run test:hooks",
     "test:lib": "node --loader=./src/lib/__tests__/vite-env-loader.mjs --test $(find src/lib src/utils src/components/DiffView src/components/ProviderAuth src/components/ChatView/__tests__ src/components/Shell/__tests__ -name '*.test.js')",
-    "test:hooks": "node --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js')"
+    "test:hooks": "node --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js') $(find src/components/Shell/__tests__ -name '*.hooktest.js')"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",

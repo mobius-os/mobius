@@ -61,6 +61,7 @@ import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import { useLogoModeGesture, prefersReducedMotion } from './useLogoModeGesture.js'
+import { useModeTransitionBeats } from './useModeTransitionBeats.js'
 import useLivingHalo from './useLivingHalo.js'
 import {
   HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
@@ -268,29 +269,26 @@ export default function Shell() {
   // projection-consuming render paints the tiled world during the drag while the
   // undo snapshot at drop-time still reads 'single'.
   const [dragPreviewBuilder, setDragPreviewBuilder] = useState(false)
-  // Transient "exiting builder" beat (item 1): on a genuine builder -> single exit
-  // of a TILED (multi-pane) workspace, hold the tiled render for ONE reverse
-  // card-deal (the leaving pane lifts + deals back out to the right while the
-  // remaining pane settles to full width) BEFORE collapsing to single. Keeping
-  // effectiveViewMode 'panes' while it is held preserves the tiled render and every
-  // mounted pane's content untouched — the collapse is only DEFERRED, never
-  // re-orchestrated, so nothing can blank. The `&& viewMode === 'single'` guard
-  // means a rapid re-ENTER (viewMode back to 'panes') drops the beat immediately.
-  const [builderExiting, setBuilderExiting] = useState(false)
-  const builderExitTimerRef = useRef(0)
-  useEffect(() => () => clearTimeout(builderExitTimerRef.current), [])
+  // The two transient builder mode-transition beats, owned as ONE mutually-
+  // exclusive state machine (useModeTransitionBeats):
+  //   - builderExiting (item 1) holds the tiled render for ONE reverse card-deal
+  //     on a genuine multi-pane exit: effectiveViewMode stays 'panes' while the
+  //     reducer viewMode is already 'single', so every mounted pane keeps painting
+  //     and the collapse is only DEFERRED, never re-orchestrated (nothing blanks).
+  //   - builderEntering (item 3) drives the single-leaf ENTER deal (strip deals
+  //     in, the single pane lift-settles) via the .shell--builder-entering class.
+  // The machine's invariant — at most ONE beat active, and a beat NEVER survives
+  // the next toggle — is why a rapid re-ENTER within the exit beat cancels it
+  // cleanly (armBeat('enter') drops the pending exit deal) instead of leaving both
+  // beats fighting. The old two-independent-latch shape left builderExiting true
+  // (timer still pending) through a re-enter, so the deal-out fought the deal-in
+  // AND renderTabRects wrongly widened the focused pane to full width mid-entry.
+  const { builderEntering, builderExiting, armBeat } =
+    useModeTransitionBeats({ enterMs: BUILDER_ENTER_MS, exitMs: BUILDER_EXIT_MS })
   const effectiveViewMode = ((dragPreviewBuilder || builderExiting)
     && workspace.viewMode === 'single')
     ? 'panes'
     : workspace.viewMode
-  // Transient "entering builder" beat (item 3): held for one deal on a genuine
-  // logo/keyboard ENTER so the single-leaf entry has its moment (the strip deals
-  // in, the single full-bleed pane lift-settles) — CSS-only, scoped to the
-  // .shell--builder-entering root class. Never engaged under reduced motion or on
-  // load/chat-switch; the multi-pane entry is carried by the pane card-deal.
-  const [builderEntering, setBuilderEntering] = useState(false)
-  const builderEnterTimerRef = useRef(0)
-  useEffect(() => () => clearTimeout(builderEnterTimerRef.current), [])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -1127,37 +1125,32 @@ export default function Shell() {
   const handleToggleViewMode = useCallback(() => {
     // Decide the transition-deal beat off the PRE-conversion state (a focused
     // Settings tab must sit out the exit deal — its overlay conversion owns that
-    // transition). Both beats are armed in the SAME event as the flip so they
-    // batch: the render never paints an un-dealt / already-collapsed frame first.
-    // Reduced motion skips both (instant flip).
+    // transition). The beat is armed in the SAME event as the flip so they batch:
+    // the render never paints an un-dealt / already-collapsed frame first.
+    //   - reduced motion → null (instant flip, both beats cleared),
+    //   - EXIT (item 1) → 'exit' only for a genuine MULTI-PANE exit; a single leaf
+    //     has no pane to deal out, so it passes null and collapses instantly,
+    //   - ENTER (item 3) → 'enter' (the single-leaf entry deal).
+    // ONE armBeat call always resolves the beat state (mutual exclusion + no stale
+    // beat live in useModeTransitionBeats), so a rapid re-enter cancels the pending
+    // exit deal cleanly instead of leaving both beats fighting.
     const ws = workspaceStateRef.current.ws
     const leavingBuilder = ws.viewMode !== 'single'
     const settingsFocused =
       ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
-    if (!prefersReducedMotion()) {
-      if (leavingBuilder) {
-        // Exit (item 1): hold the tiled render one beat for the reverse card-deal,
-        // but only for a genuine MULTI-PANE exit — a single leaf has no pane to
-        // deal out, so it collapses instantly (today's behavior).
-        if (multiPaneRef.current && !settingsFocused) {
-          setBuilderExiting(true)
-          clearTimeout(builderExitTimerRef.current)
-          builderExitTimerRef.current = setTimeout(() => setBuilderExiting(false), BUILDER_EXIT_MS)
-        }
-      } else {
-        // Enter (item 3): the single-leaf entry deal (strip deals in, pane settles).
-        setBuilderEntering(true)
-        clearTimeout(builderEnterTimerRef.current)
-        builderEnterTimerRef.current = setTimeout(() => setBuilderEntering(false), BUILDER_ENTER_MS)
-      }
-    }
+    const beat = prefersReducedMotion()
+      ? null
+      : leavingBuilder
+        ? ((multiPaneRef.current && !settingsFocused) ? 'exit' : null)
+        : 'enter'
+    armBeat(beat)
     // Convert the Settings surface across the flip with NO history entry (overlay
     // <-> builder tab), so a builder session is never stranded behind the takeover
     // overlay and single mode never shows a paned Settings. A no-op when Settings
     // isn't involved (design: mode conversion).
     convertSettingsForModeTransition()
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
-  }, [convertSettingsForModeTransition, dispatchWorkspace])
+  }, [armBeat, convertSettingsForModeTransition, dispatchWorkspace])
   // The logo gesture layer: a HOLD (~450ms) or a touch swipe-right toggles the
   // mode; the single tap keeps opening the drawer INSTANTLY (composed in the brand
   // button below). Flag-gated so a splits-off build attaches no gesture handlers.
