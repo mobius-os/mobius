@@ -316,15 +316,22 @@ test('the press state machine is pointer-captured, keyed, and classified by time
   assert.match(logoGestureSrc, /if \(detail === 0\) return false/)
 })
 
-test('completion feedback (CHARGE): ramp-tick haptics + a direction-aware spring/snap', () => {
+test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ramp ticks', () => {
   // navigator.vibrate is feature-detected (iOS has none → graceful no-op).
   assert.match(logoGestureSrc, /typeof navigator\.vibrate === 'function'/)
   assert.match(logoGestureSrc, /runHoldCompletion\(\{/)
   // Direction is read from the CURRENT mode: entering builder springs, exiting snaps.
   assert.match(logoGestureSrc, /const entering = !builderModeActive/)
-  // Ramp ticks fire ONCE each as the charge crosses 50% and 85%.
-  assert.match(logoGestureSrc, /if \(!ramp\.t1 && p >= RAMP_TICK_1\) \{ ramp\.t1 = true; vibrateFn\?\.\(RAMP_TICK_1_MS\) \}/)
-  assert.match(logoGestureSrc, /if \(!ramp\.t2 && p >= RAMP_TICK_2\) \{ ramp\.t2 = true; vibrateFn\?\.\(RAMP_TICK_2_MS\) \}/)
+  // Owner call 2026-07-19: the mid-hold ramp ticks (50% + 85%) are GONE — three
+  // pulses in a ~450ms hold read as a buzzy double/triple tap ("feels like two
+  // vibrations instead of one"). No ramp state, no ramp constants anywhere, and
+  // the rAF tick loop fires no haptic — the single completion pulse is the ONLY
+  // vibration.
+  const machineSrc = readFileSync(new URL('../logoHoldMachine.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(logoGestureSrc, /rampRef|ramp\.t1|ramp\.t2|RAMP_TICK/)
+  assert.doesNotMatch(machineSrc, /RAMP_TICK/)
+  const tickBody = logoGestureSrc.match(/const tick = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  assert.doesNotMatch(tickBody, /vibrate/, 'the hold tick loop fires no haptic — only completeHold does')
   // The spring/snap one-shot is restarted (clear-then-set) and cleared on animationend.
   assert.match(logoGestureSrc, /setFlourish\(''\)\s*\n\s*requestAnimationFrame\(\(\) => setFlourish\(isEntering \? 'igniting' : 'snapping'\)\)/)
   assert.match(logoGestureSrc, /const onAnimationEnd = useCallback\(\(\) => \{ setFlourish\(''\) \}, \[\]\)/)

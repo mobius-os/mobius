@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   HOLD_MS, decidePointerMove, isSwipeRight, movedBeyondSlop, holdComplete,
-  runHoldCompletion, RAMP_TICK_1, RAMP_TICK_2, RAMP_TICK_1_MS, RAMP_TICK_2_MS,
+  runHoldCompletion,
 } from './logoHoldMachine.js'
 
 // Builder-mode activation, hosted on the TOP-LEFT logo cluster (owner placement):
@@ -11,10 +11,12 @@ import {
 // Builder mode is entered/exited by a deliberate second gesture on the same mark:
 //
 //   - HOLD ~450ms (touch OR mouse press-and-hold): the CHARGE model — the logo
-//     itself COMPRESSES (scale driven by the --hold-progress rAF var), two light
-//     haptic ramp ticks fire at 50% and 85%, and on completion the mode flips with
-//     a heavier haptic + the logo springs (enter) or snaps (exit) back. An early
-//     release is just a tap → drawer; movement beyond a small slop cancels cleanly.
+//     itself COMPRESSES (scale driven by the --hold-progress rAF var), and on
+//     completion the mode flips with a SINGLE haptic pulse + the logo springs
+//     (enter) or snaps (exit) back. There are no mid-hold ramp ticks: one clean
+//     vibration at completion, never a buzzy series (owner call 2026-07-19). An
+//     early release is just a tap → drawer; movement beyond a small slop cancels
+//     cleanly.
 //   - a touch SWIPE-RIGHT flips the mode too; its slop suppresses the trailing
 //     click so a swipe never also toggles the drawer.
 //
@@ -44,8 +46,6 @@ export function useLogoModeGesture({
   // { t, x, y, pointerId } while a press is active; null between presses.
   const pressRef = useRef(null)
   const rafRef = useRef(0)
-  // Which ramp ticks (0.5, 0.85) have fired this hold, so each buzzes once.
-  const rampRef = useRef({ t1: false, t2: false })
   // Set when a POINTER gesture (completed hold, swipe, or drag) consumed the
   // activation, so the trailing compatibility click does NOT also toggle the
   // drawer. Only ever read for a pointer click (detail >= 1) — a keyboard click
@@ -108,20 +108,19 @@ export function useLogoModeGesture({
     endPress({ suppressClick: true })
   }, [writeProgress, onToggleMode, endPress, builderModeActive, vibrateFn])
 
-  // The rAF loop drives the compress + ramp ticks + completion — no setTimeout
-  // anywhere, so the tap path carries zero latency and the hold cannot leak a timer.
+  // The rAF loop drives the compress + completion — no setTimeout anywhere, so the
+  // tap path carries zero latency and the hold cannot leak a timer. It fires NO
+  // haptic itself: the ONLY vibration is the single completion pulse in
+  // completeHold, so a hold buzzes exactly once (owner call 2026-07-19 — the old
+  // mid-hold ramp ticks read as a double/triple buzz within the ~450ms window).
   const tick = useCallback(() => {
     const press = pressRef.current
     if (!press) return
     const p = (performance.now() - press.t) / HOLD_MS
-    // Light ramp ticks, once each, as the charge fills.
-    const ramp = rampRef.current
-    if (!ramp.t1 && p >= RAMP_TICK_1) { ramp.t1 = true; vibrateFn?.(RAMP_TICK_1_MS) }
-    if (!ramp.t2 && p >= RAMP_TICK_2) { ramp.t2 = true; vibrateFn?.(RAMP_TICK_2_MS) }
     if (p >= 1) { completeHold(); return }
     writeProgress(p)
     rafRef.current = requestAnimationFrame(tick)
-  }, [completeHold, writeProgress, vibrateFn])
+  }, [completeHold, writeProgress])
 
   const onPointerDown = useCallback((e) => {
     if (!enabled) return
@@ -129,7 +128,6 @@ export function useLogoModeGesture({
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
     pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY, pointerId: e.pointerId }
-    rampRef.current = { t1: false, t2: false } // fresh charge → re-arm the ramp ticks
     setHolding(true)
     writeProgress(0)
     stopRaf()

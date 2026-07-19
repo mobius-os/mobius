@@ -48,16 +48,18 @@ export function decidePointerMove(dx, dy) {
   return 'continue'
 }
 
-// CHARGE-model haptics. The hold ramps two light ticks, then completion fires the
-// heavier confirmation (12 entering builder, 8 snapping back to single).
+// SINGLE-PULSE haptics (owner call 2026-07-19): a completed hold fires EXACTLY
+// ONE vibration, at completion. The earlier CHARGE model also buzzed two light
+// ramp ticks at 50% and 85% of the hold, but within a ~450ms window three pulses
+// land on top of each other and read as a buzzy double/triple tap instead of one
+// clean confirmation (owner: "feels like two vibrations instead of one"). The
+// ramp ticks are gone; the completion pulse is the only haptic — 12ms entering
+// builder, 8ms snapping back to single. Those lengths stay as-is: a lone 12/8ms
+// pulse already reads as one crisp tap, so there is nothing left to soften once
+// the ramp is removed. INVARIANT: navigator.vibrate is called at most once per
+// completed hold (from runHoldCompletion), and never on a cancel/tap.
 export const HOLD_HAPTIC_ENTER_MS = 12
 export const HOLD_HAPTIC_EXIT_MS = 8
-// Progress fractions at which the ramp ticks fire (once each per hold), and their
-// short pulse lengths.
-export const RAMP_TICK_1 = 0.5
-export const RAMP_TICK_2 = 0.85
-export const RAMP_TICK_1_MS = 4
-export const RAMP_TICK_2_MS = 5
 
 // Completion feedback for a charged hold, with injected deps so it is DOM- and
 // React-free (and unit-testable). Fired EXACTLY once per completed hold — the
