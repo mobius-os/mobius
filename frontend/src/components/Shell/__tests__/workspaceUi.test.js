@@ -293,8 +293,9 @@ test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches 
   assert.match(logoGestureSrc, /decision === 'swipe'/)
   assert.match(logoGestureSrc, /onToggleMode\?\.\(\)/)
   assert.match(logoGestureSrc, /endPress\(\{ suppressClick: true \}\)/)
-  // Suppresses the long-press context menu during a hold.
-  assert.match(logoGestureSrc, /if \(pressRef\.current\) e\.preventDefault\(\)/)
+  // Suppresses the native long-press context menu for touch/pen (and any live
+  // press) so a hold activates builder mode instead of raising a menu.
+  assert.match(logoGestureSrc, /pt === 'touch' \|\| pt === 'pen' \|\| pressRef\.current\) e\.preventDefault\(\)/)
   // The hook itself never opens/closes the drawer — that stays the caller's.
   assert.doesNotMatch(logoGestureSrc, /openDrawer|closeDrawer/)
 })
@@ -407,8 +408,13 @@ test('the brand logo img is pointer-inert so a hold never raises the native imag
   assert.match(logoRule, /-webkit-user-select:\s*none/)
   // The element itself is not draggable (kills the drag-image path).
   assert.match(shell, /<img\s+className="shell__logo"[\s\S]*?draggable=\{false\}[\s\S]*?\/>/)
-  // The button keeps its contextmenu suppression during a hold (unchanged).
-  assert.match(logoGestureSrc, /if \(pressRef\.current\) e\.preventDefault\(\)/)
+  // The button suppresses the native contextmenu for touch/pen UNCONDITIONALLY —
+  // not only while a press is live — which closes the timing race that leaked the
+  // menu: the browser's long-press contextmenu can fire just AFTER the ~450ms hold
+  // completes and nulls pressRef, so a press-only guard let the native image menu
+  // through (the "sometimes" in "sometimes holding the logo opens up the image").
+  assert.match(logoGestureSrc, /const pt = lastPointerTypeRef\.current/)
+  assert.match(logoGestureSrc, /pt === 'touch' \|\| pt === 'pen' \|\| pressRef\.current\) e\.preventDefault\(\)/)
 })
 
 test('the living halo lifecycle: lit only in builder mode, one allocation-free rAF, paused on hidden, static under reduced motion', () => {

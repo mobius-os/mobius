@@ -43,9 +43,17 @@ export function useLogoModeGesture({
   // '' | 'igniting' (spring into builder) | 'snapping' (snap back to single) — the
   // one-shot completion animation class, cleared on animationend.
   const [flourish, setFlourish] = useState('')
-  // { t, x, y, pointerId } while a press is active; null between presses.
+  // { t, x, y, pointerId, pointerType } while a press is active; null between
+  // presses. pointerType is retained so onContextMenu can suppress the native
+  // long-press menu for touch/pen even after the press ended (see below).
   const pressRef = useRef(null)
   const rafRef = useRef(0)
+  // The pointerType of the most recent pointerdown on the brand ('touch' | 'pen' |
+  // 'mouse' | ''). onContextMenu reads it to decide whether a contextmenu is a
+  // touch/pen long-press (always suppress on this control) or a desktop mouse
+  // right-click (keep its native menu). Persists past press-end so a late-firing
+  // long-press contextmenu is still recognized as touch. See onContextMenu.
+  const lastPointerTypeRef = useRef('')
   // Set when a POINTER gesture (completed hold, swipe, or drag) consumed the
   // activation, so the trailing compatibility click does NOT also toggle the
   // drawer. Only ever read for a pointer click (detail >= 1) — a keyboard click
@@ -124,10 +132,14 @@ export function useLogoModeGesture({
 
   const onPointerDown = useCallback((e) => {
     if (!enabled) return
+    // Record the pointer type of the LATEST interaction before the mouse-button
+    // guard below can bail — onContextMenu reads it to suppress the touch/pen
+    // long-press menu even for a right-click-style contextmenu (review: item C).
+    lastPointerTypeRef.current = e.pointerType
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
-    pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY, pointerId: e.pointerId }
+    pressRef.current = { t: performance.now(), x: e.clientX, y: e.clientY, pointerId: e.pointerId, pointerType: e.pointerType }
     setHolding(true)
     writeProgress(0)
     stopRaf()
@@ -178,10 +190,22 @@ export function useLogoModeGesture({
   }, [endPress])
 
   const onContextMenu = useCallback((e) => {
-    // Suppress the long-press context menu / selection callout ON THE BRAND during
-    // a hold, so a press-and-hold activates builder mode instead of raising a menu.
-    // Scoped to the brand only (this handler is on the brand button).
-    if (pressRef.current) e.preventDefault()
+    // Suppress the native long-press context menu / image-callout ON THE BRAND for
+    // touch and pen. The brand is a control, never a menu target, so a touch/pen
+    // long-press must ALWAYS activate builder mode instead of raising a menu.
+    //
+    // Gating on a LIVE press alone (pressRef.current) LEAKS the menu: the browser's
+    // long-press `contextmenu` fires at its OWN threshold (~500ms), which can land
+    // AFTER the ~450ms hold completes — completeHold has already run endPress and
+    // nulled pressRef — or after a slop-cancel nulled it, so the guard sees no press
+    // and lets the native menu through. That timing race is the owner's "sometimes
+    // holding the logo opens the image [with a download option]" report. Keying off
+    // the LAST pointer type (set on every pointerdown, right-click included)
+    // suppresses touch/pen unconditionally while leaving a desktop MOUSE right-click
+    // its native menu. INVARIANT: contextmenu on the brand is prevented for every
+    // touch/pen interaction, whether or not a press is still live.
+    const pt = lastPointerTypeRef.current
+    if (pt === 'touch' || pt === 'pen' || pressRef.current) e.preventDefault()
   }, [])
 
   // Read + reset the pointer-click suppression. `detail` is the click event's
