@@ -29,6 +29,8 @@ BUNDLED_RUNTIME_LIBS: tuple[str, ...] = (
   "katex",
   "d3-geo",
   "marked",
+  "marked-highlight",
+  "highlight.js/*",
   "dompurify",
 )
 

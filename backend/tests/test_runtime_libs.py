@@ -7,12 +7,14 @@ would work online and fail on a cold offline load.
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 from app.app_compile_contract import (
   BUNDLED_RUNTIME_LIBS,
   COMPILED_RUNTIME_ABI,
   COMPILED_RUNTIME_BANNER,
+  ESBUILD_TIMEOUT_SECS,
   esbuild_command,
   esbuild_environment,
   mobius_runtime_path,
@@ -27,6 +29,11 @@ CODEMIRROR_DIRECT_IMPORTS = {
   "@codemirror/language",
   "@codemirror/lang-markdown",
   "@lezer/highlight",
+}
+
+MARKDOWN_DIRECT_IMPORTS = {
+  "marked-highlight",
+  "highlight.js/*",
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -108,3 +115,50 @@ def test_compiler_and_both_hosts_agree_on_runtime_abi():
 def test_codemirror_direct_imports_remain_supported():
   missing = sorted(CODEMIRROR_DIRECT_IMPORTS - set(BUNDLED_RUNTIME_LIBS))
   assert not missing, f"CodeMirror direct imports missing: {missing}"
+
+
+def test_markdown_direct_imports_remain_supported():
+  missing = sorted(MARKDOWN_DIRECT_IMPORTS - set(BUNDLED_RUNTIME_LIBS))
+  assert not missing, f"Markdown direct imports missing: {missing}"
+
+
+def test_markdown_dynamic_imports_compile_into_one_offline_module(tmp_path):
+  entry = tmp_path / "markdown.jsx"
+  output = tmp_path / "markdown.js"
+  metafile = tmp_path / "markdown-meta.json"
+  entry.write_text(
+    """import React from 'react'
+
+export async function loadMarkdownRuntime() {
+  return Promise.all([
+    import('marked-highlight'),
+    import('highlight.js/lib/common'),
+  ])
+}
+
+export default function MarkdownFixture() {
+  return React.createElement('div', null, 'markdown')
+}
+"""
+  )
+
+  completed = subprocess.run(
+    esbuild_command(entry, output, metafile=metafile),
+    capture_output=True,
+    check=False,
+    env=esbuild_environment(),
+    text=True,
+    timeout=ESBUILD_TIMEOUT_SECS,
+  )
+  assert completed.returncode == 0, completed.stderr
+
+  metadata = json.loads(metafile.read_text())
+  entry_outputs = [
+    details for details in metadata["outputs"].values()
+    if details.get("entryPoint")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == [], (
+    "Markdown runtime dependencies escaped the self-contained app bundle"
+  )
+  assert output.is_file() and output.stat().st_size > 0
