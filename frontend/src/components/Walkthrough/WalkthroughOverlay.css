@@ -96,85 +96,55 @@
   margin: 0;
 }
 
-/* A secondary body line (e.g. the logo-gesture hint under the drag copy): quieter
-   and spaced from the primary instruction. */
-.wt__body--sub {
-  margin-top: 10px;
-  font-size: 13px;
-  color: var(--muted, #a1a1aa);
+.wt__sigil {
+  position: relative;
+  width: 82px;
+  height: 82px;
+  margin: 2px auto 18px;
 }
 
-.wt__arrow {
+.wt__sigil-ring,
+.wt__sigil-loop {
+  position: absolute;
+  inset: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 44%, var(--border, #252b36));
+}
+
+.wt__sigil-ring {
+  border-radius: 50%;
+  opacity: 0.5;
+}
+
+.wt__sigil-loop {
+  border-radius: 50%;
+  transform: rotate(28deg) scaleX(0.56);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent, #a78bfa) 18%, transparent);
+  animation: wt-loop-breathe 3.4s ease-in-out infinite;
+}
+
+@keyframes wt-loop-breathe {
+  0%, 100% { transform: rotate(28deg) scaleX(0.56); opacity: 0.74; }
+  50% { transform: rotate(208deg) scaleX(0.56); opacity: 1; }
+}
+
+.wt__duo {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 2px 0 18px;
+}
+
+.wt__duo span {
+  min-height: 46px;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  margin: 16px auto 0;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #252b36));
-  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
-  font-size: 20px;
-  color: var(--accent, #a78bfa);
-  animation: wt-arrow-cue 1.8s var(--ease-out-soft, ease-out) infinite;
-}
-
-/* Up-arrow placed at top-of-card (before the title) — wants negative
-   margin so it visually points past the card edge toward the browser
-   chrome above, not just into the card's whitespace. */
-.wt__arrow--top {
-  margin: -8px auto 4px;
-}
-
-.wt__arrow--up {
-  animation-name: wt-arrow-cue-up;
-}
-.wt__arrow--down {
-  animation-name: wt-arrow-cue-down;
-}
-
-@keyframes wt-arrow-cue {
-  0%, 100% { opacity: 0.72; transform: translateY(0); }
-  50%      { opacity: 1; transform: translateY(-2px); }
-}
-@keyframes wt-arrow-cue-up {
-  0%, 100% { opacity: 0.72; transform: translateY(0); }
-  50%      { opacity: 1; transform: translateY(-2px); }
-}
-@keyframes wt-arrow-cue-down {
-  0%, 100% { opacity: 0.72; transform: translateY(0); }
-  50%      { opacity: 1; transform: translateY(2px); }
-}
-
-.wt__note {
-  font-size: 13px;
-  margin: 12px 0 0;
-  padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--border, #252b36);
-}
-
-.wt__note--success {
-  background: rgba(167, 139, 250, 0.12);
-  border-color: rgba(167, 139, 250, 0.4);
+  background: color-mix(in srgb, var(--text, #d4d4d8) 5%, transparent);
   color: var(--text, #d4d4d8);
-}
-
-.wt__note--warn {
-  background: var(--surface2, #1a1f28);
-  color: var(--muted, #9ca3af);
-}
-
-.wt__link {
-  color: var(--accent, #a78bfa);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .wt__link:hover {
-    color: var(--accent-hover, #c4b5fd);
-  }
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .wt__actions {
@@ -195,9 +165,7 @@
   transition: opacity 0.15s ease, background 0.15s ease;
 }
 
-.wt__btn:focus-visible,
-.wt__skip-link:focus-visible,
-.wt__link:focus-visible {
+.wt__btn:focus-visible {
   outline: 2px solid var(--accent, #a78bfa);
   outline-offset: 2px;
 }
@@ -230,100 +198,11 @@
   padding: 12px 28px;
 }
 
-/* Quiet text affordance under the install step's action row. Lower
-   visual weight than the buttons — it's the escape hatch for a user
-   who already installed and just wants the overlay gone, not the
-   primary path. */
-.wt__skip-link {
-  display: block;
-  margin: 14px auto 0;
-  padding: 4px 8px;
-  background: transparent;
-  border: none;
-  color: var(--muted, #9ca3af);
-  font-family: inherit;
-  font-size: 13px;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .wt__skip-link:hover {
-    color: var(--text, #d4d4d8);
-  }
-}
-
-/* ── Workspace step: drag-to-split mock (design §7.1) ─────────────────────────
-   A small looping demo of a tab dragging to an edge and snapping into a split.
-   Under prefers-reduced-motion it swaps to a static landed-split before/after.
-   Purely decorative (aria-hidden); theme vars carry standalone-shell fallbacks
-   like the rest of this card. */
-.wt__ws-mock {
-  position: relative;
-  width: 200px;
-  height: 104px;
-  margin: 4px auto 16px;
-}
-.wt__ws-mock-live,
-.wt__ws-mock-static {
-  position: absolute;
-  inset: 0;
-  border-radius: 10px;
-  border: 1px solid var(--border-light, #2a2a30);
-  background: color-mix(in srgb, var(--text, #d4d4d8) 4%, transparent);
-  overflow: hidden;
-}
-.wt__ws-mock-static { display: none; }
-.wt__ws-mock-pane {
-  position: absolute;
-  inset: 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--text, #d4d4d8) 6%, transparent);
-}
-.wt__ws-mock-tab {
-  position: absolute;
-  top: 12px;
-  left: 40px;
-  width: 56px;
-  height: 20px;
-  border-radius: 6px;
-  background: var(--accent, #7c6cff);
-  animation: wt-ws-drag 3s ease-in-out infinite;
-}
-.wt__ws-mock-seam {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 2px;
-  background: var(--accent, #7c6cff);
-  opacity: 0;
-  animation: wt-ws-seam 3s ease-in-out infinite;
-}
-@keyframes wt-ws-drag {
-  0%, 15% { transform: translate(0, 0); opacity: 1; }
-  55% { transform: translate(88px, 0); opacity: 1; }
-  70%, 100% { transform: translate(112px, 0); opacity: 0; }
-}
-@keyframes wt-ws-seam {
-  0%, 55% { opacity: 0; }
-  70%, 100% { opacity: 0.9; }
-}
-.wt__ws-mock-half {
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  width: calc(50% - 12px);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--text, #d4d4d8) 6%, transparent);
-}
-.wt__ws-mock-half:first-child { left: 8px; }
-.wt__ws-mock-half:last-child {
-  right: 8px;
-  background: color-mix(in srgb, var(--accent, #7c6cff) 22%, transparent);
-}
 @media (prefers-reduced-motion: reduce) {
-  .wt__ws-mock-live { display: none; }
-  .wt__ws-mock-static { display: block; }
+  .wt__overlay,
+  .wt__overlay--closing,
+  .wt__card,
+  .wt__sigil-loop {
+    animation: none;
+  }
 }

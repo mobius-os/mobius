@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { settingsQueries } from '../../hooks/queries.js'
+import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
 
 /**
  * Codex device-auth flow. Lifted out of SettingsView so SetupWizard
@@ -20,6 +21,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   const [code, setCode] = useState('')
   const [copyState, setCopyState] = useState(null)
   const [error, setError] = useState('')
+  const [openedAuthWindow, setOpenedAuthWindow] = useState(true)
   const pollRef = useRef(null)
   const copyTimerRef = useRef(null)
   // Generation counter for in-flight poll fetches. setInterval gets
@@ -29,6 +31,16 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   // Each startLogin bumps the gen; each poll captures it and bails
   // if it no longer matches.
   const pollGenRef = useRef(0)
+  // The sign-in tab is reserved before the auth URL exists, so every path that
+  // ends without navigating it -- failed start, network error, a cancel or
+  // unmount mid-fetch -- has to close it, or the owner is left staring at a
+  // blank tab. Holding the handle here is what lets those later paths reach it.
+  const authWindowRef = useRef(null)
+
+  const releaseAuthWindow = useCallback(() => {
+    closeAuthWindow(authWindowRef.current)
+    authWindowRef.current = null
+  }, [])
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -53,8 +65,9 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   useEffect(() => () => {
     pollGenRef.current += 1
     stopPolling()
+    releaseAuthWindow()
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
-  }, [stopPolling])
+  }, [stopPolling, releaseAuthWindow])
 
   async function copyCodeToClipboard(value = code) {
     if (!value) return
@@ -71,28 +84,69 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
+  async function checkLoginStatus(pollGen) {
+    const r = await api.auth.provider.codex.status()
+    if (pollGen !== pollGenRef.current) return 'stale'
+    if (!r.ok) {
+      stopPolling()
+      setStatus('failed')
+      setError('Sign-in check failed. Please try again.')
+      return 'failed'
+    }
+    const s = await r.json()
+    if (pollGen !== pollGenRef.current) return 'stale'
+    if (s.status === 'complete') {
+      stopPolling()
+      setStatus('complete')
+      setUrl('')
+      setCode('')
+      settingsQueries.owner.invalidate(queryClient)
+      onConnected?.()
+      return 'complete'
+    }
+    if (s.status === 'failed') {
+      stopPolling()
+      setStatus('failed')
+      setError('Login failed. Please try again.')
+      return 'failed'
+    }
+    return s.status || 'pending'
+  }
+
   async function startLogin() {
+    const authWindow = reserveAuthWindow('Opening Codex sign-in...')
+    authWindowRef.current = authWindow
     setError('')
     setStatus('connecting')
     setCopyState(null)
+    setOpenedAuthWindow(!!authWindow)
     // Capture the gen as of this call so a login that completes
     // after unmount/cancel doesn't transition the state machine.
     pollGenRef.current += 1
     const myGen = pollGenRef.current
     try {
       const res = await api.auth.provider.codex.startLogin()
-      if (myGen !== pollGenRef.current) return
+      if (myGen !== pollGenRef.current) {
+        releaseAuthWindow()
+        return
+      }
       if (!res.ok) {
         const data = await res.json()
         setError(data.detail || 'Could not start Codex login.')
         setStatus('idle')
+        releaseAuthWindow()
         return
       }
       const data = await res.json()
       setUrl(data.url)
       setCode(data.code)
       setStatus('pending')
-      window.open(data.url, '_blank', 'noopener,noreferrer')
+      const navigated = navigateAuthWindow(authWindow, data.url)
+      setOpenedAuthWindow(navigated)
+      // Once navigated the tab belongs to the owner's sign-in flow, so stop
+      // tracking it; if it never navigated it is a blank tab worth closing.
+      if (navigated) authWindowRef.current = null
+      else releaseAuthWindow()
 
       // Poll for completion. Bump the generation again for the poll
       // loop so cancel/unmount invalidates pending /status fetches.
@@ -108,32 +162,9 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       pollRef.current = setInterval(async () => {
         attempts += 1
         try {
-          const r = await api.auth.provider.codex.status()
-          if (pollGen !== pollGenRef.current) return
-          // Surface non-OK responses instead of trying to parse them.
-          // A 401 here would otherwise trip the global apiFetch handler
-          // (which reloads to login), restart the poll on remount, and
-          // loop. Bail out cleanly and let the user retry.
-          if (!r.ok) {
-            stopPolling()
-            setStatus('failed')
-            setError('Sign-in check failed. Please try again.')
-            return
-          }
-          const s = await r.json()
-          if (pollGen !== pollGenRef.current) return
-          if (s.status === 'complete') {
-            stopPolling()
-            setStatus('complete')
-            setUrl('')
-            setCode('')
-            settingsQueries.owner.invalidate(queryClient)
-            onConnected?.()
-          } else if (s.status === 'failed') {
-            stopPolling()
-            setStatus('failed')
-            setError('Login failed. Please try again.')
-          } else if (attempts >= maxPollAttempts) {
+          const nextStatus = await checkLoginStatus(pollGen)
+          if (nextStatus === 'complete' || nextStatus === 'failed' || nextStatus === 'stale') return
+          if (attempts >= maxPollAttempts) {
             stopPolling()
             setStatus('failed')
             setError('Sign-in timed out. Please try again.')
@@ -143,8 +174,27 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     } catch {
       setError('Network error.')
       setStatus('idle')
+      releaseAuthWindow()
     }
   }
+
+  useEffect(() => {
+    if (status !== 'pending') return undefined
+    const pollGen = pollGenRef.current
+    const onReturn = () => {
+      if (document.visibilityState !== 'visible') return
+      checkLoginStatus(pollGen).catch(() => {})
+    }
+    window.addEventListener('pageshow', onReturn)
+    document.addEventListener('visibilitychange', onReturn)
+    return () => {
+      window.removeEventListener('pageshow', onReturn)
+      document.removeEventListener('visibilitychange', onReturn)
+    }
+    // checkLoginStatus reads guarded refs and stable setters; the guard above
+    // intentionally registers only while the device-code flow is pending.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status])
 
   function cancelPending() {
     // Bump the gen so any poll request that's already mid-fetch will
@@ -152,6 +202,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     // a stale 'complete'/'failed'.
     pollGenRef.current += 1
     stopPolling()
+    releaseAuthWindow()
     setStatus('idle')
     setUrl('')
     setCode('')
@@ -163,8 +214,8 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     return (
       <div className="codex-auth">
         <p className="pa__muted">
-          Complete sign-in in your browser. The page opened in a new tab;
-          if it asks for a code, copy this one.
+          Complete sign-in in your browser. {openedAuthWindow ? 'The page opened in a new tab;' : 'Open the page below;'}
+          {' '}if it asks for a code, copy this one.
         </p>
         <div className="codex-auth__device">
           <div className="codex-auth__step">

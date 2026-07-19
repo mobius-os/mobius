@@ -118,6 +118,13 @@
   font-size: 13px;
 }
 
+.setup__success {
+  margin: 14px 0 0;
+  color: var(--text, #d4d4d8);
+  font-size: 13px;
+  text-align: center;
+}
+
 .setup__btn {
   background: var(--accent, #a78bfa);
   color: #fff;
@@ -219,60 +226,9 @@
 }
 
 /* Provider list in the connect-AI step uses the shared
-   .settings__providers + .provider-row styles from ProviderAuth.css.
-   Leave a little breathing room above the skip warning. */
+   .settings__providers + .provider-row styles from ProviderAuth.css. */
 .setup__card .settings__providers {
   margin-bottom: 16px;
-}
-
-.setup-agent {
-  margin-top: 18px;
-  padding: 14px;
-  border: 1px solid var(--border, #252b36);
-  border-radius: 10px;
-  background: var(--bg, #0d0d0d);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.setup-agent__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.setup-agent__head h2 {
-  margin: 0;
-  color: var(--text, #d4d4d8);
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.2;
-}
-
-.setup-agent__head span {
-  color: var(--muted, #52525b);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.setup-agent-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.setup-agent-row__label {
-  color: var(--muted, #52525b);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.setup-agent-row__controls {
-  display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  gap: 8px;
 }
 
 .setup__select {
@@ -362,10 +318,6 @@
   .setup__logo {
     width: 80px;
     height: 80px;
-  }
-
-  .setup-agent-row__controls {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -2,14 +2,10 @@ import { useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
-import { authQueries, modelQueries, settingsQueries } from '../../hooks/queries.js'
+import { authQueries, settingsQueries } from '../../hooks/queries.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
-import ModelSheet from '../ui/ModelSheet.jsx'
-import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
-import { PROVIDER_INFO } from '../ChatView/ChatSettingsPanel.jsx'
-import '../ui/ModelSheet.css'
 import './SetupWizard.css'
 
 const SETUP_STEPS = [
@@ -20,15 +16,6 @@ const PROVIDERS = [
   { id: 'codex', label: 'OpenAI Codex' },
   { id: 'claude', label: 'Claude Code' },
 ]
-const FALLBACK_MODELS = {
-  claude: CLAUDE_MODELS.map(m => ({ id: m.value, label: m.label })),
-  codex: CODEX_MODELS.map(m => ({ id: m.value, label: m.label })),
-}
-
-function defaultEffort(provider) {
-  const efforts = PROVIDER_INFO[provider]?.efforts || []
-  return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
-}
 
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
@@ -108,10 +95,10 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
       <div className="setup__card">
         <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
         <SetupProgress step="account" />
-        <h1 className="setup__title">Welcome to Möbius</h1>
+        <h1 className="setup__title">Create your home key</h1>
         <p className="setup__subtitle">
-          Create the owner account for this install. You will connect an AI
-          provider next.
+          This account unlocks your private Möbius. Your agent, apps, and data
+          live in the container you just made.
         </p>
         <form className="setup__form" onSubmit={handleAccountSubmit}>
           <label className="setup__label">
@@ -173,47 +160,15 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
   const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState('codex')
   const settingsQuery = settingsQueries.owner.useQuery()
-  const modelRegistryQuery = modelQueries.registry.useQuery()
   const codexConnected = !!settingsQuery.data?.codex_authenticated
   const claudeConnected = !!claudeAuthenticated
   const connectedAny = codexConnected || claudeConnected
-  const [chatChoice, setChatChoice] = useState({ provider: 'codex', model: '' })
-  const [primaryChoice, setPrimaryChoice] = useState({ provider: 'codex', model: '' })
-  const [secondaryChoice, setSecondaryChoice] = useState({ provider: '', model: '' })
   const [agentSaving, setAgentSaving] = useState(false)
   const [agentSaved, setAgentSaved] = useState(false)
   const [agentError, setAgentError] = useState('')
 
-  useEffect(() => {
-    if (!settingsQuery.data) return
-    const provider = PROVIDERS.some(p => p.id === settingsQuery.data.provider)
-      ? settingsQuery.data.provider
-      : 'codex'
-    setChatChoice({
-      provider,
-      model: settingsQuery.data.agent_settings?.model || '',
-    })
-    setPrimaryChoice({
-      provider: settingsQuery.data.background_agents?.primary?.provider || provider,
-      model: settingsQuery.data.background_agents?.primary?.model || '',
-    })
-    setSecondaryChoice({
-      provider: settingsQuery.data.background_agents?.fallback?.provider || '',
-      model: settingsQuery.data.background_agents?.fallback?.model || '',
-    })
-  }, [settingsQuery.data])
-
   function toggle(id) {
     setExpanded(prev => prev === id ? null : id)
-  }
-
-  function modelsFor(provider) {
-    if (!provider) return []
-    const rows = modelRegistryQuery.data?.[provider]
-    if (Array.isArray(rows) && rows.length) {
-      return rows.map(m => ({ id: m.id, label: m.label || m.id }))
-    }
-    return FALLBACK_MODELS[provider] || []
   }
 
   function connectedMap(extraProvider = '') {
@@ -223,58 +178,19 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     }
   }
 
-  function choiceConnected(choice, extraProvider = '') {
-    const connected = connectedMap(extraProvider)
-    return !!choice?.provider && connected[choice.provider] === true
-  }
-
   function firstConnectedProvider(extraProvider = '') {
     const connected = connectedMap(extraProvider)
     return PROVIDERS.find(provider => connected[provider.id])?.id || ''
   }
 
-  const persistAgentChoices = useCallback(async (nextChat, nextPrimary, nextSecondary) => {
-    if (!nextChat?.provider || !nextPrimary?.provider) return
+  const saveConnectedProvider = useCallback(async (provider) => {
+    if (!provider) return
     setAgentSaving(true)
     setAgentSaved(false)
     setAgentError('')
     try {
-      const providerRows = PROVIDERS.map(({ id }) => {
-        const isPrimary = nextPrimary.provider === id
-        const isFallback = nextSecondary?.provider === id
-        const enabled = isPrimary || isFallback
-        const model = isPrimary ? nextPrimary.model : isFallback ? nextSecondary.model : ''
-        return {
-          provider: id,
-          model: enabled ? (model || null) : null,
-          effort: enabled ? defaultEffort(id) : null,
-          enabled,
-        }
-      })
       const res = await api.settings.save({
-        provider: nextChat.provider,
-        agent_settings: {
-          model: nextChat.model || null,
-          effort: defaultEffort(nextChat.provider),
-          effort_by_provider: {
-            [nextChat.provider]: defaultEffort(nextChat.provider),
-          },
-        },
-        background_agents: {
-          providers: providerRows,
-          primary: {
-            provider: nextPrimary.provider,
-            model: nextPrimary.model || null,
-            effort: defaultEffort(nextPrimary.provider),
-          },
-          fallback: nextSecondary?.provider
-            ? {
-                provider: nextSecondary.provider,
-                model: nextSecondary.model || null,
-                effort: defaultEffort(nextSecondary.provider),
-              }
-            : null,
-        },
+        provider,
       })
       if (!res.ok) {
         let detail = ''
@@ -291,86 +207,25 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     }
   }, [queryClient])
 
-  function updateChoice(slot, patch) {
-    const currentChat = chatChoice
-    const currentPrimary = primaryChoice
-    const currentSecondary = secondaryChoice
-    const normalize = (choice, nextPatch) => {
-      const next = { ...choice, ...nextPatch }
-      if ('provider' in nextPatch) next.model = ''
-      return next
-    }
-    const nextChat = slot === 'chat' ? normalize(currentChat, patch) : currentChat
-    const nextPrimary = slot === 'primary' ? normalize(currentPrimary, patch) : currentPrimary
-    const nextSecondary = slot === 'secondary' ? normalize(currentSecondary, patch) : currentSecondary
-    setChatChoice(nextChat)
-    setPrimaryChoice(nextPrimary)
-    setSecondaryChoice(nextSecondary)
-    persistAgentChoices(nextChat, nextPrimary, nextSecondary)
-  }
-
-  // The bottom-sheet picker selects provider + model in one tap, so it
-  // sets both at once — unlike updateChoice, whose provider-resets-model
-  // normalization existed only for the old two-<select> flow where the
-  // provider changed first and the model second.
-  function pickChoice(slot, provider, model) {
-    const nextChat = slot === 'chat' ? { ...chatChoice, provider, model } : chatChoice
-    const nextPrimary = slot === 'primary' ? { ...primaryChoice, provider, model } : primaryChoice
-    const nextSecondary = slot === 'secondary' ? { ...secondaryChoice, provider, model } : secondaryChoice
-    setChatChoice(nextChat)
-    setPrimaryChoice(nextPrimary)
-    setSecondaryChoice(nextSecondary)
-    persistAgentChoices(nextChat, nextPrimary, nextSecondary)
-  }
-
   function handleConnected(provider) {
     const preferred = firstConnectedProvider(provider) || provider
-    if (preferred) {
-      const nextChat = choiceConnected(chatChoice, provider)
-        ? chatChoice
-        : { provider: preferred, model: '' }
-      const nextPrimary = choiceConnected(primaryChoice, provider)
-        ? primaryChoice
-        : { provider: preferred, model: '' }
-      setChatChoice(nextChat)
-      setPrimaryChoice(nextPrimary)
-      persistAgentChoices(nextChat, nextPrimary, secondaryChoice)
-    }
+    saveConnectedProvider(preferred)
     settingsQueries.owner.invalidate(queryClient)
     authQueries.provider.claudeStatus.invalidate(queryClient)
     setExpanded(null)
   }
 
-  const defaultsReady =
-    connectedAny &&
-    choiceConnected(chatChoice) &&
-    choiceConnected(primaryChoice) &&
-    !agentSaving &&
-    !agentError
-  const connectedChoices = connectedMap()
-  // Provider-grouped model lists for the shared bottom-sheet picker,
-  // plus the set of connected providers (null when none are connected
-  // yet, which the sheet reads as "show everything enabled" so the
-  // owner isn't blocked before authenticating).
-  const agentGroups = PROVIDERS.map(p => ({
-    key: p.id,
-    label: p.label,
-    Logo: PROVIDER_INFO[p.id]?.Logo,
-    models: modelsFor(p.id),
-  }))
-  const connectedSetup = connectedAny
-    ? new Set(PROVIDERS.filter(p => connectedChoices[p.id]).map(p => p.id))
-    : null
+  const readyToContinue = connectedAny && !agentSaving && !agentError
 
   return (
     <div className="setup">
       <div className="setup__card">
         <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
         <SetupProgress step="provider" />
-        <h1 className="setup__title">Connect your AI</h1>
+        <h1 className="setup__title">Wake up your AI</h1>
         <p className="setup__subtitle">
-          Connect Codex or Claude so chats can run. You can add the other later
-          in Settings.
+          Connect Codex or Claude. Möbius will choose simple defaults now;
+          you can tune models later in Settings.
         </p>
 
         <div className="settings__providers">
@@ -402,106 +257,26 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
           </ProviderRow>
         </div>
 
-        <div className="setup-agent">
-          <div className="setup-agent__head">
-            <h2>Agent defaults</h2>
-            <span>{agentSaving ? 'Saving...' : agentSaved ? 'Saved' : 'Auto-saves'}</span>
-          </div>
-          <SetupAgentChoice
-            label="Chats"
-            choice={chatChoice}
-            groups={agentGroups}
-            connectedProviders={connectedSetup}
-            onPick={(provider, model) => pickChoice('chat', provider, model)}
-          />
-          <SetupAgentChoice
-            label="Background primary"
-            choice={primaryChoice}
-            groups={agentGroups}
-            connectedProviders={connectedSetup}
-            onPick={(provider, model) => pickChoice('primary', provider, model)}
-          />
-          <SetupAgentChoice
-            label="Background secondary"
-            allowNone
-            choice={secondaryChoice}
-            groups={agentGroups}
-            connectedProviders={connectedSetup}
-            onPick={(provider, model) => pickChoice('secondary', provider, model)}
-            onNone={() => pickChoice('secondary', '', '')}
-          />
-          {agentError && <p className="setup__error">{agentError}</p>}
-        </div>
+        {agentSaved && <p className="setup__success">Provider connected. Ready when you are.</p>}
+        {agentError && <p className="setup__error">{agentError}</p>}
 
         {!connectedAny && (
           <p className="setup__skip-warn">
-            Without a provider, all chat messages will fail.
+            You can explore without AI, but chats need a provider before they can run.
           </p>
         )}
         <button
           className="setup__btn setup__btn--full"
           type="button"
           onClick={onContinue}
-          disabled={!defaultsReady}
+          disabled={!readyToContinue}
         >
-          Continue
+          {agentSaving ? 'Saving...' : 'Enter Möbius'}
         </button>
         <button className="setup__skip" type="button" onClick={onSkip}>
-          Skip for now
+          Explore without AI
         </button>
       </div>
-    </div>
-  )
-}
-
-function SetupAgentChoice({
-  label,
-  choice,
-  groups,
-  connectedProviders,
-  allowNone = false,
-  onPick,
-  onNone,
-}) {
-  const [open, setOpen] = useState(false)
-  const activeGroup = groups.find(g => g.key === choice.provider)
-  const activeModel = activeGroup?.models.find(m => m.id === choice.model)
-  const Logo = activeGroup?.Logo
-  const triggerName = choice.provider
-    ? `${activeGroup?.label || choice.provider}${activeModel ? ` · ${activeModel.label}` : ''}`
-    : (allowNone ? 'No fallback' : 'Choose model')
-  return (
-    <div className="setup-agent-row">
-      <div className="setup-agent-row__label">{label}</div>
-      <button
-        type="button"
-        className="model-trigger"
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-        aria-label={`${label} model`}
-      >
-        <span className="model-trigger__icon">{Logo ? <Logo /> : '—'}</span>
-        <span className="model-trigger__main">
-          <span className="model-trigger__name">{triggerName}</span>
-          {choice.provider && (
-            <span className="model-trigger__id">{choice.model || 'Provider default'}</span>
-          )}
-        </span>
-        <span className="model-trigger__caret" aria-hidden="true">▾</span>
-      </button>
-      <ModelSheet
-        open={open}
-        onClose={() => setOpen(false)}
-        title={`${label} model`}
-        groups={groups}
-        provider={choice.provider}
-        model={choice.model}
-        connectedProviders={connectedProviders}
-        onPick={onPick}
-        allowNone={allowNone}
-        noneLabel="No fallback"
-        onNone={onNone}
-      />
     </div>
   )
 }

@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
+import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
 import './ProviderAuth.css'
 
 /**
@@ -26,23 +27,47 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
   const [justConnected, setJustConnected] = useState(false)
+  const [openedAuthWindow, setOpenedAuthWindow] = useState(true)
+  // The sign-in tab is reserved before the auth URL exists, so any path that
+  // ends without navigating it has to close it or the owner keeps a blank tab.
+  const authWindowRef = useRef(null)
+
+  function releaseAuthWindow() {
+    closeAuthWindow(authWindowRef.current)
+    authWindowRef.current = null
+  }
+
+  useEffect(() => () => {
+    closeAuthWindow(authWindowRef.current)
+    authWindowRef.current = null
+  }, [])
 
   async function startAuth() {
+    const authWindow = reserveAuthWindow('Opening Claude sign-in...')
+    authWindowRef.current = authWindow
     setError('')
     setAuthUrl('')
+    setOpenedAuthWindow(!!authWindow)
     setStarting(true)
     try {
       const res = await api.auth.provider.claude.startLogin()
       if (!res.ok) {
         const data = await res.json()
         setError(data.detail || 'Could not start auth.')
+        releaseAuthWindow()
         return
       }
       const data = await res.json()
       setAuthUrl(data.auth_url)
-      window.open(data.auth_url, '_blank')
+      const navigated = navigateAuthWindow(authWindow, data.auth_url)
+      setOpenedAuthWindow(navigated)
+      // A navigated tab is the owner's sign-in page and no longer ours; one we
+      // could not navigate is a blank tab, so close it.
+      if (navigated) authWindowRef.current = null
+      else releaseAuthWindow()
     } catch {
       setError('Network error.')
+      releaseAuthWindow()
     } finally {
       setStarting(false)
     }
@@ -97,9 +122,11 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
     return (
       <div className={`pa__flow ${className}`}>
         <p className="pa__muted">
-          A sign-in page opened. Paste the code below when done.{' '}
-          Didn't open?{' '}
-          <a href={authUrl} target="_blank" rel="noopener noreferrer">Click here</a>.
+          {openedAuthWindow
+            ? 'A sign-in page opened. Paste the code below when done.'
+            : 'Your browser blocked the sign-in tab. Paste the code below when done.'}
+          {' '}
+          <a href={authUrl} target="_blank" rel="noopener noreferrer">Open the sign-in page</a>.
         </p>
         <form className="pa__form" onSubmit={submitCode}>
           <input

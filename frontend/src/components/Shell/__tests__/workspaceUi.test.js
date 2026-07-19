@@ -131,13 +131,12 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
   assert.match(shell, /dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
 })
 
-test('the walkthrough inserts a flag-gated workspace step with pointer-specific copy', () => {
-  assert.match(walkthrough, /insertWorkspaceStep\(\s*\[[^\]]*'customize'[^\]]*\], WORKSPACE_SPLITS_ENABLED/)
-  assert.match(walkthrough, /step === 'workspace'/)
-  assert.match(walkthrough, /Drop it in the middle to keep it as a tab/)
-  assert.match(walkthrough, /drop it at the top or bottom to split the screen/)
-  // The reduced-motion static mock exists alongside the animated one.
-  assert.match(walkthrough, /wt__ws-mock-static/)
+test('the first-run walkthrough stays short and action-first', () => {
+  assert.match(walkthrough, /const STEPS = \['intro', 'home', 'first-chat'\]/)
+  assert.doesNotMatch(walkthrough, /insertWorkspaceStep/)
+  assert.doesNotMatch(walkthrough, /step === 'workspace'/)
+  assert.match(walkthrough, /Meet my Möbius/)
+  assert.match(walkthrough, /mobius:walkthrough-completed/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {

@@ -99,9 +99,9 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 const EMPTY_PROMPTS = [
-  { label: 'Build an app', prompt: 'Build a simple app for tracking personal projects.' },
-  { label: 'Plan a task', prompt: 'Help me break down a task I need to finish this week.' },
-  { label: 'Analyze an idea', prompt: 'Help me think through an idea and find the sharpest next step.' },
+  { label: 'Make Möbius mine', prompt: 'Suggest three small changes that would make this Möbius feel more like mine, then implement the best one.' },
+  { label: 'Build a tiny app', prompt: 'Build a tiny useful app I can try in the next five minutes.' },
+  { label: 'Show me around', prompt: 'Show me what you can change in this Möbius, and recommend a first move.' },
 ]
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
