@@ -5,8 +5,10 @@
 
 # Keep the Node runtime source independent of the frontend build. Copying Node
 # from the completed frontend stage made every UI edit invalidate the backend's
-# expensive apt/agent-CLI/browser layers during local E2E builds.
-FROM node:22-slim AS node-runtime
+# expensive apt/agent-CLI/browser layers during local E2E builds. The pinned
+# agent-browser requires Node >=24; preship-gate.sh uses this same major so local
+# frontend verification cannot silently pass on an older runtime.
+FROM node:24-slim AS node-runtime
 
 # -- Stage 1: build the frontend --------------------------------------
 FROM node-runtime AS frontend

@@ -7,7 +7,7 @@
 # deploy if it returned 0. Never batch this with the push itself.
 #
 #   bash scripts/preship-gate.sh            # backend + marker checks (fast)
-#   bash scripts/preship-gate.sh --full     # + full pytest + Node-22 build
+#   bash scripts/preship-gate.sh --full     # + full pytest + Node-24 build
 #   PRESHIP_OVERRIDE=1 bash scripts/preship-gate.sh   # bypass the CI-status gate
 #
 # Intentionally has NO side effects — it only reads and reports.
@@ -86,8 +86,8 @@ if ! docker compose -p "mobius-test-$slug" -f docker-compose.test.yml \
 fi
 echo "  ok — $(grep -oE '[0-9]+ passed' /tmp/preship-pytest.log | tail -1)"
 
-echo "[5/5] frontend build (Node 22) + offline-build check"
-docker run --rm -v "$PWD/frontend":/app -w /app node:22-slim sh -c \
+echo "[5/5] frontend build (Node 24) + offline-build check"
+docker run --rm -v "$PWD/frontend":/app -w /app node:24-slim sh -c \
   "npm install --no-audit --no-fund >/tmp/preship-npm.log 2>&1 && \
    npm run build >/tmp/preship-build.log 2>&1 && \
    node scripts/check-offline-build.mjs" >/tmp/preship-fe.log 2>&1 \
