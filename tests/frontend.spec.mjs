@@ -1034,7 +1034,9 @@ test.describe('Scroll position', () => {
 
     await page.getByLabel('Toggle navigation').click()
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
-    await page.getByRole('button', { name: 'New chat', exact: true }).click()
+    await page.getByLabel('Primary navigation')
+      .getByRole('button', { name: 'New chat', exact: true })
+      .click()
     await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 5000 })
     const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(decoyChatId).toBeTruthy()
