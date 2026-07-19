@@ -114,7 +114,7 @@ run_backend() {
     done
     summary="pytest (fast — skipping ${#SLOW_TESTS[@]} slow SDK files)"
   else
-    summary="pytest (full backend suite, currently ~2,100 tests)"
+    summary="pytest (full backend suite, currently ~2,450 tests)"
   fi
 
   log "backend: ${summary}"

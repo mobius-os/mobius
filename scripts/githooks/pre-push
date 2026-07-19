@@ -6,7 +6,7 @@
 # errors, and frontend-unit regressions — BEFORE they're pushed. Fast by
 # design: conflict + syntax checks are instant; frontend-unit (~6s) runs
 # when frontend changed (if its dependency tree is complete). The full backend
-# suite currently takes about seven minutes, so it runs before updates to main
+# suite currently takes about ten minutes, so it runs before updates to main
 # (and on explicit MOBIUS_PREPUSH_FULL=1 requests), while topic/backup pushes
 # start the required PR CI immediately. CI is the backstop for anything skipped.
 #
@@ -149,7 +149,7 @@ resolve_frontend_node_modules() {
 }
 
 # Seed-skill Markdown is shipped content, not executable backend code. Treating
-# it as a backend change made a direct main push run seven minutes of pytest
+# it as a backend change made a direct main push run ten minutes of pytest
 # before GitHub ran the same suite again. Keep every other backend path on the
 # conservative full-suite gate.
 BACKEND_PYTEST_CHANGES="$(
@@ -308,7 +308,7 @@ elif backend_needs_pytest; then
       err "  enable: (cd frontend && npm ci)"
       FAIL=1
     else
-      warn "running backend pytest (full suite currently ~7m)…"
+      warn "running backend pytest (full suite currently ~10m)…"
       # Sibling sessions all share this ONE venv (+ its SQLite fixtures + esbuild),
       # so two full suites at once thrash CPU/IO and BOTH crawl — a push can look
       # like it "hangs" for many minutes when it is really contending with another

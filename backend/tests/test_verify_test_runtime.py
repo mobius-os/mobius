@@ -112,17 +112,21 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   assert "COPY Dockerfile ./test-image-inputs/Dockerfile" not in dockerfile
   shell_deps = "RUN cd ./shell-src && npm ci --ignore-scripts"
-  last_vendor = "RUN mkdir -p /tmp/dompurify-install"
+  retained_assets = (
+    "RUN mkdir -p /tmp/pdfjs-install",
+    "RUN mkdir -p /tmp/katex-install",
+  )
   backend_source = "COPY backend/app ./app/"
   backend_scripts = "COPY backend/scripts ./scripts/"
   platform_seed = 'git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked'
   frontend_source = "COPY frontend/ ./shell-src/"
   assert dockerfile.count(backend_source) == 1
   assert dockerfile.count(backend_scripts) == 1
-  assert dockerfile.index(shell_deps) < dockerfile.index(last_vendor)
-  assert dockerfile.index(last_vendor) < dockerfile.index(platform_seed)
+  for asset_stage in retained_assets:
+    assert dockerfile.index(shell_deps) < dockerfile.index(asset_stage)
+    assert dockerfile.index(asset_stage) < dockerfile.index(frontend_source)
+  assert dockerfile.index(frontend_source) < dockerfile.index(platform_seed)
   assert dockerfile.index(platform_seed) < dockerfile.index(backend_source)
-  assert dockerfile.index(last_vendor) < dockerfile.index(frontend_source)
 
 
 def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
@@ -155,7 +159,7 @@ def test_pre_push_defers_full_backend_suite_to_main_or_explicit_opt_in():
   assert 'PUSHES_MAIN=1' in hook
   assert '${MOBIUS_PREPUSH_FULL:-0}' in hook
   assert 'this push does not update main' in hook
-  assert 'full suite currently ~7m' in hook
+  assert 'full suite currently ~10m' in hook
 
 
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
