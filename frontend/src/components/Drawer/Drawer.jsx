@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
@@ -74,7 +74,7 @@ export default function Drawer({
   // returns this order already (see routes/chats.py list_chats), but we
   // mirror it defensively so the drawer stays correct if the cache holds
   // an older response.
-  const allChats = (chats || [])
+  const allChats = useMemo(() => (chats || [])
     .filter(c => c.has_messages)
     .sort((a, b) => {
       const ap = a.pinned_at, bp = b.pinned_at
@@ -83,18 +83,18 @@ export default function Drawer({
       if (ap && bp) return bp.localeCompare(ap)
       return ((b.activity_at || b.updated_at) || '')
         .localeCompare((a.activity_at || a.updated_at) || '')
-    })
+    }), [chats])
   // Mirror the same sort for apps. Server delivers it, but the cache
   // may carry a stale list. Unpinned apps stay in creation order so
   // the existing "stable apps list" UX (oldest-first within unpinned)
   // is preserved.
-  const sortedApps = (apps || []).slice().sort((a, b) => {
+  const sortedApps = useMemo(() => (apps || []).slice().sort((a, b) => {
     const ap = a.pinned_at, bp = b.pinned_at
     if (ap && !bp) return -1
     if (!ap && bp) return 1
     if (ap && bp) return bp.localeCompare(ap)
     return (a.created_at || '').localeCompare(b.created_at || '')
-  })
+  }), [apps])
 
   // One row at a time can be in rename or open-menu mode. Tracking the
   // active id (rather than per-row state) lets a click on another row's
@@ -145,6 +145,59 @@ export default function Drawer({
     renamingRef.current = next
     setRenamingState(next)
   }
+
+  // Rows receive one stable action surface instead of a new closure for every
+  // action on every item. The ref supplies the latest props and local helpers,
+  // while memoized rows can bail out when an unrelated row or drawer state changes.
+  const rowActionInputsRef = useRef(null)
+  const rowActions = useMemo(() => ({
+    select(kind, id) {
+      const current = rowActionInputsRef.current
+      if (kind === 'chat') current.onChat(id)
+      else current.onApp(id)
+    },
+    toggleMenu(kind, id, next) {
+      rowActionInputsRef.current.setOpenMenu(next ? { kind, id } : null)
+    },
+    startRename(kind, id) {
+      rowActionInputsRef.current.setRenaming({ kind, id })
+    },
+    cancelRename() {
+      rowActionInputsRef.current.setRenaming(null)
+    },
+    submitRename(kind, id, previous, next) {
+      const current = rowActionInputsRef.current
+      current.setRenaming(null)
+      if (current.overlayCancelRef.current) {
+        current.overlayCancelRef.current = false
+        return
+      }
+      if (!next || next === previous) return
+      if (kind === 'chat') current.renameChat(id, next)
+      else current.renameApp(id, next)
+    },
+    pin(kind, id, next) {
+      const current = rowActionInputsRef.current
+      if (kind === 'chat') current.pinChat(id, next)
+      else current.pinApp(id, next)
+    },
+    remove(kind, id) {
+      const current = rowActionInputsRef.current
+      if (kind === 'chat') current.onDeleteChat(id)
+      else current.onDeleteApp?.(id)
+    },
+    removeData(id) {
+      rowActionInputsRef.current.onDeleteAppData?.(id)
+    },
+    install(app) {
+      rowActionInputsRef.current.setInstallingApp({
+        id: app.id,
+        name: app.name,
+        slug: app.slug,
+        updatedAt: app.updated_at,
+      })
+    },
+  }), [])
 
   function handleOverlayPointerDown(e) {
     // Pointerdown is the canonical dismiss event. Waiting for `click` is
@@ -481,6 +534,22 @@ export default function Drawer({
     // It must never leave a click guard behind for a later destination tap.
   }
 
+  rowActionInputsRef.current = {
+    onChat,
+    onApp,
+    onDeleteChat,
+    onDeleteApp,
+    onDeleteAppData,
+    setOpenMenu,
+    setRenaming,
+    setInstallingApp,
+    overlayCancelRef,
+    renameChat,
+    renameApp,
+    pinChat,
+    pinApp,
+  }
+
   return (
     <>
       {!persistent && (
@@ -541,28 +610,13 @@ export default function Drawer({
                 <DrawerRow
                   key={chat.id}
                   kind="chat"
-                  id={chat.id}
-                  label={chat.title}
-                  pinned={!!chat.pinned_at}
+                  item={chat}
                   streaming={streamingSet.has(chat.id)}
                   attention={attentionSet.has(chat.id)}
                   active={activeView === 'chat' && activeChatId === chat.id}
-                  onSelect={() => onChat(chat.id)}
                   menuOpen={!!(openMenu && openMenu.kind === 'chat' && openMenu.id === chat.id)}
-                  onMenuToggle={(next) => setOpenMenu(next ? { kind: 'chat', id: chat.id } : null)}
-                  renaming={renaming && renaming.kind === 'chat' && renaming.id === chat.id}
-                  onRenameStart={() => setRenaming({ kind: 'chat', id: chat.id })}
-                  onRenameCancel={() => setRenaming(null)}
-                  onRenameSubmit={(next) => {
-                    setRenaming(null)
-                    if (overlayCancelRef.current) {
-                      overlayCancelRef.current = false
-                      return  // overlay-tap cancel — discard the value
-                    }
-                    if (next && next !== chat.title) renameChat(chat.id, next)
-                  }}
-                  onPin={(next) => pinChat(chat.id, next)}
-                  onDelete={() => onDeleteChat(chat.id)}
+                  renaming={!!(renaming && renaming.kind === 'chat' && renaming.id === chat.id)}
+                  actions={rowActions}
                 />
               )) : (
                 <EmptyMessage className="drawer__empty" fill="static">
@@ -585,31 +639,13 @@ export default function Drawer({
                   <DrawerRow
                     key={app.id}
                     kind="app"
-                    id={app.id}
-                    label={app.name}
-                    slug={app.slug}
-                    pinned={!!app.pinned_at}
+                    item={app}
                     building={!!(app.chat_id && streamingSet.has(app.chat_id))}
                     attention={newAppSet.has(Number(app.id))}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
-                    onSelect={() => onApp(app.id)}
                     menuOpen={!!(openMenu && openMenu.kind === 'app' && openMenu.id === app.id)}
-                    onMenuToggle={(next) => setOpenMenu(next ? { kind: 'app', id: app.id } : null)}
-                    renaming={renaming && renaming.kind === 'app' && renaming.id === app.id}
-                    onRenameStart={() => setRenaming({ kind: 'app', id: app.id })}
-                    onRenameCancel={() => setRenaming(null)}
-                    onRenameSubmit={(next) => {
-                      setRenaming(null)
-                      if (overlayCancelRef.current) {
-                        overlayCancelRef.current = false
-                        return  // overlay-tap cancel — discard the value
-                      }
-                      if (next && next !== app.name) renameApp(app.id, next)
-                    }}
-                    onPin={(next) => pinApp(app.id, next)}
-                    onDelete={() => onDeleteApp?.(app.id)}
-                    onDeleteData={() => onDeleteAppData?.(app.id)}
-                    onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
+                    renaming={!!(renaming && renaming.kind === 'app' && renaming.id === app.id)}
+                    actions={rowActions}
                   />
                 ))}
               </div>
@@ -660,13 +696,10 @@ export default function Drawer({
 /** One row in the chat or app list — handles select, inline rename,
  * three-dots menu, and confirm-delete in a single self-contained unit
  * so the parent only orchestrates which row is currently expanded. */
-function DrawerRow({
+const DrawerRow = memo(function DrawerRow({
   kind,
-  id,
-  label,
-  pinned,
+  item,
   active,
-  slug,
   streaming,
   // App rows only: the app's owning chat is streaming, i.e. the agent is
   // actively building/editing this app right now. Reuses the streaming
@@ -674,18 +707,14 @@ function DrawerRow({
   // pulses the same way an active chat does.
   building,
   attention,
-  onSelect,
   menuOpen,
-  onMenuToggle,
   renaming,
-  onRenameStart,
-  onRenameCancel,
-  onRenameSubmit,
-  onPin,
-  onDelete,
-  onDeleteData,
-  onInstall,
+  actions,
 }) {
+  const id = item.id
+  const label = kind === 'chat' ? item.title : item.name
+  const pinned = !!item.pinned_at
+  const slug = item.slug
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -726,7 +755,7 @@ function DrawerRow({
       const inputEl = inputRef.current
       if (!inputEl || inputEl.contains(e.target)) return
       cancelingRef.current = true
-      onRenameCancel()
+      actions.cancelRename()
       if (e.target?.closest?.('.drawer-overlay')) return
       e.preventDefault()
       e.stopPropagation()
@@ -744,7 +773,7 @@ function DrawerRow({
       document.removeEventListener('pointerdown', onOutsidePointer, true)
       document.removeEventListener('click', onOutsideClick, true)
     }
-  }, [renaming, onRenameCancel])
+  }, [renaming, actions])
 
   // Autofocus + select-all on rename open so the user can either retype
   // from scratch or tap into the existing name to edit it.
@@ -761,12 +790,12 @@ function DrawerRow({
       return  // outside-tap canceled — discard the value
     }
     const value = inputRef.current?.value || ''
-    onRenameSubmit(value.trim())
+    actions.submitRename(kind, id, label, value.trim())
   }
 
   function onInputKeyDown(e) {
     if (e.key === 'Enter') { e.preventDefault(); commitRename() }
-    else if (e.key === 'Escape') { e.preventDefault(); onRenameCancel() }
+    else if (e.key === 'Escape') { e.preventDefault(); actions.cancelRename() }
   }
 
   if (renaming) {
@@ -795,7 +824,7 @@ function DrawerRow({
         // pane. Only present when the splits flag is on; a plain tap still opens
         // in the focused pane (the controller never arms without slop/hold).
         data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
-        onClick={onSelect}
+        onClick={() => actions.select(kind, id)}
       >
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
@@ -828,8 +857,8 @@ function DrawerRow({
       </button>
       <Menu
         forceOpen={menuOpen}
-        onOpen={() => onMenuToggle(true)}
-        onClose={() => onMenuToggle(false)}
+        onOpen={() => actions.toggleMenu(kind, id, true)}
+        onClose={() => actions.toggleMenu(kind, id, false)}
       >
         <Menu.Trigger>
           {/* No Tooltip wrap here. Both Menu.Trigger and Tooltip
@@ -852,7 +881,7 @@ function DrawerRow({
           {!confirmingDelete && !confirmingDeleteData ? (
             <>
               <Menu.Item
-                onSelect={() => onPin?.(!pinned)}
+                onSelect={() => actions.pin(kind, id, !pinned)}
                 className="drawer__menu-item--icon"
               >
                 {pinned
@@ -860,7 +889,7 @@ function DrawerRow({
                   : <PinFilled width={14} height={14} aria-hidden="true" />}
                 <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
               </Menu.Item>
-              <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
+              <Menu.Item onSelect={() => actions.startRename(kind, id)}>Rename</Menu.Item>
               {kind === 'app' && slug && (
                 // Opens the in-PWA InstallSheet to set the home-screen
                 // name + icon first; the sheet saves, then navigates
@@ -869,7 +898,7 @@ function DrawerRow({
                 // jarring browser-tab pop-out — and lets engagement
                 // from the parent shell count toward the per-origin
                 // Site Engagement score that gates beforeinstallprompt.
-                <Menu.Item onSelect={() => onInstall?.()}>
+                <Menu.Item onSelect={() => actions.install(item)}>
                   Install to home screen
                 </Menu.Item>
               )}
@@ -883,7 +912,10 @@ function DrawerRow({
                 // id, leaving a Radix trigger looking "pressed" on
                 // whichever row slides up into the slot.
                 <Menu.Item
-                  onSelect={() => { onMenuToggle(false); onDelete() }}
+                  onSelect={() => {
+                    actions.toggleMenu(kind, id, false)
+                    actions.remove(kind, id)
+                  }}
                   className="drawer__menu-item--danger"
                 >
                   Delete
@@ -936,8 +968,8 @@ function DrawerRow({
                     // open-trigger bookkeeping in sync. The app STAYS in the
                     // list here (only its data is wiped), so no row unmounts.
                     setConfirmingDeleteData(false)
-                    onMenuToggle(false)
-                    onDeleteData?.()
+                    actions.toggleMenu(kind, id, false)
+                    actions.removeData(id)
                   }}
                 >
                   Delete data
@@ -967,8 +999,8 @@ function DrawerRow({
                     // into the deleted slot looks stuck pressed
                     // because openMenu still references the dead id.
                     setConfirmingDelete(false)
-                    onMenuToggle(false)
-                    onDelete()
+                    actions.toggleMenu(kind, id, false)
+                    actions.remove(kind, id)
                   }}
                 >
                   Delete
@@ -988,4 +1020,4 @@ function DrawerRow({
       </Menu>
     </div>
   )
-}
+})

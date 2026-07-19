@@ -423,8 +423,8 @@
   to { scale: 1; }
 }
 /* The LIVING HALO — the logo's "lit soul" in builder mode. A soft radial glow
-   behind the mark; useLivingHalo drives --halo-scale / --halo-x / --halo-y /
-   --halo-opacity on the brand via a two-sine rAF (or a static value under reduced
+   behind the mark; useLivingHalo writes translate, scale, and --halo-opacity
+   directly on this leaf via a two-sine rAF (or static values under reduced
    motion). Per-theme base alpha via --halo-alpha. Only lit in builder mode. */
 .shell__logo-halo {
   position: absolute;
@@ -435,8 +435,8 @@
   background: radial-gradient(closest-side,
     color-mix(in srgb, var(--accent) calc(var(--halo-alpha, 0.5) * 100%), transparent),
     transparent 72%);
-  translate: var(--halo-x, 0px) var(--halo-y, 0px);
-  scale: var(--halo-scale, 1);
+  translate: 0 0;
+  scale: 1;
   transition: opacity 220ms ease;
 }
 .shell__brand--builder .shell__logo-halo {

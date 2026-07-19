@@ -7,6 +7,8 @@ const css = readFileSync(
   'utf8',
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
+const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
 const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
@@ -172,9 +174,15 @@ test('the divider and drag paths coalesce their per-move work into a rAF', () =>
 test('a layout commit blooms the paned wrappers, suppressed while resizing', () => {
   const rule = css.match(/\.shell__view--paned\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /transition:\s*top 180ms ease-out/)
-  assert.match(css, /\.workspace--resizing \.shell__view--paned[\s\S]*?transition: none/)
-  assert.match(shell, /el\.classList\.add\('workspace--resizing'\)/)
-  assert.match(chrome, /contentEl\.classList\.add\('workspace--resizing'\)/)
+  assert.match(css, /\.workspace--container-resizing \.shell__view--paned[\s\S]*?transition: none/)
+  assert.match(css, /\.workspace--divider-dragging \.shell__view--paned[\s\S]*?transition: none/)
+  assert.match(shell, /el\.classList\.add\('workspace--container-resizing'\)/)
+  assert.match(shell, /el\.classList\.remove\('workspace--container-resizing'\)/)
+  assert.match(chrome, /contentEl\.classList\.add\('workspace--divider-dragging'\)/)
+  assert.doesNotMatch(shell, /workspace--divider-dragging/,
+    'the ResizeObserver must not own the divider guard')
+  assert.doesNotMatch(chrome, /workspace--container-resizing/,
+    'the divider drag must not own the ResizeObserver guard')
 })
 
 test('strips sit above dividers so the 44px grab never occludes a tab', () => {
@@ -273,11 +281,11 @@ test('there is NO standalone view-mode toggle button — the logo is the control
 test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap path', () => {
   // The brand button is the drawer trigger; onClick toggles it synchronously after
   // a suppressed-gesture check, with zero timers.
-  assert.match(shell, /className=\{`shell__brand/)
-  assert.match(shell, /aria-expanded=\{navigationOpen\}/)
-  const onClick = shell.match(/onClick=\{\(e\) => \{[\s\S]*?\n {10}\}\}/)?.[0] || ''
+  assert.match(shellBrand, /className=\{`shell__brand/)
+  assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
+  const onClick = shellBrand.match(/onClick=\{\(e\) => \{[\s\S]*?\n {8}\}\}/)?.[0] || ''
   assert.match(onClick, /if \(logoGesture\.consumeSuppressedClick\(e\.detail\)\) return/)
-  assert.match(onClick, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
+  assert.match(onClick, /onToggleNavigation\(\)/)
   assert.doesNotMatch(onClick, /setTimeout\(/, 'the tap path must carry no timer')
 })
 
@@ -341,7 +349,7 @@ test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ram
   assert.match(logoGestureSrc, /useEffect\(\(\) => \(\) => \{ stopRaf\(\) \}, \[stopRaf\]\)/)
 })
 
-test('Shell wires the toggle handler, brand ref, and Shift+Enter (no drag-deny vibrate)', () => {
+test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
@@ -349,14 +357,16 @@ test('Shell wires the toggle handler, brand ref, and Shift+Enter (no drag-deny v
   // The gesture hook receives the toggle + the brand ref (for the ring var). The
   // ref is UNIFIED with the desktop-sidebar focus ref (one ref, both jobs) after
   // the sidebar rebase.
-  assert.match(shell, /useLogoModeGesture\(\{[\s\S]*?onToggleMode: handleToggleViewMode/)
-  assert.match(shell, /brandRef: brandButtonRef,/)
+  assert.doesNotMatch(shell, /useLogoModeGesture\(/)
+  assert.match(shellBrand, /const ShellBrand = memo\(function ShellBrand/)
+  assert.match(shellBrand, /useLogoModeGesture\(\{[\s\S]*?onToggleMode,/)
+  assert.match(shell, /<ShellBrand[\s\S]*?brandRef=\{brandButtonRef\}/)
   // The drag-deny vibrate is DEAD (point 15: dragging is building, never denied).
   assert.doesNotMatch(shell, /viewModeVibrateRef|onDragBlocked/)
   // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).
-  assert.match(shell, /e\.shiftKey && e\.key === 'Enter'/)
-  assert.match(shell, /brandKeyboardModeClickRef\.current = true/)
-  assert.match(shell, /brandKeyboardModeClickRef\.current && e\.detail === 0/)
+  assert.match(shellBrand, /e\.shiftKey && e\.key === 'Enter'/)
+  assert.match(shellBrand, /keyboardModeClickRef\.current = true/)
+  assert.match(shellBrand, /keyboardModeClickRef\.current && e\.detail === 0/)
 })
 
 test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 180° twist + tint + living halo', () => {
@@ -385,8 +395,8 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   const halo = shellCss.match(/\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(halo, /radial-gradient/)
   assert.match(halo, /var\(--halo-alpha, 0\.5\)/)
-  assert.match(halo, /translate:\s*var\(--halo-x, 0px\) var\(--halo-y, 0px\)/)
-  assert.match(halo, /scale:\s*var\(--halo-scale, 1\)/)
+  assert.match(halo, /translate:\s*0 0/)
+  assert.match(halo, /scale:\s*1/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo-halo\s*\{[\s\S]*?opacity:\s*var\(--halo-opacity, 0\.85\)/)
   // Per-theme alpha token: quieter in dark.
   assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.5; \}/)
@@ -408,7 +418,7 @@ test('the brand logo img is pointer-inert so a hold never raises the native imag
   assert.match(logoRule, /user-select:\s*none/)
   assert.match(logoRule, /-webkit-user-select:\s*none/)
   // The element itself is not draggable (kills the drag-image path).
-  assert.match(shell, /<img\s+className="shell__logo"[\s\S]*?draggable=\{false\}[\s\S]*?\/>/)
+  assert.match(shellBrand, /<img\s+className="shell__logo"[\s\S]*?draggable=\{false\}[\s\S]*?\/>/)
   // The button suppresses the native contextmenu for touch/pen UNCONDITIONALLY —
   // not only while a press is live — which closes the timing race that leaked the
   // menu: the browser's long-press contextmenu can fire just AFTER the ~450ms hold
@@ -422,9 +432,9 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   // Gated on `active` (builder mode) — nothing runs when inactive, and the effect
   // re-runs on active flip so it turns ON at ignite and OFF (cleanup) at snap.
   assert.match(livingHaloSrc, /if \(!el \|\| !active\) return undefined/)
-  assert.match(livingHaloSrc, /\}, \[brandRef, active\]\)/)
+  assert.match(livingHaloSrc, /\}, \[haloRef, active\]\)/)
   // Reduced motion: settle static CSS vars, NO rAF at all.
-  assert.match(livingHaloSrc, /if \(prefersReducedMotion\(\)\) \{[\s\S]*?setProperty\('--halo-scale', '1'\)[\s\S]*?return undefined/)
+  assert.match(livingHaloSrc, /if \(prefersReducedMotion\(\)\) \{[\s\S]*?el\.style\.scale = '1'[\s\S]*?clearHaloStyles\(el\)/)
   // One reused frame object → zero per-frame allocation; the drift comes from the
   // pure haloFrame (tested in logoHoldMachine.test.js).
   assert.match(livingHaloSrc, /const frame = \{\} \/\/ reused every tick/)
@@ -434,19 +444,21 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   assert.match(livingHaloSrc, /cancelAnimationFrame\(raf\)/)
   // Cleanup kills the loop instantly (the snap) + drops the visibility listener.
   assert.match(livingHaloSrc, /return \(\) => \{[\s\S]*?cancelAnimationFrame\(raf\)[\s\S]*?removeEventListener\('visibilitychange'/)
-  // Shell lights the halo only in builder mode, keyed to the SAME brand ref.
-  assert.match(shell, /useLivingHalo\(\{ brandRef: brandButtonRef, active: builderModeActive \}\)/)
-  assert.match(shell, /<span className="shell__logo-halo" aria-hidden/)
+  // The isolated brand lights a leaf ref only in builder mode and cleans inline styles.
+  assert.match(shellBrand, /useLivingHalo\(\{ haloRef, active: splitsEnabled && builderModeActive \}\)/)
+  assert.match(shellBrand, /<span ref=\{haloRef\} className="shell__logo-halo" aria-hidden/)
+  assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
 })
 
-test('the room flourish (CHARGE): panes DEAL in on class-apply, suppressed while resizing, instant under reduced motion', () => {
+test('the room flourish (CHARGE): panes DEAL once on class-apply and resize guards never restart it', () => {
   // The divider-DRAW is gone; the entry flourish is the card-DEAL on the pane wrapper.
   assert.doesNotMatch(css, /workspace-divider-draw/)
   const paned = css.match(/\.shell__view--paned\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(paned, /animation:\s*shell-pane-deal 400ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/)
   assert.match(css, /@keyframes shell-pane-deal\s*\{[\s\S]*?translateX\(18px\)[\s\S]*?translateX\(0\)/)
-  // A live resize must not re-deal every frame.
-  assert.match(css, /\.workspace--resizing \.shell__view--paned\s*\{\s*\n\s*animation: none;/)
+  // Live geometry suppresses only the layout transition. Overriding animation
+  // here and restoring it afterward restarts shell-pane-deal on a permanent pane.
+  assert.doesNotMatch(css, /workspace--(?:container-resizing|divider-dragging)[^{]*\{[^}]*animation:/)
   // Reduced motion drops the deal (and the layout-commit transition).
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell__view--paned \{ transition: none; animation: none; \}/)
@@ -526,10 +538,28 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   // The accessible NAME stays stable (drawer semantics + e2e selectors depend on
   // it); the hold/keyboard path is a supplementary aria-description, and mode state
   // rides a polite live region (not a conflicting aria-pressed).
-  assert.match(shell, /aria-label="Toggle navigation"/)
-  assert.match(shell, /aria-description=\{paneModel\.WORKSPACE_SPLITS_ENABLED\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
-  assert.match(shell, /role="status" aria-live="polite"/)
-  assert.match(shell, /builderModeActive \? 'Builder mode' : 'Single screen'/)
+  assert.match(shellBrand, /aria-label="Toggle navigation"/)
+  assert.match(shellBrand, /aria-description=\{splitsEnabled\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
+  assert.match(shellBrand, /role="status" aria-live="polite"/)
+  assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
+})
+
+test('the mobile modal keeps its existing brand close path while the workspace is inert', () => {
+  const header = shell.match(/<header className="shell__bar"[^>]*>/)?.[0] || ''
+  assert.doesNotMatch(header, /inert=/)
+  assert.match(shell, /<main className="shell__content" inert=\{modalDrawerOpen\}/)
+  assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
+  assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
+})
+
+test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
+  assert.match(drawer, /const allChats = useMemo\(/)
+  assert.match(drawer, /const sortedApps = useMemo\(/)
+  assert.match(drawer, /const rowActions = useMemo\(/)
+  assert.match(drawer, /const DrawerRow = memo\(function DrawerRow/)
+  assert.match(drawer, /item=\{chat\}[\s\S]*?actions=\{rowActions\}/)
+  assert.match(drawer, /item=\{app\}[\s\S]*?actions=\{rowActions\}/)
+  assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
 })
 
 test('the Settings surface responds to PANE width via a query container', () => {

@@ -7,27 +7,32 @@ import { prefersReducedMotion } from './useLogoModeGesture.js'
 // irrational frequencies (never a visible loop). One single rAF, ONE reused frame
 // object → zero per-frame allocation. Pauses on a hidden tab and is killed
 // instantly when builder mode deactivates (the effect cleanup). Under reduced
-// motion it settles to a static low halo with NO rAF at all. Writes the drift as
-// CSS vars on the brand element; the CSS (Shell.css) composes them. Per-theme base
+// motion it settles to a static low halo with NO rAF at all. The animated values
+// are written directly to the halo element so each frame invalidates only that
+// leaf, rather than a brand ancestor and all of its descendants. Per-theme base
 // alpha rides the --halo-alpha token.
-export default function useLivingHalo({ brandRef, active }) {
+function clearHaloStyles(el) {
+  el.style.removeProperty('translate')
+  el.style.removeProperty('scale')
+  el.style.removeProperty('--halo-opacity')
+}
+
+export default function useLivingHalo({ haloRef, active }) {
   useEffect(() => {
-    const el = brandRef?.current
+    const el = haloRef?.current
     if (!el || !active) return undefined
     if (prefersReducedMotion()) {
-      el.style.setProperty('--halo-scale', '1')
-      el.style.setProperty('--halo-x', '0px')
-      el.style.setProperty('--halo-y', '0px')
+      el.style.translate = '0px 0px'
+      el.style.scale = '1'
       el.style.setProperty('--halo-opacity', '0.8')
-      return undefined
+      return () => clearHaloStyles(el)
     }
     let raf = 0
     const frame = {} // reused every tick — no allocation in the loop
     const loop = () => {
       haloFrame(performance.now(), frame)
-      el.style.setProperty('--halo-scale', String(frame.scale))
-      el.style.setProperty('--halo-x', `${frame.x}px`)
-      el.style.setProperty('--halo-y', `${frame.y}px`)
+      el.style.translate = `${frame.x}px ${frame.y}px`
+      el.style.scale = String(frame.scale)
       el.style.setProperty('--halo-opacity', String(frame.opacity))
       raf = requestAnimationFrame(loop)
     }
@@ -43,6 +48,7 @@ export default function useLivingHalo({ brandRef, active }) {
     return () => {
       if (raf) cancelAnimationFrame(raf)
       document.removeEventListener('visibilitychange', onVisibility)
+      clearHaloStyles(el)
     }
-  }, [brandRef, active])
+  }, [haloRef, active])
 }

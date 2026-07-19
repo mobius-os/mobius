@@ -470,7 +470,7 @@ test.describe('Back button edge cases', () => {
     // Regression guard for the bug where closeDrawer's history.back()
     // was popping the navStack and yanking the user out of the current
     // view. Sequence: navigate to settings, open drawer, close it via
-    // the X button — must stay on settings, not pop back to chat.
+    // the brand toggle — must stay on settings, not pop back to chat.
     await setup(page)
 
     // Move to a non-default view (settings) so navStack is non-empty.
@@ -481,7 +481,7 @@ test.describe('Back button edge cases', () => {
     )
     expect(onSettings).toBe(true)
 
-    // Open drawer (sentinel + drawer open) and close via the in-panel button.
+    // Open drawer (sentinel + drawer open) and close via the brand toggle.
     await openDrawer(page)
     expect((await getNavState(page)).drawerOpen).toBe(true)
 
@@ -684,7 +684,7 @@ test.describe('Drawer state machine — extended invariants', () => {
   })
 
   test('19. closeDrawer via toggle leaves history unchanged; back from open navigates', async ({ page }) => {
-    // Post-rewrite: the X-button close and the OS back-gesture from
+    // Post-rewrite: the brand-toggle close and the OS back-gesture from
     // drawer-open are no longer equivalent. Toggle is pure state;
     // back is a real navigation. Document the difference.
     await setup(page)
@@ -1186,8 +1186,8 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
   })
 
-  test('23. In-panel close button does not navigate, even from a deep view', async ({ page }) => {
-    // Same regression as test 22 but via the explicit mobile close control.
+  test('23. Brand toggle close does not navigate, even from a deep view', async ({ page }) => {
+    // Same regression as test 22 but via the existing mobile brand toggle.
     // Test 9 covers the basic case from a non-default view; this test keeps
     // the close-without-navigation contract explicit.
     await setup(page)
