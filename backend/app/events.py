@@ -446,10 +446,18 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   if event_type == "tool_input":
-    # Backfill input summary from the assistant event (arrives after
-    # content_block_start which created the tool block).  Match the
-    # earliest tool block without input — the assistant event lists
-    # tools in order, matching creation order.
+    # Backfill the input summary. Prefer an exact tool_use_id match (Codex
+    # backfills a WebSearch query at completion, when several searches may be
+    # in flight); fall back to the earliest input-less block for the Claude
+    # assistant-event path, which carries no id and lists tools in creation
+    # order.
+    tool_use_id = event.get("tool_use_id")
+    if tool_use_id:
+      for blk in assistant_blocks:
+        if (blk.get("type") == "tool"
+            and blk.get("tool_use_id") == tool_use_id):
+          blk["input"] = event.get("input", "")
+          return True
     for blk in assistant_blocks:
       if blk.get("type") == "tool" and not blk.get("input"):
         blk["input"] = event.get("input", "")

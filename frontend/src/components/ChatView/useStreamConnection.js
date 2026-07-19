@@ -852,13 +852,19 @@ export default function useStreamConnection(chatId, {
               tool_use_id: event.tool_use_id,
             }])
           } else if (event.type === 'tool_input') {
-            // Backfill input summary from the assistant event.
-            // Match earliest tool without input (same order as assistant event).
+            // Backfill the input summary. Prefer an exact tool_use_id match
+            // (Codex backfills a WebSearch query at completion, when several
+            // searches may be in flight); fall back to the earliest input-less
+            // tool for the Claude assistant-event path, which carries no id and
+            // lists tools in creation order.
             applyStreamItems(prev => {
               const updated = [...prev]
-              const i = updated.findIndex(
-                b => b.type === 'tool' && !b.input
-              )
+              let i = event.tool_use_id
+                ? updated.findIndex(
+                    b => b.type === 'tool' && b.tool_use_id === event.tool_use_id,
+                  )
+                : -1
+              if (i < 0) i = updated.findIndex(b => b.type === 'tool' && !b.input)
               if (i !== -1) updated[i] = { ...updated[i], input: event.input }
               return updated
             })
