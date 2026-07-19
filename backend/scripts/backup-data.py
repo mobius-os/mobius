@@ -249,6 +249,23 @@ def run_age_encrypt(plaintext, out_path, recipients, recipients_files):
       f"age encryption failed: {proc.stderr.decode(errors='replace')}")
 
 
+def all_readable(path):
+  """True when path (and, for a dir, every file under it) is readable by
+  the current user. Backups run as mobius; a root-owned 600 secret would
+  otherwise fail deep in the run, after the expensive DB snapshot."""
+  if os.path.isfile(path):
+    return os.access(path, os.R_OK)
+  if os.path.isdir(path):
+    if not os.access(path, os.R_OK | os.X_OK):
+      return False
+    for dp, _dirs, files in os.walk(path):
+      for f in files:
+        if not os.access(os.path.join(dp, f), os.R_OK):
+          return False
+    return True
+  return True
+
+
 def resolve_recipients(args):
   """Merges recipient config from flags + env. Returns (keys, files)."""
   keys = list(args.age_recipient or [])
@@ -339,6 +356,17 @@ def main():
     die("age not found on PATH but an age recipient was configured; "
         "install it (apt-get install -y age) or run without a recipient "
         "for a plaintext-local backup", code=2)
+  # Preflight secret readability only when secrets will actually be read
+  # (skipped-secrets mode never touches them). Fail early and clearly
+  # rather than after the snapshot, which is what the rehearsed drill hit.
+  if encrypt or args.plaintext_secrets:
+    unreadable = [n for n in sorted(SECRET_NAMES)
+                  if os.path.exists(os.path.join(data_dir, n))
+                  and not all_readable(os.path.join(data_dir, n))]
+    if unreadable:
+      die(f"secret paths not readable as this user: {unreadable}; run the "
+          "backup as the owner of /data (mobius). On a test container: "
+          "docker exec -u root <c> chown -R mobius:mobius /data", code=2)
 
   # If the target lives inside /data, its top-level component must be
   # excluded from the walk so we never back up our own backups.
@@ -408,9 +436,12 @@ def main():
     artifacts.append(_artifact(partial_dir, "data.tar.gz"))
     log(f"wrote data.tar.gz ({os.path.getsize(data_path)} bytes)")
 
-    # Build the secrets archive in memory so plaintext never hits disk.
+    # Secrets are read ONLY when they will actually be stored: skip mode
+    # never touches them (so an unreadable/irrelevant secret can't fail a
+    # skip-mode run), and the in-memory tar means plaintext never hits
+    # disk before encryption.
     secrets_state = "skipped"
-    if secret_members:
+    if secret_members and (encrypt or args.plaintext_secrets):
       buf = io.BytesIO()
       with tarfile.open(fileobj=buf, mode="w:gz") as star:
         for name in secret_members:
@@ -425,7 +456,7 @@ def main():
         secrets_state = "encrypted"
         log(f"wrote secrets.tar.gz.age (age-encrypted, "
             f"{os.path.getsize(out)} bytes)")
-      elif args.plaintext_secrets:
+      else:  # args.plaintext_secrets
         out = os.path.join(partial_dir, "secrets.tar.gz")
         with open(out, "wb") as f:
           f.write(plaintext)
@@ -436,13 +467,12 @@ def main():
                      "never move this backup offsite as-is.")
         log("WARNING: wrote secrets.tar.gz UNENCRYPTED "
             "(--plaintext-secrets)")
-      else:
-        secrets_state = "skipped"
-        notes.append("Secrets NOT backed up: no age recipient configured "
-                     "and --plaintext-secrets not set. Configure a "
-                     "recipient for a complete, safe DR artifact.")
-        log("WARNING: secrets SKIPPED (no age recipient; pass one or "
-            "--plaintext-secrets)")
+    elif secret_members:
+      notes.append("Secrets NOT backed up: no age recipient configured "
+                   "and --plaintext-secrets not set. Configure a "
+                   "recipient for a complete, safe DR artifact.")
+      log("WARNING: secrets SKIPPED (no age recipient; pass one or "
+          "--plaintext-secrets)")
 
     manifest = lib.build_manifest(
       created_at=created,

@@ -257,6 +257,25 @@ def test_encryption_requested_without_age_refuses(tmp_path):
   assert not list(target.glob("mobius-backup-*"))
 
 
+def test_backup_refuses_unreadable_secret_early(tmp_path):
+  # The rehearsed drill hit a root-owned .secret-key the mobius backup
+  # could not read, failing cryptically AFTER the snapshot. The preflight
+  # must catch it up front. (Skipped as root, where R_OK always passes.)
+  if os.geteuid() == 0:
+    return
+  data = _seed_data_dir(tmp_path / "data")
+  os.chmod(data / ".secret-key", 0o000)
+  target = tmp_path / "backups"
+  proc = _run(BACKUP, "--data-dir", str(data), "--target-dir", str(target),
+              "--plaintext-secrets", expect=2)
+  assert ".secret-key" in (proc.stdout + proc.stderr)
+  assert not list(target.glob("mobius-backup-*"))
+  # With secrets SKIPPED (no recipient, no opt-in) the same unreadable
+  # secret is irrelevant — it is never read — so the backup still runs.
+  _run(BACKUP, "--data-dir", str(data), "--target-dir", str(target))
+  assert len(list(target.glob("mobius-backup-*"))) == 1
+
+
 def test_restore_round_trip_and_guards(tmp_path):
   data = _seed_data_dir(tmp_path / "data")
   target = tmp_path / "backups"
