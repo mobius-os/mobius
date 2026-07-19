@@ -726,3 +726,47 @@ def test_unpublish_reports_failure_when_the_url_stays_live(
   assert (
     _build_dir(app_id, "still-live") / "publish-token.txt"
   ).is_file(), "the hint must survive so the live URL stays reachable"
+
+
+def test_symlinked_publish_path_does_not_block_registry_revocation(
+  client, auth, monkeypatch,
+):
+  """A symlink in app-writable publish paths must not keep a registered URL live.
+
+  Revocation is registry-authoritative; the registry lives outside app storage.
+  If validating the app-writable build/site or hint gates the revoke, an app job
+  that left one of those a symlink could keep its public URL serving.
+  """
+  app_id = _create_app(client, auth)
+  _seed_site(app_id, "sneaky", "<h1>live</h1>")
+  token = _publish(client, auth, app_id, "sneaky")
+  assert client.get(f"/sites/{token}/").status_code == 200
+
+  # Make the built-site path a symlink, exactly what the path validator rejects.
+  build = _build_dir(app_id, "sneaky")
+  shutil.rmtree(build / "site")
+  (build / "site").symlink_to("/tmp")
+
+  response = client.delete(
+    f"/api/apps/{app_id}/publish?project_id=sneaky", headers=auth,
+  )
+  assert response.status_code in (200, 204), response.text
+  record = read_publication_record(get_settings(), token)
+  assert record is not None and record.state == "revoked"
+  assert client.get(f"/sites/{token}/").status_code == 404
+
+
+def test_deeply_nested_storage_put_is_rejected_not_a_server_error(client, auth):
+  """A deeply nested JSON storage PUT must 400 like other malformed bodies.
+
+  json.loads raises RecursionError (a RuntimeError, not JSONDecodeError) on deep
+  nesting, so it would otherwise escape as an unhandled 500.
+  """
+  app_id = _create_app(client, auth)
+  payload = "[" * 20000 + "]" * 20000
+  response = client.put(
+    f"/api/storage/apps/{app_id}/deep.json",
+    headers={**auth, "Content-Type": "application/json"},
+    content=payload,
+  )
+  assert response.status_code == 400, response.text

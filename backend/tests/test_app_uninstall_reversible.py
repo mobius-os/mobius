@@ -263,6 +263,63 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   assert not secret_dir.exists()
 
 
+def test_purge_keeps_the_row_when_id_keyed_storage_survives(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  """A failed storage wipe must not free the integer id for reuse.
+
+  App.id has no AUTOINCREMENT, so a freed id can be handed to the next install.
+  If the hard-delete committed the row deletion while /data/apps/<id> lingered,
+  that replacement app could read the orphaned tree under its own credentials.
+  So the row (hence the id) must stay claimed until the storage is really gone.
+  """
+  from app.routes import apps as apps_route
+
+  app_id = _install(client, auth)["id"]
+  data_file = _seed_data(app_id)
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+
+  def _boom(path):
+    raise OSError("simulated storage removal failure")
+
+  monkeypatch.setattr(apps_route, "_rmtree_strict", _boom)
+
+  # The sweep must not 500 the drawer, and must leave the tombstone in place.
+  assert client.get("/api/apps/", headers=auth).status_code == 200
+  db.expire_all()
+  survivor = db.query(models.App).filter(models.App.id == app_id).first()
+  assert survivor is not None, "id was freed while its storage survived"
+  assert survivor.deleted_at is not None
+  assert data_file.exists()
+
+
+def test_data_wipe_reports_failure_when_data_survives(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  """DELETE /data must not answer 204 while artifact values remain on disk."""
+  from app.routes import apps as apps_route
+
+  app_id = _install(client, auth)["id"]
+  data_file = _seed_data(app_id)
+  before = db.query(models.App).filter(models.App.id == app_id).one().token_nonce
+
+  def _boom(path):
+    raise OSError("simulated wipe failure")
+
+  monkeypatch.setattr(apps_route, "_rmtree_strict", _boom)
+  response = client.delete(f"/api/apps/{app_id}/data", headers=auth)
+
+  assert response.status_code == 500, response.text
+  assert data_file.exists(), "the wipe reported failure but deleted the data"
+  db.expire_all()
+  after = db.query(models.App).filter(models.App.id == app_id).one()
+  assert after.deleted_at is None, "the app must stay live after a failed wipe"
+  assert after.token_nonce == before, "nonce rotated despite the wipe failing"
+
+
 def test_tombstoned_app_module_and_frame_404(
   client, auth, owner_token, bypass_url_validation,
 ):

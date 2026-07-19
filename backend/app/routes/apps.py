@@ -336,6 +336,22 @@ def _resolve_app_source_dir(app_source_dir, app_name, settings) -> Path | None:
   return None
 
 
+def _rmtree_strict(path: Path) -> None:
+  """Remove a directory tree, raising if anything survives the attempt.
+
+  Unlike ``shutil.rmtree(ignore_errors=True)``, a failure is surfaced so a
+  caller that is about to free a reusable id or report a wipe succeeded can
+  refuse to do so while data remains on disk. ``rmtree`` already raises on the
+  first error and refuses a symlinked root; the residual existence check is the
+  belt-and-suspenders guard for a partial delete that somehow returned.
+  """
+  if not path.exists():
+    return
+  shutil.rmtree(path)
+  if path.exists():
+    raise OSError(f"failed to remove {path}")
+
+
 async def _hard_delete_app(db: Session, app: models.App) -> None:
   """Permanently remove an app's DB row, compiled bundle, source tree, and
   id-keyed storage tree — the pre-110 destructive uninstall, now reached only by
@@ -356,9 +372,27 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     settings, deleted_app_id, app.token_nonce,
   )
 
-  # Delete the row first so a partial filesystem cleanup leaves the registry
-  # coherent — stale files are harmless orphans, a row pointing at missing
-  # files is a live 404.
+  # Remove the ID-KEYED trees, and fail loudly if any survives, BEFORE the row
+  # is deleted. App.id has no AUTOINCREMENT, so SQLite can hand a freed id to
+  # the next install; a silently-orphaned /data/apps/<id>/ tree (or its secrets)
+  # would then be readable by that unrelated replacement app under its own valid
+  # credentials. Keeping the row — hence the id — claimed until the storage is
+  # gone closes that window: a persistent failure leaves the tombstone for the
+  # next purge rather than exposing data. The compiled bundle is id-keyed too;
+  # its helper validates every target under /compiled so a corrupted
+  # compiled_path can never turn this into an arbitrary unlink.
+  apps_root = (Path(settings.data_dir) / "apps").resolve()
+  storage_dir = apps_root / str(deleted_app_id)
+  secrets_dir = Path(settings.data_dir) / "app-secrets" / str(deleted_app_id)
+  from app.compiler import purge_app_bundles
+  purge_app_bundles(deleted_app_id)
+  await asyncio.to_thread(_rmtree_strict, storage_dir)
+  await asyncio.to_thread(_rmtree_strict, secrets_dir)
+
+  # Storage is gone; only now free the row and its reusable id. A partial
+  # cleanup of the slug-keyed source tree below leaves harmless orphans — those
+  # are not addressable by a reused integer id, so a live row pointing at
+  # missing files (a 404) is the acceptable failure, not data exposure.
   db.delete(app)
   db.commit()
   get_system_broadcast().publish(
@@ -367,25 +401,11 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   from app.install import purge_app_skills
   await purge_app_skills(deleted_app_id)
 
-  # Remove the row's current content-addressed artifact plus any legacy/orphan
-  # files for this id. The helper validates every target under /compiled, so a
-  # corrupted compiled_path value can never turn hard-delete into an arbitrary
-  # filesystem unlink.
-  from app.compiler import purge_app_bundles
-  purge_app_bundles(deleted_app_id)
-
-  apps_root = (Path(settings.data_dir) / "apps").resolve()
   resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
   if resolved_source is not None:
     async with fs_locks.source_dir_lock(str(resolved_source)):
       if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
         await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
-  storage_dir = apps_root / str(deleted_app_id)
-  if storage_dir.is_dir():
-    await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
-  secrets_dir = Path(settings.data_dir) / "app-secrets" / str(deleted_app_id)
-  if secrets_dir.is_dir():
-    await asyncio.to_thread(shutil.rmtree, secrets_dir, ignore_errors=True)
 
 
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
@@ -618,7 +638,19 @@ async def list_apps(
       )
       for app in stale:
         async with fs_locks.app_storage_lock(app.id):
-          await _hard_delete_app(db, app)
+          try:
+            await _hard_delete_app(db, app)
+          except Exception:
+            # A hard-delete now fails loudly when id-keyed storage can't be
+            # removed (so a freed id can't expose orphaned data). One
+            # un-purgeable tombstone must not 500 the whole drawer list or
+            # block purging the others — log it, leave the tombstone for the
+            # next sweep, and move on. The row was not deleted, so there is no
+            # committed partial state; roll back any pending session work.
+            log.exception(
+              "hard-delete purge failed for app %s; leaving tombstone", app.id
+            )
+            db.rollback()
   return (
     db.query(models.App)
     .filter(models.App.deleted_at.is_(None))
@@ -2114,14 +2146,25 @@ async def delete_app_data(
       settings, app.id, app.token_nonce,
     )
     storage_dir = apps_root / str(app.id)
+    secrets_dir = Path(data_dir) / "app-secrets" / str(app.id)
     # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
     # Leaving the dir absent is fine — routes/storage.py recreates it on the
-    # next write (atomic_write mkdirs its parent). Passing rel="" targets the
-    # whole `<meta>/apps/<id>` sidecar tree (an empty component is dropped in
-    # the path join), the sidecar analogue of removing the storage root.
-    await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
-    secrets_dir = Path(data_dir) / "app-secrets" / str(app.id)
-    await asyncio.to_thread(shutil.rmtree, secrets_dir, ignore_errors=True)
+    # next write (atomic_write mkdirs its parent). Wipe LOUDLY: a swallowed
+    # failure would rotate the nonce and answer 204 while artifact values the
+    # owner asked to erase are still on disk and readable by the still-live app.
+    try:
+      await asyncio.to_thread(_rmtree_strict, storage_dir)
+      await asyncio.to_thread(_rmtree_strict, secrets_dir)
+    except OSError as exc:
+      log.error("app %s data wipe failed: %s", app.id, exc)
+      raise HTTPException(
+        500,
+        "Could not fully wipe app data — some data may remain. "
+        "Check storage health and try again.",
+      )
+    # Passing rel="" targets the whole `<meta>/apps/<id>` sidecar tree (an empty
+    # component is dropped in the path join), the sidecar analogue of removing
+    # the storage root.
     delete_content_type_tree(data_dir, Path("apps") / str(app.id), "")
     # Rotate the storage generation and commit it before releasing the SAME lock
     # every writer re-checks. An old-token write that was already waiting cannot
@@ -3208,16 +3251,30 @@ async def unpublish_app_site(
   settings = get_settings()
   async with fs_locks.app_storage_lock(app_id):
     _recheck_app_identity(db, app_id, expected_nonce)
-    _validate_publish_paths(settings, app, project_id)
-    _site, token_file = _publish_paths(settings, app, project_id)
-    hint = _read_publish_token_hint(token_file)
+    # The registry lives OUTSIDE app-writable storage and is the authority for
+    # what is public, so enumerate + revoke registry-owned tokens first and let
+    # nothing app-controlled gate it. The legacy publish-token.txt hint lives in
+    # app storage, where an app job could leave build/site or the hint itself a
+    # symlink; validating those paths must not be able to keep a registered URL
+    # alive while unpublish 400s.
     records = [
       record for record in _registry_records_for_app(settings, app_id)
       if record.app_gen == app.token_nonce and record.project_id == project_id
     ]
     tokens = {record.token for record in records}
-    if hint is not None:
-      tokens.add(hint)
+    token_file = None
+    try:
+      _validate_publish_paths(settings, app, project_id)
+      _site, token_file = _publish_paths(settings, app, project_id)
+      hint = _read_publish_token_hint(token_file)
+      if hint is not None:
+        tokens.add(hint)
+    except HTTPException as exc:
+      log.warning(
+        "app %s unpublish: skipping legacy hint, publish paths invalid: %s",
+        app_id, exc.detail,
+      )
+      token_file = None
     revoked = True
     for token in tokens:
       if not await _revoke_publish_token(
@@ -3234,7 +3291,7 @@ async def unpublish_app_site(
         "Could not revoke the public URL — it is still live. "
         "Check storage health and try again.",
       )
-    if not token_file.is_symlink():
+    if token_file is not None and not token_file.is_symlink():
       try:
         token_file.unlink()
       except OSError:

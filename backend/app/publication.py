@@ -86,6 +86,27 @@ def registry_root(settings) -> Path:
   return Path(settings.data_dir) / "published-meta"
 
 
+def _fsync_registry_dir(settings) -> None:
+  """Flush the registry directory entry so a record survives a hard crash.
+
+  ``atomic_write`` and ``os.link`` fsync the file's contents, but the parent
+  directory entry that makes the record findable is only flushed by the kernel
+  on its own schedule. A power loss in that window would drop the record, and a
+  registered publication with no record downgrades to legacy static serving —
+  bypassing the generation/liveness checks. fsync the directory to close it.
+  """
+  try:
+    fd = os.open(registry_root(settings), os.O_RDONLY)
+  except OSError:
+    return
+  try:
+    os.fsync(fd)
+  except OSError:
+    pass
+  finally:
+    os.close(fd)
+
+
 def registry_path(settings, token: str) -> Path:
   if not _TOKEN_RE.fullmatch(token or ""):
     raise InvalidPublicationRegistry("invalid publication token")
@@ -202,6 +223,7 @@ def create_publication_record(settings, record: PublicationRecord) -> None:
     # link() is an atomic create-if-absent.  Unlike os.replace(), it can never
     # overwrite another app's active or revoked ownership reservation.
     os.link(temp, registry_path(settings, record.token), follow_symlinks=False)
+    _fsync_registry_dir(settings)
   except FileExistsError as exc:
     raise PublicationReservationConflict(record.token) from exc
   finally:
@@ -224,6 +246,7 @@ def replace_publication_record(
     raise PublicationReservationConflict(current.token)
   updated = replace(live, state=state)
   atomic_write(registry_path(settings, current.token), _record_bytes(updated))
+  _fsync_registry_dir(settings)
   return updated
 
 

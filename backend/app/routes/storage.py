@@ -553,6 +553,11 @@ async def _decode_write_body(
     body = json.loads(raw)
   except json.JSONDecodeError:
     raise HTTPException(status_code=400, detail="Invalid JSON body.")
+  except RecursionError:
+    # Deeply nested input exhausts the decoder's stack. RecursionError is a
+    # RuntimeError, so without this it escapes as an unhandled 500 instead of
+    # the 400 that every other malformed body gets.
+    raise HTTPException(status_code=400, detail="JSON body is nested too deeply.")
 
   # For .json paths the body IS the document — never sniff for the
   # legacy envelope. Otherwise a mini-app that legitimately stores
