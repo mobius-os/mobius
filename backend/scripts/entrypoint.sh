@@ -1075,6 +1075,9 @@ db.sqlite3
 mobius.db
 chats/
 backups/
+# backup-data.py's second-volume target. A backup carries encrypted
+# secrets + the DB; never let it enter the /data safety-net repo.
+backups-external/
 *.bak-*
 apps/*/data/
 apps/*/.git/
