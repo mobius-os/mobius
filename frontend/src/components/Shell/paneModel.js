@@ -191,6 +191,28 @@ function sanitizeTabs(tabs) {
   return out
 }
 
+// The single-screen SLOT is the two-worlds design's persisted "last item opened
+// IN single mode" (codex-modecontext-design.md §Recommended state). It is a
+// `{ kind:'chat'|'app', id }` on the blob, DISTINCT from the builder pane tree —
+// opens in single mode set it without touching the tree, and builder work never
+// changes it. Sanitize forgivingly (design: forgiving parse, forward-compat with
+// older shells): an unknown/corrupt/settings value normalizes to `null` (explicit
+// empty/home), NEVER to the builder's focused item — a deleted or garbled slot
+// degrades to the empty single screen, it does not silently resurrect builder
+// focus. App ids must be finite numbers (the tab posture) or they would never
+// resolve. Property ABSENCE is preserved by the caller (normalize) as the
+// migration marker; only a PRESENT-but-invalid value collapses to null here.
+function sanitizeSingleScreen(raw) {
+  if (raw == null || typeof raw !== 'object') return null
+  if (raw.kind === 'chat' && raw.id != null && String(raw.id).trim() !== '') {
+    return { kind: 'chat', id: String(raw.id) }
+  }
+  if (raw.kind === 'app' && Number.isFinite(Number(raw.id))) {
+    return { kind: 'app', id: String(raw.id) }
+  }
+  return null
+}
+
 // Keep the first occurrence of each tab key; later duplicates are dropped.
 function dedupTabs(tabs) {
   const seen = new Set()
@@ -371,6 +393,14 @@ export function normalize(ws) {
   // returns the SAME reference when the input already carried the same mode.
   const viewMode = coerceViewMode(ws.viewMode)
   const result = { v: 1, viewMode, layout, panes, focusedPaneId: focused, nextId }
+  // The single-screen slot rides through normalize the same way viewMode does:
+  // a preserved field, forgivingly sanitized, that never affects the tree. ABSENCE
+  // is preserved (the migration marker: an older/uninitialized blob seeds the slot
+  // on its first builder→single switch); a PRESENT value is sanitized so a corrupt
+  // slot becomes explicit-empty (null) rather than absent. Keeping blob version 1
+  // (design: no v2 bump) means an older shell that ignores this key still parses
+  // the tree — forward-compat by construction.
+  if ('singleScreen' in ws) result.singleScreen = sanitizeSingleScreen(ws.singleScreen)
   return deepEqual(result, ws) ? ws : result
 }
 
@@ -446,6 +476,64 @@ export function setViewMode(ws, mode) {
 // Flip single <-> panes. Absent/'panes' -> 'single'; 'single' -> 'panes'.
 export function toggleViewMode(ws) {
   return setViewMode(ws, ws.viewMode === 'single' ? 'panes' : 'single')
+}
+
+// ── Single-screen slot ops (two-worlds design) ──────────────────────────────
+//
+// The slot is the single world's ENTIRE memory: exactly one screen, the last
+// concrete item opened while in single mode. These ops NEVER touch the pane tree
+// (design: opens in single mode must not mutate the tree), so builder and single
+// keep independent navigation contexts.
+
+// The `chat:<id>` / `app:<id>` key of the slot item, or null for an empty/home
+// slot. Shell unions this with the builder tab keys to keep the slot's iframe /
+// chat MOUNTED even while it is absent from the tree (design: mount identity is
+// independent of world visibility).
+export function singleScreenKey(ws) {
+  const slot = ws.singleScreen
+  if (!slot || typeof slot !== 'object') return null
+  if (slot.kind === 'app') return `app:${slot.id}`
+  if (slot.kind === 'chat') return `chat:${slot.id}`
+  return null
+}
+
+// Set the single-screen slot to a concrete item (or null for the empty/home
+// screen). Sanitized like the parse path — an invalid item collapses to null,
+// never to builder focus. Same reference on a no-op so React can bail. This is
+// the ONLY writer of the slot besides seeding and deletion reconciliation, so the
+// "one screen = the last item opened in single mode" invariant lives here.
+export function setSingleScreen(ws, slot) {
+  const next = sanitizeSingleScreen(slot)
+  const cur = ('singleScreen' in ws) ? ws.singleScreen : undefined
+  // Compare against the normalized current value so re-setting the same item is a
+  // no-op even when the stored id was a number and `next` is a string.
+  if (deepEqual(sanitizeSingleScreen(cur), next) && ('singleScreen' in ws)) return ws
+  return { ...ws, singleScreen: next }
+}
+
+// The concrete chat/app item the FOCUSED builder pane is showing, as a slot value
+// — or null when the focused pane is empty or on Settings (Settings never occupies
+// the slot, design §Recommended state). This is what the FIRST-ever builder→single
+// switch seeds the slot from.
+export function focusedSlotSeed(ws) {
+  const pane = ws.panes[ws.focusedPaneId]
+  const key = pane?.activeTabKey
+  if (!pane || !key) return null
+  const tab = pane.tabs.find(t => tabModel.tabKey(t) === key)
+  if (!tab || tab.kind === 'settings') return null
+  if (tab.kind === 'app') return { kind: 'app', id: String(tab.id) }
+  if (tab.kind === 'chat') return { kind: 'chat', id: String(tab.id) }
+  return null
+}
+
+// Seed the slot ONCE, on the first builder→single switch, using property ABSENCE
+// as the migration marker (design §Recommended state). A blob that already carries
+// an explicit slot (including explicit `null` = initialized empty) is left
+// untouched — an initialized empty screen is never reseeded from builder focus.
+// Same reference when the slot is already present.
+export function seedSingleScreenIfAbsent(ws) {
+  if ('singleScreen' in ws) return ws
+  return { ...ws, singleScreen: focusedSlotSeed(ws) }
 }
 
 // Every live leaf pane id in in-order (left-to-right) sequence. The resolver
@@ -938,8 +1026,22 @@ function toIdSet(ids) {
   return set
 }
 
+// Whether the single-screen slot's backing chat/app is still live. A null/home
+// slot is always "live" (nothing to prune). A null live set means "unknown, keep".
+function slotIsLive(slot, chats, apps) {
+  if (!slot || typeof slot !== 'object') return true
+  if (slot.kind === 'chat') return chats == null || chats.has(String(slot.id))
+  if (slot.kind === 'app') return apps == null || apps.has(String(slot.id))
+  return true
+}
+
 // Drop tabs whose backing chat/app is no longer live, then normalize (an emptied
-// pane collapses). Used when a chat/app is deleted out of band.
+// pane collapses). Used when a chat/app is deleted out of band. Reconciles BOTH
+// worlds atomically (design §Recommended state, risk 3): a deleted item is
+// removed from the builder tree AND clears a matching single-screen slot in the
+// same op, so a phantom slot can never point at a dead item. A deleted slot
+// degrades to the explicit-empty screen (null), NEVER to builder focus (design:
+// no auto-fallback from a deleted slot).
 export function prune(ws, { liveChatIds, liveAppIds } = {}) {
   const chats = toIdSet(liveChatIds)
   const apps = toIdSet(liveAppIds)
@@ -956,8 +1058,12 @@ export function prune(ws, { liveChatIds, liveAppIds } = {}) {
     if (kept.length !== pane.tabs.length) changed = true
     panes[id] = { ...pane, tabs: kept }
   }
-  if (!changed) return ws
-  return commit(ws, { ...ws, panes })
+  const slotDead = ('singleScreen' in ws) && !!ws.singleScreen
+    && !slotIsLive(ws.singleScreen, chats, apps)
+  if (!changed && !slotDead) return ws
+  const candidate = { ...ws, panes }
+  if (slotDead) candidate.singleScreen = null
+  return commit(ws, candidate)
 }
 
 // In-order walk of every tab across every pane — the flat projection today's
@@ -1479,8 +1585,15 @@ export function workspaceReducer(state, action) {
       if (action.reason === 'deleted') {
         // The backing chat/app was deleted; a snapshot here (or any older one)
         // would resurrect the tab without going through backend recovery. Clear.
-        if (next === ws && undo == null) return state
-        return { ws: next, undo: null }
+        // Reconcile BOTH worlds atomically (two-worlds design, risk 3): if the
+        // deleted item is also the single-screen slot, clear the slot in the same
+        // action so a phantom slot can't point at a dead item. A deleted slot
+        // degrades to the empty screen (null), never to builder focus.
+        const withSlot = (singleScreenKey(ws) === action.tabKey && ws.singleScreen)
+          ? setSingleScreen(next, null)
+          : next
+        if (withSlot === ws && undo == null) return state
+        return { ws: withSlot, undo: null }
       }
       if (action.reason === 'mode-convert') {
         // Removing the builder-only Settings tab as single mode is entered — a mode
@@ -1573,7 +1686,21 @@ export function workspaceReducer(state, action) {
       // toggling again, so it takes no slot of its own. mode 'toggle' flips;
       // 'single'/'panes' set explicitly (the single-leaf split-drop passes
       // 'panes' so the new pane actually shows).
-      const next = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
+      const flipped = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
+      // On the FIRST-ever builder→single switch the slot is seeded from the focused
+      // concrete item (two-worlds design: seed once, using property absence as the
+      // migration marker). Every later switch leaves the slot exactly as the single
+      // world last left it — builder work never rewrites the single screen.
+      const next = flipped.viewMode === 'single' ? seedSingleScreenIfAbsent(flipped) : flipped
+      if (next === ws) return state
+      return { ws: next, undo }
+    }
+    case 'SET_SINGLE_SCREEN': {
+      // The single world's ONE navigation write (two-worlds design): opening a
+      // chat/app while in single mode sets the slot and NEVER touches the pane
+      // tree. Orthogonal to the undo slot exactly like SET_VIEW_MODE — single-world
+      // navigation preserves a pending builder undo. `item` is { kind, id } | null.
+      const next = setSingleScreen(ws, action.item)
       if (next === ws) return state
       return { ws: next, undo }
     }
@@ -1588,10 +1715,29 @@ export function workspaceReducer(state, action) {
       let restored
       if (undo.restoreViewMode) restored = undo.ws
       else restored = undo.ws.viewMode === ws.viewMode ? undo.ws : { ...undo.ws, viewMode: ws.viewMode }
+      // Tree undo restores the tree/focus/mode but CARRIES FORWARD the current
+      // single-screen slot (two-worlds design: tree undo must not resurrect an old
+      // slot). The single→builder drag undo (restoreViewMode) equally preserves the
+      // slot — its gesture only built the tree, it never changed the single world.
+      // Reconcile the snapshot's slot to the CURRENT one unless they already match.
+      const curSlot = ('singleScreen' in ws) ? ws.singleScreen : undefined
+      const restSlot = ('singleScreen' in restored) ? restored.singleScreen : undefined
+      if (!deepEqual(restSlot, curSlot)) {
+        restored = ('singleScreen' in ws)
+          ? { ...restored, singleScreen: ws.singleScreen }
+          : restored
+      }
       return { ws: restored, undo: null }
     }
     case 'RESET_FLAT': {
-      const next = seedFromFlatTabs(action.tabs)
+      const seeded = seedFromFlatTabs(action.tabs)
+      // RESET_FLAT reseeds the BUILDER tree only (two-worlds design): it must not
+      // reset the world (viewMode) or the single-screen slot. seedFromFlatTabs
+      // returns a fresh 'panes' seed with no slot, so carry the current world state
+      // across. A boot with no valid blob starts from the initial seed anyway
+      // (current viewMode 'panes', slot absent), so this is a no-op there.
+      const next = { ...seeded, viewMode: ws.viewMode }
+      if ('singleScreen' in ws) next.singleScreen = ws.singleScreen
       if (deepEqual(next, ws) && undo == null) return state
       return { ws: next, undo: null }
     }
