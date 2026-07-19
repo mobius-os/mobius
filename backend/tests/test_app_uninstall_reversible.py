@@ -296,6 +296,34 @@ def test_purge_keeps_the_row_when_id_keyed_storage_survives(
   assert data_file.exists()
 
 
+def test_rmtree_strict_removes_a_symlinked_root_instead_of_following_it(tmp_path):
+  """A symlinked storage root must be removed (the link), never left behind.
+
+  Path.exists() follows a symlink, so a DANGLING root link would look
+  already-gone and survive — later readable under a reused id if its target
+  reappears. _rmtree_strict must drop the link itself, for both a live and a
+  dangling target, and never delete the link's target tree.
+  """
+  import os as _os
+  from app.routes import apps as apps_route
+
+  # Dangling link: removed cleanly, nothing raised.
+  dangling = tmp_path / "dangling"
+  dangling.symlink_to(tmp_path / "nowhere")
+  apps_route._rmtree_strict(dangling)
+  assert not _os.path.lexists(dangling)
+
+  # Live link to a real tree: the LINK is removed, the target is untouched.
+  target = tmp_path / "real"
+  (target).mkdir()
+  (target / "keep.txt").write_text("keep me")
+  link = tmp_path / "live"
+  link.symlink_to(target)
+  apps_route._rmtree_strict(link)
+  assert not _os.path.lexists(link)
+  assert (target / "keep.txt").read_text() == "keep me"
+
+
 def test_data_wipe_reports_failure_when_data_survives(
   client, auth, db, bypass_url_validation, monkeypatch,
 ):

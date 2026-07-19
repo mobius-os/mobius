@@ -104,7 +104,12 @@ def _fsync_registry_dir(settings) -> None:
   except OSError:
     pass
   finally:
-    os.close(fd)
+    try:
+      os.close(fd)
+    except OSError:
+      # A failing close must not turn an already-durable registry write into a
+      # spurious publish/unpublish failure.
+      pass
 
 
 def registry_path(settings, token: str) -> Path:

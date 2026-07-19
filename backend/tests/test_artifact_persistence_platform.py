@@ -770,3 +770,48 @@ def test_deeply_nested_storage_put_is_rejected_not_a_server_error(client, auth):
     content=payload,
   )
   assert response.status_code == 400, response.text
+
+
+def test_list_with_content_skips_deeply_nested_json_instead_of_500(client, auth):
+  """A deeply nested blob stored as raw bytes must not 500 a content listing.
+
+  json.loads raises RecursionError there too; the read path must skip the entry
+  (like other decode failures), not surface an unhandled server error.
+  """
+  app_id = _create_app(client, auth)
+  payload = ("[" * 20000 + "]" * 20000).encode()
+  assert client.put(
+    f"/api/storage/apps/{app_id}/deep.json",
+    headers={**auth, "Content-Type": "application/octet-stream"},
+    content=payload,
+  ).status_code == 204
+  response = client.get(
+    f"/api/storage/apps-list/{app_id}/?include_content=true", headers=auth,
+  )
+  assert response.status_code == 200, response.text
+
+
+def test_unpublish_revokes_the_registry_even_if_the_hint_read_errors(
+  client, auth, monkeypatch,
+):
+  """An OS error reading the app-writable hint must not block the revoke.
+
+  The registry is authoritative and lives outside app storage, so a filesystem
+  fault in the legacy publish-token path must not leave a registered URL live.
+  """
+  app_id = _create_app(client, auth)
+  _seed_site(app_id, "resilient", "<h1>live</h1>")
+  token = _publish(client, auth, app_id, "resilient")
+  assert client.get(f"/sites/{token}/").status_code == 200
+
+  def _raise(*_a, **_k):
+    raise OSError("simulated hint read failure")
+
+  monkeypatch.setattr(apps_route, "_read_publish_token_hint", _raise)
+  response = client.delete(
+    f"/api/apps/{app_id}/publish?project_id=resilient", headers=auth,
+  )
+  assert response.status_code in (200, 204), response.text
+  record = read_publication_record(get_settings(), token)
+  assert record is not None and record.state == "revoked"
+  assert client.get(f"/sites/{token}/").status_code == 404

@@ -341,14 +341,24 @@ def _rmtree_strict(path: Path) -> None:
 
   Unlike ``shutil.rmtree(ignore_errors=True)``, a failure is surfaced so a
   caller that is about to free a reusable id or report a wipe succeeded can
-  refuse to do so while data remains on disk. ``rmtree`` already raises on the
-  first error and refuses a symlinked root; the residual existence check is the
-  belt-and-suspenders guard for a partial delete that somehow returned.
+  refuse to do so while data remains on disk. ``rmtree`` raises on the first
+  error and refuses a symlinked root outright, so a symlinked root is handled
+  separately below; the residual ``lexists`` check is the belt-and-suspenders
+  guard for a partial delete that somehow returned without raising.
   """
+  if path.is_symlink():
+    # A symlinked root must be removed, not followed: shutil.rmtree refuses a
+    # symlink, and Path.exists() follows it (so a DANGLING link would look
+    # already-gone and survive silently — later readable if its target
+    # reappears under a reused id). Unlink the link itself and confirm.
+    path.unlink()
+    if os.path.lexists(path):
+      raise OSError(f"failed to remove symlink {path}")
+    return
   if not path.exists():
     return
   shutil.rmtree(path)
-  if path.exists():
+  if os.path.lexists(path):
     raise OSError(f"failed to remove {path}")
 
 
@@ -645,8 +655,11 @@ async def list_apps(
             # removed (so a freed id can't expose orphaned data). One
             # un-purgeable tombstone must not 500 the whole drawer list or
             # block purging the others — log it, leave the tombstone for the
-            # next sweep, and move on. The row was not deleted, so there is no
-            # committed partial state; roll back any pending session work.
+            # next sweep, and move on. The DB row was not deleted, so no id is
+            # freed; roll back any pending session work. The filesystem teardown
+            # may be PARTIAL (e.g. storage gone, secrets left), which the next
+            # sweep finishes — a same-owner reinstall in that window would see
+            # partially-cleaned storage, which is self-healing, not exposure.
             log.exception(
               "hard-delete purge failed for app %s; leaving tombstone", app.id
             )
@@ -3261,24 +3274,36 @@ async def unpublish_app_site(
       record for record in _registry_records_for_app(settings, app_id)
       if record.app_gen == app.token_nonce and record.project_id == project_id
     ]
-    tokens = {record.token for record in records}
+    registry_tokens = {record.token for record in records}
+    revoked = True
+    # Revoke registry-owned tokens FIRST and let nothing app-controlled run
+    # before this loop — not even reading the hint. A filesystem error from the
+    # app-writable publish paths (symlink loop, EIO) must never abort unpublish
+    # before the registered URL is dead.
+    for token in registry_tokens:
+      if not await _revoke_publish_token(
+        settings, app_id, app.token_nonce, token, project_id,
+      ):
+        revoked = False
+    # The legacy publish-token.txt hint lives in app storage; read it only if
+    # its paths are sane, and treat ANY error (HTTP validation or raw OS) as
+    # "no legacy hint" rather than letting it block the revoke above.
     token_file = None
+    hint = None
     try:
       _validate_publish_paths(settings, app, project_id)
       _site, token_file = _publish_paths(settings, app, project_id)
       hint = _read_publish_token_hint(token_file)
-      if hint is not None:
-        tokens.add(hint)
-    except HTTPException as exc:
+    except (HTTPException, OSError) as exc:
       log.warning(
-        "app %s unpublish: skipping legacy hint, publish paths invalid: %s",
-        app_id, exc.detail,
+        "app %s unpublish: skipping legacy hint, publish paths unusable: %s",
+        app_id, exc,
       )
       token_file = None
-    revoked = True
-    for token in tokens:
+      hint = None
+    if hint is not None and hint not in registry_tokens:
       if not await _revoke_publish_token(
-        settings, app_id, app.token_nonce, token, project_id,
+        settings, app_id, app.token_nonce, hint, project_id,
       ):
         revoked = False
     # Only drop the hint once the URL is really dead. Deleting it after a
