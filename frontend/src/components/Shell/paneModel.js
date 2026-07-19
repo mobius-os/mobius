@@ -419,7 +419,17 @@ export function seedFromFlatTabs(tabs) {
 // preserved multi-pane tree down to the focused pane's active tab, painted
 // full-bleed (the workspaceView derivation reads viewMode; the tree is untouched
 // so toggling back re-projects it exactly). Any other/absent value is 'panes'.
+//
+// The splits KILL SWITCH forces 'single' here — its documented job is to "restore
+// the single-pane fallback", and normalize() runs on every parse/restore. Without
+// this, a rolled-back client (splits shipped, blob persisted 'panes', then the flag
+// turned OFF) restores viewMode 'panes' and RENDERS TILED (the tiled derivation is
+// flag-independent) while BOTH exit controls — the logo gesture and Shift+Enter —
+// are flag-gated OFF: an un-exitable multi-pane workspace that survives reload
+// ("cannot reach single mode"). Forcing 'single' collapses to the focused tab and
+// preserves the tree, so re-enabling splits restores the panes.
 function coerceViewMode(mode) {
+  if (!WORKSPACE_SPLITS_ENABLED) return 'single'
   return mode === 'single' ? 'single' : 'panes'
 }
 

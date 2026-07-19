@@ -876,6 +876,32 @@ test.describe('Workspace view-mode toggle', () => {
     await page.mouse.up()
   })
 
+  // Regression (item 0): the splits KILL SWITCH must collapse a persisted 'panes'
+  // blob to single on restore. The tiled render is flag-independent but both exit
+  // controls are flag-gated, so a rolled-back client (splits off, panes blob) would
+  // otherwise restore TILED with no way to reach single — un-exitable, across reload.
+  test('(item 0) splits kill-switch collapses a persisted panes blob to single, never un-exitable tiled', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'killA')
+    const b = await createTaggedChat(page, 'killB')
+    await mockApps(page, [])
+    const blob = paneModel.serializeWorkspace(twoChatPanes(a.id, b.id)) // viewMode 'panes'
+    await page.addInitScript((wsBlob) => {
+      try {
+        localStorage.setItem('mobius:workspace-splits', '0') // KILL SWITCH OFF
+        sessionStorage.setItem('mobius-workspace', wsBlob)
+      } catch { /* private mode */ }
+    }, blob)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    // Restored SINGLE despite the persisted 'panes' viewMode: no tiled chrome/panes.
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    await expect(page.locator('.shell__view--paned')).toHaveCount(0)
+    expect((await readWs(page)).viewMode).toBe('single')
+    // The logo carries no builder state either (there is no builder mode with splits off).
+    await expect(page.getByRole('button', { name: 'Toggle navigation' })).not.toHaveClass(/shell__brand--builder/)
+  })
+
   // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides
   // split-vs-join, but ANY drop commits builder mode (point 15).
   function singleLeafTwoTabs(a, b) {

@@ -678,3 +678,14 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   // The invariant now spans one boundary OR one subsequent interaction.
   assert.match(dragBinding, /may outlive its session by at most ONE visibility\/foreground boundary,\s*\n?\s*\/\/ or at most one subsequent user interaction/)
 })
+
+test('the splits kill-switch forces the single-pane fallback so a rolled-back panes blob is not un-exitable', () => {
+  // The tiled render (chromeActive) is flag-INDEPENDENT, but both exit controls
+  // (the logo gesture + Shift+Enter) are flag-GATED. So a rolled-back client that
+  // persisted a 'panes' blob and then had WORKSPACE_SPLITS disabled would restore
+  // TILED with no way to reach single ("cannot reach single mode", survives reload).
+  // coerceViewMode — run by normalize() on every parse/restore — forces 'single'
+  // when splits are off, delivering the kill-switch's documented single-pane fallback
+  // (the tree is preserved; re-enabling splits restores the panes).
+  assert.match(paneModelSrc, /function coerceViewMode\(mode\) \{\s*\n\s*if \(!WORKSPACE_SPLITS_ENABLED\) return 'single'/)
+})
