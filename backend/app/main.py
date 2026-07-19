@@ -261,7 +261,7 @@ async def lifespan(app):
     finally:
       _bn_db.close()
   except Exception as exc:
-    _log.error("missing-bundle reconcile wiring failed: %s", exc, exc_info=True)
+    _log.error("compiled-bundle reconcile wiring failed: %s", exc, exc_info=True)
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
   # must run BEFORE the actor exists — recovery has to work even when
