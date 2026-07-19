@@ -123,11 +123,13 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller))
         .toBe(true)
 
-      const drawerToggle = page.getByRole('button', { name: 'Toggle navigation' })
-      if (await drawerToggle.getAttribute('aria-expanded') !== 'true') {
-        await drawerToggle.click()
-      }
-      await page.getByRole('button', { name: app.name, exact: true }).click()
+      // Enter through the supported cold-start URL. The contract under test is
+      // shell -> AppCanvas -> opaque frame -> parent module broker; coupling it
+      // to the drawer row's new-item entrance animation made the browser wait
+      // for actionability even though background warming had already succeeded.
+      await page.goto(`${BASE}/shell/?app=${app.id}`, {
+        waitUntil: 'domcontentloaded',
+      })
       const frameSelector = `iframe[src*="/api/apps/${app.id}/frame"]`
       await page.waitForSelector(frameSelector)
       let child
