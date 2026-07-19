@@ -106,6 +106,7 @@ import html  # noqa: E402
 import ipaddress  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import math  # noqa: E402
 import shutil  # noqa: E402
 import socket  # noqa: E402
 import subprocess  # noqa: E402
@@ -155,29 +156,70 @@ _ALLOWED_HOSTS = {
   if h.strip()
 }
 
+# Fail-safe parsing for the auth-path tunables. The recovery floor must never
+# fail to BOOT (or silently disable a protection) because of a malformed env
+# value: a bad/empty/NaN/inf/out-of-range setting falls back to the built-in
+# default, and the throttle window can never be driven <= 0 (which would turn
+# throttling off). Defaults alone are always safe, so a corrupt DB or seed can
+# never trip these.
+def _env_int_min(name: str, default: int, minimum: int) -> int:
+  raw = os.environ.get(name)
+  if raw is None:
+    return default
+  try:
+    value = int(raw.strip())
+  except (TypeError, ValueError):
+    return default
+  return value if value >= minimum else default
+
+
+def _env_float_min(
+  name: str, default: float, minimum: float, *, inclusive: bool
+) -> float:
+  raw = os.environ.get(name)
+  if raw is None:
+    return default
+  try:
+    value = float(raw.strip())
+  except (TypeError, ValueError):
+    return default
+  if not math.isfinite(value):
+    return default
+  if value < minimum or (not inclusive and value == minimum):
+    return default
+  return value
+
+
 # Auth-path resource bounds. The recovery floor is public and DB-independent —
 # the one surface that must stay responsive when everything else is down — so
 # its bcrypt login path is a cheap remote-DoS lever unless bounded: unthrottled
-# attempts pin the CPU (one bcrypt verify per attempt) and pile up worker
-# threads in the unbounded ThreadingHTTPServer. Two independent bounds close it
-# (see _handle_auth): a per-client fixed-window throttle that rejects a login
-# flood cheaply BEFORE any bcrypt runs, and a small global semaphore that caps
-# concurrent bcrypt so a burst can neither saturate the cores nor hold more than
-# a few threads in the verify at once. Defaults are generous for a human doing
-# real recovery yet starve an attacker; all env-tunable without editing the
-# frozen code.
-_AUTH_RATE_LIMIT = int(os.environ.get("RECOVERY_AUTH_RATE_LIMIT", "10"))
-_AUTH_RATE_WINDOW = float(os.environ.get("RECOVERY_AUTH_RATE_WINDOW", "60"))
-_AUTH_RATE_MAX_KEYS = int(os.environ.get("RECOVERY_AUTH_RATE_MAX_KEYS", "1024"))
-_BCRYPT_CONCURRENCY = int(os.environ.get("RECOVERY_BCRYPT_CONCURRENCY", "2"))
+# attempts pin the CPU (one bcrypt verify per attempt) and, worse, pile up
+# worker threads in the unbounded ThreadingHTTPServer. THREE bounds close it,
+# admitted in this order on the auth route (see _route_auth_post): (1) a
+# per-client fixed-window throttle keyed from headers alone, so a flood is
+# rejected with 429 BEFORE the body is drained or the DB is touched; (2) a
+# non-blocking cap on concurrent auth handlers, so a body-drip or locked-DB
+# flood cannot pile threads on this route — the newcomer past the cap gets an
+# immediate 503; (3) a small global semaphore around the DB-read + bcrypt work,
+# so concurrent verifies can neither saturate the cores nor park more than a few
+# threads. Defaults are generous for a human doing real recovery yet starve an
+# attacker; all env-tunable (fail-safe) without editing the frozen code.
+_AUTH_RATE_LIMIT = _env_int_min("RECOVERY_AUTH_RATE_LIMIT", 10, 1)
+_AUTH_RATE_WINDOW = _env_float_min(
+  "RECOVERY_AUTH_RATE_WINDOW", 60.0, 0.0, inclusive=False)
+_AUTH_RATE_MAX_KEYS = _env_int_min("RECOVERY_AUTH_RATE_MAX_KEYS", 1024, 1)
+_AUTH_MAX_CONCURRENCY = _env_int_min("RECOVERY_AUTH_MAX_CONCURRENCY", 16, 1)
+_BCRYPT_CONCURRENCY = _env_int_min("RECOVERY_BCRYPT_CONCURRENCY", 2, 1)
 # Bounded wait for a bcrypt slot: a thread that cannot get one returns 503
 # promptly rather than parking, which is what keeps a flood from piling threads.
 # A single-owner recovery flow has no real contention, so a genuine login never
 # waits; the wait only bites under attack, where a fast 503 is the right answer.
-_BCRYPT_WAIT_SECS = float(os.environ.get("RECOVERY_BCRYPT_WAIT_SECS", "2"))
+_BCRYPT_WAIT_SECS = _env_float_min(
+  "RECOVERY_BCRYPT_WAIT_SECS", 2.0, 0.0, inclusive=True)
 # A small constant delay on a FAILED login, held outside the bcrypt semaphore,
 # slows online guessing without touching a correct login. Set 0 to disable.
-_AUTH_FAIL_DELAY = float(os.environ.get("RECOVERY_AUTH_FAIL_DELAY", "0.5"))
+_AUTH_FAIL_DELAY = _env_float_min(
+  "RECOVERY_AUTH_FAIL_DELAY", 0.5, 0.0, inclusive=True)
 
 RECOVER_PENDING = DATA_DIR / ".recover-pending"
 RESTART_SENTINEL = DATA_DIR / ".platform-restart-requested"
@@ -269,50 +311,93 @@ _SSE_SOCKET_TIMEOUT = float(
 # Kept small and pure so a frozen lifeboat can be read as obviously correct.
 # ---------------------------------------------------------------------------
 
-def _resolve_client_key(peer: str, forwarded_for: str | None) -> str:
+def _canonical_ip(value: str) -> str | None:
+  """Returns the canonical string form of a bare IP address, or None.
+
+  Anything that is not a bare IP — a port suffix, bracketed IPv6, whitespace or
+  unicode variants, an over-long string, plain garbage — returns None. This is
+  what keeps the throttle key a canonical IP: equivalent IPv6 spellings collapse
+  onto one bucket, and the key length is bounded (no attacker-chosen raw header
+  string ever becomes a dict key).
+  """
+  try:
+    return str(ipaddress.ip_address(value.strip()))
+  except (ValueError, AttributeError):
+    return None
+
+
+def _peer_is_trusted(peer: str) -> bool:
+  """True iff the direct TCP peer is a private/loopback/link-local address.
+
+  recoveryd is never published on a public interface, so a private peer means
+  the request reached us through our own container network (the reverse proxy),
+  and a public peer means a direct connection that bypassed it.
+  """
+  try:
+    ip = ipaddress.ip_address(peer)
+  except ValueError:
+    return False
+  return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _resolve_client_key(peer: str, forwarded_for: list[str] | None) -> str:
   """Returns the per-client throttle key for a request: the real client IP.
 
   This is the trust boundary for the throttle, and it must never let a
   spoofable header become a bypass. recoveryd runs behind our own
-  TLS-terminating reverse proxy (Caddy) on a private container network and is
-  NEVER published on a public interface, so the direct TCP peer is ALWAYS the
+  TLS-terminating reverse proxy (edge Caddy) on a private container network and
+  is NEVER published on a public interface, so the direct TCP peer is ALWAYS the
   proxy — keying on it alone would collapse every real client onto one bucket.
 
-  So when (and only when) the direct peer is a private/loopback/link-local
-  address — meaning the request reached us through our own infra — we trust the
-  `X-Forwarded-For` the proxy set and take its RIGHTMOST element. Caddy appends
-  the client IP it actually observed as the last hop, so any client-supplied
-  XFF prefix sits to its LEFT and cannot forge the key; the rightmost token is
-  the one value an on-path attacker cannot control. A non-private peer is
-  anomalous (a direct connection that did not pass through our proxy); its XFF
-  is untrusted and we key on the peer itself. The failure mode of the whole
-  rule is over-throttling (collapsing onto the proxy IP), never a bypass.
+  *** Contract with the edge, verified against the running config: our Caddy
+  runs with NO `trusted_proxies`, so it DISCARDS any client-supplied
+  X-Forwarded-For and forwards a SINGLE bare client address (its own direct
+  socket peer). We therefore trust the forwarded address ONLY when (a) the
+  direct peer is private/loopback/link-local (came through our infra) AND (b)
+  exactly one X-Forwarded-For header carrying exactly one parseable bare IP is
+  present. Anything else — a public peer, no/duplicate XFF headers, a
+  comma-joined list (an unexpected extra proxy hop), or an unparseable token —
+  falls back to keying on the proxy peer. The failure mode is always
+  over-throttling, never a bypass.
+
+  If a CDN or load balancer is ever inserted IN FRONT of edge-caddy, this
+  single-hop assumption breaks (Caddy would then append its upstream, and the
+  real client would no longer be the whole value) and this rule must be
+  revisited. Accepted residual: all clients behind one NAT/egress share an
+  address, so a co-located attacker can consume the owner's attempts — the
+  frozen floor does not add username-scoped exemptions for this; a distributed
+  or volumetric flood is edge/L3 territory. ***
   """
-  trust_forwarded = False
-  try:
-    ip = ipaddress.ip_address(peer)
-    trust_forwarded = ip.is_private or ip.is_loopback or ip.is_link_local
-  except ValueError:
-    trust_forwarded = False
-  if trust_forwarded and forwarded_for:
-    last = forwarded_for.split(",")[-1].strip()
-    if last:
-      return last
-  return peer
+  peer_key = _canonical_ip(peer) or peer
+  if not _peer_is_trusted(peer):
+    return peer_key
+  # Exactly one header, exactly one token: our single-hop contract. Duplicate
+  # headers are ambiguous; a comma means an unexpected extra hop.
+  if not forwarded_for or len(forwarded_for) != 1:
+    return peer_key
+  token = forwarded_for[0].strip()
+  if "," in token:
+    return peer_key
+  return _canonical_ip(token) or peer_key
 
 
 class _FixedWindowThrottle:
   """A tiny per-key fixed-window rate limiter for the auth path.
 
   Bounds attempts per key to `limit` per `window` seconds. State is a bounded
-  OrderedDict (at most `max_keys` entries, oldest evicted first) so a flood of
-  distinct keys can never grow memory without bound. Thread-safe: recoveryd is
-  a ThreadingHTTPServer, so every call runs under a lock. Deliberately
-  approximate — a fixed window, not a sliding one, is a handful of lines and
-  obviously correct, which is exactly what a frozen recovery floor wants.
+  OrderedDict (at most `max_keys` entries) so a flood of distinct keys can never
+  grow memory without bound. Thread-safe: recoveryd is a ThreadingHTTPServer, so
+  every call runs under a lock. Deliberately approximate — a fixed window, not a
+  sliding one, is a handful of lines and obviously correct, which is exactly
+  what a frozen recovery floor wants.
 
-  A key that is over its limit is moved to the recent end (not evicted) so an
-  active attacker stays throttled and only idle keys age out.
+  Eviction preserves the rate property under key churn: a key that is currently
+  AT its limit (actively blocked) is never evicted for capacity — evicting it
+  would hand a returning attacker a fresh window — so only expired or
+  under-limit keys are evicted. When the table is full of actively-blocked keys,
+  a brand-new key is thrown (returns False) rather than displacing a blocked
+  one; that only happens under a max_keys-wide distinct-source flood and fails
+  safe (throttle, never bypass).
   """
 
   def __init__(self, *, limit: int, window: float, max_keys: int) -> None:
@@ -331,33 +416,49 @@ class _FixedWindowThrottle:
     """
     with self._lock:
       entry = self._hits.get(key)
-      if entry is None or now - entry[0] >= self._window:
-        # No window yet, or the previous one elapsed — start a fresh window.
-        self._hits[key] = (now, 1)
+      if entry is not None and now - entry[0] < self._window:
+        # This key has an active window.
+        start, count = entry
         self._hits.move_to_end(key)
-        self._evict_locked()
+        if count >= self._limit:
+          return False
+        self._hits[key] = (start, count + 1)
         return True
-      start, count = entry
+      # A new key, or one whose previous window elapsed — a fresh window opens.
+      if key not in self._hits and len(self._hits) >= self._max_keys:
+        if not self._make_room_locked(now):
+          # Full of actively-blocked keys; refuse the newcomer (fail-safe).
+          return False
+      self._hits[key] = (now, 1)
       self._hits.move_to_end(key)
-      if count >= self._limit:
-        return False
-      self._hits[key] = (start, count + 1)
       return True
 
-  def _evict_locked(self) -> None:
-    while len(self._hits) > self._max_keys:
-      self._hits.popitem(last=False)
+  def _make_room_locked(self, now: float) -> bool:
+    """Evicts the oldest key that is safe to drop — expired, or under its limit.
+    Returns True if a slot was freed, False if every tracked key is actively
+    blocked (nothing safe to evict)."""
+    victim = None
+    for key, (start, count) in self._hits.items():  # oldest first
+      if now - start >= self._window or count < self._limit:
+        victim = key
+        break
+    if victim is None:
+      return False
+    del self._hits[victim]
+    return True
 
 
-# The per-client login throttle and the global bcrypt gate. Module singletons
-# so all worker threads share one bounded state; both are cheap and created
-# once at import.
+# Module singletons shared by all worker threads (recoveryd is one process).
+# The per-client login throttle; the non-blocking cap on concurrent auth
+# handlers (thread-pileup guard); and the global gate around the DB-read +
+# bcrypt work. All created once at import.
 _AUTH_THROTTLE = _FixedWindowThrottle(
   limit=_AUTH_RATE_LIMIT,
   window=_AUTH_RATE_WINDOW,
   max_keys=_AUTH_RATE_MAX_KEYS,
 )
-_BCRYPT_GATE = threading.BoundedSemaphore(max(1, _BCRYPT_CONCURRENCY))
+_AUTH_INFLIGHT = threading.BoundedSemaphore(_AUTH_MAX_CONCURRENCY)
+_BCRYPT_GATE = threading.BoundedSemaphore(_BCRYPT_CONCURRENCY)
 
 
 # ---------------------------------------------------------------------------
@@ -1191,14 +1292,23 @@ class _Handler(BaseHTTPRequestHandler):
     ):
       self._handle_agent_post(path)
       return
+    # The auth route runs its admission control (throttle + concurrency cap)
+    # from headers BEFORE draining the body, so branch to it ahead of the
+    # generic drain below (which would otherwise let a body-drip flood occupy a
+    # worker for up to the 30s socket timeout before the limiter is consulted).
+    if path == "/recover/auth":
+      self._route_auth_post()
+      return
     # Read (drain) the request body FIRST, unconditionally. With HTTP/1.1
     # keep-alive, a handler that replies before consuming the body leaves
     # those bytes in the socket buffer, where they get mis-parsed as the
     # next request ("Bad request syntax"). Draining up front makes every
-    # early-return path connection-safe.
+    # early-return path connection-safe. These routes are all auth-gated and
+    # bounded by the 30s socket timeout; only the public /recover/auth route
+    # does per-request bcrypt + DB work, so only it needs the extra bounds.
     form = self._read_form()
     if path not in (
-      "/recover/auth", "/recover/restore", "/recover/update", "/recover/logout"
+      "/recover/restore", "/recover/update", "/recover/logout"
     ):
       self._send(HTTPStatus.NOT_FOUND, "not found", content_type="text/plain")
       return
@@ -1209,9 +1319,7 @@ class _Handler(BaseHTTPRequestHandler):
         content_type="text/plain",
       )
       return
-    if path == "/recover/auth":
-      self._handle_auth(form)
-    elif path == "/recover/restore":
+    if path == "/recover/restore":
       self._handle_restore(form)
     elif path == "/recover/update":
       self._handle_update(form)
@@ -1232,19 +1340,35 @@ class _Handler(BaseHTTPRequestHandler):
       self._send(HTTPStatus.OK, recovery_pages.login_html())
 
   def _client_key(self) -> str:
-    """The per-client throttle key for this request (_resolve_client_key)."""
-    peer = self.client_address[0] if self.client_address else ""
-    return _resolve_client_key(peer, self.headers.get("X-Forwarded-For"))
+    """The per-client throttle key for this request (see _resolve_client_key).
 
-  def _handle_auth(self, form: dict[str, str]) -> None:
-    # Refuse auth entirely until an owner exists (first-boot guard).
-    if not recovery_db.owner_exists():
-      self._send(HTTPStatus.OK, recovery_pages.not_configured_html())
-      return
-    # Bound resource use BEFORE any bcrypt: reject a per-client login flood
-    # cheaply so a bogus caller can neither pin the CPU (one bcrypt per
-    # attempt) nor pile up threads. The window is monotonic-clock based.
+    Reads ALL X-Forwarded-For header instances (via get_all when the headers
+    object supports it) so duplicate headers can be recognized as ambiguous
+    rather than silently collapsed to one occurrence.
+    """
+    peer = self.client_address[0] if self.client_address else ""
+    forwarded: list[str] | None = None
+    get_all = getattr(self.headers, "get_all", None)
+    if callable(get_all):
+      forwarded = get_all("X-Forwarded-For")
+    elif self.headers is not None:
+      value = self.headers.get("X-Forwarded-For")
+      forwarded = [value] if value is not None else None
+    return _resolve_client_key(peer, forwarded)
+
+  def _route_auth_post(self) -> None:
+    """Admission control for POST /recover/auth, decided BEFORE the body is
+    drained or the DB is touched.
+
+    Order: per-client throttle (headers only) -> non-blocking concurrency cap
+    -> body read (Content-Length bounded) -> cross-site guard -> the DB-read +
+    bcrypt work in _handle_auth (behind the global bcrypt semaphore). Rejecting
+    before the body read leaves the body UNREAD, so the connection is closed
+    rather than kept alive — a leftover body would desync the next request on
+    it.
+    """
     if not _AUTH_THROTTLE.allow(self._client_key(), time.monotonic()):
+      self.close_connection = True
       self._send(
         HTTPStatus.TOO_MANY_REQUESTS,
         recovery_pages.login_html(
@@ -1252,17 +1376,36 @@ class _Handler(BaseHTTPRequestHandler):
         extra_headers={"Retry-After": str(int(_AUTH_RATE_WINDOW))},
       )
       return
-    username = form.get("username", "")
-    password = form.get("password", "")
-    pw_hash = recovery_db.owner_password_hash(username)
-    # Constant-time-ish: always run bcrypt against a hash so a missing
-    # user and a wrong password take the same time. recovery_auth's
-    # verify_password handles a malformed hash by returning False.
-    candidate = pw_hash if pw_hash else _DUMMY_HASH
-    # A small global semaphore caps concurrent bcrypt so a burst that slips
-    # under the per-client throttle (many distinct clients) still cannot
-    # saturate every core or hold more than a few threads in the verify at
-    # once. The bounded wait returns a prompt 503 instead of parking a thread.
+    # Non-blocking: the newcomer past the concurrency cap is refused at once, so
+    # a body-drip or locked-DB flood cannot pile threads on the bcrypt route.
+    if not _AUTH_INFLIGHT.acquire(blocking=False):
+      self.close_connection = True
+      self._send(
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        recovery_pages.login_html(
+          error="Recovery is busy right now. Try again in a moment."),
+        extra_headers={"Retry-After": "2"},
+      )
+      return
+    try:
+      form = self._read_form()
+      # Cross-site guard, same as every other state-changing POST.
+      if self._reject_cross_site():
+        self._send(
+          HTTPStatus.FORBIDDEN, "Cross-site request blocked.",
+          content_type="text/plain",
+        )
+        return
+      self._handle_auth(form)
+    finally:
+      _AUTH_INFLIGHT.release()
+
+  def _handle_auth(self, form: dict[str, str]) -> None:
+    # Admission control (throttle + concurrency cap) already passed in
+    # _route_auth_post, and the body has been read. Bound the blocking/expensive
+    # work — the owner-row reads (which can wait on a locked DB) and the bcrypt
+    # verify — under the global semaphore, with a bounded wait so a thread that
+    # cannot get a slot returns 503 promptly instead of parking.
     if not _BCRYPT_GATE.acquire(timeout=_BCRYPT_WAIT_SECS):
       self._send(
         HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1272,6 +1415,17 @@ class _Handler(BaseHTTPRequestHandler):
       )
       return
     try:
+      # Refuse auth entirely until an owner exists (first-boot guard).
+      if not recovery_db.owner_exists():
+        self._send(HTTPStatus.OK, recovery_pages.not_configured_html())
+        return
+      username = form.get("username", "")
+      password = form.get("password", "")
+      pw_hash = recovery_db.owner_password_hash(username)
+      # Constant-time-ish: always run bcrypt against a hash so a missing user
+      # and a wrong password take the same time. recovery_auth's verify_password
+      # handles a malformed hash by returning False.
+      candidate = pw_hash if pw_hash else _DUMMY_HASH
       verified = recovery_auth.verify_password(password, candidate)
     finally:
       _BCRYPT_GATE.release()
