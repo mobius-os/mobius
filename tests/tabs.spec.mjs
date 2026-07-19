@@ -133,8 +133,14 @@ async function paneChromeDeltas(page) {
   }))
 }
 
-async function seedTabs(page, tabs) {
-  const workspace = paneModel.serializeWorkspace(paneModel.seedFromFlatTabs(tabs))
+async function seedTabs(page, tabs, { viewMode } = {}) {
+  // Builder mode ('panes', the default) now ALWAYS shows the strip, so the
+  // single-pane strip's pinning/unpinning contract (pin engages, unpin to zero
+  // disengages -> strip retires) lives in SINGLE-screen mode; callers asserting
+  // that flow seed viewMode: 'single'.
+  let ws = paneModel.seedFromFlatTabs(tabs)
+  if (viewMode) ws = paneModel.setViewMode(ws, viewMode)
+  const workspace = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([workspaceKey, workspaceRaw, legacyKey, t]) => {
     try {
       // Match the shell's dual-write persistence contract. The versioned
@@ -146,11 +152,29 @@ async function seedTabs(page, tabs) {
   }, [paneModel.STORAGE_KEY, workspace, 'mobius-open-tabs', tabs])
 }
 
+// Single-SCREEN workspace holding just `chatId`, with an EMPTY legacy mirror so
+// the strip is unengaged. Navigate WITHOUT a ?chat= deep-link (a deep-link would
+// RESET_FLAT the empty-legacy boot into builder) so the valid blob restores
+// 'single' and the sole unpinned chat shows no strip.
+async function seedSingleModeChat(page, chatId) {
+  const ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]), 'single')
+  const workspace = paneModel.serializeWorkspace(ws)
+  await page.addInitScript(([workspaceKey, workspaceRaw]) => {
+    try {
+      sessionStorage.setItem(workspaceKey, workspaceRaw)
+      sessionStorage.setItem('mobius-open-tabs', '[]')
+    } catch { /* private mode */ }
+  }, [paneModel.STORAGE_KEY, workspace])
+}
+
 test.describe('Tabs', () => {
   test('strip shows pinned tabs, switches, closes, and keeps the spacer sane', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'tabs')
     const appsMock = await mockOwnedApp(page, chat.id)
-    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
+    // Single-screen: builder always shows the strip, so the "close the last tab ->
+    // strip disappears -> chat back to full height" contract is a single-screen one.
+    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }], { viewMode: 'single' })
 
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
@@ -189,10 +213,14 @@ test.describe('Tabs', () => {
     expect(noStrip.spacerH).toBeLessThanOrEqual(noStrip.scrollClientH)
   })
 
-  test('no toggle/strip surface when nothing is pinned', async ({ page }) => {
+  test('no toggle/strip surface when nothing is pinned (single-screen)', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'notabs')
     const appsMock = await mockOwnedApp(page, chat.id)
-    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    // "Nothing pinned -> no strip" is a SINGLE-screen contract now that builder mode
+    // always surfaces the strip. Restore single-screen from a valid blob (no ?chat=
+    // deep-link, which would RESET_FLAT into builder) with an empty legacy mirror.
+    await seedSingleModeChat(page, chat.id)
+    await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
     await sendMessage(page, 'just a chat')
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0)

@@ -152,17 +152,17 @@ async function seedWorkspace(page, ws) {
  *  mirror so tabStripEngaged starts false — the owner's real "one chat, never
  *  engaged the strip" state, where single mode shows NO strip. Entering builder
  *  must then reveal the single-pane strip (item 3). */
-async function seedSingleLeafSingleMode(page, chatId) {
-  const ws = paneModel.setViewMode(
-    paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]), 'single')
-  const blob = paneModel.serializeWorkspace(ws)
-  await page.addInitScript(([flagKey, wsKey, wsBlob]) => {
+// Enable splits with an EMPTY legacy open-tabs mirror (the owner's real "one chat,
+// strip never engaged" state). A ?chat= deep-link then lands the single leaf in
+// builder ('panes') via RESET_FLAT with tabStripEngaged=false — exactly the case
+// where the strip used to be invisible and must now show (item 3).
+async function seedFreshSingleLeaf(page) {
+  await page.addInitScript((flagKey) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(wsKey, wsBlob)
       sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+  }, 'mobius:workspace-splits')
 }
 
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
@@ -834,34 +834,37 @@ test.describe('Workspace view-mode toggle', () => {
   // builder SURFACE (and the phone drag source), so it must appear on entry even
   // at a single leaf. Reproduced on a PHONE viewport with the real "one chat, strip
   // never engaged" state (empty legacy open-tabs).
-  test('phone: entering builder with ONE leaf reveals the strip (the builder surface)', async ({ page }) => {
+  test('phone: builder single-leaf shows the strip; single-screen hides it', async ({ page }) => {
     await boot(page, PHONE)
     const a = await createTaggedChat(page, 'vmPhoneStrip')
     await mockApps(page, [])
-    await seedSingleLeafSingleMode(page, a.id)
+    await seedFreshSingleLeaf(page)
+    // The ?chat= deep-link RESET_FLATs the empty-legacy boot into builder ('panes')
+    // with a single leaf and tabStripEngaged=false — the exact case the owner hit.
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
-    expect((await readWs(page)).viewMode).toBe('single')
-    // Single-screen single-leaf keeps today's no-strip look.
-    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
-
-    // Enter builder via the logo's keyboard path (the deterministic hold equivalent).
-    const brand = page.getByRole('button', { name: 'Toggle navigation' })
-    await brand.focus()
-    await page.keyboard.press('Shift+Enter')
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
 
-    // The fix: the strip is now visible even with a single leaf, and it is the drag
-    // source (its sole tab tagged with the pane id). Poll past the entry-deal beat.
+    // The fix: builder single-leaf shows the strip (the builder surface + drag
+    // source), where it used to change nothing but the logo. Poll past the entry deal.
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
     await expect(brand).toHaveClass(/shell__brand--builder/)
     await expect(page.locator('.shell__tabstrip')).toBeVisible({ timeout: 4000 })
     await expect(page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${a.id}"]`)).toHaveCount(1)
 
-    // Leaving builder returns to today's no-strip single-leaf look.
+    // Toggle to single-screen: the strip retires to today's no-strip look (an
+    // unengaged single leaf shows nothing outside builder).
     await brand.focus()
     await page.keyboard.press('Shift+Enter')
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    await expect(brand).not.toHaveClass(/shell__brand--builder/)
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0, { timeout: 4000 })
+
+    // Back to builder: the strip deals in again.
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
+    await expect(page.locator('.shell__tabstrip')).toBeVisible({ timeout: 4000 })
   })
 })
 

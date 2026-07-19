@@ -269,7 +269,9 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
     expect(baselineAdapterUrls.length).toBeGreaterThan(0)
     expect(baselineBlockedCount).toBe(baselineAdapterUrls.length)
 
-    await page.getByRole('button', { name: 'Close' }).click({ timeout: 5_000 })
+    // exact: the builder strip's per-tab close button is "Close <label> tab",
+    // which a loose name would also match; the service-surface Close is exactly "Close".
+    await page.getByRole('button', { name: 'Close', exact: true }).click({ timeout: 5_000 })
     await expect(page.getByText('Tandoor is closed')).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('iframe[src*="/_mobius/surface"]')).toHaveCount(0)
     await page.waitForTimeout(500)
