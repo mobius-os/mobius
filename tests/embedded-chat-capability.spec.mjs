@@ -73,6 +73,17 @@ async function ownerToken(page) {
   return page.evaluate(() => localStorage.getItem('token'))
 }
 
+async function currentAppFrame(iframe) {
+  try {
+    const element = await iframe.elementHandle()
+    return await element?.contentFrame() ?? null
+  } catch {
+    // AppCanvas can atomically replace its live iframe while a new bundle is
+    // promoted. The caller polls again against the current data-app-id owner.
+    return null
+  }
+}
+
 test('opaque embedded chat completes authenticated flow and survives remount', async ({ page, request }) => {
   const consoleErrors = []
   const pageErrors = []
@@ -152,33 +163,31 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
 
   try {
     await page.goto(`${BASE}/app/${app.id}`, { waitUntil: 'domcontentloaded' })
-    await expect.poll(() => page.frames().some(frame =>
-      pathnameOf(frame.url()) === `/api/apps/${app.id}/frame`
-    )).toBeTruthy()
-    const appFrame = page.frames().find(frame =>
-      pathnameOf(frame.url()) === `/api/apps/${app.id}/frame`
-    )
+    const outerFrame = page.locator(`iframe[data-app-id="${app.id}"]`)
+    await expect(outerFrame).toBeVisible()
 
     // The element intentionally remains unsandboxed so the shell service
     // worker can intercept this navigation offline. Isolation is enforced by
     // the frame response's CSP sandbox, which must keep the origin opaque.
     await expect.poll(() => appFrameResponses.length).toBeGreaterThan(0)
-    const outerFrame = page.locator(`iframe[src*="/api/apps/${app.id}/frame"]`)
     await expect(outerFrame).not.toHaveAttribute('sandbox', /.+/)
     const frameCsp = appFrameResponses.at(-1).headers['content-security-policy']
     expect(frameCsp).toContain('sandbox')
     expect(frameCsp).not.toContain('allow-same-origin')
 
-    const status = appFrame.locator('#embed-e2e-status')
+    let appFrame = null
     await expect.poll(async () => ({
-      text: await status.textContent(),
-      error: await status.getAttribute('data-error'),
-      chatType: await appFrame.evaluate(() => typeof window.mobius?.chat),
-      childFrames: appFrame.childFrames().map(frame => frame.url()),
+      frame: pathnameOf((appFrame = await currentAppFrame(outerFrame))?.url()),
+      text: await appFrame?.locator('#embed-e2e-status').textContent(),
+      error: await appFrame?.locator('#embed-e2e-status').getAttribute('data-error'),
+      chatType: await appFrame?.evaluate(() => typeof window.mobius?.chat),
+      childFrames: appFrame?.childFrames().map(frame => frame.url()) ?? [],
     }), { timeout: 20_000 }).toEqual({
+      frame: `/api/apps/${app.id}/frame`,
       text: 'ready', error: null, chatType: 'function',
       childFrames: [expect.stringContaining('/shell/embed/chat')],
     })
+    const status = appFrame.locator('#embed-e2e-status')
     const firstChat = await status.getAttribute('data-chat')
     const firstInstance = await status.getAttribute('data-instance')
     expect(firstChat).toBeTruthy()
@@ -226,17 +235,21 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     // A full shell/app/embed remount mints a fresh one-use grant but reuses the
     // durable app chat; the old owner browser token is never available inside.
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect.poll(() => page.frames().some(frame =>
-      pathnameOf(frame.url()) === `/api/apps/${app.id}/frame`
-    )).toBeTruthy()
-    const remountedAppFrame = page.frames().find(frame =>
-      pathnameOf(frame.url()) === `/api/apps/${app.id}/frame`
-    )
-    const remountedStatus = remountedAppFrame.locator('#embed-e2e-status')
+    const remountedOuterFrame = page.locator(`iframe[data-app-id="${app.id}"]`)
+    await expect(remountedOuterFrame).toBeVisible()
+    let remountedAppFrame = null
     await expect.poll(async () => ({
-      text: await remountedStatus.textContent(),
-      error: await remountedStatus.getAttribute('data-error'),
-    }), { timeout: 20_000 }).toEqual({ text: 'ready', error: null })
+      frame: pathnameOf(
+        (remountedAppFrame = await currentAppFrame(remountedOuterFrame))?.url(),
+      ),
+      text: await remountedAppFrame
+        ?.locator('#embed-e2e-status').textContent(),
+      error: await remountedAppFrame
+        ?.locator('#embed-e2e-status').getAttribute('data-error'),
+    }), { timeout: 20_000 }).toEqual({
+      frame: `/api/apps/${app.id}/frame`, text: 'ready', error: null,
+    })
+    const remountedStatus = remountedAppFrame.locator('#embed-e2e-status')
     expect(await remountedStatus.getAttribute('data-chat')).toBe(firstChat)
     const remountedChatFrame = page.frames().find(frame =>
       pathnameOf(frame.url()) === '/shell/embed/chat'
