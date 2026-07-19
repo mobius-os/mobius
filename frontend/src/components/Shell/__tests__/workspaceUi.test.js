@@ -442,7 +442,7 @@ test('logo pointer provenance EXPIRES so a keyboard context menu reaches the nat
   // as keyboard-invoked; Shell wires it into the brand's onKeyDown.
   assert.match(logoGestureSrc, /const onKeyDown = useCallback\(\(\) => \{\s*\n?\s*lastPointerTypeRef\.current = ''\s*\n?\s*lastPointerTypeAtRef\.current = 0/)
   assert.match(logoGestureSrc, /onPointerCancel, onContextMenu,\s*\n?\s*onKeyDown, consumeSuppressedClick/)
-  assert.match(shell, /if \(paneModel\.WORKSPACE_SPLITS_ENABLED\) logoGesture\.onKeyDown\(\)/)
+  assert.match(shellBrand, /if \(splitsEnabled\) logoGesture\.onKeyDown\(\)/)
 })
 
 test('the living halo lifecycle: lit only in builder mode, one allocation-free rAF, paused on hidden, static under reduced motion', () => {

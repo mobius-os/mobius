@@ -162,11 +162,19 @@ async function openDrawer(page) {
   await expect(toggle).toHaveAttribute('aria-expanded', 'true')
 }
 
-/** Close the modal drawer via the brand toggle (the drawer has no dedicated
- *  close control by owner decision — toggle, scrim, and Back are the exits). */
+/** Close the modal drawer via the SCRIM — its canonical pointerdown-dismiss
+ *  (Drawer.handleOverlayPointerDown → onClose). The drawer has no dedicated close
+ *  control by owner decision; the exits are the scrim tap, the brand toggle, and
+ *  Back. CONTRACT: the brand toggle cannot close a MODAL drawer from a test — Shell
+ *  renders the header `inert` while the modal drawer is open
+ *  (`inert={modalDrawerOpen}` in Shell.jsx), so a real click on the toggle never
+ *  lands (it times out). That inert bar is exactly why the removed ✕ button existed.
+ *  The scrim stays hit-testable while open, so close through it (matches test 22).
+ *  Do NOT rewire this back to a toggle click. */
 async function closeDrawerButton(page) {
   const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-  await toggle.click()
+  await expect(page.locator('.drawer-overlay')).toBeVisible()
+  await page.locator('.drawer-overlay').click({ position: { x: 400, y: 300 } })
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 }
 

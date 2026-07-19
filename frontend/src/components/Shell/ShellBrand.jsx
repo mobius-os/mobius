@@ -57,6 +57,10 @@ const ShellBrand = memo(function ShellBrand({
         onContextMenu={splitsEnabled ? logoGesture.onContextMenu : undefined}
         onKeyDown={(e) => {
           backFiredRef.current = false
+          // A keyboard interaction clears pointer provenance (finding 5) so a
+          // keyboard-invoked contextmenu on the focused brand reaches the
+          // native menu instead of inheriting a stale touch/pen suppression.
+          if (splitsEnabled) logoGesture.onKeyDown()
           if (splitsEnabled && e.shiftKey && e.key === 'Enter') {
             e.preventDefault()
             keyboardModeClickRef.current = true
