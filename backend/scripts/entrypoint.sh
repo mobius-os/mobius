@@ -950,6 +950,50 @@ su -s /bin/sh mobius -c \
   "bash /app/scripts/init-cron-scaffold.sh _self-reminders '*/5 * * * *'" \
   2>/dev/null || true
 
+# Install the agent-browser profile reaper. Same reserved-slug pattern as
+# _self-reminders above: a platform job, not a mini-app, so it lives under a
+# `_`-prefixed slug and its job.sh only execs the baked script.
+#
+# Why this exists: agent-browser mints a per-chat Chromium profile under
+# /data/agent-browser-profiles/chat-<id>/ and nothing reaped them. The cleanup
+# script has shipped since its introduction but was never scheduled, so the
+# tree only ever grew (measured 2026-07-19: 2.0 GiB across 134 profiles in
+# ~4 days, inside the prod /data volume).
+#
+# The flags are the load-bearing part:
+#   --delete                  the script is read-only by default
+#   --include-existing-chats  WITHOUT this, only orphaned and soft-deleted-chat
+#                             profiles are ever selected. 121 of the 134
+#                             measured profiles belonged to EXISTING chats, so
+#                             omitting it would leave the actual growth
+#                             unbounded. With it, a profile is reaped only when
+#                             the profile is stale AND the chat has been
+#                             inactive that long AND no run is active.
+# --include-non-chat is deliberately NOT passed: those are deliberately-named
+# profiles (e.g. a long-lived `atlas-touch-*`), not per-chat scratch.
+#
+# Profiles are a cache and auth/session mirror for the agent's own browser --
+# never partner transcript data -- so a reaped profile costs at most a re-login
+# inside a chat nobody has touched in two weeks. The 14-day default lives in
+# the script, not here, so operators tune one place.
+PC_DIR=/data/apps/_profile-cleanup
+if [ ! -f "$PC_DIR/init-cron.sh" ]; then
+  su -s /bin/sh mobius -c "mkdir -p $PC_DIR" 2>/dev/null || true
+  cat > "$PC_DIR/job.sh" <<'PCJOB'
+#!/bin/bash
+# Thin wrapper: cron runs this; the real logic is the baked cleanup script.
+exec python3 /app/scripts/agent-browser-profile-cleanup.py \
+  --delete --include-existing-chats
+PCJOB
+  chmod +x "$PC_DIR/job.sh" 2>/dev/null || true
+  chown -R mobius:mobius "$PC_DIR" 2>/dev/null || true
+fi
+# 04:17 daily -- off the :00/:30 marks the app jobs cluster on, and the work is
+# a stat-walk over a few hundred directories, so it never needs to be frequent.
+su -s /bin/sh mobius -c \
+  "bash /app/scripts/init-cron-scaffold.sh _profile-cleanup '17 4 * * *'" \
+  2>/dev/null || true
+
 # Never execute app-owned init-cron.sh at boot. Older files are declarations,
 # not trusted code: FastAPI lifespan parses their effective ENTRY (or the
 # manifest schedule) and rewrites both the durable file and live crontab through
