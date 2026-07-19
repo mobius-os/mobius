@@ -223,3 +223,22 @@ test('style injection is SSR-safe and idempotent', () => {
     else globalThis.document = originalDocument
   }
 })
+
+
+test('a hunk missing its lines renders instead of throwing', () => {
+  // The canonical parser always emits `lines`, so the platform suite can never
+  // catch a producer that does not. A copy of this folder fed by an app-side
+  // adapter can — and inside a mini-app frame an exception here is a
+  // frame-error and a blank app, not one degraded row.
+  assert.doesNotThrow(() => renderToStaticMarkup(
+    createElement(DiffView, {
+      file: { path: 'x.txt', hunks: [{ header: '@@ -1 +1 @@' }] },
+    }),
+  ))
+  const html = renderToStaticMarkup(
+    createElement(DiffView, {
+      file: { path: 'x.txt', hunks: [{ header: '@@ -1 +1 @@', lines: null }] },
+    }),
+  )
+  assert.match(html, /@@ -1 \+1 @@/, 'the hunk header still renders')
+})
