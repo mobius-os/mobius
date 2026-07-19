@@ -185,6 +185,39 @@ test('tool_sources attach to the latest WebSearch tool block', () => {
   assert.deepEqual(next[2].sources, sources)
 })
 
+// A turn can run several WebSearch calls in ONE batch, so every tool_sources
+// event arrives while the LAST search item is trailing. Matching by position
+// alone landed them all on that one item, each overwriting the previous, and
+// only the final search's sources survived.
+test('batched WebSearch calls each keep their own sources (matched by id)', () => {
+  const prev = [
+    toolItem('WebSearch', { input: 'query A', tool_use_id: 'toolu_a' }),
+    toolItem('WebSearch', { input: 'query B', tool_use_id: 'toolu_b' }),
+  ]
+  const a = [{ title: 'A', url: 'https://a.example/1' }]
+  const b = [{ title: 'B', url: 'https://b.example/2' }]
+
+  const next = attachToolSources(attachToolSources(prev, a, 'toolu_a'), b, 'toolu_b')
+
+  assert.deepEqual(next[0].sources, a, "the first search keeps its own results")
+  assert.deepEqual(next[1].sources, b)
+})
+
+test('replaying the same tool_sources event does not duplicate (catch-up safe)', () => {
+  const prev = [toolItem('WebSearch', { tool_use_id: 'toolu_a' })]
+  const sources = [{ title: 'A', url: 'https://a.example/1' }]
+  const once = attachToolSources(prev, sources, 'toolu_a')
+  const twice = attachToolSources(once, sources, 'toolu_a')
+  assert.deepEqual(twice[0].sources, sources)
+})
+
+test('an id with no matching item falls back to the last WebSearch', () => {
+  const prev = [toolItem('WebSearch', { input: 'only' })]
+  const sources = [{ title: 'A', url: 'https://a.example/1' }]
+  const next = attachToolSources(prev, sources, 'toolu_missing')
+  assert.deepEqual(next[0].sources, sources)
+})
+
 test('post-answer tool_output is swallowed by the absorbed card, not appended', () => {
   const items = upsertQuestionItem(
     [toolItem('AskUserQuestion')], questionEvent('q1', 'Pick a color'),

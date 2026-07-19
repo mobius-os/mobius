@@ -168,20 +168,43 @@ export function attachToolOutput(prev, content, event = null) {
 }
 
 /**
- * Applies a `tool_sources` event to the most recent WebSearch block.
+ * Applies a `tool_sources` event to the search block that produced it.
  * Sources are small metadata, so they stay inline on the tool item.
+ *
+ * Matching is by `tool_use_id`: a turn can run several WebSearch calls in ONE
+ * batch, and their results then arrive back to back while the LAST search item
+ * is the trailing one — so matching by position alone lands every batch
+ * member on that one item, each overwriting the previous, and only the final
+ * search's sources survive. Events with no id (a provider that does not stamp
+ * one) keep the historical last-WebSearch fallback rather than dropping.
  */
-export function attachToolSources(prev, sources) {
+export function attachToolSources(prev, sources, toolUseId) {
   if (!Array.isArray(sources) || sources.length === 0) return prev
-  for (let i = prev.length - 1; i >= 0; i--) {
-    const it = prev[i]
-    if (it.type === 'tool' && it.tool === 'WebSearch') {
-      const updated = [...prev]
-      updated[i] = { ...it, sources }
-      return updated
-    }
+  let idx = -1
+  if (toolUseId) {
+    idx = prev.findLastIndex(
+      it => it.type === 'tool' && it.tool_use_id === toolUseId,
+    )
   }
-  return prev
+  if (idx < 0) {
+    idx = prev.findLastIndex(it => it.type === 'tool' && it.tool === 'WebSearch')
+  }
+  if (idx < 0) return prev
+  const updated = [...prev]
+  // Merge rather than replace: keeps a block correct when one search reports
+  // across several events, and stays idempotent under the catch-up burst,
+  // which replays every event from the start of the turn.
+  const existing = updated[idx].sources || []
+  const seen = new Set(existing.map(s => s?.url).filter(Boolean))
+  const merged = [...existing]
+  for (const source of sources) {
+    const url = source?.url
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    merged.push(source)
+  }
+  updated[idx] = { ...updated[idx], sources: merged }
+  return updated
 }
 
 /**

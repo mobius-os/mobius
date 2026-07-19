@@ -898,7 +898,16 @@ def dispatch_sdk_message(
         if output.startswith("Web search results for query"):
           sources = sources_from_websearch_text(output)
           if sources:
-            bc.publish({"type": "tool_sources", "sources": sources})
+            # Carry the same tool_use_id as the output it was parsed from. A
+            # turn can batch several WebSearch calls, and their results arrive
+            # together — without the id the consumer can only guess "the last
+            # WebSearch block", so every batch member lands on one block and
+            # overwrites the previous, keeping only the final search's sources.
+            bc.publish({
+              "type": "tool_sources",
+              "sources": sources,
+              "tool_use_id": block.tool_use_id,
+            })
         bc.publish({"type": "tool_end", "tool_use_id": block.tool_use_id})
         continue
       _emit_unknown(bc, f"user_block:{type(block).__name__}", block)

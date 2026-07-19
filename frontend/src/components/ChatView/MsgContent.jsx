@@ -4,6 +4,7 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
+import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
@@ -283,6 +284,10 @@ function MsgContentInner({
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
+        {/* The turn's web sources, collected from its tool blocks and shown
+            once after the answer. Renders nothing when the turn did no web
+            search, so an ordinary reply is unchanged. */}
+        {msg.role === 'assistant' && <MessageSources blocks={msg.blocks} />}
       </>
     )
   }

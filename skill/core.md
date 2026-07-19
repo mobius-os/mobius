@@ -213,6 +213,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 
 - **Math**: `$...$` (inline) and `$$...$$` (block) render KaTeX.
 - **Images**: any `/api/` image URL in markdown renders inline.
+- **Sources**: when a web search hands back its result links, the shell renders them as source pills under your answer on its own — so don't also close the message with a hand-written "Sources" list repeating those same links. Citing a page inline, where a sentence actually needs it, is always right: not every provider's search exposes its results, so an inline link is sometimes the only citation the partner gets.
 
 ### Agent settings
 

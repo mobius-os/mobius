@@ -869,7 +869,9 @@ export default function useStreamConnection(chatId, {
             // there; see streamReducers.js).
             applyStreamItems(prev => attachToolOutput(prev, event.content, event))
           } else if (event.type === 'tool_sources') {
-            applyStreamItems(prev => attachToolSources(prev, event.sources))
+            applyStreamItems(
+              prev => attachToolSources(prev, event.sources, event.tool_use_id),
+            )
           } else if (event.type === 'tool_end') {
             applyStreamItems(prev => closeToolLifecycle(prev))
           } else if (event.type === 'skill_loaded') {

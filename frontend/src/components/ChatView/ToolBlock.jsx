@@ -9,15 +9,6 @@ import {
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 
-function sourceHost(url) {
-  try {
-    return new URL(url).host
-  } catch {
-    // Unparseable URLs have no meaningful host chip; the title keeps the label.
-    return ''
-  }
-}
-
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
 // result reads as key/values, instead of a raw JSON blob. The formatter is pure
@@ -101,12 +92,11 @@ export default function ToolBlock({ t, chatId }) {
   const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
   const label = toolCallLabel(t)
   const iconKind = toolActivityIcon(effectiveName)
-  const sources = Array.isArray(t.sources)
-    ? t.sources.filter(source => source?.url) : []
-  const hasSources = sources.length > 0
-  const hasDetail = !!(
-    t.input || t.output || t.output_truncated || hasSources
-  )
+  // `t.sources` is NOT rendered here: the turn's sources surface once at the
+  // end of the message (MessageSources), where they belong to the answer
+  // rather than to the one search that found them. They deliberately do not
+  // make a tool row expandable on their own.
+  const hasDetail = !!(t.input || t.output || t.output_truncated)
 
   useEffect(() => {
     // `loadingFull` is intentionally not a dependency or start guard. Setting
@@ -232,30 +222,6 @@ export default function ToolBlock({ t, chatId }) {
                 {isShell && <span className="chat__tool-prompt" aria-hidden="true">$ </span>}
                 {t.input}
               </pre>
-            </div>
-          )}
-          {hasSources && (
-            <div className="chat__tool-section">
-              <span className="chat__tool-section-label">Sources</span>
-              <div className="chat__tool-sources">
-                {sources.map((source, i) => (
-                  <a
-                    key={`${source.url}-${i}`}
-                    className="chat__tool-source-chip"
-                    href={source.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={source.snippet || source.title || source.url}
-                  >
-                    <span className="chat__tool-source-title">
-                      {source.title || source.url}
-                    </span>
-                    <span className="chat__tool-source-host">
-                      {sourceHost(source.url)}
-                    </span>
-                  </a>
-                ))}
-              </div>
             </div>
           )}
           {(r || t.output_truncated) && (
