@@ -110,12 +110,6 @@ export default function Shell() {
     )),
   )
   const workspace = workspaceState.ws
-  // A lone workspace tab with no legacy pinned projection is the shell's
-  // implicit home surface. An explicit cold deep link should replace it rather
-  // than turning ordinary navigation into a two-item pinned strip.
-  const replaceImplicitBootTab = legacyOpenTabs.length === 0
-    && Object.keys(workspace.panes).length === 1
-    && paneModel.flatten(workspace).length <= 1
   // Whether a VALID persisted workspace blob booted this session (not a flat-tab
   // fallback). The nav adapter uses it to make the blob authoritative over the
   // legacy shell-reload triple, seeding from that triple only when absent/invalid
@@ -123,6 +117,15 @@ export default function Shell() {
   const [blobValid] = useState(
     () => paneModel.isValidWorkspaceBlob(paneModel.readWorkspaceRaw(sessionStorage)),
   )
+  // A lone workspace tab with no legacy pinned projection is the shell's
+  // implicit home surface ONLY when there was no valid workspace blob. A valid
+  // single-screen workspace also deliberately dual-writes an empty legacy list;
+  // treating that durable state as implicit would RESET_FLAT on a cold deep link
+  // and silently flip its preserved viewMode back to the builder default.
+  const replaceImplicitBootTab = !blobValid
+    && legacyOpenTabs.length === 0
+    && Object.keys(workspace.panes).length === 1
+    && paneModel.flatten(workspace).length <= 1
   // Ref-side reducer preview: this wrapper advances a ref copy of the reducer
   // state SYNCHRONOUSLY before the raw React dispatch, so two navigation/
   // placement events in one React 18 batch observe each other (design §1). Every

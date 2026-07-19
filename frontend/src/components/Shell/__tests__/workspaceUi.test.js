@@ -41,6 +41,10 @@ test('the compact pane switcher describes its visible pane count', () => {
 })
 
 test('an implicit home tab does not engage the single-pane tab strip', () => {
+  // Only a fallback workspace may be treated as implicit. A valid one-leaf
+  // single-screen blob intentionally has an empty legacy mirror; resetting it
+  // on a deep link would silently change its view mode back to builder.
+  assert.match(shell, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& legacyOpenTabs\.length === 0/)
   assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)

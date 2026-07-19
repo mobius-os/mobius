@@ -56,10 +56,10 @@ test('pointer input inside an opaque app frame focuses its owning pane', () => {
   assert.match(shell, /onAppFocus=\{focusAppPane\}/)
 })
 
-test('an explicit deep link replaces an unpinned implicit home tab', () => {
+test('an explicit deep link replaces only a fallback implicit home tab', () => {
   assert.match(
     shell,
-    /const replaceImplicitBootTab = legacyOpenTabs\.length === 0[\s\S]*paneModel\.flatten\(workspace\)\.length <= 1/,
+    /const replaceImplicitBootTab = !blobValid[\s\S]*legacyOpenTabs\.length === 0[\s\S]*paneModel\.flatten\(workspace\)\.length <= 1/,
   )
   assert.match(
     navigation,

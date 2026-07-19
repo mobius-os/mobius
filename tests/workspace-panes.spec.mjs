@@ -148,21 +148,18 @@ async function seedWorkspace(page, ws) {
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
 }
 
-/** Single leaf, single tab, SINGLE view-mode, with an EMPTY legacy open-tabs
- *  mirror so tabStripEngaged starts false — the owner's real "one chat, never
- *  engaged the strip" state, where single mode shows NO strip. Entering builder
- *  must then reveal the single-pane strip (item 3). */
-// Enable splits with an EMPTY legacy open-tabs mirror (the owner's real "one chat,
-// strip never engaged" state). A ?chat= deep-link then lands the single leaf in
-// builder ('panes') via RESET_FLAT with tabStripEngaged=false — exactly the case
-// where the strip used to be invisible and must now show (item 3).
-async function seedFreshSingleLeaf(page) {
-  await page.addInitScript((flagKey) => {
+/** Boot without a workspace blob and with an EMPTY legacy open-tabs mirror.
+ *  The explicit deep link then creates the fallback's one leaf in builder mode
+ *  with tabStripEngaged=false — the owner's real "one chat, strip never engaged"
+ *  state where builder shows the drag surface and single-screen hides it. */
+async function seedFallbackSingleLeaf(page) {
+  await page.addInitScript(([flagKey, workspaceKey]) => {
     try {
       localStorage.setItem(flagKey, '1')
+      sessionStorage.removeItem(workspaceKey)
       sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
-  }, 'mobius:workspace-splits')
+  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY])
 }
 
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
@@ -838,7 +835,7 @@ test.describe('Workspace view-mode toggle', () => {
     await boot(page, PHONE)
     const a = await createTaggedChat(page, 'vmPhoneStrip')
     await mockApps(page, [])
-    await seedFreshSingleLeaf(page)
+    await seedFallbackSingleLeaf(page)
     // The ?chat= deep-link RESET_FLATs the empty-legacy boot into builder ('panes')
     // with a single leaf and tabStripEngaged=false — the exact case the owner hit.
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })

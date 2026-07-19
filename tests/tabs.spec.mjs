@@ -153,9 +153,9 @@ async function seedTabs(page, tabs, { viewMode } = {}) {
 }
 
 // Single-SCREEN workspace holding just `chatId`, with an EMPTY legacy mirror so
-// the strip is unengaged. Navigate WITHOUT a ?chat= deep-link (a deep-link would
-// RESET_FLAT the empty-legacy boot into builder) so the valid blob restores
-// 'single' and the sole unpinned chat shows no strip.
+// the strip is unengaged. A valid blob remains authoritative through a cold
+// ?chat= deep-link; the target opens into that workspace without RESET_FLAT
+// replacing its preserved view mode.
 async function seedSingleModeChat(page, chatId) {
   const ws = paneModel.setViewMode(
     paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]), 'single')
@@ -217,11 +217,16 @@ test.describe('Tabs', () => {
     const chat = await bootAndCreateChat(page, 'notabs')
     const appsMock = await mockOwnedApp(page, chat.id)
     // "Nothing pinned -> no strip" is a SINGLE-screen contract now that builder mode
-    // always surfaces the strip. Restore single-screen from a valid blob (no ?chat=
-    // deep-link, which would RESET_FLAT into builder) with an empty legacy mirror.
+    // always surfaces the strip. Restore single-screen from a valid blob THROUGH
+    // the real cold deep-link path; that blob must remain authoritative even though
+    // its intentionally-empty legacy mirror looks like an implicit home fallback.
     await seedSingleModeChat(page, chat.id)
-    await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
+    await expect.poll(() => page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key))?.viewMode,
+      paneModel.STORAGE_KEY,
+    )).toBe('single')
     await sendMessage(page, 'just a chat')
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
     // The parked split view left no toggle behind.
