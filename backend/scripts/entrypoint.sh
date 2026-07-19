@@ -982,8 +982,19 @@ if [ ! -f "$PC_DIR/init-cron.sh" ]; then
   cat > "$PC_DIR/job.sh" <<'PCJOB'
 #!/bin/bash
 # Thin wrapper: cron runs this; the real logic is the baked cleanup script.
-exec python3 /app/scripts/agent-browser-profile-cleanup.py \
-  --delete --include-existing-chats
+# Log every run, including the script's non-zero exit on a partial rmtree or a
+# refused (fail-closed) delete. Cron has no mailer here, so this log is the only
+# signal that a nightly --delete job ran and how it went.
+log=/data/cron-logs/_profile-cleanup.log
+mkdir -p /data/cron-logs
+{
+  echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) profile-cleanup start ==="
+  python3 /app/scripts/agent-browser-profile-cleanup.py \
+    --delete --include-existing-chats
+  rc=$?
+  echo "=== exit $rc ==="
+  exit $rc
+} >>"$log" 2>&1
 PCJOB
   chmod +x "$PC_DIR/job.sh" 2>/dev/null || true
   chown -R mobius:mobius "$PC_DIR" 2>/dev/null || true

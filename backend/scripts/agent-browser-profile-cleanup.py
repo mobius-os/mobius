@@ -62,20 +62,52 @@ def _du_bytes(path: Path) -> int:
     return total
 
 
+class ChatDbUnavailable(Exception):
+  """The chat database could not be read, so chat state is unknown.
+
+  Distinct from "the database is reachable and has zero chats". Selection must
+  fail CLOSED on this: if we cannot tell which profiles belong to live chats,
+  every chat profile would otherwise be misread as an orphan and reaped on age
+  alone, bypassing the run-status and inactivity guards. Reaping is the
+  mutating side, so it forgives nothing here.
+  """
+
+
 def _load_chats(db_path: Path) -> dict[str, dict[str, Any]]:
   if not db_path.exists():
-    return {}
-  conn = sqlite3.connect(str(db_path))
+    raise ChatDbUnavailable(f"chat database not found at {db_path}")
+  try:
+    conn = sqlite3.connect(str(db_path))
+  except sqlite3.Error as exc:
+    raise ChatDbUnavailable(f"cannot open {db_path}: {exc}") from exc
   conn.row_factory = sqlite3.Row
   try:
-    rows = conn.execute(
-      "select id, deleted_at, updated_at, activity_at, run_status from chats"
-    ).fetchall()
-  except sqlite3.Error:
-    return {}
+    try:
+      rows = conn.execute(
+        "select id, deleted_at, updated_at, activity_at, run_status from chats"
+      ).fetchall()
+    except sqlite3.OperationalError as exc:
+      # `run_status` is slated for retirement (models.py: the Step-3b follow-up
+      # once ChatRun fully replaces it). Degrade gracefully rather than treating
+      # the column drop as an unreadable database: without run_status, the
+      # 14-day inactivity guard alone still protects any active chat, because an
+      # active chat has recent activity_at. Any OTHER operational error (locked,
+      # I/O, missing table) is a genuine read failure and must fail closed.
+      if "run_status" not in str(exc).lower():
+        raise ChatDbUnavailable(f"cannot read chats from {db_path}: {exc}") from exc
+      rows = conn.execute(
+        "select id, deleted_at, updated_at, activity_at from chats"
+      ).fetchall()
+  except sqlite3.Error as exc:
+    raise ChatDbUnavailable(f"cannot read chats from {db_path}: {exc}") from exc
   finally:
     conn.close()
-  return {str(row["id"]): dict(row) for row in rows}
+  chats: dict[str, dict[str, Any]] = {}
+  for row in rows:
+    record = dict(row)
+    record.setdefault("run_status", None)
+    chats[str(row["id"])] = record
+  return chats
 
 
 def _parse_sqlite_datetime(value: Any) -> float | None:
@@ -145,7 +177,15 @@ def _fmt_bytes(n: int) -> str:
 
 def collect(args: argparse.Namespace) -> tuple[list[ProfileRow], dict[str, Any]]:
   root = Path(args.root)
-  chats = _load_chats(Path(args.db))
+  try:
+    chats = _load_chats(Path(args.db))
+  except ChatDbUnavailable:
+    # A report may still run against unknown chat state -- it selects nothing to
+    # delete anyway. A --delete run must NOT: without chat state every profile
+    # reads as an orphan, so the caller re-raises and exits non-zero instead.
+    if args.delete:
+      raise
+    chats = {}
   now = time.time()
   rows: list[ProfileRow] = []
   if root.exists():
@@ -346,7 +386,14 @@ def main(argv: list[str] | None = None) -> int:
   if args.older_than_days < 0:
     parser.error("--older-than-days must be non-negative")
 
-  rows, meta = collect(args)
+  try:
+    rows, meta = collect(args)
+  except ChatDbUnavailable as exc:
+    print(
+      f"error: chat database unavailable, refusing to delete any profiles: {exc}",
+      file=sys.stderr,
+    )
+    return 3
 
   deleted: list[str] = []
   errors: list[dict[str, str]] = []
