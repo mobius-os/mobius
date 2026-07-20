@@ -24,11 +24,15 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const RECOVER = process.env.MOBIUS_RECOVER_URL || 'http://localhost:8011'
 
 
+// First-boot claim gate: the fixed value docker-compose.test.yml presets as
+// MOBIUS_SETUP_CLAIM. Overridable to match a custom compose value.
+const SETUP_CLAIM = process.env.MOBIUS_SETUP_CLAIM || 'mobius-test-setup-claim'
+
 async function ensureOwner(page) {
-  // Idempotent setup — first run creates admin/admin, later runs
-  // 4xx (owner already exists) and we ignore.
+  // Idempotent setup — first run creates admin/admin (presenting the claim),
+  // later runs 400 (owner already exists) and we ignore.
   await page.request.post(`${BASE}/api/auth/setup`, {
-    data: { username: 'admin', password: 'admin' },
+    data: { username: 'admin', password: 'admin', claim: SETUP_CLAIM },
     failOnStatusCode: false,
   })
 }

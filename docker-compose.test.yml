@@ -65,6 +65,11 @@ services:
       - MOBIUS_TEST_RUNTIME=1
       - MOBIUS_TEST_PLATFORM_SOURCE=/workspace
       - BUILD_SHA=${GITHUB_SHA:-unknown}
+      # First-boot claim gate (card 261). A fixed, known claim so the test
+      # harness (auth.setup.mjs, live-test.sh, recovery-chat) can complete
+      # setup non-interactively. Accepted only because MOBIUS_TEST_RUNTIME=1
+      # relaxes the preset-strength check — NEVER use this value in prod.
+      - MOBIUS_SETUP_CLAIM=${MOBIUS_SETUP_CLAIM:-mobius-test-setup-claim}
       - MOBIUS_SERVICE_GATEWAY_ORIGIN=http://services.localhost:${TEST_PORT:-8001}
     volumes:
       - test_data:/data
@@ -174,6 +179,11 @@ services:
       - DATABASE_URL=sqlite:////tmp/test.db
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
+      # conftest.py sets these itself before importing the app, but declare
+      # them here too so the pytest container matches the app service and the
+      # first-boot claim gate is exercised with a known runtime + claim.
+      - MOBIUS_TEST_RUNTIME=1
+      - MOBIUS_SETUP_CLAIM=mobius-test-setup-claim
       - MOBIUS_BUILD_INFO_PATH=/workspace/.test-build-info-does-not-exist.json
       # Execute the current checkout's checker source with the dependency tree
       # baked into the verified test image; the /workspace bind intentionally

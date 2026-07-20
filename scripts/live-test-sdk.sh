@@ -69,9 +69,11 @@ for i in $(seq 1 30); do
 done
 [ "$hc" = "200" ] && ok "health=200" || fail "health=$hc after 30s"
 
+# First-boot claim gate: docker-compose.test.yml presets MOBIUS_SETUP_CLAIM.
+SETUP_CLAIM="${SETUP_CLAIM:-${MOBIUS_SETUP_CLAIM:-mobius-test-setup-claim}}"
 curl -s -X POST "$BASE/api/auth/setup" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}' >/dev/null
+  -d "{\"username\":\"admin\",\"password\":\"admin\",\"claim\":\"${SETUP_CLAIM}\"}" >/dev/null
 docker exec mobius-test mkdir -p /data/cli-auth/claude
 docker cp ~/.claude/.credentials.json mobius-test:/data/cli-auth/claude/.credentials.json
 docker cp ~/.claude.json mobius-test:/data/cli-auth/claude/.claude.json 2>/dev/null
