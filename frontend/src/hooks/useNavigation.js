@@ -356,16 +356,32 @@ export default function useNavigation({
   const appOwnerPaneId = useCallback((ws, appId) => {
     if (appId == null || settingsOpenRef.current) return null
     const key = tabModel.tabKey(tabModel.makeTab('app', appId))
+    // WORLD-AWARE (finding F5): mirror deriveContentVisibility's slot derivation so
+    // the nav adapter and the renderer can NEVER disagree about what paints. In
+    // SINGLE mode the only painted app is the slot — the builder projection (paneOf
+    // + visiblePaneIds) names HIDDEN tree panes that do not paint, so consulting it
+    // there would classify an unpainted app as visible and let Back FOCUS + nav-back
+    // into an invisible iframe. Only the BUILDER world reads the tree/visible set.
+    const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
+    if (mode === 'single') {
+      if ('singleScreen' in ws) {
+        const slot = ws.singleScreen
+        if (slot && slot.kind === 'app' && String(slot.id) === String(appId)) {
+          // Renders + pins even though paneOf() misses it (tree-absent slot), so it
+          // installs history under a stable synthetic owner.
+          return paneModel.SINGLE_SLOT_PANE
+        }
+        return null
+      }
+      // Legacy (absent-slot) blob: the pre-two-worlds collapse painted the focused
+      // pane's active tab, so that pane is the visible owner — exactly the renderer's
+      // focused-pane fallback for an uninitialized slot.
+      const focused = ws.panes[ws.focusedPaneId]
+      return (focused && focused.activeTabKey === key) ? ws.focusedPaneId : null
+    }
     const pane = paneModel.paneOf(ws, key)
     if (pane && pane.activeTabKey === key && visiblePaneIdsRef.current.has(pane.id)) {
       return pane.id
-    }
-    // Single-world slot app: it renders + pins even though paneOf() misses it, so
-    // it must still be able to install history under a stable synthetic owner.
-    const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
-    const slot = ws.singleScreen
-    if (mode === 'single' && slot && slot.kind === 'app' && String(slot.id) === String(appId)) {
-      return paneModel.SINGLE_SLOT_PANE
     }
     return null
   }, [])
@@ -1270,30 +1286,28 @@ export default function useNavigation({
         const n = appSentinelCountsRef.current.get(sourceOwnerKey) || 0
         const iframe = document.querySelector(`iframe[data-app-id="${sourceOwner.appId}"]`)
         if (iframe?.contentWindow && n > 0) {
-          let pane = paneModel.paneOf(
-            ws,
-            tabModel.tabKey(tabModel.makeTab('app', sourceOwner.appId)),
-          )
           if (!isVisibleApp(ws, sourceOwner.appId)) {
-            const paneId = ws.panes[sourceOwner.paneId]
-              ? sourceOwner.paneId
-              : ws.focusedPaneId
-            dispatchWorkspace({
-              type: 'OPEN_TAB', paneId,
-              tab: tabModel.makeTab('app', sourceOwner.appId), activate: true,
+            // Restore through the ONE decision point (finding F5), NOT a raw
+            // OPEN_TAB: single mode sets the SLOT — the painted surface — so the app
+            // genuinely reappears; a raw OPEN_TAB would seed the HIDDEN tree and this
+            // branch would then nav-back into an iframe the user cannot see (design
+            // risk 4, the funnel restoreRoute already honors but this branch did not).
+            applyModeDestination({
+              view: 'canvas', appId: Number(sourceOwner.appId), chatId: null, paneId: sourceOwner.paneId,
             })
-            pane = paneModel.paneOf(
-              workspaceStateRef.current.ws,
-              tabModel.tabKey(tabModel.makeTab('app', sourceOwner.appId)),
-            )
           }
           consumeAppEntry(sourceEntryId, sourceOwnerKey, source.appNav)
           // This ordinary Back consumed the sentinel directly, so any queued
           // nav-pop for the SAME physical entry is now satisfied — drop it or the
           // dead request wedges the FIFO head forever (finding: FIFO wedge).
           appLocalPopsRef.current = dropPopsForEntry(appLocalPopsRef.current, sourceEntryId)
-          if (pane && pane.id !== workspaceStateRef.current.ws.focusedPaneId) {
-            dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
+          // Re-derive the owner in the CURRENT world (post-apply): builder yields a
+          // real tree pane to FOCUS; single yields SINGLE_SLOT_PANE — already the
+          // painted surface — so no tree FOCUS fires. Mirrors appNavPush's handling.
+          const ownerPaneId = appOwnerPaneId(workspaceStateRef.current.ws, sourceOwner.appId)
+          if (ownerPaneId && ownerPaneId !== paneModel.SINGLE_SLOT_PANE
+              && ownerPaneId !== workspaceStateRef.current.ws.focusedPaneId) {
+            dispatchWorkspace({ type: 'FOCUS', paneId: ownerPaneId })
           }
           iframe.contentWindow.postMessage({
             type: 'moebius:nav-back',

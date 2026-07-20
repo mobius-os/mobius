@@ -149,6 +149,27 @@ test('finding 8: appOwnerPaneId returns the synthetic single-world owner for a s
   assert.equal(paneModel.SINGLE_SLOT_PANE, '__single__')
 })
 
+// -- Finding F5 (expanding review): app visibility + Back are world-aware --------
+test('finding F5: appOwnerPaneId is world-aware — single reads the slot, builder the tree', () => {
+  // In SINGLE mode the tree/visiblePaneIds branch must NOT run (it names hidden
+  // panes); the single branch resolves the slot (or the legacy focused-pane
+  // fallback) and returns null for a non-slot app.
+  assert.match(nav, /if \(mode === 'single'\) \{[\s\S]*?if \('singleScreen' in ws\)/)
+  // The tree-membership + visiblePaneIds check is AFTER the single early-returns,
+  // i.e. only reachable in the builder world.
+  const single = nav.indexOf("if (mode === 'single')")
+  const treeCheck = nav.indexOf('visiblePaneIdsRef.current.has(pane.id)')
+  assert.ok(single > 0 && treeCheck > single, 'the visible-set branch is builder-only')
+})
+
+test('finding F5: handleBack restores the hidden app through applyModeDestination', () => {
+  // The not-visible restore must funnel, not raw OPEN_TAB into the tree, and the
+  // FOCUS target is re-derived world-aware (SINGLE_SLOT_PANE skips the tree FOCUS).
+  assert.match(nav, /applyModeDestination\(\{\s*\n\s*view: 'canvas', appId: Number\(sourceOwner\.appId\)/)
+  assert.match(nav, /const ownerPaneId = appOwnerPaneId\(workspaceStateRef\.current\.ws, sourceOwner\.appId\)/)
+  assert.doesNotMatch(nav, /type: 'OPEN_TAB', paneId,\s*\n\s*tab: tabModel\.makeTab\('app', sourceOwner\.appId\)/)
+})
+
 // -- Finding 10: exit chrome is keyboard-inert during the latched deal ---------
 test('finding 10: WorkspaceChrome is inert during the exit beat, not just pointer-blocked', () => {
   assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| exitGeometryActive\}/)

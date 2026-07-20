@@ -25,7 +25,11 @@ test('ordinary Back restores a hidden sentinel owner before messaging it', () =>
   )
   assert.ok(ordinaryBack.length > 0)
   assert.match(ordinaryBack, /if \(!isVisibleApp\(ws, sourceOwner\.appId\)\)/)
-  assert.match(ordinaryBack, /type: 'OPEN_TAB'/)
+  // The restore funnels through applyModeDestination (finding F5) — world-aware, so
+  // single mode sets the painted SLOT — NOT a raw OPEN_TAB into the hidden tree,
+  // which single mode never paints (Back would then message an invisible iframe).
+  assert.match(ordinaryBack, /applyModeDestination\(\{\s*\n\s*view: 'canvas', appId: Number\(sourceOwner\.appId\)/)
+  assert.doesNotMatch(ordinaryBack, /type: 'OPEN_TAB'/)
   assert.match(ordinaryBack, /moebius:nav-back/)
 })
 
