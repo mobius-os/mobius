@@ -448,9 +448,14 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   // Gated on `active` (builder mode) — nothing runs when inactive, and the effect
   // re-runs on active flip so it turns ON at ignite and OFF (cleanup) at snap.
   assert.match(livingHaloSrc, /if \(!el \|\| !active\) return undefined/)
-  assert.match(livingHaloSrc, /\}, \[haloRef, active\]\)/)
+  // The effect re-runs on active flip AND on a reduced-motion preference change
+  // (finding 13): the halo subscribes to the media query so enabling reduce
+  // mid-session settles the static halo instead of leaving the rAF running.
+  assert.match(livingHaloSrc, /\}, \[haloRef, active, reduced\]\)/)
+  assert.match(livingHaloSrc, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/)
+  assert.match(livingHaloSrc, /mq\.addEventListener\?\.\('change', onChange\)/)
   // Reduced motion: settle static CSS vars, NO rAF at all.
-  assert.match(livingHaloSrc, /if \(prefersReducedMotion\(\)\) \{[\s\S]*?el\.style\.scale = '1'[\s\S]*?clearHaloStyles\(el\)/)
+  assert.match(livingHaloSrc, /if \(reduced\) \{[\s\S]*?el\.style\.scale = '1'[\s\S]*?clearHaloStyles\(el\)/)
   // One reused frame object → zero per-frame allocation; the drift comes from the
   // pure haloFrame (tested in logoHoldMachine.test.js).
   assert.match(livingHaloSrc, /const frame = \{\} \/\/ reused every tick/)

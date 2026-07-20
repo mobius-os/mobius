@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import {
-  initialModeState, modeReducer, completionContract, isCompletionSignal,
+  initialModeState, modeReducer, completionContract,
   reconcileVisibleEvent, needsSyncCompletion,
 } from './modeMachine.js'
 import { prefersReducedMotion } from './useLogoModeGesture.js'
@@ -9,15 +9,20 @@ import { prefersReducedMotion } from './useLogoModeGesture.js'
 // owns the ONE reducer, funnels every mode-changing intent through it (INV 2),
 // and drives completion by the transition EPOCH rather than a bare timer:
 //
-//   - animationend on the shell root, filtered by animation-name AND live epoch
-//     (INV 12 + INV 15) — the primary, battle-tested completion path;
-//   - a double-rAF getAnimations probe as the no-valid-target fallback (INV 13):
-//     if the expected deal never actually runs while visible, complete at once;
-//   - visibilitychange / pageshow reconciled from startedAt (INV 14): a beat
-//     whose animationend was throttled away while hidden is force-completed on
-//     return, with NO scheduled correctness timer;
-//   - a committedMode reconcile so an EXTERNAL durable-mode change (hydration,
-//     an undo that bypassed the controller) can never let the descriptor drift.
+//   - a per-epoch layout effect captures the epoch in a closure and completes
+//     ONLY that epoch via the animations' `finished` promises (INV 12 + INV 15):
+//     a delayed animationend from a superseded epoch can never satisfy a newer
+//     one because the completion carries the CAPTURED originating epoch, not the
+//     current transition id inferred from an animation name;
+//   - if no expected animation is running two frames after commit, it completes
+//     synchronously (INV 13 no-valid-target);
+//   - visibilitychange / pageshow reconciled from startedAt (INV 14): a beat whose
+//     animation was throttled away while hidden is force-completed on return, with
+//     NO scheduled correctness timer;
+//   - a reduced-motion media subscription settles a live beat if the preference
+//     flips mid-transition (INV 13);
+//   - a committedMode reconcile so an EXTERNAL durable-mode change can never let
+//     the descriptor drift.
 //
 // The controller never persists anything and never touches the workspace tree —
 // Shell pairs each mode-committing intent with the matching workspace dispatch in
@@ -36,73 +41,58 @@ export default function useModeController({
   // workspace.viewMode is the persisted source of truth; the descriptor's
   // committedMode mirrors it. A controller-driven toggle updates both in one
   // batch, so they agree on the next render. Any OTHER path that moved viewMode
-  // (boot hydration, a reload, an undo not routed through here) shows up as a
-  // drift and is synced with NO beat (the accepted reload policy). INV 3.
+  // (boot hydration, a reload) shows up as a drift and is synced with NO beat (the
+  // accepted reload policy). Mode-changing Undo/auto-return are routed through the
+  // controller at their dispatch sites (INV 2), so this is the hydration net, not
+  // the beat path. INV 3.
   useEffect(() => {
     if (committedMode !== stateRef.current.committedMode) {
       dispatch({ type: 'sync-committed', committedMode })
     }
   }, [committedMode])
 
-  // ── Keyed completion: animationend on the shell root (INV 12/15) ───────────
-  useEffect(() => {
-    const root = rootRef?.current
-    if (!root) return undefined
-    const onEnd = (e) => {
-      const s = stateRef.current
-      const t = s.transition
-      if (!t) return
-      // Filter by animation-name membership in the phase's set AND the live epoch
-      // (isCompletionSignal enforces both). A sheet slide, a divider bar, or a
-      // superseded epoch's late animationend can never end a mode beat.
-      if (isCompletionSignal(s, t.id, e.animationName)) {
-        dispatch({ type: 'complete', id: t.id })
-      }
-    }
-    root.addEventListener('animationend', onEnd)
-    root.addEventListener('animationcancel', onEnd)
-    return () => {
-      root.removeEventListener('animationend', onEnd)
-      root.removeEventListener('animationcancel', onEnd)
-    }
-  }, [rootRef])
-
-  // ── No-valid-target fallback (INV 13) ──────────────────────────────────────
-  // If a live animated beat's expected deal never actually runs (no target
-  // element, an animation the CSS did not apply), animationend will never fire.
-  // Two frames after the transition commits we probe getAnimations; if nothing in
-  // the expected set is running under the live epoch, complete synchronously. A
-  // pure double-rAF probe, not a duration-sized timer. Reduced-motion beats are
-  // already collapsed to instant flips in the reducer, so this only ever fires
-  // for a genuinely absent target.
+  // ── Epoch-keyed completion (INV 12/15) ─────────────────────────────────────
+  // For each ANIMATED transition epoch we CAPTURE the epoch in this closure and
+  // complete ONLY that epoch. Two frames after the beat class commits (so the CSS
+  // animations are registered), collect the expected animations via getAnimations
+  // and await their `finished` promises; when they settle — or if none are running
+  // (INV 13, no valid target) — dispatch complete{capturedEpoch}. The reducer's id
+  // guard then rejects it unless it is still the live epoch, so a stale animation
+  // from epoch N can NEVER clear epoch N+1 (the epoch-inference flaw the review
+  // flagged: a delayed same-named animation must not satisfy a newer beat).
   const transitionId = state.transition ? state.transition.id : null
   useEffect(() => {
     const contract = completionContract(stateRef.current)
     if (!contract) return undefined
+    const epoch = contract.id
+    const names = contract.animationNames
+    let cancelled = false
     let raf1 = 0
     let raf2 = 0
-    const probe = () => {
+    const settle = () => { if (!cancelled) dispatch({ type: 'complete', id: epoch }) }
+    const collect = () => {
+      if (cancelled) return
       const root = rootRef?.current
-      const s = stateRef.current
-      const live = completionContract(s)
-      if (!live || live.id !== contract.id) return // superseded — leave it
-      let running = false
+      let anims = []
       if (root && typeof root.getAnimations === 'function') {
         try {
-          running = root.getAnimations({ subtree: true }).some(
-            a => live.animationNames.has(a.animationName) && a.playState !== 'finished',
-          )
-        } catch { running = false }
+          anims = root.getAnimations({ subtree: true })
+            .filter(a => names.has(a.animationName) && a.playState !== 'finished')
+        } catch { anims = [] }
       }
-      // No expected animation is running → the deal has no valid target; complete.
-      if (!running) dispatch({ type: 'complete', id: contract.id })
+      if (anims.length === 0) { settle(); return } // INV 13: no valid target
+      // INV 12: complete on the Web Animations `finished` promises. allSettled so
+      // a cancel (animationcancel → finished rejects) still settles this epoch.
+      Promise.allSettled(anims.map(a => a.finished)).then(settle)
     }
-    raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(probe) })
+    // The class applies on the React commit; the CSS animation registers on the
+    // next style/layout, so probe on the SECOND frame.
+    raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(collect) })
     return () => {
+      cancelled = true
       if (raf1) cancelAnimationFrame(raf1)
       if (raf2) cancelAnimationFrame(raf2)
     }
-    // Re-probe whenever the live transition epoch changes.
   }, [transitionId, rootRef])
 
   // Reduced-motion / structurally-instant beats never reach the reducer as a live
@@ -128,6 +118,21 @@ export default function useModeController({
       document.removeEventListener('visibilitychange', reconcile)
       window.removeEventListener('pageshow', reconcile)
     }
+  }, [])
+
+  // ── Reduced-motion preference change mid-beat (INV 13) ─────────────────────
+  // Enabling reduce during a live beat must settle the descriptor at once rather
+  // than wait out an animation that is being removed underneath it.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const onChange = () => {
+      if (!mq.matches) return
+      const t = stateRef.current.transition
+      if (t && t.phase !== 'drag-preview') dispatch({ type: 'complete', id: t.id })
+    }
+    mq.addEventListener?.('change', onChange)
+    return () => mq.removeEventListener?.('change', onChange)
   }, [])
 
   // ── Intent dispatchers (Shell calls these alongside its workspace dispatch) ─
@@ -167,16 +172,28 @@ export default function useModeController({
   }, [])
 
   // Drag arm / cancel / commit — the drag hook owns the id it passes back (INV 5).
+  // The id is computed BEFORE dispatch (the reducer assigns state.nextId), so the
+  // returned id is ATOMIC with the dispatch. Reading stateRef AFTER dispatch would
+  // return the pre-dispatch (stale) epoch — a useReducer dispatch is async — and a
+  // later cancel/blur would then carry the wrong id and never clear the live
+  // preview, leaving the workspace permanently tiled (the wedge, reincarnated).
   const dragArm = useCallback((focusedPaneId) => {
+    const s = stateRef.current
+    // Only a single-mode drag creates a preview (the reducer no-ops otherwise).
+    if (s.committedMode !== 'single') {
+      dispatch({ type: 'drag-arm', focusedPaneId, now: now() })
+      return null
+    }
+    const id = s.nextId
     dispatch({ type: 'drag-arm', focusedPaneId, now: now() })
-    // The freshest epoch is the id the drag must carry to cancel/commit.
-    return stateRef.current.transition ? stateRef.current.transition.id : null
+    return id
   }, [])
   const dragCancel = useCallback((id) => { dispatch({ type: 'drag-cancel', id }) }, [])
   const dragCommit = useCallback((id) => { dispatch({ type: 'drag-commit', id }) }, [])
 
   // Topology mutation invalidated the latched exit roles — cancel the beat rather
-  // than let animation ownership drift (INV 10).
+  // than let animation ownership drift (INV 10). Wired to a workspace-tree watcher
+  // in Shell so a pane close/move/placement/undo during an exit settles the class.
   const cancelBeat = useCallback(() => { dispatch({ type: 'cancel-beat' }) }, [])
 
   return {

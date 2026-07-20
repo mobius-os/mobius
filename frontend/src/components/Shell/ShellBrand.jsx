@@ -55,17 +55,28 @@ const ShellBrand = memo(function ShellBrand({
         onPointerUp={splitsEnabled ? logoGesture.onPointerUp : undefined}
         onPointerCancel={splitsEnabled ? logoGesture.onPointerCancel : undefined}
         onContextMenu={splitsEnabled ? logoGesture.onContextMenu : undefined}
+        onLostPointerCapture={splitsEnabled ? logoGesture.onLostPointerCapture : undefined}
         onKeyDown={(e) => {
           backFiredRef.current = false
-          // A keyboard interaction clears pointer provenance (finding 5) so a
-          // keyboard-invoked contextmenu on the focused brand reaches the
-          // native menu instead of inheriting a stale touch/pen suppression.
+          // A keyboard interaction clears pointer provenance so a keyboard-invoked
+          // contextmenu on the focused brand reaches the native menu instead of
+          // inheriting a stale touch/pen suppression.
           if (splitsEnabled) logoGesture.onKeyDown()
-          if (splitsEnabled && e.shiftKey && e.key === 'Enter') {
+          // e.repeat guard: holding Shift+Enter must fire ONE toggle, not a storm
+          // of them at the keyboard repeat rate (INV 3).
+          if (splitsEnabled && e.shiftKey && e.key === 'Enter' && !e.repeat) {
             e.preventDefault()
             keyboardModeClickRef.current = true
             onToggleMode()
           }
+        }}
+        onKeyUp={(e) => {
+          // Tie the synthesized-click suppression to THIS key activation: a
+          // prevented Shift+Enter usually produces no compatibility click, so the
+          // flag would otherwise leak and swallow the NEXT plain Enter/Space click
+          // (finding 12). Clearing on keyup bounds it to the one activation; a real
+          // Enter fires its click on keydown (before this), so nothing is lost.
+          if (e.key === 'Enter') keyboardModeClickRef.current = false
         }}
         onClick={(e) => {
           if (backFiredRef.current) return

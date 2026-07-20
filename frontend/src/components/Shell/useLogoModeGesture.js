@@ -203,6 +203,14 @@ export function useLogoModeGesture({
     endPress({ suppressClick: true })
   }, [endPress])
 
+  // A LOST pointer capture ends the gesture's validity — cancel the live hold so a
+  // dangling rAF can't complete a press the browser already took away (finding 11).
+  const onLostPointerCapture = useCallback((e) => {
+    const press = pressRef.current
+    if (!press || (e && e.pointerId !== press.pointerId)) return
+    endPress({ suppressClick: true })
+  }, [endPress])
+
   const onContextMenu = useCallback((e) => {
     // Suppress the native long-press context menu / image-callout ON THE BRAND for
     // touch and pen. The brand is a control, never a menu target, so a touch/pen
@@ -258,12 +266,32 @@ export function useLogoModeGesture({
     if (drawerOpen && pressRef.current) endPress({ suppressClick: true })
   }, [drawerOpen, endPress])
 
+  // Cancel a live hold on any interruption that ends the gesture's validity: the
+  // tab HIDING, the window BLURRING, or a bfcache PAGEHIDE (finding 11). The rAF
+  // measures elapsed WALL time (performance.now), so a hide after pointerdown and a
+  // return >450ms later would otherwise complete a hold the user never finished and
+  // toggle the mode with no current gesture. lostpointercapture is handled by
+  // onLostPointerCapture (wired on the brand button).
+  useEffect(() => {
+    const cancel = () => { if (pressRef.current) endPress({ suppressClick: true }) }
+    const onHidden = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') cancel() }
+    window.addEventListener('blur', cancel)
+    window.addEventListener('pagehide', cancel)
+    document.addEventListener('visibilitychange', onHidden)
+    return () => {
+      window.removeEventListener('blur', cancel)
+      window.removeEventListener('pagehide', cancel)
+      document.removeEventListener('visibilitychange', onHidden)
+    }
+  }, [endPress])
+
   // Cancel a live rAF on unmount so a hold in flight can't tick a dead component.
   useEffect(() => () => { stopRaf() }, [stopRaf])
 
   return {
     holding, flourish,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onContextMenu,
-    onKeyDown, consumeSuppressedClick, onAnimationEnd,
+    onKeyDown, onLostPointerCapture,
+    consumeSuppressedClick, onAnimationEnd,
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { haloFrame } from './logoHoldMachine.js'
 import { prefersReducedMotion } from './useLogoModeGesture.js'
 
@@ -18,10 +18,23 @@ function clearHaloStyles(el) {
 }
 
 export default function useLivingHalo({ haloRef, active }) {
+  // Track the reduced-motion preference REACTIVELY (finding 13): sampling it once
+  // at effect-run left the rAF running when the owner enabled reduce mid-session.
+  // Making it state that the effect depends on re-runs the effect on a preference
+  // flip, which cancels the loop and settles the static halo (or restarts it).
+  const [reduced, setReduced] = useState(prefersReducedMotion)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const onChange = () => setReduced(mq.matches)
+    onChange()
+    mq.addEventListener?.('change', onChange)
+    return () => mq.removeEventListener?.('change', onChange)
+  }, [])
   useEffect(() => {
     const el = haloRef?.current
     if (!el || !active) return undefined
-    if (prefersReducedMotion()) {
+    if (reduced) {
       el.style.translate = '0px 0px'
       el.style.scale = '1'
       el.style.setProperty('--halo-opacity', '0.8')
@@ -50,5 +63,5 @@ export default function useLivingHalo({ haloRef, active }) {
       document.removeEventListener('visibilitychange', onVisibility)
       clearHaloStyles(el)
     }
-  }, [haloRef, active])
+  }, [haloRef, active, reduced])
 }
