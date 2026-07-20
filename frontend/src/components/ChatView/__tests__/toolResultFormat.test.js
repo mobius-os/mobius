@@ -152,6 +152,47 @@ test('plain stdout (a successful bash) is NOT treated as a failure', () => {
   assert.equal(toolResultFailed('hello world\n/data'), false)
 })
 
+test('a terminal hint renders plain command output as stdout', () => {
+  const r = formatToolResult('build ok\n3 files changed', { terminal: true })
+  assert.equal(r.kind, 'terminal')
+  assert.equal(r.stdout, 'build ok\n3 files changed')
+  assert.equal(r.stderr, '')
+  assert.equal(r.exitCode, null)
+})
+
+test('a terminal hint gives silent commands an explicit empty terminal result', () => {
+  const r = formatToolResult('', { terminal: true })
+  assert.equal(r.kind, 'terminal')
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, '')
+})
+
+test('a terminal hint preserves envelope and failure-prefix precedence', () => {
+  const envelope = formatToolResult(
+    JSON.stringify({ stdout: 'ok', stderr: '', exit_code: 0 }),
+    { terminal: true },
+  )
+  assert.equal(envelope.kind, 'terminal')
+  assert.equal(envelope.exitCode, 0)
+
+  const failure = formatToolResult('Exit code 2\nno such file', { terminal: true })
+  assert.equal(failure.kind, 'terminal')
+  assert.equal(failure.exitCode, 2)
+  assert.equal(failure.stderr, 'no such file')
+})
+
+test('valid JSON printed by a command remains exact terminal stdout', () => {
+  const objectText = '{"ok":true,"count":2}'
+  const objectResult = formatToolResult(objectText, { terminal: true })
+  assert.equal(objectResult.kind, 'terminal')
+  assert.equal(objectResult.stdout, objectText)
+
+  const arrayText = '["one","two"]'
+  const arrayResult = formatToolResult(arrayText, { terminal: true })
+  assert.equal(arrayResult.kind, 'terminal')
+  assert.equal(arrayResult.stdout, arrayText)
+})
+
 test('the Exit-code prefix is a real failure signal for toolResultFailed', () => {
   assert.equal(toolResultFailed('Exit code 127\ncommand not found'), true)
 })

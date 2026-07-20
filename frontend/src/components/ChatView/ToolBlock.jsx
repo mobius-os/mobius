@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { formatToolResult } from './toolResultFormat.js'
-import { toolActivityLabel, effectiveToolName } from './toolActivityLabel.js'
+import {
+  toolActivityIcon,
+  toolCallLabel,
+  effectiveToolName,
+} from './toolActivityLabel.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
+import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 
 function sourceHost(url) {
   try {
@@ -36,7 +41,7 @@ function ToolResult({ r }) {
         {/* A silent success (no stdout/stderr, exit 0) would otherwise expand to
             an empty box that reads as a bug — label it instead. */}
         {empty && (r.exitCode == null || r.exitCode === 0) && (
-          <span className="chat__tool-output-more">(no output)</span>
+          <span className="chat__tool-output-more">No output</span>
         )}
         {r.truncated && (
           <span className="chat__tool-output-more">… output truncated</span>
@@ -63,7 +68,9 @@ function ToolResult({ r }) {
 
   return (
     <>
-      <pre className="chat__tool-text chat__tool-output">{r.text}</pre>
+      {r.text
+        ? <pre className="chat__tool-text chat__tool-output">{r.text}</pre>
+        : <span className="chat__tool-output-more">No output</span>}
       {r.truncated && (
         <span className="chat__tool-output-more">… output truncated</span>
       )}
@@ -90,8 +97,10 @@ export default function ToolBlock({ t, chatId }) {
   // the same deps, retrying the fetch forever. A 404 is a designed outcome
   // (contract rule 6: keep the inline excerpt), so try once and stop.
   const [loadFailed, setLoadFailed] = useState(false)
-  const toolName = t.tool || 'Tool'
-  const label = toolName + (t.input ? `: ${t.input}` : '')
+  const effectiveName = effectiveToolName(t)
+  const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
+  const label = toolCallLabel(t)
+  const iconKind = toolActivityIcon(effectiveName)
   const sources = Array.isArray(t.sources)
     ? t.sources.filter(source => source?.url) : []
   const hasSources = sources.length > 0
@@ -136,9 +145,17 @@ export default function ToolBlock({ t, chatId }) {
   // surface it on the header so a failed step shows without expanding.
   // Memoized on the string so a co-rendering streaming answer (which re-renders
   // this block every typewriter frame) doesn't re-JSON-parse a large output.
+  // Live tool items start with output: ''. That is "not emitted yet", not a
+  // silent success, so only turn an empty string into "No output" after the
+  // step settles. Non-empty streaming output remains inspectable immediately.
+  const hasOutput = !!shownOutput
+    || !!t.output_truncated
+    || (t.status !== 'running' && shownOutput === '')
   const r = useMemo(
-    () => (shownOutput ? formatToolResult(shownOutput) : null),
-    [shownOutput],
+    () => (hasOutput
+      ? formatToolResult(shownOutput ?? '', { terminal: isShell })
+      : null),
+    [shownOutput, hasOutput, isShell],
   )
   // Failure exit code, field-or-parse (contract rule 6): a block reduced at the
   // funnel carries an explicit output_exit_code, so read that rather than
@@ -154,24 +171,39 @@ export default function ToolBlock({ t, chatId }) {
   // identical whether or not it is interactive.
   const headerContent = (
     <>
-      {t.status === 'running' && <span className="chat__tool-spin" />}
+      <span
+        className={
+          `chat__tool-toggle${hasDetail ? '' : ' chat__tool-toggle--spacer'}`
+          + (open ? ' chat__tool-toggle--open' : '')
+        }
+        aria-hidden="true"
+      >
+        {hasDetail && (
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
+            stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+            strokeLinejoin="round">
+            <path d="m5.5 3 5 5-5 5" />
+          </svg>
+        )}
+      </span>
+      <span
+        className={`chat__tool-icon${t.status === 'running' ? ' chat__tool-icon--running' : ''}`}
+        data-tool-kind={iconKind}
+        aria-hidden="true"
+      >
+        <ActivityTypeIcon kind={iconKind} />
+      </span>
       {/* Skill observability: when the Skill tool loaded a named
           skill, show its name as a chip so the user can see which
           skill the agent reached for this turn. */}
       {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
-      {/* While running, the header speaks owner language ("Running
-          commands…", not "Running Bash..."); once done it shows the raw
-          call (name + input) so what ran stays inspectable. */}
-      <span className="chat__tool-name">
-        {t.status === 'running' ? `${toolActivityLabel(effectiveToolName(t))}…` : label}
+      {/* The group header names the category ("Ran commands"); each child row
+          names the concrete operation ("Ran git status -sb"). */}
+      <span className="chat__tool-name" title={label}>
+        {label}{t.status === 'running' ? '…' : ''}
       </span>
       {failed && (
         <span className="chat__tool-exit chat__tool-exit--head">exit {exitCode}</span>
-      )}
-      {/* Decorative glyph only — aria-expanded on the button already announces
-          the disclosure state, so keep the arrow out of the accessible name. */}
-      {hasDetail && (
-        <span className="chat__tool-toggle" aria-hidden="true">{open ? '▾' : '▸'}</span>
       )}
     </>
   )
@@ -204,35 +236,59 @@ export default function ToolBlock({ t, chatId }) {
       )}
       {open && hasDetail && (
         <div className="chat__tool-detail">
-          {t.input && <pre className="chat__tool-text">{t.input}</pre>}
-          {hasSources && (
-            <div className="chat__tool-sources">
-              {sources.map((source, i) => (
-                <a
-                  key={`${source.url}-${i}`}
-                  className="chat__tool-source-chip"
-                  href={source.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={source.snippet || source.title || source.url}
-                >
-                  <span className="chat__tool-source-title">
-                    {source.title || source.url}
-                  </span>
-                  <span className="chat__tool-source-host">
-                    {sourceHost(source.url)}
-                  </span>
-                </a>
-              ))}
+          {t.input && (
+            <div className="chat__tool-section">
+              <span className="chat__tool-section-label">
+                {isShell ? 'Command' : 'Input'}
+              </span>
+              <pre className={
+                `chat__tool-text${isShell ? ' chat__tool-command' : ''}`
+              }>
+                {isShell && <span className="chat__tool-prompt" aria-hidden="true">$ </span>}
+                {t.input}
+              </pre>
             </div>
           )}
-          {r && <ToolResult r={r} />}
-          {t.output_truncated && fullOutput === null && (
-            <span className="chat__tool-output-more">
-              {loadingFull
-                ? '\n… loading full output …'
-                : `\n… (${t.output_full_len ?? 'more'} chars total — expand to load)`}
-            </span>
+          {hasSources && (
+            <div className="chat__tool-section">
+              <span className="chat__tool-section-label">Sources</span>
+              <div className="chat__tool-sources">
+                {sources.map((source, i) => (
+                  <a
+                    key={`${source.url}-${i}`}
+                    className="chat__tool-source-chip"
+                    href={source.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={source.snippet || source.title || source.url}
+                  >
+                    <span className="chat__tool-source-title">
+                      {source.title || source.url}
+                    </span>
+                    <span className="chat__tool-source-host">
+                      {sourceHost(source.url)}
+                    </span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {(r || t.output_truncated) && (
+            <div className="chat__tool-section">
+              <span className="chat__tool-section-label">
+                {isShell ? 'Output' : 'Result'}
+              </span>
+              {r && <ToolResult r={r} />}
+              {t.output_truncated && fullOutput === null && (
+                <span className="chat__tool-output-more">
+                  {loadingFull
+                    ? '… loading full output …'
+                    : loadFailed
+                      ? '… full output unavailable; showing excerpt'
+                      : `… showing excerpt${t.output_full_len ? ` of ${t.output_full_len} characters` : ''}`}
+                </span>
+              )}
+            </div>
           )}
         </div>
       )}

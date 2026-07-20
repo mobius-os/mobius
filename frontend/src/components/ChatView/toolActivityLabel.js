@@ -15,6 +15,7 @@ const ACTIVITY_LABELS = new Map([
   ['MultiEdit', 'Editing code'],
   ['NotebookEdit', 'Editing code'],
   ['Bash', 'Running commands'],
+  ['shell', 'Running commands'],
   ['WebFetch', 'Browsing the web'],
   ['WebSearch', 'Browsing the web'],
   ['TodoWrite', 'Planning'],
@@ -44,6 +45,7 @@ const PAST_LABELS = new Map([
   ['MultiEdit', 'Edited code'],
   ['NotebookEdit', 'Edited code'],
   ['Bash', 'Ran commands'],
+  ['shell', 'Ran commands'],
   ['WebFetch', 'Browsed the web'],
   ['WebSearch', 'Browsed the web'],
   ['TodoWrite', 'Planned'],
@@ -87,6 +89,7 @@ const ACTIVITY_ICONS = new Map([
   ['MultiEdit', 'edit'],
   ['NotebookEdit', 'edit'],
   ['Bash', 'terminal'],
+  ['shell', 'terminal'],
   ['WebFetch', 'web'],
   ['WebSearch', 'web'],
   ['TodoWrite', 'plan'],
@@ -123,6 +126,40 @@ export function toolActivitySingular(label) {
 
 export function toolActivityPastSingular(label) {
   return PAST_SINGULAR.get(label) || label
+}
+
+// One concrete child row inside an expanded activity stretch. The overview
+// speaks in categories ("Ran commands"); the child names the exact operation
+// in owner language ("Ran git status -sb") while the raw tool identifier stays
+// available as a fallback for tools we do not know yet.
+const INSTANCE_VERBS = new Map([
+  ['Read', ['Reading', 'Read']],
+  ['Glob', ['Reading', 'Read']],
+  ['Grep', ['Searching for', 'Searched for']],
+  ['Edit', ['Editing', 'Edited']],
+  ['Write', ['Writing', 'Wrote']],
+  ['MultiEdit', ['Editing', 'Edited']],
+  ['NotebookEdit', ['Editing', 'Edited']],
+  ['Bash', ['Running', 'Ran']],
+  ['shell', ['Running', 'Ran']],
+  ['WebFetch', ['Opening', 'Opened']],
+  ['WebSearch', ['Searching the web for', 'Searched the web for']],
+  ['ViewImage', ['Viewing', 'Viewed']],
+])
+
+export function toolCallLabel(tool) {
+  const name = effectiveToolName(tool) || 'Tool'
+  const input = typeof tool?.input === 'string' ? tool.input.trim() : ''
+  const verbs = INSTANCE_VERBS.get(name)
+  if (!verbs) return name + (input ? `: ${input}` : '')
+
+  const verb = tool?.status === 'running' ? verbs[0] : verbs[1]
+  if (input) return `${verb} ${input}`
+
+  const category = tool?.status === 'running'
+    ? toolActivitySingular(toolActivityLabel(name))
+    : toolActivityPastSingular(toolActivityPastLabel(name) || name)
+  return category
 }
 
 // The activity-relevant tool name for a tool block: a Read of an image file is

@@ -8,6 +8,7 @@ import {
 } from '../groupBlocks.js'
 import {
   toolActivityLabel,
+  toolCallLabel,
   effectiveToolName,
   isDistinctiveActivityTool,
 } from '../toolActivityLabel.js'
@@ -200,6 +201,26 @@ test('toolActivityLabel: maps known tools, falls back to the raw name', () => {
   assert.equal(toolActivityLabel(undefined), 'Tool')
   // Prototype-chain names must not resolve to Object internals.
   assert.equal(toolActivityLabel('constructor'), 'constructor')
+})
+
+test('toolCallLabel names the concrete nested step in progressive and past tense', () => {
+  assert.equal(
+    toolCallLabel({ tool: 'Bash', input: 'git status -sb', status: 'done' }),
+    'Ran git status -sb',
+  )
+  assert.equal(
+    toolCallLabel({ tool: 'Read', input: '/data/app.jsx', status: 'running' }),
+    'Reading /data/app.jsx',
+  )
+  assert.equal(
+    toolCallLabel({ tool: 'WebSearch', input: 'nested UI', status: 'done' }),
+    'Searched the web for nested UI',
+  )
+  assert.equal(toolCallLabel({ tool: 'Bash', status: 'done' }), 'Ran a command')
+  assert.equal(
+    toolCallLabel({ tool: 'custom_tool', input: 'mode=fast', status: 'done' }),
+    'custom_tool: mode=fast',
+  )
 })
 
 

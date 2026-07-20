@@ -785,13 +785,32 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* Same hug-the-text rule as .chat__activity-label: the disclosure glyph and
-     exit chip sit right after the name, not at the far edge of the row. */
+  /* The fixed disclosure + icon lanes lead this label. The exit chip hugs the
+     text instead of drifting to the far edge of a wide activity row. */
   flex: 0 1 auto;
 }
 
 .chat__tool--done .chat__tool-name { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
-.chat__tool-toggle { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ font-size: 12px; /* floor raised from 10px */ flex-shrink: 0; }
+
+.chat__tool-toggle,
+.chat__tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--muted); /* CONTRACT: low-contrast structural glyphs */
+}
+
+.chat__tool-toggle {
+  transition: transform 0.16s var(--ease-out-soft, ease-out);
+  transform-origin: center;
+}
+
+.chat__tool-toggle--open { transform: rotate(90deg); }
+.chat__tool-toggle--spacer { visibility: hidden; }
+.chat__tool-icon--running { color: var(--accent); /* CONTRACT: vivid accent marks the active child step */ }
 
 .chat__tool-chip {
   flex-shrink: 0;
@@ -806,12 +825,40 @@
 }
 
 .chat__tool-detail {
-  padding: 0 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 10px 10px;
   font-size: 12px; /* floor raised from 10.5px */
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   max-height: 200px;
   overflow-y: auto;
   line-height: 1.5;
+}
+
+.chat__tool-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat__tool-section-label {
+  color: var(--muted); /* CONTRACT: low-contrast field label */
+  font-family: var(--font, system-ui, sans-serif);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.chat__tool-command,
+.chat__tool-output,
+.chat__tool-stderr {
+  color: var(--text); /* CONTRACT: high-contrast command and result text */
+}
+
+.chat__tool-prompt {
+  color: var(--muted); /* CONTRACT: quiet terminal prompt before the command */
+  user-select: none;
 }
 
 .chat__tool-text {
@@ -820,11 +867,6 @@
   color: inherit;
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.chat__tool-text + .chat__tool-sources,
-.chat__tool-sources + .chat__tool-text {
-  margin-top: 6px;
 }
 
 .chat__tool-sources {
@@ -857,11 +899,10 @@
   color: var(--muted); /* CONTRACT: lower emphasis source domain */
 }
 
-.chat__tool-output { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
-
 .chat__tool-output-more {
   display: block;
   white-space: pre-wrap;
+  color: var(--muted); /* CONTRACT: low-contrast empty/truncation metadata */
 }
 
 /* ── Envelope-aware tool results ─────────────────────── */
@@ -984,10 +1025,24 @@
   cursor: default;
 }
 
-/* With the chevron gone the resting line is deliberately bare, so pointer and
-   touch users get their disclosure cue on interaction instead: the label lifts
-   to full text color on hover and press, giving discoverability without
-   resting chrome. Keyboard users already have the focus ring. */
+.chat__activity-disclosure {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--muted); /* CONTRACT: low-contrast leading disclosure glyph */
+  transition: transform 0.16s var(--ease-out-soft, ease-out);
+  transform-origin: center;
+}
+
+.chat__activity-disclosure--open { transform: rotate(90deg); }
+.chat__activity-disclosure--spacer { visibility: hidden; }
+
+/* The leading chevron carries the disclosure state; the label also lifts to
+   full text color on hover/press so the entire quiet row reads as interactive.
+   Keyboard users get the same boundary from the focus ring. */
 .chat__activity-header:not(.chat__activity-header--static):hover .chat__activity-label,
 .chat__activity-header:not(.chat__activity-header--static):active .chat__activity-label {
   color: var(--text); /* CONTRACT: high-contrast lift marks the tappable line */
@@ -998,6 +1053,8 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  width: 14px;
+  height: 14px;
   color: var(--muted); /* CONTRACT: low-contrast status glyph */
 }
 
@@ -1098,24 +1155,22 @@
   transform: rotate(-90deg);
 }
 
-/* Expanded, a quiet vertical hairline rail holds the entries in persisted
-   (chronological) order — thinking bodies inline, ToolBlock rows for tools. The
-   rail is neutral structure, not a decorative accent stripe. */
+/* Expanded, a quiet vertical hairline and a full disclosure lane place the
+   chronological child steps beneath the parent type icon. The rail is neutral
+   hierarchy, not a decorative accent stripe. */
 .chat__activity-timeline {
   display: flex;
   flex-direction: column;
   gap: var(--activity-row-gap, 4px);
   margin-top: var(--activity-row-gap, 4px);
-  /* Indent the run's steps UNDER the header's label (13px glyph + 6px gap) so an
-     expanded stretch reads as a nested list rather than a second column aligned
-     with its own header (owner call). */
-  padding: 0 0 0 19px;
+  margin-inline-start: 20px;
+  padding-inline-start: 11px;
+  border-inline-start: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
-/* A thinking entry renders inline at the first level (the user already opted in
-   by expanding): a small dim "Thought for Ns" label + the reasoning body, which
-   reuses the .chat__reasoning-body lane. For a thinking-only stretch the label
-   is suppressed (the collapsed header already said it). */
+/* Every reasoning entry keeps the same nested row throughout streaming. This
+   avoids replacing a visible body when the first tool joins a thinking-only
+   stretch, and keeps reasoning collapsed until explicitly opened. */
 .chat__activity-think {
   padding: var(--activity-row-gap, 4px) 0;
   color: var(--muted); /* CONTRACT: low-contrast reasoning tone */
@@ -1127,6 +1182,71 @@
   display: block;
   margin-bottom: var(--activity-row-gap, 4px);
   opacity: 0.8;
+}
+
+/* In a mixed stretch the reasoning is another child step, closed by default.
+   Its leading disclosure + type lanes match ToolBlock exactly, so the timeline
+   scans as one nested list instead of two unrelated renderers. */
+.chat__activity-think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: var(--activity-row-gap, 4px) 0;
+  background: none;
+  border: 0;
+  color: var(--muted); /* CONTRACT: low-contrast reasoning row */
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.chat__activity-think-toggle .chat__activity-think-label {
+  display: inline;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__activity-think-toggle:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid keyboard focus ring */
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+.chat__activity-think-chevron,
+.chat__activity-think-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--muted); /* CONTRACT: low-contrast nested structural glyphs */
+}
+
+.chat__activity-think-chevron {
+  transition: transform 0.16s var(--ease-out-soft, ease-out);
+  transform-origin: center;
+}
+
+.chat__activity-think--open .chat__activity-think-chevron {
+  transform: rotate(90deg);
+}
+
+.chat__activity-think--collapsible .chat__reasoning-body {
+  margin-inline-start: 40px;
+  padding-block: 2px var(--activity-row-gap, 4px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat__activity-think-toggle:hover .chat__activity-think-label,
+  .chat__tool-header:not(.chat__tool-header--static):hover .chat__tool-name {
+    color: var(--text); /* CONTRACT: high-contrast lift marks interactive rows */
+  }
 }
 
 /* Reasoning markdown is a deliberately quiet typography lane. Model-authored
@@ -1181,7 +1301,16 @@
   padding: var(--activity-row-gap, 4px) 0;
 }
 .chat__activity-timeline .chat__tool-detail {
-  padding: 0 0 var(--activity-row-gap, 4px);
+  margin-inline-start: 40px;
+  padding: 2px 0 calc(var(--activity-row-gap, 4px) * 2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__activity-disclosure,
+  .chat__activity-think-chevron,
+  .chat__tool-toggle {
+    transition: none;
+  }
 }
 
 /* ── Marker card (compaction + future system markers) ── */

@@ -13,7 +13,7 @@ import { toolActivityIcon, effectiveToolName } from './toolActivityLabel.js'
 import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
-import ActivityLineHeader from './ActivityLineHeader.jsx'
+import ActivityLineHeader, { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import SubagentChips from './SubagentChips.jsx'
 
 // One collapsible activity line standing in for a contiguous stretch of thinking
@@ -23,9 +23,11 @@ import SubagentChips from './SubagentChips.jsx'
 // status (a periodic shimmer over the label — bare "Thinking", or the muted
 // type glyph + progressive activities while tools run) and a FAILED step's
 // danger triangle + exit chip, all readable
-// WITHOUT expanding. Expanded, it renders the chronological timeline: thinking
-// bodies inline (dim StandardMarkdown) and tools as their own ToolBlock rows,
-// which still own the lazy-fetch of large output.
+// WITHOUT expanding. Expanded, it renders the chronological timeline: mixed
+// thinking entries and tools become independently collapsed child rows, so
+// opening the overview never spills a full reasoning trace or tool output into
+// the transcript. A thought keeps this same child component as tools arrive,
+// avoiding an automatic height/state change in the middle of a live run.
 //
 // COLLAPSED BY DEFAULT, ALWAYS — the line never auto-opens; the user's tap is
 // the only thing that opens or closes it, mid-run included. An earlier version
@@ -43,6 +45,45 @@ import SubagentChips from './SubagentChips.jsx'
 // shimmer plus the running-first activity summary already say what is
 // executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
+function TimelineThought({ label, content }) {
+  const [open, setOpen] = useState(false)
+  const headerRef = useRef(null)
+
+  return (
+    <div className={
+      `chat__activity-think chat__activity-think--collapsible`
+      + (open ? ' chat__activity-think--open' : '')
+    }>
+      <button
+        ref={headerRef}
+        type="button"
+        className="chat__activity-think-toggle"
+        onClick={() => {
+          preserveTogglePosition(headerRef.current)
+          setOpen(o => !o)
+        }}
+        aria-expanded={open}
+      >
+        <span className="chat__activity-think-chevron" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
+            stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+            strokeLinejoin="round">
+            <path d="m5.5 3 5 5-5 5" />
+          </svg>
+        </span>
+        <span className="chat__activity-think-icon" aria-hidden="true">
+          <ActivityTypeIcon kind="reasoning" />
+        </span>
+        <span className="chat__activity-think-label">{label}</span>
+      </button>
+      {open && (
+        <div className="chat__reasoning-body">
+          <StandardMarkdown text={content} />
+        </div>
+      )}
+    </div>
+  )
+}
 export default function ActivityStretch({ entries, chatId, live = false }) {
   const [userOpen, setUserOpen] = useState(false)
   const headerRef = useRef(null)
@@ -180,22 +221,14 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         <div className="chat__activity-timeline">
           {entries.map(({ item, idx }) => {
             if (item.type === 'thinking') {
-              // The stretch itself is the ONLY disclosure: opening it preserves the
-              // reasoning exactly as generated, with no second toggle to click
-              // (owner call). A mixed run keeps a plain duration label so the
-              // thought reads apart from the tool rows beside it; a thinking-only
-              // stretch already named it in the collapsed header.
+              const key = assistantBlockKey(item, idx)
+              const reasoning = thinkingContentForDisplay(item.content)
               return (
-                <div className="chat__activity-think" key={assistantBlockKey(item, idx)}>
-                  {!thinkingOnly && (
-                    <span className="chat__activity-think-label">
-                      {thoughtDurationLabel(item.duration_ms)}
-                    </span>
-                  )}
-                  <div className="chat__reasoning-body">
-                    <StandardMarkdown text={thinkingContentForDisplay(item.content)} />
-                  </div>
-                </div>
+                <TimelineThought
+                  key={key}
+                  label={thoughtDurationLabel(item.duration_ms)}
+                  content={reasoning}
+                />
               )
             }
             // chatId + the block's tool_use_id let ToolBlock lazily fetch a

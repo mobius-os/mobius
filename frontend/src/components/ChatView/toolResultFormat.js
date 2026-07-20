@@ -8,7 +8,7 @@
 //
 // Contract: formatToolResult(output) returns one of
 //   { kind: 'text',       text }                          — plain / unparseable
-//   { kind: 'terminal',   stdout, stderr, exitCode }      — shell envelope
+//   { kind: 'terminal',   stdout, stderr, exitCode }      — shell output
 //   { kind: 'structured', entries: [{ key, value }] }     — object result
 // The caller (ToolBlock) branches on `kind`. `text` is the safe default: if the
 // output isn't JSON, or is JSON we don't recognize as an envelope, it renders
@@ -137,7 +137,7 @@ function classify(value, depth) {
   return { kind: 'text', text: t.text, truncated: t.truncated }
 }
 
-export function formatToolResult(output) {
+export function formatToolResult(output, { terminal = false } = {}) {
   if (output == null) return { kind: 'text', text: '', truncated: false }
   if (typeof output !== 'string') {
     // Defensive: a non-string slipped through. Pretty-print it.
@@ -161,9 +161,36 @@ export function formatToolResult(output) {
       }
     }
     const t = truncate(output)
+    // CommandExecution items usually stream plain stdout rather than a JSON
+    // envelope. The caller knows the tool type, so its terminal hint lets that
+    // successful output use the same stdout/stderr presentation as enveloped
+    // results without guessing that every multiline string is a command.
+    if (terminal) {
+      return {
+        kind: 'terminal',
+        stdout: t.text,
+        stderr: '',
+        exitCode: null,
+        truncated: t.truncated,
+      }
+    }
     return { kind: 'text', text: t.text, truncated: t.truncated }
   }
-  return classify(parsed, 0)
+  const classified = classify(parsed, 0)
+  if (!terminal || classified.kind === 'terminal') return classified
+
+  // Valid JSON printed by a shell command is still stdout. Only a recognized
+  // terminal envelope may reinterpret it; otherwise keep the command's exact
+  // bytes instead of changing presentation based on what stdout happens to
+  // contain (for example `curl ... | jq`).
+  const t = truncate(output)
+  return {
+    kind: 'terminal',
+    stdout: t.text,
+    stderr: '',
+    exitCode: null,
+    truncated: t.truncated,
+  }
 }
 
 // Did this tool result report a failure? True only when the output parses to a

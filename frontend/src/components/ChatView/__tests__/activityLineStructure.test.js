@@ -36,7 +36,7 @@ test('placeholder and real stretches render through the shared activity header',
   const placeholder = chatView.slice(placeholderStart, placeholderEnd)
 
   assert.match(chatView, /import ActivityLineHeader from '\.\/ActivityLineHeader\.jsx'/)
-  assert.match(activityStretch, /import ActivityLineHeader from '\.\/ActivityLineHeader\.jsx'/)
+  assert.match(activityStretch, /import ActivityLineHeader, \{ ActivityTypeIcon \} from '\.\/ActivityLineHeader\.jsx'/)
   assert.match(activityStretch, /<ActivityLineHeader/,
     'the real stretch must RENDER the shared header, not merely import it')
   assert.ok(placeholderStart >= 0, 'placeholder should use the standard activity wrapper')
@@ -48,23 +48,26 @@ test('placeholder and real stretches render through the shared activity header',
     'the e2e presence hook must not carry layout compensation')
 })
 
-test('the stretch is the only disclosure — thinking renders inline as generated', () => {
+test('every thinking entry remains the same collapsed nested disclosure', () => {
   assert.match(activityHeader, /kind === 'reasoning'/,
     'the shared icon set should include a dedicated reasoning mark')
   assert.match(activityStretch, /const iconKind = thinkingOnly \? 'reasoning' : leadToolIcon/,
     'thinking-only stretches should select the reasoning glyph')
   assert.doesNotMatch(activityHeader + activityStretch, /chat__activity-icon--spacer/,
     'thinking is an activity type, not an empty icon column')
-  // Opening the stretch preserves the reasoning exactly as generated — there is
-  // no second "> Thinking" toggle to click (owner call).
-  assert.doesNotMatch(activityStretch, /TimelineThought/,
-    'an in-stretch thought must not be a nested disclosure')
-  assert.doesNotMatch(activityStretch, /chat__activity-think-toggle/,
-    'no nested thought toggle markup')
-  assert.match(activityStretch, /<StandardMarkdown text=\{thinkingContentForDisplay\(item\.content\)\} \/>/,
-    'reasoning renders inline in the expanded timeline')
-  assert.match(activityStretch, /\{!thinkingOnly && \(/,
-    'a mixed run keeps a plain duration label; a thinking-only header already named it')
+  assert.match(activityStretch, /function TimelineThought/,
+    'a mixed thought owns its disclosure state')
+  assert.match(activityStretch, /const \[open, setOpen\] = useState\(false\)/,
+    'nested thinking starts collapsed')
+  assert.match(activityStretch, /className="chat__activity-think-toggle"/)
+  assert.match(activityStretch, /aria-expanded=\{open\}/,
+    'the nested toggle exposes its state')
+  assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current\)\s*setOpen\(o => !o\)/,
+    'opening a long trace preserves the reader anchor')
+  assert.doesNotMatch(activityStretch, /if \(thinkingOnly\) \{/,
+    'a thinking-only entry must not swap component type when the first tool arrives')
+  assert.match(activityStretch, /<StandardMarkdown text=\{content\} \/>/,
+    'reasoning remains available inside the nested disclosure')
 })
 
 test('activity spacing derives from one block gap and one row gap', () => {
@@ -77,6 +80,11 @@ test('activity spacing derives from one block gap and one row gap', () => {
   assert.match(tools, /gap:\s*var\(--activity-row-gap, 4px\)/)
   assert.match(timeline, /gap:\s*var\(--activity-row-gap, 4px\)/)
   assert.match(timeline, /margin-top:\s*var\(--activity-row-gap, 4px\)/)
+  assert.match(timeline, /margin-inline-start:\s*20px/,
+    'child steps indent beneath the parent icon lane')
+  assert.match(timeline, /padding-inline-start:\s*11px/)
+  assert.match(timeline, /border-inline-start:\s*1px/,
+    'a neutral one-pixel rail carries the child hierarchy')
   assert.doesNotMatch(chatCss, /\.chat__tools \+ \.chat__tools\s*\{\s*margin-top:\s*2px/,
     'adjacent activity blocks should not retain a one-off gap')
 })

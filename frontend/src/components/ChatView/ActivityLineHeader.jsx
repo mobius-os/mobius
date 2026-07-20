@@ -4,7 +4,7 @@ import { forwardRef } from 'react'
 // Every activity line uses the same fixed-width glyph lane. Tool kinds select
 // their matching glyph; reasoning has its own mark so a thinking-only stretch
 // remains visibly part of the activity system instead of becoming bare text.
-function ActivityTypeIcon({ kind }) {
+export function ActivityTypeIcon({ kind }) {
   const common = {
     viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none',
     stroke: 'currentColor', strokeWidth: 1.5,
@@ -102,6 +102,21 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
       aria-label={ariaLabel}
       role={interactive ? undefined : 'status'}
     >
+      <span
+        className={
+          `chat__activity-disclosure${interactive ? '' : ' chat__activity-disclosure--spacer'}`
+          + (open ? ' chat__activity-disclosure--open' : '')
+        }
+        aria-hidden="true"
+      >
+        {interactive && (
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
+            stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+            strokeLinejoin="round">
+            <path d="m5.5 3 5 5-5 5" />
+          </svg>
+        )}
+      </span>
       <span
         className="chat__activity-icon"
         data-activity-kind={displayState === 'error' ? undefined : iconKind}
