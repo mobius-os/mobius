@@ -488,8 +488,12 @@ test('the room flourish (CHARGE): panes DEAL in on the KEYED beat class, suppres
   assert.doesNotMatch(panedBase, /animation:\s*shell-pane-deal/)
   assert.match(css, /\.shell--builder-entering \.shell__view--paned \{[\s\S]*?animation:\s*shell-pane-deal 400ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/)
   assert.match(css, /@keyframes shell-pane-deal\s*\{[\s\S]*?translateX\(18px\)[\s\S]*?translateX\(0\)/)
-  // A live resize during the enter beat must not re-deal every frame.
-  assert.match(css, /\.workspace--resizing \.shell--builder-entering \.shell__view--paned \{ animation: none; \}/)
+  // A live resize / divider-drag during the enter beat must not re-deal every frame
+  // (finding F14): the REAL operation classes on .shell__content, in the REAL DOM
+  // order (root .shell--builder-entering → content op-class → pane). The old
+  // `.workspace--resizing` selector matched nothing and had an inverted ancestor order.
+  assert.match(css, /\.shell--builder-entering \.workspace--container-resizing \.shell__view--paned,\s*\n\s*\.shell--builder-entering \.workspace--divider-dragging \.shell__view--paned \{ animation: none; \}/)
+  assert.doesNotMatch(css, /\.workspace--resizing \.shell--builder-entering/)
   // Reduced motion drops the deal (and the layout-commit transition).
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell__view--paned \{ transition: none; animation: none; \}/)

@@ -399,13 +399,8 @@ export function reconcileVisibleEvent(state, now) {
   return null
 }
 
-// True iff `animationName` under `epoch` is a valid completion signal for the
-// live transition (INV 12 + INV 15): the epoch must be the live one AND the name
-// must belong to the phase's animation set. The controller's animationend
-// listener calls this before dispatching complete.
-export function isCompletionSignal(state, epoch, animationName) {
-  const contract = completionContract(state)
-  if (!contract) return false
-  if (contract.id !== epoch) return false // stale epoch (INV 15)
-  return contract.animationNames.has(animationName)
-}
+// (Removed: isCompletionSignal — a production-dead helper whose doc claimed a
+// controller `animationend` listener that never existed. The controller completes
+// a beat via getAnimations + the `finished` promises keyed to the captured epoch
+// (useModeController), not by matching an animation name here; INV 12 + INV 15 are
+// enforced there and by completionContract, so this predicate had no live caller.)

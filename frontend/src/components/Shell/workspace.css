@@ -99,11 +99,17 @@
 .shell--builder-entering .shell__view--paned {
   animation: shell-pane-deal 400ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-/* A live resize DURING the enter beat must not re-deal each frame. Higher
-   specificity than the entering rule above so it wins regardless of source order
-   (the base .workspace--resizing rule earlier equals the entering rule's
-   specificity, so it alone would lose to it). */
-.workspace--resizing .shell--builder-entering .shell__view--paned { animation: none; }
+/* A live resize / divider-drag DURING the enter beat must not re-deal each frame.
+   The suppression uses the REAL operation classes Shell + WorkspaceChrome install
+   (`workspace--container-resizing` / `workspace--divider-dragging`, both on
+   `main.shell__content`) and the REAL DOM order: `.shell--builder-entering` is worn
+   by the `.shell` ROOT — the PARENT of `.shell__content` — so the ancestor chain is
+   root → content → pane. The earlier `.workspace--resizing` selector was doubly
+   dead: no JS ever installed that class, and its ancestor order was inverted. It
+   never competed with the base operation rule above either — that one sets
+   `transition: none`, not `animation`, so there was no specificity contest to win. */
+.shell--builder-entering .workspace--container-resizing .shell__view--paned,
+.shell--builder-entering .workspace--divider-dragging .shell__view--paned { animation: none; }
 
 /* --- Builder mode-EXIT reverse card-deal (design: inverse deal on close) -----
    Leaving builder with a TILED workspace holds the tiled render for one decisive

@@ -4,7 +4,7 @@ import {
   initialModeState, modeReducer,
   effectiveViewMode, transitionRootClass, builderModeActive,
   exitGeometryActive, dragPreviewActive, paneExitRole, leavingSurfacesInert,
-  completionContract, needsSyncCompletion, reconcileVisibleEvent, isCompletionSignal,
+  completionContract, needsSyncCompletion, reconcileVisibleEvent,
   MODE_ENTER_MS, MODE_EXIT_MS, RECONCILE_SLACK_MS,
 } from '../modeMachine.js'
 
@@ -360,14 +360,10 @@ test('visibility reconcile leaves a still-fresh beat running', () => {
 
 // ── Animation lifecycle (matrix §Animation lifecycle) ────────────────────────
 
-test('completion signal filters by epoch AND animation name (INV 12)', () => {
-  const s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
-  const id = s.transition.id
-  assert.equal(isCompletionSignal(s, id, 'shell-strip-deal-in'), true)
-  assert.equal(isCompletionSignal(s, id, 'shell-pane-deal-out'), false, 'wrong phase animation')
-  assert.equal(isCompletionSignal(s, id, 'workspace-sheet-in'), false, 'unrelated animation')
-  assert.equal(isCompletionSignal(s, id + 1, 'shell-strip-deal-in'), false, 'stale epoch')
-})
+// The completion CONTRACT (which animation names + max duration end the beat) is
+// the live surface (INV 12); the epoch-keyed completion itself is driven by the
+// controller's getAnimations + finished promises, not a name-matching predicate
+// here — see completionContract's tests above and the controller finding-5 lock.
 
 test('duplicate completion is harmless', () => {
   let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
