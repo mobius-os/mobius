@@ -67,7 +67,8 @@ const ShellBrand = memo(function ShellBrand({
           if (splitsEnabled && e.shiftKey && e.key === 'Enter' && !e.repeat) {
             e.preventDefault()
             keyboardModeClickRef.current = true
-            onToggleMode()
+            // Honest cause (finding F13): Shift+Enter is the 'keyboard' beat.
+            onToggleMode('keyboard')
           }
         }}
         onKeyUp={(e) => {

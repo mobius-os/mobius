@@ -125,7 +125,8 @@ export function useLogoModeGesture({
         requestAnimationFrame(() => setFlourish(isEntering ? 'igniting' : 'snapping'))
       },
     })
-    onToggleMode?.()
+    // Thread the HONEST cause (finding F13): a completed hold is 'hold'.
+    onToggleMode?.('hold')
     endPress({ suppressClick: true })
   }, [writeProgress, onToggleMode, endPress, builderModeActive, vibrateFn])
 
@@ -171,8 +172,8 @@ export function useLogoModeGesture({
     // pointerType gates the swipe (finding F12): a mouse drag classifies as 'cancel'.
     const decision = decidePointerMove(dx, dy, press.pointerType)
     if (decision === 'swipe') {
-      // Swipe-right flips the mode; slop suppresses the trailing tap.
-      onToggleMode?.()
+      // Swipe-right flips the mode; slop suppresses the trailing tap. Honest cause.
+      onToggleMode?.('swipe')
       endPress({ suppressClick: true })
     } else if (decision === 'cancel') {
       // Became a scroll/drag — abandon the hold cleanly (no drawer either).
@@ -193,7 +194,7 @@ export function useLogoModeGesture({
     const elapsed = performance.now() - press.t
     // Swipe-right flips ONLY for touch/pen (finding F12); a mouse drag past the slop
     // hits the movedBeyondSlop cancel just below, so a mouse never toggles the mode.
-    if (swipeAllowed(press.pointerType) && isSwipeRight(dx, dy)) { onToggleMode?.(); endPress({ suppressClick: true }); return }
+    if (swipeAllowed(press.pointerType) && isSwipeRight(dx, dy)) { onToggleMode?.('swipe'); endPress({ suppressClick: true }); return }
     if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: true }); return } // a drag → cancel
     if (holdComplete(elapsed)) { completeHold(); return } // held long enough → flip
     // A genuine short tap → let the native click open the drawer, unchanged.

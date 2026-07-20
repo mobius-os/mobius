@@ -138,14 +138,17 @@ export default function useModeController({
   // ── Intent dispatchers (Shell calls these alongside its workspace dispatch) ─
   // Each is stable so it never churns the logo-gesture / drag-hook callbacks.
 
-  // A user toggle (hold / swipe / keyboard). Shell supplies the tree facts the
-  // beat needs; the controller fills reduced-motion + the clock. Returns the
-  // destination mode so Shell can drive the matching workspace + Settings side.
-  const toggle = useCallback(({ focusedPaneId, leavingPaneIds, multiPane } = {}) => {
+  // A user toggle. Shell supplies the tree facts the beat needs and the HONEST
+  // cause ('hold' | 'swipe' | 'keyboard', finding F13) threaded from the gesture /
+  // keyboard caller; the controller fills reduced-motion + the clock. An omitted
+  // cause falls back to the reducer's generic 'toggle' — never a hardcoded 'hold'
+  // that mislabels a swipe/keyboard beat under inspection. Returns the destination
+  // mode so Shell can drive the matching workspace + Settings side.
+  const toggle = useCallback(({ cause, focusedPaneId, leavingPaneIds, multiPane } = {}) => {
     const from = stateRef.current.committedMode
     const to = from === 'single' ? 'panes' : 'single'
     dispatch({
-      type: 'toggle', cause: 'hold', to, from,
+      type: 'toggle', cause, to, from,
       focusedPaneId, leavingPaneIds, multiPane,
       reducedMotion: prefersReducedMotion(), now: now(),
     })

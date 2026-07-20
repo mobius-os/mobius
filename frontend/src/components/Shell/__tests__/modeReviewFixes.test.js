@@ -190,6 +190,20 @@ test('finding 12: Shift+Enter ignores auto-repeat and clears its click-suppressi
   assert.match(brand, /onKeyUp=\{\(e\) => \{[\s\S]*?keyboardModeClickRef\.current = false/)
 })
 
+// -- Finding F13 (expanding review): the beat carries an HONEST cause -----------
+test('finding F13: cause threads from the gesture/keyboard, never a hardcoded hold', () => {
+  // The controller forwards the caller's cause instead of hardcoding 'hold'.
+  assert.match(controller, /const toggle = useCallback\(\(\{ cause, focusedPaneId/)
+  assert.match(controller, /type: 'toggle', cause, to, from,/)
+  assert.doesNotMatch(controller, /type: 'toggle', cause: 'hold'/)
+  // Shell forwards the caller's cause into mode.toggle.
+  assert.match(shell, /mode\.toggle\(\{ cause, focusedPaneId, leavingPaneIds, multiPane: dealMultiPane \}\)/)
+  // Each source layer names its own beat honestly.
+  assert.match(gesture, /onToggleMode\?\.\('hold'\)/)
+  assert.match(gesture, /onToggleMode\?\.\('swipe'\)/)
+  assert.match(brand, /onToggleMode\('keyboard'\)/)
+})
+
 // -- Finding 13: reduced motion is reactive (controller + halo) ----------------
 test('finding 13: reduced-motion changes settle a live beat and stop the halo rAF', () => {
   assert.match(controller, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/)

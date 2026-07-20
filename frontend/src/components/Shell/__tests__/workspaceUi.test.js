@@ -302,7 +302,10 @@ test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches 
   // pointerType gates the swipe (finding F12): mouse drags classify as cancel.
   assert.match(logoGestureSrc, /decidePointerMove\(dx, dy, press\.pointerType\)/)
   assert.match(logoGestureSrc, /decision === 'swipe'/)
-  assert.match(logoGestureSrc, /onToggleMode\?\.\(\)/)
+  // The gesture threads the HONEST cause (finding F13): 'hold' on a completed hold,
+  // 'swipe' on a swipe — never a bare onToggleMode?.() that the controller mislabels.
+  assert.match(logoGestureSrc, /onToggleMode\?\.\('hold'\)/)
+  assert.match(logoGestureSrc, /onToggleMode\?\.\('swipe'\)/)
   assert.match(logoGestureSrc, /endPress\(\{ suppressClick: true \}\)/)
   // Suppresses the native long-press context menu for a FRESH touch/pen (or any
   // live press) so a hold activates builder mode instead of raising a menu.
@@ -319,7 +322,7 @@ test('the press state machine is pointer-captured, keyed, and classified by time
   assert.match(logoGestureSrc, /e\.pointerId !== press\.pointerId\) return/)
   assert.match(logoGestureSrc, /if \(pressRef\.current\) return \/\/ a press is already live/)
   // §4: pointerup classifies by elapsed + displacement, not liveness.
-  assert.match(logoGestureSrc, /if \(swipeAllowed\(press\.pointerType\) && isSwipeRight\(dx, dy\)\) \{ onToggleMode\?\.\(\); endPress\(\{ suppressClick: true \}\); return \}/)
+  assert.match(logoGestureSrc, /if \(swipeAllowed\(press\.pointerType\) && isSwipeRight\(dx, dy\)\) \{ onToggleMode\?\.\('swipe'\); endPress\(\{ suppressClick: true \}\); return \}/)
   assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: true \}\); return \}/)
   assert.match(logoGestureSrc, /if \(holdComplete\(elapsed\)\) \{ completeHold\(\); return \}/)
   // §6: a drawer-open from any path cancels a live hold.
@@ -352,7 +355,7 @@ test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ram
 })
 
 test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', () => {
-  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   assert.match(handler, /convertSettingsForModeTransition\(\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
@@ -499,8 +502,9 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
   // Entering builder routes through the ONE mode controller (INV 2), batched in
   // the SAME handler as the durable flip (INV 7) so no un-dealt frame paints. The
   // beat + reduced-motion collapse live in the machine now, not a Shell timer.
-  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.match(handler, /mode\.toggle\(\{ focusedPaneId, leavingPaneIds, multiPane: dealMultiPane \}\)/)
+  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  // The honest cause threads through into the descriptor (finding F13).
+  assert.match(handler, /mode\.toggle\(\{ cause, focusedPaneId, leavingPaneIds, multiPane: dealMultiPane \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   // The transient root class comes from the descriptor (exactly one beat class).
   assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
@@ -522,7 +526,7 @@ test('builder single-leaf shows the strip, and entering it has its deal moment (
 })
 
 test('leaving builder plays the INVERSE card-deal: deal-out + settle, decisive (item 1)', () => {
-  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   // The exit deal is earned only for a genuine MULTI-PANE exit with a non-Settings
   // focused surface; multiPane=false makes the machine collapse instantly (the
   // beat + duration + Zippo asymmetry live in modeMachine.js: MODE_EXIT_MS < MODE_ENTER_MS).

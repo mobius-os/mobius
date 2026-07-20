@@ -169,6 +169,14 @@ test('repeated enter request while entering: re-arms with a fresh epoch (not a n
   assert.notEqual(s.transition.id, first, 'entry animation restarts under a new epoch')
 })
 
+test('toggle threads an explicit cause; omitting it falls back to the generic label (F13)', () => {
+  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'hold', ...FLAT, now: 0 }).transition.cause, 'hold')
+  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'swipe', ...FLAT, now: 0 }).transition.cause, 'swipe')
+  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'keyboard', ...FLAT, now: 0 }).transition.cause, 'keyboard')
+  // An omitted cause is the honest generic 'toggle', NOT a mislabeled 'hold'.
+  assert.equal(modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 }).transition.cause, 'toggle')
+})
+
 test('idempotent toggle to the committed mode with no beat is a no-op reference', () => {
   const s = panes()
   const after = modeReducer(s, { type: 'toggle', to: 'panes', ...FLAT })

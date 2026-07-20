@@ -1244,7 +1244,7 @@ export default function Shell() {
   // standalone toggle button. Toggling is a pure state flip plus the no-history
   // Settings overlay<->tab conversion; it never opens/closes the drawer and the
   // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
-  const handleToggleViewMode = useCallback(() => {
+  const handleToggleViewMode = useCallback((cause) => {
     // Read the beat facts off the PRE-conversion state (a focused Settings tab
     // must sit out the exit deal — its overlay conversion owns that transition).
     // Everything is dispatched in the SAME event so the descriptor beat, the
@@ -1286,8 +1286,11 @@ export default function Shell() {
     // no-op when Settings isn't involved.
     convertSettingsForModeTransition()
     // The controller owns the beat + supersession; the workspace owns the durable
-    // flip + the seed-once slot. Both dispatch here so they batch (INV 2/7).
-    mode.toggle({ focusedPaneId, leavingPaneIds, multiPane: dealMultiPane })
+    // flip + the seed-once slot. Both dispatch here so they batch (INV 2/7). The
+    // honest `cause` ('hold'|'swipe'|'keyboard') threads from the gesture/keyboard
+    // caller into the descriptor (finding F13); an omitted cause falls back to the
+    // reducer's generic 'toggle'.
+    mode.toggle({ cause, focusedPaneId, leavingPaneIds, multiPane: dealMultiPane })
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
   }, [convertSettingsForModeTransition, dispatchWorkspace, mode])
   // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
