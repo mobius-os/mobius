@@ -3,12 +3,14 @@
 import json
 import os
 import shutil
+import stat
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from app import models
+from app import publication
 from app.artifact_data import (
   MAX_ARTIFACT_TOTAL_BYTES,
   MAX_ARTIFACT_VALUE_BYTES,
@@ -94,6 +96,31 @@ def test_publish_registry_binds_live_generation_and_serves(client, auth, db):
   assert record.binding() == (app_id, row.token_nonce, "tip-a")
   assert record.state == "active"
   assert client.get(f"/sites/{token}/").status_code == 200
+
+
+def test_registry_parent_directory_is_fsynced_after_create_and_replace(
+  monkeypatch,
+):
+  """Both registry directory-entry mutations must be crash-durable."""
+  settings = get_settings()
+  record = publication.new_publication_record(
+    "d" * 32, 42, "e" * 32, "durable",
+  )
+  real_fsync = publication.os.fsync
+  directory_fsyncs = []
+
+  def track_fsync(fd):
+    if stat.S_ISDIR(os.fstat(fd).st_mode):
+      directory_fsyncs.append(fd)
+    real_fsync(fd)
+
+  monkeypatch.setattr(publication.os, "fsync", track_fsync)
+
+  publication.create_publication_record(settings, record)
+  assert len(directory_fsyncs) == 1
+
+  publication.replace_publication_record(settings, record, "active")
+  assert len(directory_fsyncs) == 2
 
 
 def test_publish_token_hint_cannot_hijack_another_app(client, auth):
