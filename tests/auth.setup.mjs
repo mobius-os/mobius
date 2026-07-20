@@ -9,7 +9,7 @@
  * browser run is required to identify itself as an isolated test runtime,
  * and individual specs clean up only the fixture IDs they created.
  */
-import { test as setup } from '@playwright/test'
+import { expect, test as setup } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const USER = process.env.MOBIUS_USER || 'admin'
@@ -48,9 +48,12 @@ setup('authenticate', async ({ page, request }) => {
   }
 
   // Ensure the owner account exists (idempotent — 400 if already set up).
-  await request.post(`${BASE}/api/auth/setup`, {
+  const setupRes = await request.post(`${BASE}/api/auth/setup`, {
     data: { username: USER, password: PASS, claim: CLAIM },
+    failOnStatusCode: false,
   })
+  expect([200, 400], 'setup creates the owner or is already configured')
+    .toContain(setupRes.status())
 
   // Fetch the test-owner token so the walkthrough cannot intercept clicks.
   const tokRes = await request.post(`${BASE}/api/auth/token`, {

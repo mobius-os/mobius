@@ -30,11 +30,13 @@ const SETUP_CLAIM = process.env.MOBIUS_SETUP_CLAIM || 'mobius-test-setup-claim'
 
 async function ensureOwner(page) {
   // Idempotent setup — first run creates admin/admin (presenting the claim),
-  // later runs 400 (owner already exists) and we ignore.
-  await page.request.post(`${BASE}/api/auth/setup`, {
+  // later runs 400 (owner already exists). Anything else is a harness failure.
+  const response = await page.request.post(`${BASE}/api/auth/setup`, {
     data: { username: 'admin', password: 'admin', claim: SETUP_CLAIM },
     failOnStatusCode: false,
   })
+  expect([200, 400], 'setup creates the owner or is already configured')
+    .toContain(response.status())
 }
 
 

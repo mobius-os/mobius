@@ -71,9 +71,16 @@ done
 
 # First-boot claim gate: docker-compose.test.yml presets MOBIUS_SETUP_CLAIM.
 SETUP_CLAIM="${SETUP_CLAIM:-${MOBIUS_SETUP_CLAIM:-mobius-test-setup-claim}}"
-curl -s -X POST "$BASE/api/auth/setup" \
+setup_body="$LOG_DIR/setup-response.json"
+setup_status=$(curl -s -o "$setup_body" -w '%{http_code}' \
+  -X POST "$BASE/api/auth/setup" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"admin\",\"claim\":\"${SETUP_CLAIM}\"}" >/dev/null
+  -d "{\"username\":\"admin\",\"password\":\"admin\",\"claim\":\"${SETUP_CLAIM}\"}")
+if [ "$setup_status" = "200" ] || [ "$setup_status" = "400" ]; then
+  ok "owner setup status=$setup_status"
+else
+  fail "owner setup status=$setup_status body=$(tr '\n' ' ' < "$setup_body")"
+fi
 docker exec mobius-test mkdir -p /data/cli-auth/claude
 docker cp ~/.claude/.credentials.json mobius-test:/data/cli-auth/claude/.credentials.json
 docker cp ~/.claude.json mobius-test:/data/cli-auth/claude/.claude.json 2>/dev/null

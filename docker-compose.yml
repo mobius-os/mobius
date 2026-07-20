@@ -65,6 +65,7 @@ services:
       - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-Ov23liMpOLS6qp5YV8Vk}
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
+      - MOBIUS_SETUP_CLAIM=${MOBIUS_SETUP_CLAIM:-}
     volumes:
       - app_data:/data
     expose:
