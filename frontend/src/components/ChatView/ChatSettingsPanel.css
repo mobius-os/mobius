@@ -202,6 +202,33 @@
   line-height: 1.35;
 }
 
+.csp__availability-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 2px 10px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.csp__availability-warning button {
+  flex-shrink: 0;
+  border: 0;
+  padding: 3px 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.csp__availability-warning button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .csp__loading-spinner {
   width: 14px;
   height: 14px;

@@ -657,7 +657,7 @@ test.describe('Workspace drag (PR3)', () => {
  * non-splitting (center-join) drop does not.
  */
 test.describe('Workspace view-mode toggle', () => {
-  test('the logo gesture flips to single (geometry preserved, one pane) and back (identical blob)', async ({ page }) => {
+  test('the logo gesture flips to single and back without mutating either world', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmA')
     const b = await createTaggedChat(page, 'vmB')
@@ -706,7 +706,12 @@ test.describe('Workspace view-mode toggle', () => {
     await page.keyboard.press('Shift+Enter')
     await waitTiled(page)
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
-    expect(await readWs(page)).toEqual(baseline)
+    const restored = await readWs(page)
+    expect(restored.layout).toEqual(baseline.layout)
+    expect(restored.panes).toEqual(baseline.panes)
+    expect(restored.focusedPaneId).toBe(baseline.focusedPaneId)
+    expect(restored.nextId).toBe(baseline.nextId)
+    expect(restored.singleScreen).toEqual(single.singleScreen)
   })
 
   // Regression (item 0): a genuine MULTI-PANE exit via the real POINTER-HOLD
@@ -1053,7 +1058,7 @@ test.describe('Builder-mode Settings', () => {
     expect(Object.keys(ws.panes).length).toBe(2)
   })
 
-  test('mode conversion: Settings tab <-> takeover across the mode flip (no history)', async ({ page }) => {
+  test('Settings stays in the builder world while a mode flip shows the single world', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'stConvA')
     const b = await createTaggedChat(page, 'stConvB')
@@ -1067,25 +1072,31 @@ test.describe('Builder-mode Settings', () => {
       async () => whichPaneHas(await readWs(page), 'settings:settings'),
       { timeout: 3000 },
     ).toBeTruthy()
+    const settingsPane = whichPaneHas(await readWs(page), 'settings:settings')
 
     // Flip to single via the keyboard path (Shift+Enter on the focused logo).
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
     await page.keyboard.press('Shift+Enter')
 
-    // Entering single removes the builder-only Settings tab and — since Settings was
-    // the visible surface — keeps it on screen as the takeover overlay.
+    // The two worlds retain independent navigation state: entering single hides
+    // the builder tree without destructively removing its Settings tab.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
-    expect(whichPaneHas(await readWs(page), 'settings:settings'), 'tab removed entering single').toBe(null)
-    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(1)
+    expect(whichPaneHas(await readWs(page), 'settings:settings')).toBe(settingsPane)
+    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(0)
 
-    // Flip back to builder: the overlay converts back to the Settings tab.
+    // Returning to builder reveals the exact tab in its original pane; no browser
+    // history conversion or tab reconstruction is involved.
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
     await page.keyboard.press('Shift+Enter')
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
     await expect.poll(
       async () => whichPaneHas(await readWs(page), 'settings:settings'),
-      { timeout: 3000, message: 'Settings converts back to a tab entering builder' },
-    ).toBeTruthy()
+      { timeout: 3000, message: 'Settings remains in its builder pane' },
+    ).toBe(settingsPane)
+    await expect(page.locator(
+      '[data-tab-key="settings:settings"].shell__view--paned',
+    )).toHaveCount(1)
+    await expect(page.locator('.settings')).toBeVisible()
   })
 })
 

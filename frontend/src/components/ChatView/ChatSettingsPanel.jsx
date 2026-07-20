@@ -77,7 +77,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
-import { modelQueries } from '../../hooks/queries.js'
+import { authQueries, modelQueries } from '../../hooks/queries.js'
 import {
   CLAUDE_MODELS,
   CODEX_MODELS,
@@ -96,6 +96,11 @@ import {
   restorableProviderSwitch,
   stageProviderSwitch,
 } from './providerSwitch.js'
+import {
+  PROVIDER_AVAILABILITY_PHASE,
+  resolveProviderAvailability,
+  shouldShowProvider,
+} from '../../lib/providerAvailability.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -256,7 +261,6 @@ export default function ChatSettingsPanel({
 }) {
   const [saving, setSaving] = useState(false)
   const [localError, setLocalError] = useState('')
-  const [connectedProviders, setConnectedProviders] = useState(null)
   const fallbackReqId = useRef(0)
   const latestReqId = reqIdRef || fallbackReqId
   const pendingSwitchPreviousRef = useRef(null)
@@ -271,21 +275,27 @@ export default function ChatSettingsPanel({
   const compacting = providerSwitchState?.status === 'switching'
   const error = providerSwitchState?.error || localError
 
-  // Live model registry + owner prefs. Both ride 5-minute caches so
-  // a popover open doesn't refetch. The deferred-render guard below
-  // waits for BOTH to resolve before applying the prefs filter —
-  // otherwise we'd render the unfiltered list briefly, then snap
-  // to the filtered list once prefs land, causing flicker.
+  // Wait for registry, preferences, and provider availability before exposing
+  // rows. The registry deliberately contains fallback models for disconnected
+  // providers, so rendering it before status settles leaks unusable choices.
   const registryQuery = modelQueries.registry.useQuery()
   const prefsQuery = modelQueries.prefs.useQuery()
+  const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const registry = registryQuery.data
   const prefs = prefsQuery.data
-  const dataReady = !!registry && !!prefs
+  const availability = resolveProviderAvailability(providerStatusQuery)
+  const availabilitySettled = (
+    availability.phase !== PROVIDER_AVAILABILITY_PHASE.LOADING
+  )
+  const dataReady = !!registry && !!prefs && availabilitySettled
   const loadingModels = !dataReady && (
     registryQuery.isLoading
     || registryQuery.isFetching
     || prefsQuery.isLoading
     || prefsQuery.isFetching
+    || (!availabilitySettled && (
+      providerStatusQuery.isLoading || providerStatusQuery.isFetching
+    ))
   )
   const modelLoadError = !dataReady && (
     registryQuery.isError || prefsQuery.isError
@@ -337,22 +347,6 @@ export default function ChatSettingsPanel({
     providerSwitchState?.request,
     providerSwitchState?.status,
   ])
-
-  useEffect(() => {
-    let cancelled = false
-    apiFetch('/auth/providers/status')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (cancelled || !data) return
-        const ids = Object.entries(data)
-          .filter(([, v]) => v?.authenticated)
-          .map(([k]) => k)
-        setConnectedProviders(ids)
-      })
-      .catch(() => { /* silent — picker falls back to "show all" */ })
-    return () => { cancelled = true }
-  }, [])
-
 
   const patchChat = useCallback(async (body) => {
     if (!chatId) return 'fail'
@@ -646,7 +640,6 @@ export default function ChatSettingsPanel({
     && draftModel !== effective?.model
   )
 
-  const connectedSet = connectedProviders ? new Set(connectedProviders) : null
   const hiddenIds = prefs?.hidden_ids || []
   const selectedProvider = pendingSwitch?.provider ?? draftProvider
   const selectedModel = pendingSwitch?.model ?? draftModel
@@ -706,12 +699,24 @@ export default function ChatSettingsPanel({
           )}
         </>
       )}
+      {dataReady && availability.phase === PROVIDER_AVAILABILITY_PHASE.ERROR && (
+        <div className="csp__availability-warning" role="status" aria-live="polite">
+          <span>Could not verify providers. Showing the current provider only.</span>
+          <button type="button" onClick={() => providerStatusQuery.refetch()}>
+            Retry
+          </button>
+        </div>
+      )}
       {dataReady && PROVIDER_ORDER.map(pid => {
         const info = PROVIDER_INFO[pid]
-        // Hide providers the user hasn't authenticated, EXCEPT the
+        // Hide providers without configured credentials, EXCEPT the
         // chat's currently-selected provider (so the user can always
         // see what's active and switch away from it).
-        if (connectedSet && !connectedSet.has(pid) && draftProvider !== pid) {
+        if (!shouldShowProvider(
+          pid,
+          availability.connectedProviders,
+          draftProvider,
+        )) {
           return null
         }
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider

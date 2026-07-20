@@ -160,7 +160,7 @@ function useClaudeProviderStatusQuery({ enabled = true } = {}) {
 
 async function fetchProvidersStatus() {
   const res = await api.auth.provider.statuses()
-  return jsonOrNull(res)
+  return jsonOrThrow(res, 'provider statuses fetch failed:')
 }
 
 function useProvidersStatusQuery({ enabled = true } = {}) {

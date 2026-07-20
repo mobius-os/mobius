@@ -174,8 +174,9 @@ if ! compose up -d; then
 fi
 test_port="$(docker port "$caddy_container" "$test_publish_port/tcp" | tail -1 | awk -F: '{print $NF}')"
 internal_test_port="$(docker port "$app_container" 8000/tcp | tail -1 | awk -F: '{print $NF}')"
-if [[ -z "$test_port" || -z "$internal_test_port" ]]; then
-  echo "error: Docker did not publish the isolated proxy and backend ports" >&2
+recovery_test_port="$(docker port "$recovery_container" 8001/tcp | tail -1 | awk -F: '{print $NF}')"
+if [[ -z "$test_port" || -z "$internal_test_port" || -z "$recovery_test_port" ]]; then
+  echo "error: Docker did not publish the isolated proxy, backend, and recovery ports" >&2
   exit 1
 fi
 
@@ -240,6 +241,7 @@ if CI= \
    MOBIUS_LOCAL_E2E=1 \
    MOBIUS_AUTH_FILE="$auth_file" \
    MOBIUS_URL="http://localhost:${test_port}" \
+   MOBIUS_RECOVER_URL="http://localhost:${recovery_test_port}" \
    MOBIUS_TEST_INTERNAL_API="http://127.0.0.1:${internal_test_port}" \
    MOBIUS_USER=admin \
    MOBIUS_PASS=admin \

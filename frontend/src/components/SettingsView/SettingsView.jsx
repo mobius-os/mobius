@@ -681,10 +681,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   )
   const onClaudeAuthDone = useCallback(() => {
     authQueries.provider.claudeStatus.invalidate(queryClient)
+    authQueries.provider.statuses.invalidate(queryClient)
     setExpandedAuth(null)
   }, [queryClient])
   const onCodexAuthDone = useCallback(() => {
     settingsQueries.owner.invalidate(queryClient)
+    authQueries.provider.statuses.invalidate(queryClient)
     setExpandedAuth(null)
   }, [queryClient])
 

@@ -1,6 +1,10 @@
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { authQueries } from './queries.js'
+import {
+  PROVIDER_AVAILABILITY_PHASE,
+  resolveProviderAvailability,
+} from '../lib/providerAvailability.js'
 
 /**
  * Passive provider auth status — reads /api/auth/providers/status
@@ -12,30 +16,25 @@ import { authQueries } from './queries.js'
  *      session (only re-auth flips it), so a polled refetch wastes
  *      bytes. Instead we let the query's default behavior cache the
  *      result, and we invalidate on `visibilitychange → visible` so
- *      a tab waking from background gets a fresh check exactly once
- *      per wake — covering the "phone slept overnight, refresh token
- *      expired in the meantime" case without polling.
+ *      a tab waking from background gets a fresh local credential check
+ *      exactly once per wake, without polling.
  *
- *   2. **Single granularity exposed.** Returns `connected | disconnected`
- *      per provider — not `expired` vs `disconnected`. The backend's
- *      `/providers/status` endpoint today returns `{authenticated: bool}`
- *      and doesn't distinguish "never connected" from "expired refresh
- *      token" without correlating with chat 401 history. We picked the
- *      simpler shape so this hook needs no backend change; the
- *      "refresh-token expired" failure mode still surfaces — it just
- *      shows up as `disconnected` until the user reconnects via
- *      Settings.
+ *   2. **Honest granularity.** The endpoint reports whether local provider
+ *      credentials are configured; it does not make a network call to prove
+ *      that a remote token is still accepted.
  *
  * Returns:
  *   {
  *     statuses: { [providerId]: 'connected' | 'disconnected' },
  *     anyDisconnected: boolean,
- *     isLoading: boolean,
+ *     phase: 'loading' | 'ready' | 'error',
+ *     connectedProviders: Set<string>,
+ *     needsAttention: boolean,
  *     isError: boolean,
  *   }
  *
  * Callers can read `statuses.claude` etc directly, or use
- * `anyDisconnected` to drive a single "something needs attention"
+ * `needsAttention` to drive a single "something needs attention"
  * indicator (the drawer Settings warning dot).
  */
 export default function useProviderAuthStatus() {
@@ -49,7 +48,7 @@ export default function useProviderAuthStatus() {
   // Invalidate on visibility=visible so a tab waking from background
   // (phone unlocked, app foregrounded) triggers a single fresh check.
   // This is the lever instead of polling — wake events are sparse and
-  // exactly the moments when a refresh token may have silently expired.
+  // exactly the moments when credentials may have changed in another tab.
   useEffect(() => {
     function onVisibility() {
       if (document.visibilityState === 'visible') {
@@ -60,22 +59,29 @@ export default function useProviderAuthStatus() {
     return () => document.removeEventListener('visibilitychange', onVisibility)
   }, [queryClient])
 
+  const availability = resolveProviderAvailability(query)
+
   // Normalize the backend shape into the friendlier id→status map.
-  // The endpoint returns `{claude: {authenticated: bool, ...}, codex: {...}}`;
+  // The endpoint returns `{claude: {configured: bool, ...}, codex: {...}}`;
   // we collapse to `{claude: 'connected'|'disconnected', codex: ...}`.
   const raw = query.data || {}
   const statuses = {}
   let anyDisconnected = false
-  for (const [pid, info] of Object.entries(raw)) {
-    const connected = !!(info && info.authenticated)
+  for (const pid of Object.keys(raw)) {
+    const connected = availability.connectedProviders.has(pid)
     statuses[pid] = connected ? 'connected' : 'disconnected'
     if (!connected) anyDisconnected = true
   }
 
   return {
+    ...availability,
     statuses,
     anyDisconnected,
+    needsAttention:
+      availability.phase === PROVIDER_AVAILABILITY_PHASE.ERROR
+      || anyDisconnected,
     isLoading: query.isLoading,
     isError: query.isError,
+    refetch: query.refetch,
   }
 }

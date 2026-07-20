@@ -94,6 +94,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
         queryFn: authQueries.provider.claudeStatus.fetch,
       })
       authQueries.provider.claudeStatus.invalidate(queryClient)
+      authQueries.provider.statuses.invalidate(queryClient)
       if (!next?.authenticated) {
         setError('Authentication failed. Try again.')
       } else {

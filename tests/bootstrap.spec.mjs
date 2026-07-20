@@ -58,13 +58,19 @@ test.use({ serviceWorkers: 'block' })
  *   - /messages, /stream, /stop → benign stubs so a follow-on send
  *     (not exercised here) can't 500 and pollute the run
  *  Returns the `created` accumulator so the test can assert on it. */
-async function routeShell(page) {
+async function routeShell(page, { gatePostCreateList = false } = {}) {
   await page.setViewportSize({ width: 412, height: 915 })
 
   const created = []
+  let releasePostCreateList = () => {}
+  const postCreateListGate = gatePostCreateList
+    ? new Promise(resolve => { releasePostCreateList = resolve })
+    : null
+  created.releasePostCreateList = releasePostCreateList
   await page.route(/\/api\/chats$/, async route => {
     const req = route.request()
     if (req.method() === 'GET') {
+      if (created.length > 0 && postCreateListGate) await postCreateListGate
       // Reflect the bootstrap-created chats back in the list, exactly
       // as the real server would. Returning a hardcoded `[]` here would
       // make Shell's demote effect (which runs after the bootstrap
@@ -216,6 +222,24 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
     // it — we cleared any leftover above, so this can't be stale.
     const active = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(active).toBe(created[0].id)
+  })
+
+  test('opens the created chat before the background list refresh resolves', async ({ page }) => {
+    const created = await routeShell(page, { gatePostCreateList: true })
+    await cleanSession(page)
+
+    try {
+      await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+      await expect.poll(() => created.length, { timeout: 8000 }).toBe(1)
+      await expect.poll(
+        () => page.evaluate(() => localStorage.getItem('moebius_active_chat')),
+        { timeout: 2000 },
+      ).toBe(created[0].id)
+    } finally {
+      created.releasePostCreateList()
+    }
+
+    await waitForShell(page)
   })
 })
 

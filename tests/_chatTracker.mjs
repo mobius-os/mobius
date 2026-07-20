@@ -105,19 +105,13 @@ export async function createTaggedChat(page, label = '') {
   const title = info
     ? workerChatTitle(info.workerIndex, label || info.title)
     : null
-  const result = await page.evaluate(async (t) => {
-    const token = localStorage.getItem('token')
-    const res = await fetch('/api/chats', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(t ? { title: t } : {}),
-    })
-    if (!res.ok) return null
-    return res.json()
-  }, title)
+  const token = await page.evaluate(() => localStorage.getItem('token'))
+  const response = await page.request.post(`${BASE}/api/chats`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: title ? { title } : {},
+    failOnStatusCode: false,
+  })
+  const result = response.ok() ? await response.json() : null
   if (info && result?.id) registerCreatedChats(info.workerIndex, result.id)
   return result
 }

@@ -44,6 +44,7 @@ import {
 } from './newAppAttention.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
+  addCreatedChatToList,
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
 } from './newChatPolicy.js'
@@ -1497,9 +1498,8 @@ export default function Shell() {
 
   // Passive auth-status check. Reads /api/auth/providers/status with
   // a 5-minute TanStack cache + a visibilitychange-driven invalidation.
-  // Drives the small warning dot on the drawer's Settings row when
-  // any registered provider is disconnected — surfacing the "silent
-  // dead provider" failure mode without polling.
+  // Drives the small warning dot on the drawer's Settings row when local
+  // provider credentials are missing or their status cannot be checked.
   const providerAuth = useProviderAuthStatus()
 
   // The warm LRU is now maintained by the synchronous cache-derivation effect
@@ -2418,9 +2418,18 @@ export default function Shell() {
       creatingChatRef.current = true
       try {
         const res = await api.chats.create({ title: 'New chat' })
+        if (!res.ok) throw new Error(`chat create failed: ${res.status}`)
         const chat = await res.json()
         chatId = chat.id
-        await refreshChats()
+        queryClient.setQueryData(chatQueries.keys.all, current => {
+          const next = addCreatedChatToList(current, chat)
+          chatsRef.current = next
+          return next
+        })
+        // Navigation can start from the authoritative create response. Refresh
+        // the wider list beside ChatView's detail fetch instead of serializing
+        // both requests on the opening path.
+        void refreshChats()
       } catch {
         // Don’t leave a dead, drawer-still-open tap on a failed create.
         showToast("Couldn't start a new chat — please try again.", { variant: 'error' })
@@ -2753,7 +2762,7 @@ export default function Shell() {
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={newAppIds}
-        settingsWarning={providerAuth.anyDisconnected}
+        settingsWarning={providerAuth.needsAttention}
         dragActiveRef={dragActiveRef}
       />
 

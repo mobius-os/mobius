@@ -55,9 +55,8 @@ export default function Drawer({
   // an arrival cue for an app that otherwise lands silently at the bottom
   // of the oldest-first list.
   newAppIds,
-  // Truthy when any registered provider's refresh token is no longer
-  // valid. Drives a small warning dot on the Settings row — passive
-  // nudge toward Reconnect, no modal, no banner.
+  // Truthy when local provider credentials are missing or their status could
+  // not be checked. Drives a small warning dot on Settings.
   settingsWarning,
   // Shared flag the workspace drag controller raises while a row is being
   // dragged OUT of the drawer (design §3.1). The swipe-to-close touch handlers

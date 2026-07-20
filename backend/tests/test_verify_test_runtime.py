@@ -213,6 +213,8 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert "down -v --remove-orphans" in runner
   assert 'value.get("test_runtime") is not True' in runner
   assert 'MOBIUS_AUTH_FILE="$auth_file"' in runner
+  assert 'recovery_test_port="$(docker port "$recovery_container" 8001/tcp' in runner
+  assert 'MOBIUS_RECOVER_URL="http://localhost:${recovery_test_port}"' in runner
   assert 'git clone --quiet --no-local "$ROOT" "$snapshot_dir"' in runner
   assert '--project-directory "$snapshot_dir"' in runner
   assert 'cd "$snapshot_dir"' in runner

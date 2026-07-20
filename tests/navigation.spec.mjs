@@ -1293,8 +1293,16 @@ async function bootTwoAppPanes(page) {
 async function appFrameFor(page, appId) {
   const iframe = page.locator(`iframe[data-app-id="${appId}"]`)
   await expect(iframe).toHaveCount(1, { timeout: 5000 })
-  const handle = await iframe.elementHandle()
-  return handle?.contentFrame() ?? null
+  let frame = null
+  await expect.poll(async () => {
+    const handle = await iframe.elementHandle()
+    frame = await handle?.contentFrame() ?? null
+    return frame !== null
+  }, {
+    timeout: 5000,
+    message: `app ${appId} frame attached`,
+  }).toBe(true)
+  return frame
 }
 
 /** Arm a frame's nav-back counter. */

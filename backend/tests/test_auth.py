@@ -155,7 +155,17 @@ def test_providers_status_accepts_app_token(client, auth):
   body = r.json()
   assert "claude" in body
   assert "codex" in body
+  assert "configured" in body["claude"]
   assert "authenticated" in body["claude"]
+  assert body["claude"]["configured"] is body["claude"]["authenticated"]
+
+
+def test_provider_status_exposes_configured_with_legacy_alias(client, auth):
+  r = client.get("/api/auth/provider/status", headers=auth)
+
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert body["configured"] is body["authenticated"]
 
 
 def test_providers_models_returns_known_models_on_missing_creds(

@@ -154,7 +154,7 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
               </span>
             </label>
           )}
-          {error && <p className="setup__error">{error}</p>}
+          {error && <p className="setup__error" role="alert">{error}</p>}
           <button
             className="setup__btn"
             type="submit"
@@ -232,6 +232,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
     saveConnectedProvider(preferred)
     settingsQueries.owner.invalidate(queryClient)
     authQueries.provider.claudeStatus.invalidate(queryClient)
+    authQueries.provider.statuses.invalidate(queryClient)
     setExpanded(null)
   }
 
@@ -278,7 +279,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
         </div>
 
         {agentSaved && <p className="setup__success">Provider connected. Ready when you are.</p>}
-        {agentError && <p className="setup__error">{agentError}</p>}
+        {agentError && <p className="setup__error" role="alert">{agentError}</p>}
 
         {!connectedAny && (
           <p className="setup__skip-warn">

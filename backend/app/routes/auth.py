@@ -516,10 +516,11 @@ async def provider_code(
 async def provider_status(
   owner: models.Owner = Depends(get_current_owner),
 ):
-  """Checks whether the active provider is authenticated.
+  """Checks whether the active provider has local credentials configured.
 
   Uses the provider's own check_auth method so this endpoint works
-  for any registered provider, not just Claude.
+  for any registered provider, not just Claude. `authenticated` remains as a
+  compatibility alias; neither field performs a remote token probe.
   """
   from app.providers import get_provider
   provider = get_provider(owner.provider)
@@ -527,6 +528,7 @@ async def provider_status(
   return {
     "provider": owner.provider or "claude",
     "provider_name": provider.name,
+    "configured": error is None,
     "authenticated": error is None,
     "error": error,
   }
@@ -536,12 +538,13 @@ async def provider_status(
 async def providers_status(
   _: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
 ):
-  """Returns connection status for ALL registered providers.
+  """Returns local credential status for ALL registered providers.
 
   The `/provider/status` route above only reports the currently-
   active provider. Mini-app setup screens also need the full provider
   map, using app tokens, so their model pickers can disable disconnected
-  providers instead of guessing.
+  providers instead of guessing. `configured` is the durable semantic field;
+  `authenticated` is retained for compatibility with installed mini-apps.
   """
   from app.providers import PROVIDERS
   data_dir = get_settings().data_dir
@@ -550,6 +553,7 @@ async def providers_status(
     error = provider.check_auth(data_dir)
     out[pid] = {
       "name": provider.name,
+      "configured": error is None,
       "authenticated": error is None,
       "error": error,
     }

@@ -51,3 +51,37 @@ export function detailIsUntouchedEmptyChat(detail) {
   if (detail.session_id != null) return false
   return true
 }
+
+/** Publish the narrow POST /chats response into the list cache immediately.
+ * The authoritative list still revalidates in the background; this row exists
+ * so navigation and cross-tab guards do not wait for a second request. */
+export function addCreatedChatToList(
+  current,
+  created,
+  now = new Date().toISOString(),
+) {
+  if (!created?.id) throw new Error('Created chat is missing an id')
+
+  const existing = Array.isArray(current)
+    ? current.filter(chat => String(chat.id) !== String(created.id))
+    : []
+  const firstUnpinned = existing.findIndex(chat => !chat.pinned_at)
+  const insertAt = firstUnpinned === -1 ? existing.length : firstUnpinned
+  const row = {
+    id: created.id,
+    title: created.title || 'New chat',
+    updated_at: created.updated_at || now,
+    activity_at: created.activity_at || now,
+    pinned_at: null,
+    has_messages: Array.isArray(created.messages) && created.messages.length > 0,
+    created_by_app_id: created.created_by_app_id ?? null,
+    run_status: null,
+    running: false,
+  }
+
+  return [
+    ...existing.slice(0, insertAt),
+    row,
+    ...existing.slice(insertAt),
+  ]
+}
