@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  HOLD_MS, decidePointerMove, isSwipeRight, movedBeyondSlop, holdComplete,
+  HOLD_MS, decidePointerMove, isSwipeRight, swipeAllowed, movedBeyondSlop, holdComplete,
   runHoldCompletion,
 } from './logoHoldMachine.js'
 
@@ -168,7 +168,8 @@ export function useLogoModeGesture({
     if (!press || e.pointerId !== press.pointerId) return
     const dx = e.clientX - press.x
     const dy = e.clientY - press.y
-    const decision = decidePointerMove(dx, dy)
+    // pointerType gates the swipe (finding F12): a mouse drag classifies as 'cancel'.
+    const decision = decidePointerMove(dx, dy, press.pointerType)
     if (decision === 'swipe') {
       // Swipe-right flips the mode; slop suppresses the trailing tap.
       onToggleMode?.()
@@ -190,7 +191,9 @@ export function useLogoModeGesture({
     const dx = e.clientX - press.x
     const dy = e.clientY - press.y
     const elapsed = performance.now() - press.t
-    if (isSwipeRight(dx, dy)) { onToggleMode?.(); endPress({ suppressClick: true }); return }
+    // Swipe-right flips ONLY for touch/pen (finding F12); a mouse drag past the slop
+    // hits the movedBeyondSlop cancel just below, so a mouse never toggles the mode.
+    if (swipeAllowed(press.pointerType) && isSwipeRight(dx, dy)) { onToggleMode?.(); endPress({ suppressClick: true }); return }
     if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: true }); return } // a drag → cancel
     if (holdComplete(elapsed)) { completeHold(); return } // held long enough → flip
     // A genuine short tap → let the native click open the drawer, unchanged.

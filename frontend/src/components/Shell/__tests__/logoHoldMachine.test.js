@@ -8,6 +8,7 @@ import {
   holdComplete,
   releasedAsTap,
   isSwipeRight,
+  swipeAllowed,
   movedBeyondSlop,
   decidePointerMove,
   runHoldCompletion,
@@ -34,16 +35,28 @@ test('isSwipeRight needs rightward travel past the threshold AND horizontal domi
   assert.equal(isSwipeRight(-40, 0), false, 'leftward is not a swipe-right')
 })
 
-test('movedBeyondSlop trips on small drift, and swipe is classified BEFORE cancel', () => {
+test('movedBeyondSlop trips on small drift, and a TOUCH swipe is classified BEFORE cancel', () => {
   assert.equal(movedBeyondSlop(3, 3), false, 'a jittery tap stays a hold')
   assert.equal(movedBeyondSlop(20, 0), true)
-  // A qualifying swipe-right is a swipe, never merely a cancel.
-  assert.equal(decidePointerMove(SWIPE_DX, 2), 'swipe')
+  // A qualifying TOUCH/pen swipe-right is a swipe, never merely a cancel.
+  assert.equal(decidePointerMove(SWIPE_DX, 2, 'touch'), 'swipe')
+  assert.equal(decidePointerMove(SWIPE_DX, 2, 'pen'), 'swipe')
   // A large NON-swipe drag cancels the hold cleanly.
-  assert.equal(decidePointerMove(0, 40), 'cancel')
-  assert.equal(decidePointerMove(-30, 0), 'cancel')
+  assert.equal(decidePointerMove(0, 40, 'touch'), 'cancel')
+  assert.equal(decidePointerMove(-30, 0, 'touch'), 'cancel')
   // A tiny in-slop wobble keeps holding.
-  assert.equal(decidePointerMove(4, 4), 'continue')
+  assert.equal(decidePointerMove(4, 4, 'touch'), 'continue')
+})
+
+test('a MOUSE swipe-right is a cancel, never a mode flip (finding F12)', () => {
+  // Only touch/pen may swipe; unknown provenance never swipes.
+  assert.equal(swipeAllowed('touch'), true)
+  assert.equal(swipeAllowed('pen'), true)
+  assert.equal(swipeAllowed('mouse'), false)
+  assert.equal(swipeAllowed(undefined), false, 'unknown provenance never swipes')
+  // The geometry qualifies, but a mouse drag falls through to cancel — no toggle.
+  assert.equal(decidePointerMove(SWIPE_DX + 10, 0, 'mouse'), 'cancel', 'mouse drag → cancel, not swipe')
+  assert.equal(decidePointerMove(SWIPE_DX, 2, undefined), 'cancel', 'absent pointerType → cancel')
 })
 
 // ── Completion feedback (CHARGE model: haptic + spring/snap), enter AND exit ─

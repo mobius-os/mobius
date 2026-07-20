@@ -30,9 +30,18 @@ export function releasedAsTap(elapsedMs) {
   return elapsedMs < HOLD_MS
 }
 
-// A deliberate horizontal swipe-right.
+// A deliberate horizontal swipe-right (geometry only — pointerType-blind).
 export function isSwipeRight(dx, dy) {
   return dx >= SWIPE_DX && Math.abs(dx) > Math.abs(dy)
+}
+
+// The SWIPE-RIGHT flip is a TOUCH/pen affordance ONLY (finding F12). Both headers
+// scope it to touch ("a touch SWIPE-RIGHT flips the mode too"); a mouse
+// press-and-hold still enters builder, but a mouse DRAG is a drag/cancel, never a
+// mode flip. An undefined/absent pointerType is treated as NOT-a-swipe so the pure
+// predicate can never flip the mode on unknown provenance.
+export function swipeAllowed(pointerType) {
+  return pointerType === 'touch' || pointerType === 'pen'
 }
 
 // Movement large enough to abandon a hold (when it is not a qualifying swipe).
@@ -40,10 +49,11 @@ export function movedBeyondSlop(dx, dy) {
   return Math.hypot(dx, dy) > MOVE_CANCEL_PX
 }
 
-// What a pointermove during a press means. Swipe wins over cancel, so a fast
-// horizontal drag flips the mode rather than merely aborting the hold.
-export function decidePointerMove(dx, dy) {
-  if (isSwipeRight(dx, dy)) return 'swipe'
+// What a pointermove during a press means. A qualifying swipe wins over cancel —
+// but ONLY for touch/pen (finding F12); a mouse drag past the slop falls through to
+// 'cancel', so a mouse can never flip the mode by dragging.
+export function decidePointerMove(dx, dy, pointerType) {
+  if (swipeAllowed(pointerType) && isSwipeRight(dx, dy)) return 'swipe'
   if (movedBeyondSlop(dx, dy)) return 'cancel'
   return 'continue'
 }

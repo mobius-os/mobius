@@ -299,7 +299,8 @@ test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches 
   // flip, and marks the click suppressed so the gesture never also opens the drawer.
   assert.match(logoGestureSrc, /p >= 1\) \{ completeHold\(\); return \}/)
   assert.doesNotMatch(logoGestureSrc, /setTimeout\(/, 'no timer — the rAF loop owns the hold')
-  assert.match(logoGestureSrc, /decidePointerMove\(dx, dy\)/)
+  // pointerType gates the swipe (finding F12): mouse drags classify as cancel.
+  assert.match(logoGestureSrc, /decidePointerMove\(dx, dy, press\.pointerType\)/)
   assert.match(logoGestureSrc, /decision === 'swipe'/)
   assert.match(logoGestureSrc, /onToggleMode\?\.\(\)/)
   assert.match(logoGestureSrc, /endPress\(\{ suppressClick: true \}\)/)
@@ -318,7 +319,7 @@ test('the press state machine is pointer-captured, keyed, and classified by time
   assert.match(logoGestureSrc, /e\.pointerId !== press\.pointerId\) return/)
   assert.match(logoGestureSrc, /if \(pressRef\.current\) return \/\/ a press is already live/)
   // §4: pointerup classifies by elapsed + displacement, not liveness.
-  assert.match(logoGestureSrc, /if \(isSwipeRight\(dx, dy\)\) \{ onToggleMode\?\.\(\); endPress\(\{ suppressClick: true \}\); return \}/)
+  assert.match(logoGestureSrc, /if \(swipeAllowed\(press\.pointerType\) && isSwipeRight\(dx, dy\)\) \{ onToggleMode\?\.\(\); endPress\(\{ suppressClick: true \}\); return \}/)
   assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: true \}\); return \}/)
   assert.match(logoGestureSrc, /if \(holdComplete\(elapsed\)\) \{ completeHold\(\); return \}/)
   // §6: a drawer-open from any path cancels a live hold.
