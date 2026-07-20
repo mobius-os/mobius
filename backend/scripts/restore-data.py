@@ -63,8 +63,11 @@ realistic DR shape ("bring the app down, restore, bring it back").
   5. `docker start`; confirm admin/admin login 200 (DB + .secret-key
      survived) and the seeded app data + secret survived.
 
-Exit codes: 0 ok, 2 usage/config error, 3 verification/capacity failed,
-4 refused (a guard tripped: needs --force / --server-stopped / the ack).
+Exit codes: 0 ok, 2 usage/config error, 3 verification/capacity failed
+(or a full rollback — /data unchanged), 4 refused (a guard tripped: needs
+--force / --server-stopped / the ack), 5 restore failed AND rollback was
+INCOMPLETE — unrecovered originals preserved in .restore-rollback.* for
+hand recovery.
 """
 
 from __future__ import annotations
@@ -128,44 +131,44 @@ def resolve_backup_dir(args):
   die("give a backup dir or --latest [--from-dir DIR]", code=2)
 
 
-def target_has_data(data_dir):
-  """True when /data already holds owner data (any *.db or a non-empty
-  apps/chats/shared tree) — the overwrite guard's signal."""
-  db_dir = os.path.join(data_dir, "db")
-  if os.path.isdir(db_dir):
-    if any(n.endswith(".db") for n in os.listdir(db_dir)):
-      return True
-  for tree in DATA_TREES:
-    root = os.path.join(data_dir, tree)
-    if os.path.isdir(root):
-      for _dp, _dirs, files in os.walk(root):
-        if files:
-          return True
+def target_has_data(data_dir, ignore=()):
+  """True when /data holds ANY entry other than the backup store itself.
+
+  No enumerated tree list to go stale: any file or directory present is
+  treated as owner data, so a future data tree is covered automatically.
+  ``ignore`` names the top-level entries that are NOT owner data (the
+  backup store the restore is reading from, our transient dirs) so
+  restoring from a store under /data onto an otherwise-empty volume does
+  not falsely trip the guard.
+  """
+  ignore = set(ignore)
+  for name in os.listdir(data_dir):
+    if name in ignore:
+      continue
+    return True
   return False
 
 
-def live_newest_mtime(data_dir):
-  """Newest mtime across the live DB + data trees, for the advisory
-  freshness line only (NOT a gate)."""
+def live_newest_mtime(data_dir, ignore=()):
+  """Newest mtime across every live top-level entry (minus ``ignore``),
+  for the advisory freshness line only (NOT a gate)."""
+  ignore = set(ignore)
   newest = 0.0
-  db_dir = os.path.join(data_dir, "db")
-  if os.path.isdir(db_dir):
-    for n in os.listdir(db_dir):
-      if n.endswith((".db", ".db-wal", ".db-shm")):
-        try:
-          newest = max(newest, os.path.getmtime(os.path.join(db_dir, n)))
-        except OSError:
-          pass
-  for tree in DATA_TREES:
-    root = os.path.join(data_dir, tree)
-    if not os.path.isdir(root):
+  for name in os.listdir(data_dir):
+    if name in ignore:
       continue
-    for dp, _dirs, files in os.walk(root):
-      for f in files:
-        try:
-          newest = max(newest, os.path.getmtime(os.path.join(dp, f)))
-        except OSError:
-          pass
+    p = os.path.join(data_dir, name)
+    try:
+      newest = max(newest, os.path.getmtime(p))
+    except OSError:
+      pass
+    if os.path.isdir(p):
+      for dp, _dirs, files in os.walk(p):
+        for f in files:
+          try:
+            newest = max(newest, os.path.getmtime(os.path.join(dp, f)))
+          except OSError:
+            pass
   return newest
 
 
@@ -193,9 +196,19 @@ def safe_extract(tar_path, dest):
   """Extracts a tar into dest with the 'data' filter, which blocks path
   traversal and absolute/escaping links (Python 3.12). The archive
   stores paths relative to /data, so the tree lands directly under
-  dest."""
-  with tarfile.open(tar_path, "r:*") as tar:
-    tar.extractall(dest, filter="data")
+  dest.
+
+  A member the filter rejects means the archive is not one our backup
+  wrote — hash-valid or not, it is untrustworthy. That is a
+  verification failure (exit 3), reported cleanly rather than crashing:
+  extraction happens in staging, so /data is untouched either way.
+  """
+  try:
+    with tarfile.open(tar_path, "r:*") as tar:
+      tar.extractall(dest, filter="data")
+  except (tarfile.FilterError, tarfile.TarError) as exc:
+    die(f"archive rejected during extraction ({exc}); this backup is "
+        f"not trustworthy", code=3)
 
 
 def harden_secret_perms(data_dir):
@@ -281,8 +294,16 @@ def main():
   secrets_state = manifest.get("encryption", {}).get("secrets", "skipped")
   art_names = [a["name"] for a in manifest.get("artifacts", [])]
   created_unix = manifest.get("created_unix", 0)
-  nonempty = target_has_data(data_dir)
-  live_newest = int(live_newest_mtime(data_dir))
+  # The overwrite guard ignores the backup store itself (when it lives
+  # under /data) and this run's own transient dirs, so "any other entry
+  # counts as data" doesn't misfire on the backups directory.
+  ignore = {".backup.lock"}
+  store = os.path.realpath(os.path.dirname(backup_dir))
+  rdata = os.path.realpath(data_dir)
+  if os.path.commonpath([rdata, store]) == rdata and store != rdata:
+    ignore.add(os.path.relpath(store, rdata).split(os.sep)[0])
+  nonempty = target_has_data(data_dir, ignore=ignore)
+  live_newest = int(live_newest_mtime(data_dir, ignore=ignore))
 
   # GATE 4 (plan / ack): everything above is read-only, so a dry-run or
   # an un-acked call stops here having mutated nothing.
@@ -332,6 +353,7 @@ def main():
   ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
   rollback_dir = os.path.join(data_dir, f".restore-rollback.{ts}")
+  preserve_rollback = False  # set only when rollback itself failed
   try:
     if "data.tar.gz" in art_names:
       safe_extract(os.path.join(backup_dir, "data.tar.gz"), staging)
@@ -358,21 +380,36 @@ def main():
 
     try:
       moved = lib.swap_entries_transactional(staging, data_dir, rollback_dir)
+    except lib.RollbackError as rbe:
+      # The forward swap failed AND rollback could not restore some
+      # originals — they are STILL in rollback_dir. Preserve it, name what
+      # is where, and exit with a distinct code. Never delete unrecovered
+      # originals.
+      preserve_rollback = True
+      print(f"[restore]   unrecovered originals (in {rbe.rollback_dir}): "
+            f"{rbe.unrecovered}", file=sys.stderr)
+      print(f"[restore]   successfully rolled back: {rbe.restored}",
+            file=sys.stderr)
+      die(f"restore failed AND rollback was INCOMPLETE; "
+          f"{len(rbe.unrecovered)} original(s) preserved in "
+          f"{rbe.rollback_dir} — recover by hand, do NOT delete it "
+          f"(cause: {rbe.original_error!r})", code=5)
     except Exception as exc:  # noqa: BLE001
-      # swap_entries_transactional already rolled every completed swap
-      # back before re-raising, so /data is the exact original tree.
-      die(f"restore failed mid-swap and was rolled back; /data unchanged: "
-          f"{exc}", code=3)
+      # swap already rolled every completed swap back before re-raising,
+      # so /data is the exact original tree.
+      die(f"restore failed mid-swap and was fully rolled back; /data "
+          f"unchanged: {exc}", code=3)
     log(f"restored top-level entries: {moved}")
     # Success: the displaced originals in rollback_dir are no longer
     # needed.
     shutil.rmtree(rollback_dir, ignore_errors=True)
   finally:
     shutil.rmtree(staging, ignore_errors=True)
-    # If the swap failed it already restored the originals AND left
-    # rollback_dir holding what it moved back out of; clean the empty
-    # shell either way.
-    shutil.rmtree(rollback_dir, ignore_errors=True)
+    # Delete rollback_dir ONLY when it does not hold unrecovered originals
+    # — the one case (RollbackError) where it must survive for hand
+    # recovery is the whole point of preserve_rollback.
+    if not preserve_rollback:
+      shutil.rmtree(rollback_dir, ignore_errors=True)
 
   harden_secret_perms(data_dir)
   log("hardened secret perms (600/700)")

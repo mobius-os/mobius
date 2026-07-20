@@ -12,9 +12,11 @@ snapshot, tar, age, server probing).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
+import socket
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -208,21 +210,64 @@ def target_is_newer(live_newest_unix, backup_created_unix):
   return live_newest_unix > backup_created_unix
 
 
-def server_responding(url, timeout=3.0):
-  """True when an HTTP server answers at url (any status, even 4xx).
+# Only these errnos are a DEFINITIVE "nothing is listening" — the sole
+# signal we accept as "server down." A DNS failure (gaierror) is the same
+# class (the host resolves to nothing). Everything else stays "up."
+_DOWN_ERRNOS = {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH}
 
-  Connection refused / DNS / timeout mean 'not responding' — the backend
-  is down. Any HTTP answer means it is up and could be writing. Both the
-  backup cold-mode gate and the restore server-stopped gate probe with
-  this, so it lives in the shared lib.
+
+def server_responding(url, timeout=3.0):
+  """True when a server is (or MIGHT be) up at url. FAIL-SAFE.
+
+  This is a safety gate: a cold backup / a restore must never proceed
+  against a live-but-wedged server. So only a DEFINITIVE
+  connection-refused / host-unreachable / no-such-host counts as 'down'
+  (return False). Any HTTP answer, a TIMEOUT, a TLS error, or any other
+  probe failure is treated as RESPONDING (return True) — a hung server
+  that accepts the socket but never replies must not mint a cold-labeled
+  backup or let a restore swap the DB underneath it.
   """
   try:
     with urllib.request.urlopen(url, timeout=timeout) as r:
       return r.status < 600
   except urllib.error.HTTPError:
-    return True
+    return True  # the server answered, even if 4xx/5xx
+  except urllib.error.URLError as e:
+    reason = e.reason
+    if isinstance(reason, socket.gaierror):
+      return False  # host does not resolve -> nothing is there
+    # A timeout surfaces as URLError(reason=TimeoutError); that is NOT a
+    # definitive down -> fall through to 'up'.
+    if isinstance(reason, OSError) and not isinstance(reason, TimeoutError) \
+        and getattr(reason, "errno", None) in _DOWN_ERRNOS:
+      return False
+    return True  # timeout / TLS / unknown transport error -> assume up
+  except (TimeoutError, socket.timeout):
+    return True  # wedged server accepted the socket but never replied
   except Exception:
-    return False
+    return True  # anything unexpected -> fail safe, assume up
+
+
+class RollbackError(Exception):
+  """The forward restore failed AND rolling the originals back also
+  failed for at least one entry.
+
+  Carries what is where so the operator (or recoveryd) can finish the
+  recovery by hand. The invariant this exception exists to signal: the
+  originals it names are STILL in ``rollback_dir`` and were NEVER
+  deleted — the caller MUST NOT delete that directory.
+  """
+
+  def __init__(self, original_error, rollback_dir, unrecovered, restored):
+    self.original_error = original_error
+    self.rollback_dir = rollback_dir
+    self.unrecovered = unrecovered   # names still stashed in rollback_dir
+    self.restored = restored          # names successfully put back
+    super().__init__(
+      f"restore failed ({original_error!r}) and rollback was INCOMPLETE; "
+      f"{len(unrecovered)} original(s) remain stashed in {rollback_dir}: "
+      f"{unrecovered}. DO NOT delete that directory — restore them by "
+      f"hand.")
 
 
 def _remove_path(path):
@@ -240,11 +285,17 @@ def swap_entries_transactional(staging, data_dir, rollback_dir):
 
   For each staged entry: an existing live entry is RENAMED into
   rollback_dir (never deleted) before the staged entry is renamed into
-  place. On ANY failure, every change made so far is undone — entries
-  added where none existed are removed, and every stashed original is
-  moved back — before the exception propagates, so the caller is left
-  with either the fully-restored tree or the exact original tree, never
-  a half-restored mix (the atomicity the reviewer required).
+  place. On ANY forward failure, every change made so far is undone —
+  entries added where none existed are removed, and every stashed
+  original is moved back — so the caller is left with either the
+  fully-restored tree or the exact original tree, never a half-restored
+  mix (the atomicity the reviewer required).
+
+  If a ROLLBACK step itself fails, the originals it could not restore are
+  LEFT in rollback_dir and this raises RollbackError naming them; the
+  caller must preserve rollback_dir. The invariant holds either way: an
+  original is never deleted while it is still the only copy of that
+  entry.
 
   staging, data_dir, and rollback_dir must share a filesystem so every
   rename is atomic and allocates a new inode (a process holding an old
@@ -269,26 +320,31 @@ def swap_entries_transactional(staging, data_dir, rollback_dir):
         os.replace(src, dst)
         added.append(name)
     return swapped + added
-  except BaseException:
-    # Undo entries we added where nothing existed before.
+  except BaseException as forward_err:
+    # Undo entries we added where nothing existed before (removing an
+    # added entry never loses an original).
     for name in added:
       try:
         _remove_path(os.path.join(data_dir, name))
       except OSError:
         pass
-    # Restore every stashed original — scanning rollback_dir covers the
+    # Restore every stashed original. Scanning rollback_dir covers the
     # in-flight entry whose original was moved but whose replacement did
-    # not land, not just the fully-swapped ones.
-    for name in os.listdir(rollback_dir):
+    # not land, not just the fully-swapped ones. Track any step that
+    # itself fails — its original STAYS stashed (never deleted).
+    unrecovered = []
+    restored = []
+    for name in sorted(os.listdir(rollback_dir)):
       dst = os.path.join(data_dir, name)
       try:
-        _remove_path(dst)
+        _remove_path(dst)                                  # clear the slot
+        os.replace(os.path.join(rollback_dir, name), dst)  # put it back
+        restored.append(name)
       except OSError:
-        pass
-      try:
-        os.replace(os.path.join(rollback_dir, name), dst)
-      except OSError:
-        pass
+        # Could not restore this original; it remains in rollback_dir.
+        unrecovered.append(name)
+    if unrecovered:
+      raise RollbackError(forward_err, rollback_dir, unrecovered, restored)
     raise
 
 
@@ -322,12 +378,12 @@ def fsync_dir(path):
 
 
 def fsync_tree(root):
-  """fsyncs every file and directory under root, then root itself, so a
-  freshly-published backup is fully durable before any prune runs."""
+  """fsyncs every file under root (RAISING on any file fsync failure —
+  the caller must NOT prune older backups when the new one could not be
+  made durable), then best-effort fsyncs the directories (dir fsync is
+  unsupported on some filesystems; a rename's durability is a bonus, not
+  the gate)."""
   for dirpath, _dirs, files in os.walk(root):
     for f in files:
-      try:
-        fsync_path(os.path.join(dirpath, f))
-      except OSError:
-        pass
-    fsync_dir(dirpath)
+      fsync_path(os.path.join(dirpath, f))  # raises on failure
+    fsync_dir(dirpath)  # best-effort

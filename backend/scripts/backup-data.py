@@ -211,7 +211,7 @@ def statvfs_free(path):
 
 
 def _nearest_existing(path):
-  p = os.path.abspath(path)
+  p = os.path.realpath(path)
   while not os.path.exists(p) and p != os.path.dirname(p):
     p = os.path.dirname(p)
   return p
@@ -220,30 +220,31 @@ def _nearest_existing(path):
 def validate_target(data_dir, target_dir, allow_same_volume):
   """Rejects a dangerous target and returns its kind for the manifest.
 
-  data_dir itself and any parent of it are always rejected (the
-  recursion / whole-volume-archive footgun). A path strictly under
-  data_dir is rejected when it is on the SAME filesystem (dies with the
-  volume it protects) unless --allow-same-volume; a separate volume
-  mounted under data_dir is fine.
+  Uses os.path.realpath on BOTH sides so a symlink cannot alias the
+  target back onto the data dir / volume. data_dir itself and any parent
+  of it are always rejected (the recursion / whole-volume-archive
+  footgun). Any target on the SAME physical filesystem (same st_dev) as
+  the data dir — whether under /data by path or not — is rejected unless
+  --allow-same-volume, because it shares the data volume's fate. A target
+  on a genuinely separate device is a durable DR target and is accepted.
   """
-  if target_dir == data_dir:
+  rdata = os.path.realpath(data_dir)
+  rtarget = os.path.realpath(target_dir)
+  if rtarget == rdata:
     die("target dir must not be the data dir itself", code=2)
-  if os.path.commonpath([target_dir, data_dir]) == target_dir:
+  if os.path.commonpath([rtarget, rdata]) == rtarget:
     die("target dir must not be a parent of the data dir", code=2)
-  under_data = os.path.commonpath([data_dir, target_dir]) == data_dir
-  if not under_data:
-    return "external"
-  dev_data = os.stat(data_dir).st_dev
-  dev_target = os.stat(_nearest_existing(target_dir)).st_dev
-  if dev_target != dev_data:
-    return "separate-volume-under-data"
-  if not allow_same_volume:
-    die("target is on the SAME volume as /data (a path under it); a "
-        "backup there dies with the volume it protects. Mount a separate "
-        "volume (e.g. at /data/backups-external) or point --target-dir "
-        "outside /data. Pass --allow-same-volume only for a deliberate "
-        "local, non-DR copy.", code=2)
-  return "same-volume"
+  dev_data = os.stat(rdata).st_dev
+  dev_target = os.stat(_nearest_existing(rtarget)).st_dev
+  if dev_target == dev_data:
+    if not allow_same_volume:
+      die("target shares the SAME volume as the data dir (same device); a "
+          "backup there dies with the volume it protects. Point "
+          "--target-dir at a SEPARATE filesystem (a second docker volume "
+          "or a bind mount from another disk). Pass --allow-same-volume "
+          "only for a deliberate local, non-DR copy.", code=2)
+    return "same-volume"
+  return "external"
 
 
 def snapshot_dbs(db_dir, dest_dir):
@@ -402,19 +403,31 @@ def _artifact(backup_dir, name):
 
 
 def _newest_complete_secrets(target_dir, names):
-  """Newest backup whose manifest records secrets as encrypted/plaintext
-  (i.e. a usable full DR copy), or None."""
+  """Newest backup that carries complete secrets AND passes hash
+  verification (a usable full DR copy), or None.
+
+  The manifest LABEL alone is not trusted — a secrets-skipped label is
+  just as easy to corrupt as the archive, and pinning a copy whose
+  archives don't match their recorded hashes would defeat the point. So
+  every candidate is verified with the same code restore uses before it
+  is treated as the pinned complete-secrets backup.
+  """
   dated = sorted(
     ((lib.parse_backup_dirname(n), n) for n in names
      if lib.parse_backup_dirname(n) is not None),
     reverse=True)
   for _dt, n in dated:
+    bdir = os.path.join(target_dir, n)
     try:
-      m = json.load(open(os.path.join(target_dir, n, "manifest.json")))
+      m = json.load(open(os.path.join(bdir, "manifest.json")))
     except Exception:
       continue
-    if m.get("encryption", {}).get("secrets") in ("encrypted", "plaintext"):
-      return n
+    if m.get("encryption", {}).get("secrets") not in ("encrypted",
+                                                       "plaintext"):
+      continue
+    if lib.verify_manifest_hashes(m, bdir):  # non-empty == problems
+      continue  # corrupt/incomplete — do not treat as the safe copy
+    return n
   return None
 
 
@@ -510,11 +523,13 @@ def main():
     consistency = "crash-consistent-per-tree"
 
   # Exclude the target's top-level component from the walk when it lives
-  # inside /data, so we never back up our own backups.
+  # inside /data, so we never back up our own backups. realpath both
+  # sides so a symlinked target can't slip past this by aliasing.
   target_top = None
-  if os.path.commonpath([data_dir, target_dir]) == data_dir \
-      and target_dir != data_dir:
-    target_top = os.path.relpath(target_dir, data_dir).split(os.sep)[0]
+  rdata = os.path.realpath(data_dir)
+  rtarget = os.path.realpath(target_dir)
+  if os.path.commonpath([rdata, rtarget]) == rdata and rtarget != rdata:
+    target_top = os.path.relpath(rtarget, rdata).split(os.sep)[0]
 
   # Preflight secret readability only when secrets will actually be read.
   if encrypt or args.plaintext_secrets:
@@ -656,19 +671,29 @@ def main():
       f.write("\n")
 
     os.replace(partial_dir, final_dir)
-    # Durability: fsync the published artifacts + the target dir BEFORE
-    # any prune, so a crash can never leave the new backup unwritten
-    # while an older one it replaced was already deleted.
-    lib.fsync_tree(final_dir)
-    lib.fsync_dir(target_dir)
     log(f"backup complete: {final_dir}")
   except Exception as exc:  # noqa: BLE001 — clean up any partial artifact
     shutil.rmtree(partial_dir, ignore_errors=True)
     die(f"backup failed, partial removed: {exc}")
 
-  # Rotation runs only after a successful, fsync'd publish.
-  rotate(target_dir, args.keep_daily, args.keep_weekly,
-         os.path.basename(final_dir))
+  # Durability gate BEFORE any prune: fsync the published artifacts. If a
+  # file fsync fails the new backup may not be durable, so an fsync
+  # failure ABORTS pruning — we keep every older copy rather than delete
+  # one against a possibly-lost new backup.
+  durable = True
+  try:
+    lib.fsync_tree(final_dir)
+    lib.fsync_dir(target_dir)
+  except OSError as exc:
+    durable = False
+    log(f"WARNING: fsync failed ({exc}); SKIPPING rotation so no older "
+        "backup is pruned against a possibly-undurable new one")
+
+  if durable:
+    rotate(target_dir, args.keep_daily, args.keep_weekly,
+           os.path.basename(final_dir))
+  else:
+    log("retention SKIPPED (fsync failure)")
 
   total = sum(a["bytes"] for a in artifacts)
   log(f"artifacts={len(artifacts)} total_bytes={total} "

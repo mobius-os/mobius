@@ -249,8 +249,12 @@ def _dead_url():
 
 
 def _backup(*args, expect=0, health=None):
-  return _run(BACKUP, "--health-url", health or _dead_url(), *args,
-              expect=expect)
+  # Tests back up onto the same tmp filesystem by construction — a
+  # deliberate local copy, which is exactly what --allow-same-volume
+  # exists to acknowledge. test_backup_rejects_bad_targets covers the
+  # refusal shape without the flag.
+  return _run(BACKUP, "--health-url", health or _dead_url(),
+              "--allow-same-volume", *args, expect=expect)
 
 
 def _restore(*args, expect=0, health=None):
@@ -338,11 +342,11 @@ def test_backup_refuses_running_server_and_allows_online(tmp_path):
   try:
     # Default (cold) mode refuses while the backend answers.
     _run(BACKUP, "--data-dir", str(data), "--target-dir", str(target),
-         "--health-url", url, expect=2)
+         "--health-url", url, "--allow-same-volume", expect=2)
     assert not list(target.glob("mobius-backup-*"))
     # --online proceeds and labels the artifact honestly.
     _run(BACKUP, "--data-dir", str(data), "--target-dir", str(target),
-         "--health-url", url, "--online")
+         "--health-url", url, "--allow-same-volume", "--online")
     bdir = next(target.glob("mobius-backup-*"))
     manifest = json.loads((bdir / "manifest.json").read_text())
     assert manifest["consistency"] == "crash-consistent-per-tree"
@@ -351,16 +355,24 @@ def test_backup_refuses_running_server_and_allows_online(tmp_path):
 
 
 def test_backup_rejects_bad_targets(tmp_path):
+  # Deliberately bypasses the _backup helper: these are exactly the
+  # no---allow-same-volume refusals the helper opts out of.
   data = _seed_data_dir(tmp_path / "data")
+  dead = _dead_url()
   # target == data root
-  _backup("--data-dir", str(data), "--target-dir", str(data), expect=2)
+  _run(BACKUP, "--health-url", dead, "--data-dir", str(data),
+       "--target-dir", str(data), expect=2)
   # target strictly under data root on the same filesystem
   under = data / "backups"
-  _backup("--data-dir", str(data), "--target-dir", str(under), expect=2)
+  _run(BACKUP, "--health-url", dead, "--data-dir", str(data),
+       "--target-dir", str(under), expect=2)
   assert not under.exists() or not list(under.glob("mobius-backup-*"))
+  # same-device target OUTSIDE the data root also needs the opt-in
+  outside = tmp_path / "elsewhere"
+  _run(BACKUP, "--health-url", dead, "--data-dir", str(data),
+       "--target-dir", str(outside), expect=2)
   # ...allowed with the explicit same-volume opt-in
-  _backup("--data-dir", str(data), "--target-dir", str(under),
-          "--allow-same-volume")
+  _backup("--data-dir", str(data), "--target-dir", str(under))
   assert list(under.glob("mobius-backup-*"))
 
 
@@ -577,3 +589,101 @@ def test_safe_extract_contains_malicious_members(tmp_path):
     t.extractall(dest, filter="data")
   assert not os.path.exists("/tmp/mobius-escape-should-not-exist")
   assert (dest / "tmp" / "mobius-escape-should-not-exist").exists()
+
+
+def test_restore_rejects_malicious_archive_via_production_path(tmp_path):
+  """A malicious data.tar.gz behind a VALID manifest must be stopped by
+  safe_extract itself (the manifest gate can't see inside the archive).
+  The restore exits nonzero and the destination stays untouched."""
+  data = _seed_data_dir(tmp_path / "data")
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target),
+          "--plaintext-secrets")
+  bdir = Path(next(target.glob("mobius-backup-*")))
+
+  arc = bdir / "data.tar.gz"
+  _maltar(str(arc), name="lnk", ttype=tarfile.SYMTYPE,
+          linkname="../../../../etc/passwd")
+  mpath = bdir / "manifest.json"
+  manifest = json.loads(mpath.read_text())
+  for art in manifest["artifacts"]:
+    if art["name"] == "data.tar.gz":
+      art["bytes"] = arc.stat().st_size
+      art["sha256"] = lib.sha256_file(str(arc))
+  mpath.write_text(json.dumps(manifest))
+
+  dest = tmp_path / "restored"
+  dest.mkdir()
+  proc = _restore(str(bdir), "--data-dir", str(dest),
+                  "--i-understand-this-overwrites", expect=3)
+  assert list(dest.iterdir()) == []  # nothing escaped, nothing landed
+  assert "rejected" in proc.stderr.lower()
+
+
+def test_rollback_failure_preserves_originals(tmp_path, monkeypatch):
+  """If rolling back itself fails, the stashed original is NEVER deleted:
+  RollbackError names it, and it survives in rollback_dir for hand
+  recovery (exit 5 at the script layer routes through this exception)."""
+  staging = tmp_path / "staging"
+  data = tmp_path / "data"
+  rollback = tmp_path / "rollback"
+  staging.mkdir()
+  data.mkdir()
+  for name in ("alpha", "bravo"):
+    (staging / name).write_text(f"new-{name}")
+    (data / name).write_text(f"old-{name}")
+
+  real_replace = os.replace
+
+  def broken_replace(src, dst):
+    # Forward placement of 'bravo' fails; then restoring 'alpha' from the
+    # rollback dir also fails — the double-fault the invariant is for.
+    if str(dst) == str(data / "bravo") and str(src).startswith(str(staging)):
+      raise OSError("disk error placing bravo")
+    if str(src) == str(rollback / "alpha"):
+      raise OSError("disk error restoring alpha")
+    return real_replace(src, dst)
+
+  monkeypatch.setattr(lib.os, "replace", broken_replace)
+  with pytest.raises(lib.RollbackError) as exc:
+    lib.swap_entries_transactional(str(staging), str(data), str(rollback))
+  err = exc.value
+  assert err.unrecovered == ["alpha"]
+  # The one true copy of alpha still exists, stashed — never deleted.
+  assert (rollback / "alpha").read_text() == "old-alpha"
+  assert "DO NOT delete" in str(err)
+
+
+def test_server_responding_is_fail_safe(tmp_path):
+  """Only a definitive nothing-is-listening reads as down; a wedged
+  server that accepts but never replies must read as UP."""
+  # Definitive down: bound-then-closed port.
+  assert lib.server_responding(_dead_url(), timeout=0.5) is False
+  # Unresolvable host: down.
+  assert lib.server_responding(
+    "http://mobius-no-such-host.invalid/api/health", timeout=0.5) is False
+  # Accepts the socket, never replies: UP (fail-safe).
+  wedged = socket.socket()
+  wedged.bind(("127.0.0.1", 0))
+  wedged.listen(1)
+  port = wedged.getsockname()[1]
+  try:
+    assert lib.server_responding(
+      f"http://127.0.0.1:{port}/api/health", timeout=0.5) is True
+  finally:
+    wedged.close()
+
+
+def test_fsync_tree_raises_so_prune_aborts(tmp_path, monkeypatch):
+  """A file fsync failure must propagate — the caller treats 'new backup
+  not durable' as 'do not prune the old ones'."""
+  root = tmp_path / "b"
+  root.mkdir()
+  (root / "artifact").write_bytes(b"x")
+
+  def broken_fsync(fd):
+    raise OSError("fsync failed")
+
+  monkeypatch.setattr(lib.os, "fsync", broken_fsync)
+  with pytest.raises(OSError):
+    lib.fsync_tree(str(root))
