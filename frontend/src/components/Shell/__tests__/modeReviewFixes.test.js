@@ -87,6 +87,22 @@ test('bypass hunt: navTo and restoreRoute apply destinations ONLY through applyM
   assert.match(nav, /applyModeDestination\(itemRoute\)/)
 })
 
+// -- Finding F9 (expanding review): the chat repair/seed paths funnel too --------
+test('finding F9: mounted-chat + boot chat repair route through applyModeDestination, world-aware', () => {
+  // All three repair/seed sites (mounted-chat 404, boot chat-list seed, restored-
+  // chat 404) must set the fallback via the ONE decision point, not a raw OPEN_TAB
+  // into the hidden pane tree — else single mode paints an empty screen while the
+  // "repaired" chat sits invisible in the tree (INV 2/4).
+  assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: fallback\.id, appId: null, paneId: ws\.focusedPaneId \}\)/)
+  assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: chats\[0\]\.id, appId: null, paneId: ws\.focusedPaneId \}\)/)
+  // The "visible world is empty" guard is mode-aware: single checks a null slot.
+  assert.match(shell, /const single = !paneModel\.WORKSPACE_SPLITS_ENABLED \|\| ws\.viewMode === 'single'/)
+  assert.match(shell, /\? ws\.singleScreen == null/)
+  // No repair path OPEN_TABs a fallback/seed chat into the tree any more.
+  assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', fallback\.id\)/)
+  assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', chats\[0\]\.id\)/)
+})
+
 // -- Finding 5: completion is epoch-keyed (captured epoch, not inferred) --------
 test('finding 5: completion captures the originating epoch, not the current transition id', () => {
   assert.match(controller, /const epoch = contract\.id/)

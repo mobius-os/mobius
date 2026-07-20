@@ -1106,17 +1106,24 @@ export default function Shell() {
       reason: 'deleted',
     })
     const ws = workspaceStateRef.current.ws
-    const focused = ws.panes[ws.focusedPaneId]
-    if (Object.keys(ws.panes).length === 1 && !focused?.activeTabKey) {
+    // Seed the fallback only when the CURRENT world's visible surface is empty
+    // (finding F9). In single mode that is a null slot — the deleted-close above
+    // already cleared it (CLOSE_TAB reason:'deleted' slot reconciliation); in
+    // builder it is the sole empty root. Route through the ONE decision point so
+    // single sets the SLOT (visible) and builder opens the pane tab — a raw
+    // OPEN_TAB would seed the HIDDEN pane tree and leave the repaired chat
+    // invisible while single mode paints an empty screen (INV 2/4).
+    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const visibleWorldEmpty = single
+      ? ws.singleScreen == null
+      : (Object.keys(ws.panes).length === 1 && !ws.panes[ws.focusedPaneId]?.activeTabKey)
+    if (visibleWorldEmpty) {
       const fallback = chatsRef.current.find(c => String(c.id) !== String(missingId))
       if (fallback) {
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: ws.focusedPaneId,
-          tab: tabModel.makeTab('chat', fallback.id), activate: true,
-        })
+        applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId })
       }
     }
-  }, [dispatchWorkspace, workspaceStateRef])
+  }, [applyModeDestination, dispatchWorkspace, workspaceStateRef])
   const handlePaneChatFirstMessage = useCallback((chatId) => {
     recoveredChatIdsRef.current.delete(chatId)
   }, [])
@@ -1890,17 +1897,21 @@ export default function Shell() {
       return
     }
     if (!prev) {
-      // No restored chat target. Seed the newest listed chat into the focused/
-      // root pane ONLY if it has no active tab — never overwrite an active app
-      // pane merely to maintain a remembered chat id (contract §1.4.8). If the
-      // owner has no listed chats, the bootstrap effect creates one.
+      // No restored chat target. Seed the newest listed chat into the CURRENT
+      // world's empty surface ONLY (finding F9): in single mode a null slot, in
+      // builder the focused/root pane with no active tab — never overwrite an
+      // active pane merely to maintain a remembered chat id (contract §1.4.8).
+      // The ONE decision point sets the visible SLOT in single / the pane tab in
+      // builder, so a single-mode reload (activeChatId derives from a null slot,
+      // so `prev` is null here) seeds the visible screen, not the hidden tree. If
+      // the owner has no listed chats, the bootstrap effect creates one.
       const ws = workspaceStateRef.current.ws
-      const focused = ws.panes[ws.focusedPaneId]
-      if (!focused?.activeTabKey && chats[0]) {
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: ws.focusedPaneId,
-          tab: tabModel.makeTab('chat', chats[0].id), activate: true,
-        })
+      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const visibleWorldEmpty = single
+        ? ws.singleScreen == null
+        : !ws.panes[ws.focusedPaneId]?.activeTabKey
+      if (visibleWorldEmpty && chats[0]) {
+        applyModeDestination({ view: 'chat', chatId: chats[0].id, appId: null, paneId: ws.focusedPaneId })
       }
       chatsLoadedRef.current = true
       return
@@ -1946,13 +1957,17 @@ export default function Shell() {
             reason: 'deleted',
           })
           const ws = workspaceStateRef.current.ws
-          const focused = ws.panes[ws.focusedPaneId]
+          // Same world-aware seed as the boot path (finding F9): route the
+          // fallback through the ONE decision point so single sets the visible
+          // SLOT and builder the pane tab — never a raw OPEN_TAB into the hidden
+          // tree, which single mode would never paint.
+          const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+          const visibleWorldEmpty = single
+            ? ws.singleScreen == null
+            : !ws.panes[ws.focusedPaneId]?.activeTabKey
           const fallback = chats.find(c => c.id !== probedChatId)
-          if (!focused?.activeTabKey && fallback) {
-            dispatchWorkspace({
-              type: 'OPEN_TAB', paneId: ws.focusedPaneId,
-              tab: tabModel.makeTab('chat', fallback.id), activate: true,
-            })
+          if (visibleWorldEmpty && fallback) {
+            applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId })
           }
         } else if (res.ok) {
           // Exists but is unlisted because it is app-attributed or the drawer
@@ -1972,7 +1987,8 @@ export default function Shell() {
     return () => { cancelled = true }
   }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,
       chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
-      refreshChats, dispatchWorkspace, workspaceStateRef, activeChatIdRef])
+      refreshChats, dispatchWorkspace, applyModeDestination,
+      workspaceStateRef, activeChatIdRef])
 
   useEffect(() => {
     if (navigationOpen) { refreshApps(); refreshChats() }
