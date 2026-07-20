@@ -949,14 +949,53 @@ def test_dispatch_server_web_search_result_emits_sources():
   dispatch_sdk_message(msg, bus, None)
 
   assert bus.events == [
-    {"type": "tool_start", "tool": "WebSearch", "input": "mobius docs"},
+    {
+      "type": "tool_start", "tool": "WebSearch", "input": "mobius docs",
+      "tool_use_id": "srv-1",
+    },
     {"type": "tool_sources", "sources": [{
       "title": "Mobius",
       "url": "https://example.com/mobius",
       "snippet": "Project page",
-    }]},
-    {"type": "tool_end"},
+    }], "tool_use_id": "srv-1"},
+    {"type": "tool_end", "tool_use_id": "srv-1"},
   ]
+
+
+def test_dispatch_batched_server_web_search_results_keep_their_ids():
+  bus = _Bus()
+  msg = AssistantMessage(
+    content=[
+      ServerToolUseBlock(
+        id="srv-a", name="web_search", input={"query": "query A"},
+      ),
+      ServerToolUseBlock(
+        id="srv-b", name="web_search", input={"query": "query B"},
+      ),
+      ServerToolResultBlock(
+        tool_use_id="srv-a",
+        content={"type": "web_search_tool_result", "content": [{
+          "title": "A", "url": "https://a.example/result",
+        }]},
+      ),
+      ServerToolResultBlock(
+        tool_use_id="srv-b",
+        content={"type": "web_search_tool_result", "content": [{
+          "title": "B", "url": "https://b.example/result",
+        }]},
+      ),
+    ],
+    model="claude-opus",
+  )
+
+  dispatch_sdk_message(msg, bus, None)
+
+  source_events = [event for event in bus.events
+                   if event["type"] == "tool_sources"]
+  assert [(event["tool_use_id"], event["sources"][0]["title"])
+          for event in source_events] == [("srv-a", "A"), ("srv-b", "B")]
+  end_events = [event for event in bus.events if event["type"] == "tool_end"]
+  assert [event["tool_use_id"] for event in end_events] == ["srv-a", "srv-b"]
 
 
 def test_dispatch_client_web_search_tool_result_emits_sources():

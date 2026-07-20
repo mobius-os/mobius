@@ -441,6 +441,21 @@ def test_tool_sources_noop_without_matching_block_or_sources():
   assert "sources" not in blocks[0]
 
 
+def test_tool_sources_id_never_falls_back_to_an_unrelated_tool():
+  blocks = [
+    {"type": "tool", "tool": "WebSearch", "tool_use_id": "search-1"},
+    {"type": "tool", "tool": "Bash", "tool_use_id": "bash-1"},
+  ]
+  sources = [{"title": "E", "url": "https://example.com"}]
+
+  assert process_event({
+    "type": "tool_sources", "sources": sources, "tool_use_id": "bash-1",
+  }, blocks) is False
+
+  assert "sources" not in blocks[0]
+  assert "sources" not in blocks[1]
+
+
 def test_build_assistant_message():
   blocks = [
     {"type": "text", "content": "Here is the result:"},

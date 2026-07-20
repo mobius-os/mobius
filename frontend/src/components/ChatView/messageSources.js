@@ -11,13 +11,27 @@
 // from it would fragment one continuous reasoning pass into many one-second
 // "Thought" blocks.
 
-// Only http(s) may reach an href — a `javascript:` or `data:` string is a
-// perfectly ordinary non-empty string, so an emptiness check is not a guard.
-const HTTP_URL_RE = /^https?:\/\//i
+// Only complete http(s) URLs may reach an href. URL() rejects superficially
+// plausible but unusable values such as `https://` and hosts with whitespace;
+// checking the parsed protocol rejects javascript:/data:/mailto:.
+export function safeSourceUrl(value) {
+  if (typeof value !== 'string') return ''
+  const candidate = value.trim()
+  if (!candidate) return ''
+  try {
+    const parsed = new URL(candidate)
+    return ['http:', 'https:'].includes(parsed.protocol) && parsed.host
+      ? candidate
+      : ''
+  } catch {
+    return ''
+  }
+}
 
 export function sourceHost(url) {
   try {
-    return new URL(url).host
+    const safeUrl = safeSourceUrl(url)
+    return safeUrl ? new URL(safeUrl).host : ''
   } catch {
     // Unparseable URLs have no meaningful host chip; the title keeps the label.
     return ''
@@ -46,15 +60,15 @@ export function messageSources(blocks) {
   for (const block of blocks) {
     if (block?.type !== 'tool' || !Array.isArray(block.sources)) continue
     for (const source of block.sources) {
-      const url = source?.url
+      const url = safeSourceUrl(source?.url)
       // The backend enforces http(s) (tool_sources.py `_safe_http_url`), but
       // this value ends up in an <a href> that now renders unconditionally
       // rather than behind a disclosure, so re-check the scheme here instead
       // of trusting two upstream call sites to stay correct forever.
-      if (typeof url !== 'string' || !HTTP_URL_RE.test(url)) continue
+      if (!url) continue
       if (seen.has(url)) continue
       seen.add(url)
-      sources.push(source)
+      sources.push(url === source.url ? source : { ...source, url })
     }
   }
   return sources

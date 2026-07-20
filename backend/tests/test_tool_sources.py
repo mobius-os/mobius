@@ -21,6 +21,8 @@ def test_drops_non_http_urls():
     {"title": "x", "url": "javascript:alert(1)"},
     {"title": "y", "url": "data:text/html,<script>alert(1)</script>"},
     {"title": "z", "url": "ftp://host/file"},
+    {"title": "no host", "url": "https://"},
+    {"title": "bad host", "url": "https://exa mple.com/page"},
     {"title": "ok", "url": "https://ok.example"},
   ]}
   assert normalize_tool_sources(raw) == [
