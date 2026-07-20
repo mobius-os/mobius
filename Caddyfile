@@ -29,6 +29,14 @@
     # identically at both the proxy and the origin.
     @publishedSite path /sites/*
     @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /api/apps/*/frame /recover* /sites/*
+    # recoveryd sets its OWN stricter Referrer-Policy: same-origin (no referrer
+    # cross-origin). The site-wide replacement below is
+    # strict-origin-when-cross-origin (leaks the origin cross-origin), so it
+    # must not touch the recovery surface — a disjoint matcher, since a later
+    # `header >Set` on the same field is not guaranteed to win. The other
+    # site-wide headers (nosniff, HSTS, Permissions-Policy) are equal-or-
+    # stronger and stay applied to /recover*.
+    @notRecover not path /recover*
 
     header {
         # Defer replacements until after reverse_proxy copies the backend
@@ -36,7 +44,6 @@
         # browsers receive comma-joined duplicates such as
         # `X-Content-Type-Options: nosniff, nosniff`.
         >X-Content-Type-Options "nosniff"
-        >Referrer-Policy "strict-origin-when-cross-origin"
         >Permissions-Policy "camera=(), geolocation=()"
         >Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         # script-src notes:
@@ -53,6 +60,7 @@
     # previews (useFileUpload), the image lightbox, and install-sheet icon
     # previews; without blob: those render as broken images under an
     # enforced policy.
+    header @notRecover >Referrer-Policy "strict-origin-when-cross-origin"
     header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
     header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     header @appFrame >X-Frame-Options "SAMEORIGIN"

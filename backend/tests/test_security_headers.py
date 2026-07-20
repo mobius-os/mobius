@@ -304,3 +304,39 @@ def test_opaque_app_preflight_allows_versioned_storage_requests():
     for header in actual.headers["access-control-expose-headers"].split(",")
   }
   assert "etag" in exposed
+
+
+def test_recover_keeps_recoveryd_stricter_referrer_policy():
+  """The site-wide Referrer-Policy replacement must not touch /recover*.
+
+  recoveryd sets Referrer-Policy: same-origin (no referrer cross-origin);
+  the shell's strict-origin-when-cross-origin leaks the origin. Card 253
+  item 7: the replacement lived in the unmatched header block and clobbered
+  recoveryd's value on /recover*. It now sits on a disjoint @notRecover
+  matcher, mirroring how the frame headers already exclude the recovery
+  surface. A later `header >Set` on the same field is not guaranteed to win,
+  so exclusion — not a second override — is the only deterministic form.
+  """
+  caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
+  raw = caddyfile.read_text(encoding="utf-8")
+  lines = [line.strip() for line in raw.splitlines()]
+  assert "@notRecover not path /recover*" in lines
+  assert (
+    'header @notRecover >Referrer-Policy "strict-origin-when-cross-origin"'
+    in lines
+  )
+  # The unmatched (all-paths) header block must NOT carry Referrer-Policy —
+  # that is exactly what reached /recover*. Scope the check to the mobius
+  # site block, before the services gateway (which legitimately keeps a bare
+  # >Referrer-Policy for its own /services surface).
+  # The services gateway vhost (its own block) legitimately keeps a bare
+  # >Referrer-Policy; scope this check to the mobius site block before it.
+  mobius_block = raw.split("{$MOBIUS_SERVICE_GATEWAY_ORIGIN}", 1)[0]
+  bare = [
+    ln.strip() for ln in mobius_block.splitlines()
+    if ln.strip().startswith(">Referrer-Policy ")
+  ]
+  assert bare == [], (
+    "the mobius site block must not set Referrer-Policy on the unmatched "
+    f"header block (would hit /recover*); found {bare}"
+  )
