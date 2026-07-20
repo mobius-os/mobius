@@ -11,9 +11,8 @@ Invariants (all load-bearing):
   - Exactly one published claim: the token file is created atomically (temp
     file + atomic os.link winner, the same shape as
     `backend/recovery/recovery_auth.py`) and never regenerated while it exists.
-  - Exactly one unclaimed->owner transition: `SETUP_LOCK` serializes the whole
-    owner-recheck -> claim-verify -> owner-create -> claim-consume sequence in
-    the setup route, so concurrent setups yield exactly one owner.
+  - Exactly one unclaimed->owner transition: `SETUP_LOCK` serializes threads,
+    and the database's unique owner singleton rejects a racing process.
   - No silent re-arming after Owner-row loss: consuming the claim writes a
     durable non-secret marker. If the owner row later vanishes (DB wipe or
     corruption) WITHOUT a deliberate factory reset, the marker (or the recovery
@@ -21,9 +20,9 @@ Invariants (all load-bearing):
     could use. Only an explicit factory reset clears the marker.
   - No claim exposure via /data git or the filesystem API: the token file is
     gitignored + untracked (entrypoint) and denied by routes/fs.py.
-  - Fail-closed init: if the claim cannot be published while unconfigured,
-    `verify` has no valid file to match, so setup stays unavailable rather than
-    allowing an unauthenticated takeover — the failure never degrades to "open".
+  - Fail-closed init: verification is disabled until this boot successfully
+    reconciles the claim. A failed init also purges any old claim best-effort,
+    so the failure never degrades to "use the stale secret".
 """
 
 from __future__ import annotations
@@ -67,6 +66,11 @@ _GENERATED_ENTROPY_BYTES = 24
 # first-boot setups can produce only one owner. Module-level so every worker
 # thread of the one process shares it.
 SETUP_LOCK = threading.Lock()
+
+# Per-process boot gate. Lifespan clears this before reconciliation, and only a
+# successful ensure_claim() sets it. An old claim file is therefore unusable if
+# this boot could not validate/publish the configured claim.
+_INIT_SUCCEEDED = threading.Event()
 
 # Per-process key for a length-blind constant-time compare: HMAC both sides to
 # a fixed 32-byte digest before compare_digest so neither the published token's
@@ -122,27 +126,48 @@ def _read_claim_file(data_dir) -> Optional[str]:
   """Return the published claim token, or None.
 
   Strict on read so a tampered or malformed file can never authorize setup: a
-  symlink, a non-regular file, any group/other permission bit, an empty file,
-  or oversize/non-ASCII content all read as "no claim".
+  symlink, a non-regular file, a file not owned by this uid, a mode other than
+  exactly 0600, an empty file, or oversize/non-ASCII content all read as "no
+  claim". Open-before-fstat with O_NOFOLLOW keeps validation and reading on the
+  same inode, closing the path-swap race of lstat followed by open.
   """
   path = _claim_path(data_dir)
+  fd = -1
   try:
-    st = os.lstat(path)
-  except OSError:
-    return None
-  if not stat.S_ISREG(st.st_mode):
-    return None  # a symlink or special file is never the claim we published
-  if stat.S_IMODE(st.st_mode) & 0o077:
-    return None  # any group/other bit set — not the 0600 we published
-  try:
-    with open(path, "r", encoding="ascii") as fh:
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+      flags |= os.O_CLOEXEC
+    fd = os.open(path, flags)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+      return None
+    if stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.getuid():
+      return None
+    fh = os.fdopen(fd, "r", encoding="ascii")
+    fd = -1  # fh owns it now
+    with fh:
       data = fh.read(_MAX_CLAIM_LEN + 1)
   except (OSError, ValueError):
     return None  # ValueError covers a non-ASCII (UnicodeDecodeError) body
+  finally:
+    if fd >= 0:
+      os.close(fd)
   token = data.strip()
   if not token or len(token) > _MAX_CLAIM_LEN:
     return None
   return token
+
+
+def _fsync_dir(path: Path) -> None:
+  """Persist a directory-entry change before returning."""
+  flags = os.O_RDONLY
+  if hasattr(os, "O_DIRECTORY"):
+    flags |= os.O_DIRECTORY
+  fd = os.open(str(path), flags)
+  try:
+    os.fsync(fd)
+  finally:
+    os.close(fd)
 
 
 def _link_claim_atomic(data_dir, token: str) -> str:
@@ -163,7 +188,9 @@ def _link_claim_atomic(data_dir, token: str) -> str:
   try:
     with os.fdopen(fd, "w") as fh:
       fh.write(token)
-    os.chmod(tmp, 0o600)
+      fh.flush()
+      os.fchmod(fh.fileno(), 0o600)
+      os.fsync(fh.fileno())
     try:
       os.link(tmp, path)
       return token
@@ -174,11 +201,13 @@ def _link_claim_atomic(data_dir, token: str) -> str:
       # target exists but is invalid — replace it so setup isn't wedged.
       os.replace(tmp, path)
       replaced = True
+      _fsync_dir(path.parent)
       return token
   finally:
     if not replaced:
       try:
         os.unlink(tmp)
+        _fsync_dir(path.parent)
       except OSError:
         pass
 
@@ -192,8 +221,11 @@ def _replace_claim_atomic(data_dir, token: str) -> str:
   try:
     with os.fdopen(fd, "w") as fh:
       fh.write(token)
-    os.chmod(tmp, 0o600)
+      fh.flush()
+      os.fchmod(fh.fileno(), 0o600)
+      os.fsync(fh.fileno())
     os.replace(tmp, path)  # atomic; the preset value wins
+    _fsync_dir(path.parent)
     return token
   except Exception:
     try:
@@ -203,13 +235,21 @@ def _replace_claim_atomic(data_dir, token: str) -> str:
     raise
 
 
-def _purge_claim(data_dir) -> None:
-  """Delete the claim file if present. Best-effort but logged."""
+def _purge_claim(data_dir, *, strict: bool = False) -> None:
+  """Delete the claim and persist its removal.
+
+  Reconciliation can request strict failure reporting. Consumption is already
+  fail-closed once its marker is durable, so it logs a deletion failure.
+  """
+  path = _claim_path(data_dir)
   try:
-    os.unlink(str(_claim_path(data_dir)))
+    os.unlink(str(path))
+    _fsync_dir(path.parent)
   except FileNotFoundError:
     pass
   except OSError as exc:
+    if strict:
+      raise
     log.warning("could not purge setup claim: %s", exc)
 
 
@@ -225,8 +265,11 @@ def _write_marker(data_dir) -> None:
   try:
     with os.fdopen(fd, "w") as fh:
       fh.write("setup-consumed\n")
-    os.chmod(tmp, 0o600)
+      fh.flush()
+      os.fchmod(fh.fileno(), 0o600)
+      os.fsync(fh.fileno())
     os.replace(tmp, path)
+    _fsync_dir(path.parent)
   except Exception:
     try:
       os.unlink(tmp)
@@ -266,6 +309,8 @@ def verify(data_dir, candidate) -> bool:
   compare_digest so neither the published token nor the candidate leaks its
   length via timing, and an oversize candidate is rejected before any work.
   """
+  if not _INIT_SUCCEEDED.is_set():
+    return False
   published = _read_claim_file(data_dir)
   if not published:
     return False
@@ -281,13 +326,13 @@ def verify(data_dir, candidate) -> bool:
 
 
 def consume(data_dir) -> None:
-  """Consume the claim on successful setup: marker first, then delete the file.
+  """Durably consume the verified claim before committing the owner.
 
   Marker-before-delete is the safe crash order: a crash between the two leaves
   the marker (the instance is fail-closed on the next boot, never re-claimable),
-  while a crash before the marker leaves the claim to be re-published. The owner
-  row is already committed by the time this runs, so either crash resolves
-  correctly on reboot.
+  while a crash before the marker has not begun the owner write. The route calls
+  this before db.commit(), so every later crash is fail-closed even if the owner
+  transaction never becomes durable.
   """
   _write_marker(data_dir)
   _purge_claim(data_dir)
@@ -308,14 +353,13 @@ def clear_consumed_marker(data_dir) -> None:
     log.warning("could not clear setup-consumed marker: %s", exc)
 
 
-def _publish_or_read(data_dir) -> str:
+def _publish_or_read(data_dir, preset: Optional[str]) -> str:
   """Resolve the published claim for an unconfigured, not-fail-closed instance.
 
   Precedence: an explicit MOBIUS_SETUP_CLAIM preset is authoritative and
   overwrites any stale generated value; otherwise a token is generated once and
   reused for the life of the file (never regenerated while it exists).
   """
-  preset = _validate_preset(os.environ.get(_ENV_VAR))
   existing = _read_claim_file(data_dir)
   if preset is not None:
     if existing == preset:
@@ -341,22 +385,38 @@ def ensure_claim(data_dir, *, owner_exists: bool) -> Optional[str]:
       claim; return None (setup requires factory reset).
     - no owner, not fail-closed: publish/reuse exactly one claim; return it.
 
-  Not best-effort in spirit: on a publish failure this raises, and the lifespan
-  logs it and serves with NO claim file, so `verify` fails closed — setup stays
-  unavailable rather than silently open.
+  Any failure leaves this boot's verification gate disabled and attempts to
+  remove an old claim before raising. The in-memory gate is authoritative even
+  when a filesystem failure prevents that cleanup.
   """
-  if owner_exists:
+  begin_initialization()
+  try:
+    if owner_exists:
+      _purge_claim(data_dir, strict=True)
+      result = None
+    elif is_fail_closed(data_dir):
+      _purge_claim(data_dir, strict=True)
+      result = None
+    else:
+      # Validate the preset before reading, replacing, or publishing a claim.
+      preset = _validate_preset(os.environ.get(_ENV_VAR))
+      result = _publish_or_read(data_dir, preset)
+  except Exception:
     _purge_claim(data_dir)
-    return None
-  if is_fail_closed(data_dir):
-    _purge_claim(data_dir)  # never leave a stale secret in a locked state
-    return None
-  return _publish_or_read(data_dir)
+    raise
+  _INIT_SUCCEEDED.set()
+  return result
+
+
+def begin_initialization() -> None:
+  """Disable verification until claim reconciliation succeeds this boot."""
+  _INIT_SUCCEEDED.clear()
 
 
 def _reset_for_tests(data_dir) -> None:
   """Test-only: drop the claim file + consumed marker so a fresh claim can be
   ensured. Does not touch the recovery seed — conftest owns that removal."""
+  begin_initialization()
   for path in (_claim_path(data_dir), _marker_path(data_dir)):
     try:
       os.unlink(str(path))

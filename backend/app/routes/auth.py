@@ -175,12 +175,11 @@ def setup(
 
   Gated by the first-boot claim (app.setup_claim): the caller must present the
   one-time token published to the deploy logs / MOBIUS_SETUP_CLAIM. The whole
-  owner-recheck -> fail-closed -> verify -> create -> consume transition runs
-  under `SETUP_LOCK`, so concurrent first-boot setups produce exactly one owner
-  (one 200, the rest 400). The setup-specific rate limiter was removed: a
-  high-entropy claim makes brute force infeasible and invalid compares are
-  cheap (they run before any hashing), so the limiter only enabled a
-  denial-of-setup.
+  owner-recheck -> fail-closed -> verify -> consume -> create transition runs
+  under `SETUP_LOCK`, while a database singleton rejects a racing process. The
+  setup-specific rate limiter was removed: a high-entropy claim makes brute
+  force infeasible and invalid compares are cheap (they run before any
+  hashing), so the limiter only enabled a denial-of-setup.
   """
   data_dir = get_settings().data_dir
   with setup_claim.SETUP_LOCK:
@@ -199,6 +198,10 @@ def setup(
     # Uniform 403 for missing/empty/malformed/wrong claim — no oracle for why.
     if not setup_claim.verify(data_dir, body.claim):
       raise HTTPException(status_code=403, detail="Invalid setup claim.")
+    # Make re-arming impossible BEFORE any owner commit. If this request or the
+    # process dies after this point, the durable marker forces operator
+    # recovery rather than publishing another first-boot claim.
+    setup_claim.consume(data_dir)
     owner = models.Owner(
       username=body.username,
       hashed_password=auth.hash_password(body.password),
@@ -207,8 +210,8 @@ def setup(
     try:
       db.commit()
     except IntegrityError:
-      # Backstop the lock across processes/replicas: a racing writer already
-      # created the owner. Treat as already-configured, never a 500.
+      # The database singleton is the cross-process backstop: a racing writer
+      # created the one allowed owner. Treat it as already configured.
       db.rollback()
       raise HTTPException(status_code=400, detail="Already configured.")
     db.refresh(owner)
@@ -223,10 +226,6 @@ def setup(
     # recovery_seed swallows its own errors.
     from app import recovery_seed
     recovery_seed.write_owner_seed(owner.username, owner.hashed_password)
-    # Consume the claim LAST — after the owner is durably committed and the
-    # side effects seeded. A crash before this leaves a re-publishable claim; a
-    # crash after leaves the fail-closed marker. Either way, no re-claim.
-    setup_claim.consume(data_dir)
     token = auth.create_access_token(
       {"sub": owner.username}, token_epoch=owner.token_epoch
     )

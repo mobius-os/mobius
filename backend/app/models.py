@@ -17,8 +17,8 @@ import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-  Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, true,
+  Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON,
+  LargeBinary, String, Text, true,
 )
 
 from app.database import Base
@@ -29,8 +29,16 @@ class Owner(Base):
   """Single owner account for this installation."""
 
   __tablename__ = "owner"
+  __table_args__ = (
+    Index("ux_owner_setup_singleton", "setup_singleton", unique=True),
+  )
 
   id = Column(Integer, primary_key=True)
+  # Every owner row has the same value. The unique index makes the one-owner
+  # installation invariant database-enforced, including across processes.
+  setup_singleton = Column(
+    Integer, nullable=False, default=1, server_default="1",
+  )
   username = Column(String(64), nullable=False, unique=True)
   hashed_password = Column(String(255), nullable=False)
   # Must stay in sync with providers.PROVIDER_NAMES.

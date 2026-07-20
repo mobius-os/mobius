@@ -165,14 +165,13 @@ async def lifespan(app):
   # First-boot claim gate (card 261). Publish/reconcile the one-time setup
   # claim now — after _init_db() so the owner state is readable, and before
   # `yield` so no request can reach POST /api/auth/setup before the gate
-  # exists. This ordering closes the lifespan-vs-first-request race. A publish
-  # failure leaves NO claim file, and setup_claim.verify fails closed on a
-  # missing file, so setup stays unavailable rather than allowing an
-  # unauthenticated takeover; we still wrap the call so a disk error can't
-  # brick the recovery surface (the never-crash-boot contract every lifespan
-  # step shares), and log the banner + any error for the deployer.
+  # exists. Verification remains disabled until reconciliation succeeds this
+  # boot, even if a filesystem error prevents deletion of an old claim. We
+  # still keep the recovery surface reachable and log the failure for the
+  # operator.
   try:
     from app import setup_claim
+    setup_claim.begin_initialization()
     with SessionLocal() as _claim_db:
       _owner_exists = _claim_db.query(models.Owner).first() is not None
     _claim_code = setup_claim.ensure_claim(

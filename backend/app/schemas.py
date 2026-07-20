@@ -20,6 +20,12 @@ class SetupRequest(BaseModel):
   # app.setup_claim.
   claim: str = ""
 
+  @field_validator("claim", mode="before")
+  @classmethod
+  def normalize_claim_type(cls, value):
+    """Route every non-string claim through the uniform invalid-claim path."""
+    return value if isinstance(value, str) else ""
+
 
 class SetupStatus(BaseModel):
   configured: bool

@@ -10,6 +10,7 @@ import threading
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app import setup_claim
 from app.config import get_settings
@@ -45,7 +46,7 @@ def test_setup_status_advertises_claim_required_without_leaking_token(client):
   assert published not in res.text
 
 
-def test_missing_empty_malformed_wrong_claim_all_uniform_403(client):
+def test_missing_empty_malformed_and_nonstring_claims_all_uniform_403(client):
   """Missing / empty / malformed / wrong claim all take the SAME 403 path with
   the SAME detail — no oracle for why the claim was rejected."""
   base = {"username": "admin", "password": "securepassword123"}
@@ -54,6 +55,11 @@ def test_missing_empty_malformed_wrong_claim_all_uniform_403(client):
     {**base, "claim": ""},                 # empty
     {**base, "claim": "!!!not-base64!!!"}, # malformed charset
     {**base, "claim": "wrongclaimvalue0000000000"},  # valid shape, wrong value
+    {**base, "claim": None},
+    {**base, "claim": 123},
+    {**base, "claim": []},
+    {**base, "claim": {}},
+    {**base, "claim": True},
   ]
   details = set()
   for payload in attempts:
@@ -90,6 +96,32 @@ def test_valid_setup_consumes_claim_and_second_setup_400(client):
   assert again.status_code == 400
 
 
+def test_setup_consumes_claim_before_owner_commit(client, db, monkeypatch):
+  events = []
+  session_type = type(db)
+  real_commit = session_type.commit
+  real_consume = setup_claim.consume
+
+  def record_commit(session):
+    events.append("commit")
+    return real_commit(session)
+
+  def record_consume(data_dir):
+    events.append("consume")
+    return real_consume(data_dir)
+
+  monkeypatch.setattr(session_type, "commit", record_commit)
+  monkeypatch.setattr(setup_claim, "consume", record_consume)
+  response = client.post("/api/auth/setup", json={
+    "username": "admin",
+    "password": "securepassword123",
+    "claim": SETUP_CLAIM,
+  })
+
+  assert response.status_code == 200
+  assert events[:2] == ["consume", "commit"]
+
+
 # ---------------------------------------------------------------------------
 # Barrier: concurrent setup yields exactly one owner
 # ---------------------------------------------------------------------------
@@ -122,6 +154,17 @@ def test_concurrent_setup_yields_one_owner(db):
 
   assert results.count(200) == 1, results
   assert all(s == 400 for s in results if s != 200), results
+  assert _owner_count(db) == 1
+
+
+def test_database_singleton_rejects_second_owner_with_distinct_username(db):
+  """The database, not only the process lock, enforces one owner row."""
+  db.add(models.Owner(username="first", hashed_password="hash"))
+  db.commit()
+  db.add(models.Owner(username="second", hashed_password="hash"))
+  with pytest.raises(IntegrityError):
+    db.commit()
+  db.rollback()
   assert _owner_count(db) == 1
 
 
@@ -193,7 +236,7 @@ def test_owner_present_purges_stale_claim(tmp_path, monkeypatch):
   assert not (tmp_path / ".setup-claim").exists()
 
 
-def test_read_rejects_symlink_badmode_and_empty(tmp_path):
+def test_read_rejects_symlink_nonexact_modes_and_empty(tmp_path):
   claim = tmp_path / ".setup-claim"
 
   # symlink is never trusted
@@ -203,10 +246,13 @@ def test_read_rejects_symlink_badmode_and_empty(tmp_path):
   assert setup_claim._read_claim_file(str(tmp_path)) is None
   claim.unlink()
 
-  # group/other bits set -> not the 0600 we publish
-  claim.write_text("token12345", encoding="ascii")
-  os.chmod(claim, 0o644)
-  assert setup_claim._read_claim_file(str(tmp_path)) is None
+  # Every mode other than exact 0600 is rejected, including stricter-looking
+  # or owner-executable modes.
+  for mode in (0o400, 0o644, 0o700):
+    claim.write_text("token12345", encoding="ascii")
+    os.chmod(claim, mode)
+    assert setup_claim._read_claim_file(str(tmp_path)) is None
+    os.chmod(claim, 0o600)
 
   # empty file -> no claim
   os.chmod(claim, 0o600)
@@ -217,6 +263,41 @@ def test_read_rejects_symlink_badmode_and_empty(tmp_path):
   claim.write_text("goodtoken", encoding="ascii")
   os.chmod(claim, 0o600)
   assert setup_claim._read_claim_file(str(tmp_path)) == "goodtoken"
+
+
+def test_read_rejects_claim_owned_by_another_uid(tmp_path, monkeypatch):
+  claim = tmp_path / ".setup-claim"
+  claim.write_text("goodtoken", encoding="ascii")
+  os.chmod(claim, 0o600)
+  real_fstat = os.fstat
+
+  def wrong_owner(fd):
+    st = real_fstat(fd)
+    return type("Stat", (), {"st_mode": st.st_mode, "st_uid": st.st_uid + 1})
+
+  monkeypatch.setattr(setup_claim.os, "fstat", wrong_owner)
+  assert setup_claim._read_claim_file(str(tmp_path)) is None
+
+
+def test_consume_fsyncs_marker_file_and_parent_after_claim_deletion(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.delenv("MOBIUS_SETUP_CLAIM", raising=False)
+  setup_claim.ensure_claim(str(tmp_path), owner_exists=False)
+  fsync_targets = []
+  real_fsync = os.fsync
+
+  def record_fsync(fd):
+    fsync_targets.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+    return real_fsync(fd)
+
+  monkeypatch.setattr(setup_claim.os, "fsync", record_fsync)
+  setup_claim.consume(str(tmp_path))
+
+  assert fsync_targets.count(False) >= 1  # marker contents
+  assert fsync_targets.count(True) >= 2   # marker rename + claim unlink
+  assert setup_claim.is_consumed(str(tmp_path))
+  assert not (tmp_path / ".setup-claim").exists()
 
 
 def test_verify_uses_constant_time_compare(tmp_path, monkeypatch):
@@ -285,6 +366,85 @@ def test_preset_allows_fixed_short_value_under_test_runtime(
   monkeypatch.setenv("MOBIUS_SETUP_CLAIM", "short-fixed")
   out = setup_claim.ensure_claim(str(tmp_path), owner_exists=False)
   assert out == "short-fixed"
+
+
+# ---------------------------------------------------------------------------
+# Real lifespan reconciliation
+# ---------------------------------------------------------------------------
+
+def test_lifespan_generates_claim_on_cold_boot(monkeypatch):
+  data_dir = _data_dir()
+  setup_claim._reset_for_tests(data_dir)
+  monkeypatch.delenv("MOBIUS_SETUP_CLAIM", raising=False)
+
+  with TestClient(app) as lifespan_client:
+    published = setup_claim._read_claim_file(data_dir)
+    assert published
+    assert len(published) == 32
+    status = lifespan_client.get("/api/auth/setup/status")
+    assert status.status_code == 200
+    assert status.json()["claim_required"] is True
+
+
+def test_lifespan_env_preset_takes_precedence(monkeypatch):
+  data_dir = _data_dir()
+  setup_claim._reset_for_tests(data_dir)
+  monkeypatch.delenv("MOBIUS_SETUP_CLAIM", raising=False)
+  generated = setup_claim.ensure_claim(data_dir, owner_exists=False)
+  preset = "Lifespan-Preset-Claim-0123456789"
+  monkeypatch.setenv("MOBIUS_SETUP_CLAIM", preset)
+
+  with TestClient(app):
+    assert setup_claim._read_claim_file(data_dir) == preset
+    assert setup_claim.verify(data_dir, preset) is True
+    assert setup_claim.verify(data_dir, generated) is False
+
+
+def test_lifespan_init_failure_disables_setup_with_old_claim(monkeypatch):
+  data_dir = _data_dir()
+  setup_claim._reset_for_tests(data_dir)
+  old_claim = "Previously-Valid-Claim-0123456789"
+  monkeypatch.setenv("MOBIUS_SETUP_CLAIM", old_claim)
+  setup_claim.ensure_claim(data_dir, owner_exists=False)
+  assert setup_claim.verify(data_dir, old_claim) is True
+
+  # Invalid at startup: lifespan logs and keeps serving recovery, but the old
+  # file is removed and the per-boot verification gate stays closed.
+  monkeypatch.setenv("MOBIUS_SETUP_CLAIM", "invalid claim with spaces")
+  with TestClient(app) as lifespan_client:
+    assert setup_claim._read_claim_file(data_dir) is None
+    response = lifespan_client.post("/api/auth/setup", json={
+      "username": "admin",
+      "password": "securepassword123",
+      "claim": old_claim,
+    })
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Invalid setup claim."
+
+
+def test_lifespan_init_failure_refuses_stale_claim_if_cleanup_fails(
+  monkeypatch,
+):
+  data_dir = _data_dir()
+  setup_claim._reset_for_tests(data_dir)
+  old_claim = "Previously-Valid-Claim-0123456789"
+  monkeypatch.setenv("MOBIUS_SETUP_CLAIM", old_claim)
+  setup_claim.ensure_claim(data_dir, owner_exists=False)
+
+  # Model an unreadable/unwritable data directory: validation fails and the
+  # cleanup attempt cannot remove the old inode. Boot readiness, not deletion,
+  # is the final gate, so the stale bytes still cannot authorize setup.
+  monkeypatch.setenv("MOBIUS_SETUP_CLAIM", "invalid claim with spaces")
+  monkeypatch.setattr(setup_claim, "_purge_claim", lambda *args, **kwargs: None)
+  with TestClient(app) as lifespan_client:
+    assert setup_claim._read_claim_file(data_dir) == old_claim
+    assert setup_claim.verify(data_dir, old_claim) is False
+    response = lifespan_client.post("/api/auth/setup", json={
+      "username": "admin",
+      "password": "securepassword123",
+      "claim": old_claim,
+    })
+    assert response.status_code == 403
 
 
 # ---------------------------------------------------------------------------

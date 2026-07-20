@@ -1,4 +1,6 @@
+import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from app import models
 from app.database import run_migrations
@@ -192,3 +194,37 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "true"
+
+
+def test_run_migrations_enforces_owner_singleton(tmp_path):
+  db_path = tmp_path / "legacy-owner-singleton.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, username VARCHAR(64), "
+      "hashed_password VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "INSERT INTO owner (id, username, hashed_password) "
+      "VALUES (1, 'owner', 'hash')"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  inspector = inspect(eng)
+  cols = {c["name"] for c in inspector.get_columns("owner")}
+  indexes = {i["name"]: i for i in inspector.get_indexes("owner")}
+  assert "setup_singleton" in cols
+  assert indexes["ux_owner_setup_singleton"]["unique"]
+  with eng.begin() as conn:
+    with pytest.raises(IntegrityError):
+      conn.execute(text(
+        "INSERT INTO owner "
+        "(id, username, hashed_password, setup_singleton) "
+        "VALUES (2, 'racer', 'hash', 1)"
+      ))
