@@ -60,6 +60,8 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
   assert.match(activityStretch, /const \[open, setOpen\] = useState\(false\)/,
     'nested thinking starts collapsed')
   assert.match(activityStretch, /className="chat__activity-think-toggle"/)
+  assert.doesNotMatch(activityStretch, /chat__activity-think-chevron/,
+    'nested reasoning uses its icon and row affordance without a chevron')
   assert.match(activityStretch, /aria-expanded=\{open\}/,
     'the nested toggle exposes its state')
   assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current\)\s*setOpen\(o => !o\)/,

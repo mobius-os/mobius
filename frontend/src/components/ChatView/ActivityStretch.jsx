@@ -64,13 +64,6 @@ function TimelineThought({ label, content }) {
         }}
         aria-expanded={open}
       >
-        <span className="chat__activity-think-chevron" aria-hidden="true">
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
-            stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
-            strokeLinejoin="round">
-            <path d="m5.5 3 5 5-5 5" />
-          </svg>
-        </span>
         <span className="chat__activity-think-icon" aria-hidden="true">
           <ActivityTypeIcon kind="reasoning" />
         </span>

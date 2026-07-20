@@ -172,21 +172,6 @@ export default function ToolBlock({ t, chatId }) {
   const headerContent = (
     <>
       <span
-        className={
-          `chat__tool-toggle${hasDetail ? '' : ' chat__tool-toggle--spacer'}`
-          + (open ? ' chat__tool-toggle--open' : '')
-        }
-        aria-hidden="true"
-      >
-        {hasDetail && (
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
-            stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
-            strokeLinejoin="round">
-            <path d="m5.5 3 5 5-5 5" />
-          </svg>
-        )}
-      </span>
-      <span
         className={`chat__tool-icon${t.status === 'running' ? ' chat__tool-icon--running' : ''}`}
         data-tool-kind={iconKind}
         aria-hidden="true"
