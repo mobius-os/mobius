@@ -68,6 +68,18 @@ async function readViolations(page) {
   })
 }
 
+async function modePhase(page) {
+  return page.evaluate(() => document.querySelector('.shell')?.getAttribute('data-mode-phase') || 'idle')
+}
+
+async function openNavigation(page) {
+  // A persistent (wide) sidebar is already open; a modal (phone) drawer opens via
+  // the brand's single tap. Best-effort — the drag source may already be visible.
+  const docked = await page.evaluate(() => document.querySelector('.shell')?.className.includes('shell--drawer-docked'))
+  if (!docked) await page.getByLabel('Toggle navigation').click().catch(() => {})
+  await page.waitForTimeout(300)
+}
+
 async function transientClassCount(page) {
   return page.evaluate(() => {
     const c = document.querySelector('.shell').className
@@ -81,11 +93,46 @@ for (const [name, viewport] of [
 ]) {
   test(`[${name}] a single builder toggle flips the mode and settles clean`, async ({ page }) => {
     await bootShell(page, viewport)
-    expect(await builderActive(page)).toBe(false)
+    // A fresh workspace seeds viewMode:'panes' (builder), so do NOT hardcode the
+    // initial direction (finding 15) — read it and assert the toggle FLIPS it.
+    const before = await builderActive(page)
+    await toggleMode(page)
+    await expect.poll(() => builderActive(page)).toBe(!before)
+    // The beat settles: no transient class lingers.
+    await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
+    await expect.poll(() => modePhase(page)).toBe('idle')
+  })
+
+  test(`[${name}] a cancelled single-mode drag UNTILES (BLOCKER 1: no permanent tile)`, async ({ page }) => {
+    await bootShell(page, viewport)
+    // Ensure SINGLE mode (a fresh workspace is builder).
+    if (await builderActive(page)) {
+      await toggleMode(page)
+      await expect.poll(() => builderActive(page)).toBe(false)
+    }
+    // Open navigation and find a draggable source (a chat/app row carries
+    // data-drag-key). Skip only if the instance genuinely has no source.
+    await openNavigation(page)
+    const src = page.locator('[data-drag-key]').first()
+    if (!(await src.count())) { test.skip(true, 'no drag source available'); return }
+    const box = await src.boundingBox()
+    // Arm a single-mode drag: press + move past the drag threshold. This unfolds
+    // the builder preview (data-mode-phase becomes 'drag-preview').
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 40, { steps: 6 })
+    await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2 + 80, { steps: 6 })
+    await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('drag-preview')
+    // Cancel the drag (Escape) — the id handoff must clear the LIVE preview.
+    await page.keyboard.press('Escape')
+    await page.mouse.up().catch(() => {})
+    // The descriptor returns to idle and the workspace is NOT stranded in the
+    // builder/tiled render — this is the exact wedge the dragArm epoch fix closes.
+    await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+    await expect.poll(() => builderActive(page)).toBe(false)
+    // Still responsive: a subsequent toggle works.
     await toggleMode(page)
     await expect.poll(() => builderActive(page)).toBe(true)
-    // The entering beat settles: no transient class lingers.
-    await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
   })
 
   test(`[${name}] 20x rapid toggle never wedges and never doubles the beat class`, async ({ page }) => {
