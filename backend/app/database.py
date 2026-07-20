@@ -640,24 +640,11 @@ def run_migrations(eng) -> None:
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN token_epoch INTEGER NOT NULL DEFAULT 0"
       )
-    if "setup_singleton" not in owner_cols:
-      # Every row receives the same key; the unique index below turns the
-      # platform's one-owner contract into a cross-process DB invariant.
-      _add_owner.append(
-        "ALTER TABLE owner ADD COLUMN setup_singleton INTEGER "
-        "NOT NULL DEFAULT 1"
-      )
     if _add_owner:
       with eng.connect() as conn:
         for stmt in _add_owner:
           conn.execute(text(stmt))
         conn.commit()
-    with eng.connect() as conn:
-      conn.execute(text(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ux_owner_setup_singleton "
-        "ON owner (setup_singleton)"
-      ))
-      conn.commit()
 
   # `chat_runs` is a newer table (persistence redesign Step 3): create_all
   # builds it fresh with the current schema, but on an already-deployed DB the

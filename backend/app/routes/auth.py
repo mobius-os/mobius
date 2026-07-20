@@ -176,8 +176,9 @@ def setup(
   Gated by the first-boot claim (app.setup_claim): the caller must present the
   one-time token published to the deploy logs / MOBIUS_SETUP_CLAIM. The whole
   owner-recheck -> fail-closed -> verify -> consume -> create transition runs
-  under `SETUP_LOCK`, while a database singleton rejects a racing process. The
-  setup-specific rate limiter was removed: a high-entropy claim makes brute
+  under the in-process `SETUP_LOCK`, which fully serializes concurrent setups —
+  Mobius runs single-worker uvicorn, so there is no second process to race.
+  The setup-specific rate limiter was removed: a high-entropy claim makes brute
   force infeasible and invalid compares are cheap (they run before any
   hashing), so the limiter only enabled a denial-of-setup.
   """
@@ -210,8 +211,9 @@ def setup(
     try:
       db.commit()
     except IntegrityError:
-      # The database singleton is the cross-process backstop: a racing writer
-      # created the one allowed owner. Treat it as already configured.
+      # Belt-and-suspenders for the unique username constraint. The recheck +
+      # SETUP_LOCK above already prevent a second owner in this single-worker
+      # process; this only trips on a genuine username collision.
       db.rollback()
       raise HTTPException(status_code=400, detail="Already configured.")
     db.refresh(owner)

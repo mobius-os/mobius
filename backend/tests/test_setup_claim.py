@@ -156,22 +156,6 @@ def test_concurrent_setup_yields_one_owner(db):
   assert all(s == 400 for s in results if s != 200), results
   assert _owner_count(db) == 1
 
-
-def test_database_singleton_rejects_second_owner_with_distinct_username(db):
-  """The database, not only the process lock, enforces one owner row."""
-  db.add(models.Owner(username="first", hashed_password="hash"))
-  db.commit()
-  db.add(models.Owner(username="second", hashed_password="hash"))
-  with pytest.raises(IntegrityError):
-    db.commit()
-  db.rollback()
-  assert _owner_count(db) == 1
-
-
-# ---------------------------------------------------------------------------
-# Fail-closed lifecycle
-# ---------------------------------------------------------------------------
-
 def test_fail_closed_when_marker_present_and_no_owner(client, db):
   """A consumed marker with no owner (DB wiped without factory reset) makes
   setup refuse with 409 — even with a valid claim — and creates no owner."""
