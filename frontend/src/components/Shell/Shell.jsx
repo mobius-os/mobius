@@ -74,12 +74,6 @@ import useDesktopSidebar from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
-// The stable synthetic pane id the single-screen SLOT chat mounts under when the
-// slot item is ABSENT from the builder pane tree (two-worlds design: a stable
-// single-world owner rather than assuming paneOf() succeeds). Chosen so it can
-// never collide with a generated `pN` pane id — a FOCUS dispatch on it is a
-// harmless no-op (single mode has no pane focus).
-const SINGLE_SLOT_PANE = '__single__'
 // The builder mode-ENTER / mode-EXIT beat durations now live in modeMachine.js
 // (MODE_ENTER_MS / MODE_EXIT_MS) as the reconcile clock, and completion is keyed
 // to the beat's animationend, not a bare timer — so the old BUILDER_ENTER_MS /
@@ -209,7 +203,7 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, settingsOverlayOpen, openDrawer, closeDrawer,
-    navTo, convertSettingsForModeTransition,
+    navTo, applyModeDestination, convertSettingsForModeTransition,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
@@ -306,6 +300,19 @@ export default function Shell() {
   const isInertLeaving = useCallback((paneId) => (
     exitGeometryActive && modeMachine.paneExitRole(modeState, paneId) === 'leaving'
   ), [exitGeometryActive, modeState])
+  // INV 10 / finding 6: a topology mutation DURING an exit beat (a pane the deal
+  // latched — the settling pane or a leaving pane — gets closed/moved/placed away,
+  // or an undo rewrote the tree) invalidates the latched roles. Cancel the beat so
+  // the exit class + inert state settle at once rather than strand on a target that
+  // no longer exists. This is the ONLY caller of cancelBeat, and it fires precisely
+  // when the animated target could vanish out from under the completion probe.
+  useEffect(() => {
+    const t = modeState.transition
+    if (!t || t.phase !== 'exiting') return
+    const settleGone = t.focusedPaneId != null && !workspace.panes[t.focusedPaneId]
+    const leavingGone = t.leavingPaneIds.some(id => !workspace.panes[id])
+    if (settleGone || leavingGone) mode.cancelBeat()
+  }, [workspace.panes, modeState, mode])
 
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -918,7 +925,7 @@ export default function Shell() {
     // visible tree pane, that pane's mount covers it and no synthetic mount is added.
     const slot = workspace.singleScreen
     if (slot && slot.kind === 'chat' && !mountedChatIds.has(String(slot.id))) {
-      out.push({ paneId: SINGLE_SLOT_PANE, chatId: slot.id })
+      out.push({ paneId: paneModel.SINGLE_SLOT_PANE, chatId: slot.id })
     }
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
   }, [projection, workspace])
@@ -1316,11 +1323,31 @@ export default function Shell() {
     const onKey = (e) => {
       if (!undoKeyPressed(e) || isEditableTarget(document.activeElement)) return
       e.preventDefault()
+      // A mode-restoring undo (single-leaf drop, empty-builder auto-return) routes
+      // through the controller FIRST (finding 7; INV 2/3) so its re-entry/exit deal
+      // fires as one gesture, not a passive sync a render later. undo.restoreViewMode
+      // reverts the snapshot's mode; every other undo carries the current mode
+      // forward (restoredMode === current), so mode.undo is a no-op there.
+      const wsState = workspaceStateRef.current
+      const undoSlot = wsState.undo
+      if (undoSlot) {
+        const restoredMode = undoSlot.restoreViewMode
+          ? undoSlot.ws.viewMode : wsState.ws.viewMode
+        if (restoredMode !== wsState.ws.viewMode) {
+          const focusedPaneId = undoSlot.ws.focusedPaneId
+          mode.undo({
+            restoredMode,
+            focusedPaneId,
+            leavingPaneIds: visibleLeavesRef.current.filter(id => id !== wsState.ws.focusedPaneId),
+            multiPane: multiPaneRef.current,
+          })
+        }
+      }
       dispatchWorkspace({ type: 'UNDO_LAST' })
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatchWorkspace])
+  }, [dispatchWorkspace, mode])
 
   // No per-mutation undo toast: the reducer still mints a fresh undo slot on
   // every workspace mutation (its `toast` label included, for the reducer's own
@@ -2428,13 +2455,12 @@ export default function Shell() {
     if (recordsHistory) navTo('chat', { chatId })
     else {
       // Non-history path: no back-target push, but the workspace still owns what
-      // renders — open the new chat into the focused pane (contract §1.4.10).
+      // renders. Route through the ONE decision point (finding 4; INV 2/4) so a
+      // single-world new chat sets the SLOT — never OPEN_TAB into the hidden pane
+      // tree, which would leave the created chat invisible.
       closeDrawer()
       const ws = workspaceStateRef.current.ws
-      dispatchWorkspace({
-        type: 'OPEN_TAB', paneId: ws.focusedPaneId,
-        tab: tabModel.makeTab('chat', chatId), activate: true,
-      })
+      applyModeDestination({ view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId })
     }
     if (focusComposer) requestComposerFocus(chatId)
   }
@@ -2668,6 +2694,12 @@ export default function Shell() {
   return (
     <div
       ref={shellRootRef}
+      // The live transition phase + epoch, surfaced for observability + tests: the
+      // completion is epoch-keyed in the controller closure (INV 12/15), and this
+      // data-epoch documents which beat the DOM belongs to (a drag preview has no
+      // beat class, so this is the only external signal it is armed). idle otherwise.
+      data-mode-phase={modeState.transition ? modeState.transition.phase : 'idle'}
+      data-mode-epoch={modeState.transition ? modeState.transition.id : undefined}
       // The ONE transient beat class comes from the descriptor (INV 1/4): exactly
       // one of entering/exiting is ever present, and the keyed animationend on
       // this root completes the beat (the controller's listener). No separate
@@ -2971,7 +3003,11 @@ export default function Shell() {
             the phone overflow chip; no content lives here. */}
         {workspaceChromeActive && (
           <WorkspaceChrome
-            inert={modalDrawerOpen}
+            // INV 9 / finding 10: during the latched exit deal the chrome is not
+            // just pointer-transparent (CSS) but fully INERT — keyboard-unfocusable
+            // and aria-hidden — so a tab/divider that already held focus can't
+            // process Enter/arrow input while invisibly dealing away.
+            inert={modalDrawerOpen || exitGeometryActive}
             workspace={workspace}
             projection={projection}
             mode={workspaceMode}
