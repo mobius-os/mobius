@@ -1,10 +1,13 @@
 """Tests for authentication flow."""
 
+from tests.conftest import SETUP_CLAIM
+
 
 def test_setup_creates_owner(client):
   r = client.post("/api/auth/setup", json={
     "username": "admin",
     "password": "securepassword123",
+    "claim": SETUP_CLAIM,
   })
   assert r.status_code == 200
   assert "access_token" in r.json()
@@ -14,10 +17,14 @@ def test_setup_rejects_duplicate(client):
   client.post("/api/auth/setup", json={
     "username": "admin",
     "password": "securepassword123",
+    "claim": SETUP_CLAIM,
   })
+  # Owner already exists — the owner recheck 400s before the claim is even
+  # consulted, so a second setup fails regardless of the claim.
   r = client.post("/api/auth/setup", json={
     "username": "admin2",
     "password": "anotherpassword",
+    "claim": SETUP_CLAIM,
   })
   assert r.status_code == 400
 
@@ -26,6 +33,7 @@ def test_login_success(client):
   client.post("/api/auth/setup", json={
     "username": "admin",
     "password": "securepassword123",
+    "claim": SETUP_CLAIM,
   })
   r = client.post("/api/auth/token", data={
     "username": "admin",
@@ -39,6 +47,7 @@ def test_login_wrong_password(client):
   client.post("/api/auth/setup", json={
     "username": "admin",
     "password": "securepassword123",
+    "claim": SETUP_CLAIM,
   })
   r = client.post("/api/auth/token", data={
     "username": "admin",
@@ -235,7 +244,11 @@ def test_setup_allows_curl_style_request(client):
   """Setup with no Sec-Fetch-Site header (e.g. curl) must still work."""
   r = client.post(
     "/api/auth/setup",
-    json={"username": "admin", "password": "securepassword123"},
+    json={
+      "username": "admin",
+      "password": "securepassword123",
+      "claim": SETUP_CLAIM,
+    },
   )
   assert r.status_code == 200
   assert "access_token" in r.json()

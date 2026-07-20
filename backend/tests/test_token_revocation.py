@@ -10,6 +10,7 @@ routes/admin.py:sign_out_everywhere.
 from datetime import timedelta
 
 from app import auth, models
+from tests.conftest import SETUP_CLAIM
 
 
 def _app_token(client, owner_token):
@@ -57,6 +58,7 @@ def test_fresh_login_after_bump_works(client):
   new epoch that validates."""
   client.post("/api/auth/setup", json={
     "username": "test", "password": "testpassword123",
+    "claim": SETUP_CLAIM,
   })
   r = client.post("/api/auth/token", data={
     "username": "test", "password": "testpassword123",
@@ -186,6 +188,7 @@ def test_service_token_carries_epoch_and_is_revocable(client):
   unrevocable token would be the biggest hole in the revocation story."""
   client.post("/api/auth/setup", json={
     "username": "test", "password": "testpassword123",
+    "claim": SETUP_CLAIM,
   })
   r = client.post("/api/auth/token", data={
     "username": "test", "password": "testpassword123",

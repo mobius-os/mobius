@@ -12,6 +12,14 @@ os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
+# First-boot claim gate (app.setup_claim): the suite runs as the dedicated
+# test runtime with a fixed, known claim preset. MOBIUS_TEST_RUNTIME=1 relaxes
+# the preset-strength check so this short, base64url value is accepted; every
+# setup POST in the suite presents it (see the `owner_token`/`claim_code`
+# fixtures). Set before importing app modules so app.setup_claim reads it.
+SETUP_CLAIM = "mobius-test-setup-claim"
+os.environ["MOBIUS_TEST_RUNTIME"] = "1"
+os.environ["MOBIUS_SETUP_CLAIM"] = SETUP_CLAIM
 
 # Ensure the baked static dir exists with an index.html carrying the
 # __mobius-theme__ slot BEFORE importing app.main — main.py registers the SPA
@@ -180,6 +188,22 @@ def fresh_db():
   for _sub in ("apps", "app-secrets", "shared", "compiled"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
+  # First-boot claim gate: recreate a fresh claim for each test. A prior test's
+  # successful setup consumed the claim (wrote the .setup-consumed marker +
+  # .recovery-owner.json seed and deleted the token). Both persist across the
+  # module-level DATA_DIR, so without clearing them the next test's owner-less
+  # DB would read as fail-closed and every setup would 409. Drop the claim,
+  # marker, and seed, then republish the fixed preset via the same helper the
+  # app uses at boot.
+  from app import setup_claim as _setup_claim
+  _setup_claim._reset_for_tests(_data_dir)
+  for _dot in (".recovery-owner.json",):
+    try:
+      _os.unlink(_os.path.join(_data_dir, _dot))
+    except OSError:
+      pass
+  _setup_claim.ensure_claim(_data_dir, owner_exists=False)
+
   yield
   from app import chat_writer as _cw
   _cw.stop_writer(timeout=5)
@@ -193,6 +217,14 @@ def client():
 
 
 @pytest.fixture
+def claim_code():
+  """The fixed first-boot claim the suite presets (valid because
+  MOBIUS_TEST_RUNTIME=1 relaxes the entropy check). Tests that POST setup
+  present it."""
+  return SETUP_CLAIM
+
+
+@pytest.fixture
 def owner_token(client):
   """Creates an owner account (username 'test') and returns the JWT.
 
@@ -203,6 +235,7 @@ def owner_token(client):
   r = client.post("/api/auth/setup", json={
     "username": "test",
     "password": "testpassword123",
+    "claim": SETUP_CLAIM,
   })
   return r.json()["access_token"]
 
