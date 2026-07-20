@@ -479,6 +479,50 @@ test('a batch of built-app placements folds identically to sequential delivery (
   assert.deepEqual(keysOf(appPane), ['app:41', 'app:42'])
 })
 
+// ── Two-worlds: single-mode agent placement (finding F4) ────────────────────
+//
+// In the SINGLE world the only painted surface is the slot. A FOREGROUND agent
+// open must set the slot (so the user SEES it), never mutate the hidden pane tree
+// where it would be invisible; BACKGROUND work still parks in the builder tree.
+
+test('single mode + FOREGROUND: sets the slot, leaves the pane tree untouched', () => {
+  const ws = { ...twoPaneWs([CHAT('a')], [APP(42)]), viewMode: 'single' }
+  const out = resolveWorkspaceRequest(ws, req(APP(9), null, PLACE_WITH_FOCUS, ACTIVATE_FOREGROUND), env(ws))
+  assert.deepEqual(out.singleScreen, { kind: 'app', id: '9' }, 'the foregrounded item becomes the slot')
+  assert.equal(out.panes, ws.panes, 'the builder pane tree is byte-identical (no OPEN_TAB)')
+  assert.equal(paneModel.paneOf(out, 'app:9'), null, 'the item is NOT added to the tree')
+})
+
+test('single mode + FOREGROUND for a tree item still sets the slot (no hidden focus)', () => {
+  // App 42 is already open in the builder tree. A single-mode foreground open must
+  // set the SLOT, not focus the hidden tree pane (which single mode never paints).
+  const ws = { ...twoPaneWs([CHAT('a')], [APP(42)]), viewMode: 'single' }
+  const out = resolveWorkspaceRequest(ws, req(APP(42), null, PLACE_WITH_FOCUS, ACTIVATE_FOREGROUND), env(ws))
+  assert.deepEqual(out.singleScreen, { kind: 'app', id: '42' })
+  assert.equal(out.panes, ws.panes, 'no tree focus/activate mutation')
+})
+
+test('single mode + FOREGROUND chat: the chat becomes the slot', () => {
+  const ws = { ...twoPaneWs([CHAT('a')], [APP(42)]), viewMode: 'single' }
+  const out = resolveWorkspaceRequest(ws, req(CHAT('z'), null, PLACE_WITH_FOCUS, ACTIVATE_FOREGROUND), env(ws))
+  assert.deepEqual(out.singleScreen, { kind: 'chat', id: 'z' })
+  assert.equal(out.panes, ws.panes)
+})
+
+test('single mode + BACKGROUND: parks in the builder tree (workshop), slot untouched', () => {
+  const ws = { ...twoPaneWs([CHAT('a')], [APP(42)]), viewMode: 'single', singleScreen: { kind: 'app', id: '42' } }
+  const out = resolveWorkspaceRequest(ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_IN_BACKGROUND), env(ws))
+  assert.ok(paneModel.paneOf(out, 'app:9'), 'a background open still lands in the tree')
+  assert.deepEqual(out.singleScreen, { kind: 'app', id: '42' }, 'the slot is unchanged by background work')
+})
+
+test('builder mode + FOREGROUND: unchanged tree placement (no slot write)', () => {
+  const ws = twoPaneWs([CHAT('a')], [APP(42)]) // viewMode panes
+  const out = resolveWorkspaceRequest(ws, req(APP(9), null, PLACE_WITH_FOCUS, ACTIVATE_FOREGROUND), env(ws))
+  assert.ok(paneModel.paneOf(out, 'app:9'), 'builder foreground opens the pane tab as before')
+  assert.equal('singleScreen' in out, false, 'no slot write in builder')
+})
+
 // ── the durable-list reconnect wiring is still in place ─────────────────────
 
 test('shell reconciles the durable app list whenever the system stream reconnects', () => {

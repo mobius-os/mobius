@@ -252,6 +252,18 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   if (!isOpenItemRequest(request)) return ws
   const { item, source, placement, activation } = request
   const foreground = activation === ACTIVATE_FOREGROUND
+  // Two-worlds (finding F4): in the SINGLE world the only visible surface is the
+  // slot, so a FOREGROUND agent open must SET THE SLOT — mutating the hidden pane
+  // tree (as every branch below does) would leave the foregrounded item invisible.
+  // This mirrors applyModeDestination's single branch (the one owning decision
+  // point for USER nav; the agent path funnels here) and honors the invariant that
+  // single-mode opens never touch the pane tree. BACKGROUND work still parks in the
+  // builder tree plus its attention dot — the builder world is the workshop. The
+  // world is clamped to single when the splits kill switch is off (INV 16).
+  const world = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
+  if (foreground && world === 'single') {
+    return paneModel.setSingleScreen(ws, { kind: item.kind, id: String(item.id) })
+  }
   const itemKey = tabKey(item)
   const mode = env.mode || 'wide'
 
