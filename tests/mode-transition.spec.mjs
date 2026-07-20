@@ -18,7 +18,8 @@
  *
  * Runs against the deployed app with agent routes intercepted — no tokens.
  *
- * Run: MOBIUS_URL=http://localhost:8053 npx playwright test tests/mode-transition.spec.mjs --project=tests
+ * Run: MOBIUS_URL=http://localhost:8053 scripts/playwright-local.sh
+ *   --allow-local-e2e tests/mode-transition.spec.mjs --project=tests
  */
 import { test, expect } from '@playwright/test'
 
