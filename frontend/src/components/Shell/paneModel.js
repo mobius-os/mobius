@@ -103,6 +103,13 @@ export const MIN_PANE_H = 200
 // still finds its tabs.
 export const STORAGE_KEY = 'mobius-workspace'
 
+// The stable synthetic pane id the single-world SLOT (chat or app) mounts + owns
+// its history under when the item is ABSENT from the builder pane tree (two-worlds
+// design: a stable single-world owner rather than assuming paneOf() succeeds). It
+// can never collide with a generated `pN` pane id, so a FOCUS/paneOf on it is a
+// harmless miss. Shared by Shell (mount owner) and useNavigation (history owner).
+export const SINGLE_SLOT_PANE = '__single__'
+
 // A layout node is either a leaf (a pane-id string) or a split object.
 function isSplit(node) {
   return node != null && typeof node === 'object'

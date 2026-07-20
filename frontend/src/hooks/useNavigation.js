@@ -232,7 +232,16 @@ export default function useNavigation({
   // the CURRENT world actually shows, and a single-world reload restores the slot,
   // not the builder focus.
   const contentRoute = paneModel.activeContentRoute(workspace)
-  const activeView = settingsOpen ? 'settings' : contentRoute.view
+  // The single-world takeover overlay counts only where it can PAINT — single mode
+  // (or flag-off). In builder it is SUSPENDED (deriveContentVisibility gates it
+  // off), so activeView reflects the tree, not the suspended flag — else a builder
+  // session would report activeView:'settings' while painting the tree. Two-worlds
+  // (finding 2): Settings is context-independent — a single overlay + a builder
+  // tab, each shown only in its own world, NEVER destructively converted between
+  // them (INV 6/7).
+  const overlayShowing = settingsOpen
+    && (workspace.viewMode === 'single' || !paneModel.BUILDER_SETTINGS_ENABLED)
+  const activeView = overlayShowing ? 'settings' : contentRoute.view
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
 
@@ -340,15 +349,29 @@ export default function useNavigation({
   // pane's active tab, and that pane is in the renderer's committed visible set
   // (design §5, contract §3.1.1). NOT "mounted in the cache" and NOT merely
   // "contained by a pane".
-  const isVisibleApp = useCallback((ws, appId) => {
-    if (settingsOpenRef.current) return false
-    if (appId == null) return false
+  // The pane that OWNS an app's in-app Back history + mount: its real visible tree
+  // pane, or the SYNTHETIC single-world owner when the app is the current slot app
+  // painted full-bleed in single mode but absent from the tree (finding 8; INV 4).
+  // Returns null when the app is not currently painted anywhere.
+  const appOwnerPaneId = useCallback((ws, appId) => {
+    if (appId == null || settingsOpenRef.current) return null
     const key = tabModel.tabKey(tabModel.makeTab('app', appId))
     const pane = paneModel.paneOf(ws, key)
-    return !!pane
-      && pane.activeTabKey === key
-      && visiblePaneIdsRef.current.has(pane.id)
+    if (pane && pane.activeTabKey === key && visiblePaneIdsRef.current.has(pane.id)) {
+      return pane.id
+    }
+    // Single-world slot app: it renders + pins even though paneOf() misses it, so
+    // it must still be able to install history under a stable synthetic owner.
+    const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
+    const slot = ws.singleScreen
+    if (mode === 'single' && slot && slot.kind === 'app' && String(slot.id) === String(appId)) {
+      return paneModel.SINGLE_SLOT_PANE
+    }
+    return null
   }, [])
+  const isVisibleApp = useCallback(
+    (ws, appId) => appOwnerPaneId(ws, appId) != null, [appOwnerPaneId],
+  )
 
   // Register a new live app entry: record its owner + increment its count. Both
   // structures, exactly once (contract §3.1.3).
@@ -519,14 +542,16 @@ export default function useNavigation({
   const appNavPush = useCallback((appId, navMeta = {}) => {
     if (appId == null) return false
     const ws = workspaceStateRef.current.ws
-    if (!isVisibleApp(ws, appId)) return false
-    const key = tabModel.tabKey(tabModel.makeTab('app', appId))
-    const pane = paneModel.paneOf(ws, key)
-    if (!pane) return false
-    const ownerKey = ownerKeyOf(pane.id, appId)
+    const ownerPaneId = appOwnerPaneId(ws, appId)
+    if (ownerPaneId == null) return false
+    const ownerKey = ownerKeyOf(ownerPaneId, appId)
     if ((appSentinelCountsRef.current.get(ownerKey) || 0) >= MAX_APP_SENTINELS) return false
     // Focus the visible owner pane (design §5: an app gesture focuses its pane).
-    dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
+    // The SYNTHETIC single-world owner has no tree pane to focus — single mode has
+    // no pane focus — so skip the FOCUS for it (finding 8).
+    if (ownerPaneId !== paneModel.SINGLE_SLOT_PANE) {
+      dispatchWorkspace({ type: 'FOCUS', paneId: ownerPaneId })
+    }
     const appNav = {
       appId: String(appId),
       requestId: typeof navMeta.requestId === 'string' ? navMeta.requestId : null,
@@ -537,13 +562,13 @@ export default function useNavigation({
     try {
       state = pushShellEntry(
         'app',
-        navRoute('canvas', null, Number(appId), pane.id),
+        navRoute('canvas', null, Number(appId), ownerPaneId),
         appNav,
       )
     } catch { return false }
-    addAppEntry(navEntryId(state), pane.id, appId, appNav)
+    addAppEntry(navEntryId(state), ownerPaneId, appId, appNav)
     return true
-  }, [addAppEntry, dispatchWorkspace, isVisibleApp, pushShellEntry, workspaceStateRef])
+  }, [addAppEntry, appOwnerPaneId, dispatchWorkspace, pushShellEntry, workspaceStateRef])
 
   const appNavForwardResult = useCallback((appId, requestId, restored) => {
     if (typeof requestId !== 'string') return
@@ -747,10 +772,14 @@ export default function useNavigation({
       return
     }
     const ws = workspaceStateRef.current.ws
+    // Kill-switch clamp BEFORE the world branch (finding 9; INV 16): with splits
+    // disabled the presentation is single, so a chat/app nav must set the SLOT,
+    // never OPEN_TAB into the hidden pane tree.
+    const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
     // A chat/app destination always leaves any Settings takeover overlay.
     setSettingsOpen(false)
     settingsOpenRef.current = false
-    if (ws.viewMode === 'single') {
+    if (mode === 'single') {
       const item = route.view === 'canvas'
         ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
         : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null)
@@ -766,45 +795,18 @@ export default function useNavigation({
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
-  // Convert the Settings surface across a view-mode flip WITHOUT adding a history
-  // entry (design: mode-transition conversion). Called by the shell's toggle just
-  // before it dispatches the pure SET_VIEW_MODE flip, reading the CURRENT mode to
-  // derive the destination:
-  //   - entering builder (→ 'panes') while the takeover overlay is up: convert it
-  //     to the Settings tab in the focused pane (no overlay exists in builder);
-  //   - entering single (→ 'single') while Settings is a tab: remove that
-  //     builder-only tab, and if it was the visible (focused-active) surface keep
-  //     Settings on screen as the takeover overlay.
-  // Otherwise the header toggle could strand a builder session behind the overlay
-  // (or leave a meaningless paned Settings under single mode). Flag-gated: with
-  // the builder flag off there is no Settings tab to convert either way.
-  const convertSettingsForModeTransition = useCallback(() => {
-    if (!paneModel.BUILDER_SETTINGS_ENABLED) return
-    const ws = workspaceStateRef.current.ws
-    const enteringBuilder = ws.viewMode !== 'panes'
-    if (enteringBuilder) {
-      if (settingsOpenRef.current) {
-        setSettingsOpen(false)
-        settingsOpenRef.current = false
-        dispatchWorkspace({
-          type: 'OPEN_TAB', paneId: ws.focusedPaneId, tab: tabModel.settingsTab(), activate: true,
-        })
-      }
-      return
-    }
-    // Entering single mode.
-    if (!paneModel.paneOf(ws, tabModel.SETTINGS_TAB_KEY)) return
-    const wasVisible = ws.panes[ws.focusedPaneId]?.activeTabKey === tabModel.SETTINGS_TAB_KEY
-    // reason:'mode-convert' removes the tab, no toast, and PRESERVES the existing
-    // undo slot (review §10): the Settings tab is a regenerable mode artifact (the
-    // flip back re-creates it), orthogonal to any pending tab-move the user may
-    // still want to undo — so unlike reason:'deleted' it must not clear the slot.
-    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.SETTINGS_TAB_KEY, reason: 'mode-convert' })
-    if (wasVisible) {
-      setSettingsOpen(true)
-      settingsOpenRef.current = true
-    }
-  }, [dispatchWorkspace, workspaceStateRef])
+  // Settings is context-independent across a world toggle (two-worlds design,
+  // finding 2 / INV 6-7): the SINGLE world owns the takeover overlay (`settingsOpen`,
+  // painted only in single mode), the BUILDER world owns its own Settings TAB in the
+  // pane tree. Toggling worlds changes which is VISIBLE — it must NOT destructively
+  // convert the overlay into a tab or CLOSE a builder Settings tab. The old
+  // conversion permanently destroyed an unfocused Settings-only pane on exit (it
+  // closed the tab globally, the pane collapsed, and re-entry could not reconstruct
+  // it) and could restore a `single + Settings-tab` snapshot; leaving each world's
+  // Settings state intact removes both. A stray Settings tab in single mode is
+  // simply hidden (single paints the slot), so it is no longer a forbidden state.
+  // Kept as a no-op the toggle can still call, so the call site stays uniform.
+  const convertSettingsForModeTransition = useCallback(() => {}, [])
 
   function navTo(view, opts = {}) {
     // App-sentinels from other apps stay in browser history — each is still a
@@ -968,10 +970,27 @@ export default function useNavigation({
           : { type: 'OPEN_TAB', paneId: bootPaneId, tab, activate: true })
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
+      // A deep link routes through the ONE decision point (finding 3; INV 2/4): in
+      // an initialized SINGLE world it sets the slot (the requested item actually
+      // appears) rather than OPEN_TAB-ing the hidden pane tree. Builder (and the
+      // no-valid-blob RESET_FLAT path) keep openBootTab.
+      const bootDeepLink = (route, tab) => {
+        const mode = paneModel.WORKSPACE_SPLITS_ENABLED
+          ? workspaceStateRef.current.ws.viewMode : 'single'
+        if (mode === 'single') applyModeDestination(route)
+        else openBootTab(tab)
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
+      }
       if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {
-        openBootTab(tabModel.makeTab('app', deepLink.appId))
+        bootDeepLink(
+          { view: 'canvas', appId: deepLink.appId, chatId: null, paneId: bootPaneId },
+          tabModel.makeTab('app', deepLink.appId),
+        )
       } else if (deepLink?.view === 'chat' && deepLink.chatId) {
-        openBootTab(tabModel.makeTab('chat', deepLink.chatId))
+        bootDeepLink(
+          { view: 'chat', chatId: deepLink.chatId, appId: null, paneId: bootPaneId },
+          tabModel.makeTab('chat', deepLink.chatId),
+        )
       } else if (!blobValid && initialNav.view === 'canvas' && initialNav.appId != null) {
         // No valid blob: the flat-tab seed is only the tab STRIP; the legacy
         // triple (moebius_active_view/_app/_chat) names the ACTIVE tab and must
@@ -1488,10 +1507,11 @@ export default function useNavigation({
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings
     // never hides sibling panes (design: the named risk, made structural).
-    settingsOverlayOpen: settingsOpen,
+    settingsOverlayOpen: overlayShowing,
     openDrawer,
     closeDrawer,
     navTo,
+    applyModeDestination,
     convertSettingsForModeTransition,
     backFiredRef,
     drawerPushedRef,
