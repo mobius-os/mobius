@@ -69,6 +69,21 @@ test('web tool activity uses the assistant reading width', () => {
     'tool activity should grow to the assistant reading measure on web')
 })
 
+test('message sources stay inside the assistant row on narrow screens', () => {
+  const css = stripComments(chatCss)
+  const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
+  const listRule = css.match(/\.chat__sources-list\s*\{[^}]*\}/)?.[0] || ''
+
+  assert.match(sourcesRule, /width:\s*100%/,
+    'align-items:flex-start otherwise lets the sources row grow to max-content')
+  assert.match(sourcesRule, /max-width:\s*100%/,
+    'the source section must not exceed the assistant message')
+  assert.match(listRule, /min-width:\s*0/,
+    'the flex list must be allowed to shrink long source titles')
+  assert.match(listRule, /max-width:\s*100%/,
+    'the source list must stay within its section')
+})
+
 test('primary chat actions leave a brief empty beat before replacement', () => {
   const css = stripComments(chatCss)
   const actionRule = css.match(/\.chat__send,\s*\.chat__steer,\s*\.chat__stop\s*\{[^}]*\}/)?.[0] || ''

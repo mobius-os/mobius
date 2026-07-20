@@ -833,6 +833,7 @@ def dispatch_sdk_message(
             "type": "tool_start",
             "tool": "WebSearch",
             "input": _server_web_search_input(block.input),
+            "tool_use_id": block.id,
           })
           continue
         _emit_unknown(
@@ -847,8 +848,15 @@ def dispatch_sdk_message(
         ):
           sources = normalize_tool_sources(block.content)
           if sources:
-            bc.publish({"type": "tool_sources", "sources": sources})
-          bc.publish({"type": "tool_end"})
+            bc.publish({
+              "type": "tool_sources",
+              "sources": sources,
+              "tool_use_id": block.tool_use_id,
+            })
+          bc.publish({
+            "type": "tool_end",
+            "tool_use_id": block.tool_use_id,
+          })
           continue
         _emit_unknown(
           bc, f"assistant_block:{type(block).__name__}", block,

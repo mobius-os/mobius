@@ -183,10 +183,14 @@ export function attachToolSources(prev, sources, toolUseId) {
   let idx = -1
   if (toolUseId) {
     idx = prev.findLastIndex(
-      it => it.type === 'tool' && it.tool_use_id === toolUseId,
+      it => it.type === 'tool'
+        && it.tool === 'WebSearch'
+        && it.tool_use_id === toolUseId,
     )
-  }
-  if (idx < 0) {
+    // An explicit id is authoritative: never misattribute its sources to a
+    // different search merely because that search is the trailing one.
+    if (idx < 0) return prev
+  } else {
     idx = prev.findLastIndex(it => it.type === 'tool' && it.tool === 'WebSearch')
   }
   if (idx < 0) return prev

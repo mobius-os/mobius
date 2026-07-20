@@ -860,26 +860,45 @@
   word-break: break-all;
 }
 
-.chat__tool-source-chip {
+.chat__source-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  min-height: 28px;
   max-width: 100%;
-  padding: 2px 7px;
+  padding: 4px 8px;
   border-radius: 8px;
   color: var(--text); /* CONTRACT: readable source text on opaque fill */
-  background: var(--surface); /* CONTRACT: opaque chip fill inside tool */
+  background: var(--surface); /* CONTRACT: opaque chip fill */
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
   text-decoration: none;
 }
 
-.chat__tool-source-title {
+.chat__source-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) {
+  .chat__source-chip:hover {
+    background: var(--surface2);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
+  }
+}
+
+.chat__source-chip:active {
+  background: var(--accent-dim);
+}
+
+.chat__source-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat__tool-source-host {
+.chat__source-host {
   flex-shrink: 0;
   color: var(--muted); /* CONTRACT: lower emphasis source domain */
 }
@@ -891,6 +910,8 @@
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
+  width: 100%;
+  max-width: 100%;
   gap: 6px 8px;
   padding: 2px 32px 2px 8px;
 }
@@ -902,12 +923,20 @@
   font-weight: 600;
 }
 
-.chat__sources-chips {
+.chat__sources-list {
   display: flex;
   min-width: 0;
+  max-width: 100%;
   flex: 1 1 240px;
   flex-wrap: wrap;
   gap: 5px;
+  list-style: none;
+}
+
+.chat__source-item {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Narrow viewports stack the label above the chips so a long source title
@@ -917,6 +946,9 @@
   .chat__sources-label { display: block; padding: 0 0 6px; }
 }
 
+@media (pointer: coarse) {
+  .chat__source-chip { min-height: 44px; }
+}
 .chat__tool-output-more {
   display: block;
   white-space: pre-wrap;

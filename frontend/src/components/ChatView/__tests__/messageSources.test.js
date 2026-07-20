@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { messageSources, sourceHost, sourceLabel } from '../messageSources.js'
+import {
+  messageSources,
+  safeSourceUrl,
+  sourceHost,
+  sourceLabel,
+} from '../messageSources.js'
 
 const tool = sources => ({ type: 'tool', tool: 'WebSearch', sources })
 
@@ -37,9 +42,20 @@ test('malformed rows never reach an href', () => {
     { title: 'null url', url: null },
     { title: 'object url', url: { evil: true } },
     { title: 'empty', url: '' },
+    { title: 'no host', url: 'https://' },
+    { title: 'bad host', url: 'https://exa mple.com/x' },
     { title: 'good', url: 'https://ok.example/z' },
   ])]
   assert.deepEqual(messageSources(blocks).map(s => s.title), ['good'])
+})
+
+test('valid URLs are trimmed before rendering and deduping', () => {
+  const sources = messageSources([tool([
+    { title: 'trimmed', url: '  https://ok.example/z  ' },
+    { title: 'duplicate', url: 'https://ok.example/z' },
+  ])])
+  assert.deepEqual(sources, [{ title: 'trimmed', url: 'https://ok.example/z' }])
+  assert.equal(safeSourceUrl('  HTTPS://ok.example/z  '), 'HTTPS://ok.example/z')
 })
 
 // The chips now render unconditionally at the end of every answer rather than

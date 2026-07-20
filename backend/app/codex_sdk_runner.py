@@ -407,7 +407,13 @@ def _reasoning_summary_setting(sdk: dict[str, Any]) -> Any | None:
 
 
 def _web_search_sources(item: Any) -> list[dict[str, str]]:
-  """Extract source URLs exposed by a Codex web-search item, if any."""
+  """Extract source URLs exposed by a Codex web-search item, if any.
+
+  The pinned SDK's public item model carries the URL on ``openPage`` and
+  ``findInPage`` actions, but not on a plain search action. Keep the optional
+  result-field scan for forward compatibility with SDKs that expose the app
+  server's result metadata directly.
+  """
   collected: list[dict[str, str]] = []
   seen: set[str] = set()
 
