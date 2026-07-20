@@ -24,18 +24,11 @@ export function coachmarkDismissed(storage) {
   }
 }
 
-// Insert the 'workspace' walkthrough step immediately after 'customize' (design
-// §7.1), but only when the splits flag is on — teaching a gesture the flag-off
-// build cannot perform would mislead. Returns a NEW array; the input is
-// untouched. A missing 'customize' anchor leaves the steps unchanged.
-export function insertWorkspaceStep(steps, enabled) {
-  if (!enabled) return steps
-  const at = steps.indexOf('customize')
-  if (at < 0 || steps.includes('workspace')) return steps
-  const out = steps.slice()
-  out.splice(at + 1, 0, 'workspace')
-  return out
-}
+// The workspace gesture is taught by the first-use coachmark above, which arms
+// at the moment the owner actually holds two tabs. A walkthrough step for it
+// used to exist as well; it was retired with the shortened walkthrough rather
+// than re-anchored, so there is one teaching path at the right moment instead
+// of two at different ones.
 
 // Cmd/Ctrl+Z (no Shift, no Alt) — the workspace-undo chord (design §3.5). Shift
 // is excluded so it never steals redo.

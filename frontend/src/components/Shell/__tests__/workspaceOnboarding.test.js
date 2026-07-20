@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  HINT_KEY, coachmarkArmed, coachmarkDismissed, insertWorkspaceStep,
+  HINT_KEY, coachmarkArmed, coachmarkDismissed,
   undoKeyPressed, isEditableTarget,
 } from '../workspaceOnboarding.js'
 
@@ -18,32 +18,6 @@ test('coachmarkDismissed reads the flag and treats broken storage as dismissed',
   assert.equal(coachmarkDismissed({ getItem: (k) => (k === HINT_KEY ? '1' : null) }), true)
   assert.equal(coachmarkDismissed({ getItem: () => null }), false)
   assert.equal(coachmarkDismissed({ getItem: () => { throw new Error('blocked') } }), true)
-})
-
-// ── walkthrough step insertion (design §7.1) ─────────────────────────────────
-
-test('insertWorkspaceStep places workspace right after customize when enabled', () => {
-  assert.deepEqual(
-    insertWorkspaceStep(['intro', 'customize', 'install', 'safety-net', 'first-chat'], true),
-    ['intro', 'customize', 'workspace', 'install', 'safety-net', 'first-chat'],
-  )
-  assert.deepEqual(
-    insertWorkspaceStep(['intro', 'customize', 'safety-net', 'first-chat'], true),
-    ['intro', 'customize', 'workspace', 'safety-net', 'first-chat'],
-  )
-})
-
-test('insertWorkspaceStep is a no-op when the flag is off', () => {
-  const steps = ['intro', 'customize', 'first-chat']
-  assert.equal(insertWorkspaceStep(steps, false), steps) // same reference, untouched
-})
-
-test('insertWorkspaceStep never double-inserts or mutates the input', () => {
-  const steps = ['intro', 'customize', 'workspace', 'first-chat']
-  assert.equal(insertWorkspaceStep(steps, true), steps) // already present → unchanged
-  const fresh = ['intro', 'customize', 'first-chat']
-  insertWorkspaceStep(fresh, true)
-  assert.deepEqual(fresh, ['intro', 'customize', 'first-chat']) // input not mutated
 })
 
 // ── undo chord (design §3.5) ─────────────────────────────────────────────────

@@ -133,8 +133,10 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 
 test('the first-run walkthrough stays short and action-first', () => {
   assert.match(walkthrough, /const STEPS = \['intro', 'home', 'first-chat'\]/)
-  assert.doesNotMatch(walkthrough, /insertWorkspaceStep/)
   assert.doesNotMatch(walkthrough, /step === 'workspace'/)
+  // The recovery net is named next to the capability it backstops; a future
+  // trim of the walkthrough must not silently drop it.
+  assert.match(walkthrough, /\/recover runs outside Möbius/)
   assert.match(walkthrough, /Meet my Möbius/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
 })

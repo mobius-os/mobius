@@ -96,6 +96,14 @@
   margin: 0;
 }
 
+/* A secondary note under the step's own point -- quieter, never competing with
+   it for attention. */
+.wt__body--aside {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted, #a1a1aa);
+}
+
 .wt__sigil {
   position: relative;
   width: 82px;

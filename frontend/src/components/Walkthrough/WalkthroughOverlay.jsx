@@ -116,6 +116,10 @@ export default function WalkthroughOverlay({ onDone }) {
               Möbius can build apps, install community work, and change the platform
               around them. The Contribute app is where improvements can flow back.
             </p>
+            <p className="wt__body wt__body--aside">
+              Changing the platform can break it. /recover runs outside Möbius and
+              can put it back.
+            </p>
             <div className="wt__actions">
               <button type="button" className="wt__btn wt__btn--ghost" onClick={skip}>
                 Skip
