@@ -203,7 +203,7 @@ export default function Shell() {
     activeView,
     activeAppId,
     activeChatId,
-    drawerOpen, settingsOverlayOpen, openDrawer, closeDrawer,
+    drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     navTo, applyModeDestination, convertSettingsForModeTransition,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -248,12 +248,12 @@ export default function Shell() {
     }
   }, [navigationOpen, persistentDrawer])
 
-  // The Settings TAKEOVER overlay (single mode / flag off) suppresses the chrome
-  // and positioned rects — panes stay mounted but hidden. In builder mode Settings
-  // is a pane TAB and this is FALSE, so sibling panes keep painting: the render
-  // never uses `activeView === 'settings'` for pane suppression (that would hide
-  // every pane behind a builder Settings tab — the named risk). `settingsOverlayOpen`
-  // comes straight from the nav adapter's overlay flag.
+  // The COMMITTED-mode-gated overlay flag from the nav adapter — the DERIVATION
+  // INPUT to deriveContentVisibility only (finding F3). It counts the takeover
+  // wherever the COMMITTED world is single; deriveContentVisibility re-gates it by
+  // the EFFECTIVE mode and returns `settingsOverlay`, which every PAINT gate reads.
+  // The render never uses `activeView === 'settings'` for pane suppression (that
+  // would hide every pane behind a builder Settings tab — the named risk).
   const settingsActive = settingsOverlayOpen
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
   // exist). It drives the logo's 180deg twist — the persistent mode indicator,
@@ -357,6 +357,13 @@ export default function Shell() {
     [workspace, projection, settingsActive, immersiveActive, immersiveAppId, effectiveViewMode],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
+  // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
+  // takeover actually PAINTS — false in builder AND during a single-mode drag
+  // preview / exit beat (effectiveViewMode 'panes'). Every PAINT gate below reads
+  // THIS, not the committed-gated `settingsActive` (which is only the derivation
+  // INPUT now), so those transient windows paint the tiled world with Settings
+  // suspended exactly as the derived flags assume. MOUNT keys off `settingsOpenRaw`.
+  const settingsOverlay = contentVisibility.settingsOverlay
   const workspaceChromeActive = contentVisibility.chromeActive
   // Current multiPane, read in the toggle handler (a stable callback) to decide
   // whether a builder exit earns the reverse card-deal (item 1) — a single leaf
@@ -877,21 +884,27 @@ export default function Shell() {
   // preserves component identity across the tab<->overlay mode conversion, so the
   // scroll position and transient Settings state survive the flip.
   const SETTINGS_KEY = tabModel.SETTINGS_TAB_KEY
-  // Visible as a builder TAB: the overlay is closed AND some visible pane has the
-  // Settings tab active. (Blind to a BACKGROUND Settings tab — not painted.)
-  const settingsVisibleAsTab = !settingsActive
+  // Visible as a builder TAB: the takeover is not PAINTING AND some visible pane has
+  // the Settings tab active. Gated on the effective `settingsOverlay` (finding F3),
+  // so a single-mode drag preview / exit beat can paint a stray Settings tab as a
+  // pane. (Blind to a BACKGROUND Settings tab — not painted.)
+  const settingsVisibleAsTab = !settingsOverlay
     && projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === SETTINGS_KEY)
-  // Mounted whenever Settings is on screen in either form; stays mounted across
-  // the conversion so SettingsView is not torn down mid-flip.
-  const settingsMounted = settingsActive || settingsVisibleAsTab
+  // MOUNT (finding F3): keyed off the RAW suspended overlay intent, NOT the
+  // committed/effective PAINT flag, so SettingsView stays mounted-hidden across a
+  // world flip (mount-identity rule, exactly like the slot chat) and its transient
+  // state survives — the old `settingsActive` gate unmounted it on a builder flip
+  // with no Settings tab.
+  const settingsMounted = settingsOpenRaw || settingsVisibleAsTab
   // Positioned into its pane's content rect only in the tiled multi-pane render.
   const settingsPaned = (workspaceChromeActive && settingsVisibleAsTab)
     ? renderTabRects.get(SETTINGS_KEY)
     : null
-  // Full-bleed for the takeover overlay, and for single-pane builder where the
-  // Settings tab is the sole full-bleed surface (fullBleedKey === settings key).
+  // Full-bleed for the PAINTING takeover overlay (effective-gated, finding F3), and
+  // for single-pane builder where the Settings tab is the sole full-bleed surface
+  // (fullBleedKey === settings key).
   const settingsFullBleed = !settingsPaned
-    && (settingsActive || (settingsVisibleAsTab && SETTINGS_KEY === fullBleedKey))
+    && (settingsOverlay || (settingsVisibleAsTab && SETTINGS_KEY === fullBleedKey))
   // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -904,14 +917,14 @@ export default function Shell() {
   // tests (design §2 M13, finding D-iii).
   const visibleChatIds = useMemo(() => {
     const set = new Set()
-    if (settingsActive) return set
+    if (settingsOverlay) return set
     for (const paneId of projection.visibleLeaves) {
       const pane = workspace.panes[paneId]
       const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
       if (active && active.kind === 'chat') set.add(String(active.id))
     }
     return set
-  }, [settingsActive, workspace, projection])
+  }, [settingsOverlay, workspace, projection])
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
   // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
@@ -949,7 +962,7 @@ export default function Shell() {
   // without a remount (two-worlds design).
   const visibleChatKeys = useMemo(() => {
     const set = new Set()
-    if (settingsActive) return set
+    if (settingsOverlay) return set
     if (single) {
       if (fullBleedKey && fullBleedKey.startsWith('chat:')) set.add(fullBleedKey)
       return set
@@ -960,7 +973,7 @@ export default function Shell() {
       if (active && active.kind === 'chat') set.add(`chat:${active.id}`)
     }
     return set
-  }, [single, settingsActive, fullBleedKey, projection, workspace])
+  }, [single, settingsOverlay, fullBleedKey, projection, workspace])
 
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
@@ -2954,7 +2967,7 @@ export default function Shell() {
           const paneActiveKey = workspace.panes[paneId]?.activeTabKey || tabKey
           const paned = workspaceChromeActive ? renderTabRects.get(paneActiveKey) : null
           const fullBleed = !paned && paneActiveKey === fullBleedKey
-          const handoffClass = !settingsActive && role !== 'active'
+          const handoffClass = !settingsOverlay && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
           return (
@@ -2972,8 +2985,8 @@ export default function Shell() {
                 : undefined}
               // Inert while covered/handing-off OR while dealing out as a leaving
               // pane during the exit beat (INV 9).
-              inert={settingsActive || role !== 'active' || (paned ? isInertLeaving(paneId) : false)}
-              aria-hidden={settingsActive || role !== 'active' ? 'true' : undefined}
+              inert={settingsOverlay || role !== 'active' || (paned ? isInertLeaving(paneId) : false)}
+              aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !isInertLeaving(paneId)
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}

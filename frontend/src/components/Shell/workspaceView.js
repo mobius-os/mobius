@@ -106,6 +106,12 @@ export function deriveContentVisibility({
   // off via the `single` flag, the chat analogue of visibleAppIds.
   const chatPanesVisible = !settingsOverlay && !immersive
   return {
-    multiPane, single, focusedActiveKey, chromeActive, fullBleedKey, visibleAppIds, chatPanesVisible,
+    // `settingsOverlay` is the EFFECTIVE-mode-gated takeover flag (finding F3): it
+    // is the one honest "is the Settings takeover painting NOW" signal — false in
+    // builder AND during a single-mode drag preview / exit beat (viewMode='panes').
+    // Shell's PAINT gates read THIS, not the committed-gated nav flag, so the tiled
+    // world paints with the takeover suspended exactly as the flags above assume.
+    multiPane, single, focusedActiveKey, chromeActive, fullBleedKey, visibleAppIds,
+    chatPanesVisible, settingsOverlay,
   }
 }

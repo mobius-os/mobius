@@ -25,10 +25,11 @@ test('each pane holds one outgoing chat over one staging chat', () => {
     'the destination stages only while a different painted chat exists')
   assert.match(shell, /pane\?\.activeTabKey !== `chat:\$\{id\}`/,
     'a stale ready signal from rapid navigation must not complete the handoff')
-  // A held/staging chat is inert (settings covered OR not the active role); the
-  // condition now also folds in a leaving pane during the exit beat (INV 9), so
-  // match the leading clause rather than the exact full expression.
-  assert.match(shell, /inert=\{settingsActive \|\| role !== 'active'/,
+  // A held/staging chat is inert (the takeover is PAINTING OR not the active role);
+  // the condition now also folds in a leaving pane during the exit beat (INV 9), so
+  // match the leading clause rather than the exact full expression. The takeover
+  // gate is the EFFECTIVE-mode `settingsOverlay` (finding F3), not the committed one.
+  assert.match(shell, /inert=\{settingsOverlay \|\| role !== 'active'/,
     'neither the held nor staging chat may accept interaction')
   assert.match(shell, /composerFocusRequest=\{role === 'active' \? composerFocusRequest : null\}/,
     'an inert staging composer must not consume the one-shot focus request')

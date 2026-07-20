@@ -361,6 +361,39 @@ test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
   assert.deepEqual([...v.visibleAppIds], ['42'])
 })
 
+// ── Settings takeover is EFFECTIVE-mode gated (finding F3) ───────────────────
+//
+// The returned `settingsOverlay` is the ONE honest "is the takeover PAINTING now"
+// flag: true only when the takeover actually paints. It is FALSE in builder AND
+// during a single-mode drag preview / exit beat (viewMode 'panes' while the
+// committed world is single). Shell's PAINT gates read this so those transient
+// windows paint the tiled world with Settings suspended.
+
+test('settingsOverlay true when the takeover paints in single mode', () => {
+  const ws = twoPaneChatAndApp()
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'single',
+  })
+  assert.equal(v.settingsOverlay, true, 'the takeover paints in the single world')
+})
+
+test('settingsOverlay SUSPENDED when the effective mode is panes (drag preview / exit beat)', () => {
+  const ws = twoPaneChatAndApp()
+  // The nav flag says the overlay is up (committed world single), but the effective
+  // mode is 'panes' — a single-mode drag preview or exit beat holds the tiled world.
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'panes',
+  })
+  assert.equal(v.settingsOverlay, false, 'the takeover is suspended while the tiled world paints')
+  // And the derivation paints the tiled world, not the takeover.
+  assert.equal(v.single, false)
+  assert.equal(v.chromeActive, true, 'panes deal out with Settings suspended, not covered')
+})
+
 test('builder mode ignores the slot entirely (tree drives the render)', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '99' } }
   const v = deriveContentVisibility({

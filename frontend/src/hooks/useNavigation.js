@@ -1528,6 +1528,13 @@ export default function useNavigation({
     // gates pane suppression on THIS, never on activeView, so builder Settings
     // never hides sibling panes (design: the named risk, made structural).
     settingsOverlayOpen: overlayShowing,
+    // The RAW suspended overlay intent (finding F3), NOT gated by the committed
+    // world. Settings is context-independent across a world toggle (INV 6/7): the
+    // takeover is SUSPENDED (overlayShowing false) in builder but `settingsOpen`
+    // survives, so Shell mounts SettingsView on THIS and only PAINTS it on the
+    // effective-gated flag — the component stays mounted-hidden across world flips
+    // (mount-identity rule, like the slot chat), never torn down mid-flip.
+    settingsOpenRaw: settingsOpen,
     openDrawer,
     closeDrawer,
     navTo,
