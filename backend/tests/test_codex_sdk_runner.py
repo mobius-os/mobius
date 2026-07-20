@@ -283,6 +283,32 @@ def test_websearch_completed_events_backfill_query_and_sources():
     {"title": "Node", "url": "https://nodejs.org/x"}]} in events
 
 
+@pytest.mark.parametrize("action_type", ["openPage", "findInPage"])
+def test_websearch_completed_events_extract_current_sdk_action_url(action_type):
+  """The pinned SDK exposes visited source URLs on action.root, not results."""
+  class WebSearchThreadItem:
+    query = "Node.js releases"
+    action = SimpleNamespace(root=SimpleNamespace(
+      type=action_type,
+      url="https://nodejs.org/en/blog/release/v24.0.0",
+    ))
+
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": WebSearchThreadItem,
+  }
+
+  events = codex_sdk_runner._tool_completed_events(WebSearchThreadItem(), sdk)
+
+  assert {"type": "tool_sources", "sources": [{
+    "title": "https://nodejs.org/en/blog/release/v24.0.0",
+    "url": "https://nodejs.org/en/blog/release/v24.0.0",
+  }]} in events
+
+
 def test_steer_into_active_turn_cleans_dead_handle(monkeypatch):
   sdk = _fake_sdk(async_codex_cls=object)
 

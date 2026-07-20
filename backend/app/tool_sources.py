@@ -50,19 +50,27 @@ def _safe_http_url(value: Any) -> str:
     return ""
   candidate = value.strip()
   try:
-    scheme = urlparse(candidate).scheme.lower()
+    parsed = urlparse(candidate)
   except ValueError:
     return ""
-  return candidate if scheme in ("http", "https") else ""
+  if parsed.scheme.lower() not in ("http", "https"):
+    return ""
+  # A scheme alone ("https://") is technically parseable but is not a usable
+  # browser destination. Whitespace in a provider-supplied host is likewise
+  # rejected by URL() in the client, so keep the two safety gates aligned.
+  if not parsed.hostname or any(char.isspace() for char in candidate):
+    return ""
+  return candidate
 
 
 def normalize_tool_sources(raw: Any) -> list[dict[str, str]]:
   """Normalize provider-specific source payloads to title/url/snippet.
 
-  Claude currently returns server web-search results as a result block
-  whose ``content`` contains a provider-specific result list. Codex's
-  typed item can grow similar fields independently. This helper keeps
-  both runners tolerant of those shapes without persisting raw SDK data.
+  Claude returns server web-search results as a result block whose ``content``
+  contains a provider-specific result list. The pinned Codex SDK exposes URLs
+  for ``openPage`` / ``findInPage`` actions; optional result fields are handled
+  defensively for SDK versions that expose them. This helper keeps both runners
+  tolerant of those shapes without persisting raw SDK data.
   """
   sources: list[dict[str, str]] = []
   seen_urls: set[str] = set()

@@ -211,11 +211,24 @@ test('replaying the same tool_sources event does not duplicate (catch-up safe)',
   assert.deepEqual(twice[0].sources, sources)
 })
 
-test('an id with no matching item falls back to the last WebSearch', () => {
+test('an explicit id with no matching item never misattributes sources', () => {
   const prev = [toolItem('WebSearch', { input: 'only' })]
   const sources = [{ title: 'A', url: 'https://a.example/1' }]
   const next = attachToolSources(prev, sources, 'toolu_missing')
-  assert.deepEqual(next[0].sources, sources)
+  assert.equal(next, prev)
+  assert.equal(next[0].sources, undefined)
+})
+
+test('a source id cannot attach metadata to a non-WebSearch tool', () => {
+  const prev = [
+    toolItem('WebSearch', { tool_use_id: 'search-a' }),
+    toolItem('Bash', { tool_use_id: 'bash-a' }),
+  ]
+  const sources = [{ title: 'A', url: 'https://a.example/1' }]
+  const next = attachToolSources(prev, sources, 'bash-a')
+  assert.equal(next, prev)
+  assert.equal(next[0].sources, undefined)
+  assert.equal(next[1].sources, undefined)
 })
 
 test('post-answer tool_output is swallowed by the absorbed card, not appended', () => {

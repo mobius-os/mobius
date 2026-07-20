@@ -53,3 +53,14 @@ test('QuestionCard gives the conditional Other field a durable accessible name',
   assert.match(source, /aria-label=\{`Other answer for: \$\{q\.question\}`\}/)
   assert.match(source, /placeholder="Type your answer…"/)
 })
+
+test('message sources expose list semantics, keyboard focus, and touch targets', () => {
+  const source = read('../MessageSources.jsx')
+  const css = read('../ChatView.css')
+
+  assert.match(source, /<section className="chat__sources" aria-labelledby=/)
+  assert.match(source, /<ul className="chat__sources-list">/)
+  assert.match(source, /<li key=\{source\.url\} className="chat__source-item">/)
+  assert.match(css, /\.chat__source-chip:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
+  assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__source-chip\s*\{\s*min-height:\s*44px/s)
+})

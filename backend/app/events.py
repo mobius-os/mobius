@@ -141,8 +141,13 @@ def _tool_block_for_sources(assistant_blocks: list, tool_use_id) -> dict | None:
   if tool_use_id:
     for blk in reversed(assistant_blocks):
       if (blk.get("type") == "tool"
+          and blk.get("tool") == "WebSearch"
           and blk.get("tool_use_id") == tool_use_id):
         return blk
+    # An explicit id is authoritative. Falling back would silently attach one
+    # search's sources to a different search (or to a non-search tool whose id
+    # was accidentally stamped on the event).
+    return None
   for blk in reversed(assistant_blocks):
     if blk.get("type") == "tool" and blk.get("tool") == "WebSearch":
       return blk
