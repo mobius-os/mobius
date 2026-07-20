@@ -17,7 +17,7 @@ const PROVIDERS = [
   { id: 'claude', label: 'Claude Code' },
 ]
 
-export default function SetupWizard({ onDone, initialStep = 'account' }) {
+export default function SetupWizard({ onDone, initialStep = 'account', claimRequired = false }) {
   const [step, setStep] = useState(initialStep)
   // Hoisted from ProviderStep so ProviderAuth (which is a
   // grandchild) doesn't need to re-run the same query. Gated on
@@ -41,6 +41,10 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  // First-boot claim code — the one-time setup token from the deploy logs
+  // (or the MOBIUS_SETUP_CLAIM the deployer preset). Only collected when the
+  // backend reports the gate is open.
+  const [claim, setClaim] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -63,7 +67,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
     }
     setLoading(true)
     try {
-      const res = await api.auth.setup.create({ username, password })
+      const res = await api.auth.setup.create({ username, password, claim })
       if (!res.ok) {
         const data = await res.json()
         setError(data.detail || 'Setup failed.')
@@ -134,6 +138,22 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
               autoComplete="new-password"
             />
           </label>
+          {claimRequired && (
+            <label className="setup__label">
+              Setup code
+              <input
+                className="setup__input"
+                value={claim}
+                onChange={(e) => setClaim(e.target.value)}
+                required
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <span className="setup__hint">
+                Find this in your deploy logs (or the MOBIUS_SETUP_CLAIM you set).
+              </span>
+            </label>
+          )}
           {error && <p className="setup__error">{error}</p>}
           <button
             className="setup__btn"
