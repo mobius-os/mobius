@@ -168,15 +168,15 @@ for (const [name, viewport] of [
       const agree = await page.evaluate(() => {
         const root = document.querySelector('.shell')
         const builder = !!document.querySelector('.shell__brand--builder')
+        // The strip is the builder world's rendered surface; the logo state is the
+        // committed mode. Both derive from ONE descriptor, so once no beat class
+        // is present they must agree — that agreement IS this test's contract.
+        const strip = !!document.querySelector('.shell__tabstrip, .workspace__strip')
         const exiting = root.className.includes('shell--builder-exiting')
-        // While exiting, the logo has already snapped to single (committed) — that
-        // is expected. Once no beat class is present, builder<->logo must be stable.
         const settled = !root.className.includes('shell--builder-entering') && !exiting
-        return { builder, settled }
+        return { builder, strip, settled }
       })
-      // No assertion of a specific value each step (the mode alternates); the point
-      // is the page never throws / white-screens driving the descriptor.
-      expect(typeof agree.builder).toBe('boolean')
+      if (agree.settled) expect(agree.strip).toBe(agree.builder)
     }
     // The shell content is still mounted (no wedge / crash) after the sequence.
     await expect(page.locator('.shell__content')).toBeAttached()

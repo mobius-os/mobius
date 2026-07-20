@@ -1113,6 +1113,11 @@ export function prune(ws, { liveChatIds, liveAppIds } = {}) {
     if (kept.length !== pane.tabs.length) changed = true
     panes[id] = { ...pane, tabs: kept }
   }
+  // NOTE: prune()/PRUNE currently have no live dispatcher — the reactive
+  // eviction effect and onChatMissing/onPaneChatMissing paths (Shell.jsx) are
+  // the delete-reconciliation that actually runs, and they clear a dead slot
+  // via CLOSE_TAB reason:'deleted'. This slot check exists so PRUNE remains
+  // CORRECT if a bulk-reconcile caller is ever wired; it is not the delete path.
   const slotDead = ('singleScreen' in ws) && !!ws.singleScreen
     && !slotIsLive(ws.singleScreen, chats, apps)
   if (!changed && !slotDead) return ws
