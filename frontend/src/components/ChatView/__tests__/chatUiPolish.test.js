@@ -78,10 +78,16 @@ test('message sources stay inside the assistant row on narrow screens', () => {
     'align-items:flex-start otherwise lets the sources row grow to max-content')
   assert.match(sourcesRule, /max-width:\s*100%/,
     'the source section must not exceed the assistant message')
+  assert.match(sourcesRule, /box-sizing:\s*border-box/,
+    'section padding must be included in its width, even outside the app reset')
   assert.match(listRule, /min-width:\s*0/,
     'the flex list must be allowed to shrink long source titles')
   assert.match(listRule, /max-width:\s*100%/,
     'the source list must stay within its section')
+  assert.match(listRule, /margin:\s*0/,
+    'browser list margins must not push source cards out of alignment')
+  assert.match(listRule, /padding:\s*0/,
+    'browser list indentation must not reduce the source card width')
 })
 
 test('primary chat actions leave a brief empty beat before replacement', () => {
