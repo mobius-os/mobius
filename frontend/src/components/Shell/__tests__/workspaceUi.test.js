@@ -440,7 +440,7 @@ test('logo pointer provenance EXPIRES so a keyboard context menu reaches the nat
   // A keydown on the brand also clears provenance so the next contextmenu is treated
   // as keyboard-invoked; Shell wires it into the brand's onKeyDown.
   assert.match(logoGestureSrc, /const onKeyDown = useCallback\(\(\) => \{\s*\n?\s*lastPointerTypeRef\.current = ''\s*\n?\s*lastPointerTypeAtRef\.current = 0/)
-  assert.match(logoGestureSrc, /onPointerCancel, onContextMenu,\s*\n?\s*onKeyDown, consumeSuppressedClick/)
+  assert.match(logoGestureSrc, /onKeyDown, onLostPointerCapture,\s*\n?\s*consumeSuppressedClick/)
   assert.match(shellBrand, /if \(splitsEnabled\) logoGesture\.onKeyDown\(\)/)
 })
 
