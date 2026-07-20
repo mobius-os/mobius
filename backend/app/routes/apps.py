@@ -3234,6 +3234,7 @@ async def publish_app_site(
       # content. The registry is the sole ownership authority, so an
       # unrecognized hint falls through to minting a fresh token below; the
       # pre-registry snapshot keeps serving its old content untouched.
+    republishing = record is not None
     if record is None:
       token, record = _mint_publish_record(settings, app, project_id)
 
@@ -3244,6 +3245,7 @@ async def publish_app_site(
     staging_root.mkdir(parents=True, exist_ok=True)
     stage = staging_root / uuid.uuid4().hex
     destination = root / token
+    had_destination = destination.exists()
 
     def _snapshot():
       if any(path.is_symlink() for path in site_dir.rglob("*")):
@@ -3253,16 +3255,20 @@ async def publish_app_site(
       shutil.copytree(site_dir, stage, symlinks=True)
 
     promoted = False
+    preserve_stage = False
     try:
       await asyncio.to_thread(_snapshot)
-      await asyncio.to_thread(atomic_promote_directory, stage, destination)
+      # Keep the exchange itself on this task so cancellation cannot leave the
+      # thread committing a swap after ``promoted`` incorrectly stayed false.
+      atomic_promote_directory(stage, destination)
       promoted = True
       atomic_write(token_file, token)
       record = replace_publication_record(settings, record, "active")
-    except BaseException:
-      # `record` is only ever a freshly minted staged reservation here, so a
-      # failed publish always revokes it and tears down anything promoted.
+    except BaseException as publish_exc:
       if record.state == "staged":
+        # A first publish has no prior public generation. Revoke its new
+        # reservation and remove the promoted candidate before surfacing the
+        # failure.
         try:
           replace_publication_record(settings, record, "revoked")
         except (OSError, InvalidPublicationRegistry,
@@ -3273,9 +3279,29 @@ async def publish_app_site(
           await asyncio.to_thread(shutil.rmtree, destination)
         except OSError:
           pass
+      elif promoted and republishing:
+        try:
+          if had_destination:
+            # RENAME_EXCHANGE left the prior complete generation in ``stage``.
+            # Exchange it back before the request reports the metadata failure.
+            atomic_promote_directory(stage, destination)
+          else:
+            # An active record with a missing snapshot was already a 404. Put
+            # that prior state back rather than making failed content public.
+            _rmtree_strict(destination)
+        except OSError as rollback_exc:
+          # The stage is now the only known copy of the previous generation.
+          # Never let the finally block destroy the owner's recovery copy.
+          preserve_stage = True
+          log.error(
+            "republish rollback failed for token %s; prior generation kept "
+            "at %s: %s",
+            token, stage, rollback_exc,
+          )
+          raise rollback_exc from publish_exc
       raise
     finally:
-      if stage.exists() and not stage.is_symlink():
+      if not preserve_stage and stage.exists() and not stage.is_symlink():
         try:
           await asyncio.to_thread(shutil.rmtree, stage)
         except OSError:

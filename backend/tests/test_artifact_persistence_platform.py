@@ -233,6 +233,86 @@ def test_failed_first_publish_never_activates_orphan(
   assert client.get(f"/sites/{records[0].token}/").status_code == 404
 
 
+@pytest.mark.parametrize("failure_point", ["hint", "registry"])
+def test_failed_republish_restores_the_previous_generation(
+  client, auth, monkeypatch, failure_point,
+):
+  """A post-exchange failure must put the old snapshot back at the live URL."""
+  app_id = _create_app(client, auth)
+  project_id = "tip-rollback"
+  _seed_site(app_id, project_id, "previous generation")
+  token = _publish(client, auth, app_id, project_id)
+
+  site = _build_dir(app_id, project_id) / "site"
+  (site / "index.html").write_text("failed generation", encoding="utf-8")
+
+  def fail_write(*_args, **_kwargs):
+    raise OSError("simulated hint write failure")
+
+  def fail_registry(*_args, **_kwargs):
+    raise OSError("simulated registry write failure")
+
+  if failure_point == "hint":
+    monkeypatch.setattr(apps_route, "atomic_write", fail_write)
+  else:
+    monkeypatch.setattr(
+      apps_route, "replace_publication_record", fail_registry,
+    )
+
+  with pytest.raises(OSError, match="simulated .* write failure"):
+    client.post(
+      f"/api/apps/{app_id}/publish",
+      headers=auth,
+      json={"project_id": project_id},
+    )
+
+  response = client.get(f"/sites/{token}/")
+  assert response.status_code == 200
+  assert response.text == "previous generation"
+
+
+def test_failed_republish_preserves_old_copy_if_rollback_fails(
+  client, auth, monkeypatch,
+):
+  """A failed rollback must not rmtree the only prior-generation copy."""
+  app_id = _create_app(client, auth)
+  project_id = "tip-preserve"
+  _seed_site(app_id, project_id, "recoverable generation")
+  _publish(client, auth, app_id, project_id)
+
+  site = _build_dir(app_id, project_id) / "site"
+  (site / "index.html").write_text("failed generation", encoding="utf-8")
+  real_promote = apps_route.atomic_promote_directory
+  promotions = 0
+
+  def fail_rollback(stage, destination):
+    nonlocal promotions
+    promotions += 1
+    if promotions == 1:
+      return real_promote(stage, destination)
+    raise OSError("simulated rollback failure")
+
+  def fail_write(*_args, **_kwargs):
+    raise OSError("simulated hint write failure")
+
+  monkeypatch.setattr(
+    apps_route, "atomic_promote_directory", fail_rollback,
+  )
+  monkeypatch.setattr(apps_route, "atomic_write", fail_write)
+
+  with pytest.raises(OSError, match="simulated rollback failure"):
+    client.post(
+      f"/api/apps/{app_id}/publish",
+      headers=auth,
+      json={"project_id": project_id},
+    )
+
+  staging = Path(get_settings().data_dir) / "published" / ".staging"
+  prior_copies = list(staging.glob("*/index.html"))
+  assert len(prior_copies) == 1
+  assert prior_copies[0].read_text() == "recoverable generation"
+
+
 def test_generation_mismatch_uniformly_404s_site_and_data(
   client, auth, db,
 ):
