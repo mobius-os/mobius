@@ -31,8 +31,10 @@ from app.artifact_data import (
   MAX_ARTIFACT_KEYS,
   MAX_ARTIFACT_TOTAL_BYTES,
   MAX_ARTIFACT_VALUE_BYTES,
+  artifact_dir_path,
   artifact_file_path,
   artifact_usage,
+  list_artifact_keys,
   canonical_json,
   parse_json,
   read_json_file,
@@ -3013,6 +3015,41 @@ async def _revoke_app_publish_tokens(
     except Exception as exc:  # best-effort batch boundary
       log.exception("unexpected publication revoke failure for %s: %s",
                     token, exc)
+
+
+@router.api_route(
+  "/{app_id}/artifact-data/{artifact_id}",
+  methods=["GET"],
+  dependencies=[Depends(reject_cross_site)],
+)
+async def artifact_data_keys(
+  app_id: int,
+  artifact_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """List an artifact's stored keys, derived from the directory.
+
+  The keys are enumerated server-side precisely so no client has to maintain an
+  index file: two tabs updating one would race and silently drop a key. The
+  directory cannot disagree with itself.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(403, "An app may only access its own artifact data.")
+  if not validate_artifact_id(artifact_id):
+    raise HTTPException(400, "Invalid artifact_id.")
+  app = live_app_or_404(db, app_id)
+  expected_nonce = app.token_nonce
+  settings = get_settings()
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_app_identity(db, app_id, expected_nonce)
+    try:
+      keys = list_artifact_keys(
+        artifact_dir_path(settings, app_id, artifact_id),
+      )
+    except ArtifactDataError as exc:
+      raise HTTPException(400, str(exc)) from exc
+  return {"keys": keys}
 
 
 @router.api_route(

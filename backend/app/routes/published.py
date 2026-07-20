@@ -20,7 +20,12 @@ from sqlalchemy.orm import Session
 
 from app import fs_locks
 from app.artifact_data import (
-  ArtifactDataError, artifact_file_path, read_json_file, validate_artifact_key,
+  ArtifactDataError,
+  artifact_dir_path,
+  artifact_file_path,
+  list_artifact_keys,
+  read_json_file,
+  validate_artifact_key,
 )
 from app.config import get_settings
 from app.database import SessionLocal, get_db
@@ -57,6 +62,13 @@ def _public_token_key(request: Request) -> str:
 # site can throttle that same site, which is the blast radius we want.
 _public_data_limiter = Limiter(
   key_func=_public_token_key, key_style="endpoint",
+)
+# ONE budget for the whole public artifact-data capability. `limit()` scopes per
+# HANDLER under key_style="endpoint", so listing and per-key reads would each get
+# their own 60/minute; `shared_limit` pins both to one explicit scope instead.
+_PUBLIC_DATA_SCOPE = "published-artifact-data"
+_public_data_limit = _public_data_limiter.shared_limit(
+  "60/minute", scope=_PUBLIC_DATA_SCOPE,
 )
 
 
@@ -123,10 +135,48 @@ def _serve(token: str, path: str, db: Session | None = None):
 
 
 @published_router.get(
+  "/api/published-sites/{token}/data",
+  include_in_schema=False,
+)
+@_public_data_limit
+async def list_published_artifact_data(
+  token: str,
+  request: Request,
+  db: Session = Depends(get_db),
+):
+  """List the published artifact's keys through the same public capability.
+
+  Enumeration is server-derived from the directory so a published page never
+  depends on a client-maintained index that concurrent writers could desync.
+  Same generation binding, lock, and throttle as the per-key read.
+  """
+  if not _TOKEN_RE.fullmatch(token or ""):
+    raise _not_found()
+  settings = get_settings()
+  record = resolve_active_publication(db, settings, token)
+  if record is None or record.project_id is None:
+    raise _not_found()
+  async with fs_locks.app_storage_lock(record.app_id):
+    current = resolve_active_publication(db, settings, token)
+    if current is None or current.binding() != record.binding():
+      raise _not_found()
+    try:
+      keys = list_artifact_keys(
+        artifact_dir_path(settings, current.app_id, current.project_id),
+      )
+    except ArtifactDataError:
+      raise _not_found()
+  response = JSONResponse({"keys": keys})
+  response.headers["X-Content-Type-Options"] = "nosniff"
+  response.headers["Cache-Control"] = "no-cache"
+  return response
+
+
+@published_router.get(
   "/api/published-sites/{token}/data/{key}",
   include_in_schema=False,
 )
-@_public_data_limiter.limit("60/minute")
+@_public_data_limit
 async def read_published_artifact_data(
   token: str,
   key: str,

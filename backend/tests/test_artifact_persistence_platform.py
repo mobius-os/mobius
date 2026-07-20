@@ -815,3 +815,159 @@ def test_unpublish_revokes_the_registry_even_if_the_hint_read_errors(
   record = read_publication_record(get_settings(), token)
   assert record is not None and record.state == "revoked"
   assert client.get(f"/sites/{token}/").status_code == 404
+
+
+def test_artifact_keys_are_derived_from_the_directory(client, auth):
+  """Enumeration is server-side so no client index can desync.
+
+  Two tabs maintaining an index file would each read the old list, write their
+  own key, and the second index write would drop the first — leaving a value
+  that exists but cannot be listed. The directory cannot disagree with itself.
+  """
+  app_id = _create_app(client, auth)
+  for key in ("beta", "alpha", "gamma"):
+    assert _write_value(client, auth, app_id, "deck", key, {"k": key}).status_code == 204
+
+  response = client.get(f"/api/apps/{app_id}/artifact-data/deck", headers=auth)
+  assert response.status_code == 200, response.text
+  assert response.json()["keys"] == ["alpha", "beta", "gamma"]
+
+  # A delete is reflected immediately — nothing to keep in sync.
+  assert client.delete(
+    f"/api/apps/{app_id}/artifact-data/deck/beta", headers=auth,
+  ).status_code == 204
+  assert client.get(
+    f"/api/apps/{app_id}/artifact-data/deck", headers=auth,
+  ).json()["keys"] == ["alpha", "gamma"]
+
+  # An artifact that was never written enumerates empty rather than 404ing.
+  assert client.get(
+    f"/api/apps/{app_id}/artifact-data/never-used", headers=auth,
+  ).json()["keys"] == []
+
+
+def test_artifact_keys_reject_a_bad_id_and_another_apps_token(client, auth):
+  app_id = _create_app(client, auth)
+  assert client.get(
+    f"/api/apps/{app_id}/artifact-data/..%2Fescape", headers=auth,
+  ).status_code in (400, 404)
+  assert client.get(
+    f"/api/apps/{app_id}/artifact-data/deck",
+  ).status_code == 401
+
+
+def test_published_page_lists_keys_through_its_own_capability(client, auth, db):
+  """The public listing is generation-bound exactly like the per-key read."""
+  app_id = _create_app(client, auth)
+  _seed_site(app_id, "shared-deck", "<h1>live</h1>")
+  token = _publish(client, auth, app_id, "shared-deck")
+  for key in ("score", "config"):
+    assert _write_value(
+      client, auth, app_id, "shared-deck", key, {"k": key},
+    ).status_code == 204
+
+  listing = client.get(f"/api/published-sites/{token}/data")
+  assert listing.status_code == 200, listing.text
+  assert listing.json()["keys"] == ["config", "score"]
+
+  # Revoking the publication takes the listing down with it.
+  assert client.delete(
+    f"/api/apps/{app_id}/publish?project_id=shared-deck", headers=auth,
+  ).status_code in (200, 204)
+  assert client.get(f"/api/published-sites/{token}/data").status_code == 404
+
+
+def test_published_listing_is_read_only_and_unknown_tokens_404(client, auth):
+  assert client.get(
+    "/api/published-sites/" + "a" * 32 + "/data",
+  ).status_code == 404
+  # No public write surface is introduced alongside the listing.
+  assert client.put(
+    "/api/published-sites/" + "a" * 32 + "/data", json={"keys": []},
+  ).status_code in (404, 405)
+
+
+def test_key_listing_ignores_symlinks_and_non_value_files(client, auth):
+  """A planted symlink or stray file must never appear as a stored key."""
+  from app.artifact_data import list_artifact_keys
+
+  app_id = _create_app(client, auth)
+  assert _write_value(
+    client, auth, app_id, "deck", "real", {"v": 1},
+  ).status_code == 204
+  root = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "artifact-data" / "deck"
+  )
+  (root / "evil.json").symlink_to("/etc/passwd")
+  (root / "notes.txt").write_text("not a value", encoding="utf-8")
+  (root / "sub").mkdir()
+
+  assert list_artifact_keys(root) == ["real"]
+  assert client.get(
+    f"/api/apps/{app_id}/artifact-data/deck", headers=auth,
+  ).json()["keys"] == ["real"]
+
+
+def test_key_listing_is_bounded_against_a_flooded_directory(client, auth):
+  """Public enumeration must not become an unbounded scan.
+
+  The 100-key cap is enforced by the artifact-data ROUTE, but the generic
+  app-storage API can drop arbitrarily many .json files into the same directory.
+  An unauthenticated published listing must stay bounded regardless.
+  """
+  from app.artifact_data import (
+    MAX_ARTIFACT_KEYS,
+    MAX_ARTIFACT_SCAN_ENTRIES,
+    list_artifact_keys,
+  )
+
+  app_id = _create_app(client, auth)
+  assert _write_value(client, auth, app_id, "flood", "real", {"v": 1}).status_code == 204
+  root = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "artifact-data" / "flood"
+  )
+  for i in range(MAX_ARTIFACT_SCAN_ENTRIES + 250):
+    (root / f"k{i:05d}.json").write_text("{}", encoding="utf-8")
+
+  keys = list_artifact_keys(root)
+  assert len(keys) <= MAX_ARTIFACT_KEYS, "listing must be capped"
+  response = client.get(f"/api/apps/{app_id}/artifact-data/flood", headers=auth)
+  assert response.status_code == 200
+  assert len(response.json()["keys"]) <= MAX_ARTIFACT_KEYS
+
+
+def test_key_listing_hides_values_the_per_key_read_cannot_serve(client, auth):
+  """A key that always 404s on read must not be advertised by the listing."""
+  from app.artifact_data import MAX_ARTIFACT_READ_BYTES, list_artifact_keys
+
+  app_id = _create_app(client, auth)
+  assert _write_value(client, auth, app_id, "deck", "real", {"v": 1}).status_code == 204
+  root = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "artifact-data" / "deck"
+  )
+  # Larger than the read cap: read_json_file refuses it, so listing it would
+  # advertise a key that can never be fetched.
+  (root / "huge.json").write_text("x" * (MAX_ARTIFACT_READ_BYTES + 10), encoding="utf-8")
+
+  assert list_artifact_keys(root) == ["real"]
+  assert client.get(
+    f"/api/apps/{app_id}/artifact-data/deck/huge", headers=auth,
+  ).status_code == 404
+
+
+def test_public_listing_and_value_reads_share_one_throttle_budget():
+  """Both public reads spend from ONE per-token budget, not one each."""
+  from app.routes import published as published_mod
+
+  limiter = published_mod._public_data_limiter
+  assert limiter._key_style == "endpoint"
+  # `limit()` scopes per handler; `shared_limit(scope=...)` is what pins both
+  # public reads to ONE bucket, so applying the same decorator to both is the
+  # contract under test.
+  assert published_mod._PUBLIC_DATA_SCOPE
+  source = Path(published_mod.__file__).read_text(encoding="utf-8")
+  assert "shared_limit(" in source
+  assert source.count("@_public_data_limit\n") == 2

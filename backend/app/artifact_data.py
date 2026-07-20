@@ -13,6 +13,10 @@ MAX_ARTIFACT_VALUE_BYTES = 64 * 1024
 MAX_ARTIFACT_TOTAL_BYTES = 1024 * 1024
 MAX_ARTIFACT_KEYS = 100
 MAX_ARTIFACT_READ_BYTES = 1024 * 1024
+# Enumeration stops after this many directory entries. Comfortably above the
+# 100-key cap so a legitimate artifact always lists in full, while bounding the
+# work an unauthenticated published-site listing can cost.
+MAX_ARTIFACT_SCAN_ENTRIES = 1000
 
 
 class ArtifactDataError(ValueError):
@@ -55,13 +59,8 @@ def parse_json(raw: bytes):
     raise ArtifactDataError("Value is nested too deeply.") from exc
 
 
-def artifact_file_path(
-  settings,
-  app_id: int,
-  artifact_id: str,
-  key: str,
-) -> tuple[Path, Path]:
-  """Return the artifact directory and key file after literal confinement.
+def artifact_dir_path(settings, app_id: int, artifact_id: str) -> Path:
+  """Return the artifact's directory after literal confinement.
 
   App-controlled storage may never redirect any literal component through a
   symlink.  The strict one-segment identifiers also make browser/path
@@ -69,19 +68,32 @@ def artifact_file_path(
   """
   if type(app_id) is not int or app_id <= 0:
     raise ArtifactDataError("Invalid app id.")
-  if not validate_artifact_id(artifact_id) or not validate_artifact_key(key):
-    raise ArtifactDataError("Invalid artifact id or key.")
+  if not validate_artifact_id(artifact_id):
+    raise ArtifactDataError("Invalid artifact id.")
   data_root = Path(settings.data_dir)
   apps_root = data_root / "apps"
   app_root = apps_root / str(app_id)
   artifact_data_root = app_root / "artifact-data"
   artifact_root = artifact_data_root / artifact_id
-  file_path = artifact_root / f"{key}.json"
-  for component in (
-    apps_root, app_root, artifact_data_root, artifact_root, file_path,
-  ):
+  for component in (apps_root, app_root, artifact_data_root, artifact_root):
     if component.is_symlink():
       raise ArtifactDataError("Symlinks are not allowed in artifact storage.")
+  return artifact_root
+
+
+def artifact_file_path(
+  settings,
+  app_id: int,
+  artifact_id: str,
+  key: str,
+) -> tuple[Path, Path]:
+  """Return the artifact directory and key file after literal confinement."""
+  if not validate_artifact_key(key):
+    raise ArtifactDataError("Invalid artifact id or key.")
+  artifact_root = artifact_dir_path(settings, app_id, artifact_id)
+  file_path = artifact_root / f"{key}.json"
+  if file_path.is_symlink():
+    raise ArtifactDataError("Symlinks are not allowed in artifact storage.")
   expected = artifact_root.resolve()
   resolved = file_path.resolve()
   if expected != resolved.parent:
@@ -107,6 +119,63 @@ def read_json_file(file_path: Path, cap: int = MAX_ARTIFACT_READ_BYTES):
   finally:
     os.close(fd)
   return parse_json(raw)
+
+
+def list_artifact_keys(artifact_root: Path) -> list[str]:
+  """Return the artifact's stored keys, derived from the directory itself.
+
+  Enumeration belongs here rather than in a client-maintained index file: two
+  browser tabs writing different keys would each read the old index, write their
+  own value, and the second index write would drop the first key — leaving a
+  value that exists but cannot be discovered. The directory is the only thing
+  that cannot disagree with itself.
+
+  Applies the same no-symlink rule as every other read of this tree, and hides
+  anything that is not a validly-named ``.json`` value (including any legacy
+  index file an older app version left behind, which callers filter by name).
+  """
+  if not artifact_root.exists():
+    return []
+  if artifact_root.is_symlink() or not artifact_root.is_dir():
+    raise ArtifactDataError("Invalid artifact storage directory.")
+  keys = []
+  examined = 0
+  try:
+    # Iterate lazily and stop early: this is reachable UNAUTHENTICATED through a
+    # published site, and the per-artifact key cap is only enforced by the
+    # artifact-data route — the generic app-storage API can drop arbitrarily
+    # many .json files into this same directory. Materializing the whole scandir
+    # (and the response) would hand any published page an unbounded scan.
+    with os.scandir(artifact_root) as entries:
+      for entry in entries:
+        examined += 1
+        if examined > MAX_ARTIFACT_SCAN_ENTRIES:
+          break
+        if len(keys) >= MAX_ARTIFACT_KEYS:
+          break
+        try:
+          if entry.is_symlink():
+            continue
+          info = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+          # Do NOT skip silently: returning 200 with a quietly incomplete list
+          # is the same "stored but unlistable" failure this enumeration exists
+          # to remove. Surface it and let the caller fail closed.
+          raise ArtifactDataError("Artifact storage changed while scanning.") from exc
+        if not stat.S_ISREG(info.st_mode):
+          continue
+        # A value larger than the read cap cannot be served by the per-key read,
+        # so listing it would advertise a key that always 404s.
+        if info.st_size > MAX_ARTIFACT_READ_BYTES:
+          continue
+        if not entry.name.endswith(".json"):
+          continue
+        name = entry.name[:-5]
+        if validate_artifact_key(name):
+          keys.append(name)
+  except OSError as exc:
+    raise ArtifactDataError("Artifact storage is unreadable.") from exc
+  return sorted(keys)
 
 
 def artifact_usage(artifact_root: Path) -> tuple[int, int]:
