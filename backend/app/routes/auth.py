@@ -16,9 +16,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import auth, models, schemas
+from app import auth, models, schemas, setup_claim
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -130,9 +131,16 @@ def _extract_provider_code_and_state(raw_code: str) -> tuple[str, str | None]:
 
 @router.get("/setup/status", response_model=schemas.SetupStatus)
 def setup_status(db: Session = Depends(get_db)):
-  """Returns whether the owner account has been configured."""
+  """Returns whether the owner account has been configured.
+
+  `claim_required` tells the wizard to collect the first-boot claim while setup
+  is still open. The token itself is never returned — only whether one is
+  needed.
+  """
   configured = db.query(models.Owner).first() is not None
-  return schemas.SetupStatus(configured=configured)
+  return schemas.SetupStatus(
+    configured=configured, claim_required=not configured
+  )
 
 
 def _write_service_token(username: str, token_epoch: int) -> None:
@@ -160,38 +168,69 @@ def _write_service_token(username: str, token_epoch: int) -> None:
 
 @router.post("/setup", response_model=schemas.TokenResponse,
              dependencies=[Depends(reject_cross_site)])
-@_limiter.limit("3/minute")
 def setup(
-  request: Request,
   body: schemas.SetupRequest, db: Session = Depends(get_db)
 ):
-  """Creates the owner account on first boot and returns a JWT."""
-  if db.query(models.Owner).first():
-    raise HTTPException(
-      status_code=400, detail="Already configured."
+  """Creates the owner account on first boot and returns a JWT.
+
+  Gated by the first-boot claim (app.setup_claim): the caller must present the
+  one-time token published to the deploy logs / MOBIUS_SETUP_CLAIM. The whole
+  owner-recheck -> fail-closed -> verify -> create -> consume transition runs
+  under `SETUP_LOCK`, so concurrent first-boot setups produce exactly one owner
+  (one 200, the rest 400). The setup-specific rate limiter was removed: a
+  high-entropy claim makes brute force infeasible and invalid compares are
+  cheap (they run before any hashing), so the limiter only enabled a
+  denial-of-setup.
+  """
+  data_dir = get_settings().data_dir
+  with setup_claim.SETUP_LOCK:
+    if db.query(models.Owner).first():
+      raise HTTPException(status_code=400, detail="Already configured.")
+    # Fail closed: an owner-less instance that already completed setup once
+    # (marker) or still carries a recovery seed has had an owner. Re-claiming
+    # it would be a takeover, so it must be recovered/reset, not set up again.
+    if setup_claim.is_fail_closed(data_dir):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "This instance has already been set up. Use recovery to reset it."
+        ),
+      )
+    # Uniform 403 for missing/empty/malformed/wrong claim — no oracle for why.
+    if not setup_claim.verify(data_dir, body.claim):
+      raise HTTPException(status_code=403, detail="Invalid setup claim.")
+    owner = models.Owner(
+      username=body.username,
+      hashed_password=auth.hash_password(body.password),
     )
-  owner = models.Owner(
-    username=body.username,
-    hashed_password=auth.hash_password(body.password),
-  )
-  db.add(owner)
-  db.commit()
-  db.refresh(owner)
-  try:
-    _write_service_token(owner.username, owner.token_epoch)
-  except OSError as exc:
-    log.warning("Could not write service token: %s", exc)
-  # Mirror the owner credential to the DB-independent recovery seed so the
-  # recovery floor can still authenticate the owner if the database is
-  # later wiped or corrupted. Written only now — after the owner row is
-  # committed — so the seed can never authenticate before an owner exists.
-  # Best-effort: recovery_seed swallows its own errors.
-  from app import recovery_seed
-  recovery_seed.write_owner_seed(owner.username, owner.hashed_password)
-  token = auth.create_access_token(
-    {"sub": owner.username}, token_epoch=owner.token_epoch
-  )
-  return schemas.TokenResponse(access_token=token)
+    db.add(owner)
+    try:
+      db.commit()
+    except IntegrityError:
+      # Backstop the lock across processes/replicas: a racing writer already
+      # created the owner. Treat as already-configured, never a 500.
+      db.rollback()
+      raise HTTPException(status_code=400, detail="Already configured.")
+    db.refresh(owner)
+    try:
+      _write_service_token(owner.username, owner.token_epoch)
+    except OSError as exc:
+      log.warning("Could not write service token: %s", exc)
+    # Mirror the owner credential to the DB-independent recovery seed so the
+    # recovery floor can still authenticate the owner if the database is later
+    # wiped or corrupted. Written only now — after the owner row is committed —
+    # so the seed can never authenticate before an owner exists. Best-effort:
+    # recovery_seed swallows its own errors.
+    from app import recovery_seed
+    recovery_seed.write_owner_seed(owner.username, owner.hashed_password)
+    # Consume the claim LAST — after the owner is durably committed and the
+    # side effects seeded. A crash before this leaves a re-publishable claim; a
+    # crash after leaves the fail-closed marker. Either way, no re-claim.
+    setup_claim.consume(data_dir)
+    token = auth.create_access_token(
+      {"sub": owner.username}, token_epoch=owner.token_epoch
+    )
+    return schemas.TokenResponse(access_token=token)
 
 
 # Bcrypt-verifying against this dummy hash when the username is unknown makes the

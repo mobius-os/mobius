@@ -162,6 +162,30 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  # First-boot claim gate (card 261). Publish/reconcile the one-time setup
+  # claim now — after _init_db() so the owner state is readable, and before
+  # `yield` so no request can reach POST /api/auth/setup before the gate
+  # exists. This ordering closes the lifespan-vs-first-request race. A publish
+  # failure leaves NO claim file, and setup_claim.verify fails closed on a
+  # missing file, so setup stays unavailable rather than allowing an
+  # unauthenticated takeover; we still wrap the call so a disk error can't
+  # brick the recovery surface (the never-crash-boot contract every lifespan
+  # step shares), and log the banner + any error for the deployer.
+  try:
+    from app import setup_claim
+    with SessionLocal() as _claim_db:
+      _owner_exists = _claim_db.query(models.Owner).first() is not None
+    _claim_code = setup_claim.ensure_claim(
+      get_settings().data_dir, owner_exists=_owner_exists,
+    )
+    if _claim_code:
+      _log.warning(
+        "SETUP CLAIM (first-boot owner gate): POST /api/auth/setup requires "
+        'claim="%s". It is single-use; preset it with MOBIUS_SETUP_CLAIM.',
+        _claim_code,
+      )
+  except Exception as exc:
+    _log.error("setup claim init failed: %s", exc, exc_info=True)
   # One-time semantic migration for the per-chat prompt boundary. Existing
   # chats were started before the snapshot column existed, so freeze their
   # currently effective base + system-app prompt now, before serving requests.

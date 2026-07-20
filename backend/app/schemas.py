@@ -13,10 +13,19 @@ from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
 class SetupRequest(BaseModel):
   username: str
   password: str
+  # First-boot claim gate: the one-time possession proof from the deploy logs
+  # / MOBIUS_SETUP_CLAIM. Optional-with-default on purpose — a missing field
+  # must NOT become a Pydantic 422 (an oracle exposing the mechanism); the
+  # route funnels missing/empty/malformed/wrong to one uniform 403. See
+  # app.setup_claim.
+  claim: str = ""
 
 
 class SetupStatus(BaseModel):
   configured: bool
+  # True while setup is still open (no owner): the wizard must collect the
+  # claim. Never the token itself — the status endpoint never leaks it.
+  claim_required: bool = False
 
 
 class TokenResponse(BaseModel):
