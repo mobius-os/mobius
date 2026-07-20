@@ -862,17 +862,22 @@
 
 .chat__source-chip {
   display: inline-flex;
+  box-sizing: border-box;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   min-width: 0;
-  min-height: 28px;
-  max-width: 100%;
-  padding: 4px 8px;
-  border-radius: 8px;
+  min-height: 42px;
+  width: 100%;
+  max-width: 290px;
+  padding: 6px 8px 6px 7px;
+  border-radius: 10px;
   color: var(--text); /* CONTRACT: readable source text on opaque fill */
-  background: var(--surface); /* CONTRACT: opaque chip fill */
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
+  background: color-mix(in srgb, var(--surface2) 72%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border-light));
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--bg) 18%, transparent);
   text-decoration: none;
+  transition: background-color 120ms ease, border-color 120ms ease,
+    transform 120ms ease;
 }
 
 .chat__source-chip:focus-visible {
@@ -882,13 +887,41 @@
 
 @media (hover: hover) {
   .chat__source-chip:hover {
-    background: var(--surface2);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
+    background: color-mix(in srgb, var(--accent-dim) 42%, var(--surface2));
+    border-color: color-mix(in srgb, var(--accent) 42%, var(--border-light));
+    transform: translateY(-1px);
   }
 }
 
 .chat__source-chip:active {
   background: var(--accent-dim);
+  transform: translateY(0);
+}
+
+.chat__source-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  background: color-mix(in srgb, var(--accent-dim) 82%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.chat__source-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.chat__source-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .chat__source-title {
@@ -896,18 +929,37 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 590;
+  line-height: 1.25;
 }
 
 .chat__source-host {
-  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted); /* CONTRACT: lower emphasis source domain */
+  font-size: 11px;
+  line-height: 1.2;
 }
 
-/* The turn's sources, after the answer (MessageSources). Shares the chip
-   styling with the tool-level markup above so a source reads the same
-   wherever it appears; only the surrounding row is message-level. */
+.chat__source-open {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.chat__source-open svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* The turn's sources, after the answer (MessageSources). */
 .chat__sources {
   display: flex;
+  box-sizing: border-box;
   align-items: flex-start;
   flex-wrap: wrap;
   width: 100%;
@@ -925,16 +977,20 @@
 
 .chat__sources-list {
   display: flex;
+  box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
   flex: 1 1 240px;
   flex-wrap: wrap;
   gap: 5px;
+  margin: 0;
+  padding: 0;
   list-style: none;
 }
 
 .chat__source-item {
   display: flex;
+  flex: 0 1 290px;
   min-width: 0;
   max-width: 100%;
 }
@@ -944,10 +1000,17 @@
 @media (max-width: 480px) {
   .chat__sources { display: block; }
   .chat__sources-label { display: block; padding: 0 0 6px; }
+  .chat__source-item { flex-basis: 100%; width: 100%; }
+  .chat__source-item,
+  .chat__source-chip { max-width: none; }
 }
 
 @media (pointer: coarse) {
   .chat__source-chip { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__source-chip { transition: none; }
 }
 .chat__tool-output-more {
   display: block;
