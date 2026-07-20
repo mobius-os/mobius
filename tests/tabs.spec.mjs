@@ -205,10 +205,9 @@ async function toggleAndSamplePaneChrome(page) {
 }
 
 async function seedTabs(page, tabs, { viewMode } = {}) {
-  // Builder mode ('panes', the default) now ALWAYS shows the strip, so the
-  // single-pane strip's pinning/unpinning contract (pin engages, unpin to zero
-  // disengages -> strip retires) lives in SINGLE-screen mode; callers asserting
-  // that flow seed viewMode: 'single'.
+  // Two-worlds: the strip is builder chrome only. Builder ('panes', the default)
+  // ALWAYS shows it — even at one tab — and single-screen NEVER does; there is no
+  // single-mode strip contract left to seed.
   let ws = paneModel.seedFromFlatTabs(tabs)
   if (viewMode) ws = paneModel.setViewMode(ws, viewMode)
   const workspace = paneModel.serializeWorkspace(ws)
@@ -240,12 +239,13 @@ async function seedSingleModeChat(page, chatId) {
 }
 
 test.describe('Tabs', () => {
-  test('strip shows pinned tabs, switches, closes, and keeps the spacer sane', async ({ page }) => {
+  test('strip shows pinned tabs, switches, closes, and the last close auto-returns to single', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'tabs')
     const appsMock = await mockOwnedApp(page, chat.id)
-    // Single-screen: builder always shows the strip, so the "close the last tab ->
-    // strip disappears -> chat back to full height" contract is a single-screen one.
-    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }], { viewMode: 'single' })
+    // Two-worlds: the strip lives in BUILDER only, so the full strip contract —
+    // render, switch, close, and "closing the last tab auto-returns to single
+    // (strip retires)" — runs in the default builder world.
+    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
 
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
@@ -272,18 +272,22 @@ test.describe('Tabs', () => {
     await page.getByRole('button', { name: chat.title, exact: true }).click()
     await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
 
-    // Close the app tab — one fewer tab, strip stays.
+    // Close the app tab — one fewer tab, and the strip STAYS: builder shows its
+    // chrome even at a single tab (owner: "builder strip always visible").
     await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-close').click()
     await expect(page.locator('.shell__tab')).toHaveCount(1)
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(1)
 
-    // Close the last tab — strip disappears, chat back to full height, spacer sane.
+    // Close the last tab — the emptied builder auto-returns to SINGLE (owner
+    // semantic). The strip retires with the world flip, and the never-seeded
+    // single slot opens on the home surface.
     await page.locator('.shell__tab-close').first().click()
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
-    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
-    await page.waitForTimeout(300)
-    const noStrip = await measure(page)
-    expect(noStrip.chatH / noStrip.contentH).toBeGreaterThan(0.9)
-    expect(noStrip.spacerH).toBeLessThanOrEqual(noStrip.scrollClientH)
+    await expect.poll(() => page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key))?.viewMode,
+      paneModel.STORAGE_KEY,
+    ), { timeout: 3000 }).toBe('single')
+    await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
   })
 
   test('no toggle/strip surface when nothing is pinned (single-screen)', async ({ page }) => {
