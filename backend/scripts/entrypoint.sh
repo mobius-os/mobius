@@ -1068,6 +1068,8 @@ service-token.txt
 .secret-key
 .recovery-secret
 .recovery-owner.json
+.setup-claim
+.setup-consumed
 .pm-commit
 compiled/
 db/
@@ -1176,7 +1178,7 @@ else
   # Runs as mobius (the .git owner); the pre-chown above guarantees
   # ownership is correct.
   su -s /bin/sh mobius -c '
-    for path in .secret-key db.sqlite3 mobius.db; do
+    for path in .secret-key db.sqlite3 mobius.db .setup-claim .setup-consumed; do
       git -C /data rm --cached "$path" 2>/dev/null || true
     done
   '

@@ -97,6 +97,12 @@ _DENY_RELPATHS = (
   ".env",
   "db/ultimate.db",
   ".storage-meta",
+  # First-boot claim gate (app.setup_claim): the one-time setup token, and its
+  # non-secret consumed marker. The token must never leak via the file API; the
+  # marker is runtime state, kept out like .storage-meta so it can't be
+  # hand-edited into a fail-closed lockout.
+  ".setup-claim",
+  ".setup-consumed",
 )
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
 # in case one is copied outside its canonical home. `.recovery-secret` is the
@@ -106,6 +112,9 @@ _DENY_RELPATHS = (
 _SECRET_NAMES = {
   ".env", ".secret-key", ".recovery-secret", ".recovery-owner.json",
   ".credentials.json", "service-token.txt",
+  # The first-boot setup claim is a one-time takeover secret — deny a file of
+  # that name anywhere in the tree, in case a copy lands outside its root home.
+  ".setup-claim",
 }
 
 
