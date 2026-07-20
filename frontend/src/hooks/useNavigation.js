@@ -461,7 +461,13 @@ export default function useNavigation({
   }, [])
 
   const snapshotRoute = useCallback(() => {
-    const content = paneModel.focusedContentRoute(workspaceStateRef.current.ws)
+    // CURRENT-WORLD route, not the builder focus: in single mode the visible
+    // surface is the slot, and snapshotting the hidden builder focus corrupted
+    // every single-mode Back target and same-route short-circuit (with builder
+    // focus A + slot B, opening C recorded A — Back then rewrote the slot to A,
+    // and re-opening A from the drawer was rejected as "same route").
+    // activeContentRoute is the one world-aware projection (two-worlds design).
+    const content = paneModel.activeContentRoute(workspaceStateRef.current.ws)
     // When Settings is open the physical route is a Settings route, but it
     // retains the focused content ids + pane hint (contract §2.2.1).
     const view = settingsOpenRef.current ? 'settings' : content.view

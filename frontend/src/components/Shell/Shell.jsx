@@ -490,7 +490,11 @@ export default function Shell() {
     // not the render-lagging active*Refs (§5.3.10): a workspace action previewed
     // in the same React batch must not persist a fresh blob beside a stale triple.
     // Settings is a global overlay tracked separately from pane content.
-    const content = paneModel.focusedContentRoute(workspaceStateRef.current.ws)
+    // CURRENT-WORLD projection (activeContentRoute): in single mode the reload
+    // triple must name the slot, not the hidden builder focus — the triple only
+    // seeds a boot with no valid workspace blob, and that boot lands in single
+    // mode showing the slot.
+    const content = paneModel.activeContentRoute(workspaceStateRef.current.ws)
     return {
       activeView: activeViewRef.current === 'settings' ? 'settings' : content.view,
       activeAppId: content.appId,
@@ -769,14 +773,19 @@ export default function Shell() {
   // Close only the tab; the derived triple follows the workspace, so dropping the
   // focused pane's active tab activates its neighbour (paneModel.closeTab).
   const closeTab = useCallback((kind, id) => {
-    // In the single-pane parity path, closing the sole strip item means
-    // "unpin this surface", not "remove the content currently on screen". The
-    // workspace keeps its implicit authority tab while the legacy projection is
-    // cleared, exactly matching the pre-workspace shell. The SOLE Settings tab is
-    // the exception (review §11): it has no authority content to keep, so the
-    // "unpin" shortcut would leave it active + persisted and UNCLOSABLE — it must
-    // genuinely close so the pane reverts to the empty chat surface.
-    if (openTabs.length === 1 && kind !== 'settings') {
+    // Kill-switch world only: closing the sole strip item means "unpin this
+    // surface", not "remove the content currently on screen" — the workspace
+    // keeps its implicit authority tab while the legacy projection is cleared,
+    // exactly matching the pre-workspace shell. The SOLE Settings tab is the
+    // exception (review §11): it has no authority content to keep, so the
+    // "unpin" shortcut would leave it active + persisted and UNCLOSABLE.
+    // With splits ON this shortcut must NOT run: the strip is builder chrome,
+    // and the sole-tab ✕ is a real close — CLOSE_TAB empties the tree and the
+    // reducer auto-returns to single with the coupled one-gesture undo (owner
+    // semantic). The old unconditional shortcut swallowed exactly that close:
+    // it unpinned legacy state, left the tree + builder mode intact, and made
+    // the last-tab ✕ a visible no-op.
+    if (!SPLITS && openTabs.length === 1 && kind !== 'settings') {
       setTabStripEngaged(false)
       tabModel.writeOpenTabs([])
       return
@@ -810,16 +819,19 @@ export default function Shell() {
       resolve: (ws) => resolveWorkspaceRequests(ws, requests, { mode, contentRect, liveApps }),
     })
   }, [dispatchWorkspace])
-  // The tab strip is the BUILDER SURFACE: in builder mode it is ALWAYS present
-  // (even at a single leaf, where this single-pane .shell__tabstrip stands in for
-  // the tiled WorkspaceChrome strips), giving phone users the drag source and
-  // making "enter builder → tabs and panes" true even without a second pane
-  // (owner phone report: "the logo changes but the pane doesn't get added").
-  // Single-SCREEN mode keeps today's rule (engaged only after 2+ tabs), so its
-  // no-strip single-pane look is byte-identical; builderModeActive is flag-gated
-  // (WORKSPACE_SPLITS_ENABLED) so the kill switch reverts to that too. Either way
-  // an empty workspace (no tabs) shows nothing — the >= 1 gate stays.
-  const tabStripVisible = (tabStripEngaged || builderModeActive) && openTabs.length >= 1
+  // The tab strip is the BUILDER SURFACE: with splits ON it follows the
+  // EFFECTIVE builder world exactly — always present in builder (even at a
+  // single leaf, where this single-pane .shell__tabstrip stands in for the
+  // tiled WorkspaceChrome strips, giving phone users the drag source), riding
+  // an exit beat or a single-mode drag preview with the rest of the tiled
+  // presentation, and NEVER rendered in single mode (owner: tabs exist in one
+  // world and don't exist in the other). The legacy tabStripEngaged latch is
+  // the KILL-SWITCH world's rule only (engaged after 2+ tabs) — letting it
+  // leak into the flag-ON formula painted the parked builder tree's strip
+  // over single mode whenever the latch was set. An empty workspace (no tabs)
+  // shows nothing either way — the >= 1 gate stays.
+  const tabStripVisible = (SPLITS ? effectiveViewMode === 'panes' : tabStripEngaged)
+    && openTabs.length >= 1
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
   // tab of each visible pane. A content wrapper matching a key is positioned +
@@ -1192,16 +1204,19 @@ export default function Shell() {
   const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
-  // matching cancel so a stale cancel from a superseded drag is ignored. The
-  // COMMIT path needs no separate descriptor event — the drop's OPEN_TAB_AT
-  // flips viewMode to 'panes' and the controller's committedMode reconcile picks
-  // that up; a rejected/no-op drop calls cancel (below) and mutates nothing.
+  // matching commit/cancel so a stale end-event from a superseded drag is
+  // ignored. A COMMITTED drop dispatches drag-commit in the SAME pointerup
+  // batch as the drop's OPEN_TAB_AT (which flips viewMode to 'panes'), so the
+  // descriptor and the tree flip as ONE transaction (INV 7) — the passive
+  // sync-committed reconcile stays a pure hydration net, never the beat path.
+  // A rejected/no-op drop cancels and mutates nothing.
   const dragPreviewIdRef = useRef(null)
-  const onModeDragPreview = useCallback((active) => {
+  const onModeDragPreview = useCallback((active, { committed = false } = {}) => {
     if (active) {
       dragPreviewIdRef.current = mode.dragArm(workspaceStateRef.current.ws.focusedPaneId)
     } else {
-      mode.dragCancel(dragPreviewIdRef.current)
+      if (committed) mode.dragCommit(dragPreviewIdRef.current)
+      else mode.dragCancel(dragPreviewIdRef.current)
       dragPreviewIdRef.current = null
     }
   }, [mode, workspaceStateRef])

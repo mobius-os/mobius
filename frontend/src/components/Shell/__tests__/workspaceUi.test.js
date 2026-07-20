@@ -50,13 +50,14 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
-  // Builder mode forces the single-pane strip visible (the builder surface); a
-  // fresh single-screen home still shows nothing until 2+ tabs engage it.
-  assert.match(shell, /const tabStripVisible = \(tabStripEngaged \|\| builderModeActive\) && openTabs\.length >= 1/)
+  // With splits ON the strip follows the EFFECTIVE builder world only (never
+  // single mode); the engaged latch is the kill-switch world's legacy rule.
+  assert.match(shell, /const tabStripVisible = \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
   assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
-  // The sole-tab "unpin" shortcut, EXCEPT for a sole Settings tab which must
-  // genuinely close (review §11).
-  assert.match(shell, /if \(openTabs\.length === 1 && kind !== 'settings'\) \{[\s\S]*?setTabStripEngaged\(false\)[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
+  // The sole-tab "unpin" shortcut is KILL-SWITCH-world only (with splits ON
+  // the sole-tab close is a real CLOSE_TAB so auto-return can fire), and even
+  // there a sole Settings tab must genuinely close (review §11).
+  assert.match(shell, /if \(!SPLITS && openTabs\.length === 1 && kind !== 'settings'\) \{[\s\S]*?setTabStripEngaged\(false\)[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
 })
 
 test('the pane switcher uses the shared modal focus and dismissal contract', () => {
@@ -491,8 +492,9 @@ test('the room flourish (CHARGE): panes DEAL in on the KEYED beat class, suppres
 })
 
 test('builder single-leaf shows the strip, and entering it has its deal moment (item 3)', () => {
-  // The strip is the builder surface: forced visible in builder even at one leaf.
-  assert.match(shell, /const tabStripVisible = \(tabStripEngaged \|\| builderModeActive\) && openTabs\.length >= 1/)
+  // The strip is the builder surface: visible in the effective builder world even
+  // at one leaf, and never in single mode.
+  assert.match(shell, /const tabStripVisible = \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
   // Entering builder routes through the ONE mode controller (INV 2), batched in
   // the SAME handler as the durable flip (INV 7) so no un-dealt frame paints. The
   // beat + reduced-motion collapse live in the machine now, not a Shell timer.

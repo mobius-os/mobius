@@ -77,10 +77,13 @@ export default function useWorkspaceDrag({
   openDrawer,
   openTabMenuAtRef, // ref → (clientX, clientY, tab, paneId) => void
   onDragStart, // dismiss the coachmark on the first real drag
-  onPreviewBuilder, // (active) => void — enter/leave the LIVE builder preview a
-  // single-mode drag unfolds (point 15: dragging IS building). Render-only: the
-  // reducer viewMode stays 'single' until the drop commits 'panes', so ONE undo
-  // reverts both the tree AND the mode.
+  onPreviewBuilder, // (active, { committed }) => void — enter/leave the LIVE
+  // builder preview a single-mode drag unfolds (point 15: dragging IS
+  // building). Render-only: the reducer viewMode stays 'single' until the drop
+  // commits 'panes', so ONE undo reverts both the tree AND the mode. The leave
+  // call carries the outcome — committed:true means the drop's OPEN_TAB_AT
+  // flipped the tree, so the descriptor must drag-commit (not cancel) in the
+  // same batch.
   convertSettingsForModeTransition, // () => void — the ONE centralized overlay<->tab
   // conversion every mode transition uses (review BLOCKER §1). A drop that commits
   // 'panes' runs it so a Settings TAKEOVER open at commit time converts to a tab
@@ -494,11 +497,16 @@ export default function useWorkspaceDrag({
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return
         cleaned = true
-        // Leave the live builder preview. On a COMMITTED drop the reducer is now in
-        // 'panes' (OPEN_TAB_AT flipped it), so dropping the render-only preview shows
-        // the committed builder world seamlessly; on CANCEL the reducer never left
-        // 'single', so this reverts the render to single-screen with no mutation.
-        onPreviewBuilder?.(false)
+        // Leave the live builder preview, telling the mode machine WHICH way it
+        // ended. On a COMMITTED drop the reducer is now in 'panes' (OPEN_TAB_AT
+        // flipped it) and the descriptor must commit in the SAME pointerup batch
+        // (drag-commit → committedMode 'panes'; INV 7 one-transaction) — routing
+        // a successful drop through drag-cancel left one committed render where
+        // the tree said 'panes' but the descriptor painted single (preview
+        // collapse + logo untwist) until the passive sync-committed net caught
+        // up. On CANCEL the reducer never left 'single', so the cancel reverts
+        // the render with no mutation.
+        onPreviewBuilder?.(false, { committed })
         clearTimeout(holdTimer)
         if (moveRAF) { cancelAnimationFrame(moveRAF); moveRAF = 0 }
         stopAutoScroll()

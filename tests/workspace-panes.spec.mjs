@@ -1106,7 +1106,10 @@ test.describe('Builder-mode Settings', () => {
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
     const back = await readWs(page)
     expect(whichPaneHas(back, 'settings:settings'), 'Settings tab intact after the round-trip').toBe(settingsPane)
-    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(1)
+    // In builder, pane surfaces wear the paned class, not the single-world
+    // --active flavor — same locator the takeover-vs-tab spec above uses.
+    await expect(page.locator('[data-tab-key="settings:settings"].shell__view--paned')).toHaveCount(1)
+    await expect(page.locator('.settings')).toBeVisible()
   })
 })
 

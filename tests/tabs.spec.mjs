@@ -282,23 +282,12 @@ test.describe('Tabs', () => {
     // semantic). The strip retires with the world flip, and the never-seeded
     // single slot opens on the home surface.
     await page.locator('.shell__tab-close').first().click()
-    // TEMP INSTRUMENTATION: capture the post-close world instead of asserting,
-    // so the failure diff shows the actual state (viewMode, tabs, strip DOM).
-    await page.waitForTimeout(1500)
-    const dump = await page.evaluate((key) => {
-      const ws = JSON.parse(sessionStorage.getItem(key) || 'null')
-      return {
-        viewMode: ws?.viewMode,
-        singleScreen: ws?.singleScreen === undefined ? '(absent)' : ws?.singleScreen,
-        paneTabs: Object.fromEntries(Object.entries(ws?.panes || {}).map(
-          ([id, p]) => [id, { tabs: p.tabs, active: p.activeTabKey }])),
-        legacyMirror: JSON.parse(sessionStorage.getItem('mobius-open-tabs') || 'null'),
-        stripCount: document.querySelectorAll('.shell__tabstrip').length,
-        stripText: document.querySelector('.shell__tabstrip')?.textContent ?? null,
-        tabCount: document.querySelectorAll('.shell__tab').length,
-      }
-    }, paneModel.STORAGE_KEY)
-    expect(dump).toEqual({ INSTRUMENTATION: 'see-diff' })
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key))?.viewMode,
+      paneModel.STORAGE_KEY,
+    ), { timeout: 3000 }).toBe('single')
+    await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
   })
 
   test('no toggle/strip surface when nothing is pinned (single-screen)', async ({ page }) => {
