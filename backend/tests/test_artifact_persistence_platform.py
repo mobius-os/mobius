@@ -123,6 +123,34 @@ def test_registry_parent_directory_is_fsynced_after_create_and_replace(
   assert len(directory_fsyncs) == 2
 
 
+@pytest.mark.parametrize("operation", ["create", "replace"])
+def test_registry_parent_fsync_failure_is_reported(
+  monkeypatch, operation,
+):
+  """A mutation is not successful when its directory entry is not durable."""
+  settings = get_settings()
+  record = publication.new_publication_record(
+    "f" * 32, 43, "a" * 32, "strict-fsync",
+  )
+  if operation == "replace":
+    publication.create_publication_record(settings, record)
+
+  real_fsync = publication.os.fsync
+
+  def fail_directory_fsync(fd):
+    if stat.S_ISDIR(os.fstat(fd).st_mode):
+      raise OSError("simulated registry directory fsync failure")
+    real_fsync(fd)
+
+  monkeypatch.setattr(publication.os, "fsync", fail_directory_fsync)
+
+  with pytest.raises(OSError, match="directory fsync failure"):
+    if operation == "create":
+      publication.create_publication_record(settings, record)
+    else:
+      publication.replace_publication_record(settings, record, "active")
+
+
 def test_publish_token_hint_cannot_hijack_another_app(client, auth):
   app_a = _create_app(client, auth, "publisher-a")
   app_b = _create_app(client, auth, "publisher-b")

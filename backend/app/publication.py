@@ -95,14 +95,11 @@ def _fsync_registry_dir(settings) -> None:
   registered publication with no record downgrades to legacy static serving —
   bypassing the generation/liveness checks. fsync the directory to close it.
   """
-  try:
-    fd = os.open(registry_root(settings), os.O_RDONLY)
-  except OSError:
-    return
+  # Failure to open or fsync means the mutation is not crash-durable. Let it
+  # abort the caller rather than report a publication/revocation succeeded.
+  fd = os.open(registry_root(settings), os.O_RDONLY)
   try:
     os.fsync(fd)
-  except OSError:
-    pass
   finally:
     try:
       os.close(fd)
