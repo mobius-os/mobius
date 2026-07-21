@@ -3,8 +3,9 @@
 import asyncio
 from uuid import uuid4
 
-from app import memory, questions
+from app import memory, models, questions
 from app.pending_questions import PendingQuestion
+from sqlalchemy import event
 
 
 def _make_pending() -> PendingQuestion:
@@ -114,6 +115,38 @@ def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
   assert detail.status_code == 200
   detail_body = detail.json()
   assert body["detail"] == detail_body
+
+
+def test_chat_list_projects_summaries_without_hydrating_transcripts(
+  client, auth,
+):
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Projected row",
+      "messages": [{"role": "user", "content": "large history sentinel"}],
+    },
+    headers=auth,
+  )
+  assert created.status_code == 200
+
+  hydrated_chat_ids = []
+
+  def on_load(chat, _context):
+    hydrated_chat_ids.append(chat.id)
+
+  event.listen(models.Chat, "load", on_load)
+  try:
+    listed = client.get("/api/chats", headers=auth)
+  finally:
+    event.remove(models.Chat, "load", on_load)
+
+  assert listed.status_code == 200
+  row = next(item for item in listed.json() if item["id"] == created.json()["id"])
+  assert row["has_messages"] is True
+  assert hydrated_chat_ids == [], (
+    "the drawer list must not instantiate Chat objects and decode messages"
+  )
 
 
 def test_update_chat_rejects_cross_site_request(client, auth, chat):
