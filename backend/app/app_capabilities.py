@@ -151,6 +151,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "cross_app_access": perms.get("cross_app_access", "none"),
       "share_with_apps": perms.get("share_with_apps", "none"),
       "manage_apps": bool(perms.get("manage_apps", False)),
+      "manage_skills": bool(perms.get("manage_skills", False)),
       "github_access": bool(perms.get("github_access", False)),
     },
     "background": (
@@ -226,6 +227,7 @@ def contract_from_app_state(
       "cross_app_access": getattr(app, "cross_app_access", "none"),
       "share_with_apps": getattr(app, "share_with_apps", "none"),
       "manage_apps": bool(getattr(app, "manage_apps", False)),
+      "manage_skills": bool(getattr(app, "manage_skills", False)),
       "github_access": bool(getattr(app, "github_access", False)),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),

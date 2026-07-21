@@ -662,6 +662,39 @@ def get_owner_or_app_with_manage_apps(
   )
 
 
+def get_owner_or_app_with_manage_skills(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, OR an app-scoped JWT whose App row has manage_skills=true.
+
+  The Skills mini-app is the canonical caller — it ships
+  `permissions.manage_skills: true` so its own UI can install a skill from an
+  online source (POST /api/skills/install) and uninstall an installed one
+  (DELETE /api/skills/{name}) on the owner's behalf without holding the owner
+  JWT directly. Any other app declaring the same permission inherits the trust.
+
+  Permission is gated by the live App row, not the manifest the JWT was issued
+  for — so revoking manage_skills (PATCH /api/apps/{id}) cuts off install
+  access on the next request without rotating the JWT. A boolean gate like
+  manage_apps, not a ladder.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.manage_skills):
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.manage_skills=true in its manifest "
+      "to install or uninstall skills on your behalf."
+    ),
+  )
+
+
 def get_owner_or_app_with_github_access(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

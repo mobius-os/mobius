@@ -1,0 +1,12 @@
+{
+  "id": "skills",
+  "name": "Skills",
+  "version": "0.1.0",
+  "description": "Browse, install, and manage agent skills — from your instance and the public ecosystem (Anthropic Agent Skills, Hermes catalogs, any SKILL.md on GitHub). Includes an agent chat that finds and offers matching skills.",
+  "entry": "index.jsx",
+  "embeds_agent": true,
+  "theme_color": "#5A0FC8",
+  "permissions": {
+    "manage_skills": true
+  }
+}

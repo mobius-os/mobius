@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from app import models
 from app.bootstrap import (
+  BOOTSTRAP_SKILLS_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
   LEGACY_PLATFORM_APP_MANIFEST_URLS,
   _migrate_legacy_platform_apps,
@@ -28,6 +29,7 @@ def _install_result(name="App", slug="app", app_id=1, mode="install"):
 def _bootstrap_urls():
   return [
     BOOTSTRAP_STORE_MANIFEST_URL,
+    BOOTSTRAP_SKILLS_MANIFEST_URL,
     LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"],
     LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"],
   ]
@@ -42,7 +44,7 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 3
+  assert install_mock.await_count == 4
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -67,6 +69,16 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       slug="store",
       manifest_url=_canonical_identity_key(
         BOOTSTRAP_STORE_MANIFEST_URL, "store",
+      ),
+      deleted_at=deleted_at,
+    ),
+    models.App(
+      name="Skills",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="skills",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_SKILLS_MANIFEST_URL, "skills",
       ),
       deleted_at=deleted_at,
     ),
@@ -96,11 +108,12 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  install_mock.assert_awaited_once()
-  assert (
-    install_mock.await_args.kwargs["manifest_url"]
-    == BOOTSTRAP_STORE_MANIFEST_URL
-  )
+  # Both reinstall_after_uninstall=True apps (store, skills) come back;
+  # Memory (policy False) stays gone; live Reflection is skipped.
+  assert install_mock.await_count == 2
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == [BOOTSTRAP_STORE_MANIFEST_URL, BOOTSTRAP_SKILLS_MANIFEST_URL]
 
 
 @pytest.mark.asyncio
@@ -116,6 +129,15 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       jsx_source="export default function App() {}",
       slug="app-store",
       manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
+    ),
+    models.App(
+      name="Skills",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="skills-custom",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_SKILLS_MANIFEST_URL, "skills",
+      ),
     ),
     models.App(
       name="Memory",
@@ -224,13 +246,14 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   install_mock = AsyncMock(side_effect=[
     HTTPException(502, "upstream down"),
+    _install_result("Skills", "skills", app_id=4),
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
   ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 3
+  assert install_mock.await_count == 4
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()

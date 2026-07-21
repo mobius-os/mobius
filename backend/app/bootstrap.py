@@ -33,6 +33,14 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-store/main/mobius.json"
 )
 
+# The Skills app (browse/install ecosystem skills + the skill-agent chat).
+# Developed in-repo under app-skills/; its canonical home is this catalog repo.
+# Bootstrap is failure-tolerant, so until the repo exists the install just
+# logs and retries next boot.
+BOOTSTRAP_SKILLS_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-skills/main/mobius.json"
+)
+
 LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
 
 
@@ -45,6 +53,7 @@ class _BootstrapApp:
 
 _BOOTSTRAP_APPS = (
   _BootstrapApp("store", BOOTSTRAP_STORE_MANIFEST_URL, True),
+  _BootstrapApp("skills", BOOTSTRAP_SKILLS_MANIFEST_URL, True),
   _BootstrapApp("memory", LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], False),
   _BootstrapApp(
     "reflection", LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], False,

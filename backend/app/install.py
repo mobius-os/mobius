@@ -1445,6 +1445,9 @@ async def _sync_app_skills(
         sidecar_path,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+  # The skill set changed (or may have) — refresh the generated tier-1 index.
+  # Best-effort like everything else in this post-commit phase.
+  _regenerate_skills_index(skills_dir)
 
 
 def _read_app_skill_records(skills_dir: Path) -> tuple[Path, dict]:
@@ -1494,6 +1497,7 @@ async def deactivate_app_skills(app_id: int) -> list[str]:
         sidecar,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+  _regenerate_skills_index(skills_dir)
   return warnings
 
 
@@ -1542,6 +1546,7 @@ async def restore_app_skills(app_id: int) -> list[str]:
         sidecar,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+  _regenerate_skills_index(skills_dir)
   return warnings
 
 
@@ -1568,6 +1573,17 @@ async def purge_app_skills(app_id: int) -> None:
       sidecar,
       json.dumps(records, indent=2, sort_keys=True) + "\n",
     )
+  _regenerate_skills_index(skills_dir)
+
+
+def _regenerate_skills_index(skills_dir: Path) -> None:
+  """Best-effort refresh of the generated skills-index.md after a change."""
+  try:
+    from app import skills as skills_mod
+
+    skills_mod.write_index(skills_dir)
+  except Exception:  # noqa: BLE001 - the index is a convenience surface
+    log.warning("skills index regeneration failed", exc_info=True)
 
 
 def _check_source_completeness(
@@ -2404,6 +2420,7 @@ async def install_from_manifest(
         share_with_apps=perms.get("share_with_apps", "none"),
         chat_log_access=perms.get("chat_log_access", "none"),
         manage_apps=bool(perms.get("manage_apps", False)),
+        manage_skills=bool(perms.get("manage_skills", False)),
         github_access=bool(perms.get("github_access", False)),
         filesystem_access=bool(perms.get("filesystem_access", False)),
         # The manifest's `offline_capable: true` opts the app into the
@@ -2804,6 +2821,8 @@ async def install_from_manifest(
           # versions; default to the existing value when the manifest omits the key.
           if "manage_apps" in perms:
             app.manage_apps = bool(perms["manage_apps"])
+          if "manage_skills" in perms:
+            app.manage_skills = bool(perms["manage_skills"])
           if "github_access" in perms:
             app.github_access = bool(perms["github_access"])
           # Filesystem authority is opt-in on every published version. Omitting

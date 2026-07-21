@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "13"  # v13: remove the retired built-in image provider
+SEED_VERSION = "14"  # v14: finding-skills (ecosystem discovery + install API)
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -84,6 +84,27 @@ def _chown_mobius(path: Path) -> None:
       pass
 
 
+def _write_index() -> None:
+  """Regenerates skills-index.md via app.skills; best-effort.
+
+  This script runs standalone from the entrypoint (before uvicorn), so the
+  app package import can fail on a badly broken tree — the index is a
+  convenience surface, never worth failing boot over. The server-side install
+  paths regenerate it too, so a skipped boot write self-heals on the next
+  install.
+  """
+  try:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from app.skills import write_index
+
+    write_index(SKILLS)
+    print("init_skills: skills-index.md regenerated")
+  except Exception as exc:  # noqa: BLE001 - boot must not fail on the index
+    print(f"init_skills: index generation skipped ({exc})")
+
+
 def init() -> None:
   seed = _seed_dir()
   if seed is None:
@@ -98,6 +119,7 @@ def init() -> None:
     n = len(list(SKILLS.glob("*.md")))
     print(f"init_skills: seeded {n} skills (v{SEED_VERSION})")
     _chown_mobius(SKILLS)
+    _write_index()
     return
   # Present already — preserve the agent's edits. Only add NEW seed skills the
   # instance doesn't have yet (never overwrite an existing one).
@@ -123,6 +145,7 @@ def init() -> None:
   if migrated:
     print(f"init_skills: migrated {migrated} unmodified base skill(s)")
   _chown_mobius(SKILLS)
+  _write_index()
 
 
 if __name__ == "__main__":

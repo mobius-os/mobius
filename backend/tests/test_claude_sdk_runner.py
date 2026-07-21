@@ -1296,6 +1296,25 @@ def test_skill_file_read_name_rejects_non_matches():
     assert _skill_file_read_name(tool, input_data, "/data") == ""
 
 
+def test_skill_file_read_name_matches_dir_shaped_skill():
+  """`<skills>/<name>/SKILL.md` (the installed-skill convention) is a load."""
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  path = os.path.join(_skills_dir(), "pdf-tools", "SKILL.md")
+  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == "pdf-tools"
+  # A resource file inside the skill dir is NOT a load — only the entry doc.
+  res = os.path.join(_skills_dir(), "pdf-tools", "reference.md")
+  assert _skill_file_read_name("Read", {"file_path": res}, "/data") == ""
+
+
+def test_skill_file_read_name_ignores_generated_index():
+  """Reading skills-index.md is browsing the index, not loading a skill."""
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  path = os.path.join(_skills_dir(), "skills-index.md")
+  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == ""
+
+
 def test_observe_skill_file_read_publishes_chip_and_activity(monkeypatch):
   from app import activity
   from app.claude_sdk_runner import observe_skill_file_read
