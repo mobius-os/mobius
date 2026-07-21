@@ -524,6 +524,9 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
   assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
   // The single-pane nav strip carries the beat motion so it deals WITH its pane.
   assert.match(shell, /data-mode-motion=\{navMotion \? navMotion\.motion : undefined\}/)
+  // M4: and it is INERT throughout the exit beat (not just under the drawer), so a
+  // tap on the strip while it clears cannot re-target the transition.
+  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{modalDrawerOpen \|\| exitBeatActive\}/)
   // CSS: a strip deals in with its pane on enter (shared with the WorkspaceChrome
   // strips via .shell__tabstrip[data-mode-motion]).
   assert.match(css, /\.shell--builder-entering \.shell__tabstrip\[data-mode-motion="deal-in"\] \{[\s\S]*?shell-mode-deal-in/)

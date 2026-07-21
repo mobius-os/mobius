@@ -2905,7 +2905,11 @@ export default function Shell() {
         return (
         <nav
           className="shell__tabstrip"
-          inert={modalDrawerOpen}
+          // INV 9 (inert beat): the single-pane strip clears WITH its pane during
+          // an exit beat, so it is pointer/keyboard inert throughout — not just under
+          // the drawer (M4). It matches the WorkspaceChrome strips, which already go
+          // inert on exitBeatActive.
+          inert={modalDrawerOpen || exitBeatActive}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
           // (the coachmark teaches "drag tabs to split" here). Tag it with the

@@ -157,13 +157,21 @@ export function deriveExitPlan({
   let underlayKey = null
 
   if (promoteLeaf) {
+    // FLIP the promote pane from its ACTUAL wrapper geometry to the full box. At a
+    // single visible leaf the strip is a flex SIBLING outside .shell__content, so the
+    // sole wrapper already fills the content box — its rect IS the destination, an
+    // identity FLIP with no STRIP_H inset. At >=2 leaves the WorkspaceChrome strips
+    // sit INSIDE the pane rect, so the wrapper is inset by STRIP_H. Insetting the
+    // single-leaf case (contentRectOfPane) overshot the FLIP (y:-STRIP_H, sy>1) and
+    // snapped back when the strip unmounted (M4).
+    const fromRect = leaves.length === 1 ? promoteLeaf.rect : contentRectOfPane(promoteLeaf.rect)
     participants.push({
       key: promoteLeaf.activeKey,
       paneId: promoteLeaf.paneId,
       motion: 'promote',
       delayMs: 0,
       durationMs: MODE_MOTION.promoteMs,
-      flip: flipTo(contentRectOfPane(promoteLeaf.rect), dest),
+      flip: flipTo(fromRect, dest),
     })
     completionNames.add(PROMOTE_NAME)
     // Siblings deal out in visual order beneath the promoting pane.

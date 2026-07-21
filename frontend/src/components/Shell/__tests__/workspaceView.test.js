@@ -475,6 +475,32 @@ test('deriveExitPlan: siblings deal out on a 20ms visual-order stagger', () => {
   assert.equal(plan.totalMs, MODE_MOTION.staggerMs + MODE_MOTION.exitItemMs)
 })
 
+// ── M4: the single-leaf promote FLIP must not overshoot ───────────────────────
+test('deriveExitPlan: M4 the single-leaf promote FLIPs identity (no STRIP_H overshoot)', () => {
+  // One visible leaf → its strip is a flex SIBLING outside .shell__content, so the
+  // sole wrapper already fills the content box. The promote FLIP must be identity,
+  // not inset by STRIP_H (which overshot y:-STRIP_H, sy>1 then snapped back).
+  const ws = { ...paneModel.seedFromFlatTabs([makeTab('app', '42')]), singleScreen: { kind: 'app', id: '42' } }
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  const promote = plan.participants.find(p => p.motion === 'promote')
+  assert.ok(promote, 'the sole leaf promotes')
+  assert.equal(Math.abs(promote.flip.x), 0) // -from.x can be -0; compare magnitude
+  assert.equal(Math.abs(promote.flip.y), 0, 'no STRIP_H vertical inset')
+  assert.equal(promote.flip.sx, 1)
+  assert.equal(promote.flip.sy, 1, 'no vertical overshoot — the wrapper is already full-bleed')
+})
+
+test('deriveExitPlan: M4 a multi-pane promote KEEPS the STRIP_H inset (strip is inside the pane rect)', () => {
+  // >=2 leaves → WorkspaceChrome strips sit INSIDE each pane rect, so the wrapper is
+  // inset by STRIP_H and the FLIP legitimately scales up. The single-leaf fix must
+  // not touch this multi-pane case.
+  const ws = twoPaneChatAndApp() // legacy absent-slot → seeds app:42 (focused right pane)
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  const promote = plan.participants.find(p => p.motion === 'promote')
+  assert.ok(promote && promote.key === 'app:42')
+  assert.ok(promote.flip.sy > 1, 'STRIP_H inset stays for a real multi-pane strip')
+})
+
 // ── M2: exit plans must describe takeover / immersive destinations ────────────
 test('deriveExitPlan: M2 a suspended Settings takeover reveals to the Settings underlay, not the slot', () => {
   // The single world paints Settings OVER the slot on completion, so the exit must
