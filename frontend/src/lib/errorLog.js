@@ -94,6 +94,18 @@ export function getRecentErrors() {
 
 let installed = false
 
+// Browser extensions (MetaMask, password managers, ad blockers, ...) inject
+// scripts into the page and sometimes throw or reject on their own, for
+// reasons that have nothing to do with the shell. Recognize their own
+// script/stack origin and skip it here too, so it never becomes a fake
+// "app_error" activity event (and, worse, a "the app crashed" chat) for
+// something Möbius code never touched. Mirrors the same filter in
+// app-frame.html's per-iframe handlers.
+const EXTENSION_ORIGIN_RE = /\b(chrome|moz|safari-web|ms-browser)-extension:\/\//i
+function isExtensionError(source, stack) {
+  return EXTENSION_ORIGIN_RE.test(String(source || '')) || EXTENSION_ORIGIN_RE.test(String(stack || ''))
+}
+
 /**
  * Installs window-level handlers for the errors React's ErrorBoundary can't
  * catch: errors thrown in event handlers / async callbacks (window 'error')
@@ -108,6 +120,10 @@ export function installGlobalErrorHandlers() {
     // carry no `error` object and aren't actionable script faults — skip them
     // so the log stays signal, not noise.
     if (!e.error && !e.message) return
+    if (isExtensionError(e.filename, e.error?.stack)) {
+      console.warn('[mobius] ignored browser-extension error (not the shell):', e.message)
+      return
+    }
     recordClientError({
       where: 'window.onerror',
       message: e.message,
@@ -118,6 +134,10 @@ export function installGlobalErrorHandlers() {
 
   window.addEventListener('unhandledrejection', (e) => {
     const reason = e.reason
+    if (isExtensionError('', reason?.stack)) {
+      console.warn('[mobius] ignored browser-extension rejection (not the shell):', reason?.message ?? reason)
+      return
+    }
     recordClientError({
       where: 'unhandledrejection',
       message: reason?.message ?? String(reason),

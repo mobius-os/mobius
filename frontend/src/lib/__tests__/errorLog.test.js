@@ -94,3 +94,47 @@ test('still writes the sessionStorage ring (existing behavior preserved)', () =>
   const ring = errorLog.getRecentErrors()
   assert.ok(ring.some((r) => r.message === 'ring me'), 'ring buffer still populated')
 })
+
+function stubWindowEvents() {
+  const handlers = {}
+  globalThis.window = {
+    addEventListener: (type, fn) => {
+      handlers[type] = handlers[type] || []
+      handlers[type].push(fn)
+    },
+  }
+  return handlers
+}
+
+test('installGlobalErrorHandlers ignores a browser-extension window.onerror (e.g. MetaMask inpage.js)', () => {
+  const handlers = stubWindowEvents()
+  errorLog.installGlobalErrorHandlers()
+  handlers.error[0]({
+    message: 'Failed to connect to MetaMask',
+    filename: 'chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/scripts/inpage.js',
+    error: new Error('Failed to connect to MetaMask'),
+  })
+  assert.equal(fetchCalls.length, 0, 'an extension-origin error must never be recorded as a shell/app crash')
+  const ring = errorLog.getRecentErrors()
+  assert.equal(ring.length, 0, 'must not even populate the local ring — it is not our error')
+})
+
+test('installGlobalErrorHandlers ignores a browser-extension unhandledrejection', () => {
+  const handlers = stubWindowEvents()
+  errorLog.installGlobalErrorHandlers()
+  const reason = new Error('boom')
+  reason.stack = 'Error: boom\n    at chrome-extension://abcdefabcdefabcdefabcdefabcdefabcdefabcd/scripts/inpage.js:1:1'
+  handlers.unhandledrejection[0]({ reason })
+  assert.equal(fetchCalls.length, 0, 'an extension-origin rejection must never be recorded as a shell/app crash')
+})
+
+test('installGlobalErrorHandlers still records a genuine shell error', () => {
+  const handlers = stubWindowEvents()
+  errorLog.installGlobalErrorHandlers()
+  handlers.error[0]({
+    message: 'TypeError: x is not a function',
+    filename: 'https://mobius.example/assets/index-abc123.js',
+    error: new Error('TypeError: x is not a function'),
+  })
+  assert.equal(fetchCalls.length, 1, 'a real shell error must still be reported')
+})
