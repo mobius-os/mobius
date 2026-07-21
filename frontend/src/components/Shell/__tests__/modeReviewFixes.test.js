@@ -191,6 +191,16 @@ test('finding R1: applyModeDestination only dismisses Settings when NOT preservi
   assert.match(nav, /if \(!preserveSettings\) \{\s*\n\s*setSettingsOpen\(false\)/)
 })
 
+// -- Finding R2: a foreground single-world open dismisses the Settings takeover --
+test('finding R2: a foreground single-world placement dismisses the Settings takeover', () => {
+  // The pure resolver writes the slot BENEATH an open takeover (it cannot clear React
+  // state), so Shell dismisses Settings alongside a foreground single-world open —
+  // exactly as a user-initiated open does — so the foregrounded item is visible.
+  assert.match(shell, /if \(world === 'single'\s*\n\s*&& requests\.some\(r => r && r\.item && r\.activation === ACTIVATE_FOREGROUND\)\) \{\s*\n\s*dismissSettings\(\)/)
+  // dismissSettings is a no-op when no takeover is open (guarded in the nav hook).
+  assert.match(nav, /const dismissSettings = useCallback\(\(\) => \{\s*\n\s*if \(!settingsOpenRef\.current\) return/)
+})
+
 // -- Finding W1: an epoch-keyed completion watchdog bounds a stuck beat ---------
 test('finding W1: a bounded completion watchdog force-completes a stranded epoch (INV 7/14)', () => {
   // A finished promise that never resolves while the page stays visible would strand

@@ -33,6 +33,7 @@ import {
   resolveWorkspaceRequests,
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
+  ACTIVATE_FOREGROUND,
 } from './workspacePlacement.js'
 import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
@@ -198,7 +199,7 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
-    navTo, applyModeDestination,
+    navTo, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
@@ -826,6 +827,19 @@ export default function Shell() {
     }
     const mode = paneModel.modeForRect(contentRect)
     const liveApps = appsRef.current
+    // R2: a FOREGROUND agent open in the SINGLE world writes the slot (via the pure
+    // resolver's F4 branch) BENEATH an open Settings takeover, so the item would be
+    // invisible. Dismiss the takeover alongside the placement — exactly as a
+    // user-initiated open does — so the foregrounded item is actually shown. Only in
+    // single (in builder the takeover is suspended, and clearing settingsOpen there
+    // would unmount the mounted-hidden SettingsView). dismissSettings no-ops when no
+    // takeover is open.
+    const currentWs = workspaceStateRef.current.ws
+    const world = paneModel.WORKSPACE_SPLITS_ENABLED ? currentWs.viewMode : 'single'
+    if (world === 'single'
+        && requests.some(r => r && r.item && r.activation === ACTIVATE_FOREGROUND)) {
+      dismissSettings()
+    }
     // Dispatch the resolver as a FUNCTION (workspace → workspace): the reducer
     // runs it against the CURRENT reducer workspace, so placements landing in one
     // React batch compose (the second sees the first, splits and all) instead of
@@ -836,7 +850,7 @@ export default function Shell() {
       type: 'APPLY_PLACEMENT',
       resolve: (ws) => resolveWorkspaceRequests(ws, requests, { mode, contentRect, liveApps }),
     })
-  }, [dispatchWorkspace])
+  }, [dispatchWorkspace, dismissSettings])
   // The tab strip is the BUILDER SURFACE: with splits ON it follows the
   // EFFECTIVE builder world exactly — always present in builder (even at a
   // single leaf, where this single-pane .shell__tabstrip stands in for the

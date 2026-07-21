@@ -833,6 +833,17 @@ export default function useNavigation({
   // convert, so the former no-op mode-conversion hook (v1) is gone — the toggle no
   // longer calls it, and no reducer branch removes a Settings tab on entry.
 
+  // Dismiss the single-world Settings TAKEOVER overlay (R2). A FOREGROUND agent open
+  // that writes the single slot goes through the pure placement resolver (batchable),
+  // not applyModeDestination, so it cannot clear the takeover itself — Shell calls
+  // this alongside it so the foregrounded item is actually visible, exactly as a
+  // user-initiated open would leave Settings. A no-op when no takeover is open.
+  const dismissSettings = useCallback(() => {
+    if (!settingsOpenRef.current) return
+    setSettingsOpen(false)
+    settingsOpenRef.current = false
+  }, [])
+
   function navTo(view, opts = {}) {
     // App-sentinels from other apps stay in browser history — each is still a
     // valid back-target for its owner, routed by its tag when consumed. An
@@ -1542,6 +1553,7 @@ export default function useNavigation({
     closeDrawer,
     navTo,
     applyModeDestination,
+    dismissSettings,
     backFiredRef,
     drawerPushedRef,
     drawerOpenRef,
