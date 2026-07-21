@@ -355,3 +355,140 @@ test('v2 auto-return flips the descriptor and the tree atomically (no lagging fr
     key => JSON.parse(sessionStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
   ), { timeout: 3000 }).toBe('single')
 })
+
+// ── Round 4 item 1: the logo holds its breath until completion ────────────────
+// The hold hands its compression to the descriptor: while an animated beat owns the
+// logo it stays compressed (~.84) and springs back so its first full-size frame lands
+// at completion. A standalone keyboard/swipe flip never synthesizes compression.
+
+// Press-and-hold the brand past the ~450ms threshold, then release. A completed hold
+// consumes its trailing click, so this never also opens the drawer.
+async function pressHoldLogo(page, holdMs = 650) {
+  const box = await page.getByLabel('Toggle navigation').boundingBox()
+  const cx = box.x + box.width / 2
+  const cy = box.y + box.height / 2
+  await page.mouse.move(cx, cy)
+  await page.mouse.down()
+  await page.waitForTimeout(holdMs)
+  await page.mouse.up()
+}
+
+// Sample the logo across a beat: install BEFORE the trigger. Records, on every frame,
+// whether .shell__brand carried is-beat-held, the min computed logo `scale`, and
+// whether data-logo-beat-epoch ever disagreed with the root data-mode-epoch while both
+// were present. Resolves once a beat started then settled (or a generous frame budget).
+async function sampleLogoBeat(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    const brand = document.querySelector('.shell__brand')
+    const logo = document.querySelector('.shell__logo')
+    let beatHeldSeen = false
+    let minScale = 1
+    let epochMismatch = false
+    let sawBeatClass = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const cls = root.className
+        const beatClass = cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')
+        if (beatClass) sawBeatClass = true
+        if (brand.classList.contains('is-beat-held')) {
+          beatHeldSeen = true
+          const s = parseFloat(getComputedStyle(logo).scale)
+          if (Number.isFinite(s)) minScale = Math.min(minScale, s)
+          const logoEpoch = brand.getAttribute('data-logo-beat-epoch')
+          const modeEpoch = root.getAttribute('data-mode-epoch')
+          if (logoEpoch != null && modeEpoch != null && logoEpoch !== modeEpoch) epochMismatch = true
+        }
+        frames += 1
+        if ((sawBeatClass && !beatClass && frames > 4) || frames > 320) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    const settledScale = parseFloat(getComputedStyle(logo).scale)
+    return { beatHeldSeen, minScale, epochMismatch, sawBeatClass, settledScale }
+  })
+}
+
+// Whether is-beat-held is on the brand RIGHT NOW (for the instant/no-compression checks).
+async function beatHeldNow(page) {
+  return page.evaluate(() => !!document.querySelector('.shell__brand.is-beat-held'))
+}
+
+test('round4-1: a completed HOLD keeps the logo compressed then springs back at completion', async ({ page }) => {
+  await bootShell(page, WIDE)
+  // Fresh boot = builder; a hold EXITS to single with an animated beat.
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await pressHoldLogo(page)
+  const r = await sampler
+  expect(r.sawBeatClass, 'an animated beat ran').toBe(true)
+  expect(r.beatHeldSeen, 'the hold emitted the is-beat-held compression class').toBe(true)
+  // The mark stayed compressed at ~.84 through the beat (pointer release did NOT
+  // spring it) and reaches full size only at completion.
+  expect(r.minScale, 'the logo held its .84 compression during the beat').toBeLessThanOrEqual(0.88)
+  expect(r.epochMismatch, 'the logo release always tracks the live beat epoch').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  // Settled: no compression class lingers, the mark is full size.
+  await expect.poll(() => beatHeldNow(page)).toBe(false)
+  const finalScale = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale))
+  expect(Math.abs(finalScale - 1)).toBeLessThan(0.02)
+})
+
+test('round4-1: a standalone Shift+Enter flip never emits a compression class', async ({ page }) => {
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page) // keyboard path — the standalone announcement is enough
+  const r = await sampler
+  expect(r.sawBeatClass, 'the keyboard flip still ran an animated beat').toBe(true)
+  expect(r.beatHeldSeen, 'no synthetic compression on a standalone keyboard flip').toBe(false)
+  // The logo never dipped toward .84 — it was not compressed.
+  expect(r.minScale, 'the logo stayed full size (no compression)').toBeGreaterThan(0.95)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('round4-1: an EARLY logo release is a tap — mode unchanged, no compression class', async ({ page }) => {
+  await bootShell(page, WIDE)
+  const before = await builderActive(page)
+  // A press well under the ~450ms threshold releases as a tap (opens the drawer),
+  // never a mode flip, and never emits is-beat-held.
+  await pressHoldLogo(page, 150)
+  await page.waitForTimeout(200)
+  expect(await beatHeldNow(page)).toBe(false)
+  expect(await builderActive(page)).toBe(before)
+})
+
+test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to the mode epoch', async ({ page }) => {
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  // Complete a hold (holdOwnsBeat latches), then immediately retoggle by keyboard —
+  // the compression rides through to the newest epoch, whose id the logo release must
+  // track (data-logo-beat-epoch === data-mode-epoch on every sampled frame).
+  await pressHoldLogo(page)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.beatHeldSeen, 'the hold-owned compression rode through the retoggle').toBe(true)
+  expect(r.epochMismatch, 'the logo release never lagged behind the newest beat epoch').toBe(false)
+  await expect.poll(() => modePhase(page), { timeout: 3000 }).toBe('idle')
+})
+
+test('round4-1: reduced motion flips instantly with no beat class and no compression', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  // Reduced motion commits directly: no descriptor arms, so neither the beat class nor
+  // the is-beat-held compression is ever emitted (the haptic still fires in JS).
+  expect(r.sawBeatClass, 'reduced motion is an instant flip — no beat class').toBe(false)
+  expect(r.beatHeldSeen, 'reduced motion never emits is-beat-held').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})

@@ -36,6 +36,11 @@ export const MODE_MOTION = Object.freeze({
   enterSingleMs: 230, // the sole leaf's deal-in (single-leaf entry)
   exitItemMs: 180, // one pane's deal-out (world reveal)
   promoteMs: 250, // the survivor pane's FLIP grow-to-full-bleed (slower, more mass)
+  // The logo's spring-back window (round 4 item 1): the compressed mark holds .84
+  // through the beat and RELEASES over the terminal logoReleaseMs so its first
+  // full-size frame coincides with descriptor completion. For a world reveal this is
+  // exactly phase 2 (== exitArriveMs below), so a short plan clamps it to totalMs.
+  logoReleaseMs: 120,
 })
 
 // The slack a visibility-return reconcile allows past the plan's totalMs before it

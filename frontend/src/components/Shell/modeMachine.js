@@ -73,8 +73,10 @@ export function initialModeState(committedMode = 'panes') {
 // Reduced motion and structurally-instant flips (an empty tree) are represented as
 // a NULL presentation from the caller — there is no `animated` boolean to strand
 // (INV 11: retained transitions are animated by construction). A drag preview
-// passes no presentation and never self-completes.
-function planArms(presentation) {
+// passes no presentation and never self-completes. Exported so the controller can
+// tell an animated toggle from an instant flip when it builds the toggle RECEIPT —
+// the ONE predicate, never duplicated (logo-beat handoff, round 4 item 1).
+export function planArms(presentation) {
   return !!presentation
     && Array.isArray(presentation.completionNames)
     && presentation.completionNames.length > 0

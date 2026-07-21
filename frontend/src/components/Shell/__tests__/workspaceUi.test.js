@@ -398,16 +398,26 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   // The 180° twist is a var flip in builder mode (not a transform override).
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
-  // Completion: spring (enter) overshoots 0.84→1; snap (exit) settles fast. Polish
-  // item 5 puts these on the SAME beat as the panes (280ms ignite, not 480ms).
+  // INSTANT flip (empty tree) completion keeps the immediate ignite/snap (0.84→1);
+  // an ANIMATED beat emits is-beat-held instead (round 4 item 1). Polish item 5's
+  // same-beat timing survives (280ms ignite, not 480ms).
   assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 280ms cubic-bezier\(0\.16, 1, 0\.3, 1\)/)
   assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 140ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
   assert.match(shellCss, /@keyframes shell-logo-ignite\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
   assert.match(shellCss, /@keyframes shell-logo-snap\s*\{[\s\S]*?scale:\s*0\.84/)
-  // Item 5: logo rotate, halo bloom, and wordmark tint ride the SAME beat classes as
-  // the panes (.shell--builder-entering/-exiting) instead of trailing them.
-  assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate 260ms cubic-bezier\(0\.2, 1\.1, 0\.32, 1\)/)
-  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate 220ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
+  // Round 4 item 1: a HOLD-owned animated beat holds .84 and RELEASES over the
+  // terminal --logo-release-ms after --logo-release-delay (both fill), so the mark's
+  // first full-size frame lands at completion. Two identical keyframes alternate by
+  // epoch parity (a|b) so a retoggle restarts the delay by swapping the name.
+  assert.match(shellCss, /\.shell__brand\.is-beat-held-a \.shell__logo\s*\{[\s\S]*?animation:\s*[\s\S]*?shell-logo-beat-release-a[\s\S]*?var\(--logo-release-ms, 120ms\)[\s\S]*?var\(--logo-release-delay, 0ms\)[\s\S]*?both/)
+  assert.match(shellCss, /\.shell__brand\.is-beat-held-b \.shell__logo\s*\{[\s\S]*?animation:\s*[\s\S]*?shell-logo-beat-release-b[\s\S]*?var\(--logo-release-ms, 120ms\)[\s\S]*?var\(--logo-release-delay, 0ms\)[\s\S]*?both/)
+  assert.match(shellCss, /@keyframes shell-logo-beat-release-a\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
+  assert.match(shellCss, /@keyframes shell-logo-beat-release-b\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
+  // Item 5 + round 4 item 1: logo rotate rides --mode-total (the plan's own totalMs)
+  // so the twist settles with the panes — for a world reveal, at the end of the
+  // destination arrival, not the last deal-out. Halo bloom + wordmark tint keep pace.
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 260ms\) cubic-bezier\(0\.2, 1, 0\.32, 1\)/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 220ms\) cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
   assert.match(shellCss, /\.shell--builder-entering \.shell__logo-halo\s*\{\s*transition: opacity 160ms var\(--ease-mode-arrive\) 60ms/)
   assert.match(shellCss, /\.shell--builder-exiting \.shell__logo-halo\s*\{\s*transition: opacity 100ms var\(--ease-mode-chrome\)/)
   assert.match(shellCss, /\.shell--builder-entering \.shell__wordmark \{ transition-duration: 220ms; \}/)
@@ -431,7 +441,10 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   // Reduced motion: twist instant, the compress kept (direct press feedback), the
   // spring/snap skipped (haptic still fires in JS), halo static (no rAF).
   assert.match(shellCss, /\.shell__logo \{ transition: rotate 0s, scale 160ms ease; \}/)
-  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo,\s*\n\s*\.shell__brand\.is-snapping \.shell__logo \{ animation: none; \}/)
+  // The ignite/snap AND the hold's descriptor-owned beat-release are all disabled
+  // under reduced motion (round 4 item 1 — belt-and-braces; is-beat-held is not even
+  // emitted since the toggle commits instantly).
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo,\s*\n\s*\.shell__brand\.is-snapping \.shell__logo,\s*\n\s*\.shell__brand\.is-beat-held-a \.shell__logo,\s*\n\s*\.shell__brand\.is-beat-held-b \.shell__logo \{ animation: none; \}/)
 })
 
 test('the brand logo img is pointer-inert so a hold never raises the native image preview', () => {

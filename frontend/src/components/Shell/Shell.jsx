@@ -78,7 +78,7 @@ import {
 import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature,
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
 } from './workspaceView.js'
 import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
@@ -295,6 +295,22 @@ export default function Shell() {
   const beatPlan = modeMachine.transitionPresentation(modeState)
   const exitPlan = modeMachine.exitPresentation(modeState)
   const exitUnderlayKey = exitPlan ? exitPlan.underlayKey : null
+  // The logo spring-back window on the shell root while an animated beat is live
+  // (round 4 item 1): the mark holds .84 through the beat and releases over the
+  // terminal logoReleaseMs so its first full-size frame lands at completion. `both`
+  // fill on the CSS keyframe holds .84 through the release DELAY. The twist rides
+  // --mode-total so rotation, panes, and logo settle together. A short plan clamps
+  // the release to the whole beat. Null (no vars) when idle.
+  const beatRootVars = useMemo(() => {
+    if (!beatPlan) return null
+    const total = beatPlan.totalMs
+    const release = Math.min(MODE_MOTION.logoReleaseMs, total)
+    return {
+      '--mode-total': `${total}ms`,
+      '--logo-release-ms': `${release}ms`,
+      '--logo-release-delay': `${Math.max(0, total - MODE_MOTION.logoReleaseMs)}ms`,
+    }
+  }, [beatPlan])
   // The key SINGLE mode will paint after this exit. During the beat it drives the
   // destination AppCanvas `active` prop so insets/immersive presentation are already
   // correct and do not jump only at completion (exit-design v1 §Visibility).
@@ -1354,8 +1370,10 @@ export default function Shell() {
       })
       : deriveEnterPlan({ workspace: settled, projection })
     // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the gesture/
-    // keyboard caller (F13); an omitted cause falls back to 'toggle'.
-    mode.toggle({ cause, presentation })
+    // keyboard caller (F13); an omitted cause falls back to 'toggle'. RETURN the
+    // toggle receipt so the logo gesture can tell an animated beat from an instant
+    // flip and hand its compression to the descriptor (round 4 item 1).
+    return mode.toggle({ cause, presentation })
   }, [dispatchWorkspace, mode, projection, contentRect, resolveEmptySingleHome])
   // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
   // gesture + living halo). The HOLD / swipe / Shift+Enter mode toggle is
@@ -2913,6 +2931,9 @@ export default function Shell() {
   return (
     <div
       ref={shellRootRef}
+      // The logo-release timing vars for the live beat (round 4 item 1); absent when
+      // idle so the .shell__logo rotate/scale transitions fall back to their defaults.
+      style={beatRootVars || undefined}
       // The live transition phase + epoch, surfaced for observability + tests: the
       // completion is epoch-keyed in the controller closure (INV 12/15), and this
       // data-epoch documents which beat the DOM belongs to (a drag preview has no
@@ -2942,6 +2963,10 @@ export default function Shell() {
           // transition (entry, exit, or a drag preview) so it adds no per-frame style
           // writes while panes are animating (exit-design v2 §Background isolation).
           haloActive={builderModeActive && !modeState.transition}
+          // The live descriptor drives the logo's hold→completion spring (round 4
+          // item 1): a hold-owned animated beat holds the mark compressed and releases
+          // it as the beat completes, instead of an immediate ignite/snap.
+          transition={modeState.transition}
           backFiredRef={backFiredRef}
           onToggleMode={handleToggleViewMode}
           onToggleNavigation={handleToggleNavigation}
