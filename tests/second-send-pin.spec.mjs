@@ -195,6 +195,73 @@ test('Second send from auto-scroll pins to viewport top through the full SSE flo
   expect(afterSecond.lastUserVisualTop).toBeLessThanOrEqual(afterSecond.clientH / 3)
 })
 
+test('A tall-composer send lands once without a post-paint pin repair', async ({ page }) => {
+  await setupWithSSE(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'First response paragraph. '.repeat(60) },
+    { type: 'done' },
+  ])
+  await newChat(page)
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  await gestureToBottom(page)
+
+  await replaceStreamRoute(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Short reply.' },
+    { type: 'done' },
+  ])
+
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const multiline = [
+    'Second user message',
+    'with enough draft text',
+    'to make the composer tall',
+    'before it collapses on send.',
+  ].join('\n')
+  await input.fill(multiline)
+  await expect(page.locator('.chat__pill')).toHaveClass(/chat__pill--tall/)
+
+  // Recreate the real race deterministically: the passive foot observer still
+  // exposes the previous composer measurement while the committed textarea is
+  // about to collapse. The controller must overwrite this stale value in its
+  // pre-paint layout pass, before it sizes the reservation or writes scrollTop.
+  await page.evaluate(() => {
+    const chat = document.querySelector('.chat')
+    const foot = document.querySelector('.chat__foot')
+    if (!chat || !foot) throw new Error('missing chat foot')
+    chat.style.setProperty('--composer-h', `${foot.offsetHeight + 48}px`)
+    window.__mobiusChatScrollTrace = {
+      version: 1, transitions: [], writes: [], events: [],
+    }
+  })
+
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.chat__msg--user')).toHaveCount(2, { timeout: 3000 })
+  await expect(page.locator('.chat__msg--user').last()).toContainText('Second user message')
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 350)))
+
+  const result = await page.evaluate(() => {
+    const scroll = document.querySelector('.chat__scroll')
+    const users = document.querySelectorAll('.chat__msg--user')
+    const last = users[users.length - 1]
+    const sr = scroll?.getBoundingClientRect()
+    const ur = last?.getBoundingClientRect()
+    return {
+      visualTop: sr && ur ? Math.round(ur.top - sr.top) : null,
+      pinWrites: (window.__mobiusChatScrollTrace?.writes || [])
+        .filter(row => row?.from?.kind === 'PIN_USER_MSG')
+        .map(row => row.event),
+    }
+  })
+
+  expect(result.visualTop).not.toBeNull()
+  expect(result.visualTop).toBeGreaterThanOrEqual(-2)
+  expect(result.visualTop).toBeLessThanOrEqual(12)
+  expect(result.pinWrites).toContain('layout:mode-transition')
+  expect(result.pinWrites).not.toContain('layout:repair-pin')
+})
+
 test('Pin HOLDS when content above the pinned message grows after send (late image/error/question layout)', async ({ page }) => {
   // The user-reported "first send works, subsequent can fail" bug. On a later
   // send the message pins to the top, but then content ABOVE it grows — a

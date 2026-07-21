@@ -16,6 +16,7 @@ import {
   mountMediaSettled,
   modeForChatExit,
   modeForForegroundReturn,
+  modeForQuestionSubmission,
   modeForQueuedSubmission,
   modeForViewportChange,
   modeAfterReaderReachesBottom,
@@ -289,6 +290,32 @@ test('queued submission freezes the visible row before footer reflow', () => {
     modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
     { kind: 'ANCHOR_AT', key: 'assistant-live', offset: 60 },
   )
+})
+
+test('question submission freezes the visible row before same-turn output resumes', () => {
+  const item = {
+    offsetTop: 720,
+    offsetHeight: 420,
+    dataset: { key: 'assistant-with-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 660,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+  assert.deepEqual(
+    modeForQuestionSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
+    { kind: 'ANCHOR_AT', key: 'assistant-with-question', offset: 60 },
+  )
+})
+
+test('question submission keeps the current mode when there is no visible row', () => {
+  const current = { kind: 'FOLLOW_BOTTOM' }
+  const scrollEl = { querySelectorAll() { return [] } }
+  assert.equal(modeForQuestionSubmission(scrollEl, current), current)
 })
 
 test('queued submission anchors before the active assistant shell that steer will split', () => {

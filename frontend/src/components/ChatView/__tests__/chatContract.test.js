@@ -67,6 +67,19 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
+test('owner contract freezes question answers without changing active-row ownership', () => {
+  const architecture = readFileSync(
+    new URL('../../../../../ARCHITECTURE.md', import.meta.url),
+    'utf8',
+  )
+  assert.match(architecture, /Owner-authoritative contract — v1\.6 \(2026-07-22\)/)
+  assert.match(
+    architecture,
+    /In-process question is answered \| any \| `ANCHOR_AT` on current visible row; same active assistant row/,
+    'question submission must freeze the reader while preserving the R6 row',
+  )
+})
+
 test('a retained chat crosses the old unmount lifecycle while hidden', () => {
   const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
   assert.match(

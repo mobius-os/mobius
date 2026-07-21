@@ -491,7 +491,7 @@ The removals not yet done at HEAD are noted in the last bullet:
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.5 (2026-07-15).** This section is the
+**Owner-authoritative contract — v1.6 (2026-07-22).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -592,6 +592,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   separate answers. The answer response declares this ownership independently as
   `answer_turn: "same" | "new"`: an in-process question answer (`answer_delivered`)
   resumes that same row and turn, so answering must not retire its source bridge.
+  Submitting an in-message answer is also a deliberate reading action: before the
+  card enters its pending state or output resumes, the controller snapshots the
+  currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
+  output grows without dragging the reader, even when the chat had been following
+  the tail before Submit. A failed answer keeps that settled reading anchor for the
+  retryable card rather than manufacturing follow intent again.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a
@@ -623,7 +629,7 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
 | Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-process question is answered | any | same mode and active assistant row | None |
+| In-process question is answered | any | `ANCHOR_AT` on current visible row; same active assistant row | Hold exact visible anchor through card reflow and resumed output |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 
