@@ -919,20 +919,28 @@ test.describe('Workspace view-mode toggle', () => {
   }
 
   test('single-leaf: an EDGE drop splits AND flips to panes', async ({ page }) => {
+    // Two-worlds: single mode renders NO strip (the strip is builder chrome), so
+    // the single-mode drag source is the DRAWER row — same as the join test
+    // below. An edge-band drop must split into two panes AND commit builder.
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmFlipA')
     const b = await createTaggedChat(page, 'vmFlipB')
+    const c = await createTaggedChat(page, 'vmFlipC') // in the drawer, not open
     await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
     await seedWorkspace(page, singleLeafTwoTabs(a.id, b.id))
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
-    // The single-pane strip renders as the drag source (one leaf, two tabs).
-    await expect(page.locator('.shell__tabstrip')).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    // No strip in single mode — the world contract this spec used to violate.
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
     expect((await readWs(page)).viewMode).toBe('single')
 
+    await ensureNavigationOpen(page)
     const content = await page.locator('.shell__content').boundingBox()
-    const src = page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${b.id}"]`)
-    // Drag the strip tab down into the content's right edge band → split.
-    await mouseDrag(page, src, content.x + content.width - 18, content.y + content.height / 2)
+    const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
+    await expect(row).toBeVisible()
+    // Drag the drawer row into the content's right edge band → split.
+    await mouseDrag(page, row, content.x + content.width - 18, content.y + content.height / 2)
     await expect.poll(async () => (await readWs(page)).viewMode, {
       timeout: 3000, message: 'the single-leaf edge drop flipped to panes',
     }).toBe('panes')

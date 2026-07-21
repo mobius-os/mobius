@@ -793,6 +793,25 @@ export default function Shell() {
   // Delete/Backspace, and the context-menu "Close tab" all invoke THIS. Resource
   // deletion differs only by reason:'deleted'. Takes a tab object + opts so the
   // WorkspaceChrome strips no longer own a private CLOSE_TAB dispatcher.
+  // The single world must never PAINT an empty screen while the owner has chats:
+  // a null slot is only a legitimate resting state on a zero-chat install (the
+  // nav's "empty semantic home"). Everywhere else home resolves to the freshest
+  // chat through the ONE decision point — restoreRoute, the boot seed, and the
+  // 404 repairs all do this already. This helper is the same resolution for the
+  // two event families they don't cover: an auto-returning last-tab close and an
+  // app delete that clears the slot. Event-scoped (no reactive watcher): a
+  // deliberate future null-home stays expressible.
+  const resolveEmptySingleHome = useCallback(({ excludeChatId } = {}) => {
+    const ws = workspaceStateRef.current.ws
+    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    if (!single || ws.singleScreen != null) return
+    const fallback = chatsRef.current.find(c => String(c.id) !== String(excludeChatId ?? ''))
+    if (!fallback) return
+    applyModeDestination(
+      { view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId },
+      { preserveSettings: true },
+    )
+  }, [applyModeDestination, workspaceStateRef])
   const closeTab = useCallback((tab, { reason } = {}) => {
     const key = tabModel.tabKey(tab)
     const ws = workspaceStateRef.current.ws
@@ -810,7 +829,13 @@ export default function Shell() {
       mode.toggle({ cause: 'auto', to: 'single' })
     }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
-  }, [dispatchWorkspace, mode, workspaceStateRef])
+    // An auto-returned single world with a never-seeded slot would paint blank;
+    // resolve home to the freshest chat (the closed tab's chat still exists —
+    // closing a tab never deletes the chat, so "back to normal mode on your
+    // latest chat" is the honest landing). The tree's coupled undo still
+    // restores tab + builder as one gesture — the slot write is invisible there.
+    resolveEmptySingleHome()
+  }, [dispatchWorkspace, mode, workspaceStateRef, resolveEmptySingleHome])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
@@ -1648,8 +1673,11 @@ export default function Shell() {
     // Drop any warm-only stale frame (not a tab, so CLOSE_TAB was a no-op for it)
     // so its 404'ing iframe unmounts.
     dropFromWarmLru(id => staleSet.has(String(id)))
+    // An uninstalled app that occupied the single-world slot leaves it null —
+    // resolve home rather than painting a blank single screen.
+    resolveEmptySingleHome()
   }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
-      navStackRef, retireAppHistory, dispatchWorkspace])
+      navStackRef, retireAppHistory, dispatchWorkspace, resolveEmptySingleHome])
 
   // New-app dot detection (state + open-clear live up beside the chat
   // attention machinery). First live list = the session baseline; anything
@@ -1703,7 +1731,8 @@ export default function Shell() {
     })
     const sid = String(coldRestoredCanvasAppId)
     dropFromWarmLru(id => String(id) === sid)
-  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace])
+    resolveEmptySingleHome()
+  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace, resolveEmptySingleHome])
 
   // Warm the SW app-code cache once per shell load for the apps the user
   // is most likely to open next — pinned + most-recent (the persisted
@@ -2654,6 +2683,9 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
+    // Deleting the app that occupied the single-world slot cleared it — resolve
+    // home so single mode never paints a blank screen.
+    resolveEmptySingleHome()
     await refreshApps()
     showToast('App deleted', {
       duration: 5000,
