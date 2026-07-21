@@ -179,6 +179,20 @@ test('finding R3: an emptying close arms the auto-return flip in the SAME batch,
   assert.equal(flipped.transition, null)
 })
 
+// -- Finding W1: an epoch-keyed completion watchdog bounds a stuck beat ---------
+test('finding W1: a bounded completion watchdog force-completes a stranded epoch (INV 7/14)', () => {
+  // A finished promise that never resolves while the page stays visible would strand
+  // the descriptor (the visibility reconcile only runs on visibilitychange). The
+  // watchdog is armed inside the same completion effect, bounded by the plan's
+  // totalMs + margin, dispatching complete{captured epoch}; the reducer's stale-epoch
+  // guard makes a late fire safe. It is the ONLY correctness timer.
+  assert.match(controller, /const watchdog = setTimeout\(settle, contract\.maxMs \+ RECONCILE_SLACK_MS\)/)
+  assert.match(controller, /clearTimeout\(watchdog\)/)
+  // No other bare setTimeout/setInterval correctness timer lives in the controller.
+  const timers = controller.match(/set(Timeout|Interval)\(/g) || []
+  assert.equal(timers.length, 1, 'exactly one timer — the watchdog')
+})
+
 // -- Finding 8: slot-only app gets a synthetic history owner -------------------
 test('finding 8: appOwnerPaneId returns the synthetic single-world owner for a slot app', () => {
   assert.match(nav, /const appOwnerPaneId = useCallback/)

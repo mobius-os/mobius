@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
 import {
   initialModeState, modeReducer, completionContract, reconcileVisibleEvent,
+  RECONCILE_SLACK_MS,
 } from './modeMachine.js'
 import { prefersReducedMotion } from './useLogoModeGesture.js'
 
@@ -87,9 +88,20 @@ export default function useModeController({
     // ONE rAF: the class applies on the React commit; the CSS animations register
     // on the next style/layout, resolved before this frame's paint (exit-design v2).
     raf = requestAnimationFrame(collect)
+    // W1: a bounded completion WATCHDOG (INV 7/14). The finished-promise path is the
+    // primary mechanism, and the visibility reconcile handles a beat throttled away
+    // while HIDDEN — but neither covers a beat whose `finished` promise never
+    // resolves while the page stays VISIBLE (a stuck/cancelled animation, a target
+    // that outlives its epoch). This timer force-completes the CAPTURED epoch at the
+    // plan's totalMs + margin; the reducer's stale-epoch guard makes a late fire a
+    // no-op if the beat already settled or was superseded. Armed only while an
+    // animated beat is live and cleared on cleanup, this is the ONE correctness timer
+    // in the mode system — nothing else schedules a bare timer.
+    const watchdog = setTimeout(settle, contract.maxMs + RECONCILE_SLACK_MS)
     return () => {
       cancelled = true
       if (raf) cancelAnimationFrame(raf)
+      clearTimeout(watchdog)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transitionId, rootRef])
