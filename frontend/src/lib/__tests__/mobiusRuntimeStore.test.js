@@ -50,6 +50,12 @@ async function runtimeExports() {
   return import('../../../public/mobius-runtime.js')
 }
 
+test('runtime publishes additive feature markers for version-skew-safe app fallbacks', async () => {
+  const { runtimeFeatures } = await runtimeExports()
+  assert.equal(runtimeFeatures.idleDocument, true)
+  assert.equal(Object.isFrozen(runtimeFeatures), true)
+})
+
 test('an opaque sandbox without IndexedDB still reads and writes online', async () => {
   const { server } = freshEnv()
   globalThis.indexedDB = {
