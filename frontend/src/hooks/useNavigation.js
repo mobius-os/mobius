@@ -281,6 +281,20 @@ export default function useNavigation({
   settingsOpenRef.current = settingsOpen
   const drawerOpenRef = useRef(drawerOpen)
   drawerOpenRef.current = drawerOpen
+  // The PAINTED Settings takeover for a given workspace snapshot — the render-time
+  // `overlayShowing` above, generalized to any `ws` and read from the ref for the
+  // async callbacks below. The takeover only PAINTS where the world is single (or
+  // the builder-Settings flag is off); in builder it is SUSPENDED and the tree
+  // paints (deriveContentVisibility gates it off). Nav bookkeeping that decides
+  // "what is actually visible" must consult THIS, never the raw `settingsOpen`
+  // flag — else a suspended takeover in builder rejects the visible app's nav
+  // pushes/pops and records/restores Settings for Back instead of the surface the
+  // user was really looking at (finding M1).
+  const overlayShowingForWs = useCallback(
+    (ws) => settingsOpenRef.current
+      && (ws.viewMode === 'single' || !paneModel.BUILDER_SETTINGS_ENABLED),
+    [],
+  )
   // The committed set of visible pane ids (excludes phone-deck-hidden panes).
   // `isVisibleApp` reads this; Settings-open covered panes are excluded by the
   // separate settingsOpenRef check, not by this set.
@@ -354,7 +368,7 @@ export default function useNavigation({
   // painted full-bleed in single mode but absent from the tree (finding 8; INV 4).
   // Returns null when the app is not currently painted anywhere.
   const appOwnerPaneId = useCallback((ws, appId) => {
-    if (appId == null || settingsOpenRef.current) return null
+    if (appId == null || overlayShowingForWs(ws)) return null
     const key = tabModel.tabKey(tabModel.makeTab('app', appId))
     // WORLD-AWARE (finding F5): mirror deriveContentVisibility's slot derivation so
     // the nav adapter and the renderer can NEVER disagree about what paints. In
@@ -384,7 +398,7 @@ export default function useNavigation({
       return pane.id
     }
     return null
-  }, [])
+  }, [overlayShowingForWs])
   const isVisibleApp = useCallback(
     (ws, appId) => appOwnerPaneId(ws, appId) != null, [appOwnerPaneId],
   )
@@ -483,12 +497,16 @@ export default function useNavigation({
     // focus A + slot B, opening C recorded A — Back then rewrote the slot to A,
     // and re-opening A from the drawer was rejected as "same route").
     // activeContentRoute is the one world-aware projection (two-worlds design).
-    const content = paneModel.activeContentRoute(workspaceStateRef.current.ws)
-    // When Settings is open the physical route is a Settings route, but it
-    // retains the focused content ids + pane hint (contract §2.2.1).
-    const view = settingsOpenRef.current ? 'settings' : content.view
+    const ws = workspaceStateRef.current.ws
+    const content = paneModel.activeContentRoute(ws)
+    // Record Settings ONLY when the takeover actually PAINTS in this world (the
+    // painted overlay, not the raw flag): in builder the takeover is suspended and
+    // the tree is what shows, so snapshotting 'settings' there would make Back
+    // record/restore Settings instead of the builder surface the user saw (M1). It
+    // still retains the focused content ids + pane hint (contract §2.2.1).
+    const view = overlayShowingForWs(ws) ? 'settings' : content.view
     return navRoute(view, content.chatId, content.appId, content.paneId)
-  }, [workspaceStateRef])
+  }, [workspaceStateRef, overlayShowingForWs])
 
   const pushShellEntry = useCallback((kind, route, appNav = null) => {
     const state = pushNavEntry(kind, route, {

@@ -86,3 +86,39 @@ test('the legacy active destination wins every blob-invalid flat-tab boot', () =
     'a legacy flat-tab seed must not suppress the active destination',
   )
 })
+
+// ── M1: a SUSPENDED Settings takeover must not poison builder nav/history ─────
+// The single-world takeover is suspended in builder (the tree paints), so the two
+// nav-bookkeeping consumers that decide "what is visible / what did Back see" must
+// read the PAINTED overlay (world-gated), never the raw settingsOpen flag.
+test('M1: overlayShowingForWs is the world-gated PAINTED takeover, not the raw flag', () => {
+  // Mirrors the render-time overlayShowing derivation: single world OR builder-
+  // Settings flag off. This is the one predicate both consumers below share.
+  assert.match(
+    navigation,
+    /const overlayShowingForWs = useCallback\(\s*\(ws\) => settingsOpenRef\.current\s*&& \(ws\.viewMode === 'single' \|\| !paneModel\.BUILDER_SETTINGS_ENABLED\)/,
+  )
+})
+
+test('M1: appOwnerPaneId gates on the painted overlay, never the raw settingsOpen flag', () => {
+  const owner = navigation.slice(
+    navigation.indexOf('const appOwnerPaneId = useCallback'),
+    navigation.indexOf('const isVisibleApp = useCallback'),
+  )
+  assert.ok(owner.length > 0)
+  // The early-out consults the world-gated overlay for THIS ws...
+  assert.match(owner, /if \(appId == null \|\| overlayShowingForWs\(ws\)\) return null/)
+  // ...and never rejects every app on the raw suspended flag (the M1 bug).
+  assert.doesNotMatch(owner, /settingsOpenRef\.current/)
+})
+
+test('M1: snapshotRoute records Settings only when the takeover actually paints', () => {
+  const snap = navigation.slice(
+    navigation.indexOf('const snapshotRoute = useCallback'),
+    navigation.indexOf('const pushShellEntry = useCallback'),
+  )
+  assert.ok(snap.length > 0)
+  assert.match(snap, /const view = overlayShowingForWs\(ws\) \? 'settings' : content\.view/)
+  // Back must never record 'settings' from the raw suspended flag in builder.
+  assert.doesNotMatch(snap, /settingsOpenRef\.current \? 'settings'/)
+})
