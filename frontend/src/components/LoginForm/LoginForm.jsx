@@ -25,10 +25,18 @@ export default function LoginForm({ onLogin }) {
     try {
       const res = await api.auth.login({ username, password })
       if (!res.ok) {
-        setError('Incorrect username or password.')
+        let detail = ''
+        try { detail = (await res.json())?.detail || '' } catch {}
+        setError(res.status === 401
+          ? 'Incorrect username or password.'
+          : (detail || 'Sign-in is unavailable. Please try again.'))
         return
       }
       const data = await res.json()
+      if (!data?.access_token) {
+        setError('Sign-in response was incomplete. Please try again.')
+        return
+      }
       setToken(data.access_token)
       onLogin()
     } catch {

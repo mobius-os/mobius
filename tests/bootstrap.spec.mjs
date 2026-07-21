@@ -313,6 +313,32 @@ test.describe('Unauthenticated startup', () => {
     expect(await page.evaluate(() => sessionStorage.getItem('auth_expired'))).toBeNull()
   })
 
+  test('a login service failure is not mislabeled as a bad password', async ({ page }) => {
+    await page.route(/\/api\/auth\/setup\/status$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ configured: true, claim_required: false }),
+      })
+    )
+    await page.route(/\/api\/auth\/token$/, route =>
+      route.fulfill({
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"detail":"Authentication service is starting"}',
+      })
+    )
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.getByLabel('Username').fill('owner')
+    await page.getByLabel('Password').fill('correct password')
+    await page.getByRole('button', { name: 'Sign in' }).click()
+
+    await expect(page.getByRole('alert'))
+      .toHaveText('Authentication service is starting')
+    await expect(page.getByText(/incorrect username or password/i)).toHaveCount(0)
+  })
+
   test('setup-status failure pauses startup until a successful retry', async ({ page }) => {
     let checks = 0
     await page.route(/\/api\/auth\/setup\/status$/, route => {
