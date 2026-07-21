@@ -1179,6 +1179,29 @@ test('useDocument resolves a lazy initial value once so rerenders do not restart
   assert.equal(second.refresh, first.refresh)
 })
 
+test('useDocument is idle and performs no storage work without an enabled path', async () => {
+  freshEnv()
+  const calls = []
+  const storage = {
+    async get() { calls.push('get'); return null },
+    async getWithVersion() { calls.push('getWithVersion'); return { value: null, version: null } },
+    async durableWrite() { calls.push('durableWrite'); return { durability: 'synced' } },
+    subscribe() { calls.push('subscribe'); return () => {} },
+  }
+
+  for (const [path, opts] of [[null, {}], ['notes/a.json', { enabled: false }]]) {
+    const doc = await renderUseDocument(storage, path, { initial: null, ...opts })
+    assert.equal(doc.handle.status, 'idle')
+    assert.deepEqual(calls, [])
+    await assert.rejects(
+      doc.handle.update(() => ({ body: 'must not write' })),
+      /provide a document path/,
+    )
+    assert.deepEqual(calls, [])
+    doc.cleanup()
+  }
+})
+
 test('useDocument path changes never seed the new document from the previous path', async () => {
   freshEnv()
   const { createUseDocument } = await runtimeExports()
