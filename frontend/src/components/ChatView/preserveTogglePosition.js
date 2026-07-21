@@ -20,13 +20,6 @@ export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementS
   const scroller = anchorEl.closest?.('.chat__scroll')
   if (!scroller) return
 
-  // FOLLOW_BOTTOM is already a complete, idempotent layout policy: the scroll
-  // controller follows the new real-content tail after every ResizeObserver
-  // pass. A second header-local correction would race that authority and make
-  // identical toggles sometimes hold and sometimes move. Outside follow mode,
-  // preserve the reader's exact header position below.
-  if (scroller.dataset?.scrollMode === 'FOLLOW_BOTTOM') return
-
   // Closing a disclosure at the physical tail removes height before the chat's
   // ResizeObserver can grow its dynamic bottom reservation. The browser clamps
   // scrollTop in that gap, paints the header lower for one frame, then the

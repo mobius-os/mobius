@@ -617,13 +617,11 @@ export function modeForChatExit(scrollEl) {
 }
 
 
-/** A disclosure toggle obeys the existing reading mode instead of inventing a
- * second scroll policy. FOLLOW_BOTTOM stays live and follows the resized tail;
- * every non-follow mode freezes the exact visible message anchor before the
- * disclosure changes height. Repeating the same toggle therefore has the same
- * result until the reader explicitly changes scroll mode. */
+/** A disclosure toggle is a reading action, so it freezes the exact visible
+ * message anchor before the disclosure changes height. This deliberately
+ * retires FOLLOW_BOTTOM: replaying follow after the toggle makes an identical
+ * tap move only when live content happens to resize in the same frame. */
 export function modeForDisclosureToggle(scrollEl, currentMode) {
-  if (currentMode?.kind === 'FOLLOW_BOTTOM') return currentMode
   return anchorModeFromScroll(scrollEl) || currentMode
 }
 
@@ -902,14 +900,12 @@ export default function useScrollMode({
     const previousMode = modeRef.current
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
-    const scrollEl = scrollRef.current
-    if (scrollEl) scrollEl.dataset.scrollMode = nextMode.kind
     recordTrace('transitions', event, {
       from: previousMode,
       to: nextMode,
     })
     return nextMode
-  }, [recordTrace, scrollRef])
+  }, [recordTrace])
 
   // The sole automatic scrollTop funnel inside the controller. `applyMode`
   // remains exported as a pure executor for unit tests, but live code routes
@@ -1542,10 +1538,10 @@ export default function useScrollMode({
         scrollEl,
       })
       if (activatesDisclosure) {
-        // A disclosure tap obeys the mode the reader already chose. FOLLOW_BOTTOM
-        // remains the sole tail authority; every other mode latches the visible
-        // anchor BEFORE React changes body height. The gesture gate below defers
-        // ResizeObserver writes until pointerup, then replays that same policy.
+        // A disclosure tap says "hold what I am reading," including when the
+        // previous mode was FOLLOW_BOTTOM. Latch the visible anchor BEFORE React
+        // changes body height. The gesture gate below defers ResizeObserver
+        // writes until pointerup, then replays that same held position.
         const nextMode = modeForDisclosureToggle(scrollEl, modeRef.current)
         if (nextMode && nextMode !== modeRef.current) {
           readerLocationExplicitRef.current = true
