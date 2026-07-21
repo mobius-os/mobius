@@ -14,6 +14,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -26,7 +27,7 @@ attachCleanup()
  *  the app origin), and create a worker-tagged chat. Returns the chat. */
 async function bootAndCreateChat(page, label, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
-  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
+  await mockAcceptedMessages(page)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   const initialAppsResponse = page.waitForResponse(response =>
