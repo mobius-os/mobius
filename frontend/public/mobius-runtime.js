@@ -36,6 +36,7 @@
 //   window.mobius.storage.pendingCount()          -> Promise<number>
 //   window.mobius.storage.getWithVersion(path, kind?) -> {value, version}   read + its server ETag, for compare-and-swap
 //   window.mobius.storage.durableWrite(path, data, opts?) -> {durability, path, writeId, version?}
+//   window.mobius.runtimeFeatures.idleDocument    -> true when null/empty useDocument paths are idle
 //     opts.ifMatch=version makes it a CONDITIONAL write; a 412 rejects with DurableWriteError{code:'conflict', retryable:true}.
 //     CAS a file with several writers (agent + cron + UI): getWithVersion -> merge -> durableWrite({ifMatch:version}); on a
 //     'conflict' error re-read + retry (the app owns its merge; the runtime does NOT retry for you). See building-apps.md.
@@ -3940,6 +3941,16 @@ function tokenMatchesRuntime(token, appId, appInstanceId) {
 
 let _runtimeContext = null
 
+// App bundles embed the runtime that was present when they were compiled. A
+// small explicit feature map lets an app adopt a new runtime contract without
+// guessing from a platform version or breaking when an app update lands before
+// the matching platform update. Additive booleans keep the check cheap and
+// preserve old locally-modified app bundles: an absent key simply means the app
+// should keep its legacy fallback.
+export const runtimeFeatures = Object.freeze({
+  idleDocument: true,
+})
+
 export function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
   const identityKey = `${String(appId)}:${appInstanceId || 'legacy'}`
   if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
@@ -3987,6 +3998,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     DurableWriteError,
     durableWrite: storage.durableWrite,
     onDeadLetter: storage.onDeadLetter,
+    runtimeFeatures,
     // useDocument is a React hook, so it must run on the APP's React instance.
     // The runtime is deliberately React-free (and headless-testable), and no
     // host sets window.React, so a self-binding window.mobius.useDocument would
