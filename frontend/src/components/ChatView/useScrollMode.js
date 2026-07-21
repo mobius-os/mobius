@@ -617,6 +617,17 @@ export function modeForChatExit(scrollEl) {
 }
 
 
+/** Submitting an in-message question answer resumes output inside the same
+ * assistant row and may replace the card's controls immediately. It is not a
+ * request to follow the live tail. Freeze the exact visible row/offset before
+ * that card-to-stream handoff so neither the control reflow nor resumed output
+ * moves the reader. */
+export function modeForQuestionSubmission(scrollEl, currentMode) {
+  if (!scrollEl) return currentMode
+  return anchorModeFromScroll(scrollEl) || currentMode
+}
+
+
 /** A queued send changes composer/footer layout but does not add a transcript
  * row. Freeze the visible anchor before that reflow; its separately-captured
  * submit intent still decides what happens when the row is later promoted. */
@@ -713,6 +724,10 @@ export function mountMediaSettled(scrollEl) {
  *   The dynamic spacer at the bottom of `.chat__list`.
  * @param {React.RefObject<HTMLElement>} args.lastUserMsgRef
  *   The most recent visible user message element.
+ * @param {() => void} args.syncComposerGeometry
+ *   Publishes the current overlaid composer height before the controller reads
+ *   list/spacer geometry. Keeping this in the same pre-paint layout pass stops
+ *   a later composer measurement from briefly clamping a newly pinned send.
  * @param {Array<object>} args.messages
  *   Persisted message list (drives effect re-runs).
  * @param {React.MutableRefObject<Array<object>>} args.messagesRef
@@ -745,6 +760,7 @@ export function mountMediaSettled(scrollEl) {
  *   closePreSendGestureWindow: () => void,
  *   freezeChatExit: () => void,
  *   freezeForegroundReturn: () => void,
+ *   freezeQuestionSubmission: () => void,
  *   freezeQueuedSubmission: () => void,
  *   revealConversationTail: () => void,
  *   settleNonPin: (event?: object) => void,
@@ -756,6 +772,7 @@ export default function useScrollMode({
   scrollRef,
   spacerRef,
   lastUserMsgRef,
+  syncComposerGeometry,
   messages,
   messagesRef,
   pendingMessagesLength,
@@ -965,6 +982,14 @@ export default function useScrollMode({
     )
   }, [scrollRef, transitionMode])
 
+  const freezeQuestionSubmission = useCallback(() => {
+    readerLocationExplicitRef.current = true
+    return transitionMode(
+      modeForQuestionSubmission(scrollRef.current, modeRef.current),
+      'send:question-freeze',
+    )
+  }, [scrollRef, transitionMode])
+
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
     readerLocationExplicitRef.current = true
@@ -1142,6 +1167,17 @@ export default function useScrollMode({
     resumeLayoutAfterGestureRef.current = resumeLayoutAfterGesture
 
     function sizeSpacer() {
+      // The list's bottom padding is derived from the absolutely-positioned
+      // composer height. React commits the emptied composer / new turn footer
+      // in the same render as a sent row, but the foot's ResizeObserver runs
+      // after paint. If spacer math reads the OLD padding first, the later
+      // --composer-h update transiently shortens the scroll range, the browser
+      // clamps the fresh pin, and the next controller pass visibly nudges the
+      // row upward a second time. Publish the committed foot height here,
+      // before ANY list/spacer reads, so reservation + scrollTop land from one
+      // geometry snapshot. Respect reader ownership: the CSS-variable write is
+      // scroll geometry too and must wait with the spacer during a gesture.
+      if (layoutOwnsScroll()) syncComposerGeometry?.()
       // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
       // the layout-effect entry and the RO callback start (the other two grow
       // sites). The visualViewport keyboard handler reaches sizeSpacer via
@@ -1643,6 +1679,7 @@ export default function useScrollMode({
     chatId,
     initialEntryCanReveal,
     initialEntrySettled,
+    syncComposerGeometry,
   ])
 
   // Re-hold the reading position after an atomic catch-up commit lands
@@ -1783,6 +1820,7 @@ export default function useScrollMode({
     closePreSendGestureWindow,
     freezeChatExit,
     freezeForegroundReturn,
+    freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,
