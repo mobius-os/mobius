@@ -395,6 +395,33 @@ test('round4-2: reduced motion has no intermediate exit phase (instant world fli
   await expect.poll(() => builderActive(page)).toBe(false)
 })
 
+// ── Round 4 item 3: the null slot is a first-class New Chat landing ────────────
+test('round4-3: exiting a NULL-slot builder reveals the New Chat landing, not a blank main, no composer focus', async ({ page }) => {
+  // A materialize POST /chats (when there is no reusable empty) returns a fresh empty
+  // row so the swap to a real empty ChatView is seamless.
+  await page.route(/\/api\/chats$/, r => {
+    if (r.request().method() !== 'POST') return r.fallback()
+    return r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ id: 'freshnew', title: 'New chat', has_messages: false }),
+    })
+  })
+  // Two-pane builder with an EXPLICIT null slot → exit reveals home:new-chat.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  // The first-class New Chat empty surface renders (What's on your mind?), never a
+  // blank <main> and never the freshest transcript. Scope to the VISIBLE full-bleed
+  // surface — the preserved builder chat panes sit mounted-but-hidden and also carry
+  // an empty title, so an unscoped selector would strict-mode-match several.
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
+  // The automatic landing must NOT summon the mobile keyboard — the composer is not
+  // auto-focused by a mode toggle.
+  const composerFocused = await page.evaluate(() => document.activeElement?.tagName === 'TEXTAREA')
+  expect(composerFocused, 'a mode toggle must not auto-focus the composer').toBe(false)
+})
+
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
 // builder is exited by closing its sole tab; a frame-sampler proves the descriptor
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an

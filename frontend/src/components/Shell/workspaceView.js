@@ -17,6 +17,13 @@
 import * as paneModel from './paneModel.js'
 import * as tabModel from './tabModel.js'
 
+// The presentation key for a null single-screen slot (round 4 item 3). The persisted
+// slot stays `null` — adding a `{kind:'new-chat'}` variant would only invent migration
+// + sanitizer work — but for RENDERING and for the exit target/underlay, null now maps
+// to this first-class New Chat landing rather than the freshest chat. `singleScreenRoute`
+// still reports {view:'chat', chatId:null}; only the render surface changes.
+export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'
+
 // ── Mode-transition motion (exit-presentation v2) ────────────────────────────
 // The presentation module owns the timing + the pure plan builders; the state
 // machine (modeMachine.js) treats a plan as OPAQUE data. A beat is described by a
@@ -87,12 +94,14 @@ function flipTo(from, dest) {
   }
 }
 
-// The concrete chat/app key SINGLE mode will paint after this exit — the slot, or
-// (legacy absent-slot blob) the value the SAME SET_VIEW_MODE transaction will seed
-// from the focused item. A Settings-focused legacy seed and an explicit null slot
-// both resolve to null = the home reveal. The one classification input.
+// The concrete surface key SINGLE mode will paint after this exit — the slot, the New
+// Chat landing (an explicit null slot, round 4 item 3), or (legacy absent-slot blob)
+// the value the SAME SET_VIEW_MODE transaction will seed from the focused item. A
+// Settings-focused legacy seed still resolves to null. The one classification input.
 function exitTargetKey(ws) {
-  if ('singleScreen' in ws) return paneModel.singleScreenKey(ws)
+  // An INITIALIZED slot: a concrete chat/app key, or the New Chat landing when null.
+  // Null now means a definite New Chat destination — never the freshest chat.
+  if ('singleScreen' in ws) return paneModel.singleScreenKey(ws) || EMPTY_SINGLE_SURFACE_KEY
   const seed = paneModel.focusedSlotSeed(ws)
   if (!seed) return null
   return seed.kind === 'app' ? `app:${seed.id}` : `chat:${seed.id}`
@@ -159,9 +168,10 @@ function byVisualOrder(a, b) {
 // Classification (exit-design v1 §exit-classification, honored by v2):
 //   - target is the active key of a VISIBLE leaf → promote that leaf (physical
 //     continuity), deal every sibling out, no underlay.
-//   - target is inactive-in-a-pane, tree-absent, or null → WORLD REVEAL: deal
-//     every painted leaf out over the mounted destination (underlayKey = target;
-//     null = the opaque home background). Never promote the focused pane to
+//   - target is inactive-in-a-pane, tree-absent, the New Chat landing (an empty single
+//     slot, round 4 item 3), or null → WORLD REVEAL: deal every painted leaf out over
+//     the mounted destination (underlayKey = target; null = the opaque background only
+//     for a legacy Settings-focused absent-slot). Never promote the focused pane to
 //     manufacture a correspondence single mode will not paint.
 export function deriveExitPlan(input) {
   const { workspace, projection, contentRect, settingsDestination = false } = input
@@ -339,8 +349,8 @@ export function deriveContentVisibility({
   // TWO-WORLDS (codex-modecontext-design.md): in SINGLE mode the active content is
   // the persisted single-screen SLOT — the last item opened IN single mode — NOT
   // the focused builder pane. The slot may be absent from the pane tree entirely;
-  // Shell pins its iframe / chat mount regardless. A null slot is the empty/home
-  // screen. BACKWARD-COMPAT: a blob whose slot property is ABSENT is legacy/
+  // Shell pins its iframe / chat mount regardless. A null slot is the New Chat landing
+  // (round 4 item 3). BACKWARD-COMPAT: a blob whose slot property is ABSENT is legacy/
   // uninitialized (the reducer seeds it on the first builder→single switch, using
   // absence as the migration marker), so single mode falls back to the focused
   // pane's active tab until the slot is seeded — an older blob still collapses to
@@ -349,11 +359,17 @@ export function deriveContentVisibility({
   const hasSlot = ('singleScreen' in workspace)
   const focusedPaneKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null
   const slotKey = single ? (hasSlot ? paneModel.singleScreenKey(workspace) : focusedPaneKey) : null
+  // An INITIALIZED but empty slot in single mode is the New Chat landing (round 4
+  // item 3): a first-class home:new-chat surface, never the freshest chat. Legacy
+  // absent-slot blobs still fall back to the focused pane (hasSlot false).
+  const emptySingleSlot = single && hasSlot && paneModel.singleScreenKey(workspace) == null
   // The active tab key that drives the full-bleed surface + AppCanvas `active`
   // prop. Under the Settings overlay it is null (panes hidden behind it). In single
   // mode it is the slot key (or the focused-pane fallback); otherwise the focused
   // pane's active tab — EVEN WHEN that is Settings (a builder Settings tab is the
   // paned/full-bleed surface, driven off this key). Immersive uses the holder key.
+  // A null slot keeps focusedActiveKey NULL so navigation + AppCanvas never pretend
+  // the New Chat landing is a chat/app tab (the landing is not a tab).
   const focusedActiveKey = settingsOverlay
     ? null
     : (single ? slotKey : focusedPaneKey)
@@ -361,9 +377,13 @@ export function deriveContentVisibility({
   // and no takeover. In builder this is simply `multiPane` (no takeover can trip
   // here); single-mode / a takeover paints one surface over the whole box.
   const chromeActive = multiPane && !settingsOverlay && !immersive && !single
-  // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane
-  // render; under a single-mode collapse / takeover it is the focused/holder key.
-  const fullBleedKey = (multiPane && !immersive && !single) ? null : focusedActiveKey
+  // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane render;
+  // the New Chat landing key for an empty single slot; the focused/holder key
+  // otherwise. Distinct from focusedActiveKey (which stays null for the empty slot)
+  // so the render paints the landing while nav/AppCanvas see no active tab.
+  const fullBleedKey = emptySingleSlot
+    ? EMPTY_SINGLE_SURFACE_KEY
+    : ((multiPane && !immersive && !single) ? null : focusedActiveKey)
   // The app ids that PAINT and stay interactive/frame-visible. A single-mode
   // immersive solos the holder; single-mode solos the focused pane's active app;
   // the Settings overlay hides all; the tiled (incl. all of builder) render keeps

@@ -8,6 +8,8 @@ const css = readFileSync(
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
+const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
+const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
 const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
@@ -573,9 +575,11 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
   assert.match(handler, /deriveExitPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
-  // A flip to single resolves a null/never-seeded slot to the freshest chat
-  // BEFORE the plan derives (no blank home, no dishonest beat target).
-  assert.match(handler, /if \(leavingBuilder\) resolveEmptySingleHome\(\)/)
+  // A flip to single REQUESTS the New Chat landing for a null/never-seeded slot BEFORE
+  // the plan derives (round 4 item 3): the slot stays null through the beat so
+  // exitTargetKey reveals home:new-chat, and the row materializes after the descriptor
+  // idles — never the freshest chat, never a blank home.
+  assert.match(handler, /if \(leavingBuilder\) requestEmptySingleNewChat\(\)/)
   // M2: the exit plan is fed the honest single-world destination state (a suspended
   // Settings takeover / a retained immersive holder), so it reveals to Settings or
   // classifies immersive instant instead of promoting/revealing the covered slot.
@@ -834,9 +838,10 @@ test('H1: the initial slot-app reconcile confirms absence with an authoritative 
   // Cancelled-guard cleanup, like the chat cold-restore probe.
   assert.match(effect, /let cancelled = false/)
   assert.match(effect, /return \(\) => \{ cancelled = true \}/)
-  // Close as deleted (reducer clears the slot), then resolve home instead of blank.
+  // Close as deleted (reducer clears the slot), then land on the New Chat surface
+  // instead of a blank single screen (round 4 item 3).
   assert.match(effect, /reason: 'deleted'/)
-  assert.match(effect, /resolveEmptySingleHome\(\)/)
+  assert.match(effect, /requestEmptySingleNewChat\(\)/)
 })
 
 // The shared deletion-evidence contract both cold-restore probes route through: list
@@ -850,6 +855,67 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   // Both cold-restore probes read the SAME contract (rhyme, not two copies).
   assert.match(shell, /probeDeletion\(`\/apps\//)
   assert.match(shell, /probeDeletion\(`\/chats\//)
+})
+
+// ── Round 4 item 3: the null slot is a first-class, deferred New Chat landing ──
+test('round4-3: requestEmptySingleNewChat records a tokenized request and does NOT write the slot', () => {
+  const fn = shell.match(/const requestEmptySingleNewChat = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  assert.ok(fn.length > 0, 'found the request helper')
+  // Guarded to an empty single slot; captures the reuse candidate from the
+  // pre-transition active chat; records a monotonic token; NEVER writes a slot itself.
+  assert.match(fn, /if \(!single \|\| ws\.singleScreen != null\) return/)
+  assert.match(fn, /currentReusableEmptyChat\(chatsRef\.current/)
+  assert.match(fn, /activeChatId: activeChatIdRef\.current/)
+  assert.match(fn, /newChatRequestSeqRef\.current = token/)
+  assert.match(fn, /pendingNewChatRef\.current = \{ token, candidateId/)
+  assert.match(fn, /setPendingNewChatToken\(token\)/)
+  assert.doesNotMatch(fn, /applyModeDestination|SET_SINGLE_SCREEN|chatsRef\.current\[0\]/)
+})
+
+test('round4-3: the materialize watcher gates on an IDLE descriptor', () => {
+  const effect = shell.match(/Deferred New Chat materialization watcher[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
+  assert.ok(effect.length > 0, 'found the materialize watcher')
+  // Deferred until the mode descriptor idles — a slot write mid-beat would drift the
+  // exit signature and cancel the latched plan.
+  assert.match(effect, /if \(modeState\.transition\) return/)
+  assert.match(effect, /pending\.token !== pendingNewChatToken/)
+  assert.match(effect, /if \(!single \|\| ws\.singleScreen != null\)/)
+  assert.match(effect, /materializeNewChatHomeRef\.current\?\.\(pending\)/)
+})
+
+test('round4-3: materializeNewChatHome is stale-guarded and writes a history-free, focus-free slot', () => {
+  const fn = shell.match(/async function materializeNewChatHome\(pending\) \{[\s\S]*?\n  \}/)?.[0] || ''
+  assert.ok(fn.length > 0, 'found materializeNewChatHome')
+  // Shares the ONE reuse-and-create policy with newChat.
+  assert.match(fn, /resolveNewChatId\(\{ candidate \}\)/)
+  // Stale-guard: token still current, still single, slot still null, no live beat.
+  assert.match(fn, /newChatRequestSeqRef\.current !== pending\.token/)
+  assert.match(fn, /!single \|\| ws\.singleScreen != null \|\| modeTransitionRef\.current/)
+  // offline/failed → keep the landing with a retry state, never chats[0].
+  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingOffline\(true\)/)
+  // The slot write is history-free (applyModeDestination pushes none) + preserveSettings,
+  // and there is NO composer focus (a mode toggle must not summon the keyboard).
+  assert.match(fn, /applyModeDestination\(\s*\{ view: 'chat', chatId, appId: null, paneId: ws\.focusedPaneId \},\s*\{ preserveSettings: true \}/)
+  assert.doesNotMatch(fn, /requestComposerFocus|focusComposer/)
+})
+
+test('round4-3: resolveNewChatId is the shared reuse-and-create policy; newChat + materialize both use it', () => {
+  assert.match(shell, /async function resolveNewChatId\(\{ candidate, draft, forceNew, exclude \} = \{\}\)/)
+  // newChat consumes the shared resolver, not its own inline reuse/create.
+  assert.match(shell, /const \{ chatId, reason \} = await resolveNewChatId\(\{ draft, forceNew, exclude \}\)/)
+})
+
+test('round4-3: the New Chat landing renders for a null slot / reveal underlay and reuses ChatView empty visuals', () => {
+  // The presentation key + its wiring.
+  assert.match(workspaceViewSrc, /export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'/)
+  assert.match(shell, /const newChatUnderlay = isUnderlay\(EMPTY_SINGLE_SURFACE_KEY\)/)
+  assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
+  assert.match(shell, /<NewChatLanding/)
+  assert.match(shell, /onRetry=\{requestEmptySingleNewChat\}/)
+  // Seamless swap: the landing reuses ChatView's exact empty treatment.
+  assert.match(newChatLanding, /className="chat chat--empty"/)
+  assert.match(newChatLanding, /className="chat__empty-wrap"/)
+  assert.match(newChatLanding, /What&apos;s on your mind\?/)
 })
 
 // ── N1: retired v2 plumbing is gone ───────────────────────────────────────────
@@ -869,9 +935,11 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /shell-mode-chrome-in 110ms var\(--ease-mode-chrome\) 84ms/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
   assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
-  // The unused excludeChatId param on resolveEmptySingleHome is gone.
+  // The unused excludeChatId param is gone; the helper is now the New Chat request
+  // (round 4 item 3 — the old freshest-chat write is fully retired).
   assert.doesNotMatch(shell, /excludeChatId/)
-  assert.match(shell, /const resolveEmptySingleHome = useCallback\(\(\) =>/)
+  assert.doesNotMatch(shell, /resolveEmptySingleHome/)
+  assert.match(shell, /const requestEmptySingleNewChat = useCallback\(\(\) =>/)
   // The stale "Settings conversion" comment near the toggle handler is corrected.
   assert.doesNotMatch(shell, /Settings overlay<->tab conversion/)
 })

@@ -1096,15 +1096,23 @@ test.describe('Builder-mode Settings', () => {
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
     await page.keyboard.press('Shift+Enter')
 
-    // Entering single: the Settings tab STAYS in the preserved tree (identity
-    // pinned to its original pane). The slot seed skips a Settings-focused pane
-    // (Settings never occupies the slot); the flip-site home resolution then
-    // seeds the freshest CHAT so the single world never paints the blank home —
-    // and never a Settings takeover.
+    // Entering single: the Settings tab STAYS in the preserved tree (identity pinned
+    // to its original pane). The slot seed skips a Settings-focused pane (Settings never
+    // occupies the slot); the flip lands on the first-class New Chat landing (round 4
+    // item 3) — the reusable active empty chat is materialized after the beat — so the
+    // single world shows its OWN empty New-Chat screen, never a Settings takeover and
+    // never the freshest OTHER transcript.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    // The New Chat empty surface (What's on your mind?) shows, not a Settings takeover.
+    // Scope to the VISIBLE full-bleed surface — the preserved builder chat panes sit
+    // mounted-but-hidden and also carry an empty title.
+    await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
     const single = await readWs(page)
     expect(whichPaneHas(single, 'settings:settings'), 'Settings tab survives entering single').toBe(settingsPane)
-    expect(single.singleScreen?.kind, 'the slot resolves to a chat home, never Settings').toBe('chat')
+    // The empty single world is the New Chat landing — a null slot before the row
+    // materializes, or a chat home after — NEVER Settings.
+    expect(single.singleScreen == null || single.singleScreen?.kind === 'chat',
+      'the empty single world is the New Chat landing, never Settings').toBe(true)
     await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(0)
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
 

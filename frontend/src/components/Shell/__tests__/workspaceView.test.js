@@ -4,6 +4,7 @@ import * as paneModel from '../paneModel.js'
 import * as tabModel from '../tabModel.js'
 import {
   deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
+  EMPTY_SINGLE_SURFACE_KEY,
 } from '../workspaceView.js'
 
 const { makeTab, tabKey } = tabModel
@@ -347,11 +348,14 @@ test('single mode with a CHAT slot paints no app frame', () => {
   assert.equal(v.chatPanesVisible, true)
 })
 
-test('single mode with a NULL slot is the empty/home screen', () => {
+test('single mode with a NULL slot is the first-class New Chat landing (round 4 item 3)', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: null }
   const v = singleView(ws)
-  assert.equal(v.fullBleedKey, null, 'nothing painted full-bleed')
-  assert.deepEqual([...v.visibleAppIds], [])
+  // The empty single slot paints the New Chat surface, never chats[0]...
+  assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY, 'the New Chat landing paints full-bleed')
+  // ...but focusedActiveKey stays NULL so nav + AppCanvas never treat it as a tab.
+  assert.equal(v.focusedActiveKey, null, 'the landing is not a chat/app tab')
+  assert.deepEqual([...v.visibleAppIds], [], 'no app paints for the New Chat landing')
 })
 
 test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
@@ -361,6 +365,34 @@ test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
   const v = singleView(ws)
   assert.equal(v.fullBleedKey, 'app:42', 'falls back to the focused pane app')
   assert.deepEqual([...v.visibleAppIds], ['42'])
+})
+
+test('round 4 item 3: a null slot renders home:new-chat while its ROUTE stays chat:null (no chats[0])', () => {
+  // Even with populated chats in the tree, an empty single slot NEVER selects a chat —
+  // the render key is the New Chat landing and the semantic route is still chat:null.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: null }
+  const v = singleView(ws)
+  assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY, 'render key is the New Chat landing')
+  assert.equal(v.fullBleedKey.startsWith('chat:'), false, 'never a chat key (never chats[0])')
+  // The persisted slot stays null; singleScreenRoute keeps reporting chat:null.
+  assert.deepEqual(paneModel.singleScreenRoute(ws), {
+    view: 'chat', chatId: null, appId: null, paneId: ws.focusedPaneId,
+  })
+})
+
+test('round 4 item 3: an INITIALIZED null slot targets home:new-chat; a legacy Settings-only absent slot stays null', () => {
+  // An initialized empty slot → New Chat landing target/underlay (world reveal).
+  const nullSlot = { ...twoPaneChatAndApp(), singleScreen: null }
+  const nullPlan = deriveExitPlan({ workspace: nullSlot, projection: project(nullSlot), contentRect: CONTENT })
+  assert.equal(nullPlan.target, EMPTY_SINGLE_SURFACE_KEY)
+  assert.equal(nullPlan.underlayKey, EMPTY_SINGLE_SURFACE_KEY)
+  // A LEGACY absent-slot whose sole pane is Settings seeds NO concrete item, so the
+  // target stays null (the opaque-background reveal) — unchanged by item 3.
+  const legacy = paneModel.seedFromFlatTabs([tabModel.settingsTab()])
+  assert.equal('singleScreen' in legacy, false, 'absent slot (legacy)')
+  const legacyPlan = deriveExitPlan({ workspace: legacy, projection: project(legacy), contentRect: CONTENT })
+  assert.equal(legacyPlan.target, null, 'a legacy Settings-only absent slot is not the New Chat landing')
+  assert.equal(legacyPlan.underlayKey, null, 'opaque background reveal, no underlay wrapper')
 })
 
 // ── Settings takeover is EFFECTIVE-mode gated (finding F3) ───────────────────
@@ -457,11 +489,14 @@ test('deriveExitPlan: WORLD-REVEAL when the slot tab is INACTIVE in a pane (neve
   assert.equal(plan.participants.some(p => p.motion === 'promote'), false)
 })
 
-test('deriveExitPlan: NULL slot reveals home (underlayKey null), empty tree is instant (null plan)', () => {
+test('deriveExitPlan: NULL slot reveals the New Chat landing (round 4 item 3), empty tree is instant', () => {
   const home = { ...twoPaneChatAndApp(), singleScreen: null }
   const homePlan = deriveExitPlan({ workspace: home, projection: project(home), contentRect: CONTENT })
-  assert.equal(homePlan.target, null)
-  assert.equal(homePlan.underlayKey, null, 'home reveal uses the opaque background, no underlay wrapper')
+  // A null slot is a definite New Chat destination now — a WORLD REVEAL to the
+  // home:new-chat underlay, never the freshest chat and never the opaque-only home.
+  assert.equal(homePlan.target, EMPTY_SINGLE_SURFACE_KEY)
+  assert.equal(homePlan.underlayKey, EMPTY_SINGLE_SURFACE_KEY, 'the New Chat landing is revealed beneath the deal')
+  assert.ok(homePlan.participants.every(p => p.motion === 'deal-out'), 'every painted leaf deals out')
   assert.ok(homePlan.participants.length >= 1)
   // Empty tree → no participants → null plan → an INSTANT flip (no descriptor).
   const empty = paneModel.seedFromFlatTabs([])

@@ -79,7 +79,9 @@ import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
   deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
+  EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
+import NewChatLanding from './NewChatLanding.jsx'
 import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
@@ -794,6 +796,9 @@ export default function Shell() {
   // per-render function declaration with volatile inputs — chats, streaming,
   // online — that would churn any callback listing it as a dep).
   const newChatRef = useRef(null)
+  // Latest-materialize ref so the deferred-New-Chat watcher (stable deps) runs this
+  // render's live closure without depending on the function's identity (round 4 item 3).
+  const materializeNewChatHomeRef = useRef(null)
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
@@ -808,6 +813,23 @@ export default function Shell() {
   // guarantees the has_messages flag is now true and the reuse guard
   // (which reads has_messages from the chats query) is reliable again.
   const recoveredChatIdsRef = useRef(new Set())
+  // ── Deferred New Chat materialization (round 4 item 3) ─────────────────────
+  // A null single-screen slot renders the New Chat landing NOW; the reusable-empty
+  // validation + creation runs only AFTER the mode descriptor idles, so the slot write
+  // never drifts a live exit signature and cancels its own beat. The request is a
+  // monotonic token + a candidate captured from the pre-transition active chat; a
+  // watcher effect materializes it once the descriptor is idle, stale-guarded on token
+  // + still-single + still-null. offline/failed creation leaves the landing with a
+  // retry affordance — never a blank <main>, never chats[0].
+  const newChatRequestSeqRef = useRef(0)
+  const pendingNewChatRef = useRef(null) // { token, candidateId } | null
+  const materializingNewChatRef = useRef(false)
+  const [pendingNewChatToken, setPendingNewChatToken] = useState(0)
+  const [newChatLandingOffline, setNewChatLandingOffline] = useState(false)
+  // Live mirror of the mode descriptor so the async materialize can re-check for a
+  // beat that started during its await (writing the slot mid-beat would cancel it).
+  const modeTransitionRef = useRef(modeState.transition)
+  modeTransitionRef.current = modeState.transition
   // Every mounted chat pane derives its OWN built-app CTA list per chatId inside
   // PaneChatView (builtAppState.js), so Shell no longer holds a global builtApps
   // bound to a single activeChatId.
@@ -850,32 +872,33 @@ export default function Shell() {
     )
     if (pane) dispatchWorkspace({ type: 'FOCUS', paneId: pane.id })
   }, [dispatchWorkspace])
-  // The ONE user-close action (INV 13): the ✕ button, middle-click, keyboard
-  // Delete/Backspace, and the context-menu "Close tab" all invoke THIS. Resource
-  // deletion differs only by reason:'deleted'. Takes a tab object + opts so the
-  // WorkspaceChrome strips no longer own a private CLOSE_TAB dispatcher.
-  // The single world must never PAINT an empty screen while the owner has chats:
-  // a null slot is only a legitimate resting state on a zero-chat install (the
-  // nav's "empty semantic home"). Everywhere else home resolves to the freshest
-  // chat through the ONE decision point — restoreRoute, the boot seed, and the
-  // 404 repairs all do this already. This helper is the same resolution for the
-  // two event families they don't cover: an auto-returning last-tab close and an
-  // app delete that clears the slot. Event-scoped (no reactive watcher): a
-  // deliberate future null-home stays expressible.
-  const resolveEmptySingleHome = useCallback(() => {
+  // Request the New Chat landing for an emptied single slot (round 4 item 3). A null
+  // slot is a DEFINITE New Chat destination now — never the freshest chat — so this
+  // leaves the slot null (the render paints the New Chat surface) and records a
+  // tokenized pending request. The reusable-empty validation + creation runs only
+  // AFTER the mode descriptor idles (the materialize watcher below), so the slot write
+  // never drifts a live exit signature and cancels its own beat. The candidate is
+  // captured from the PRE-transition active chat but NOT targeted synchronously — the
+  // reuse policy (newChatPolicy) is deliberately provisional (has_messages can be
+  // stale cross-client), so it must survive its detail validation before it becomes
+  // the slot. Used by the two event families the ONE decision point does not cover (an
+  // auto-returning last-tab close and an app delete/uninstall that clears the slot);
+  // the old "null is legitimate only at zero chats" invariant is retired.
+  const requestEmptySingleNewChat = useCallback(() => {
     const ws = workspaceStateRef.current.ws
     const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
     if (!single || ws.singleScreen != null) return
-    // The freshest chat is the honest landing — closing a tab never deletes its
-    // chat, and an uninstalled app's slot is unrelated to any chat, so no exclusion
-    // is needed (the sole caller that once passed one always sent the empty string).
-    const fallback = chatsRef.current[0]
-    if (!fallback) return
-    applyModeDestination(
-      { view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId },
-      { preserveSettings: true },
-    )
-  }, [applyModeDestination, workspaceStateRef])
+    const candidate = currentReusableEmptyChat(chatsRef.current, {
+      activeChatId: activeChatIdRef.current,
+      recoveredChatIds: recoveredChatIdsRef.current,
+      streamingChatIds: streamingChatIdsRef.current,
+    })
+    const token = newChatRequestSeqRef.current + 1
+    newChatRequestSeqRef.current = token
+    pendingNewChatRef.current = { token, candidateId: candidate ? candidate.id : null }
+    setNewChatLandingOffline(false)
+    setPendingNewChatToken(token)
+  }, [workspaceStateRef, activeChatIdRef])
   const closeTab = useCallback((tab, { reason } = {}) => {
     const key = tabModel.tabKey(tab)
     const ws = workspaceStateRef.current.ws
@@ -893,13 +916,12 @@ export default function Shell() {
       mode.toggle({ cause: 'auto', to: 'single' })
     }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
-    // An auto-returned single world with a never-seeded slot would paint blank;
-    // resolve home to the freshest chat (the closed tab's chat still exists —
-    // closing a tab never deletes the chat, so "back to normal mode on your
-    // latest chat" is the honest landing). The tree's coupled undo still
-    // restores tab + builder as one gesture — the slot write is invisible there.
-    resolveEmptySingleHome()
-  }, [dispatchWorkspace, mode, workspaceStateRef, resolveEmptySingleHome])
+    // An auto-returned single world with a never-seeded slot lands on the New Chat
+    // surface — the honest destination for "closed the last tab" (round 4 item 3),
+    // never the freshest transcript. The tree's coupled undo still restores tab +
+    // builder as one gesture — no slot write happens on that path.
+    requestEmptySingleNewChat()
+  }, [dispatchWorkspace, mode, workspaceStateRef, requestEmptySingleNewChat])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
@@ -1361,16 +1383,17 @@ export default function Shell() {
     // it opaquely; the controller drops it under reduced motion (commit directly). A
     // null plan (empty tree) is an instant flip. Settings needs no conversion — its
     // tab SURVIVES the flip and single mode paints its own slot (never Settings).
-    // Durable flip FIRST (the synchronous reducer-preview ref advances with it),
-    // then resolve a null/never-seeded slot to the freshest chat (e.g. a
-    // Settings-focused builder seeds no slot — without this the single world
-    // paints the blank home), THEN derive the plan from the post-resolution
-    // state so the beat animates toward the surface single mode will actually
-    // paint. Everything dispatches inside this one handler, so the workspace
-    // flip, the slot write, and the descriptor beat batch as ONE transaction
-    // (INV 2/3).
+    // Durable flip FIRST (the synchronous reducer-preview ref advances with it), then
+    // REQUEST the New Chat landing for a null/never-seeded slot (e.g. a
+    // Settings-focused builder seeds no slot). The slot stays NULL through the beat —
+    // exitTargetKey maps it to home:new-chat so the exit reveals the New Chat surface,
+    // and the row materializes only after the descriptor idles (writing it now would
+    // drift the exit signature and cancel the beat). THEN derive the plan so the beat
+    // animates toward the surface single mode will actually paint. Everything
+    // dispatches inside this one handler, so the workspace flip, the request, and the
+    // descriptor beat batch as ONE transaction (INV 2/3).
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
-    if (leavingBuilder) resolveEmptySingleHome()
+    if (leavingBuilder) requestEmptySingleNewChat()
     const settled = workspaceStateRef.current.ws
     const presentation = leavingBuilder
       ? deriveExitPlan({
@@ -1387,7 +1410,7 @@ export default function Shell() {
     // toggle receipt so the logo gesture can tell an animated beat from an instant
     // flip and hand its compression to the descriptor (round 4 item 1).
     return mode.toggle({ cause, presentation })
-  }, [dispatchWorkspace, mode, projection, contentRect, resolveEmptySingleHome])
+  }, [dispatchWorkspace, mode, projection, contentRect, requestEmptySingleNewChat])
   // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
   // gesture + living halo). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
@@ -1771,10 +1794,10 @@ export default function Shell() {
     // so its 404'ing iframe unmounts.
     dropFromWarmLru(id => staleSet.has(String(id)))
     // An uninstalled app that occupied the single-world slot leaves it null —
-    // resolve home rather than painting a blank single screen.
-    resolveEmptySingleHome()
+    // land on the New Chat surface rather than painting a blank single screen.
+    requestEmptySingleNewChat()
   }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
-      navStackRef, retireAppHistory, dispatchWorkspace, resolveEmptySingleHome])
+      navStackRef, retireAppHistory, dispatchWorkspace, requestEmptySingleNewChat])
 
   // One-shot slot-app reconcile (H1). A slot app uninstalled while the browser was
   // CLOSED is never "seen present" this session, so the eviction above can't reach
@@ -1787,8 +1810,8 @@ export default function Shell() {
   // cold-restore probe below: list absence hints, the authoritative per-resource 404
   // decides. A 'deleted' verdict triggers CLOSE_TAB reason:'deleted' (the reducer
   // clears the slot + scrubs history), retires its physical nav history, drops its
-  // warm frame, and resolves the empty single world to home; anything else (present,
-  // offline, timeout) leaves the still-installed slot app pinned.
+  // warm frame, and lands the empty single world on the New Chat surface; anything else
+  // (present, offline, timeout) leaves the still-installed slot app pinned.
   useEffect(() => {
     if (!appsLiveFetched || initialSlotReconciledRef.current) return
     initialSlotReconciledRef.current = true
@@ -1817,11 +1840,11 @@ export default function Shell() {
         reason: 'deleted',
       })
       dropFromWarmLru(id => String(id) === sid)
-      resolveEmptySingleHome()
+      requestEmptySingleNewChat()
     })()
     return () => { cancelled = true }
   }, [appsLiveFetched, apps, retireAppHistory, tombstoneRoute, dispatchWorkspace,
-      dropFromWarmLru, resolveEmptySingleHome, workspaceStateRef])
+      dropFromWarmLru, requestEmptySingleNewChat, workspaceStateRef])
 
   // New-app dot detection (state + open-clear live up beside the chat
   // attention machinery). First live list = the session baseline; anything
@@ -1875,8 +1898,8 @@ export default function Shell() {
     })
     const sid = String(coldRestoredCanvasAppId)
     dropFromWarmLru(id => String(id) === sid)
-    resolveEmptySingleHome()
-  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace, resolveEmptySingleHome])
+    requestEmptySingleNewChat()
+  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace, requestEmptySingleNewChat])
 
   // Warm the SW app-code cache once per shell load for the apps the user
   // is most likely to open next — pinned + most-recent (the persisted
@@ -2573,6 +2596,124 @@ export default function Shell() {
     }
   }, [navTo, openAppWithIntent, refreshChats])
 
+  // Resolve the chat id a New-chat action lands on: a validated reusable empty row, or
+  // a freshly created one. Split out of newChat (round 4 item 3) so BOTH the ordinary
+  // user navigation (newChat) and the deferred slot materialization
+  // (materializeNewChatHome) share ONE reuse-and-create policy. Returns
+  // { chatId, reason }: reason is 'offline' | 'inflight' | 'error' when chatId is null,
+  // so each caller can react appropriately (a toast vs a retry surface).
+  //
+  // `candidate`: an explicitly pre-captured reusable row (the materialize path, which
+  // captured it from the pre-transition active chat). When undefined, derive it fresh
+  // from the current active chat (the user newChat path). The list is only a candidate
+  // source — cross-client sends can make has_messages stale — so online reuse needs one
+  // fresh, bounded detail read; any error/unfamiliar response fails closed to creating.
+  async function resolveNewChatId({ candidate, draft, forceNew, exclude } = {}) {
+    let empty = candidate !== undefined
+      ? candidate
+      : currentReusableEmptyChat(chatsRef.current, {
+        activeChatId: activeChatIdRef.current,
+        draft: !!draft,
+        exclude,
+        forceNew: !!forceNew,
+        recoveredChatIds: recoveredChatIdsRef.current,
+        streamingChatIds: streamingChatIdsRef.current,
+      })
+    if (empty && online) {
+      try {
+        const res = await apiFetch(
+          `/chats/${encodeURIComponent(empty.id)}?limit=1`,
+          { timeoutMs: 5000 },
+        )
+        const detail = res.ok ? await res.json() : null
+        if (!detailIsUntouchedEmptyChat(detail)) {
+          empty = null
+          void refreshChats()
+        }
+      } catch {
+        empty = null
+      }
+    }
+    if (empty) return { chatId: empty.id, reason: null }
+    // Creating a fresh chat needs the server (POST allocates the row, and a chat is
+    // only useful once the server-side agent can run). The reuse branch already handled
+    // the offline-friendly case, so reaching here offline means we truly need network.
+    if (!online) return { chatId: null, reason: 'offline' }
+    // Spam-click guard: when no empty exists, two rapid taps would race two POSTs and
+    // leave an extra empty behind. The in-flight ref short-circuits until the first
+    // resolves — the caller acknowledges the tap without a second create.
+    if (creatingChatRef.current) return { chatId: null, reason: 'inflight' }
+    creatingChatRef.current = true
+    try {
+      const res = await api.chats.create({ title: 'New chat' })
+      const chat = await jsonOrThrow(res, 'Chat creation failed')
+      const detailCache = createdChatDetailCache(chat)
+      if (detailCache) {
+        queryClient.setQueryData(chatMessagesQueryKey(chat.id), detailCache)
+      }
+      queryClient.setQueryData(chatQueries.keys.all, current => {
+        const next = addCreatedChatToList(current, chat)
+        chatsRef.current = next
+        return next
+      })
+      // Navigation and first paint can start from the authoritative create response.
+      // Both wider caches revalidate off the opening path.
+      void refreshChats()
+      return { chatId: chat.id, reason: null }
+    } catch {
+      return { chatId: null, reason: 'error' }
+    } finally {
+      creatingChatRef.current = false
+    }
+  }
+
+  // Materialize the deferred New Chat landing into a real chat slot (round 4 item 3).
+  // Runs ONLY after the mode descriptor idles (the watcher below gates it), so the slot
+  // write never drifts a live exit signature and cancels its own beat. Stale-guarded
+  // against a superseding request, a re-toggle back to builder, and a slot filled by
+  // another path. On offline/failed creation it leaves the New Chat landing visible
+  // with a retry affordance — never a blank <main>, never chats[0].
+  async function materializeNewChatHome(pending) {
+    if (materializingNewChatRef.current) return
+    materializingNewChatRef.current = true
+    try {
+      // Re-look-up the captured candidate by id (the list may have changed since the
+      // request). Missing → no reuse, straight to create. Explicit candidate (may be
+      // null) so resolveNewChatId does not re-derive from the now-different active chat.
+      const candidate = pending.candidateId != null
+        ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
+        : null
+      const { chatId } = await resolveNewChatId({ candidate })
+      // Stale-guard: token still current, still single, slot still null, no live beat.
+      // A beat that started during the await must NOT be cancelled by a slot write.
+      if (newChatRequestSeqRef.current !== pending.token) return
+      const ws = workspaceStateRef.current.ws
+      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      if (!single || ws.singleScreen != null || modeTransitionRef.current) {
+        if (pendingNewChatRef.current && pendingNewChatRef.current.token === pending.token) {
+          pendingNewChatRef.current = null
+        }
+        return
+      }
+      if (chatId == null) {
+        // offline / failed — keep the landing + the pending request for a retry.
+        setNewChatLandingOffline(true)
+        return
+      }
+      pendingNewChatRef.current = null
+      setNewChatLandingOffline(false)
+      // Guarded, history-free slot write: applyModeDestination never pushes history;
+      // preserveSettings so a background repair doesn't yank an open Settings takeover;
+      // no composer focus — a mode toggle must not summon the mobile keyboard.
+      applyModeDestination(
+        { view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId },
+        { preserveSettings: true },
+      )
+    } finally {
+      materializingNewChatRef.current = false
+    }
+  }
+
   async function newChat({ draft, forceNew, exclude, autoSend, focusComposer, recordHistory } = {}) {
     // Keep the active chat when it is still an untouched blank; only POST a
     // fresh row when this explicit New-chat action needs one. Never borrow an
@@ -2589,85 +2730,14 @@ export default function Shell() {
     //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
-    let chatId
-    let empty = currentReusableEmptyChat(chatsRef.current, {
-      activeChatId: activeChatIdRef.current,
-      draft: !!draft,
-      exclude,
-      forceNew: !!forceNew,
-      recoveredChatIds: recoveredChatIdsRef.current,
-      streamingChatIds: streamingChatIdsRef.current,
-    })
-
-    // The list is intentionally only a candidate source. Cross-client sends
-    // can make has_messages stale, so online reuse needs one fresh, bounded
-    // detail read. Any error or unfamiliar response fails closed to creating
-    // a new row rather than opening somebody else's newly-running chat.
-    if (empty && online) {
-      try {
-        const res = await apiFetch(
-          `/chats/${encodeURIComponent(empty.id)}?limit=1`,
-          { timeoutMs: 5000 },
-        )
-        const detail = res.ok ? await res.json() : null
-        if (!detailIsUntouchedEmptyChat(detail)) {
-          empty = null
-          void refreshChats()
-        }
-      } catch {
-        empty = null
-      }
-    }
-    if (empty) {
-      chatId = empty.id
-    } else {
-      // Creating a fresh chat needs the server (POST allocates the row,
-      // and a chat is only useful once the server-side agent can run).
-      // Offline the POST below throws into the `catch { return }` — a
-      // dead "New chat" tap with no feedback. Tell the user instead.
-      // (The reuse-existing-empty branch above already handled the
-      // offline-friendly case, so reaching here means we truly need
-      // the network.)
-      if (!online) {
-        showToast("You're offline.")
-        closeDrawer()
-        return
-      }
-      // Spam-click guard: when no empty exists, two rapid taps would
-      // race two POSTs and leave an extra empty behind. The in-flight
-      // ref short-circuits the second call until the first resolves.
-      if (creatingChatRef.current) {
-        // A 2nd rapid tap while the first create is in flight — that
-        // create will land and navigate; close the drawer so the tap is
-        // acknowledged instead of leaving the menu hanging open.
-        closeDrawer()
-        return
-      }
-      creatingChatRef.current = true
-      try {
-        const res = await api.chats.create({ title: 'New chat' })
-        const chat = await jsonOrThrow(res, 'Chat creation failed')
-        chatId = chat.id
-        const detailCache = createdChatDetailCache(chat)
-        if (detailCache) {
-          queryClient.setQueryData(chatMessagesQueryKey(chatId), detailCache)
-        }
-        queryClient.setQueryData(chatQueries.keys.all, current => {
-          const next = addCreatedChatToList(current, chat)
-          chatsRef.current = next
-          return next
-        })
-        // Navigation and first paint can start from the authoritative create
-        // response. Both wider caches revalidate off the opening path.
-        void refreshChats()
-      } catch {
-        // Don’t leave a dead, drawer-still-open tap on a failed create.
-        showToast("Couldn't start a new chat — please try again.", { variant: 'error' })
-        closeDrawer()
-        return
-      } finally {
-        creatingChatRef.current = false
-      }
+    const { chatId, reason } = await resolveNewChatId({ draft, forceNew, exclude })
+    if (chatId == null) {
+      // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
+      // toast; an in-flight second tap just closes the drawer (the first create lands).
+      if (reason === 'offline') showToast("You're offline.")
+      else if (reason === 'error') showToast("Couldn't start a new chat — please try again.", { variant: 'error' })
+      closeDrawer()
+      return
     }
 
     const changesRoute = activeViewRef.current !== 'chat'
@@ -2706,6 +2776,30 @@ export default function Shell() {
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
+  // Keep the latest-materialize ref current so the watcher effect (stable deps) always
+  // runs this render's live closure without depending on the function's identity.
+  materializeNewChatHomeRef.current = materializeNewChatHome
+
+  // ── Deferred New Chat materialization watcher (round 4 item 3) ─────────────
+  // A pending New Chat request (recorded by requestEmptySingleNewChat) materializes
+  // only once the mode descriptor is IDLE and the slot is still an empty single — so
+  // the slot write can never drift a live exit signature and cancel its own beat. When
+  // the beat completes, modeState.transition flips to null and this re-runs.
+  useEffect(() => {
+    if (!pendingNewChatToken) return
+    if (modeState.transition) return // wait for the descriptor to idle
+    const pending = pendingNewChatRef.current
+    if (!pending || pending.token !== pendingNewChatToken) return
+    const ws = workspaceStateRef.current.ws
+    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    if (!single || ws.singleScreen != null) {
+      // No longer an empty single slot (re-toggled to builder, or a slot was set by
+      // another path) — drop the request.
+      pendingNewChatRef.current = null
+      return
+    }
+    materializeNewChatHomeRef.current?.(pending)
+  }, [pendingNewChatToken, modeState.transition, workspaceStateRef])
 
   function selectChat(id) {
     clearChatAttention(id)
@@ -2841,9 +2935,9 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
-    // Deleting the app that occupied the single-world slot cleared it — resolve
-    // home so single mode never paints a blank screen.
-    resolveEmptySingleHome()
+    // Deleting the app that occupied the single-world slot cleared it — land on the
+    // New Chat surface so single mode never paints a blank screen.
+    requestEmptySingleNewChat()
     await refreshApps()
     showToast('App deleted', {
       duration: 5000,
@@ -3307,6 +3401,34 @@ export default function Shell() {
               />
             </Suspense>
           </div>
+          )
+        })()}
+        {/* New Chat landing (round 4 item 3) — the first-class surface a null single
+            slot paints, and the phase-2 world-reveal underlay while an exit beat lands
+            on it. Rendered only when it is actually the surface (fullBleedKey) or the
+            reveal underlay, so it never sits mounted-hidden behind real content. The row
+            materializes into a real chat after the descriptor idles; until then this is
+            the honest destination (never chats[0], never a blank <main>). */}
+        {(() => {
+          const newChatUnderlay = isUnderlay(EMPTY_SINGLE_SURFACE_KEY)
+          const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY
+          if (!newChatUnderlay && !newChatSurface) return null
+          return (
+            <div
+              key="home-new-chat"
+              className={newChatUnderlay
+                ? 'shell__view shell__view--exit-underlay shell__chat-view'
+                : 'shell__view shell__view--active shell__chat-view'}
+              // The reveal underlay carries the gating destination-arrival timing.
+              style={newChatUnderlay ? (arriveVars || undefined) : undefined}
+              inert={(exitBeatActive && newChatUnderlay) || undefined}
+            >
+              <NewChatLanding
+                // Retry state only on the resting surface — never mid-reveal.
+                offline={newChatSurface && newChatLandingOffline}
+                onRetry={requestEmptySingleNewChat}
+              />
+            </div>
           )
         })()}
         {/* Chrome layer — sibling AFTER the content wrappers, over the whole
