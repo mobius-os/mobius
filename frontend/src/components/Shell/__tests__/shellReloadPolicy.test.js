@@ -81,9 +81,15 @@ test('passive watcher rebuilds coalesce while an idle chat is visible', () => {
     ...base,
     activeView: 'canvas',
     passiveRebuild: true,
-  }), false, 'leaving the chat releases a queued watcher rebuild')
+  }), true, 'a visible app is never torn down for a watcher rebuild')
   assert.equal(shouldDeferShellReload({
     ...base,
+    activeView: 'canvas',
+    passiveRebuild: false,
+  }), true, 'an explicit apply also waits until the visible app is safe')
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    activeView: 'canvas',
     passiveRebuild: true,
     visibilityState: 'hidden',
   }), false, 'a hidden page is a safe apply boundary')

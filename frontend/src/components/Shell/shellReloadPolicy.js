@@ -79,6 +79,12 @@ export function shouldDeferShellReload({
   visibilityState = 'visible',
 } = {}) {
   if (visibilityState === 'hidden') return false
+  // Canvas apps may contain games, unsaved work, media, or nested fullscreen
+  // documents whose state is opaque to the shell. Never tear down that visible
+  // surface for a background shell generation. The existing active-view and
+  // visibility effects release the queued reload after the owner leaves the
+  // app or backgrounds the page.
+  if (activeView === 'canvas') return true
   // Watcher rebuilds are noisy implementation detail: a burst of source saves
   // can publish several generations while the owner is simply reading an idle
   // chat. Keep those generations coalesced until the chat is no longer the
