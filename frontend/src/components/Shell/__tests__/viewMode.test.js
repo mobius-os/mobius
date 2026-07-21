@@ -169,3 +169,42 @@ test('UNDO_LAST restores the captured tree but KEEPS the current view-mode', () 
   assert.equal(Object.keys(undone.ws.panes).length, beforeLeaves, 'the tree change is reverted')
   assert.equal(undone.ws.viewMode, 'single', 'the view-mode flip is NOT reverted')
 })
+
+// ── M3: the kill switch clamps the fresh/fallback seed to ONE world ───────────
+// parseWorkspace returns seedFromFlatTabs directly on the fresh/fallback/invalid
+// paths (no re-normalize), and the seed was always viewMode:'panes'. With splits
+// OFF the presentation clamps to single, but activeContentRoute reads the RAW
+// ws.viewMode — 'panes' made it project the hidden builder focus while single
+// mode painted the slot: two conflicting worlds. Clamping the seed's viewMode at
+// the parse layer (coerceViewMode, the same clamp the valid-blob path gets) keeps
+// the blob itself single, so both readers agree.
+test('M3: with splits OFF a fresh/fallback seed is single and activeContentRoute reads the slot', async () => {
+  const prevLS = globalThis.localStorage
+  globalThis.localStorage = { getItem: (k) => (k === 'mobius:workspace-splits' ? '0' : null) }
+  try {
+    const pmOff = await import('../paneModel.js?m3-splits-off')
+    assert.equal(pmOff.WORKSPACE_SPLITS_ENABLED, false)
+    // The fresh fallback seed (empty raw → seedFromFlatTabs) is clamped to single.
+    const fresh = pmOff.parseWorkspace('')
+    assert.equal(fresh.viewMode, 'single', 'the seed itself is single when splits are off')
+    // Reproduce the review simulation: focused builder tab A, single-world slot B.
+    let ws = pmOff.seedFromFlatTabs([makeTab('chat', 'A')])
+    assert.equal(ws.viewMode, 'single', 'seedFromFlatTabs clamps at the parse layer')
+    ws = pmOff.setSingleScreen(ws, { kind: 'chat', id: 'B' })
+    const route = pmOff.activeContentRoute(ws)
+    assert.equal(route.view, 'chat')
+    assert.equal(route.chatId, 'B', 'reads the single-world SLOT, not the hidden builder focus A')
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = prevLS
+  }
+})
+
+test('M3: with splits ON the seed keeps the tiled panes default (no regression)', () => {
+  // The clamp only fires under the kill switch; the default (tests + prod) is the
+  // tiled builder world, and activeContentRoute reads the focused pane there.
+  assert.equal(paneModel.WORKSPACE_SPLITS_ENABLED, true)
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'A')])
+  assert.equal(ws.viewMode, 'panes')
+  assert.equal(paneModel.activeContentRoute(ws).chatId, 'A')
+})
