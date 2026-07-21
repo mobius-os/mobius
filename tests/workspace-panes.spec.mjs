@@ -650,14 +650,16 @@ test.describe('Workspace drag (PR3)', () => {
  * or the Shift+Enter keyboard path flips 'panes' <-> 'single'; builder mode is the
  * accent .shell__brand--builder state). Single-mode collapses the preserved tree to
  * the focused pane full-bleed WITHOUT rewriting the persisted geometry, so a
- * round-trip restores the identical blob. In single-mode with a multi-pane tree
+ * round-trip restores the identical pane tree. The first switch also seeds the
+ * single world's independent screen slot, so that additive field persists. In
+ * single-mode with a multi-pane tree
  * dragging is disabled (attempted drawer-row drag: no split, the LOGO vibrates —
  * the bar paints above the drawer scrim so it is perceivable). In single-mode with
  * ONE leaf dragging stays on: a SPLITTING (edge) drop opts back into panes, a
  * non-splitting (center-join) drop does not.
  */
 test.describe('Workspace view-mode toggle', () => {
-  test('the logo gesture flips to single and back without mutating either world', async ({ page }) => {
+  test('the logo gesture flips to single (geometry preserved, one pane) and back', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmA')
     const b = await createTaggedChat(page, 'vmB')
@@ -701,7 +703,8 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
     await expect(page.locator(`[data-tab-key="chat:${a.id}"].shell__view--active`)).toHaveCount(1)
 
-    // Flip back — identical layout restored (the tree was never mutated).
+    // Flip back — the pane world is identical (the tree was never mutated),
+    // while the single world's newly seeded slot remains as its own memory.
     await brand.focus()
     await page.keyboard.press('Shift+Enter')
     await waitTiled(page)
@@ -711,7 +714,8 @@ test.describe('Workspace view-mode toggle', () => {
     expect(restored.panes).toEqual(baseline.panes)
     expect(restored.focusedPaneId).toBe(baseline.focusedPaneId)
     expect(restored.nextId).toBe(baseline.nextId)
-    expect(restored.singleScreen).toEqual(single.singleScreen)
+    expect(restored.viewMode).toBe('panes')
+    expect(restored.singleScreen).toEqual({ kind: 'chat', id: String(a.id) })
   })
 
   // Regression (item 0): a genuine MULTI-PANE exit via the real POINTER-HOLD
@@ -1058,7 +1062,7 @@ test.describe('Builder-mode Settings', () => {
     expect(Object.keys(ws.panes).length).toBe(2)
   })
 
-  test('Settings stays in the builder world while a mode flip shows the single world', async ({ page }) => {
+  test('mode flip preserves the builder Settings tab behind the single takeover', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'stConvA')
     const b = await createTaggedChat(page, 'stConvB')
@@ -1078,20 +1082,20 @@ test.describe('Builder-mode Settings', () => {
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
     await page.keyboard.press('Shift+Enter')
 
-    // The two worlds retain independent navigation state: entering single hides
-    // the builder tree without destructively removing its Settings tab.
+    // The two navigation worlds retain their own state: entering single hides
+    // (but does not destroy) the builder Settings tab and paints the takeover.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
-    expect(whichPaneHas(await readWs(page), 'settings:settings')).toBe(settingsPane)
-    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(0)
+    expect(whichPaneHas(await readWs(page), 'settings:settings'), 'builder tab is preserved')
+      .toBe(settingsPane)
+    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(1)
 
-    // Returning to builder reveals the exact tab in its original pane; no browser
-    // history conversion or tab reconstruction is involved.
+    // Flip back to builder: the same Settings tab becomes visible again.
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
     await page.keyboard.press('Shift+Enter')
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')
     await expect.poll(
       async () => whichPaneHas(await readWs(page), 'settings:settings'),
-      { timeout: 3000, message: 'Settings remains in its builder pane' },
+      { timeout: 3000, message: 'preserved Settings tab returns in builder' },
     ).toBe(settingsPane)
     await expect(page.locator(
       '[data-tab-key="settings:settings"].shell__view--paned',

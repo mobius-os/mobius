@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
-import { apiFetch, getAuthHeaders, BASE } from '../../api/client.js'
+import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
@@ -1037,7 +1037,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 15000 })
-      const data = await res.json()
+      const data = await jsonOrThrow(res, 'Runtime refresh failed')
       if (chatIdStaleRef.current) return
       if (fetchGenRef.current !== gen) return
       const serverPending = data.pending_messages || []
@@ -1873,8 +1873,8 @@ export default function ChatView({
     // them to the bottom, undoing the pagination. Pagination leaves
     // them at the new anchor; the next gesture (or send) writes a
     // fresh mode.
-    apiFetch(`/chats/${chatId}?limit=20&before=${offset}`)
-      .then(r => r.json())
+    apiFetch(`/chats/${chatId}?limit=20&before=${offset}`, { timeoutMs: 15000 })
+      .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
       .then(data => {
         if (chatIdStaleRef.current) return
         const older = data.messages || []
@@ -2579,21 +2579,30 @@ export default function ChatView({
   // Cancel a queued message via DELETE. Optimistic remove; reconcile
   // by re-fetching authoritative state on success or on error.
   const handleCancelPending = useCallback(async (cid) => {
+    const currentQueue = pendingQueue.pendingMessagesRef.current
+    const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
+    const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
     pendingQueue.cancelByCid(cid)
     forgetQueuedPinIntent({ cid })
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
+        timeoutMs: 15000,
       })
-      const data = await res.json()
+      const data = await jsonOrThrow(res, 'Queued-message cancellation failed')
       pendingQueue.hydrate(data.pending_messages || [])
     } catch {
       // Refetch authoritative state.
       try {
-        const res = await apiFetch(`/chats/${chatId}?limit=1`)
-        const data = await res.json()
+        const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 15000 })
+        const data = await jsonOrThrow(res, 'Queue refresh failed')
         pendingQueue.hydrate(data.pending_messages || [])
-      } catch { /* offline; leave optimistic, user can retry */ }
+      } catch {
+        // Both the mutation and its authoritative read are inconclusive. Put
+        // back only this row, preserving any newer queue changes made while
+        // the two requests were pending.
+        pendingQueue.restoreByCid(cancelledRow, cancelledIndex)
+      }
     }
   }, [chatId, pendingQueue])
 
@@ -3507,6 +3516,13 @@ export default function ChatView({
     .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
     .filter(entry => entry.vm)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
+  let lastVisibleMessageIndex = -1
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (!messages[i].hidden) {
+      lastVisibleMessageIndex = i
+      break
+    }
+  }
 
   return (
     <div
@@ -3649,8 +3665,7 @@ export default function ChatView({
 
           {messages.map((msg, i) => {
             if (msg.hidden) return null
-            const isLastMsg = i === messages.length - 1
-              || messages.slice(i + 1).every(m => m.hidden)
+            const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only
             // that row; unrelated assistant history remains in this map.

@@ -843,7 +843,7 @@ export default function ChatSettingsPanel({
               reply — may briefly affect that turn.
             </p>
           )}
-          {error && <p className="csp__error">{error}</p>}
+          {error && <p className="csp__error" role="alert">{error}</p>}
         </div>
       )}
     </div>

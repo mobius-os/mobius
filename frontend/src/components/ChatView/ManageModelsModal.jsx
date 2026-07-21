@@ -249,7 +249,7 @@ export default function ManageModelsModal({
           </div>
         </div>
 
-        {error && <p className="mmm__error">{error}</p>}
+        {error && <p className="mmm__error" role="alert">{error}</p>}
 
         {pendingClose && (
           <div className="mmm__confirm" role="group" aria-label="Confirm discard">

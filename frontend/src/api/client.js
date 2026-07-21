@@ -198,6 +198,9 @@ export async function apiFetch(path, options = {}) {
     'Content-Type': 'application/json',
     ...getAuthHeaders(options.headers),
   }
+  const sentCredential = Object.entries(headers).some(
+    ([name, value]) => name.toLowerCase() === 'authorization' && !!value,
+  )
 
   // Opt-in timeout: callers that must not hang forever (e.g. the background
   // reconcile poll and the message fetch — see ChatView) pass `timeoutMs`.
@@ -225,7 +228,7 @@ export async function apiFetch(path, options = {}) {
     if (timeoutTimer) clearTimeout(timeoutTimer)
   }
 
-  if (res.status === 401 && !setupSession.isInProgress()) {
+  if (res.status === 401 && sentCredential && !setupSession.isInProgress()) {
     if (ephemeralAuthEnabled) {
       clearEphemeralAuthSession()
       window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))

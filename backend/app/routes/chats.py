@@ -132,13 +132,16 @@ def _mirror_agent_defaults(
   settings_obj: dict,
 ) -> None:
   """Repair the best-effort defaults mirrored from a committed chat choice."""
-  mirror = providers._load_agent_settings(data_dir) or {}
+  patch = {}
   for key in ("model", "effort", "effort_by_provider"):
     value = settings_obj.get(key)
     if value is not None:
-      mirror[key] = value
-  if mirror:
-    providers.write_agent_settings(data_dir, mirror)
+      patch[key] = value
+  if patch:
+    providers.update_agent_settings(
+      data_dir,
+      lambda current: {**current, **patch},
+    )
   owner = db.query(models.Owner).first()
   if owner is not None and owner.provider != provider_id:
     owner.provider = provider_id
@@ -726,14 +729,16 @@ async def patch_chat(
       and settings_obj
       and picker_settings_changed
     ):
-      from app.providers import _load_agent_settings, write_agent_settings
-      mirror = _load_agent_settings(data_dir) or {}
+      mirror_patch = {}
       for key in ("model", "effort", "effort_by_provider"):
         value = settings_obj.get(key)
         if value is not None:
-          mirror[key] = value
-      if mirror:
-        write_agent_settings(data_dir, mirror)
+          mirror_patch[key] = value
+      if mirror_patch:
+        providers.update_agent_settings(
+          data_dir,
+          lambda current: {**current, **mirror_patch},
+        )
     # Provider is part of the picker default, so mirror it only when this
     # PATCH actually represents a picker/provider choice. A title, pin, or
     # auto-resume-only PATCH on a historical chat must not change which
