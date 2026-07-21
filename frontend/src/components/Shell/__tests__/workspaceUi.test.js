@@ -609,18 +609,24 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
 })
 
-test('polish item 4: the world-reveal underlay breathes in 1.2%, atmospheric-only', () => {
-  // The destination starts very slightly enlarged and settles to rest — a 1.2% breathe
-  // instead of standing statically.
-  assert.match(css, /\.shell--builder-exiting \.shell__view--exit-underlay \{[\s\S]*?animation:\s*\n?\s*shell-mode-underlay-settle/)
-  const settle = css.match(/@keyframes shell-mode-underlay-settle\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(settle, /from \{ transform: scale\(1\.012\); opacity: 0\.96; \}/)
-  assert.match(settle, /to \{ transform: scale\(1\); opacity: 1; \}/)
-  // ATMOSPHERIC only: the breathe must NEVER gate completion, so workspaceView never
-  // names it (its completionNames are only promote/deal-out/deal-in).
+test('round 4 item 2: the world-reveal underlay is a GATING destination arrival, not a breathe', () => {
+  // Phase 2: the destination settles in (opacity .60→1, scale 1.012→1) over
+  // --mode-arrive-duration delayed by --mode-arrive-delay (Shell writes both from the
+  // plan's destinationMotion). `both` holds the veil through the delay.
+  assert.match(css, /\.shell--builder-exiting \.shell__view--exit-underlay \{[\s\S]*?animation:\s*\n?\s*shell-mode-destination-arrive[\s\S]*?var\(--mode-arrive-duration\)[\s\S]*?var\(--mode-arrive-delay\)[\s\S]*?both/)
+  const arrive = css.match(/@keyframes shell-mode-destination-arrive\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(arrive, /from \{ transform: scale\(1\.012\); opacity: 0\.60; \}/)
+  assert.match(arrive, /to \{ transform: scale\(1\); opacity: 1; \}/)
+  // Compositor-only: transform + opacity, nothing that forces layout.
+  assert.doesNotMatch(arrive, /box-shadow|border-radius|filter|clip|top:|left:|width:|height:/)
+  // The old atmospheric breathe is fully retired.
+  assert.doesNotMatch(css, /shell-mode-underlay-settle/)
   const workspaceView = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
   assert.doesNotMatch(workspaceView, /underlay-settle/)
-  // Defensive reduced-motion rule (the doc's rule): drop the breathe under reduce.
+  // GATING: workspaceView DOES name it now (its completionNames add destination-arrive
+  // for a world reveal), so the descriptor awaits the delayed arrival.
+  assert.match(workspaceView, /DESTINATION_ARRIVE_NAME = 'shell-mode-destination-arrive'/)
+  // Defensive reduced-motion rule: drop the arrival under reduce.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell--builder-exiting \.shell__view--exit-underlay \{ animation: none; \}/)
 })

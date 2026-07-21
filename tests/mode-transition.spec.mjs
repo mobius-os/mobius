@@ -316,6 +316,85 @@ test('v2 world-reveal exit paints the mounted destination underlay beneath the d
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
 })
 
+// ── Round 4 item 2: the two-phase world reveal (destination arrival) ──────────
+// Frame-sample the underlay opacity across a world reveal: it must stay veiled (~.60)
+// while the cards are still present, then rise to full only AFTER the last card clears
+// — the destination ARRIVES as phase 2, it does not read as already-present.
+async function sampleUnderlayArrival(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let maxOpacityWithCards = 0
+    let roseAfterCards = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const exiting = root.className.includes('shell--builder-exiting')
+        const underlay = document.querySelector('.shell__view--exit-underlay')
+        if (exiting && underlay) {
+          started = true
+          const op = parseFloat(getComputedStyle(underlay).opacity)
+          const cards = [...document.querySelectorAll('.shell__view[data-mode-motion="deal-out"]')]
+          const cardsPresent = cards.some(c => parseFloat(getComputedStyle(c).opacity) > 0.05)
+          if (cardsPresent) maxOpacityWithCards = Math.max(maxOpacityWithCards, op)
+          else if (op > 0.9) roseAfterCards = true
+        }
+        frames += 1
+        if ((started && !exiting && frames > 4) || frames > 240) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { started, maxOpacityWithCards, roseAfterCards }
+  })
+}
+
+test('round4-2: the world-reveal destination stays veiled while cards are present, then arrives', async ({ page }) => {
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleUnderlayArrival(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.started, 'a world-reveal exit ran').toBe(true)
+  // Phase 1: the destination sits veiled beneath the departing cards (the `both` fill
+  // holds the .60 from-frame through the arrival delay).
+  expect(r.maxOpacityWithCards, 'the destination stays veiled while cards are present')
+    .toBeLessThanOrEqual(0.8)
+  // Phase 2: opacity rises to full only after the last card clears.
+  expect(r.roseAfterCards, 'the destination arrives (rises to full) after the cards clear').toBe(true)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('round4-2: reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  // Watch for ANY exiting beat class or reveal underlay across the flip.
+  const sampler = page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let sawExitPhase = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        if (root.className.includes('shell--builder-exiting')
+          || document.querySelector('.shell__view--exit-underlay')) sawExitPhase = true
+        frames += 1
+        if (frames > 60) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return sawExitPhase
+  })
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const sawExitPhase = await sampler
+  expect(sawExitPhase, 'reduced motion discards the whole exit presentation (no phase)').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
 // builder is exited by closing its sole tab; a frame-sampler proves the descriptor
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an

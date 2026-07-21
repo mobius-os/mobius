@@ -295,6 +295,19 @@ export default function Shell() {
   const beatPlan = modeMachine.transitionPresentation(modeState)
   const exitPlan = modeMachine.exitPresentation(modeState)
   const exitUnderlayKey = exitPlan ? exitPlan.underlayKey : null
+  // The two-phase destination-arrival timing for a world-reveal exit (round 4 item 2):
+  // the underlay wrapper settles in (opacity .60→1, scale 1.012→1) over exitArriveMs,
+  // delayed until the last card clears. Written onto whichever wrapper is the underlay
+  // so its arrival is a GATING animation (its name is in the plan's completion
+  // contract). Null for a promote (no phase 2) or when idle.
+  const arriveVars = useMemo(() => {
+    const m = exitPlan ? exitPlan.destinationMotion : null
+    if (!m) return null
+    return {
+      '--mode-arrive-duration': `${m.durationMs}ms`,
+      '--mode-arrive-delay': `${m.delayMs}ms`,
+    }
+  }, [exitPlan])
   // The logo spring-back window on the shell root while an animated beat is live
   // (round 4 item 1): the mark holds .84 through the beat and releases over the
   // terminal logoReleaseMs so its first full-size frame lands at completion. `both`
@@ -3116,7 +3129,11 @@ export default function Shell() {
               : (paned
                 ? 'shell__view shell__view--paned'
                 : `shell__view ${fullBleed ? 'shell__view--active' : ''}`)}
-            style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
+            // The underlay carries the gating destination-arrival timing (round 4
+            // item 2); a participant carries its own motion vars.
+            style={underlay
+              ? (arriveVars || undefined)
+              : (motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined))}
             // INV 9 (inert beat): every exit-beat surface — a participant pane OR the
             // underlay — is pointer/keyboard inert so a tap on a dealing-out / covered
             // surface cannot dispatch FOCUS mid-animation.
@@ -3196,7 +3213,10 @@ export default function Shell() {
                 : (paned
                   ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
                   : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`)}
-              style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
+              // The reveal underlay carries the gating destination-arrival timing.
+              style={underlay
+                ? (arriveVars || undefined)
+                : (motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined))}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
               inert={settingsOverlay || role !== 'active' || (exitBeatActive && (!!motion || underlay))}
@@ -3266,7 +3286,10 @@ export default function Shell() {
               : (settingsPaned
                 ? 'shell__view shell__view--paned shell__settings-view'
                 : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`)}
-            style={settingsMotion ? { ...(settingsPos || {}), ...settingsMotion.vars } : (settingsPos || undefined)}
+            // A Settings reveal underlay carries the gating destination-arrival timing.
+            style={settingsUnderlay
+              ? (arriveVars || undefined)
+              : (settingsMotion ? { ...(settingsPos || {}), ...settingsMotion.vars } : (settingsPos || undefined))}
             inert={(exitBeatActive && (!!settingsMotion || settingsUnderlay)) || undefined}
             onPointerDownCapture={settingsPaned && !settingsUnderlay && !exitBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })

@@ -36,10 +36,17 @@ export const MODE_MOTION = Object.freeze({
   enterSingleMs: 230, // the sole leaf's deal-in (single-leaf entry)
   exitItemMs: 180, // one pane's deal-out (world reveal)
   promoteMs: 250, // the survivor pane's FLIP grow-to-full-bleed (slower, more mass)
+  // A WORLD REVEAL is TWO phases (round 4 item 2): phase 1 clears the cards + chrome
+  // over a veiled destination, then a terminal exitArriveMs settles the destination in
+  // (opacity .60→1, scale 1.012→1). This is a real GATING phase — its animation name
+  // joins the completion contract so the descriptor (and the logo spring + halo
+  // resume) end at the ARRIVAL, not the last deal-out. Promote exits keep their
+  // seamless continuity and never grow a destinationMotion.
+  exitArriveMs: 120,
   // The logo's spring-back window (round 4 item 1): the compressed mark holds .84
   // through the beat and RELEASES over the terminal logoReleaseMs so its first
   // full-size frame coincides with descriptor completion. For a world reveal this is
-  // exactly phase 2 (== exitArriveMs below), so a short plan clamps it to totalMs.
+  // exactly phase 2 (== exitArriveMs), so a short plan clamps it to totalMs.
   logoReleaseMs: 120,
 })
 
@@ -55,6 +62,11 @@ export const RECONCILE_SLACK_MS = 250
 export const PROMOTE_NAME = 'shell-mode-promote'
 export const DEAL_OUT_NAME = 'shell-mode-deal-out'
 export const DEAL_IN_NAME = 'shell-mode-deal-in'
+// The GATING destination-arrival of a two-phase world reveal (round 4 item 2). Unlike
+// the old atmospheric settle, this name is IN the plan's completion contract, so the
+// descriptor collects the delayed CSS animation in its first getAnimations pass and
+// awaits it alongside the cards — no second timer, reducer phase, or event.
+export const DESTINATION_ARRIVE_NAME = 'shell-mode-destination-arrive'
 
 // A pane's CONTENT rect is its pane rect minus the strip row on top — the same
 // geometry the tiled render positions the wrapper into (see visibleTabRects).
@@ -178,6 +190,9 @@ export function deriveExitPlan(input) {
   const participants = []
   const completionNames = new Set()
   let underlayKey = null
+  // A world reveal grows a phase-2 destination arrival (round 4 item 2); a promote
+  // keeps its seamless single-phase continuity and leaves this null.
+  let destinationMotion = null
 
   if (promoteLeaf) {
     // FLIP the promote pane from its ACTUAL wrapper geometry to the full box. At a
@@ -229,15 +244,26 @@ export function deriveExitPlan(input) {
       })
     })
     completionNames.add(DEAL_OUT_NAME)
+    // Phase 2: the veiled destination settles in only AFTER the last card clears. Its
+    // delay is exactly when the departures finish, so the two phases never overlap.
+    const departureEndMs = participants.reduce((max, p) => Math.max(max, p.delayMs + p.durationMs), 0)
+    destinationMotion = { delayMs: departureEndMs, durationMs: MODE_MOTION.exitArriveMs }
+    completionNames.add(DESTINATION_ARRIVE_NAME)
   }
 
-  const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
+  // The beat ends when the last card is away PLUS the destination arrival (world
+  // reveal), or simply when the last participant finishes (promote — no phase 2).
+  const participantsEndMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
+  const totalMs = participantsEndMs + (destinationMotion ? MODE_MOTION.exitArriveMs : 0)
   return {
     kind: 'exit',
     target,
     destinationRect: dest,
     participants,
     underlayKey,
+    // Shell writes destinationMotion's delay/duration onto the underlay wrapper so the
+    // arrival is gating; null for a promote (its continuity would break with a reveal).
+    destinationMotion,
     completionNames: [...completionNames],
     totalMs,
     snapshotSignature: exitSignature(input),
