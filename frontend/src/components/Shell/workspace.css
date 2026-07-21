@@ -469,15 +469,16 @@
   border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   opacity: 0;
-  /* First appearance fades in over 80ms; a zone-to-zone move MORPHS the same
-     rectangle over 120ms. Both live on one element so the vocabulary reads as a
-     single object gliding between targets. */
+  /* First appearance fades in over 60ms; a zone-to-zone move MORPHS the same
+     rectangle over 90ms. Both live on one element so the vocabulary reads as a
+     single object gliding between targets — the faster morph makes the (now larger)
+     bands feel even more responsive than their geometry. */
   transition:
-    opacity 80ms ease,
-    left 120ms cubic-bezier(0.2, 0, 0, 1),
-    top 120ms cubic-bezier(0.2, 0, 0, 1),
-    width 120ms cubic-bezier(0.2, 0, 0, 1),
-    height 120ms cubic-bezier(0.2, 0, 0, 1);
+    opacity 60ms ease-out,
+    left 90ms cubic-bezier(0.2, 0, 0, 1),
+    top 90ms cubic-bezier(0.2, 0, 0, 1),
+    width 90ms cubic-bezier(0.2, 0, 0, 1),
+    height 90ms cubic-bezier(0.2, 0, 0, 1);
 }
 .workspace__drop-preview.is-visible { opacity: 1; }
 

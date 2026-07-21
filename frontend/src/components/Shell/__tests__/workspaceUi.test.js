@@ -73,9 +73,10 @@ test('the drop preview reads as an 18% accent fill with a 2px border and morph',
   assert.match(rule, /border:\s*2px solid var\(--accent\)/)
   assert.match(rule, /var\(--accent\)\s*18%/)
   assert.match(rule, /border-radius:\s*10px/)
-  // First-appear fade (80ms) + zone-to-zone morph (120ms cubic-bezier).
-  assert.match(rule, /opacity 80ms/)
-  assert.match(rule, /120ms cubic-bezier\(0\.2, 0, 0, 1\)/)
+  // First-appear fade (60ms) + zone-to-zone morph (90ms cubic-bezier) — the faster
+  // morph makes the larger uncapped bands feel even more responsive.
+  assert.match(rule, /opacity 60ms/)
+  assert.match(rule, /90ms cubic-bezier\(0\.2, 0, 0, 1\)/)
 })
 
 test('the strip caret variant drops the fill and border for a solid bar', () => {
