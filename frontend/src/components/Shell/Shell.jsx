@@ -323,19 +323,6 @@ export default function Shell() {
     (key) => exitBeatActive && exitUnderlayKey != null && key === exitUnderlayKey,
     [exitBeatActive, exitUnderlayKey],
   )
-  // INV 10: a topology or geometry change DURING an exit beat (a participant pane
-  // closes, its active tab changes, the target moves, the content box resizes)
-  // makes the latched plan no longer describe the tree. Cancel rather than retarget
-  // a live transform: recompute the exit signature from the same projection
-  // authority and compare it to the latched one. This is the ONLY caller of
-  // cancelBeat, firing precisely when the animated target could drift.
-  useEffect(() => {
-    const t = modeState.transition
-    if (!t || t.phase !== 'exiting' || !t.presentation) return
-    const live = exitSignature({ workspace, projection, contentRect })
-    if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
-  }, [workspace, projection, contentRect, modeState, mode])
-
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
   // full-viewport — only while that app is the active canvas of the FOCUSED
@@ -375,6 +362,27 @@ export default function Shell() {
   settingsDestinationRef.current = settingsOpenRaw
   const immersiveHolderRef = useRef(immersiveAppId)
   immersiveHolderRef.current = immersiveAppId
+
+  // INV 10 / H2: a topology, geometry, OR DESTINATION change DURING an exit beat makes
+  // the latched plan no longer describe what single mode will paint — a participant
+  // pane closes, its active tab changes, the slot moves, the box resizes, OR a Settings
+  // takeover / immersive request suspends or lands over the slot mid-beat. Cancel
+  // rather than retarget a live transform: recompute the exit signature from the same
+  // projection authority AND the live overlay classification, and compare to the
+  // latched one. Because the signature folds the destination through the SAME
+  // classifier the plan used, every input the plan derives from also drifts this key —
+  // so the live overlay state (settingsOpenRaw / immersiveAppId) is both read here and
+  // in the deps, letting a mid-beat destination flip fire this. Only caller of cancelBeat.
+  useEffect(() => {
+    const t = modeState.transition
+    if (!t || t.phase !== 'exiting' || !t.presentation) return
+    const live = exitSignature({
+      workspace, projection, contentRect,
+      settingsDestination: settingsOpenRaw,
+      immersiveHolderId: immersiveAppId,
+    })
+    if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
+  }, [workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode])
 
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay

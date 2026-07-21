@@ -93,15 +93,36 @@ function visibleLeafDescriptors(workspace, projection) {
   return out
 }
 
-// The immutable invalidation key for an exit beat: target + visible (pane, active
-// key) pairs + content dimensions. Recomputed live by the controller's cancel
-// watcher; any drift means the latched plan no longer describes the tree, so the
-// beat snaps to the committed destination rather than retargeting a transform.
-export function exitSignature({ workspace, projection, contentRect }) {
-  const target = exitTargetKey(workspace)
+// The effective destination single mode will ACTUALLY paint on completion, given the
+// tree's slot plus the two live overlay states (M2). A suspended Settings takeover
+// paints full-bleed OVER the slot (reveal to Settings); a retained immersive holder
+// that solos the exit slot is an INSTANT destination (full-viewport, header gone) the
+// beat cannot honestly latch. Both the exit PLAN and the exit SIGNATURE classify
+// through THIS one function from the SAME input, so an overlay input can never change
+// the plan's destination without also changing its invalidation key (INV 10 / H2).
+function classifyExitDestination({ workspace, settingsDestination = false, immersiveHolderId = null }) {
+  const slotTarget = exitTargetKey(workspace)
+  const immersiveInstant = !settingsDestination
+    && immersiveHolderId != null
+    && slotTarget === `app:${immersiveHolderId}`
+  const target = settingsDestination ? tabModel.SETTINGS_TAB_KEY : slotTarget
+  return { target, immersiveInstant }
+}
+
+// The immutable invalidation key for an exit beat. INVARIANT (INV 10 / H2): it must
+// incorporate EVERY input deriveExitPlan derives its plan from — the visible (pane,
+// active key) pairs + content dimensions AND the effective destination (which folds
+// the live Settings/immersive overlay states via classifyExitDestination). The
+// controller's cancel watcher recomputes this live and snaps the beat to the committed
+// destination on ANY drift; an input that changed the plan but not this key would let a
+// stale plan animate to the wrong surface. New destination inputs therefore belong in
+// classifyExitDestination — which this and the plan SHARE — never in one alone.
+export function exitSignature(input) {
+  const { workspace, projection, contentRect } = input
+  const { target, immersiveInstant } = classifyExitDestination(input)
   const leaves = visibleLeafDescriptors(workspace, projection)
     .map(l => `${l.paneId}=${l.activeKey}`)
-  return `${target || ''}|${leaves.join(',')}|${contentRect.w}x${contentRect.h}`
+  return `${target || ''}|${immersiveInstant ? 'i' : ''}|${leaves.join(',')}|${contentRect.w}x${contentRect.h}`
 }
 
 // Sort by visual reading order (top, then left) of the pane rect.
@@ -110,8 +131,11 @@ function byVisualOrder(a, b) {
   return a.rect.x - b.rect.x
 }
 
-// deriveExitPlan({ workspace, projection, contentRect }) → the latched exit plan,
-// or null when the beat is instant (empty tree — nothing painted to deal out).
+// deriveExitPlan(input) → the latched exit plan, or null when the beat is instant (an
+// empty tree — nothing painted to deal out — or an immersive-instant destination).
+// `input` is { workspace, projection, contentRect, settingsDestination?,
+// immersiveHolderId? }; the SAME object is fed to exitSignature so the plan and its
+// invalidation key can never disagree about the destination (INV 10 / H2).
 //
 // Classification (exit-design v1 §exit-classification, honored by v2):
 //   - target is the active key of a VISIBLE leaf → promote that leaf (physical
@@ -120,32 +144,25 @@ function byVisualOrder(a, b) {
 //     every painted leaf out over the mounted destination (underlayKey = target;
 //     null = the opaque home background). Never promote the focused pane to
 //     manufacture a correspondence single mode will not paint.
-export function deriveExitPlan({
-  workspace, projection, contentRect,
-  settingsDestination = false, immersiveHolderId = null,
-}) {
+export function deriveExitPlan(input) {
+  const { workspace, projection, contentRect, settingsDestination = false } = input
   const leaves = visibleLeafDescriptors(workspace, projection)
   if (leaves.length === 0) return null // empty tree → instant flip, no descriptor
-  // The concrete slot the single world seeds — the DEFAULT destination.
-  const slotTarget = exitTargetKey(workspace)
-  // HONEST DESTINATION (M2): classify against what the single world will ACTUALLY
-  // paint on completion, not the slot the tree seeds beneath a takeover/immersive-
-  // solo — else the takeover/immersive pops over the promoted-or-revealed slot when
-  // the beat ends, breaking the v2 "visually identical completion" contract.
-  //   - A retained immersive holder solos over the WHOLE viewport (header gone), a
-  //     rect the beat cannot honestly latch while the header is still painted and
-  //     the mode is still 'panes'. An honest INSTANT beats a false animation that
-  //     jumps at completion, so classify it instant (return null).
-  if (!settingsDestination
-      && immersiveHolderId != null
-      && slotTarget === `app:${immersiveHolderId}`) {
-    return null
-  }
+  // HONEST DESTINATION (M2): what single mode will ACTUALLY paint on completion — the
+  // tree's slot re-classified by the live overlays — never the slot the tree seeds
+  // beneath a takeover/immersive-solo (else the takeover/immersive pops over the
+  // promoted-or-revealed slot at completion, breaking the "visually identical
+  // completion" contract). The exit signature reads the SAME classifier (H2).
+  //   - An immersive holder that solos the exit slot is a full-viewport INSTANT the
+  //     beat cannot honestly latch while the header is still painted and the mode is
+  //     still 'panes'. An honest instant beats a false animation that jumps at
+  //     completion, so classify it instant (return null).
+  const { target, immersiveInstant } = classifyExitDestination(input)
+  if (immersiveInstant) return null
   //   - A suspended Settings takeover paints full-bleed OVER the slot → world reveal
   //     to the mounted-hidden Settings surface (part-2 F3), never the slot the
-  //     takeover then covers. modeMachine stays ignorant of what Settings means; the
-  //     underlayKey just names the destination wrapper the renderer paints beneath.
-  const target = settingsDestination ? tabModel.SETTINGS_TAB_KEY : slotTarget
+  //     takeover then covers (target = SETTINGS_TAB_KEY). modeMachine stays ignorant
+  //     of what Settings means; the underlayKey just names the destination wrapper.
   const dest = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
   // A Settings destination is always a world reveal (never a promote), even if a
   // builder Settings tab happens to be a visible leaf.
@@ -216,7 +233,7 @@ export function deriveExitPlan({
     underlayKey,
     completionNames: [...completionNames],
     totalMs,
-    snapshotSignature: exitSignature({ workspace, projection, contentRect }),
+    snapshotSignature: exitSignature(input),
   }
 }
 

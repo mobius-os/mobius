@@ -143,12 +143,17 @@ test('finding 5: completion captures the originating epoch, not the current tran
   assert.equal(modeReducer(s, { type: 'complete', id: e1 }).transition.id, e3, 'stale epoch rejected')
 })
 
-// -- Finding 6 / INV 10: cancelBeat is wired to a plan-signature drift ----------
-test('finding 6: a topology/geometry change during an exit beat cancels it (INV 10)', () => {
+// -- Finding 6 / INV 10 / H2: cancelBeat is wired to a plan-signature drift ------
+test('finding 6: a topology/geometry/destination change during an exit beat cancels it (INV 10 / H2)', () => {
   assert.match(shell, /mode\.cancelBeat\(\)/)
   // v2: the cancel watcher recomputes the exit signature from the same projection
-  // authority and compares it to the latched snapshotSignature — any drift snaps.
-  assert.match(shell, /const live = exitSignature\(\{ workspace, projection, contentRect \}\)/)
+  // authority AND the live overlay classification, comparing it to the latched
+  // snapshotSignature — any drift snaps. H2: the destination inputs (settingsOpenRaw /
+  // immersiveAppId) are folded in and in the deps, so a mid-beat destination flip fires it.
+  assert.match(shell, /const live = exitSignature\(\{/)
+  assert.match(shell, /settingsDestination: settingsOpenRaw/)
+  assert.match(shell, /immersiveHolderId: immersiveAppId/)
+  assert.match(shell, /\}, \[workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode\]\)/)
   assert.match(shell, /if \(live !== t\.presentation\.snapshotSignature\) mode\.cancelBeat\(\)/)
   // The reducer's cancel-beat clears the descriptor without touching committedMode.
   let s = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
