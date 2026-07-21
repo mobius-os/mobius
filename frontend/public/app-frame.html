@@ -617,12 +617,40 @@
       });
     }
 
+    // Fallback loader for environments whose CSP forbids executing a blob:
+    // module. The blob path (below) needs `script-src ... blob:`; a deployment
+    // whose edge proxy serves an older policy WITHOUT blob: (an app-code vs.
+    // edge-CSP version skew) blocks EVERY app with an opaque
+    // "Failed to fetch dynamically imported module: blob:null/..." error. This
+    // imports the compiled module directly from its same-origin /module URL,
+    // which `script-src 'self'` always permits (the mechanism the frame used
+    // before brokered-blob loading). The token rides as a query param because
+    // dynamic import() can't set headers; a cache-buster avoids Chromium
+    // resolving a previously-cached import failure. Self-contained bundle, so no
+    // relative/bare sub-imports depend on the URL. This keeps a stale-edge
+    // deployment fully working instead of dark, and self-heals once the edge
+    // policy is corrected (the blob path simply stops throwing).
+    async function importDirectModule() {
+      const url = '/api/apps/' + encodeURIComponent(_FRAME_APP_ID)
+        + '/module?token=' + encodeURIComponent(currentToken)
+        + '&_=' + Date.now();
+      return await import(url);
+    }
+
     async function importBrokeredModule(retry) {
       const bytes = await requestModuleBytes(retry);
       const blob = new Blob([bytes], { type: 'text/javascript' });
       const blobUrl = URL.createObjectURL(blob);
       try {
         return await import(blobUrl);
+      } catch (blobImportErr) {
+        // The blob module itself failed to execute. The dominant cause in
+        // practice is a CSP that forbids blob: scripts (surfaced as a TypeError
+        // "Failed to fetch dynamically imported module: blob:null/..."); a
+        // genuine syntax/eval error in the bundle would fail identically on the
+        // direct path and fall through to the error surface, so the fallback is
+        // safe either way.
+        return await importDirectModule();
       } finally {
         URL.revokeObjectURL(blobUrl);
       }
