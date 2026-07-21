@@ -471,6 +471,11 @@ export default function Shell() {
   // hasn't been seen present yet, so it's exempt until the list catches
   // up; a real uninstall flips a previously-seen id to absent and evicts.
   const seenAppIdsRef = useRef(new Set())
+  // One-shot guard for the M5 pre-upgrade-blob slot-app validation: the present->
+  // absent eviction below only fires for ids SEEN present this session, so a slot
+  // app uninstalled while the browser was CLOSED (never seen present) needs a
+  // first-authoritative-fetch check, exactly like the cold-restore probe.
+  const initialSlotReconciledRef = useRef(false)
   // toast state: null | { message, variant, duration, action }
   // variant: 'info' | 'error'  (see components/ui/Toast.jsx)
   const [toast, setToast] = useState(null)
@@ -1656,6 +1661,31 @@ export default function Shell() {
     // Record everything the live list currently shows, so a later
     // disappearance reads as a real uninstall rather than a never-seen id.
     for (const id of liveIds) seenAppIdsRef.current.add(id)
+    // PRE-UPGRADE BLOB (M5): the single-world slot app is pinned even while builder
+    // paints, so the present->absent eviction below — gated on seenAppIds — never
+    // fires for a slot app uninstalled while the browser was CLOSED (it was never
+    // "seen present" this session). Validate the persisted slot app against the FIRST
+    // authoritative live list exactly once (like the cold-restore probe): absent →
+    // CLOSE_TAB reason:'deleted' (the reducer clears the slot + scrubs history),
+    // retire its physical nav history, drop its warm frame, then resolve the empty
+    // single world to home so it lands on a chat, not a blank/broken frame. This is
+    // the narrow live dispatcher for the documented PRUNE gap — NOT a general pruner.
+    if (!initialSlotReconciledRef.current) {
+      initialSlotReconciledRef.current = true
+      const slot = workspaceStateRef.current.ws.singleScreen
+      if (slot && slot.kind === 'app' && !liveIds.has(Number(slot.id))) {
+        const sid = String(slot.id)
+        retireAppHistory(sid, 'uninstalled')
+        tombstoneRoute('app', sid)
+        dispatchWorkspace({
+          type: 'CLOSE_TAB',
+          tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
+          reason: 'deleted',
+        })
+        dropFromWarmLru(id => String(id) === sid)
+        resolveEmptySingleHome()
+      }
+    }
     // Candidates: every mounted app frame (rendered set) plus every app tab.
     const candidates = new Set(renderedAppIds.map(String))
     for (const tab of openTabs) if (tab.kind === 'app') candidates.add(String(tab.id))

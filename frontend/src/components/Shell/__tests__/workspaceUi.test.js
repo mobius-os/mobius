@@ -751,3 +751,20 @@ test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip
   // committed drop keeps focus (the tab moved).
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
 })
+
+// ── M5: a slot app uninstalled while closed must not survive the first reconcile ─
+test('M5: the initial live reconcile validates the pinned single-world slot app', () => {
+  // The single-world slot app is pinned even while builder paints, so the present->
+  // absent eviction (gated on seenAppIds) never fires for a slot app uninstalled
+  // while the browser was CLOSED — it was never "seen present" this session. A
+  // one-shot first-authoritative-fetch check closes it, mirroring the cold-restore
+  // probe, so it can't later paint a broken single world.
+  const effect = shell.match(/for \(const id of liveIds\) seenAppIdsRef\.current\.add\(id\)[\s\S]*?\/\/ Candidates:/)?.[0] || ''
+  assert.ok(effect.length > 0, 'found the initial reconcile body')
+  assert.match(effect, /if \(!initialSlotReconciledRef\.current\)/)
+  assert.match(effect, /const slot = workspaceStateRef\.current\.ws\.singleScreen/)
+  assert.match(effect, /slot && slot\.kind === 'app' && !liveIds\.has\(Number\(slot\.id\)\)/)
+  // Close as deleted (reducer clears the slot), then resolve home instead of blank.
+  assert.match(effect, /reason: 'deleted'/)
+  assert.match(effect, /resolveEmptySingleHome\(\)/)
+})
