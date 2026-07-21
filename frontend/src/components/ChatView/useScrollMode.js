@@ -560,7 +560,7 @@ export function readerInputActivatesDisclosure(
   pointerButton = 0,
 ) {
   const disclosure = target?.closest?.(
-    'button.chat__activity-header, button.chat__tool-header, button.chat__marker-header',
+    'button.chat__activity-header, button.chat__activity-think-toggle, button.chat__tool-header, button.chat__marker-header',
   )
   if (!disclosure) return false
   return (type === 'pointerdown' && pointerButton === 0)
@@ -614,6 +614,17 @@ export function modeForForegroundReturn(scrollEl) {
 export function modeForChatExit(scrollEl) {
   if (!scrollEl) return null
   return anchorModeFromScroll(scrollEl)
+}
+
+
+/** A disclosure toggle obeys the existing reading mode instead of inventing a
+ * second scroll policy. FOLLOW_BOTTOM stays live and follows the resized tail;
+ * every non-follow mode freezes the exact visible message anchor before the
+ * disclosure changes height. Repeating the same toggle therefore has the same
+ * result until the reader explicitly changes scroll mode. */
+export function modeForDisclosureToggle(scrollEl, currentMode) {
+  if (currentMode?.kind === 'FOLLOW_BOTTOM') return currentMode
+  return anchorModeFromScroll(scrollEl) || currentMode
 }
 
 
@@ -891,12 +902,14 @@ export default function useScrollMode({
     const previousMode = modeRef.current
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    const scrollEl = scrollRef.current
+    if (scrollEl) scrollEl.dataset.scrollMode = nextMode.kind
     recordTrace('transitions', event, {
       from: previousMode,
       to: nextMode,
     })
     return nextMode
-  }, [recordTrace])
+  }, [recordTrace, scrollRef])
 
   // The sole automatic scrollTop funnel inside the controller. `applyMode`
   // remains exported as a pure executor for unit tests, but live code routes
@@ -1529,15 +1542,14 @@ export default function useScrollMode({
         scrollEl,
       })
       if (activatesDisclosure) {
-        // A disclosure tap says "hold what I am reading", not "keep following
-        // the conversation tail". Latch that intent BEFORE React changes the
-        // body height. The normal gesture gate below then defers ResizeObserver
-        // writes until pointerup, at which point it replays this anchor rather
-        // than the stale FOLLOW_BOTTOM that caused the non-repeatable jump.
-        const anchor = anchorModeFromScroll(scrollEl)
-        if (anchor) {
+        // A disclosure tap obeys the mode the reader already chose. FOLLOW_BOTTOM
+        // remains the sole tail authority; every other mode latches the visible
+        // anchor BEFORE React changes body height. The gesture gate below defers
+        // ResizeObserver writes until pointerup, then replays that same policy.
+        const nextMode = modeForDisclosureToggle(scrollEl, modeRef.current)
+        if (nextMode && nextMode !== modeRef.current) {
           readerLocationExplicitRef.current = true
-          transitionMode(anchor, 'reader:disclosure-toggle')
+          transitionMode(nextMode, 'reader:disclosure-toggle')
           persistMode()
         }
       }

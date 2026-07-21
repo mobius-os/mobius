@@ -15,6 +15,7 @@ import {
   layoutMayOwnScroll,
   mountMediaSettled,
   modeForChatExit,
+  modeForDisclosureToggle,
   modeForForegroundReturn,
   modeForQuestionSubmission,
   modeForQueuedSubmission,
@@ -209,6 +210,26 @@ test('disclosure activation is recognized as an anchor-latching reading action',
   assert.equal(readerInputActivatesDisclosure(
     'pointerdown', '', staticStatusTarget), false,
   'a non-interactive status row must not stop live follow')
+})
+
+test('disclosure toggles follow only in FOLLOW_BOTTOM and otherwise hold the reader anchor', () => {
+  const row = {
+    dataset: { key: 'assistant-1' },
+    offsetTop: 420,
+    offsetHeight: 300,
+  }
+  const scrollEl = {
+    scrollTop: 500,
+    querySelectorAll: () => [row],
+  }
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+  assert.equal(modeForDisclosureToggle(scrollEl, follow), follow,
+    'autoscroll remains the sole authority while following the tail')
+  assert.deepEqual(
+    modeForDisclosureToggle(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c1' }),
+    { kind: 'ANCHOR_AT', key: 'assistant-1', offset: -80 },
+    'outside autoscroll the visible reading position is frozen before resize',
+  )
 })
 
 test('only provably clamped wheel input gets a next-frame no-scroll release', () => {
