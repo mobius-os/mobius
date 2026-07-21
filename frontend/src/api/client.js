@@ -271,6 +271,30 @@ export async function jsonOrThrow(response, label = 'Request failed') {
   return body
 }
 
+// The platform's DELETION-EVIDENCE CONTRACT. A resource missing from a LIST read is
+// only a HINT, never proof it was deleted: the /api/{chats,apps,...}/ list routes are
+// NetworkFirst (sw.js), so a slow or offline read can resolve from a stale SW cache
+// fallback that is byte-indistinguishable from a live response — and a filtered list
+// (e.g. /api/chats hides app-attributed chats) or a lagging list can omit a live one.
+// The ONLY authoritative deletion evidence is a direct per-resource GET returning 404
+// (the backend's live_*_or_404 tombstone). This helper classifies one such probe so
+// every caller reads the contract the same way instead of re-deriving it:
+//   'deleted' — a real 404: the resource is genuinely gone; safe to tear it down.
+//   'exists'  — a 2xx: present, merely off the filtered/lagging list; keep it.
+//   'unknown' — any other status, or a network / timeout / offline / auth error: NOT
+//               deletion evidence, so the caller must leave the resource alone.
+// It owns only "what counts as gone"; each caller owns its own stale-guard + teardown.
+export async function probeDeletion(path) {
+  try {
+    const res = await apiFetch(path, { timeoutMs: 15000 })
+    if (res.status === 404) return 'deleted'
+    if (res.ok) return 'exists'
+    return 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
   // and frontend bundle identity.

@@ -761,21 +761,48 @@ test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
 })
 
-// ── M5: a slot app uninstalled while closed must not survive the first reconcile ─
-test('M5: the initial live reconcile validates the pinned single-world slot app', () => {
+// ── H1 (was M5): a slot app uninstalled while closed must not survive the first
+// reconcile — BUT absence from the NetworkFirst list is not deletion evidence ─────
+test('H1: the initial slot-app reconcile confirms absence with an authoritative 404 probe', () => {
   // The single-world slot app is pinned even while builder paints, so the present->
   // absent eviction (gated on seenAppIds) never fires for a slot app uninstalled
-  // while the browser was CLOSED — it was never "seen present" this session. A
-  // one-shot first-authoritative-fetch check closes it, mirroring the cold-restore
-  // probe, so it can't later paint a broken single world.
-  const effect = shell.match(/for \(const id of liveIds\) seenAppIdsRef\.current\.add\(id\)[\s\S]*?\/\/ Candidates:/)?.[0] || ''
-  assert.ok(effect.length > 0, 'found the initial reconcile body')
-  assert.match(effect, /if \(!initialSlotReconciledRef\.current\)/)
+  // while the browser was CLOSED — it was never "seen present" this session. Its
+  // one-shot check must NOT trust the /api/apps/ list's absence (NetworkFirst → a
+  // stale SW cache fallback is indistinguishable from a live response); it probes the
+  // AUTHORITATIVE per-app endpoint and deletes ONLY on a real 404, mirroring the chat
+  // 404-probe (cancelled + stale guards).
+  const effect = shell.match(/One-shot slot-app reconcile \(H1\)[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
+  assert.ok(effect.length > 0, 'found the slot-app probe effect')
+  assert.match(effect, /if \(!appsLiveFetched \|\| initialSlotReconciledRef\.current\) return/)
   assert.match(effect, /const slot = workspaceStateRef\.current\.ws\.singleScreen/)
-  assert.match(effect, /slot && slot\.kind === 'app' && !liveIds\.has\(Number\(slot\.id\)\)/)
+  // Fast path: a slot app the live list already vouches for is skipped, no probe.
+  assert.match(effect, /if \(apps\.some\(a => Number\(a\.id\) === Number\(slot\.id\)\)\) return/)
+  // The authoritative per-app probe via the shared deletion-evidence contract, and
+  // teardown ONLY on a 'deleted' verdict (a real 404).
+  assert.match(effect, /probeDeletion\(`\/apps\/\$\{encodeURIComponent\(slotId\)\}`\)/)
+  assert.match(effect, /if \(verdict !== 'deleted'\) return/)
+  // Stale-guard: a slot change mid-probe must never delete the new slot.
+  assert.match(effect, /const current = workspaceStateRef\.current\.ws\.singleScreen/)
+  assert.match(effect, /Number\(current\.id\) !== Number\(slotId\)\) return/)
+  // Cancelled-guard cleanup, like the chat cold-restore probe.
+  assert.match(effect, /let cancelled = false/)
+  assert.match(effect, /return \(\) => \{ cancelled = true \}/)
   // Close as deleted (reducer clears the slot), then resolve home instead of blank.
   assert.match(effect, /reason: 'deleted'/)
   assert.match(effect, /resolveEmptySingleHome\(\)/)
+})
+
+// The shared deletion-evidence contract both cold-restore probes route through: list
+// absence is a HINT, an authoritative per-resource 404 is the only proof of deletion.
+test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unknown', () => {
+  const client = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+  assert.match(client, /export async function probeDeletion\(path\)/)
+  assert.match(client, /if \(res\.status === 404\) return 'deleted'/)
+  assert.match(client, /if \(res\.ok\) return 'exists'/)
+  assert.match(client, /return 'unknown'/)
+  // Both cold-restore probes read the SAME contract (rhyme, not two copies).
+  assert.match(shell, /probeDeletion\(`\/apps\//)
+  assert.match(shell, /probeDeletion\(`\/chats\//)
 })
 
 // ── N1: retired v2 plumbing is gone ───────────────────────────────────────────
