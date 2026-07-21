@@ -171,10 +171,10 @@ jobs:
       github.ref == 'refs/heads/main' ||
       startsWith(github.ref, 'refs/heads/integration/')
     runs-on: ubuntu-latest
-    # Building the Docker image can take several minutes on cold hosted
-    # runners. Keep the job cap comfortably above the inner Playwright timeout
-    # so failures still reach the diagnostic log/report upload steps.
-    timeout-minutes: 25
+    # A cold hosted build can spend roughly 20 minutes populating the GHA cache
+    # before Playwright starts. Leave enough room for the complete browser suite
+    # and its diagnostic uploads instead of cancelling a healthy run mid-test.
+    timeout-minutes: 40
     # The backend and browser suites are independent and each takes roughly
     # seven minutes. Serializing them doubled every review cycle without adding
     # coverage. Keep the short privacy job fail-closed, then run both expensive

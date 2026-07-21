@@ -216,6 +216,21 @@ def issue_media_token(
   return {"token": token, "expires_in": 900}
 
 
+def _owner_chat_summary(chat: models.Chat) -> dict:
+  """Canonical shape shared by create and the owner drawer list."""
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "updated_at": chat.updated_at.isoformat(),
+    "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
+    "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
+    "has_messages": bool(chat.messages and len(chat.messages) > 0),
+    "created_by_app_id": chat.created_by_app_id,
+    "run_status": chat.run_status,
+    "running": chat.run_status == "running" or is_chat_running(chat.id),
+  }
+
+
 @router.get("")
 def list_chats(
   include_app_chats: bool = False,
@@ -335,20 +350,7 @@ def list_chats(
     # embedded app panels and stay hidden; an app can opt a spawned, first-class
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
-  return [
-    {
-      "id": c.id,
-      "title": c.title,
-      "updated_at": c.updated_at.isoformat(),
-      "activity_at": c.activity_at.isoformat() if c.activity_at else None,
-      "pinned_at": c.pinned_at.isoformat() if c.pinned_at else None,
-      "has_messages": bool(c.messages and len(c.messages) > 0),
-      "created_by_app_id": c.created_by_app_id,
-      "run_status": c.run_status,
-      "running": c.run_status == "running" or is_chat_running(c.id),
-    }
-    for c in chats
-  ]
+  return [_owner_chat_summary(c) for c in chats]
 
 
 @router.get("/session-links")
@@ -438,7 +440,10 @@ def create_chat(
   db.commit()
   db.refresh(chat)
   activity.log_event("chat_created", chat_id=chat.id)
-  return {"id": chat.id, "title": chat.title, "messages": chat.messages}
+  # Keep messages for existing create callers while returning the exact drawer
+  # row shape so clients can navigate immediately without fabricating metadata
+  # or waiting for a second list request.
+  return {**_owner_chat_summary(chat), "messages": chat.messages}
 
 
 @router.put("/{chat_id}", dependencies=[Depends(reject_cross_site)])

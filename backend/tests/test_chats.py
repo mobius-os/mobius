@@ -95,6 +95,22 @@ def test_create_chat_rejects_cross_site_request(client, auth):
   assert cross.status_code == 403
 
 
+def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
+  created = client.post(
+    "/api/chats",
+    json={"title": "Canonical create"},
+    headers=auth,
+  )
+  assert created.status_code == 200
+  body = created.json()
+
+  listed = client.get("/api/chats", headers=auth)
+  assert listed.status_code == 200
+  row = next(item for item in listed.json() if item["id"] == body["id"])
+  assert {key: body[key] for key in row} == row
+  assert body["messages"] == []
+
+
 def test_update_chat_rejects_cross_site_request(client, auth, chat):
   cross = client.put(
     f"/api/chats/{chat.id}",
