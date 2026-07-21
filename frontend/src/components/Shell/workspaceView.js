@@ -34,7 +34,6 @@ export const MODE_MOTION = Object.freeze({
   enterSingleMs: 240, // the sole leaf's deal-in (single-leaf entry)
   exitItemMs: 180, // one pane's deal-out (world reveal)
   promoteMs: 240, // the survivor pane's FLIP grow-to-full-bleed
-  chromeMs: 120, // strips/dividers/chip fade, not gated by completion
 })
 
 // The slack a visibility-return reconcile allows past the plan's totalMs before it

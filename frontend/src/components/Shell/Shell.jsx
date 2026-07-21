@@ -817,11 +817,14 @@ export default function Shell() {
   // two event families they don't cover: an auto-returning last-tab close and an
   // app delete that clears the slot. Event-scoped (no reactive watcher): a
   // deliberate future null-home stays expressible.
-  const resolveEmptySingleHome = useCallback(({ excludeChatId } = {}) => {
+  const resolveEmptySingleHome = useCallback(() => {
     const ws = workspaceStateRef.current.ws
     const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
     if (!single || ws.singleScreen != null) return
-    const fallback = chatsRef.current.find(c => String(c.id) !== String(excludeChatId ?? ''))
+    // The freshest chat is the honest landing — closing a tab never deletes its
+    // chat, and an uninstalled app's slot is unrelated to any chat, so no exclusion
+    // is needed (the sole caller that once passed one always sent the empty string).
+    const fallback = chatsRef.current[0]
     if (!fallback) return
     applyModeDestination(
       { view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId },
@@ -1291,7 +1294,7 @@ export default function Shell() {
   const dragPreviewIdRef = useRef(null)
   const onModeDragPreview = useCallback((active, { committed = false } = {}) => {
     if (active) {
-      dragPreviewIdRef.current = mode.dragArm(workspaceStateRef.current.ws.focusedPaneId)
+      dragPreviewIdRef.current = mode.dragArm()
     } else {
       if (committed) mode.dragCommit(dragPreviewIdRef.current)
       else mode.dragCancel(dragPreviewIdRef.current)
@@ -1299,8 +1302,9 @@ export default function Shell() {
     }
   }, [mode, workspaceStateRef])
   // The builder-mode control is the TOP-LEFT logo (owner placement) — there is no
-  // standalone toggle button. Toggling is a pure state flip plus the no-history
-  // Settings overlay<->tab conversion; it never opens/closes the drawer and the
+  // standalone toggle button. Toggling is a pure state flip: Settings needs NO
+  // conversion (v2 deleted it) — its tab survives the flip and single mode paints
+  // its own slot, never Settings. It never opens/closes the drawer, and the
   // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
   const handleToggleViewMode = useCallback((cause) => {
     const ws = workspaceStateRef.current.ws
@@ -1374,6 +1378,11 @@ export default function Shell() {
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     tabCount: openTabs.length,
     dismissed: wsCoachmarkDismissed,
+    // M6: only where the tab strip actually exists — the EFFECTIVE builder world —
+    // and never over an immersive-solo (z-120). Immersive is single-mode only, so
+    // the panes gate already excludes it; the explicit check is the last line of
+    // defense if that coupling ever changes.
+    builderWorld: effectiveViewMode === 'panes' && !immersiveActive,
   })
   // Auto-dismiss after 12s — deliberately NOT on an unrelated pointerdown (§7.2).
   useEffect(() => {

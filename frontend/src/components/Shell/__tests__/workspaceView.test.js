@@ -475,6 +475,13 @@ test('deriveExitPlan: siblings deal out on a 20ms visual-order stagger', () => {
   assert.equal(plan.totalMs, MODE_MOTION.staggerMs + MODE_MOTION.exitItemMs)
 })
 
+test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
+  assert.equal(MODE_MOTION.chromeMs, undefined)
+  // The live timings the plan builders use are still present.
+  assert.equal(typeof MODE_MOTION.promoteMs, 'number')
+  assert.equal(typeof MODE_MOTION.exitItemMs, 'number')
+})
+
 // ── M4: the single-leaf promote FLIP must not overshoot ───────────────────────
 test('deriveExitPlan: M4 the single-leaf promote FLIPs identity (no STRIP_H overshoot)', () => {
   // One visible leaf → its strip is a flex SIBLING outside .shell__content, so the

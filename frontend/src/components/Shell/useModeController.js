@@ -165,14 +165,14 @@ export default function useModeController({
   // The id is computed BEFORE dispatch (the reducer assigns state.nextId), so the
   // returned id is ATOMIC with the dispatch. Reading stateRef AFTER dispatch would
   // return the pre-dispatch epoch and a later cancel/blur would carry the wrong id.
-  const dragArm = useCallback((focusedPaneId) => {
+  const dragArm = useCallback(() => {
     const s = stateRef.current
     if (s.committedMode !== 'single') {
-      dispatch({ type: 'drag-arm', focusedPaneId, now: now() })
+      dispatch({ type: 'drag-arm', now: now() })
       return null
     }
     const id = s.nextId
-    dispatch({ type: 'drag-arm', focusedPaneId, now: now() })
+    dispatch({ type: 'drag-arm', now: now() })
     return id
   }, [])
   const dragCancel = useCallback((id) => { dispatch({ type: 'drag-cancel', id }) }, [])

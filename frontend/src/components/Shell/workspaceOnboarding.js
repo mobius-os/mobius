@@ -6,11 +6,16 @@
 export const HINT_KEY = 'mobius:hint-workspace'
 
 // The coachmark arms when the workspace first holds ≥2 tabs, the splits flag is
-// on, and it has not already been dismissed this browser (design §7.2). It is
-// deliberately NOT gated on a pointer event — an unrelated first tap must never
-// kill it unread, so the caller dismisses only on a drag, the ✕, or a timeout.
-export function coachmarkArmed({ enabled, tabCount, dismissed }) {
-  return !!enabled && !dismissed && (tabCount || 0) >= 2
+// on, it has not already been dismissed this browser (design §7.2), AND the
+// current presentation is the effective builder world with no immersive-solo up
+// (`builderWorld`, M6). It teaches "drag tabs to split", so it may only appear
+// where the tab strip actually exists — this branch removed the strip from single
+// mode, so arming on tab count alone showed it for 12s where no tabs were onscreen,
+// including over immersive content at z-120. It is deliberately NOT gated on a
+// pointer event — an unrelated first tap must never kill it unread, so the caller
+// dismisses only on a drag, the ✕, or a timeout.
+export function coachmarkArmed({ enabled, tabCount, dismissed, builderWorld = true }) {
+  return !!enabled && !dismissed && !!builderWorld && (tabCount || 0) >= 2
 }
 
 // Read the persisted dismissal flag. A storage that throws (private mode,

@@ -16,7 +16,6 @@
 .shell {
   --ease-mode-arrive: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
-  --ease-mode-chrome: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 /* A content wrapper (app iframe or PaneChatView) that is the active tab of a

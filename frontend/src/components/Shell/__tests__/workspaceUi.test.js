@@ -109,6 +109,9 @@ test('reduced motion makes the drop preview instant', () => {
 
 test('the coachmark carries pointer-specific copy and dismisses without a stray tap', () => {
   assert.match(shell, /workspaceCoachmarkVisible/)
+  // M6: gated to the effective builder world + non-immersive, so it never shows in
+  // single mode (no tabs) or over an immersive-solo (z-120).
+  assert.match(shell, /builderWorld: effectiveViewMode === 'panes' && !immersiveActive/)
   assert.match(shell, /coarsePointer \? 'Hold a tab to move it' : 'Drag tabs to split the view'/)
   assert.match(shell, /onClick=\{dismissWorkspaceCoachmark\}/)
   // 12s auto-dismiss, never an unrelated pointerdown.
@@ -767,4 +770,20 @@ test('M5: the initial live reconcile validates the pinned single-world slot app'
   // Close as deleted (reducer clears the slot), then resolve home instead of blank.
   assert.match(effect, /reason: 'deleted'/)
   assert.match(effect, /resolveEmptySingleHome\(\)/)
+})
+
+// ── N1: retired v2 plumbing is gone ───────────────────────────────────────────
+test('N1: dead exit-presentation plumbing is removed', () => {
+  const controller = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
+  // The ignored focusedPaneId drag-arm payload is gone (the reducer never read it).
+  assert.doesNotMatch(controller, /dragArm = useCallback\(\(focusedPaneId\)/)
+  assert.doesNotMatch(controller, /drag-arm', focusedPaneId/)
+  assert.match(shell, /mode\.dragArm\(\)/)
+  // The unused --ease-mode-chrome token is gone (only arrive/leave remain).
+  assert.doesNotMatch(css, /--ease-mode-chrome/)
+  // The unused excludeChatId param on resolveEmptySingleHome is gone.
+  assert.doesNotMatch(shell, /excludeChatId/)
+  assert.match(shell, /const resolveEmptySingleHome = useCallback\(\(\) =>/)
+  // The stale "Settings conversion" comment near the toggle handler is corrected.
+  assert.doesNotMatch(shell, /Settings overlay<->tab conversion/)
 })
