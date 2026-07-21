@@ -50,28 +50,6 @@
   pointer-events: none;
   z-index: 0;
 }
-/* Round 4 item 2 — TWO-PHASE world reveal. Phase 1 clears the cards + chrome over a
-   veiled destination (opacity .60, scale 1.012, inert); phase 2 is the destination
-   ARRIVAL — it settles in only after the last card clears, over --mode-arrive-duration
-   delayed by --mode-arrive-delay (both written by Shell from the plan's
-   destinationMotion). Unlike the old atmospheric underlay-settle this is GATING: its
-   name is in the plan's completionNames, so the descriptor (and the logo spring + halo
-   resume) end at the ARRIVAL, not the last deal-out. `both` holds the .60 veil through
-   the delay. Compositor-only — transform + opacity, nothing that forces layout. */
-.shell--builder-exiting .shell__view--exit-underlay {
-  transform-origin: 50% 50%;
-  animation:
-    shell-mode-destination-arrive
-    var(--mode-arrive-duration)
-    cubic-bezier(0.16, 1, 0.3, 1)
-    var(--mode-arrive-delay)
-    both;
-}
-@keyframes shell-mode-destination-arrive {
-  from { transform: scale(1.012); opacity: 0.60; }
-  to { transform: scale(1); opacity: 1; }
-}
-
 /* Promote: the survivor pane keeps its tiled content rect and FLIPs to cover the
    full destination (transform-origin at its own top-left; Shell latches --flip-*
    from the projection, never a DOM read). Its OWN curve (--ease-mode-promote) gives
@@ -88,9 +66,9 @@
     both;
 }
 
-/* Deal-out: a departing pane lifts, drifts right, and fades over its 28ms-stagger
-   delay. Pointer-inert (INV 9 inert beat) so a tap on the nearly-gone card cannot
-   re-target the transition. */
+/* Deal-out: the tiled world leaves left in one short, simultaneous beat. Keeping the
+   offset small preserves context without making live chats/apps feel like cards being
+   performed at the owner. Pointer-inert (INV 9) throughout. */
 .shell--builder-exiting
 .shell__view[data-mode-motion="deal-out"] {
   z-index: 4;
@@ -103,8 +81,7 @@
     both;
 }
 
-/* Deal-in: entry's reverse grammar — each pane deals in from the same small
-   offset with a 0/28/56/84 visual-order stagger. */
+/* Deal-in is the exact directional inverse: panes arrive together from the right. */
 .shell--builder-entering
 .shell__view[data-mode-motion="deal-in"] {
   animation:
@@ -127,36 +104,13 @@
 }
 
 @keyframes shell-mode-deal-out {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-    opacity: 1;
-  }
-  16% {
-    transform: translate3d(0, -2px, 0) scale(1.003);
-    opacity: 1;
-  }
-  38% {
-    transform: translate3d(4px, -3px, 0) scale(0.999);
-    opacity: 0.96;
-  }
-  100% {
-    transform: translate3d(28px, -6px, 0) scale(0.982);
-    opacity: 0;
-  }
+  from { transform: translate3d(0, 0, 0); opacity: 1; }
+  to { transform: translate3d(-16px, 0, 0); opacity: 0; }
 }
 
 @keyframes shell-mode-deal-in {
-  from {
-    transform: translate3d(28px, -6px, 0) scale(0.982);
-    opacity: 0;
-  }
-  42% {
-    opacity: 1;
-  }
-  to {
-    transform: translate3d(0, 0, 0) scale(1);
-    opacity: 1;
-  }
+  from { transform: translate3d(16px, 0, 0); opacity: 0; }
+  to { transform: translate3d(0, 0, 0); opacity: 1; }
 }
 
 /* Strips move WITH their pane, replacing the deleted parent-chrome opacity fade.
@@ -196,7 +150,7 @@
 }
 .shell--builder-entering .workspace__pane-chip,
 .shell--builder-entering .workspace__divider {
-  animation: shell-mode-chrome-in 110ms var(--ease-mode-chrome) 84ms both;
+  animation: shell-mode-chrome-in 100ms var(--ease-mode-chrome) both;
 }
 @keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }
@@ -639,7 +593,4 @@
   .shell--builder-exiting .workspace__pane-chip,
   .shell--builder-entering .workspace__divider,
   .shell--builder-entering .workspace__pane-chip { animation: none; }
-  /* The two-phase destination arrival is motion — drop it under reduced motion
-     (defensive parity; the controller never arms a beat here anyway). */
-  .shell--builder-exiting .shell__view--exit-underlay { animation: none; }
 }

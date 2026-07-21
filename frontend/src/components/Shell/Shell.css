@@ -55,6 +55,51 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+.shell__bar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A plain one-tap mode control. The logo gestures remain shortcuts, but pane mode
+   no longer depends on discovering a hold or keyboard chord. */
+.shell__mode-toggle {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.shell__mode-toggle--active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+.shell__mode-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.shell__mode-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+@media (hover: hover) and (pointer: fine) {
+  .shell__mode-toggle:not(:disabled):hover {
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    color: var(--text);
+  }
+  .shell__mode-toggle--active:not(:disabled):hover {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+}
+
 .shell__brand {
   display: flex;
   align-items: center;
@@ -305,6 +350,11 @@
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
 }
+/* The strip scrolls horizontally; a vertical touch pull is therefore free for the
+   workspace drag controller to claim without disabling native tab scrolling. */
+.shell__tab-open[data-drag-key] {
+  touch-action: pan-x pinch-zoom;
+}
 .shell__tab-text {
   white-space: nowrap;
   overflow: hidden;
@@ -337,7 +387,6 @@
      browser reports offline (useOnlineStatus). Keeps the user oriented
      so they aren't guessing about connectivity. */
   .shell__offline {
-    margin-left: auto;
     align-self: center;
     padding: 3px 10px;
     border-radius: 999px;
@@ -408,8 +457,7 @@
 /* Same-beat timing (polish item 5 + round 4 item 1): the logo, wordmark, and halo
    settle on the SAME beat as the panes. The twist now rides --mode-total (the plan's
    own totalMs, written on the shell root by Shell while the beat is live) so rotation
-   reaches its rest exactly when the panes do — for a world reveal that is the end of
-   the destination arrival, not the last deal-out. Entering keeps a tiny signature
+   reaches its rest exactly when the panes do. Entering keeps a tiny signature
    settle (the 1 control point); exiting is a quick, springless settle. */
 .shell--builder-entering .shell__logo {
   transition:

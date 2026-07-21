@@ -6,8 +6,8 @@ import { BASE } from '../../api/client.js'
  * freshest transcript — so the honest beat destination is this cheap, always-available
  * surface. It shares ChatView's empty-treatment visuals (the same .chat__empty-wrap /
  * .chat__empty glyph + title) so the swap to a real empty ChatView, once the row
- * materializes, is visually seamless. It also doubles as the phase-2 world-reveal
- * underlay while the beat runs.
+ * materializes, is visually seamless. It also doubles as the stationary world-reveal
+ * underlay while the panes slide away.
  *
  * It is deliberately NOT a live composer: drafts, attachments, provider state, and the
  * send pipeline are all chat-ID-bound, so the row is materialized AFTER the descriptor

@@ -316,16 +316,15 @@ test('v2 world-reveal exit paints the mounted destination underlay beneath the d
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
 })
 
-// ── Round 4 item 2: the two-phase world reveal (destination arrival) ──────────
-// Frame-sample the underlay opacity across a world reveal: it must stay veiled (~.60)
-// while the cards are still present, then rise to full only AFTER the last card clears
-// — the destination ARRIVES as phase 2, it does not read as already-present.
-async function sampleUnderlayArrival(page) {
+// Frame-sample the destination across a world reveal. It is ready and stationary
+// beneath one short leftward departure; there is no delayed second phase.
+async function sampleStationaryUnderlay(page) {
   return page.evaluate(async () => {
     const root = document.querySelector('.shell')
     let started = false
-    let maxOpacityWithCards = 0
-    let roseAfterCards = false
+    let cardsPresent = false
+    let minOpacity = 1
+    const transforms = new Set()
     await new Promise((resolve) => {
       let frames = 0
       const tick = () => {
@@ -333,11 +332,11 @@ async function sampleUnderlayArrival(page) {
         const underlay = document.querySelector('.shell__view--exit-underlay')
         if (exiting && underlay) {
           started = true
-          const op = parseFloat(getComputedStyle(underlay).opacity)
+          const style = getComputedStyle(underlay)
+          minOpacity = Math.min(minOpacity, parseFloat(style.opacity))
+          transforms.add(style.transform)
           const cards = [...document.querySelectorAll('.shell__view[data-mode-motion="deal-out"]')]
-          const cardsPresent = cards.some(c => parseFloat(getComputedStyle(c).opacity) > 0.05)
-          if (cardsPresent) maxOpacityWithCards = Math.max(maxOpacityWithCards, op)
-          else if (op > 0.9) roseAfterCards = true
+          cardsPresent ||= cards.some(c => parseFloat(getComputedStyle(c).opacity) > 0.05)
         }
         frames += 1
         if ((started && !exiting && frames > 4) || frames > 240) { resolve(); return }
@@ -345,29 +344,26 @@ async function sampleUnderlayArrival(page) {
       }
       requestAnimationFrame(tick)
     })
-    return { started, maxOpacityWithCards, roseAfterCards }
+    return { started, cardsPresent, minOpacity, transforms: [...transforms] }
   })
 }
 
-test('round4-2: the world-reveal destination stays veiled while cards are present, then arrives', async ({ page }) => {
+test('world reveal is one short slide over a stationary, ready destination', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
   await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleUnderlayArrival(page)
+  const sampler = sampleStationaryUnderlay(page)
   await page.waitForTimeout(30)
   await toggleMode(page)
   const r = await sampler
   expect(r.started, 'a world-reveal exit ran').toBe(true)
-  // Phase 1: the destination sits veiled beneath the departing cards (the `both` fill
-  // holds the .60 from-frame through the arrival delay).
-  expect(r.maxOpacityWithCards, 'the destination stays veiled while cards are present')
-    .toBeLessThanOrEqual(0.8)
-  // Phase 2: opacity rises to full only after the last card clears.
-  expect(r.roseAfterCards, 'the destination arrives (rises to full) after the cards clear').toBe(true)
+  expect(r.cardsPresent, 'departing panes painted above the destination').toBe(true)
+  expect(r.minOpacity, 'the destination never waits behind a veil').toBeGreaterThanOrEqual(0.99)
+  expect(r.transforms, 'the destination itself stays still').toEqual(['none'])
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(false)
 })
 
-test('round4-2: reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
+test('reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
   await expect.poll(() => builderActive(page)).toBe(true)

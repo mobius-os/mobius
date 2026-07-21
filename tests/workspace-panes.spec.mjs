@@ -535,6 +535,29 @@ async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {})
   if (release) await page.mouse.up()
 }
 
+/** A real Chromium touch stream (not synthetic PointerEvents). The first move is
+ * vertical, across the tab strip's horizontal scroll axis, so the mobile controller
+ * can claim it immediately; subsequent moves travel to the requested drop point. */
+async function touchDragTab(page, sourceLocator, toX, toY) {
+  const box = await sourceLocator.boundingBox()
+  const sx = box.x + box.width / 2
+  const sy = box.y + box.height / 2
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+  const point = (x, y) => [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }]
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(sx, sy) })
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: point(sx, sy + 12) })
+  for (let i = 1; i <= 10; i += 1) {
+    const t = i / 10
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: point(sx + (toX - sx) * t, sy + 12 + (toY - sy - 12) * t),
+    })
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await cdp.detach()
+}
+
 async function bootThreeTab(page, tag) {
   await boot(page, WIDE)
   // These cases exercise full-width three-pane geometry. The persistent
@@ -634,21 +657,24 @@ test.describe('Workspace drag (PR3)', () => {
     ).toBe('p0')
   })
 
-  // Touch long-press lift → drag cannot be expressed with Playwright's mouse
-  // pointer input (no synthetic touch hold in this harness), and the existing
-  // specs simulate only mouse/keyboard. The hold/slop thresholds and the touch
-  // escalation (hold→release-in-place = menu) are covered as pure predicates in
-  // dragController.test.js; a device path would need real touch events.
-  test.skip('touch long-press lifts a tab into a drag', async () => {
-    // Intentionally skipped — no touch-hold primitive in the mocked harness.
+  test('phone touch-drag moves a tab between stacked panes without a long press', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'touchDrag')
+    await page.setViewportSize(PHONE)
+    await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 4000 })
+    const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    await touchDragTab(page, src, target.x + target.width / 2, target.y + target.height / 2)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000, message: 'the real touch stream moved C into the lower pane' },
+    ).toBe('p1')
   })
 })
 
 /**
- * View-mode control (design: builder-mode activation). There is NO standalone
- * toggle button — the top-left LOGO is the control (a hold, a touch swipe-right,
- * or the Shift+Enter keyboard path flips 'panes' <-> 'single'; builder mode is the
- * accent .shell__brand--builder state). Single-mode collapses the preserved tree to
+ * View-mode control (design: builder-mode activation). The visible header button is
+ * the one-tap path; logo hold/swipe and Shift+Enter remain shortcuts. Builder mode is
+ * the accent .shell__brand--builder state. Single-mode collapses the preserved tree to
  * the focused pane full-bleed WITHOUT rewriting the persisted geometry, so a
  * round-trip restores the identical tree. The one blob field a first flip DOES
  * write is the two-worlds `singleScreen` slot — seeded once from the focused
@@ -659,6 +685,21 @@ test.describe('Workspace drag (PR3)', () => {
  * non-splitting (center-join) drop does not.
  */
 test.describe('Workspace view-mode toggle', () => {
+  test('the visible panes button toggles both modes in one tap', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'modeButtonA')
+    const b = await createTaggedChat(page, 'modeButtonB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    await page.getByRole('button', { name: 'Use single screen' }).click()
+    await expect.poll(async () => (await readWs(page)).viewMode).toBe('single')
+    await page.getByRole('button', { name: 'Use panes' }).click()
+    await expect.poll(async () => (await readWs(page)).viewMode).toBe('panes')
+  })
+
   test('the logo gesture flips to single (geometry preserved, one pane) and back', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmA')
@@ -671,8 +712,8 @@ test.describe('Workspace view-mode toggle', () => {
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('panes')
 
-    // The mode control is the logo (no standalone toggle). Flip via its keyboard
-    // path (Shift+Enter) — the deterministic equivalent of a hold. It must NOT
+    // Exercise the logo's keyboard shortcut (Shift+Enter), independently of the
+    // visible button. It must NOT
     // change the navigation state: no modal drawer opens, and the persistent
     // desktop sidebar (WIDE viewport) keeps its aria-expanded.
     const brand = page.getByRole('button', { name: 'Toggle navigation' })

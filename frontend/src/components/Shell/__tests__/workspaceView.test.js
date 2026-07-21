@@ -467,12 +467,8 @@ test('deriveExitPlan: WORLD-REVEAL when the slot is tree-absent (underlay + all 
   assert.equal(plan.target, 'chat:99')
   assert.equal(plan.underlayKey, 'chat:99', 'the mounted destination is revealed beneath')
   assert.equal(plan.participants.every(p => p.motion === 'deal-out'), true, 'no false promotion')
-  // Round 4 item 2: a world reveal is two-phase — the departures AND the gating
-  // destination arrival both end the beat.
-  assert.deepEqual(plan.completionNames, ['shell-mode-deal-out', 'shell-mode-destination-arrive'])
-  // The FOCUSED pane (app 42) is the LAST card put away (world-reveal focus-last).
-  const last = plan.participants.reduce((a, b) => (b.delayMs > a.delayMs ? b : a))
-  assert.equal(last.key, 'app:42')
+  assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
+  assert.ok(plan.participants.every(p => p.delayMs === 0), 'all panes leave together')
 })
 
 test('deriveExitPlan: WORLD-REVEAL when the slot tab is INACTIVE in a pane (never promote it)', () => {
@@ -503,43 +499,34 @@ test('deriveExitPlan: NULL slot reveals the New Chat landing (round 4 item 3), e
   assert.equal(deriveExitPlan({ workspace: empty, projection: project(empty), contentRect: CONTENT }), null)
 })
 
-test('deriveExitPlan: siblings deal out on a 20ms visual-order stagger', () => {
+test('deriveExitPlan: siblings deal out together in one short beat', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
   const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
   const delays = plan.participants.map(p => p.delayMs).sort((a, b) => a - b)
-  assert.deepEqual(delays, [0, MODE_MOTION.staggerMs])
+  assert.deepEqual(delays, [0, 0])
+  assert.equal(MODE_MOTION.staggerMs, undefined)
   assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.exitItemMs))
-  // Round 4 item 2: totalMs is departureEnd PLUS the phase-2 arrival.
-  const departureEnd = MODE_MOTION.staggerMs + MODE_MOTION.exitItemMs
-  assert.equal(plan.totalMs, departureEnd + MODE_MOTION.exitArriveMs)
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
 })
 
-// ── Round 4 item 2: two-phase world reveal (destination arrival) ──────────────
-test('deriveExitPlan: a world reveal grows a gating phase-2 destination arrival', () => {
+test('deriveExitPlan: a world reveal has no delayed destination phase', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
   const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
-  // Both the deal-out AND the destination-arrive names gate the beat.
-  assert.ok(plan.completionNames.includes('shell-mode-deal-out'))
-  assert.ok(plan.completionNames.includes('shell-mode-destination-arrive'))
-  // The arrival is delayed until the last card clears (departureEnd), then lasts
-  // exitArriveMs, and its delay+duration is the plan's totalMs.
-  const departureEnd = plan.participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
-  assert.ok(plan.destinationMotion, 'a world reveal carries a destinationMotion')
-  assert.equal(plan.destinationMotion.delayMs, departureEnd, 'arrival starts as the last card clears')
-  assert.equal(plan.destinationMotion.durationMs, MODE_MOTION.exitArriveMs)
-  assert.equal(plan.totalMs, departureEnd + MODE_MOTION.exitArriveMs)
+  assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
+  assert.equal('destinationMotion' in plan, false)
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
 })
 
-test('deriveExitPlan: a promote keeps its seamless continuity — no destinationMotion, no arrival name', () => {
+test('deriveExitPlan: a promote keeps its seamless continuity', () => {
   // twoPaneChatAndApp legacy absent-slot → seeds app:42 (focused) → PROMOTE.
   const ws = twoPaneChatAndApp()
   const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
   assert.ok(plan.participants.some(p => p.motion === 'promote'))
-  assert.equal(plan.destinationMotion, null, 'a promote adds no phase-2 reveal (continuity)')
+  assert.equal('destinationMotion' in plan, false)
   assert.equal(plan.completionNames.includes('shell-mode-destination-arrive'), false)
 })
 
-test('deriveExitPlan: a four-pane world reveal is exactly 384ms and never exceeds the 400ms ceiling (MAX_PANES budget)', () => {
+test('deriveExitPlan: four panes cost the same 150ms beat as one pane', () => {
   // Build MAX_PANES visible leaves (a balanced 2×2 within MAX_DEPTH) and a tree-absent
   // slot so all four deal out over a revealed underlay. Tied to MAX_PANES so a future
   // pane-count change can't silently blow the beat budget.
@@ -554,12 +541,8 @@ test('deriveExitPlan: a four-pane world reveal is exactly 384ms and never exceed
   ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } } // tree-absent → world reveal
   const plan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
   assert.ok(plan.participants.every(p => p.motion === 'deal-out'), 'all four deal out')
-  // phase 1 = exitItemMs + (MAX_PANES-1)*stagger; phase 2 = exitArriveMs.
-  const expected = MODE_MOTION.exitItemMs + (paneModel.MAX_PANES - 1) * MODE_MOTION.staggerMs
-    + MODE_MOTION.exitArriveMs
-  assert.equal(plan.totalMs, expected)
-  assert.equal(plan.totalMs, 384, 'the documented four-pane budget')
-  assert.ok(plan.totalMs <= 400, 'stays under the 400ms ceiling')
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+  assert.equal(plan.totalMs, 150)
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
@@ -662,22 +645,23 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: each visible leaf deals in, 28ms stagger, focal pane first, single-leaf longer', () => {
+test('deriveEnterPlan: every visible leaf arrives together in one 160ms beat', () => {
   const two = twoPaneChatAndApp() // the app:42 pane is focused
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two) })
   assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
   assert.equal(twoPlan.participants.length, 2)
   assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
-  // Focal pane first (item 6): the focused app pane deals in at delay 0 even though
-  // chat:5 is the top-left leaf; the other follows one stagger later.
-  assert.equal(twoPlan.participants[0].key, 'app:42')
+  // Stable visual order is retained, but no pane waits for another.
+  assert.equal(twoPlan.participants[0].key, 'chat:5')
   assert.equal(twoPlan.participants[0].delayMs, 0)
-  assert.equal(twoPlan.participants[1].key, 'chat:5')
-  assert.equal(twoPlan.participants[1].delayMs, MODE_MOTION.staggerMs)
+  assert.equal(twoPlan.participants[1].key, 'app:42')
+  assert.equal(twoPlan.participants[1].delayMs, 0)
+  assert.equal(twoPlan.totalMs, 160)
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one) })
   assert.equal(onePlan.participants.length, 1)
-  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs, 'the sole leaf uses the paired gesture duration')
+  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs)
+  assert.equal(onePlan.totalMs, twoPlan.totalMs, 'pane count does not make mode entry slower')
 })
 
 test('exitSignature is stable for the same tree and drifts on a topology/geometry change (INV 10)', () => {

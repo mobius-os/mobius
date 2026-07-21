@@ -33,28 +33,15 @@ export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'
 //
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
-// totalMs rather than a fixed per-phase maximum. The 28ms visual-order stagger — long
-// enough that the second card only begins as the first clears its lift waypoint, so
-// two panes visibly deal rather than launching together — plus the critically-damped
-// curves make the deal read as cards, never a generic fade.
+// totalMs rather than a fixed per-phase maximum. Mode changes are intentionally one
+// short beat: every pane moves together, using only compositor transforms + opacity.
+// There is no per-pane stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
-  staggerMs: 28,
-  enterItemMs: 210, // one pane's deal-in (multi-pane entry)
-  enterSingleMs: 230, // the sole leaf's deal-in (single-leaf entry)
-  exitItemMs: 180, // one pane's deal-out (world reveal)
-  promoteMs: 250, // the survivor pane's FLIP grow-to-full-bleed (slower, more mass)
-  // A WORLD REVEAL is TWO phases (round 4 item 2): phase 1 clears the cards + chrome
-  // over a veiled destination, then a terminal exitArriveMs settles the destination in
-  // (opacity .60→1, scale 1.012→1). This is a real GATING phase — its animation name
-  // joins the completion contract so the descriptor (and the logo spring + halo
-  // resume) end at the ARRIVAL, not the last deal-out. Promote exits keep their
-  // seamless continuity and never grow a destinationMotion.
-  exitArriveMs: 120,
-  // The logo's spring-back window (round 4 item 1): the compressed mark holds .84
-  // through the beat and RELEASES over the terminal logoReleaseMs so its first
-  // full-size frame coincides with descriptor completion. For a world reveal this is
-  // exactly phase 2 (== exitArriveMs), so a short plan clamps it to totalMs.
-  logoReleaseMs: 120,
+  enterItemMs: 160,
+  enterSingleMs: 160,
+  exitItemMs: 150,
+  promoteMs: 180,
+  logoReleaseMs: 90,
 })
 
 // The slack a visibility-return reconcile allows past the plan's totalMs before it
@@ -69,11 +56,6 @@ export const RECONCILE_SLACK_MS = 250
 export const PROMOTE_NAME = 'shell-mode-promote'
 export const DEAL_OUT_NAME = 'shell-mode-deal-out'
 export const DEAL_IN_NAME = 'shell-mode-deal-in'
-// The GATING destination-arrival of a two-phase world reveal (round 4 item 2). Unlike
-// the old atmospheric settle, this name is IN the plan's completion contract, so the
-// descriptor collects the delayed CSS animation in its first getAnimations pass and
-// awaits it alongside the cards — no second timer, reducer phase, or event.
-export const DESTINATION_ARRIVE_NAME = 'shell-mode-destination-arrive'
 
 // A pane's CONTENT rect is its pane rect minus the strip row on top — the same
 // geometry the tiled render positions the wrapper into (see visibleTabRects).
@@ -200,9 +182,6 @@ export function deriveExitPlan(input) {
   const participants = []
   const completionNames = new Set()
   let underlayKey = null
-  // A world reveal grows a phase-2 destination arrival (round 4 item 2); a promote
-  // keeps its seamless single-phase continuity and leaves this null.
-  let destinationMotion = null
 
   if (promoteLeaf) {
     // FLIP the promote pane from its ACTUAL wrapper geometry to the full box. At a
@@ -224,19 +203,16 @@ export function deriveExitPlan(input) {
     completionNames.add(PROMOTE_NAME)
     // Siblings deal out in visual order beneath the promoting pane.
     const siblings = leaves.filter(l => l !== promoteLeaf).sort(byVisualOrder)
-    siblings.forEach((l, i) => {
+    siblings.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: i * MODE_MOTION.staggerMs, durationMs: MODE_MOTION.exitItemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
       })
     })
     if (siblings.length) completionNames.add(DEAL_OUT_NAME)
   } else {
-    // World reveal: every painted leaf deals out. Visual order, but the FOCUSED
-    // pane moves to the LAST stagger slot so the surface the user was reading is
-    // the last card put away.
+    // World reveal: every painted leaf deals out together over the stationary target.
     underlayKey = target // null = home reveal (opaque --bg background)
-    const focusedId = workspace.focusedPaneId
     // The underlay is the stationary DESTINATION, so a visible leaf that IS the
     // underlay (a builder Settings tab equal to the takeover destination) never
     // also deals out. For an ordinary tree-absent chat/app slot this filters
@@ -245,35 +221,22 @@ export function deriveExitPlan(input) {
     // beat has no honest motion → instant flip.
     const ordered = leaves.filter(l => l.activeKey !== target).sort(byVisualOrder)
     if (ordered.length === 0) return null
-    const focusedIdx = ordered.findIndex(l => l.paneId === focusedId)
-    if (focusedIdx !== -1) ordered.push(ordered.splice(focusedIdx, 1)[0])
-    ordered.forEach((l, i) => {
+    ordered.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: i * MODE_MOTION.staggerMs, durationMs: MODE_MOTION.exitItemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
       })
     })
     completionNames.add(DEAL_OUT_NAME)
-    // Phase 2: the veiled destination settles in only AFTER the last card clears. Its
-    // delay is exactly when the departures finish, so the two phases never overlap.
-    const departureEndMs = participants.reduce((max, p) => Math.max(max, p.delayMs + p.durationMs), 0)
-    destinationMotion = { delayMs: departureEndMs, durationMs: MODE_MOTION.exitArriveMs }
-    completionNames.add(DESTINATION_ARRIVE_NAME)
   }
 
-  // The beat ends when the last card is away PLUS the destination arrival (world
-  // reveal), or simply when the last participant finishes (promote — no phase 2).
-  const participantsEndMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
-  const totalMs = participantsEndMs + (destinationMotion ? MODE_MOTION.exitArriveMs : 0)
+  const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {
     kind: 'exit',
     target,
     destinationRect: dest,
     participants,
     underlayKey,
-    // Shell writes destinationMotion's delay/duration onto the underlay wrapper so the
-    // arrival is gating; null for a promote (its continuity would break with a reveal).
-    destinationMotion,
     completionNames: [...completionNames],
     totalMs,
     snapshotSignature: exitSignature(input),
@@ -282,24 +245,17 @@ export function deriveExitPlan(input) {
 
 // deriveEnterPlan({ workspace, projection }) → the latched entry plan, or null
 // when there is nothing to deal in. Entry is the reverse grammar: each visible
-// leaf (and its strip) deals in from a small offset with a 0/28/56/84 visual-order
-// stagger. Single-leaf entry uses the slightly longer paired gesture.
+// leaf (and its strip) slides in from the right together. The shared timing keeps the
+// interaction crisp regardless of whether the workspace has one or four panes.
 //
-// FOCAL PANE FIRST (polish item 6): the user's focused builder pane deals in FIRST
-// (delay 0), even when it is not top-left, so entry's first impression restores the
-// surface the user cares about rather than reading as a generic top-left layout
-// reveal. Exit already keeps the focused pane LAST during world reveal — "focus first
-// entering, focus last leaving" is a strong, understandable asymmetry.
 export function deriveEnterPlan({ workspace, projection }) {
   const leaves = visibleLeafDescriptors(workspace, projection).sort(byVisualOrder)
   if (leaves.length === 0) return null
-  const focusedIndex = leaves.findIndex(leaf => leaf.paneId === workspace.focusedPaneId)
-  if (focusedIndex > 0) leaves.unshift(leaves.splice(focusedIndex, 1)[0])
   const single = leaves.length === 1
   const duration = single ? MODE_MOTION.enterSingleMs : MODE_MOTION.enterItemMs
-  const participants = leaves.map((l, i) => ({
+  const participants = leaves.map((l) => ({
     key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-    delayMs: i * MODE_MOTION.staggerMs, durationMs: duration,
+    delayMs: 0, durationMs: duration,
   }))
   const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {

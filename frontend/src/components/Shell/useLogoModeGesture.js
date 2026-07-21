@@ -10,11 +10,10 @@ import {
 // suppressed; a keyboard contextmenu arriving later inherits no stale pointer type.
 const POINTER_PROVENANCE_MS = 1500
 
-// Builder-mode activation, hosted on the TOP-LEFT logo cluster (owner placement):
-// there is NO standalone toggle button — the Möbius mark itself is the control and
-// the mode indicator (a 180deg twist + wordmark tint). The logo's single-tap job
-// (open the drawer) is UNCHANGED — instant, no window, no timer on the tap path.
-// Builder mode is entered/exited by a deliberate second gesture on the same mark:
+// Builder-mode shortcuts hosted on the top-left logo cluster. The explicit header
+// button is the discoverable one-tap path; the mark remains a mode indicator (180deg
+// twist + wordmark tint), and its single-tap drawer job is unchanged. Power users can
+// also enter/exit builder mode with a deliberate second gesture on the mark:
 //
 //   - HOLD ~450ms (touch OR mouse press-and-hold): the CHARGE model — the logo
 //     itself COMPRESSES (scale driven by the --hold-progress rAF var), and on

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
+import PanelsTopLeft from 'lucide-react/dist/esm/icons/panels-top-left.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
@@ -278,8 +279,7 @@ export default function Shell() {
   // would hide every pane behind a builder Settings tab — the named risk).
   const settingsActive = settingsOverlayOpen
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
-  // exist). It drives the logo's 180deg twist — the persistent mode indicator,
-  // now that there is no standalone toggle button.
+  // exist). It drives both the logo's 180deg shortcut cue and the explicit button.
   // ── Mode transition machine (modeMachine.js / useModeController) ───────────
   // The ONE descriptor { committedMode, transition } that replaces the old
   // dragPreviewBuilder / builderExiting / builderEntering booleans, their two
@@ -314,19 +314,6 @@ export default function Shell() {
   const beatPlan = modeMachine.transitionPresentation(modeState)
   const exitPlan = modeMachine.exitPresentation(modeState)
   const exitUnderlayKey = exitPlan ? exitPlan.underlayKey : null
-  // The two-phase destination-arrival timing for a world-reveal exit (round 4 item 2):
-  // the underlay wrapper settles in (opacity .60→1, scale 1.012→1) over exitArriveMs,
-  // delayed until the last card clears. Written onto whichever wrapper is the underlay
-  // so its arrival is a GATING animation (its name is in the plan's completion
-  // contract). Null for a promote (no phase 2) or when idle.
-  const arriveVars = useMemo(() => {
-    const m = exitPlan ? exitPlan.destinationMotion : null
-    if (!m) return null
-    return {
-      '--mode-arrive-duration': `${m.durationMs}ms`,
-      '--mode-arrive-delay': `${m.delayMs}ms`,
-    }
-  }, [exitPlan])
   // The logo spring-back window on the shell root while an animated beat is live
   // (round 4 item 1): the mark holds .84 through the beat and releases over the
   // terminal logoReleaseMs so its first full-size frame lands at completion. `both`
@@ -1383,8 +1370,8 @@ export default function Shell() {
       dragPreviewIdRef.current = null
     }
   }, [mode, workspaceStateRef])
-  // The builder-mode control is the TOP-LEFT logo (owner placement) — there is no
-  // standalone toggle button. Toggling is a pure state flip: Settings needs NO
+  // Builder mode has one explicit header button; the logo hold/swipe and Shift+Enter
+  // remain shortcuts. Toggling is a pure state flip: Settings needs NO
   // conversion (v2 deleted it) — its tab survives the flip and single mode paints
   // its own slot, never Settings. It never opens/closes the drawer, and the
   // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
@@ -1394,7 +1381,7 @@ export default function Shell() {
     // Build the latched presentation plan from the PROJECTION authority (exit-design
     // v2). The plan owns ALL of the classification the old handler computed inline:
     // promote a genuinely-shared pane vs reveal the single world underneath, the
-    // FLIP rects, the 20ms stagger, and the completion contract. The machine treats
+    // FLIP rects, shared short timing, and the completion contract. The machine treats
     // it opaquely; the controller drops it under reduced motion (commit directly). A
     // null plan (empty tree) is an instant flip. Settings needs no conversion — its
     // tab SURVIVES the flip and single mode paints its own slot (never Settings).
@@ -1415,8 +1402,8 @@ export default function Shell() {
         immersiveHolderId: immersiveHolderRef.current,
       })
       : deriveEnterPlan({ workspace: settled, projection })
-    // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the gesture/
-    // keyboard caller (F13); an omitted cause falls back to 'toggle'. RETURN the
+    // The honest `cause` ('button'|'hold'|'swipe'|'keyboard') threads from the caller;
+    // an omitted cause falls back to 'toggle'. RETURN the
     // toggle receipt so the logo gesture can tell an animated beat from an instant
     // flip and hand its compression to the descriptor (round 4 item 1).
     return mode.toggle({ cause, presentation })
@@ -1479,10 +1466,6 @@ export default function Shell() {
     const t = setTimeout(dismissWorkspaceCoachmark, 12000)
     return () => clearTimeout(t)
   }, [workspaceCoachmarkVisible, dismissWorkspaceCoachmark])
-  // A coarse pointer gets the hold-to-move copy; a fine pointer, drag-to-split.
-  const [coarsePointer] = useState(
-    () => typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches,
-  )
   // Cmd/Ctrl+Z restores the single-slot pre-mutation snapshot while no input is
   // focused (design §3.5). Flag-gated; a text field's own undo always wins.
   // Documented limitation (PR3): key events do not cross the iframe boundary, so
@@ -3096,11 +3079,27 @@ export default function Shell() {
           onToggleMode={handleToggleViewMode}
           onToggleNavigation={handleToggleNavigation}
         />
-        {!online && (
-          <span className="shell__offline" role="status" aria-live="polite">
-            Offline
-          </span>
-        )}
+        <div className="shell__bar-actions">
+          {paneModel.WORKSPACE_SPLITS_ENABLED && (
+            <button
+              type="button"
+              className={`shell__mode-toggle${builderModeActive ? ' shell__mode-toggle--active' : ''}`}
+              aria-label={builderModeActive ? 'Use single screen' : 'Use panes'}
+              aria-pressed={builderModeActive}
+              aria-keyshortcuts="Shift+Enter"
+              title={builderModeActive ? 'Use single screen' : 'Use panes'}
+              disabled={modalDrawerOpen}
+              onClick={() => handleToggleViewMode('button')}
+            >
+              <PanelsTopLeft size={18} aria-hidden="true" />
+            </button>
+          )}
+          {!online && (
+            <span className="shell__offline" role="status" aria-live="polite">
+              Offline
+            </span>
+          )}
+        </div>
       </header>
 
       <Drawer
@@ -3241,11 +3240,7 @@ export default function Shell() {
               : (paned
                 ? 'shell__view shell__view--paned'
                 : `shell__view ${fullBleed ? 'shell__view--active' : ''}`)}
-            // The underlay carries the gating destination-arrival timing (round 4
-            // item 2); a participant carries its own motion vars.
-            style={underlay
-              ? (arriveVars || undefined)
-              : (motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined))}
+            style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
             // INV 9 (inert beat): every exit-beat surface — a participant pane OR the
             // underlay — is pointer/keyboard inert so a tap on a dealing-out / covered
             // surface cannot dispatch FOCUS mid-animation.
@@ -3325,10 +3320,7 @@ export default function Shell() {
                 : (paned
                   ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
                   : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`)}
-              // The reveal underlay carries the gating destination-arrival timing.
-              style={underlay
-                ? (arriveVars || undefined)
-                : (motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined))}
+              style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
               inert={settingsOverlay || role !== 'active' || (exitBeatActive && (!!motion || underlay))}
@@ -3398,10 +3390,9 @@ export default function Shell() {
               : (settingsPaned
                 ? 'shell__view shell__view--paned shell__settings-view'
                 : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`)}
-            // A Settings reveal underlay carries the gating destination-arrival timing.
-            style={settingsUnderlay
-              ? (arriveVars || undefined)
-              : (settingsMotion ? { ...(settingsPos || {}), ...settingsMotion.vars } : (settingsPos || undefined))}
+            style={settingsMotion
+              ? { ...(settingsPos || {}), ...settingsMotion.vars }
+              : (settingsPos || undefined)}
             inert={(exitBeatActive && (!!settingsMotion || settingsUnderlay)) || undefined}
             onPointerDownCapture={settingsPaned && !settingsUnderlay && !exitBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })
@@ -3422,7 +3413,7 @@ export default function Shell() {
           )
         })()}
         {/* New Chat landing (round 4 item 3) — the first-class surface a null single
-            slot paints, and the phase-2 world-reveal underlay while an exit beat lands
+            slot paints, and the stationary world-reveal underlay while an exit beat lands
             on it. Rendered only when it is actually the surface (fullBleedKey) or the
             reveal underlay, so it never sits mounted-hidden behind real content. The row
             materializes into a real chat after the descriptor idles; until then this is
@@ -3437,8 +3428,6 @@ export default function Shell() {
               className={newChatUnderlay
                 ? 'shell__view shell__view--exit-underlay shell__chat-view'
                 : 'shell__view shell__view--active shell__chat-view'}
-              // The reveal underlay carries the gating destination-arrival timing.
-              style={newChatUnderlay ? (arriveVars || undefined) : undefined}
               inert={(exitBeatActive && newChatUnderlay) || undefined}
             >
               <NewChatLanding
@@ -3505,7 +3494,7 @@ export default function Shell() {
       {workspaceCoachmarkVisible && (
         <div className="workspace__coachmark" role="status" aria-live="polite" inert={modalDrawerOpen}>
           <span className="workspace__coachmark-text">
-            {coarsePointer ? 'Hold a tab to move it' : 'Drag tabs to split the view'}
+            Drag a tab to move or split it
           </span>
           <button
             type="button"

@@ -110,12 +110,12 @@ test('reduced motion makes the drop preview instant', () => {
   assert.match(block, /\.workspace__drop-preview\s*\{\s*transition:\s*none/)
 })
 
-test('the coachmark carries pointer-specific copy and dismisses without a stray tap', () => {
+test('the coachmark gives one direct drag instruction and dismisses without a stray tap', () => {
   assert.match(shell, /workspaceCoachmarkVisible/)
   // M6: gated to the effective builder world + non-immersive, so it never shows in
   // single mode (no tabs) or over an immersive-solo (z-120).
   assert.match(shell, /builderWorld: effectiveViewMode === 'panes' && !immersiveActive/)
-  assert.match(shell, /coarsePointer \? 'Hold a tab to move it' : 'Drag tabs to split the view'/)
+  assert.match(shell, /Drag a tab to move or split it/)
   assert.match(shell, /onClick=\{dismissWorkspaceCoachmark\}/)
   // 12s auto-dismiss, never an unrelated pointerdown.
   assert.match(shell, /setTimeout\(dismissWorkspaceCoachmark, 12000\)/)
@@ -261,10 +261,11 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
   assert.match(css, /\.workspace__strip:has\(\.shell__tab-open:focus-visible\)\s*\{[\s\S]*?outline:/)
 })
 
-// ── Builder-mode control lives on the LOGO (owner placement) ────────────────
+// ── Builder-mode control + logo shortcuts ──────────────────────────────────
 
 const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
 const livingHaloSrc = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
@@ -278,9 +279,11 @@ test('the docked sidebar offsets only direct shell layout rows', () => {
   assert.doesNotMatch(shellCss, /\.shell--drawer-docked \.shell__tabstrip/)
 })
 
-test('there is NO standalone view-mode toggle button — the logo is the control', () => {
+test('the explicit mode button supplements the logo gestures without reviving old plumbing', () => {
   assert.match(shell, /<header className="shell__bar"/)
-  // The old top-right toggle component and its class are gone entirely.
+  assert.match(shell, /className=\{`shell__mode-toggle/)
+  // The old separate component/state machine remains gone; this button calls the
+  // same mode boundary as every other gesture.
   assert.doesNotMatch(shell, /ViewModeToggle/)
   assert.doesNotMatch(shell, /shell__viewmode/)
   assert.doesNotMatch(shellCss, /\.shell__viewmode\b/)
@@ -417,7 +420,7 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(shellCss, /@keyframes shell-logo-beat-release-b\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
   // Item 5 + round 4 item 1: logo rotate rides --mode-total (the plan's own totalMs)
   // so the twist settles with the panes — for a world reveal, at the end of the
-  // destination arrival, not the last deal-out. Halo bloom + wordmark tint keep pace.
+  // pane beat. Halo bloom + wordmark tint keep pace.
   assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 260ms\) cubic-bezier\(0\.2, 1, 0\.32, 1\)/)
   assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 220ms\) cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
   assert.match(shellCss, /\.shell--builder-entering \.shell__logo-halo\s*\{\s*transition: opacity 160ms var\(--ease-mode-arrive\) 60ms/)
@@ -528,7 +531,7 @@ test('entry deals in on the keyed beat class, compositor-only, instant under red
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
   // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealIn, /translate3d\(28px, -6px, 0\) scale\(0\.982\)/)
+  assert.match(dealIn, /translate3d\(16px, 0, 0\)/)
   assert.match(dealIn, /opacity: 0/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
   // The old dead .workspace--resizing selector is gone entirely.
@@ -571,7 +574,7 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
 test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, decisive (item 1)', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   // v2: the latched plan owns classification (promote a genuinely-shared pane vs
-  // reveal the single world underneath), the 20ms stagger, and the FLIP rects — the
+  // reveal the single world underneath), shared timing, and the FLIP rects — the
   // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
   assert.match(handler, /deriveExitPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
@@ -605,7 +608,7 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)
   const dealOut = css.match(/@keyframes shell-mode-deal-out\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealOut, /translate3d\(28px, -6px, 0\) scale\(0\.982\)/)
+  assert.match(dealOut, /translate3d\(-16px, 0, 0\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
@@ -615,26 +618,14 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
 })
 
-test('round 4 item 2: the world-reveal underlay is a GATING destination arrival, not a breathe', () => {
-  // Phase 2: the destination settles in (opacity .60→1, scale 1.012→1) over
-  // --mode-arrive-duration delayed by --mode-arrive-delay (Shell writes both from the
-  // plan's destinationMotion). `both` holds the veil through the delay.
-  assert.match(css, /\.shell--builder-exiting \.shell__view--exit-underlay \{[\s\S]*?animation:\s*\n?\s*shell-mode-destination-arrive[\s\S]*?var\(--mode-arrive-duration\)[\s\S]*?var\(--mode-arrive-delay\)[\s\S]*?both/)
-  const arrive = css.match(/@keyframes shell-mode-destination-arrive\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(arrive, /from \{ transform: scale\(1\.012\); opacity: 0\.60; \}/)
-  assert.match(arrive, /to \{ transform: scale\(1\); opacity: 1; \}/)
-  // Compositor-only: transform + opacity, nothing that forces layout.
-  assert.doesNotMatch(arrive, /box-shadow|border-radius|filter|clip|top:|left:|width:|height:/)
-  // The old atmospheric breathe is fully retired.
-  assert.doesNotMatch(css, /shell-mode-underlay-settle/)
+test('world reveal keeps its destination stationary and ready beneath one short slide', () => {
+  const underlay = css.match(/\.shell__view--exit-underlay\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(underlay, /visibility:\s*visible/)
+  assert.doesNotMatch(underlay, /animation:|transition:|transform:|opacity:/)
+  assert.doesNotMatch(css, /shell-mode-destination-arrive|--mode-arrive/)
   const workspaceView = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
-  assert.doesNotMatch(workspaceView, /underlay-settle/)
-  // GATING: workspaceView DOES name it now (its completionNames add destination-arrive
-  // for a world reveal), so the descriptor awaits the delayed arrival.
-  assert.match(workspaceView, /DESTINATION_ARRIVE_NAME = 'shell-mode-destination-arrive'/)
-  // Defensive reduced-motion rule: drop the arrival under reduce.
-  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /\.shell--builder-exiting \.shell__view--exit-underlay \{ animation: none; \}/)
+  assert.doesNotMatch(workspaceView, /destinationMotion|DESTINATION_ARRIVE_NAME|exitArriveMs/)
+  assert.doesNotMatch(shell, /arriveVars|--mode-arrive/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
@@ -655,6 +646,23 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /aria-description=\{splitsEnabled\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
   assert.match(shellBrand, /role="status" aria-live="polite"/)
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
+})
+
+test('pane mode has a visible one-tap header control with a full touch target', () => {
+  assert.match(shell, /aria-label=\{builderModeActive \? 'Use single screen' : 'Use panes'\}/)
+  assert.match(shell, /aria-pressed=\{builderModeActive\}/)
+  assert.match(shell, /onClick=\{\(\) => handleToggleViewMode\('button'\)\}/)
+  const control = shellCss.match(/\.shell__mode-toggle\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(control, /width:\s*44px/)
+  assert.match(control, /height:\s*44px/)
+  assert.match(shellCss, /\.shell__mode-toggle--active\s*\{[\s\S]*?color:\s*var\(--accent\)/)
+})
+
+test('mobile drag claims only the source cross-axis and adds no scroll-blocking listener', () => {
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
+  assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
 })
 
 test('the mobile modal keeps its existing brand close path while the workspace is inert', () => {
@@ -958,7 +966,7 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /--ease-mode-chrome: cubic-bezier/)
   assert.match(css, /--ease-mode-promote: cubic-bezier/)
   assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-chrome-in 110ms var\(--ease-mode-chrome\) 84ms/)
+  assert.match(css, /shell-mode-chrome-in 100ms var\(--ease-mode-chrome\) both/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
   assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param is gone; the helper is now the New Chat request

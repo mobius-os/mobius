@@ -5,7 +5,7 @@ import {
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
-  passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, chipOffset,
+  passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene, paneAcceptsJoin,
 } from '../dragController.js'
@@ -42,9 +42,13 @@ test('passedSlop arms only past the slop radius', () => {
   assert.equal(passedSlop(3, 3), false) // hypot 4.24 < 5
 })
 
-test('preHoldMoveCancels yields a pre-hold touch to native scroll past 8px', () => {
-  assert.equal(preHoldMoveCancels(8, 0), false)
-  assert.equal(preHoldMoveCancels(8.1, 0), true)
+test('touchMoveIntent preserves source scrolling and arms the cross-axis drag', () => {
+  assert.equal(touchMoveIntent(8, 0, 'tab'), 'pending')
+  assert.equal(touchMoveIntent(0, 8.1, 'tab'), 'drag', 'vertical pull drags a horizontal tab strip')
+  assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'scroll', 'horizontal pull scrolls the tab strip')
+  assert.equal(touchMoveIntent(8.1, 0, 'drawer'), 'drag', 'horizontal pull drags a vertical drawer row')
+  assert.equal(touchMoveIntent(0, 8.1, 'drawer'), 'scroll', 'vertical pull scrolls the drawer')
+  assert.equal(touchMoveIntent(10, 10, 'drawer'), 'scroll', 'ambiguous diagonals favor native scroll')
   assert.equal(PRE_HOLD_MOVE_PX, 8)
 })
 

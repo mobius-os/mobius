@@ -36,8 +36,8 @@ export const POINTER_SLOP = 5
 // longer, more deliberate hold to not fight the scroll).
 export const TAB_HOLD_MS = 350
 export const DRAWER_HOLD_MS = 450
-// Movement past this BEFORE the hold completes cancels the lift and yields the
-// gesture to native scrolling — a touch that starts moving was a scroll.
+// Movement past this before the hold resolves is enough to classify the gesture
+// against the source scroller's axis (touchMoveIntent below).
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this opens the context
 // menu instead of dropping (lift → release-in-place = menu; lift → move = drag).
@@ -95,10 +95,19 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
   return hypot(dx, dy) > slop
 }
 
-// A touch that moves this far before its hold timer fires is a scroll, not a
-// lift — the binding cancels the pending lift and lets the page scroll.
-export function preHoldMoveCancels(dx, dy, limit = PRE_HOLD_MOVE_PX) {
-  return hypot(dx, dy) > limit
+// Touch sources sit in one-axis scrollers. A deliberate move across that scroll
+// axis can become a drag immediately without waiting for the hold timer:
+//   - pane tabs live in a horizontal strip, so a vertical pull means drag;
+//   - drawer rows live in a vertical list, so a horizontal pull means drag.
+// Movement along the source's scroll axis is returned to native scrolling. This
+// avoids both failure modes of a blanket `touch-action:none`: dead scrolling, or a
+// browser-cancelled pointer stream after a long press.
+export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
+  if (hypot(dx, dy) <= limit) return 'pending'
+  const x = Math.abs(dx)
+  const y = Math.abs(dy)
+  if (sourceKind === 'drawer') return x > y ? 'drag' : 'scroll'
+  return y > x ? 'drag' : 'scroll'
 }
 
 // After a lift, a release still within this radius opened no drag — it is the
