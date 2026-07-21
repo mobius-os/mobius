@@ -6,6 +6,7 @@ from app import models
 from app.chat import _ChatEventSink
 from app.chat_writer import Barrier, StashThinkingTrace, get_writer
 from app.events import THINKING_INLINE_THRESHOLD
+from app.routes.chats import THINKING_TRACE_PREVIEW_CHARS
 
 
 class _Bus:
@@ -76,6 +77,32 @@ def test_thinking_trace_endpoint_serves_exact_full_text(client, auth, db):
     assert r.status_code == 200
     assert r.text == "full reasoning"
     assert r.headers["x-thinking-revision"] == "14"
+    assert r.headers["x-thinking-complete"] == "1"
+    assert r.headers["cache-control"] == "private, no-store"
+
+
+def test_thinking_trace_endpoint_bounds_expansion_preview(client, auth, db):
+    chat_id = str(uuid.uuid4())
+    content = "reasoning\n" * (THINKING_TRACE_PREVIEW_CHARS // 10 + 1000)
+    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(models.ThinkingTrace(
+        chat_id=chat_id,
+        thinking_id="think-large",
+        content=content,
+        revision=len(content),
+        complete=True,
+    ))
+    db.commit()
+
+    r = client.get(
+        f"/api/chats/{chat_id}/thinking-trace/think-large"
+        f"?revision={len(content)}&preview=1",
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    assert r.text == content[:THINKING_TRACE_PREVIEW_CHARS]
+    assert r.headers["x-thinking-preview-complete"] == "0"
     assert r.headers["x-thinking-complete"] == "1"
 
 

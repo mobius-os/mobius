@@ -1,22 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { fetchLazyText } from './lazySidecar.js'
 
-export const MAX_PENDING_TRACE_RETRIES = 5
-const DEFAULT_RETRY_MS = 1000
-const MIN_RETRY_MS = 250
-const MAX_RETRY_MS = 5000
-
-/** Prefer the server's retry window. If an older server omits it, back off
- * locally instead of falling into a tight fixed poll. */
-export function pendingTraceRetryDelay(retryAfter, retryNumber) {
-  const seconds = retryAfter == null || retryAfter === '' ? NaN : Number(retryAfter)
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.max(MIN_RETRY_MS, Math.min(seconds * 1000, MAX_RETRY_MS))
-  }
-  const parsedRetry = Number(retryNumber)
-  const attempt = Math.max(0, (Number.isFinite(parsedRetry) ? parsedRetry : 1) - 1)
-  return Math.min(DEFAULT_RETRY_MS * (2 ** attempt), MAX_RETRY_MS)
-}
+// Backward-compatible names for the small pure retry contract's focused unit
+// test. Tool and thought sidecars now share the same bounded policy.
+export {
+  MAX_PENDING_SIDECAR_RETRIES as MAX_PENDING_TRACE_RETRIES,
+  pendingSidecarRetryDelay as pendingTraceRetryDelay,
+} from './lazySidecar.js'
 
 /** Fetch a deferred thought only while its own nested disclosure is open.
  * Closing aborts in-flight work and releases the loaded string from memory. */
@@ -24,6 +14,9 @@ export function useThinkingTrace({ open, thought, chatId }) {
   const deferred = !!thought.thinking_deferred
   const [loadedContent, setLoadedContent] = useState('')
   const [loadState, setLoadState] = useState('idle')
+  const [previewComplete, setPreviewComplete] = useState(true)
+  const [traceComplete, setTraceComplete] = useState(false)
+  const [fullRequested, setFullRequested] = useState(false)
   const [refreshNonce, setRefreshNonce] = useState(0)
   const revisionRef = useRef(Number(thought.thinking_revision) || 0)
   revisionRef.current = Number(thought.thinking_revision) || 0
@@ -39,7 +32,13 @@ export function useThinkingTrace({ open, thought, chatId }) {
     }
     if (debouncedRevisionRef.current === revisionRef.current) return
     debouncedRevisionRef.current = revisionRef.current
-    const timer = setTimeout(() => setRefreshNonce(value => value + 1), 450)
+    const timer = setTimeout(() => {
+      // A live trace that changes after an explicit full load returns to the
+      // bounded preview. Otherwise each token burst would redownload the full
+      // growing Markdown payload.
+      setFullRequested(false)
+      setRefreshNonce(value => value + 1)
+    }, 450)
     return () => clearTimeout(timer)
   }, [open, deferred, thought.thinking_revision])
 
@@ -48,55 +47,52 @@ export function useThinkingTrace({ open, thought, chatId }) {
       if (!open && deferred) {
         setLoadedContent('')
         setLoadState('idle')
+        setPreviewComplete(true)
+        setTraceComplete(false)
+        setFullRequested(false)
       }
       return
     }
     const controller = new AbortController()
-    let retryTimer = null
     let cancelled = false
-    let pendingRetries = 0
     const url = `/chats/${chatId}/thinking-trace/${encodeURIComponent(thought.thinking_id)}`
       + `?revision=${revisionRef.current}`
+      + (fullRequested ? '' : '&preview=1')
 
-    const load = () => {
-      setLoadState('loading')
-      apiFetch(url, { signal: controller.signal })
-        .then(async res => {
-          if (res.status === 202) {
-            if (pendingRetries >= MAX_PENDING_TRACE_RETRIES) {
-              throw new Error('Thinking trace is still pending')
-            }
-            pendingRetries += 1
-            retryTimer = setTimeout(
-              load,
-              pendingTraceRetryDelay(res.headers.get('Retry-After'), pendingRetries),
-            )
-            return null
-          }
-          if (!res.ok) throw new Error(`HTTP ${res.status}`)
-          return res.text()
-        })
-        .then(text => {
-          if (text != null && !cancelled) {
-            setLoadedContent(text)
-            setLoadState('ready')
-          }
-        })
-        .catch(error => {
-          if (!cancelled && error?.name !== 'AbortError') setLoadState('failed')
-        })
-    }
-    load()
+    setLoadState('loading')
+    fetchLazyText(url, { signal: controller.signal })
+      .then(({ response, text }) => {
+        if (!cancelled) {
+          setLoadedContent(text)
+          setPreviewComplete(
+            fullRequested
+            || response.headers.get('X-Thinking-Preview-Complete') !== '0',
+          )
+          setTraceComplete(response.headers.get('X-Thinking-Complete') === '1')
+          setLoadState('ready')
+        }
+      })
+      .catch(error => {
+        if (!cancelled && error?.name !== 'AbortError') setLoadState('failed')
+      })
     return () => {
       cancelled = true
-      clearTimeout(retryTimer)
       controller.abort()
     }
-  }, [open, deferred, chatId, thought.thinking_id, refreshNonce])
+  }, [open, deferred, chatId, thought.thinking_id, fullRequested, refreshNonce])
 
   return {
     content: deferred ? loadedContent : (thought.content || ''),
     loadState,
+    previewComplete: !deferred || previewComplete,
+    // Persisted snapshots carry this flag, and final live-stream promotion
+    // stamps it locally. This makes the explicit full-load action available
+    // at completion without another request; the payload remains lazy.
+    traceComplete: !deferred || traceComplete || !!thought.thinking_complete,
+    loadFull: () => {
+      setFullRequested(true)
+      setLoadState('loading')
+    },
     retry: () => {
       setLoadedContent('')
       setLoadState('loading')

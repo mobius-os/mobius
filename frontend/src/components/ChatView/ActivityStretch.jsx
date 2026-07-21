@@ -94,11 +94,27 @@ function TimelineThought({ label, thought, chatId }) {
         </span>
         <span className="chat__activity-think-label">{label}</span>
       </button>
-      {open && (
-        <div id={bodyId} className="chat__reasoning-body">
-          {body}
-        </div>
-      )}
+      <div id={bodyId} className="chat__reasoning-body" hidden={!open}>
+        {open && body}
+        {open && loadState === 'ready' && !trace.previewComplete && (
+          <div className="chat__lazy-status chat__reasoning-preview-status">
+            <span>
+              {trace.traceComplete
+                ? 'Showing a bounded preview to keep this chat responsive.'
+                : 'Showing a bounded preview while this thought is in progress.'}
+            </span>
+            {trace.traceComplete && (
+              <button
+                type="button"
+                className="chat__lazy-retry"
+                onClick={trace.loadFull}
+              >
+                Load full thought
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -237,28 +253,26 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           subagent={tool.subagent}
         />
       ))}
-      {open && (
-        <div id={timelineId} className="chat__activity-timeline">
-          {entries.map(({ item, idx }) => {
-            if (item.type === 'thinking') {
-              const key = assistantBlockKey(item, idx)
-              return (
-                <TimelineThought
-                  key={key}
-                  label={thoughtDurationLabel(item.duration_ms)}
-                  thought={item}
-                  chatId={chatId}
-                />
-              )
-            }
-            // chatId + the block's tool_use_id let ToolBlock lazily fetch a
-            // truncated large output on expand (GET /tool-output/{tool_use_id}).
+      <div id={timelineId} className="chat__activity-timeline" hidden={!open}>
+        {open && entries.map(({ item, idx }) => {
+          if (item.type === 'thinking') {
+            const key = assistantBlockKey(item, idx)
             return (
-              <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+              <TimelineThought
+                key={key}
+                label={thoughtDurationLabel(item.duration_ms)}
+                thought={item}
+                chatId={chatId}
+              />
             )
-          })}
-        </div>
-      )}
+          }
+          // chatId + the block's tool_use_id let ToolBlock lazily fetch a
+          // truncated large output on expand (GET /tool-output/{tool_use_id}).
+          return (
+            <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+          )
+        })}
+      </div>
     </div>
   )
 }
