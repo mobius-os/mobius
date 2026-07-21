@@ -1292,10 +1292,11 @@ class _Handler(BaseHTTPRequestHandler):
     ):
       self._handle_agent_post(path)
       return
-    # The auth route runs its admission control (throttle + concurrency cap)
-    # from headers BEFORE draining the body, so branch to it ahead of the
-    # generic drain below (which would otherwise let a body-drip flood occupy a
-    # worker for up to the 30s socket timeout before the limiter is consulted).
+    # The auth route runs its cross-site guard and admission control (throttle
+    # + concurrency cap) from headers BEFORE draining the body, so branch to it
+    # ahead of the generic drain below (which would otherwise let a body-drip
+    # flood occupy a worker for up to the 30s socket timeout before the limiter
+    # is consulted).
     if path == "/recover/auth":
       self._route_auth_post()
       return
@@ -1360,13 +1361,20 @@ class _Handler(BaseHTTPRequestHandler):
     """Admission control for POST /recover/auth, decided BEFORE the body is
     drained or the DB is touched.
 
-    Order: per-client throttle (headers only) -> non-blocking concurrency cap
-    -> body read (Content-Length bounded) -> cross-site guard -> the DB-read +
-    bcrypt work in _handle_auth (behind the global bcrypt semaphore). Rejecting
-    before the body read leaves the body UNREAD, so the connection is closed
-    rather than kept alive — a leftover body would desync the next request on
-    it.
+    Order: cross-site guard (headers only) -> per-client throttle ->
+    non-blocking concurrency cap -> body read (Content-Length bounded) -> the
+    DB-read + bcrypt work in _handle_auth (behind the global bcrypt semaphore).
+    Rejecting before the body read leaves the body UNREAD, so the connection is
+    closed rather than kept alive — a leftover body would desync the next
+    request on it.
     """
+    if self._reject_cross_site():
+      self.close_connection = True
+      self._send(
+        HTTPStatus.FORBIDDEN, "Cross-site request blocked.",
+        content_type="text/plain",
+      )
+      return
     if not _AUTH_THROTTLE.allow(self._client_key(), time.monotonic()):
       self.close_connection = True
       self._send(
@@ -1389,13 +1397,6 @@ class _Handler(BaseHTTPRequestHandler):
       return
     try:
       form = self._read_form()
-      # Cross-site guard, same as every other state-changing POST.
-      if self._reject_cross_site():
-        self._send(
-          HTTPStatus.FORBIDDEN, "Cross-site request blocked.",
-          content_type="text/plain",
-        )
-        return
       self._handle_auth(form)
     finally:
       _AUTH_INFLIGHT.release()

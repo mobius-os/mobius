@@ -308,6 +308,63 @@ def test_module_tunables_are_valid(recovery_env):
 
 # -- /recover/auth admission ordering ---------------------------------------
 
+def test_cross_site_auth_consumes_zero_throttle_budget(
+  recovery_env, monkeypatch,
+):
+  recoveryd = recovery_env["recoveryd"]
+
+  class _TrackingThrottle:
+    def __init__(self):
+      self.calls = 0
+      self.throttle = recoveryd._FixedWindowThrottle(
+        limit=1, window=60, max_keys=16)
+
+    def allow(self, key, now):
+      self.calls += 1
+      return self.throttle.allow(key, now)
+
+  class _TrackingInflight:
+    def __init__(self):
+      self.acquire_calls = 0
+      self.release_calls = 0
+
+    def acquire(self, *, blocking):
+      self.acquire_calls += 1
+      return True
+
+    def release(self):
+      self.release_calls += 1
+
+  throttle = _TrackingThrottle()
+  inflight = _TrackingInflight()
+  monkeypatch.setattr(recoveryd, "_AUTH_THROTTLE", throttle)
+  monkeypatch.setattr(recoveryd, "_AUTH_INFLIGHT", inflight)
+
+  body_reads = {"n": 0}
+  cross_site, captured = _auth_handler(recoveryd)
+  del cross_site._reject_cross_site
+  cross_site.headers["Sec-Fetch-Site"] = "cross-site"
+  cross_site._read_form = (
+    lambda: body_reads.__setitem__("n", body_reads["n"] + 1) or {})
+  cross_site._route_auth_post()
+
+  assert captured["code"] == int(HTTPStatus.FORBIDDEN)
+  assert cross_site.close_connection is True
+  assert throttle.calls == 0
+  assert inflight.acquire_calls == 0
+  assert inflight.release_calls == 0
+  assert body_reads["n"] == 0
+
+  same_site, captured = _auth_handler(recoveryd)
+  same_site._handle_auth = lambda form: same_site._send(HTTPStatus.OK, "ok")
+  same_site._route_auth_post()
+  assert captured["code"] == int(HTTPStatus.OK)
+
+  exhausted, captured = _auth_handler(recoveryd)
+  exhausted._route_auth_post()
+  assert captured["code"] == int(HTTPStatus.TOO_MANY_REQUESTS)
+
+
 def test_auth_route_throttle_precedes_body_and_db(recovery_env, monkeypatch):
   """A throttled request must be rejected from headers alone — no body read, no
   owner_exists()/DB touch, no bcrypt."""
