@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
 import { apiFetch } from '../../api/client.js'
@@ -47,8 +47,8 @@ function ToolResult({ r }) {
   if (r.kind === 'structured') {
     return (
       <div className="chat__tool-kv">
-        {r.entries.map(({ key, value }) => (
-          <div className="chat__tool-kv-row" key={key}>
+        {r.entries.map(({ id, key, value }) => (
+          <div className="chat__tool-kv-row" key={id}>
             <span className="chat__tool-kv-key">{key}</span>
             <pre className="chat__tool-kv-val">{value}</pre>
           </div>
@@ -79,6 +79,8 @@ export default function ToolBlock({ t, chatId }) {
   // like everything else).
   const [open, setOpen] = useState(false)
   const headerRef = useRef(null)
+  const headerId = useId()
+  const detailId = useId()
   // The full output of a large tool block is fetched lazily on first expand —
   // a chat load ships only a bounded excerpt plus an output_truncated marker
   // (the write funnel reduced it and stashed the full text in tool_outputs), so
@@ -88,10 +90,11 @@ export default function ToolBlock({ t, chatId }) {
   const [fullOutput, setFullOutput] = useState(null)
   const [loadingFull, setLoadingFull] = useState(false)
   // A true 404 is terminal and explicitly degrades copying to the excerpt. A
-  // network/5xx failure is retryable on the next close→open instead of being
-  // permanently mistaken for a missing stash.
+  // network/5xx failure is retryable in place (or by closing and reopening)
+  // instead of being permanently mistaken for a missing stash.
   const [missingFull, setMissingFull] = useState(false)
   const [loadError, setLoadError] = useState(false)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [copyState, setCopyState] = useState('idle')
   const copyTimerRef = useRef(null)
   const effectiveName = effectiveToolName(t)
@@ -152,7 +155,15 @@ export default function ToolBlock({ t, chatId }) {
       cancelled = true
       controller.abort()
     }
-  }, [open, t.output_truncated, t.tool_use_id, fullOutput, missingFull, chatId])
+  }, [
+    open,
+    t.output_truncated,
+    t.tool_use_id,
+    fullOutput,
+    missingFull,
+    chatId,
+    loadAttempt,
+  ])
 
   useEffect(() => {
     if (!open) {
@@ -215,6 +226,11 @@ export default function ToolBlock({ t, chatId }) {
     copyTimerRef.current = setTimeout(() => setCopyState('idle'), 1800)
   }
 
+  function retryFullOutput() {
+    setLoadError(false)
+    setLoadAttempt(value => value + 1)
+  }
+
   // The header content is shared by both shells below so the visual row is
   // identical whether or not it is interactive.
   const headerContent = (
@@ -250,6 +266,7 @@ export default function ToolBlock({ t, chatId }) {
         // clickable <div> was not); the toggle logic is otherwise unchanged.
         <button
           ref={headerRef}
+          id={headerId}
           type="button"
           className="chat__tool-header"
           onClick={() => {
@@ -257,6 +274,7 @@ export default function ToolBlock({ t, chatId }) {
             setOpen(o => !o)
           }}
           aria-expanded={open}
+          aria-controls={detailId}
         >
           {headerContent}
         </button>
@@ -268,7 +286,13 @@ export default function ToolBlock({ t, chatId }) {
         </div>
       )}
       {open && hasDetail && (
-        <div className="chat__tool-detail">
+        <div
+          id={detailId}
+          className="chat__tool-detail"
+          role="region"
+          aria-labelledby={headerId}
+          tabIndex={0}
+        >
           {t.input && (
             <div className="chat__tool-section">
               <span className="chat__tool-section-label">
@@ -311,15 +335,29 @@ export default function ToolBlock({ t, chatId }) {
               </div>
               {r && <ToolResult r={r} />}
               {t.output_truncated && fullOutput === null && (
-                <span className="chat__tool-output-more">
-                  {loadingFull
-                    ? '… loading full output …'
-                    : missingFull
-                      ? '… full output unavailable; showing excerpt'
-                      : loadError
-                        ? '… couldn’t load full output; reopen to retry'
-                      : `… showing excerpt${t.output_full_len ? ` of ${t.output_full_len} characters` : ''}`}
-                </span>
+                <div className="chat__tool-output-more chat__lazy-status">
+                  <span
+                    role={loadingFull || missingFull || loadError ? 'status' : undefined}
+                    aria-live={loadingFull || missingFull || loadError ? 'polite' : undefined}
+                  >
+                    {loadingFull
+                      ? '… loading full output …'
+                      : missingFull
+                        ? '… full output unavailable; showing excerpt'
+                        : loadError
+                          ? 'Couldn’t load full output.'
+                          : `… showing excerpt${t.output_full_len ? ` of ${t.output_full_len} characters` : ''}`}
+                  </span>
+                  {loadError && (
+                    <button
+                      type="button"
+                      className="chat__lazy-retry"
+                      onClick={retryFullOutput}
+                    >
+                      Retry
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}

@@ -85,6 +85,7 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
   interactive = false,
   open = false,
   ariaLabel,
+  controlsId,
   onToggle,
   count = null,
 }, ref) {
@@ -99,6 +100,7 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
       }
       onClick={interactive ? onToggle : undefined}
       aria-expanded={interactive ? open : undefined}
+      aria-controls={interactive ? controlsId : undefined}
       aria-label={ariaLabel}
       role={interactive ? undefined : 'status'}
     >

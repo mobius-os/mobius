@@ -312,7 +312,7 @@
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.12s, border-color 0.12s;
-  min-height: 36px;             /* 44px touch target via padding */
+  min-height: 36px;             /* coarse pointers use the 44px override below */
 }
 .chat__quick-action-chip:hover {
   background: var(--surface2, var(--surface));
@@ -827,6 +827,11 @@
   line-height: 1.5;
 }
 
+.chat__tool-detail:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .chat__tool-section {
   display: flex;
   flex-direction: column;
@@ -1054,6 +1059,35 @@
   display: block;
   white-space: pre-wrap;
   color: var(--muted); /* CONTRACT: low-contrast empty/truncation metadata */
+}
+
+.chat__lazy-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat__lazy-retry {
+  min-height: 28px;
+  padding: 2px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: 500 11px/1.2 var(--font, system-ui, sans-serif);
+}
+
+.chat__lazy-retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat__lazy-retry:hover {
+    background: color-mix(in srgb, var(--surface) 72%, transparent);
+  }
 }
 
 /* ── Envelope-aware tool results ─────────────────────── */
@@ -1442,11 +1476,15 @@
    target. These rows carry their disclosure state without a trailing chevron,
    so the whole labeled line must be comfortably tappable. */
 @media (pointer: coarse) {
+  .chat__empty-prompt,
+  .chat__empty-action,
+  .chat__quick-action-chip,
   .chat__activity-header:not(.chat__activity-header--static),
   .chat__activity-think-toggle,
   .chat__tool-header:not(.chat__tool-header--static),
   .chat__activity-timeline .chat__tool-header:not(.chat__tool-header--static),
-  .chat__tool-copy {
+  .chat__tool-copy,
+  .chat__lazy-retry {
     min-height: 44px;
   }
 

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useId, useMemo, useRef, useState } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import {
@@ -49,14 +49,28 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 function TimelineThought({ label, thought, chatId }) {
   const [open, setOpen] = useState(false)
   const headerRef = useRef(null)
+  const bodyId = useId()
   const trace = useThinkingTrace({ open, thought, chatId })
   const content = thinkingContentForDisplay(trace.content)
   const loadState = trace.loadState
   let body = <StandardMarkdown text={content} />
   if (loadState === 'loading') {
-    body = <span className="chat__reasoning-load">Loading thought…</span>
+    body = (
+      <span className="chat__reasoning-load" role="status" aria-live="polite">
+        Loading thought…
+      </span>
+    )
   } else if (loadState === 'failed') {
-    body = <span className="chat__reasoning-load">Thought unavailable.</span>
+    body = (
+      <div className="chat__lazy-status">
+        <span className="chat__reasoning-load" role="status" aria-live="polite">
+          Thought unavailable.
+        </span>
+        <button type="button" className="chat__lazy-retry" onClick={trace.retry}>
+          Retry
+        </button>
+      </div>
+    )
   }
 
   return (
@@ -73,6 +87,7 @@ function TimelineThought({ label, thought, chatId }) {
           setOpen(o => !o)
         }}
         aria-expanded={open}
+        aria-controls={bodyId}
       >
         <span className="chat__activity-think-icon" aria-hidden="true">
           <ActivityTypeIcon kind="reasoning" />
@@ -80,7 +95,7 @@ function TimelineThought({ label, thought, chatId }) {
         <span className="chat__activity-think-label">{label}</span>
       </button>
       {open && (
-        <div className="chat__reasoning-body">
+        <div id={bodyId} className="chat__reasoning-body">
           {body}
         </div>
       )}
@@ -90,6 +105,7 @@ function TimelineThought({ label, thought, chatId }) {
 export default function ActivityStretch({ entries, chatId, live = false }) {
   const [userOpen, setUserOpen] = useState(false)
   const headerRef = useRef(null)
+  const timelineId = useId()
 
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
@@ -199,6 +215,7 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         interactive
         open={open}
         ariaLabel={`${text}${stepNote}${stateNote}`}
+        controlsId={timelineId}
         // Togglable at any time, running or not: with default-collapse there is
         // no forced-open state for a tap to fight, so the user can peek into a
         // live run and close it again.
@@ -221,7 +238,7 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
         />
       ))}
       {open && (
-        <div className="chat__activity-timeline">
+        <div id={timelineId} className="chat__activity-timeline">
           {entries.map(({ item, idx }) => {
             if (item.type === 'thinking') {
               const key = assistantBlockKey(item, idx)

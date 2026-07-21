@@ -35,11 +35,15 @@ const COMMON_KEYS = ['result', 'content', 'text', 'summary', 'output', 'data']
 // multi-megabyte stdout blob in a <pre> janks scroll; the caller shows a
 // "truncated" hint when this fires. Generous enough that normal output is whole.
 const MAX_FIELD = 20000
+const MAX_PARSE_CHARS = 256 * 1024
+const MAX_STRUCTURED_ENTRIES = 100
+const MAX_STRUCTURED_CHARS = MAX_FIELD
+const MAX_KEY_CHARS = 500
 
-function truncate(s) {
+function truncate(s, limit = MAX_FIELD) {
   if (typeof s !== 'string') return { text: s, truncated: false }
-  if (s.length <= MAX_FIELD) return { text: s, truncated: false }
-  return { text: s.slice(0, MAX_FIELD), truncated: true }
+  if (s.length <= limit) return { text: s, truncated: false }
+  return { text: s.slice(0, Math.max(0, limit)), truncated: true }
 }
 
 // Attempt to parse a string as JSON. Returns the parsed value, or undefined if
@@ -48,6 +52,9 @@ function truncate(s) {
 // sentence like "42 files changed" isn't reinterpreted as the number 42.
 function tryParse(s) {
   if (typeof s !== 'string') return undefined
+  // Keep very large results as bounded raw text. Parsing them would duplicate
+  // the payload as an object graph on the UI thread just to decorate a preview.
+  if (s.length > MAX_PARSE_CHARS) return undefined
   const t = s.trim()
   if (!t) return undefined
   const first = t[0]
@@ -115,12 +122,32 @@ function classify(value, depth) {
     }
     // A plain object → key/value rows, each value length-capped like the other
     // kinds so a huge structured field can't dump megabytes into the DOM.
-    const entries = keys.map(k => {
-      const t = truncate(displayValue(value[k]))
-      return { key: k, value: t.text, truncated: t.truncated }
-    })
+    const entries = []
+    let remaining = MAX_STRUCTURED_CHARS
+    let truncated = false
+    for (const key of keys) {
+      if (entries.length >= MAX_STRUCTURED_ENTRIES || remaining <= 0) {
+        truncated = true
+        break
+      }
+      const shownKey = truncate(key, Math.min(MAX_KEY_CHARS, remaining))
+      remaining -= shownKey.text.length
+      if (remaining <= 0) {
+        entries.push({ id: key, key: shownKey.text, value: '' })
+        truncated = true
+        break
+      }
+      const shownValue = truncate(
+        displayValue(value[key]),
+        Math.min(MAX_FIELD, remaining),
+      )
+      remaining -= shownValue.text.length
+      entries.push({ id: key, key: shownKey.text, value: shownValue.text })
+      truncated ||= shownKey.truncated || shownValue.truncated
+    }
+    truncated ||= entries.length < keys.length
     if (entries.length > 0) {
-      return { kind: 'structured', entries, truncated: entries.some(e => e.truncated) }
+      return { kind: 'structured', entries, truncated }
     }
   }
 

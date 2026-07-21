@@ -64,12 +64,37 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'nested reasoning uses its icon and row affordance without a chevron')
   assert.match(activityStretch, /aria-expanded=\{open\}/,
     'the nested toggle exposes its state')
+  assert.match(activityStretch, /aria-controls=\{bodyId\}/,
+    'the nested toggle names the thought body it controls')
+  assert.match(activityStretch, /role="status" aria-live="polite"/,
+    'deferred thought state changes should be announced')
+  assert.match(activityStretch, /className="chat__lazy-retry" onClick=\{trace\.retry\}/,
+    'a failed thought should retry without a close/reopen ritual')
   assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current\)\s*setOpen\(o => !o\)/,
     'opening a long trace preserves the reader anchor')
   assert.doesNotMatch(activityStretch, /if \(thinkingOnly\) \{/,
     'a thinking-only entry must not swap component type when the first tool arrives')
   assert.match(activityStretch, /<StandardMarkdown text=\{content\} \/>/,
     'reasoning remains available inside the nested disclosure')
+})
+
+test('lazy tool details and touch targets keep their accessibility contract', () => {
+  const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
+  const coarse = [...chatCss.matchAll(/@media \(pointer: coarse\) \{[\s\S]*?\n\}/g)]
+    .map(match => match[0])
+    .join('\n')
+
+  assert.match(toolBlock, /aria-controls=\{detailId\}/)
+  assert.match(toolBlock, /role="region"/)
+  assert.match(toolBlock, /aria-labelledby=\{headerId\}/)
+  assert.match(toolBlock, /className="chat__lazy-retry"/)
+  assert.match(toolBlock, /\? 'status' : undefined/)
+  assert.match(toolBlock, /\? 'polite' : undefined/)
+  assert.match(coarse, /\.chat__empty-prompt/)
+  assert.match(coarse, /\.chat__empty-action/)
+  assert.match(coarse, /\.chat__quick-action-chip/)
+  assert.match(coarse, /\.chat__lazy-retry/)
+  assert.match(coarse, /min-height:\s*44px/)
 })
 
 test('activity spacing derives from one block gap and one row gap', () => {

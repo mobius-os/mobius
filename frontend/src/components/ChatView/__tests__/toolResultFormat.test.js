@@ -151,6 +151,29 @@ test('a structured value is truncated and flags it', () => {
   assert.ok(blob.value.length < big.length)
 })
 
+test('structured results have one total row and character budget', () => {
+  const source = Object.fromEntries(
+    Array.from({ length: 200 }, (_, i) => [`field-${i}`, 'x'.repeat(500)]),
+  )
+  const r = formatToolResult(JSON.stringify(source))
+  assert.equal(r.kind, 'structured')
+  assert.equal(r.truncated, true)
+  assert.ok(r.entries.length <= 100)
+  assert.ok(
+    r.entries.reduce((total, entry) => total + entry.key.length + entry.value.length, 0)
+      <= 20000,
+  )
+})
+
+test('very large JSON skips structured parsing but still copies exactly', () => {
+  const source = JSON.stringify({ blob: 'x'.repeat(300000) })
+  const r = formatToolResult(source)
+  assert.equal(r.kind, 'text')
+  assert.equal(r.truncated, true)
+  assert.equal(r.text.length, 20000)
+  assert.equal(toolResultCopyText(source), source)
+})
+
 test('Claude Bash "Exit code N" failure prefix parses to a terminal', () => {
   const r = formatToolResult('Exit code 1\ncat: /x: No such file or directory')
   assert.equal(r.kind, 'terminal')

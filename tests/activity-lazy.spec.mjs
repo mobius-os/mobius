@@ -116,6 +116,9 @@ test('activity stays nested and lazy, aborts on close, and copies excerpt or ful
   let thinkingRequests = 0
   await page.route(new RegExp(`/api/chats/${chat.id}/thinking-trace/${thinkingId}`), route => {
     thinkingRequests += 1
+    if (thinkingRequests === 3) {
+      return route.fulfill({ status: 503, contentType: 'text/plain', body: 'offline' })
+    }
     return route.fulfill({ status: 200, contentType: 'text/plain', body: thoughtText })
   })
 
@@ -126,6 +129,9 @@ test('activity stays nested and lazy, aborts on close, and copies excerpt or ful
       // Keep the first request pending long enough to exercise excerpt copying
       // and abort-on-collapse. A second open receives the full output at once.
       await new Promise(resolve => setTimeout(resolve, 1800))
+    }
+    if (toolRequests === 3) {
+      return route.fulfill({ status: 503, contentType: 'text/plain', body: 'offline' })
     }
     try {
       await route.fulfill({ status: 200, contentType: 'text/plain', body: fullOutput })
@@ -150,10 +156,13 @@ test('activity stays nested and lazy, aborts on close, and copies excerpt or ful
 
   await activityHeader.click()
   await expect(activityHeader).toHaveAttribute('aria-expanded', 'true')
+  await expect(activityHeader).toHaveAttribute('aria-controls', /.+/)
   const thoughtToggle = activity.locator('.chat__activity-think-toggle')
   const toolToggle = activity.locator('.chat__tool-header')
   await expect(thoughtToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(thoughtToggle).toHaveAttribute('aria-controls', /.+/)
   await expect(toolToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(toolToggle).toHaveAttribute('aria-controls', /.+/)
   expect(thinkingRequests).toBe(0)
   expect(toolRequests).toBe(0)
 
@@ -185,6 +194,7 @@ test('activity stays nested and lazy, aborts on close, and copies excerpt or ful
   await thoughtToggle.click()
 
   await toolToggle.click()
+  await expect(activity.getByRole('region')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Copy excerpt' })).toBeEnabled()
   await expect(page.getByText(/loading full output/i)).toBeVisible()
   await page.getByRole('button', { name: 'Copy excerpt' }).click()
@@ -210,6 +220,22 @@ test('activity stays nested and lazy, aborts on close, and copies excerpt or ful
   await page.getByRole('button', { name: 'Could not copy output' }).click()
   await expect(activity.getByText('Copied')).toBeVisible()
 
+  // A transient sidecar failure is announced and retries in place. It should
+  // not require collapsing the detail or retaining another hidden payload.
+  await toolToggle.click()
+  await toolToggle.click()
+  await expect(activity.getByRole('status')).toHaveText('Couldn’t load full output.')
+  await activity.locator('.chat__tool').getByRole('button', { name: 'Retry' }).click()
+  await expect(page.getByText(fullOutput)).toBeVisible()
+  expect(toolRequests).toBe(4)
+
+  await thoughtToggle.click()
+  await expect(activity.getByRole('status')).toHaveText('Thought unavailable.')
+  await activity.locator('.chat__activity-think').getByRole('button', { name: 'Retry' }).click()
+  await expect(page.getByText(thoughtText)).toBeVisible()
+  expect(thinkingRequests).toBe(4)
+  await thoughtToggle.click()
+
   // Closing the outer stretch unmounts every nested payload; reopening proves
   // both sidecars are still closed and no hidden request is made.
   await activityHeader.click()
@@ -218,6 +244,6 @@ test('activity stays nested and lazy, aborts on close, and copies excerpt or ful
   await expect(activity.locator('.chat__activity-timeline')).toBeVisible()
   await expect(activity.locator('.chat__activity-think-toggle')).toHaveAttribute('aria-expanded', 'false')
   await expect(activity.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'false')
-  expect(thinkingRequests).toBe(2)
-  expect(toolRequests).toBe(2)
+  expect(thinkingRequests).toBe(4)
+  expect(toolRequests).toBe(4)
 })
