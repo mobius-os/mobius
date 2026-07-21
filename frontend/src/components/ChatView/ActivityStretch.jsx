@@ -138,7 +138,12 @@ function SingleActivity({ entry, chatId, live }) {
     && Object.keys(item.subagent).length > 0
   return (
     <>
-      <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+      <ToolBlock
+        key={assistantBlockKey(item, idx)}
+        t={item}
+        chatId={chatId}
+        compact
+      />
       {hasHelpers && <SubagentChips subagent={item.subagent} />}
     </>
   )

@@ -58,7 +58,9 @@ test('message sources expose list semantics, keyboard focus, and touch targets',
   const source = read('../MessageSources.jsx')
   const css = read('../ChatView.css')
 
-  assert.match(source, /<section className="chat__sources" aria-labelledby=/)
+  assert.match(source, /<section className="chat__sources" aria-label="Source links">/)
+  assert.doesNotMatch(source, />Sources</,
+    'source links should stand on their own at the end of the answer')
   assert.match(source, /<ul className="chat__sources-list">/)
   assert.match(source, /<li key=\{source\.url\} className="chat__source-item">/)
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)

@@ -651,10 +651,17 @@ export function reconcileStreamItems(prev, next) {
         return n
       }
     }
-    if (n.type === 'thinking' && Number.isFinite(n.lastAt)) {
+    if (n.type === 'thinking'
+        && k === next.length - 1
+        && k === prev.length - 1
+        && Number.isFinite(n.lastAt)) {
       // A bounded replay may no longer contain the first delta, while the
-      // visible/session snapshot still has the older clock anchor. Never let
-      // reconciliation move a live timer backwards in that case.
+      // visible/session snapshot still has the older clock anchor. Only the
+      // TRAILING thinking item in BOTH views can still be live. Catch-up can
+      // momentarily contain only the first historical thought while the
+      // visible snapshot already has prose/tools after it; treating that
+      // partial replay tail as live made a completed "Thought for …" counter
+      // grow on every reconnect long after that reasoning pass had ended.
       const previousElapsed = thinkingElapsedMs(p, n.lastAt)
       const replayElapsed = thinkingElapsedMs(n, n.lastAt)
       if (previousElapsed > replayElapsed) {
