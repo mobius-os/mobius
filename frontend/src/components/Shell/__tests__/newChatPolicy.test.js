@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   addCreatedChatToList,
@@ -8,6 +9,10 @@ import {
   detailIsUntouchedEmptyChat,
   enteredEmptySingleScreen,
 } from '../newChatPolicy.js'
+
+const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
+const clientSource = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
 const empty = (id, extra = {}) => ({
   id,
@@ -184,6 +189,24 @@ test('a created chat enters the cache without displacing pinned chats', () => {
   assert.equal(result[1].has_messages, false)
   assert.equal('messages' in result[1], false)
   assert.equal('detail' in result[1], false)
+})
+
+test('ordinary chat selection does not launch a competing drawer refresh', () => {
+  const selectChat = shellSource.match(
+    /function selectChat\(id\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+  assert.match(selectChat, /navTo\('chat', \{ chatId: id \}\)/)
+  assert.doesNotMatch(selectChat, /refreshChats/)
+})
+
+test('new-chat creation cancels stale list reads through a real AbortSignal', () => {
+  const cancelAt = shellSource.indexOf('await queryClient.cancelQueries({')
+  const createAt = shellSource.indexOf("api.chats.create({ title: 'New chat' })")
+  assert.ok(cancelAt >= 0 && cancelAt < createAt,
+    'the stale drawer read must be cancelled before the create request')
+  assert.match(queriesSource, /async function fetchChats\(\{ signal \} = \{\}\)/)
+  assert.match(queriesSource, /api\.chats\.list\(\{ signal \}\)/)
+  assert.match(clientSource, /list: \(options = \{\}\) => apiFetch\('\/chats', options\)/)
 })
 
 test('a created chat replaces a duplicate cache row', () => {

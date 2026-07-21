@@ -2613,6 +2613,7 @@ export default function Shell() {
       })
     if (empty && online) {
       try {
+        const staleEmptyId = empty.id
         const res = await apiFetch(
           `/chats/${encodeURIComponent(empty.id)}?limit=1`,
           { timeoutMs: 5000 },
@@ -2620,7 +2621,19 @@ export default function Shell() {
         const detail = res.ok ? await res.json() : null
         if (!detailIsUntouchedEmptyChat(detail)) {
           empty = null
-          void refreshChats()
+          // The detail read has already given us the only fact New Chat needs:
+          // this row is no longer empty. Publish that narrow correction instead
+          // of launching the expensive drawer list beside the create request.
+          queryClient.setQueryData(chatQueries.keys.all, current => {
+            if (!Array.isArray(current)) return current
+            const next = current.map(chat => (
+              String(chat.id) === String(staleEmptyId)
+                ? { ...chat, has_messages: true }
+                : chat
+            ))
+            chatsRef.current = next
+            return next
+          })
         }
       } catch {
         empty = null
@@ -2637,6 +2650,15 @@ export default function Shell() {
     if (creatingChatRef.current) return { chatId: null, reason: 'inflight' }
     creatingChatRef.current = true
     try {
+      // Opening the drawer may already have started a list read whose snapshot
+      // predates this POST. Cancel it before creation so it cannot land later
+      // and overwrite the optimistic row with a stale list. fetchChats consumes
+      // TanStack's AbortSignal, making this a real network cancellation rather
+      // than merely ignoring the query result.
+      await queryClient.cancelQueries({
+        queryKey: chatQueries.keys.all,
+        exact: true,
+      })
       const res = await api.chats.create({ title: 'New chat' })
       const chat = await jsonOrThrow(res, 'Chat creation failed')
       const detailCache = createdChatDetailCache(chat)
@@ -2648,9 +2670,9 @@ export default function Shell() {
         chatsRef.current = next
         return next
       })
-      // Navigation and first paint can start from the authoritative create response.
-      // Both wider caches revalidate off the opening path.
-      void refreshChats()
+      // Navigation, drawer membership, and first paint all come from the
+      // authoritative create response. Do not immediately replace it with a
+      // second list read; ordinary drawer/run events revalidate later.
       return { chatId: chat.id, reason: null }
     } catch {
       return { chatId: null, reason: 'error' }
@@ -2819,7 +2841,6 @@ export default function Shell() {
   function selectChat(id) {
     clearChatAttention(id)
     navTo('chat', { chatId: id })
-    refreshChats()
   }
 
   async function deleteChat(id) {
