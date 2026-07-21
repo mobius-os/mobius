@@ -842,6 +842,7 @@ export default function ChatView({
     scrollRef,
     spacerRef,
     lastUserMsgRef,
+    syncComposerGeometry: measureComposerHeight,
     messages,
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
