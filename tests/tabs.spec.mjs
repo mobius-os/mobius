@@ -310,6 +310,32 @@ test.describe('Tabs', () => {
     await expect(page.locator('.shell__split-toggle')).toHaveCount(0)
   })
 
+  // R4: the strip formula must follow the EFFECTIVE builder world only. A single-mode
+  // workspace that ALSO carries a parked 1-pane/2-tab tree AND an engaged legacy
+  // mirror (seedTabs writes a non-empty mobius-open-tabs) must show NO strip — the old
+  // `(SPLITS ? effectiveViewMode==='panes' : tabStripEngaged)` formula leaked the
+  // engaged latch and painted the parked tree's strip over single mode.
+  test('single mode shows no strip even with a parked tree + engaged legacy mirror (R4)', async ({ page }) => {
+    const chat = await bootAndCreateChat(page, 'stripformula')
+    const appsMock = await mockOwnedApp(page, chat.id)
+    await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }], { viewMode: 'single' })
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
+    await expect.poll(() => page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
+    )).toBe('single')
+    await sendMessage(page, 'single with a parked tree')
+    // NO strip in single, despite the engaged mirror + the parked 2-tab tree.
+    await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
+    await expect(page.locator('.workspace__strip')).toHaveCount(0)
+    // The tree is preserved (parked): toggling to builder surfaces the strip again,
+    // proving the strip was hidden by the world, not lost.
+    await page.getByLabel('Toggle navigation').focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect(page.locator('.shell__tabstrip, .workspace__strip').first())
+      .toBeVisible({ timeout: 3000 })
+  })
+
   // Regression for the review's HIGH finding: an app opened numerically (drawer/
   // deep-link) then re-opened via its tab (string id) must not double-mount —
   // the LRU dedups on strict !==, so a string id would sit beside the number.
