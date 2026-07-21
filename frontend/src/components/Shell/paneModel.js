@@ -518,16 +518,20 @@ export function setSingleScreen(ws, slot) {
   return { ...ws, singleScreen: next }
 }
 
-// The concrete chat/app item the FOCUSED builder pane is showing, as a slot value
-// — or null when the focused pane is empty or on Settings (Settings never occupies
-// the slot, design §Recommended state). This is what the FIRST-ever builder→single
-// switch seeds the slot from.
+// The concrete chat/app item the FOCUSED builder pane is showing, as a slot value.
+// Settings never occupies the single-world slot; when Settings is active, fall
+// back to the most recently positioned concrete tab in that same pane. Otherwise
+// the first-ever builder→single toggle from the common Settings flow paints an
+// empty shell even though the owner's chat is still directly underneath it.
 export function focusedSlotSeed(ws) {
   const pane = ws.panes[ws.focusedPaneId]
   const key = pane?.activeTabKey
   if (!pane || !key) return null
-  const tab = pane.tabs.find(t => tabModel.tabKey(t) === key)
-  if (!tab || tab.kind === 'settings') return null
+  const activeTab = pane.tabs.find(t => tabModel.tabKey(t) === key)
+  const tab = activeTab?.kind === 'settings'
+    ? [...pane.tabs].reverse().find(candidate => candidate.kind !== 'settings')
+    : activeTab
+  if (!tab) return null
   if (tab.kind === 'app') return { kind: 'app', id: String(tab.id) }
   if (tab.kind === 'chat') return { kind: 'chat', id: String(tab.id) }
   return null

@@ -93,11 +93,12 @@ test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () =>
     'builder focus change never rewrites the single screen')
 })
 
-test('seeding skips a Settings-focused builder pane (slot stays empty)', () => {
+test('seeding a Settings-focused builder pane uses its underlying concrete tab', () => {
   let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
   ws = paneModel.openTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, activate: true })
   const s = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
-  assert.equal(s.ws.singleScreen, null, 'Settings focus seeds an empty screen, not Settings')
+  assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' },
+    'Settings itself is skipped without blanking the single world')
 })
 
 test('seedSingleScreenIfAbsent leaves an explicit null untouched', () => {
