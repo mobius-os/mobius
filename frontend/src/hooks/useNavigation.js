@@ -13,6 +13,7 @@ import {
 } from '../lib/navHistory.js'
 import { resolveInitialNav } from '../lib/resolveInitialNav.js'
 import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
+import { shellReload } from '../lib/shellReloadState.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
 
@@ -65,21 +66,6 @@ function sameRoute(a, b) {
 function safeStoredChatId() {
   try { return localStorage.getItem(ACTIVE_CHAT_KEY) } catch { return null }
 }
-
-// Parse shell-reload state (shell rebuild preserves view across reload).
-// Exported so App.jsx can read the parsed value without a second
-// sessionStorage.getItem() call — the IIFE already consumed and removed the
-// key, so a second read would always return null (dead branch in App.jsx).
-export const shellReload = (() => {
-  try {
-    const raw = sessionStorage.getItem('shell-reload')
-    if (!raw) return null
-    sessionStorage.removeItem('shell-reload')
-    try { return JSON.parse(raw) } catch { return null }
-  } catch {
-    return null
-  }
-})()
 
 // Parse deep-link URL. A COLD notification tap lands on the in-scope
 // shell form `/shell/?app=<id-or-slug>` (or `?chat=<id>`) — this reopens

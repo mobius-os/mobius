@@ -75,6 +75,34 @@ def test_missing_empty_malformed_and_nonstring_claims_all_uniform_403(client):
   assert "access_token" in ok.json()
 
 
+@pytest.mark.parametrize("payload", [
+  {"username": "   ", "password": "securepassword123"},
+  {"username": "x" * 65, "password": "securepassword123"},
+  {"username": "admin", "password": "   "},
+  {"username": "admin", "password": "x" * 1025},
+])
+def test_invalid_account_fields_do_not_consume_setup_claim(client, payload):
+  response = client.post(
+    "/api/auth/setup", json={**payload, "claim": SETUP_CLAIM}
+  )
+  assert response.status_code == 422
+
+  status = client.get("/api/auth/setup/status")
+  assert status.status_code == 200
+  assert status.json() == {"configured": False, "claim_required": True}
+
+
+def test_setup_normalizes_surrounding_username_whitespace(client, db):
+  response = client.post("/api/auth/setup", json={
+    "username": "  admin  ",
+    "password": "securepassword123",
+    "claim": SETUP_CLAIM,
+  })
+  assert response.status_code == 200
+  db.expire_all()
+  assert db.query(models.Owner).one().username == "admin"
+
+
 def test_valid_setup_consumes_claim_and_second_setup_400(client):
   """A successful setup writes the durable marker, deletes the claim file, and
   a second setup 400s (owner exists)."""

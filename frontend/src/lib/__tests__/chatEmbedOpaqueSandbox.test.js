@@ -22,6 +22,11 @@ test('embed route bypasses IndexedDB-backed query persistence in opaque app fram
   const persistedProvider = appSource.indexOf('<PersistQueryClientProvider', route)
   assert.ok(route !== -1 && plainProvider > route)
   assert.ok(persistedProvider > plainProvider)
+  assert.match(
+    appSource.slice(route, persistedProvider),
+    /<Suspense fallback=\{null\}>/,
+    'the opaque embed must stay blank while its route chunk and capability load',
+  )
 })
 
 test('runtime INIT carries a one-use bootstrap rather than an owner or app token', () => {

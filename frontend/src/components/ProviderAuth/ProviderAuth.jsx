@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
@@ -28,6 +28,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
   const [starting, setStarting] = useState(false)
   const [justConnected, setJustConnected] = useState(false)
   const [openedAuthWindow, setOpenedAuthWindow] = useState(true)
+  const authCodeId = useId()
   // The sign-in tab is reserved before the auth URL exists, so any path that
   // ends without navigating it has to close it or the owner keeps a blank tab.
   const authWindowRef = useRef(null)
@@ -121,14 +122,20 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
           <a href={authUrl} target="_blank" rel="noopener noreferrer">Open the sign-in page</a>.
         </p>
         <form className="pa__form" onSubmit={submitCode}>
-          <input
-            className="pa__input"
-            value={authCode}
-            onChange={(e) => setAuthCode(e.target.value)}
-            placeholder="Paste authorization code…"
-            autoFocus
-            autoComplete="off"
-          />
+          <label className="pa__field" htmlFor={authCodeId}>
+            <span className="pa__input-label">Authorization code</span>
+            <input
+              id={authCodeId}
+              name="authorization-code"
+              className="pa__input"
+              value={authCode}
+              onChange={(e) => setAuthCode(e.target.value)}
+              placeholder="Paste authorization code…"
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
           <button
             className="pa__btn"
             type="submit"

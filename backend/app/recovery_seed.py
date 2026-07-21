@@ -5,7 +5,7 @@ it can run the Tier-1 "Restore platform" action. Its default source of
 truth is the SQLite owner row (`recovery_db.py`), which survives a broken
 platform but NOT a wiped or corrupt database — the exact disaster the
 owner most needs recovery for. This module closes that gap by mirroring
-the owner's username + bcrypt hash into a small JSON file on the `/data`
+the owner's username + password hash into a small JSON file on the `/data`
 volume (`/data/.recovery-owner.json`) that `recovery_db.py` falls back to
 when the DB is unreadable.
 
@@ -15,7 +15,7 @@ Load-bearing invariants:
   `routes/auth.py:setup()` and the idempotent boot sync below), so it can
   never authenticate before an owner exists on this volume — the
   first-boot-takeover guard the recovery floor depends on.
-- It stores the bcrypt HASH, never the plaintext password. That is the
+- It stores the password HASH, never the plaintext password. That is the
   same secret already sitting in the DB and already read by the recovery
   floor, so the seed adds no new exposure.
 - It lives OUTSIDE the frozen recovery bundle on purpose: writing is a
@@ -42,8 +42,7 @@ from typing import Optional
 log = logging.getLogger("moebius.recovery_seed")
 
 # Fixed, volume-backed path — kept in lockstep with `recovery_db.py`'s
-# `_OWNER_SEED_PATH`. Resolved from DATA_DIR the same way the recovery
-# secret is (`recovery_auth.py`), overridable for tests.
+# `_OWNER_SEED_PATH` and resolved from the same DATA_DIR. Overridable for tests.
 OWNER_SEED_PATH = Path(
   os.environ.get("DATA_DIR", "/data")
 ) / ".recovery-owner.json"

@@ -62,6 +62,8 @@ export default function LoginForm({ onLogin }) {
               className="login__input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              name="username"
+              maxLength={64}
               required
               autoFocus
               autoComplete="username"
@@ -74,6 +76,7 @@ export default function LoginForm({ onLogin }) {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              name="password"
               required
               autoComplete="current-password"
             />

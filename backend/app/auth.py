@@ -1,5 +1,6 @@
 """Password hashing and JWT utilities."""
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 
@@ -9,23 +10,45 @@ from jose import JWTError, jwt
 from app.config import get_settings
 
 
+# bcrypt ignores bytes after the first 72. Pre-hashing new passwords makes the
+# full UTF-8 input significant while retaining bcrypt's salt and work factor.
+# The prefix makes the format self-describing so hashes created by older Mobius
+# versions can still be verified and upgraded after a successful login.
+PASSWORD_HASH_PREFIX = "bcrypt-sha256$v1$"
+
+
+def _password_digest(password: str) -> bytes:
+  """Returns a fixed-width bcrypt input derived from the full password."""
+  return hashlib.sha256(password.encode("utf-8")).hexdigest().encode("ascii")
+
+
 def hash_password(password: str) -> str:
-  """Returns a bcrypt hash of the given password."""
-  # bcrypt only ever uses the first 72 bytes of the input; bcrypt>=5 raises
-  # ValueError on longer inputs instead of silently truncating, so truncate
-  # explicitly. Hashes produced by bcrypt 4.x (silent truncation) or by this
-  # code still verify — both feed bcrypt the same 72-byte prefix — and a
-  # >72-byte password no longer crashes.
-  return bcrypt.hashpw(
-    password.encode()[:72], bcrypt.gensalt(rounds=12)
-  ).decode()
+  """Returns a versioned bcrypt hash covering the full password."""
+  bcrypt_hash = bcrypt.hashpw(
+    _password_digest(password), bcrypt.gensalt(rounds=12)
+  ).decode("ascii")
+  return PASSWORD_HASH_PREFIX + bcrypt_hash
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-  """Returns True if the plain password matches the hash."""
-  # Match hash_password's 72-byte truncation (see there): bcrypt>=5 raises on
-  # >72-byte inputs, and the stored hash was computed from the first 72 bytes.
-  return bcrypt.checkpw(plain.encode()[:72], hashed.encode())
+  """Verifies current hashes and legacy raw-bcrypt hashes."""
+  try:
+    if hashed.startswith(PASSWORD_HASH_PREFIX):
+      bcrypt_hash = hashed[len(PASSWORD_HASH_PREFIX):]
+      candidate = _password_digest(plain)
+    else:
+      # Older Mobius releases passed the raw first 72 bytes to bcrypt. Keep
+      # this path indefinitely so existing local installations can sign in.
+      bcrypt_hash = hashed
+      candidate = plain.encode("utf-8")[:72]
+    return bcrypt.checkpw(candidate, bcrypt_hash.encode("ascii"))
+  except (AttributeError, TypeError, ValueError):
+    return False
+
+
+def password_needs_rehash(hashed: str) -> bool:
+  """Returns True for a legacy hash that should migrate after login."""
+  return not hashed.startswith(PASSWORD_HASH_PREFIX)
 
 
 def create_access_token(

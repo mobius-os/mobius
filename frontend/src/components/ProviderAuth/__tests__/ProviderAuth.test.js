@@ -61,6 +61,13 @@ test('ProviderAuth exports a component that accepts an `authenticated` prop', ()
     `ProviderAuth must take an \`authenticated\` prop (per 036 commit 3b prop-drilling contract).`)
 })
 
+test('Claude authorization code has a durable visible label', () => {
+  assert.match(SOURCE, /<label className="pa__field" htmlFor=\{authCodeId\}>/,
+    'the code input must be associated with a visible label')
+  assert.match(SOURCE, /<span className="pa__input-label">Authorization code<\/span>/)
+  assert.match(SOURCE, /id=\{authCodeId\}/)
+})
+
 test('ProviderAuth treats a successful code exchange as authoritative', () => {
   // /provider/code returns success only after credentials are durable. A
   // synchronous fetchQuery can reuse a fresh cached `false` value (or an

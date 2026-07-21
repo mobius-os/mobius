@@ -42,7 +42,7 @@ log = logging.getLogger("moebius.setup_claim")
 _CLAIM_NAME = ".setup-claim"
 _MARKER_NAME = ".setup-consumed"
 
-# The recovery seed (owner bcrypt mirror written at setup) doubles as a
+# The recovery seed (owner password-hash mirror written at setup) doubles as a
 # "setup already happened here" signal for the fail-closed check. Kept in
 # lockstep with app.recovery_seed.OWNER_SEED_PATH's basename.
 _RECOVERY_SEED_NAME = ".recovery-owner.json"
