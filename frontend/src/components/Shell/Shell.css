@@ -534,14 +534,13 @@
   /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not); and the
      halo settles STATIC (useLivingHalo runs no rAF under reduced motion). The hold
-     COMPRESS stays: it is direct feedback for the user's own press, not autonomous
-     motion. */
-  .shell__logo { transition: rotate 0s, scale 160ms ease; }
+     compression remains as immediate direct feedback, with no animated release. */
+  .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
   /* No completion motion under reduced motion — the ignite/snap AND the hold's
      descriptor-owned release are both skipped (the toggle commits instantly, so
      is-beat-held is never even emitted; this is the belt-and-braces). The direct
-     press compression + its 160ms decay and the completion haptic remain. */
+     press compression and completion haptic remain; release snaps immediately. */
   .shell__brand.is-igniting .shell__logo,
   .shell__brand.is-snapping .shell__logo,
   .shell__brand.is-beat-held-a .shell__logo,

@@ -440,9 +440,9 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.4; \}/)
   assert.match(shellCss, /:root\[data-theme="light"\] \.shell \{ --halo-alpha: 0\.5; \}/)
   assert.doesNotMatch(shellCss, /@media \(prefers-color-scheme: dark\)[\s\S]*?--halo-alpha/)
-  // Reduced motion: twist instant, the compress kept (direct press feedback), the
-  // spring/snap skipped (haptic still fires in JS), halo static (no rAF).
-  assert.match(shellCss, /\.shell__logo \{ transition: rotate 0s, scale 160ms ease; \}/)
+  // Reduced motion: twist + compression/release snap immediately, spring/snap is
+  // skipped (haptic still fires in JS), and the halo is static (no rAF).
+  assert.match(shellCss, /\.shell__logo \{ transition: none; \}/)
   // The ignite/snap AND the hold's descriptor-owned beat-release are all disabled
   // under reduced motion (round 4 item 1 — belt-and-braces; is-beat-held is not even
   // emitted since the toggle commits instantly).
@@ -575,11 +575,13 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
   assert.match(handler, /deriveExitPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
-  // A flip to single REQUESTS the New Chat landing for a null/never-seeded slot BEFORE
-  // the plan derives (round 4 item 3): the slot stays null through the beat so
-  // exitTargetKey reveals home:new-chat, and the row materializes after the descriptor
-  // idles — never the freshest chat, never a blank home.
-  assert.match(handler, /if \(leavingBuilder\) requestEmptySingleNewChat\(\)/)
+  // The durable flip goes through the workspace boundary BEFORE plan derivation. That
+  // boundary owns a null-slot New Chat request, so the destination remains
+  // home:new-chat through the beat without a toggle-specific policy patch.
+  assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)[\s\S]*?const settled/)
+  assert.match(shell, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
+  assert.match(shell, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
+  assert.doesNotMatch(handler, /requestEmptySingleNewChat/)
   // M2: the exit plan is fed the honest single-world destination state (a suspended
   // Settings takeover / a retained immersive holder), so it reveals to Settings or
   // classifies immersive instant instead of promoting/revealing the covered slot.
@@ -838,10 +840,10 @@ test('H1: the initial slot-app reconcile confirms absence with an authoritative 
   // Cancelled-guard cleanup, like the chat cold-restore probe.
   assert.match(effect, /let cancelled = false/)
   assert.match(effect, /return \(\) => \{ cancelled = true \}/)
-  // Close as deleted (reducer clears the slot), then land on the New Chat surface
-  // instead of a blank single screen (round 4 item 3).
+  // Close as deleted (the reducer clears the slot); the shared dispatch boundary,
+  // tested below, owns the New Chat landing rather than this effect patching it.
   assert.match(effect, /reason: 'deleted'/)
-  assert.match(effect, /requestEmptySingleNewChat\(\)/)
+  assert.doesNotMatch(effect, /requestEmptySingleNewChat/)
 })
 
 // The shared deletion-evidence contract both cold-restore probes route through: list
@@ -872,6 +874,22 @@ test('round4-3: requestEmptySingleNewChat records a tokenized request and does N
   assert.doesNotMatch(fn, /applyModeDestination|SET_SINGLE_SCREEN|chatsRef\.current\[0\]/)
 })
 
+test('round4-3: every reducer edge into an empty single screen uses one policy boundary', () => {
+  const dispatch = shell.match(/const dispatchWorkspace = useCallback\(\(action\) => \{[\s\S]*?\}, \[\]\)/)?.[0] || ''
+  assert.ok(dispatch.length > 0, 'found the workspace dispatch boundary')
+  assert.match(dispatch, /workspaceReducer\(prev, action\)/)
+  assert.match(dispatch, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
+  assert.match(dispatch, /prev\.ws, next\.ws, paneModel\.WORKSPACE_SPLITS_ENABLED/)
+  assert.match(dispatch, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
+  // Explicit calls remain only for boot states that do not cross a reducer edge:
+  // populated-history null restore and live-confirmed zero-chat bootstrap.
+  const explicitCalls = shell.match(/\brequestEmptySingleNewChat\(\)/g) || []
+  assert.equal(explicitCalls.length, 2)
+  // A create response updates the chat list before its slot write. Boot must not
+  // interpret that refresh as a second request and POST another empty row.
+  assert.match(shell, /chats\.length > 0\s*&& pendingNewChatRef\.current == null/)
+})
+
 test('round4-3: the materialize watcher gates on an IDLE descriptor', () => {
   const effect = shell.match(/Deferred New Chat materialization watcher[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
   assert.ok(effect.length > 0, 'found the materialize watcher')
@@ -888,9 +906,17 @@ test('round4-3: materializeNewChatHome is stale-guarded and writes a history-fre
   assert.ok(fn.length > 0, 'found materializeNewChatHome')
   // Shares the ONE reuse-and-create policy with newChat.
   assert.match(fn, /resolveNewChatId\(\{ candidate \}\)/)
-  // Stale-guard: token still current, still single, slot still null, no live beat.
+  // Stale-guard: token still current, then invalid destinations clear the request.
+  // A live beat is a separate keep-and-resume branch, not a destructive clear.
   assert.match(fn, /newChatRequestSeqRef\.current !== pending\.token/)
-  assert.match(fn, /!single \|\| ws\.singleScreen != null \|\| modeTransitionRef\.current/)
+  assert.match(fn, /latest\.resolvedChatId = chatId/)
+  assert.match(fn, /if \(!single \|\| ws\.singleScreen != null\) \{[\s\S]*?pendingNewChatRef\.current = null/)
+  assert.match(fn, /if \(modeTransitionRef\.current\) return/)
+  assert.match(fn, /pending\.resolvedChatId = chatId/)
+  // A request that supersedes an in-flight token gets one event-driven retry after
+  // the older await releases; there is no interval/polling loop.
+  assert.match(fn, /latest\.token !== pending\.token[\s\S]*?setMaterializeNewChatRevision/)
+  assert.doesNotMatch(fn, /setInterval|setTimeout/)
   // offline/failed → keep the landing with a retry state, never chats[0].
   assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingOffline\(true\)/)
   // The slot write is history-free (applyModeDestination pushes none) + preserveSettings,

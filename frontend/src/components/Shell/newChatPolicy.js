@@ -3,6 +3,23 @@ function normalizedId(value) {
 }
 
 /**
+ * True only for the edge into the first-class empty single-screen surface.
+ *
+ * Keeping this at the workspace-dispatch boundary means every reducer action
+ * that clears the slot (close, prune, restore, mode flip, or a future action)
+ * inherits the New Chat policy without adding another call-site repair. The
+ * edge check is important: actions while the landing is already visible must
+ * not manufacture new request tokens.
+ */
+export function enteredEmptySingleScreen(previous, next, splitsEnabled = true) {
+  const previousSingle = !splitsEnabled || previous?.viewMode === 'single'
+  const nextSingle = !splitsEnabled || next?.viewMode === 'single'
+  return nextSingle
+    && next?.singleScreen == null
+    && (!previousSingle || previous?.singleScreen != null)
+}
+
+/**
  * Return the only client-side chat that is safe to consider for reuse.
  *
  * An off-screen empty row may belong to another browser that has just sent a

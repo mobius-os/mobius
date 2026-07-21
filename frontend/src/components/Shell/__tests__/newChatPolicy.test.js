@@ -6,6 +6,7 @@ import {
   createdChatDetailCache,
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
+  enteredEmptySingleScreen,
 } from '../newChatPolicy.js'
 
 const empty = (id, extra = {}) => ({
@@ -14,6 +15,39 @@ const empty = (id, extra = {}) => ({
   running: false,
   run_status: null,
   ...extra,
+})
+
+test('empty-single policy fires only on the transition edge', () => {
+  const chat = { kind: 'chat', id: '7' }
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: null },
+    { viewMode: 'single', singleScreen: null },
+  ), true)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'single', singleScreen: chat },
+    { viewMode: 'single', singleScreen: null },
+  ), true)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'single', singleScreen: null },
+    { viewMode: 'single', singleScreen: null },
+  ), false)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: chat },
+    { viewMode: 'panes', singleScreen: null },
+  ), false)
+})
+
+test('empty-single policy respects the splits kill switch', () => {
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: { kind: 'app', id: 4 } },
+    { viewMode: 'panes', singleScreen: null },
+    false,
+  ), true)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: null },
+    { viewMode: 'single', singleScreen: null },
+    false,
+  ), false)
 })
 
 test('only the active empty chat is eligible for client-side reuse', () => {

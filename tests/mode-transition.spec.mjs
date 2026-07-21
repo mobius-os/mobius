@@ -422,6 +422,87 @@ test('round4-3: exiting a NULL-slot builder reveals the New Chat landing, not a 
   expect(composerFocused, 'a mode toggle must not auto-focus the composer').toBe(false)
 })
 
+test('round4-3: a persisted NULL single slot stays New Chat even with historical chats', async ({ page }) => {
+  let createCount = 0
+  await page.route(/\/api\/chats(?:\?.*)?$/, (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'historical', title: 'Historical transcript', has_messages: true },
+        ]),
+      })
+    }
+    if (method === 'POST') {
+      createCount += 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: 'freshboot', title: 'New chat', has_messages: false }),
+      })
+    }
+    return route.fallback()
+  })
+  const ws = paneModel.setViewMode(twoPaneBuilder(null), 'single')
+  await bootSeededWorkspace(page, WIDE, ws)
+
+  await expect.poll(() => page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    paneModel.STORAGE_KEY,
+  ), { timeout: 3000 }).toBe('freshboot')
+  expect(createCount, 'boot materializes one new row instead of selecting chats[0]').toBe(1)
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+})
+
+test('round4-3: a superseding NULL-slot request drains after the older POST without duplicating it', async ({ page }) => {
+  let createCount = 0
+  let releaseFirstCreate
+  const firstCreateGate = new Promise(resolve => { releaseFirstCreate = resolve })
+  await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'aaa', title: 'Left', has_messages: true },
+          { id: 'bbb', title: 'Right', has_messages: true },
+        ]),
+      })
+    }
+    if (method === 'POST') {
+      const ordinal = ++createCount
+      if (ordinal === 1) await firstCreateGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: `fresh-race-${ordinal}`, title: 'New chat', has_messages: false }),
+      })
+    }
+    return route.fallback()
+  })
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await toggleMode(page) // builder -> null single; token 1 starts after the exit beat
+  await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
+
+  // Supersede token 1 while its POST is held: enter builder, then exit to the same
+  // null single destination again. The latest token must run once the old await ends.
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  releaseFirstCreate()
+
+  await expect.poll(() => page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    paneModel.STORAGE_KEY,
+  ), { timeout: 4000 }).toBe('fresh-race-1')
+  expect(createCount, 'the newer request reuses the already-created untouched row').toBe(1)
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+})
+
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
 // builder is exited by closing its sole tab; a frame-sampler proves the descriptor
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an
@@ -584,17 +665,44 @@ test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to t
   await expect.poll(() => modePhase(page), { timeout: 3000 }).toBe('idle')
 })
 
-test('round4-1: reduced motion flips instantly with no beat class and no compression', async ({ page }) => {
+test('round4-1: reduced motion keeps direct hold feedback but releases without animation', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await bootShell(page, WIDE)
   await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleLogoBeat(page)
-  await page.waitForTimeout(30)
-  await toggleMode(page)
-  const r = await sampler
-  // Reduced motion commits directly: no descriptor arms, so neither the beat class nor
-  // the is-beat-held compression is ever emitted (the haptic still fires in JS).
-  expect(r.sawBeatClass, 'reduced motion is an instant flip — no beat class').toBe(false)
-  expect(r.beatHeldSeen, 'reduced motion never emits is-beat-held').toBe(false)
-  await expect.poll(() => builderActive(page)).toBe(false)
+  await page.evaluate(() => {
+    const root = document.querySelector('.shell')
+    window.__reducedMotionBeatSeen = false
+    window.__reducedMotionObserver = new MutationObserver(() => {
+      const cls = root.className
+      if (cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')) {
+        window.__reducedMotionBeatSeen = true
+      }
+    })
+    window.__reducedMotionObserver.observe(root, { attributes: true, attributeFilter: ['class'] })
+  })
+  const box = await page.getByLabel('Toggle navigation').boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.waitForTimeout(325)
+  const heldScale = await page.evaluate(() => parseFloat(
+    getComputedStyle(document.querySelector('.shell__logo')).scale,
+  ))
+  expect(heldScale, 'the user-controlled hold still gives immediate compression feedback').toBeLessThan(0.96)
+  // Cross the 450ms completion threshold. Under reduced motion the mode commits and
+  // the scale returns to 1 in that same frame; the old 160ms release failed here.
+  await page.waitForTimeout(150)
+  const result = await page.evaluate(() => {
+    window.__reducedMotionObserver?.disconnect()
+    return {
+      builder: !!document.querySelector('.shell__brand--builder'),
+      beatHeld: !!document.querySelector('.shell__brand.is-beat-held'),
+      beatSeen: !!window.__reducedMotionBeatSeen,
+      scale: parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale),
+    }
+  })
+  await page.mouse.up()
+  expect(result.builder, 'the hold still flips the mode').toBe(false)
+  expect(result.beatSeen, 'reduced motion arms no transition descriptor').toBe(false)
+  expect(result.beatHeld, 'reduced motion never hands compression to a beat').toBe(false)
+  expect(Math.abs(result.scale - 1), 'release is immediate under reduced motion').toBeLessThan(0.02)
 })

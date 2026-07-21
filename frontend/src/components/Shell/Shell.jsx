@@ -59,6 +59,7 @@ import {
   createdChatDetailCache,
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
+  enteredEmptySingleScreen,
 } from './newChatPolicy.js'
 import {
   reloadWhenWorkerTakesOver,
@@ -151,6 +152,10 @@ export default function Shell() {
   // Set after useNavigation (needs navStackRef): reconciles in-memory restorable
   // route hints against every workspace transition (design §5.1.3).
   const onWorkspaceTransitionRef = useRef(null)
+  // Set once the New Chat policy has its chat/query dependencies. The synchronous
+  // workspace boundary can then own every edge into an empty single screen without
+  // making early navigation hooks depend on a callback declared later in the render.
+  const requestEmptySingleNewChatRef = useRef(null)
   const dispatchWorkspace = useCallback((action) => {
     const prev = workspaceStateRef.current
     const next = paneModel.workspaceReducer(prev, action)
@@ -160,8 +165,17 @@ export default function Shell() {
     // routes pointing at the old pane, and a pane collapse leaves dead-pane hints.
     // Reconcile them synchronously (using prev/next), before any restore reads
     // them, so a hint always names the pane that now holds its item.
-    if (next.ws !== prev.ws) onWorkspaceTransitionRef.current?.(prev.ws, next.ws)
+    const enteredEmptySingle = next.ws !== prev.ws
+      && enteredEmptySingleScreen(
+        prev.ws, next.ws, paneModel.WORKSPACE_SPLITS_ENABLED,
+      )
+    if (next.ws !== prev.ws) {
+      onWorkspaceTransitionRef.current?.(prev.ws, next.ws)
+    }
     dispatchWorkspaceRaw(action)
+    // Queue the reducer commit before policy state. React batches both, while the
+    // already-advanced ref still lets the request capture the pre-render chat target.
+    if (enteredEmptySingle) requestEmptySingleNewChatRef.current?.()
   }, [])
 
   // ── Multi-pane projection (design §2/§4) — computed BEFORE useNavigation so
@@ -825,9 +839,13 @@ export default function Shell() {
   // + still-single + still-null. offline/failed creation leaves the landing with a
   // retry affordance — never a blank <main>, never chats[0].
   const newChatRequestSeqRef = useRef(0)
-  const pendingNewChatRef = useRef(null) // { token, candidateId } | null
+  const pendingNewChatRef = useRef(null) // { token, candidateId, resolvedChatId? } | null
   const materializingNewChatRef = useRef(false)
   const [pendingNewChatToken, setPendingNewChatToken] = useState(0)
+  // A superseding request can arrive while the prior token is awaiting the server.
+  // One revision bump after that await releases is enough to drain the latest token;
+  // this is event-driven and only renders in that rare collision (no polling loop).
+  const [materializeNewChatRevision, setMaterializeNewChatRevision] = useState(0)
   const [newChatLandingOffline, setNewChatLandingOffline] = useState(false)
   // Live mirror of the mode descriptor so the async materialize can re-check for a
   // beat that started during its await (writing the slot mid-beat would cancel it).
@@ -884,9 +902,9 @@ export default function Shell() {
   // captured from the PRE-transition active chat but NOT targeted synchronously — the
   // reuse policy (newChatPolicy) is deliberately provisional (has_messages can be
   // stale cross-client), so it must survive its detail validation before it becomes
-  // the slot. Used by the two event families the ONE decision point does not cover (an
-  // auto-returning last-tab close and an app delete/uninstall that clears the slot);
-  // the old "null is legitimate only at zero chats" invariant is retired.
+  // the slot. The workspace dispatch boundary calls this for every edge into an empty
+  // single screen; the old "null is legitimate only at zero chats" invariant is
+  // retired.
   const requestEmptySingleNewChat = useCallback(() => {
     const ws = workspaceStateRef.current.ws
     const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
@@ -902,6 +920,7 @@ export default function Shell() {
     setNewChatLandingOffline(false)
     setPendingNewChatToken(token)
   }, [workspaceStateRef, activeChatIdRef])
+  requestEmptySingleNewChatRef.current = requestEmptySingleNewChat
   const closeTab = useCallback((tab, { reason } = {}) => {
     const key = tabModel.tabKey(tab)
     const ws = workspaceStateRef.current.ws
@@ -919,12 +938,9 @@ export default function Shell() {
       mode.toggle({ cause: 'auto', to: 'single' })
     }
     dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
-    // An auto-returned single world with a never-seeded slot lands on the New Chat
-    // surface — the honest destination for "closed the last tab" (round 4 item 3),
-    // never the freshest transcript. The tree's coupled undo still restores tab +
-    // builder as one gesture — no slot write happens on that path.
-    requestEmptySingleNewChat()
-  }, [dispatchWorkspace, mode, workspaceStateRef, requestEmptySingleNewChat])
+    // If this auto-returned into a never-seeded single slot, dispatchWorkspace owns
+    // the New Chat request. The coupled undo still restores tab + builder together.
+  }, [dispatchWorkspace, mode, workspaceStateRef])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
@@ -1238,8 +1254,8 @@ export default function Shell() {
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
-  // workspace. If that collapses the workspace to the sole empty root and a live
-  // chat remains, seed the current first chat into it (contract §1.4.12).
+  // workspace. Builder mode may seed a surviving chat into its sole empty root;
+  // an emptied single slot is owned by the New Chat policy boundary.
   const handlePaneChatMissing = useCallback((missingId) => {
     knownExistingOffListChatIdsRef.current.delete(missingId)
     dispatchWorkspace({
@@ -1248,18 +1264,14 @@ export default function Shell() {
       reason: 'deleted',
     })
     const ws = workspaceStateRef.current.ws
-    // Seed the fallback only when the CURRENT world's visible surface is empty
-    // (finding F9). In single mode that is a null slot — the deleted-close above
-    // already cleared it (CLOSE_TAB reason:'deleted' slot reconciliation); in
-    // builder it is the sole empty root. Route through the ONE decision point so
-    // single sets the SLOT (visible) and builder opens the pane tab — a raw
-    // OPEN_TAB would seed the HIDDEN pane tree and leave the repaired chat
-    // invisible while single mode paints an empty screen (INV 2/4).
+    // Only builder repair falls back to a historical chat. In single mode the
+    // deleted-close edge already requested the explicit New Chat destination;
+    // selecting chats[0] here would overwrite it with an unrelated transcript.
     const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
-    const visibleWorldEmpty = single
-      ? ws.singleScreen == null
-      : (Object.keys(ws.panes).length === 1 && !ws.panes[ws.focusedPaneId]?.activeTabKey)
-    if (visibleWorldEmpty) {
+    const builderEmpty = !single
+      && Object.keys(ws.panes).length === 1
+      && !ws.panes[ws.focusedPaneId]?.activeTabKey
+    if (builderEmpty) {
       const fallback = chatsRef.current.find(c => String(c.id) !== String(missingId))
       if (fallback) {
         // R1: a background 404-repair preserves an open Settings takeover — it seeds
@@ -1386,17 +1398,12 @@ export default function Shell() {
     // it opaquely; the controller drops it under reduced motion (commit directly). A
     // null plan (empty tree) is an instant flip. Settings needs no conversion — its
     // tab SURVIVES the flip and single mode paints its own slot (never Settings).
-    // Durable flip FIRST (the synchronous reducer-preview ref advances with it), then
-    // REQUEST the New Chat landing for a null/never-seeded slot (e.g. a
-    // Settings-focused builder seeds no slot). The slot stays NULL through the beat —
-    // exitTargetKey maps it to home:new-chat so the exit reveals the New Chat surface,
-    // and the row materializes only after the descriptor idles (writing it now would
-    // drift the exit signature and cancel the beat). THEN derive the plan so the beat
-    // animates toward the surface single mode will actually paint. Everything
-    // dispatches inside this one handler, so the workspace flip, the request, and the
-    // descriptor beat batch as ONE transaction (INV 2/3).
+    // Durable flip FIRST. The synchronous dispatch boundary requests the New Chat
+    // landing if this enters a null slot (e.g. a Settings-focused builder never
+    // seeded one). The slot stays null through the beat, so exitTargetKey reveals
+    // home:new-chat and materialization waits for the descriptor to idle. THEN derive
+    // the plan from the already-advanced workspace (INV 2/3).
     dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
-    if (leavingBuilder) requestEmptySingleNewChat()
     const settled = workspaceStateRef.current.ws
     const presentation = leavingBuilder
       ? deriveExitPlan({
@@ -1413,7 +1420,7 @@ export default function Shell() {
     // toggle receipt so the logo gesture can tell an animated beat from an instant
     // flip and hand its compression to the descriptor (round 4 item 1).
     return mode.toggle({ cause, presentation })
-  }, [dispatchWorkspace, mode, projection, contentRect, requestEmptySingleNewChat])
+  }, [dispatchWorkspace, mode, projection, contentRect])
   // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
   // gesture + living halo). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
@@ -1796,11 +1803,8 @@ export default function Shell() {
     // Drop any warm-only stale frame (not a tab, so CLOSE_TAB was a no-op for it)
     // so its 404'ing iframe unmounts.
     dropFromWarmLru(id => staleSet.has(String(id)))
-    // An uninstalled app that occupied the single-world slot leaves it null —
-    // land on the New Chat surface rather than painting a blank single screen.
-    requestEmptySingleNewChat()
   }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
-      navStackRef, retireAppHistory, dispatchWorkspace, requestEmptySingleNewChat])
+      navStackRef, retireAppHistory, dispatchWorkspace])
 
   // One-shot slot-app reconcile (H1). A slot app uninstalled while the browser was
   // CLOSED is never "seen present" this session, so the eviction above can't reach
@@ -1843,11 +1847,10 @@ export default function Shell() {
         reason: 'deleted',
       })
       dropFromWarmLru(id => String(id) === sid)
-      requestEmptySingleNewChat()
     })()
     return () => { cancelled = true }
   }, [appsLiveFetched, apps, retireAppHistory, tombstoneRoute, dispatchWorkspace,
-      dropFromWarmLru, requestEmptySingleNewChat, workspaceStateRef])
+      dropFromWarmLru, workspaceStateRef])
 
   // New-app dot detection (state + open-clear live up beside the chat
   // attention machinery). First live list = the session baseline; anything
@@ -1901,8 +1904,7 @@ export default function Shell() {
     })
     const sid = String(coldRestoredCanvasAppId)
     dropFromWarmLru(id => String(id) === sid)
-    requestEmptySingleNewChat()
-  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace, requestEmptySingleNewChat])
+  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace])
 
   // Warm the SW app-code cache once per shell load for the apps the user
   // is most likely to open next — pinned + most-recent (the persisted
@@ -2104,23 +2106,18 @@ export default function Shell() {
       return
     }
     if (!prev) {
-      // No restored chat target. Seed the newest listed chat into the CURRENT
-      // world's empty surface ONLY (finding F9): in single mode a null slot, in
-      // builder the focused/root pane with no active tab — never overwrite an
-      // active pane merely to maintain a remembered chat id (contract §1.4.8).
-      // The ONE decision point sets the visible SLOT in single / the pane tab in
-      // builder, so a single-mode reload (activeChatId derives from a null slot,
-      // so `prev` is null here) seeds the visible screen, not the hidden tree. If
-      // the owner has no listed chats, the bootstrap effect creates one.
+      // No restored chat target. A null single slot is a deliberate New Chat
+      // destination even when historical chats exist; never replace it with chats[0].
+      // Builder mode retains its legacy seed into an actually empty focused pane.
+      // A zero-chat install waits for the live-confirmed bootstrap effect below so a
+      // stale empty list cannot manufacture a server row.
       const ws = workspaceStateRef.current.ws
       const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
-      const visibleWorldEmpty = single
-        ? ws.singleScreen == null
-        : !ws.panes[ws.focusedPaneId]?.activeTabKey
-      if (visibleWorldEmpty && chats[0]) {
-        // R1: the boot chat-list seed preserves an open Settings takeover (it seeds
-        // the empty slot beneath it), so a single-mode reload into Settings is not
-        // dismissed by the background seed.
+      const focusedPaneEmpty = !ws.panes[ws.focusedPaneId]?.activeTabKey
+      if (single && ws.singleScreen == null && chats.length > 0
+          && pendingNewChatRef.current == null) {
+        requestEmptySingleNewChat()
+      } else if (!single && focusedPaneEmpty && chats[0]) {
         applyModeDestination({ view: 'chat', chatId: chats[0].id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
       }
       chatsLoadedRef.current = true
@@ -2159,25 +2156,19 @@ export default function Shell() {
       if (cancelled || activeChatIdRef.current !== probedChatId) return
       if (verdict === 'deleted') {
         knownExistingOffListChatIdsRef.current.delete(probedChatId)
-        // The restored chat is genuinely gone: close its tab in its pane. If that
-        // leaves the sole empty root and a live chat remains, seed the fallback into
-        // it (contract §1.4.9).
+        // The restored chat is genuinely gone: close its tab in its pane. Builder
+        // mode may seed a surviving chat into an empty root; an emptied single slot
+        // is the explicit New Chat destination owned by dispatchWorkspace.
         dispatchWorkspace({
           type: 'CLOSE_TAB',
           tabKey: tabModel.tabKey(tabModel.makeTab('chat', probedChatId)),
           reason: 'deleted',
         })
         const ws = workspaceStateRef.current.ws
-        // Same world-aware seed as the boot path (finding F9): route the fallback
-        // through the ONE decision point so single sets the visible SLOT and builder
-        // the pane tab — never a raw OPEN_TAB into the hidden tree, which single mode
-        // would never paint.
         const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
-        const visibleWorldEmpty = single
-          ? ws.singleScreen == null
-          : !ws.panes[ws.focusedPaneId]?.activeTabKey
+        const builderEmpty = !single && !ws.panes[ws.focusedPaneId]?.activeTabKey
         const fallback = chats.find(c => c.id !== probedChatId)
-        if (visibleWorldEmpty && fallback) {
+        if (builderEmpty && fallback) {
           // R1: a background 404-repair preserves an open Settings takeover — it seeds
           // the visible slot beneath it rather than dismissing the owner's Settings view.
           applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
@@ -2196,7 +2187,7 @@ export default function Shell() {
   }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,
       chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
       refreshChats, dispatchWorkspace, applyModeDestination,
-      workspaceStateRef, activeChatIdRef])
+      requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
   useEffect(() => {
     if (navigationOpen) { refreshApps(); refreshChats() }
@@ -2684,18 +2675,36 @@ export default function Shell() {
       const candidate = pending.candidateId != null
         ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
         : null
-      const { chatId } = await resolveNewChatId({ candidate })
-      // Stale-guard: token still current, still single, slot still null, no live beat.
-      // A beat that started during the await must NOT be cancelled by a slot write.
-      if (newChatRequestSeqRef.current !== pending.token) return
+      const { chatId } = pending.resolvedChatId != null
+        ? { chatId: pending.resolvedChatId }
+        : await resolveNewChatId({ candidate })
+      // Stale-guard: if a newer empty-single request arrived during the await, hand
+      // it this already-validated/created untouched row. That preserves latest-token
+      // ownership without abandoning a server row or issuing a duplicate POST.
+      if (newChatRequestSeqRef.current !== pending.token) {
+        const latest = pendingNewChatRef.current
+        if (chatId != null && latest
+            && latest.token === newChatRequestSeqRef.current
+            && latest.resolvedChatId == null) {
+          latest.resolvedChatId = chatId
+        }
+        return
+      }
+      // Preserve a successfully resolved row if a beat began during the await. The
+      // watcher will retry after that beat without issuing another detail/POST call.
+      if (chatId != null) pending.resolvedChatId = chatId
       const ws = workspaceStateRef.current.ws
       const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
-      if (!single || ws.singleScreen != null || modeTransitionRef.current) {
+      if (!single || ws.singleScreen != null) {
         if (pendingNewChatRef.current && pendingNewChatRef.current.token === pending.token) {
           pendingNewChatRef.current = null
         }
         return
       }
+      // Keep the request (and any resolved row) while a newer beat is live. Clearing
+      // it here strands the landing because the descriptor-idle watcher has nothing
+      // left to resume.
+      if (modeTransitionRef.current) return
       if (chatId == null) {
         // offline / failed — keep the landing + the pending request for a retry.
         setNewChatLandingOffline(true)
@@ -2712,6 +2721,10 @@ export default function Shell() {
       )
     } finally {
       materializingNewChatRef.current = false
+      const latest = pendingNewChatRef.current
+      if (latest && latest.token !== pending.token) {
+        setMaterializeNewChatRevision(revision => revision + 1)
+      }
     }
   }
 
@@ -2800,7 +2813,8 @@ export default function Shell() {
       return
     }
     materializeNewChatHomeRef.current?.(pending)
-  }, [pendingNewChatToken, modeState.transition, workspaceStateRef])
+  }, [pendingNewChatToken, materializeNewChatRevision, modeState.transition,
+      workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
   function selectChat(id) {
     clearChatAttention(id)
@@ -2859,8 +2873,10 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tabModel.makeTab('chat', id)),
       reason: 'deleted',
     })
-    const focusedAfterClose = workspaceStateRef.current.ws.panes[workspaceStateRef.current.ws.focusedPaneId]
-    if (!focusedAfterClose?.activeTabKey) {
+    const wsAfterClose = workspaceStateRef.current.ws
+    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || wsAfterClose.viewMode === 'single'
+    const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
+    if (!single && !focusedAfterClose?.activeTabKey) {
       // Exclude the just-deleted id: it's still in `chats` until the
       // refreshChats below, and the reuse filter would otherwise pick it
       // (empty + was active) and navigate straight back into a 404 chat.
@@ -2936,9 +2952,6 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
-    // Deleting the app that occupied the single-world slot cleared it — land on the
-    // New Chat surface so single mode never paints a blank screen.
-    requestEmptySingleNewChat()
     await refreshApps()
     showToast('App deleted', {
       duration: 5000,
@@ -3032,9 +3045,13 @@ export default function Shell() {
     // 'chat' and this effect re-runs (activeView is in deps) to create
     // the starter chat then.
     if (chats.length === 0 && activeChatId === null && activeView === 'chat') {
-      newChat()
+      const ws = workspaceStateRef.current.ws
+      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      if (single && ws.singleScreen == null) requestEmptySingleNewChat()
+      else newChat()
     }
-  }, [chats, activeChatId, activeView, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
+  }, [chats, activeChatId, activeView, chatsQuery.isSuccess,
+      chatsQuery.isFetchedAfterMount, requestEmptySingleNewChat, workspaceStateRef])
 
   return (
     <div
