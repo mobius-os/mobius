@@ -1366,13 +1366,12 @@ export default function useStreamConnection(chatId, {
       // when a queueOnly send raced the server's `status: 'started'`
       // branch and then the POST itself failed mid-flight.
       //
-      // EXCEPT a force_steer: it never started its own turn (it injects
-      // into the live one), so its POST failure must not tear down the
-      // still-running live stream — flipping isStreaming off here would
-      // kill the live turn's UI even though the backend turn keeps going.
-      // handleSteer's own catch leaves the queue intact for the turn-end
-      // drain; we leave the live stream attached.
-      if (!forceSteer) {
+      // EXCEPT requests that inject into an existing turn. A force_steer and
+      // an AskUserQuestion answer do not start the live turn they target, so
+      // their POST failures must not tear down that turn's stream. The caller
+      // keeps the queued steer / retryable question intact while the existing
+      // connection remains authoritative.
+      if (!forceSteer && !isAnswerSubmission) {
         wantsReconnectRef.current = false
         setIsStreaming(false)
       }
