@@ -486,7 +486,18 @@ test.describe('Q&A atomic write', () => {
     const sentBodies = []
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       if (route.request().method() !== 'POST') return route.continue()
-      sentBodies.push(route.request().postDataJSON())
+      const body = route.request().postDataJSON()
+      sentBodies.push(body)
+      if (body.answers) {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'answer_delivered',
+            answer_turn: 'same',
+          }),
+        })
+      }
       return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route => {
@@ -530,6 +541,11 @@ test.describe('Q&A atomic write', () => {
     await sendMessage(page, 'Ask')
     await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
     await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
+    await page.evaluate(() => {
+      window.__mobiusChatScrollTrace = {
+        version: 1, transitions: [], writes: [], events: [],
+      }
+    })
     await page.locator('.qcard__submit').click()
 
     await expect.poll(() => sentBodies.length).toBe(2)
@@ -538,6 +554,13 @@ test.describe('Q&A atomic write', () => {
     expect(sentBodies[1].hidden).toBe(true)
     expect(sentBodies[1].answers).toBeTruthy()
     expect(sentBodies[1].answers).toHaveProperty('Pick', 'Yes')
+    const questionFreeze = await page.evaluate(() => (
+      window.__mobiusChatScrollTrace?.transitions?.find(
+        row => row.event === 'send:question-freeze',
+      ) || null
+    ))
+    expect(questionFreeze).toBeTruthy()
+    expect(questionFreeze.to?.kind).toBe('ANCHOR_AT')
   })
 })
 

@@ -2503,10 +2503,10 @@ export default function ChatView({
     sendingRef.current = true
     promotedRef.current = false
     // Hidden answer is a continuation, NOT a new visible send. The
-    // user may be reading somewhere else; don't yank them with a
-    // PIN. The agent's response builds into the existing assistant
-    // message; if the user was at FOLLOW_BOTTOM they'll see it
-    // forming, if ANCHOR_AT they stay where they are.
+    // user may be reading somewhere else; don't yank them with a PIN.
+    // freezeQuestionSubmission above already converted the exact visible
+    // position into ANCHOR_AT, so resumed output grows inside the existing
+    // assistant row without creating tail-follow intent.
     try {
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
@@ -2574,6 +2574,8 @@ export default function ChatView({
       // synchronous ref even when React state was already false; otherwise a
       // failed answer silently blocks every later composer send. A question
       // submitted while a live turn is parked keeps that live turn attached.
+      // Deliberately keep the reader anchor: the failed card remains the retry
+      // target, and an error-label reflow must not recreate live following.
       sendingRef.current = wasSending
       setSending(wasSending)
       setServerRunningState(wasServerRunning)
