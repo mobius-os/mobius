@@ -407,9 +407,12 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(halo, /translate:\s*0 0/)
   assert.match(halo, /scale:\s*1/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo-halo\s*\{[\s\S]*?opacity:\s*var\(--halo-opacity, 0\.85\)/)
-  // Per-theme alpha token: quieter in dark.
-  assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.5; \}/)
-  assert.match(shellCss, /@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?--halo-alpha: 0\.4/)
+  // Per-theme alpha token: keyed off the APP theme (data-theme), NOT the OS
+  // prefers-color-scheme (V2) — a dark app theme under a light OS gets the dark
+  // value. Dark is the default (base .shell), light is the explicit override.
+  assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.4; \}/)
+  assert.match(shellCss, /:root\[data-theme="light"\] \.shell \{ --halo-alpha: 0\.5; \}/)
+  assert.doesNotMatch(shellCss, /@media \(prefers-color-scheme: dark\)[\s\S]*?--halo-alpha/)
   // Reduced motion: twist instant, the compress kept (direct press feedback), the
   // spring/snap skipped (haptic still fires in JS), halo static (no rAF).
   assert.match(shellCss, /\.shell__logo \{ transition: rotate 0s, scale 160ms ease; \}/)

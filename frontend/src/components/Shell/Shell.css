@@ -463,12 +463,14 @@
   box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
-/* Living-halo base alpha — quieter in dark so the glow doesn't bloom. The theme
-   engine can override --halo-alpha; these are the light/dark defaults. */
-.shell { --halo-alpha: 0.5; }
-@media (prefers-color-scheme: dark) {
-  .shell { --halo-alpha: 0.4; }
-}
+/* Living-halo base alpha — quieter in dark so the glow doesn't bloom. Keyed off the
+   APP THEME (the data-theme token the theme engine stamps on :root beside --bg), NOT
+   the OS `prefers-color-scheme` media query: a dark app theme running under a LIGHT
+   OS must get the DARK value (V2). Dark is the default theme, so .shell carries the
+   dark alpha and the light override applies only under an explicit light theme.
+   The theme engine can still override --halo-alpha for a bespoke look. */
+.shell { --halo-alpha: 0.4; }
+:root[data-theme="light"] .shell { --halo-alpha: 0.5; }
 
 @media (prefers-reduced-motion: reduce) {
   .shell__settings-loading-dot { animation: none; }
