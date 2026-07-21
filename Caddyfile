@@ -64,7 +64,9 @@
     header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
     header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     header @appFrame >X-Frame-Options "SAMEORIGIN"
-    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
+    # A user-opened external tab must not inherit the app frame's opaque
+    # origin. The app remains sandboxed; only its new popup/tab escapes.
+    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     # The embedded chat mounts the full ChatView (upload previews, image
     # lightbox), so its img-src needs blob: for the same object URLs as the
     # shell policy above.
