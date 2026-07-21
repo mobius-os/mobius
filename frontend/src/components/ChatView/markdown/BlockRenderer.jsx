@@ -1,19 +1,15 @@
 import { useMemo } from 'react'
 import { Marked } from 'marked'
-import markedKatex from 'marked-katex-extension'
 import { MemoBlock, BlockToken, MathBlock } from './blocks.jsx'
+import { mathTokens } from './mathTokens.js'
 import '../markdown.css'
 
 /**
- * Configured marked instance with KaTeX math support.
- * The katex extension handles $...$ (inline) and $$...$$ (block)
- * natively in the tokenizer — no placeholder hacks needed.
- *
- * nonStandard:true relaxes spacing requirements around $ delimiters.
- * throwOnError:false prevents KaTeX parse errors from breaking render.
+ * Configured marked instance with math token support. Tokenization stays tiny
+ * and synchronous; the renderer loads KaTeX only when a math token is present.
  */
 const md = new Marked()
-md.use(markedKatex({ nonStandard: true, throwOnError: false }))
+md.use(mathTokens())
 
 
 function tokenize(text) {

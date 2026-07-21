@@ -27,12 +27,10 @@
          Preloading the primary text face (Inter 400) avoids a FOUT on first
          paint without blocking non-Latin weights until they're needed. -->
     <link rel="preload" href="/vendor/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
-    <!-- KaTeX CSS + JS are self-hosted under /vendor/katex@0.17.0/ (built
-         into the image by the Dockerfile). The script is deferred so it
-         does not block first paint; math.js guards on window.katex before
-         calling any render function. -->
+    <!-- KaTeX CSS is self-hosted under /vendor/katex@0.17.0/ (built into the
+         image by the Dockerfile). Its JS is an on-demand application chunk,
+         loaded only when a chat actually contains mathematical content. -->
     <link rel="stylesheet" href="/vendor/katex@0.17.0/katex.min.css" />
-    <script defer src="/vendor/katex@0.17.0/katex.min.js"></script>
     <title>Möbius</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <!-- The exact embedded-chat route is intentionally frameable below an

@@ -180,8 +180,8 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
 # KaTeX browser assets — the package's JavaScript is bundled when an app imports
 # it, while the shell and app-authored stylesheets still use these public files.
 #
-# JS: katex.min.js (UMD global, loaded as window.katex by the shell) plus a
-#     public ESM file for explicit asset consumers.
+# JS: katex.min.js (UMD global) plus a public ESM file for explicit app asset
+#     consumers. The shell uses its own on-demand bundle instead.
 # CSS: katex.min.css with @font-face rules that reference ./fonts/*.
 # Fonts: woff2 only (all modern browsers support woff2; skipping ttf/woff
 #        shrinks the layer by ~1.5 MB).

@@ -1,50 +1,56 @@
-/**
- * KaTeX rendering helpers.
- * Uses the global window.katex loaded via CDN in index.html.
- *
- * renderToString returns an HTML string for synchronous rendering
- * (no useEffect, no reflow).  Falls back to raw TeX if KaTeX is
- * not loaded or parsing fails.
- */
+import { useEffect, useState } from 'react'
 
-export function renderMathToString(tex, displayMode) {
-  if (!window.katex) return null
+let katex = null
+let katexPromise = null
+
+function loadKatex() {
+  if (katex) return Promise.resolve(katex)
+  if (!katexPromise) {
+    katexPromise = import('katex')
+      .then(module => {
+        katex = module.default || module
+        return katex
+      })
+      .catch(error => {
+        katexPromise = null
+        throw error
+      })
+  }
+  return katexPromise
+}
+
+function renderMath(renderer, tex, displayMode) {
+  if (!renderer) return null
   try {
-    return window.katex.renderToString(tex, {
-      displayMode,
-      throwOnError: false,
-    })
+    return renderer.renderToString(tex, { displayMode, throwOnError: false })
   } catch {
     return null
   }
 }
 
-export function renderBlockMath(tex, element) {
-  if (!window.katex) {
-    element.textContent = tex
-    return
-  }
-  try {
-    window.katex.render(tex, element, {
-      displayMode: true,
-      throwOnError: false,
-    })
-  } catch {
-    element.textContent = tex
-  }
-}
+/** Loads the single KaTeX module on first mathematical content. Plain chats,
+ * setup, and the shell never pay its download, parse, or resident-memory cost. */
+export function useMathHtml(tex, displayMode) {
+  const [rendered, setRendered] = useState(() => ({
+    tex,
+    displayMode,
+    html: renderMath(katex, tex, displayMode),
+  }))
 
-export function renderInlineMath(tex, element) {
-  if (!window.katex) {
-    element.textContent = tex
-    return
-  }
-  try {
-    window.katex.render(tex, element, {
-      displayMode: false,
-      throwOnError: false,
-    })
-  } catch {
-    element.textContent = tex
-  }
+  useEffect(() => {
+    let cancelled = false
+    loadKatex().then(renderer => {
+      if (cancelled) return
+      setRendered({
+        tex,
+        displayMode,
+        html: renderMath(renderer, tex, displayMode),
+      })
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [tex, displayMode])
+
+  return rendered.tex === tex && rendered.displayMode === displayMode
+    ? rendered.html
+    : null
 }

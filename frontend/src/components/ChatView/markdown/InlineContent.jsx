@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
 import { getToken, isEphemeralAuth, BASE } from '../../../api/client.js'
 import { mediaTokenParam } from '../../../api/mediaToken.js'
-import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
+import { useMathHtml } from './math.js'
 import { parseImageDims, imageVarsFromDims } from './imageDims.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
@@ -292,8 +292,7 @@ function sanitizeKatex(html) {
 }
 
 function BlockMathDiv({ tex }) {
-  // Synchronous render — no useEffect, no reflow.
-  const html = renderMathToString(tex, true)
+  const html = useMathHtml(tex, true)
   if (html) {
     return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: sanitizeKatex(html) }} />
   }
@@ -301,7 +300,7 @@ function BlockMathDiv({ tex }) {
 }
 
 function InlineMathSpan({ tex }) {
-  const html = renderMathToString(tex, false)
+  const html = useMathHtml(tex, false)
   if (html) {
     return <span className="md-math-inline" dangerouslySetInnerHTML={{ __html: sanitizeKatex(html) }} />
   }

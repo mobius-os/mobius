@@ -32,7 +32,6 @@
     "lucide-react": "^1.23.0",
     "marked": "^17.0.6",
     "marked-highlight": "2.2.4",
-    "marked-katex-extension": "^5.1.10",
     "pdfjs-dist": "4.10.38",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

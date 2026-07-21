@@ -1,7 +1,7 @@
 import { useEffect, useState, memo } from 'react'
 import DOMPurify from 'dompurify'
 import InlineContent from './InlineContent.jsx'
-import { renderBlockMath, renderMathToString } from './math.js'
+import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 
 /**
@@ -159,7 +159,7 @@ const KATEX_PURIFY_CONFIG = {
 }
 
 export function MathBlock({ tex }) {
-  const html = renderMathToString(tex, true)
+  const html = useMathHtml(tex, true)
   if (html) {
     return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html, KATEX_PURIFY_CONFIG) }} />
   }
