@@ -60,3 +60,18 @@ test('a failed question submission does not append a transcript row', () => {
   )
   assert.match(silentSubmit, /QuestionCard owns this transient failure notice/)
 })
+
+test('question submission paints a resumed turn only after the POST commits', () => {
+  const start = chatView.indexOf('const doSendSilent = useCallback')
+  const end = chatView.indexOf('function handleSubmit(e)', start)
+  const silentSubmit = chatView.slice(start, end)
+  const send = silentSubmit.indexOf('const response = await streamSend')
+  const paintRunning = silentSubmit.indexOf('setServerRunningState(true)')
+
+  assert.ok(send >= 0 && paintRunning > send,
+    'a pending answer must not remount the durable question card')
+  assert.match(silentSubmit, /sendingRef\.current = wasSending/,
+    'a failed answer must restore the synchronous composer guard')
+  assert.match(silentSubmit, /setServerRunningState\(wasServerRunning\)/,
+    'a failed answer must restore the prior durable running verdict')
+})

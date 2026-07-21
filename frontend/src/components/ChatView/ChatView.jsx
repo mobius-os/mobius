@@ -2482,12 +2482,15 @@ export default function ChatView({
       sendSilentInFlightRef.current = false
       return false
     }
+    // Block a simultaneous composer send synchronously, but do not paint the
+    // whole chat as a new active turn until the answer POST commits. On a
+    // parked/durable question that premature parent transition swaps the
+    // history row into the active-assistant surface, remounting QuestionCard
+    // while it awaits the request and discarding its local retry error.
+    const wasSending = sendingRef.current
+    const wasServerRunning = serverRunningRef.current
     sendingRef.current = true
-    onMessageStartRef.current?.()
     promotedRef.current = false
-
-    setSending(true)
-    setServerRunningState(true)
     // Hidden answer is a continuation, NOT a new visible send. The
     // user may be reading somewhere else; don't yank them with a
     // PIN. The agent's response builds into the existing assistant
@@ -2506,6 +2509,13 @@ export default function ChatView({
         answers: resolvedAnswers,
         question_id: questionId,
       })
+      // The transport boundary above is the commit point. Only now advertise
+      // the resumed/recovered turn to the shell; successful answer settlement
+      // patches the card below in the same React batch, so a source handoff
+      // cannot expose an unanswered replacement card.
+      onMessageStartRef.current?.()
+      setSending(true)
+      setServerRunningState(true)
       // The 202 means the answer write committed. Settle the durable and live
       // card sources only now; an optimistic pre-request answer made transient
       // failures look final and erased the retryable per-tab question draft.
@@ -2549,8 +2559,13 @@ export default function ChatView({
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
       return true
     } catch (err) {
-      setSending(false)
-      setServerRunningState(false)
+      // Restore the exact pre-submit turn state. In particular, reset the
+      // synchronous ref even when React state was already false; otherwise a
+      // failed answer silently blocks every later composer send. A question
+      // submitted while a live turn is parked keeps that live turn attached.
+      sendingRef.current = wasSending
+      setSending(wasSending)
+      setServerRunningState(wasServerRunning)
       if (err.message === 'HTTP 410') {
         // The backend refused this answer because the durable transcript no
         // longer has that open question (for example Stop cancelled it, or a

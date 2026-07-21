@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const streamHookSource = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const msgContentSource = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const streamingMessageSource = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
 const blockRendererSource = readFileSync(new URL('../markdown/BlockRenderer.jsx', import.meta.url), 'utf8')
@@ -48,6 +49,14 @@ test('R6: answering in-process keeps the active bridge through settlement', () =
     'the bridge may retire only after the backend says recovery started a new turn')
   assert.doesNotMatch(answerPath.slice(0, sendIndex), /bridgeHook\.markBridged\(\)/,
     'an in-process answer must not retire the same-turn bridge before its POST result')
+})
+
+test('R6: a rejected answer POST does not tear down its existing stream', () => {
+  assert.match(
+    streamHookSource,
+    /if \(!forceSteer && !isAnswerSubmission\) \{\s*wantsReconnectRef\.current = false\s*setIsStreaming\(false\)/,
+    'an injected answer failure must leave the parked live turn attached',
+  )
 })
 
 // ---------------------------------------------------------------------------
